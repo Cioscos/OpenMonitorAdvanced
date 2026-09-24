@@ -6,5 +6,6 @@ pub mod history;
 pub mod model;
 pub mod provider;
 pub mod rate;
+pub mod sampler;
 pub mod sanitize;
 mod worker;

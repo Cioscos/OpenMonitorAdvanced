@@ -26,11 +26,12 @@
 | Cosa | Milestone |
 |---|---|
 | GPU | M2 |
-| Polling parallelo con timeout per provider (§4.1): in M1 i provider sono tutti API locali veloci | M2 |
-| Vista Avanzata, min/max/media, batteria, SMBIOS, Wi-Fi RSSI, nome modello dei dischi | M3 |
+| Vista Avanzata, min/max/media, batteria, SMBIOS, Wi-Fi RSSI, metadati completi RAM/dischi, commit memoria (`GetPerformanceInfo`), IOPS dischi | M3 |
+| Fallback temperatura NVMe senza privilegi (punto aperto §13.6) | M3, prova hardware prima dell’integrazione |
 | Servizio e IPC | M4 |
 | Motore regole, notifiche, tray dinamica, log CSV, `settings.json`, avvio automatico | M5 |
-| Report sensori, installer | M6 |
+| Installer NSIS con servizio e PawnIO | M4 |
+| Report sensori e release 1.0 | M6 |
 
 **Prove già fatte durante la stesura (prototipi usa e getta in scratchpad, non da riusare):**
 - **Firme `windows` 0.62:** verificate compilando ed eseguendo il codice PDH, memoria, volumi e `GetIfTable2` su Windows 11 in italiano (Ryzen 7 7800X3D).
@@ -42,6 +43,8 @@
   - Vitest 5 richiede `defineConfig` da `vitest/config`;
   - jsdom non ha `matchMedia` e serve un polyfill, perché `prefersReducedMotion` di `svelte/motion` la usa;
   - `Tween.set(v, { duration: 0 })` è sincrono.
+
+**Esito della revisione del 24 settembre 2026:** corretti isolamento dello scheduler, backoff, identità dei dischi, fallback CPU, validità PDH, sincronizzazione UI, capability, diagnostica e verifica del budget. I prototipi citati sopra sono evidenza storica della stesura, non una verifica dei blocchi aggiornati: eseguire i test indicati durante l’implementazione.
 
 ## Global Constraints
 
@@ -57,7 +60,7 @@
   - finestra aperta < 200 MB in totale, WebView2 compresa.
   
   Misura: working set privato (colonna "Memoria" di Task Manager).
-- **Intervallo di campionamento:** default 1 s. **Storico:** 1 ora di campioni (3600 a 1 s).
+- **Intervallo di campionamento:** default 1 s, configurabile nel nucleo da 500 a 5000 ms; il controllo nelle impostazioni arriva in M5. **Storico:** 1 ora di campioni (3600 a 1 s).
 - **L'interfaccia non gira mai con privilegi elevati.** Nessun contenuto remoto. CSP stretta.
 - **Stringhe UI:** tutte in `app/src/lib/i18n/en.json` e `it.json`, con l'inglese come lingua di riserva. Stesse chiavi nelle due lingue.
 - **ID dei sensori stabili:** `<device_id>/<kind>/<name>`, per esempio `cpu/0/load/total`. Le **chiavi delle etichette** (`Label.key`) sono il contratto tra Rust e UI: la UI le cerca come `sensor.<key>`.
@@ -120,6 +123,7 @@ crates/oma-core/
   src/sanitize.rs                            filtro dei valori anomali (§8)
   src/rate.rs                                CounterRate per i contatori cumulativi
   src/history.rs                             History (ring buffer), HistoryWindow
+  src/worker.rs                              un worker persistente per provider, timeout e backoff
   src/engine.rs                              Engine: discovery, poll, backoff, schema
   src/sampler.rs                             thread di campionamento, next_deadline, unix_ms
 
@@ -129,6 +133,7 @@ crates/oma-win/
   src/pdh.rs                                 wrapper sicuro di PDH
   src/cpu.rs                                 CpuProvider
   src/memory.rs                              MemoryProvider
+  src/storage_identity.rs                    identità persistenti di dischi e volumi
   src/storage.rs                             StorageProvider
   src/network.rs                             NetworkProvider
   tests/providers.rs                         smoke test su hardware reale
@@ -155,6 +160,8 @@ app/src-tauri/                               crate oma-app
 
 ---
 
+**Comandi:** i blocchi `bash` richiedono Git Bash; in PowerShell eseguire le righe separatamente e usare `curl.exe` per scaricare la licenza. Non sostituire indiscriminatamente comandi di cancellazione tra shell. I test hardware sono esclusi dalla CI ordinaria e richiesti prima di chiudere M1.
+
 ### Task 1: Monorepo e modello dati di `oma-core`
 
 **File:**
@@ -171,9 +178,10 @@ app/src-tauri/                               crate oma-app
   - `enum Unit { Celsius, Percent, Megahertz, Watt, Volt, Ampere, Rpm, Bytes, BytesPerSecond, BitsPerSecond, Joule, Boolean }`
   - `enum Source { Pdh, Win32, IpHelper, Mock }`
   - `struct Label { key: String, arg: Option<String> }` con `Label::new(&str)` e `Label::with_arg(&str, impl Into<String>)`
-  - `struct Device { id: String, kind: DeviceKind, name: String }`
-  - `struct Sensor { id, device_id, kind, unit, label, source }` con `Sensor::new(device_id: &str, kind: SensorKind, name: &str, unit: Unit, label: Label, source: Source) -> Sensor`, che produce l'id `"{device_id}/{kind}/{name}"`
+  - `struct Device { id: String, kind: DeviceKind, name: String, vendor: Option<String>, properties: BTreeMap<String, String> }`
+  - `struct Sensor { id, device_id, kind, unit, label, source, category }` con `Sensor::new(device_id: &str, kind: SensorKind, name: &str, unit: Unit, label: Label, source: Source) -> Sensor`, che produce l'id `"{device_id}/{kind}/{name}"`
   - `struct Schema { revision: u64, devices: Vec<Device>, sensors: Vec<Sensor> }` (con `Default`)
+  - `struct Reading { sensor_id: String, value: Option<f64>, timestamp_ms: u64 }`
   - `struct Snapshot { revision: u64, seq: u64, timestamp_ms: u64, values: Vec<Option<f64>> }`
   - Serializzazione JSON: strutture in camelCase, enum in snake_case.
 
@@ -307,7 +315,8 @@ mod tests {
                 "kind": "throughput",
                 "unit": "bytes_per_second",
                 "label": { "key": "network.down" },
-                "source": "ip_helper"
+                "source": "ip_helper",
+                "category": "throughput"
             })
         );
     }
@@ -320,7 +329,7 @@ mod tests {
 
     #[test]
     fn device_kind_uses_snake_case() {
-        let d = Device { id: "x".into(), kind: DeviceKind::FanController, name: "X".into() };
+        let d = Device { id: "x".into(), kind: DeviceKind::FanController, name: "X".into(), vendor: None, properties: Default::default() };
         assert_eq!(serde_json::to_value(&d).unwrap()["kind"], json!("fan_controller"));
     }
 
@@ -456,6 +465,10 @@ pub struct Device {
     pub id: String,
     pub kind: DeviceKind,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub properties: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -467,6 +480,7 @@ pub struct Sensor {
     pub unit: Unit,
     pub label: Label,
     pub source: Source,
+    pub category: String,
 }
 
 impl Sensor {
@@ -479,6 +493,7 @@ impl Sensor {
             unit,
             label,
             source,
+            category: kind.as_str().to_owned(),
         }
     }
 }
@@ -490,6 +505,14 @@ pub struct Schema {
     pub revision: u64,
     pub devices: Vec<Device>,
     pub sensors: Vec<Sensor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reading {
+    pub sensor_id: String,
+    pub value: Option<f64>,
+    pub timestamp_ms: u64,
 }
 
 /// One sampling cycle. `values[i]` belongs to `schema.sensors[i]` of the
@@ -685,6 +708,7 @@ use crate::model::Unit;
 pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
     let v = value?;
     if !v.is_finite() {
+        tracing::debug!(?unit, v, "discarding non-finite value");
         return None;
     }
     let plausible = match unit {
@@ -983,7 +1007,7 @@ git commit -m "feat(core): in-memory sample history"
 ### Task 4: `Engine` (discovery, poll, backoff, schema)
 
 **File:**
-- Crea: `crates/oma-core/src/engine.rs`
+- Crea: `crates/oma-core/src/engine.rs`, `crates/oma-core/src/worker.rs`
 - Modifica: `crates/oma-core/src/lib.rs` (aggiungi `pub mod engine;`)
 
 **Interfacce:**
@@ -996,16 +1020,16 @@ git commit -m "feat(core): in-memory sample history"
   - `struct TickOutput { snapshot: Snapshot, schema: Option<Schema> }`, dove `schema` è `Some` quando lo schema è cambiato in quel tick (sempre al primo tick)
   - `struct Engine`, con i metodi:
     - `new(providers: Vec<Box<dyn Provider>>, history_capacity: usize)`
-    - `tick(&mut self, now_ms: u64) -> TickOutput`
+    - `tick(&mut self, timestamp_ms: u64, monotonic_ms: u64) -> TickOutput`
     - `schema(&self) -> &Schema`
     - `history(&self) -> &History`
   - `fn backoff_ms(failures: u32) -> u64`
 
 **Comportamento (spec §4.1 e §8):**
-- Ogni provider ha uno stato: `NeedsDiscover`, `Healthy` oppure `Degraded { failures, retry_at_ms }`.
-- Un errore di `discover` o di `poll`, o un numero di valori sbagliato, porta a `Degraded`. Il nuovo tentativo passa da `discover` dopo `backoff_ms(failures)`: 5 s, 10 s, 20 s, 40 s, poi fisso a 60 s.
+- Ogni provider vive in un worker persistente. Un solo timer nel sampler; discovery e poll sono paralleli, con deadline comune di 200 ms. Al timeout si conserva l’ultimo valore (§4.1), senza avviare altre chiamate finché quella pendente termina. Il worker gestisce discovery, backoff e recupero; solo un poll riuscito azzera gli errori consecutivi. Lo shutdown non attende una chiamata Win32 bloccata.
+- Un errore di `discover` o di `poll`, o un numero di valori sbagliato, rende il provider degradato. Il nuovo tentativo passa da `discover` dopo `backoff_ms(failures)`: 5 s, 10 s, 20 s, 40 s, poi fisso a 60 s.
 - Un provider degradato **resta nello schema**; i suoi valori sono `None`.
-- `Err(Rediscover)` porta a `NeedsDiscover`: `discover` viene rieseguito al tick successivo, e se l'inventario cambia si passa a una nuova revisione dello schema.
+- `Err(Rediscover)` richiede una nuova discovery: `discover` viene rieseguito al tick successivo, e se l'inventario cambia si passa a una nuova revisione dello schema.
 
 - [ ] **Step 1: Scrivi i test (falliscono)**
 
@@ -1016,6 +1040,7 @@ git commit -m "feat(core): in-memory sample history"
 mod tests {
     use super::*;
     use crate::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
+    use crate::provider::ProviderError;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -1059,7 +1084,7 @@ mod tests {
 
     fn inventory(device: &str, sensors: &[&str]) -> Inventory {
         Inventory {
-            devices: vec![Device { id: device.into(), kind: DeviceKind::Cpu, name: device.into() }],
+            devices: vec![Device { id: device.into(), kind: DeviceKind::Cpu, name: device.into(), vendor: None, properties: Default::default() }],
             sensors: sensors
                 .iter()
                 .map(|n| Sensor::new(device, SensorKind::Load, n, Unit::Percent, Label::new("test"), Source::Mock))
@@ -1080,20 +1105,20 @@ mod tests {
     fn first_tick_discovers_and_publishes_schema() {
         let (p, _) = fake("a", inventory("dev/a", &["x", "y"]));
         let mut e = Engine::new(vec![p], 10);
-        let out = e.tick(1_000);
+        let out = e.tick(1_000, 1_000);
         let schema = out.schema.expect("schema on first tick");
         assert_eq!(schema.revision, 1);
         assert_eq!(schema.sensors.len(), 2);
         assert_eq!(out.snapshot.revision, 1);
         assert_eq!(out.snapshot.seq, 1);
         assert_eq!(out.snapshot.values, vec![Some(1.0), Some(1.0)]);
-        assert!(e.tick(2_000).schema.is_none());
+        assert!(e.tick(2_000, 2_000).schema.is_none());
     }
 
     #[test]
     fn engine_without_providers_publishes_an_empty_schema() {
         let mut e = Engine::new(Vec::new(), 10);
-        let out = e.tick(0);
+        let out = e.tick(0, 0);
         assert_eq!(out.schema.map(|s| s.revision), Some(1));
         assert!(out.snapshot.values.is_empty());
     }
@@ -1103,7 +1128,7 @@ mod tests {
         let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
         script.lock().unwrap().polls.push_back(Ok(vec![Some(150.0), Some(f64::NAN)]));
         let mut e = Engine::new(vec![p], 10);
-        assert_eq!(e.tick(0).snapshot.values, vec![None, None]);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, None]);
     }
 
     #[test]
@@ -1111,10 +1136,10 @@ mod tests {
         let (p, script) = fake("a", inventory("dev/a", &["x"]));
         script.lock().unwrap().polls.push_back(Err(failed()));
         let mut e = Engine::new(vec![p], 10);
-        assert_eq!(e.tick(0).snapshot.values, vec![None]);
-        assert_eq!(e.tick(1_000).snapshot.values, vec![None]);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None]);
+        assert_eq!(e.tick(1_000, 1_000).snapshot.values, vec![None]);
         assert_eq!(script.lock().unwrap().discover_calls, 1);
-        assert_eq!(e.tick(5_000).snapshot.values, vec![Some(1.0)]);
+        assert_eq!(e.tick(5_000, 5_000).snapshot.values, vec![Some(1.0)]);
         assert_eq!(script.lock().unwrap().discover_calls, 2);
     }
 
@@ -1123,11 +1148,11 @@ mod tests {
         let (p, script) = fake("a", inventory("dev/a", &["x"]));
         script.lock().unwrap().discover_errors.extend([failed(), failed()]);
         let mut e = Engine::new(vec![p], 10);
-        e.tick(0);
-        e.tick(5_000);
-        e.tick(14_999);
+        e.tick(0, 0);
+        e.tick(5_000, 5_000);
+        e.tick(14_999, 14_999);
         assert_eq!(script.lock().unwrap().discover_calls, 2);
-        let out = e.tick(15_000);
+        let out = e.tick(15_000, 15_000);
         assert_eq!(script.lock().unwrap().discover_calls, 3);
         assert_eq!(out.schema.map(|s| s.revision), Some(2));
         assert_eq!(out.snapshot.values, vec![Some(1.0)]);
@@ -1137,16 +1162,16 @@ mod tests {
     fn rediscover_rebuilds_schema_and_keeps_history_by_id() {
         let (p, script) = fake("a", inventory("dev/a", &["x"]));
         let mut e = Engine::new(vec![p], 10);
-        e.tick(1_000);
+        e.tick(1_000, 1_000);
         {
             let mut s = script.lock().unwrap();
             s.polls.push_back(Err(ProviderError::Rediscover));
             s.inventory = inventory("dev/a", &["x", "z"]);
         }
-        let out = e.tick(2_000);
+        let out = e.tick(2_000, 2_000);
         assert!(out.schema.is_none());
         assert_eq!(out.snapshot.values, vec![None]);
-        let out = e.tick(3_000);
+        let out = e.tick(3_000, 3_000);
         assert_eq!(out.schema.map(|s| s.revision), Some(2));
         assert_eq!(out.snapshot.values, vec![Some(1.0), Some(1.0)]);
         let w = e.history().window(&["dev/a/load/x".into(), "dev/a/load/z".into()], 0);
@@ -1160,8 +1185,8 @@ mod tests {
         let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
         script.lock().unwrap().polls.push_back(Ok(vec![Some(1.0)]));
         let mut e = Engine::new(vec![p], 10);
-        assert_eq!(e.tick(0).snapshot.values, vec![None, None]);
-        e.tick(1_000);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, None]);
+        e.tick(1_000, 1_000);
         assert_eq!(script.lock().unwrap().poll_calls, 1);
     }
 
@@ -1171,7 +1196,74 @@ mod tests {
         let (b, _) = fake("b", inventory("dev/b", &["y"]));
         script_a.lock().unwrap().polls.push_back(Err(failed()));
         let mut e = Engine::new(vec![a, b], 10);
-        assert_eq!(e.tick(0).snapshot.values, vec![None, Some(1.0)]);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, Some(1.0)]);
+    }
+
+    #[test]
+    fn successful_rediscovery_does_not_reset_poll_backoff() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script.lock().unwrap().polls.extend([Err(failed()), Err(failed())]);
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(100_000, 0);
+        e.tick(1_000, 5_000); // Wall clock moves backwards; retry still occurs.
+        e.tick(2_000, 14_999);
+        assert_eq!(script.lock().unwrap().poll_calls, 2);
+        assert_eq!(e.tick(3_000, 15_000).snapshot.values, vec![Some(1.0)]);
+    }
+
+    struct Blocked(std::sync::mpsc::Receiver<()>);
+    impl Provider for Blocked {
+        fn name(&self) -> &'static str { "blocked" }
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            let _ = self.0.recv();
+            Ok(Inventory::default())
+        }
+        fn poll(&mut self) -> PollResult { Ok(Vec::new()) }
+    }
+    #[test]
+    fn blocked_discovery_does_not_block_other_providers_or_drop() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let (fast, _) = fake("fast", inventory("dev/fast", &["x"]));
+        let mut e = Engine::new(vec![Box::new(Blocked(wait)), fast], 10);
+        let start = Instant::now();
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![Some(1.0)]);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let start = Instant::now();
+        drop(e);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        drop(release);
+    }
+
+    struct SlowPoll {
+        wait: std::sync::mpsc::Receiver<()>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Provider for SlowPoll {
+        fn name(&self) -> &'static str { "slow-poll" }
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            Ok(inventory("dev/slow", &["x"]))
+        }
+        fn poll(&mut self) -> PollResult {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                let _ = self.wait.recv();
+            }
+            Ok(vec![Some(42.0)])
+        }
+    }
+    #[test]
+    fn timed_out_poll_reuses_last_value_without_queuing_more_work() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow = SlowPoll { wait, calls: calls.clone() };
+        let (fast, script) = fake("fast", inventory("dev/fast", &["x"]));
+        let mut e = Engine::new(vec![Box::new(slow), fast], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![Some(42.0), Some(1.0)]);
+        script.lock().unwrap().polls.push_back(Ok(vec![Some(2.0)]));
+        assert_eq!(e.tick(1_000, 1_000).snapshot.values, vec![Some(42.0), Some(2.0)]);
+        e.tick(2_000, 2_000);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        drop(e);
+        drop(release);
     }
 
     #[test]
@@ -1193,67 +1285,32 @@ Risultato atteso: errore di compilazione (`cannot find type Engine`).
 In testa a `crates/oma-core/src/engine.rs`:
 
 ```rust
-//! Drives providers each tick: discovery, polling, failure isolation,
-//! schema revisions and history (spec §4.1, §8).
-
-use std::ops::Range;
-
+//! Parallel provider sampling with one shared deadline, schema revisions and history.
+use std::time::{Duration, Instant};
 use crate::history::History;
 use crate::model::{Schema, Snapshot};
-use crate::provider::{Inventory, Provider, ProviderError};
+use crate::provider::{Inventory, Provider};
 use crate::sanitize::sanitize;
+use crate::worker::Worker;
 
-const BACKOFF_BASE_MS: u64 = 5_000;
-const BACKOFF_MAX_MS: u64 = 60_000;
-
-/// Retry delay after `failures` consecutive failures: 5 s doubling up to 60 s.
 pub fn backoff_ms(failures: u32) -> u64 {
-    (BACKOFF_BASE_MS << failures.saturating_sub(1).min(4)).min(BACKOFF_MAX_MS)
+    (5_000u64 << failures.saturating_sub(1).min(4)).min(60_000)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickOutput {
     pub snapshot: Snapshot,
-    /// Present when the schema changed during this tick (always on the first).
     pub schema: Option<Schema>,
 }
 
-enum SlotState {
-    NeedsDiscover,
-    Healthy,
-    Degraded { failures: u32, retry_at_ms: u64 },
-}
-
 struct Slot {
-    provider: Box<dyn Provider>,
+    worker: Worker,
     inventory: Inventory,
-    state: SlotState,
-}
-
-impl Slot {
-    fn discovery_due(&self, now_ms: u64) -> bool {
-        match self.state {
-            SlotState::NeedsDiscover => true,
-            SlotState::Healthy => false,
-            SlotState::Degraded { retry_at_ms, .. } => now_ms >= retry_at_ms,
-        }
-    }
-
-    fn degrade(&mut self, now_ms: u64, err: &ProviderError) {
-        let failures = match self.state {
-            SlotState::Degraded { failures, .. } => failures + 1,
-            _ => 1,
-        };
-        let delay_ms = backoff_ms(failures);
-        tracing::warn!(provider = self.provider.name(), %err, failures, delay_ms, "provider degraded");
-        self.state = SlotState::Degraded { failures, retry_at_ms: now_ms + delay_ms };
-    }
+    last: Vec<Option<f64>>,
 }
 
 pub struct Engine {
     slots: Vec<Slot>,
-    /// Range of `schema.sensors` owned by each slot, in slot order.
-    ranges: Vec<Range<usize>>,
     schema: Schema,
     history: History,
     seq: u64,
@@ -1261,95 +1318,133 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(providers: Vec<Box<dyn Provider>>, history_capacity: usize) -> Self {
-        let slots = providers
-            .into_iter()
-            .map(|provider| Slot { provider, inventory: Inventory::default(), state: SlotState::NeedsDiscover })
-            .collect();
         Self {
-            slots,
-            ranges: Vec::new(),
-            schema: Schema::default(),
-            history: History::new(history_capacity),
-            seq: 0,
+            slots: providers.into_iter().map(|p| Slot {
+                worker: Worker::spawn(p), inventory: Inventory::default(), last: Vec::new(),
+            }).collect(),
+            schema: Schema::default(), history: History::new(history_capacity), seq: 0,
         }
     }
+    pub fn schema(&self) -> &Schema { &self.schema }
+    pub fn history(&self) -> &History { &self.history }
+    pub fn sequence(&self) -> u64 { self.seq }
 
-    pub fn schema(&self) -> &Schema {
-        &self.schema
-    }
-
-    pub fn history(&self) -> &History {
-        &self.history
-    }
-
-    /// Runs one sampling cycle at wall-clock time `now_ms`.
-    pub fn tick(&mut self, now_ms: u64) -> TickOutput {
+    /// `timestamp_ms` is Unix time for display; `monotonic_ms` drives retry deadlines.
+    pub fn tick(&mut self, timestamp_ms: u64, monotonic_ms: u64) -> TickOutput {
+        // One budget for the entire cycle, not N sequential provider timeouts.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        for slot in &mut self.slots { slot.worker.start(monotonic_ms); }
         let mut changed = self.schema.revision == 0;
         for slot in &mut self.slots {
-            if !slot.discovery_due(now_ms) {
-                continue;
+            if let Some(sample) = slot.worker.finish(deadline) {
+                changed |= slot.inventory != sample.inventory;
+                slot.inventory = sample.inventory;
+                slot.last = sample.values;
             }
-            match slot.provider.discover() {
-                Ok(inventory) => {
-                    if inventory != slot.inventory {
-                        slot.inventory = inventory;
-                        changed = true;
-                    }
-                    slot.state = SlotState::Healthy;
-                }
-                Err(err) => slot.degrade(now_ms, &err),
-            }
+            // A timeout retains the last values (§4.1). An explicit error returns
+            // None from the worker (§8). No extra worker/request is spawned while busy.
         }
         if changed {
-            self.rebuild_schema();
+            self.schema = Schema {
+                revision: self.schema.revision + 1,
+                devices: self.slots.iter().flat_map(|s| s.inventory.devices.iter().cloned()).collect(),
+                sensors: self.slots.iter().flat_map(|s| s.inventory.sensors.iter().cloned()).collect(),
+            };
+            self.history.set_sensors(&self.schema.sensors.iter().map(|s| s.id.clone()).collect::<Vec<_>>());
         }
-
-        let mut values = vec![None; self.schema.sensors.len()];
-        for (slot, range) in self.slots.iter_mut().zip(&self.ranges) {
-            if !matches!(slot.state, SlotState::Healthy) {
-                continue;
-            }
-            match slot.provider.poll() {
-                Ok(polled) if polled.len() == range.len() => {
-                    for (offset, value) in polled.into_iter().enumerate() {
-                        let index = range.start + offset;
-                        values[index] = sanitize(self.schema.sensors[index].unit, value);
-                    }
-                }
-                Ok(polled) => {
-                    let err = ProviderError::Failed(format!(
-                        "poll returned {} values, expected {}",
-                        polled.len(),
-                        range.len()
-                    ));
-                    slot.degrade(now_ms, &err);
-                }
-                Err(ProviderError::Rediscover) => slot.state = SlotState::NeedsDiscover,
-                Err(err) => slot.degrade(now_ms, &err),
-            }
-        }
-
-        self.history.push(now_ms, &values);
+        let values: Vec<_> = self.slots.iter().flat_map(|s| s.last.iter().copied())
+            .zip(&self.schema.sensors).map(|(value, sensor)| sanitize(sensor.unit, value)).collect();
+        self.history.push(timestamp_ms, &values);
         self.seq += 1;
         TickOutput {
-            snapshot: Snapshot { revision: self.schema.revision, seq: self.seq, timestamp_ms: now_ms, values },
+            snapshot: Snapshot { revision: self.schema.revision, seq: self.seq, timestamp_ms, values },
             schema: changed.then(|| self.schema.clone()),
         }
     }
+}
+```
 
-    fn rebuild_schema(&mut self) {
-        let mut devices = Vec::new();
-        let mut sensors = Vec::new();
-        self.ranges.clear();
-        for slot in &self.slots {
-            let start = sensors.len();
-            devices.extend(slot.inventory.devices.iter().cloned());
-            sensors.extend(slot.inventory.sensors.iter().cloned());
-            self.ranges.push(start..sensors.len());
+`crates/oma-core/src/worker.rs` (aggiungi `mod worker;` in `lib.rs`):
+
+```rust
+//! One persistent worker per provider. No timer and at most one in-flight request.
+use std::sync::mpsc::{self, Receiver, SyncSender, RecvTimeoutError};
+use std::time::Instant;
+use crate::engine::backoff_ms;
+use crate::provider::{Inventory, Provider, ProviderError};
+
+pub(crate) struct Sample {
+    pub inventory: Inventory,
+    pub values: Vec<Option<f64>>,
+}
+
+pub(crate) struct Worker {
+    tx: SyncSender<u64>,
+    rx: Receiver<Sample>,
+    pending: bool,
+}
+
+impl Worker {
+    pub fn spawn(mut provider: Box<dyn Provider>) -> Self {
+        let (tx, requests) = mpsc::sync_channel::<u64>(1);
+        let (responses, rx) = mpsc::sync_channel(1);
+        std::thread::Builder::new().name(format!("oma-{}", provider.name())).spawn(move || {
+            let mut inventory = Inventory::default();
+            let mut discover = true;
+            let mut failures = 0u32;
+            let mut retry_at = 0u64;
+            while let Ok(now) = requests.recv() {
+                let mut values = vec![None; inventory.sensors.len()];
+                if now >= retry_at {
+                    // A Rust panic is isolated; native DLL access violations are not catchable.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if discover {
+                            inventory = provider.discover()?;
+                            discover = false;
+                        }
+                        let polled = provider.poll()?;
+                        if polled.len() != inventory.sensors.len() {
+                            return Err(ProviderError::Failed("poll value count mismatch".into()));
+                        }
+                        Ok(polled)
+                    })).unwrap_or_else(|_| Err(ProviderError::Failed("provider panicked".into())));
+                    match result {
+                        Ok(polled) => {
+                            values = polled;
+                            failures = 0; // Only a successful poll ends a failure streak.
+                        }
+                        Err(ProviderError::Rediscover) => {
+                            discover = true;
+                            values = vec![None; inventory.sensors.len()];
+                        }
+                        Err(err) => {
+                            failures = failures.saturating_add(1);
+                            retry_at = now.saturating_add(backoff_ms(failures));
+                            discover = true;
+                            values = vec![None; inventory.sensors.len()];
+                            tracing::warn!(provider = provider.name(), %err, failures, "provider degraded");
+                        }
+                    }
+                }
+                if responses.send(Sample { inventory: inventory.clone(), values }).is_err() { break; }
+            }
+        }).expect("provider worker");
+        // Deliberately do not join a worker executing an uninterruptible Win32 call.
+        // Dropping the channels ends an idle worker; blocked workers exit with the process.
+        Self { tx, rx, pending: false }
+    }
+
+    pub fn start(&mut self, monotonic_ms: u64) {
+        if !self.pending && self.tx.try_send(monotonic_ms).is_ok() { self.pending = true; }
+    }
+
+    pub fn finish(&mut self, deadline: Instant) -> Option<Sample> {
+        if !self.pending { return None; }
+        match self.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(sample) => { self.pending = false; Some(sample) }
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => { self.pending = false; None }
         }
-        self.schema = Schema { revision: self.schema.revision + 1, devices, sensors };
-        let ids: Vec<String> = self.schema.sensors.iter().map(|s| s.id.clone()).collect();
-        self.history.set_sensors(&ids);
     }
 }
 ```
@@ -1357,7 +1452,7 @@ impl Engine {
 - [ ] **Step 4: Esegui i test e verifica che passino**
 
 Esegui: `cargo test -p oma-core engine`
-Risultato atteso: `9 passed`.
+Risultato atteso: tutti i test engine PASS, inclusi backoff dopo rediscovery e provider bloccato.
 
 - [ ] **Step 5: Lint e commit**
 
@@ -1386,7 +1481,7 @@ git commit -m "feat(core): engine with failure isolation and schema revisions"
     - `stop(self)`; anche il `Drop` ferma il thread e aspetta che termini
 
 **Regole:**
-- Un solo thread, chiamato `oma-sampler`.
+- Un solo thread con timer, chiamato `oma-sampler`; i worker dei provider attendono richieste senza timer propri.
 - **Nessuna modifica della risoluzione del timer:** si usano solo `park_timeout` e `sleep` standard.
 - `on_tick` viene chiamato **dopo** aver rilasciato il lock dell'engine.
 - Dopo una sospensione i tick persi si saltano, non si recuperano.
@@ -1416,7 +1511,7 @@ mod tests {
     #[test]
     fn next_deadline_skips_missed_ticks_after_sleep() {
         let t0 = Instant::now();
-        assert_eq!(next_deadline(t0, t0 + ms(10_500), ms(1_000)), t0 + ms(11_000));
+        assert_eq!(next_deadline(t0, t0 + ms(10_500), ms(1_000)), t0 + ms(11_500));
     }
 
     #[test]
@@ -1434,13 +1529,22 @@ mod tests {
 
         fn discover(&mut self) -> Result<Inventory, ProviderError> {
             Ok(Inventory {
-                devices: vec![Device { id: "d".into(), kind: DeviceKind::Cpu, name: "d".into() }],
+                devices: vec![Device { id: "d".into(), kind: DeviceKind::Cpu, name: "d".into(), vendor: None, properties: Default::default() }],
                 sensors: vec![Sensor::new("d", SensorKind::Load, "x", Unit::Percent, Label::new("t"), Source::Mock)],
             })
         }
 
         fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
             Ok(vec![Some(42.0)])
+        }
+    }
+
+    #[test]
+    fn configured_interval_retains_one_hour() {
+        assert!(sample_interval(499).is_err());
+        assert!(sample_interval(5_001).is_err());
+        for (ms, capacity) in [(500, 7200), (1000, 3600), (5000, 720)] {
+            assert_eq!(history_capacity(sample_interval(ms).unwrap()), capacity);
         }
     }
 
@@ -1488,8 +1592,17 @@ pub fn next_deadline(prev: Instant, now: Instant, interval: Duration) -> Instant
     if next > now {
         return next;
     }
-    let missed = ((now - prev).as_nanos() / interval.as_nanos()) as u32;
-    prev + interval * (missed + 1)
+    now + interval // Coalesce missed ticks without integer overflow or catch-up bursts.
+}
+
+/// Validated application sampling interval; tests may use shorter intervals directly.
+pub fn sample_interval(ms: u64) -> Result<Duration, &'static str> {
+    if (500..=5_000).contains(&ms) { Ok(Duration::from_millis(ms)) }
+    else { Err("sampling interval must be 500..=5000 ms") }
+}
+
+pub fn history_capacity(interval: Duration) -> usize {
+    (3_600_000u128 / interval.as_millis()) as usize
 }
 
 /// Wall-clock time in milliseconds since the Unix epoch.
@@ -1509,14 +1622,16 @@ impl Sampler {
     where
         F: FnMut(&TickOutput) + Send + 'static,
     {
+        assert!(!interval.is_zero(), "sampling interval must be positive");
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
             .name("oma-sampler".into())
             .spawn(move || {
-                let mut deadline = Instant::now();
+                let epoch = Instant::now();
+                let mut deadline = epoch;
                 while !stop_flag.load(Ordering::Acquire) {
-                    let output = engine.lock().unwrap_or_else(PoisonError::into_inner).tick(unix_ms());
+                    let output = engine.lock().unwrap_or_else(PoisonError::into_inner).tick(unix_ms(), epoch.elapsed().as_millis() as u64);
                     on_tick(&output);
                     deadline = next_deadline(deadline, Instant::now(), interval);
                     while !stop_flag.load(Ordering::Acquire) {
@@ -1552,7 +1667,7 @@ impl Drop for Sampler {
 - [ ] **Step 4: Esegui i test e verifica che passino**
 
 Esegui: `cargo test -p oma-core`
-Risultato atteso: tutti i test di `oma-core` OK (i 4 di `sampler` compresi).
+Risultato atteso: tutti i test di `oma-core` OK (quelli di `sampler` compresi).
 
 - [ ] **Step 5: Lint e commit**
 
@@ -1610,11 +1725,15 @@ license.workspace = true
 [dependencies]
 oma-core.workspace = true
 tracing.workspace = true
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
   "Win32_Storage_FileSystem",
@@ -1679,6 +1798,18 @@ mod tests {
     }
 
     #[test]
+    fn utility_falls_back_to_processor_time() {
+        let mut paths = Vec::new();
+        let value = add_load_counter(|path| {
+            paths.push(path.to_owned());
+            if path == UTILITY { Err("missing utility") } else { Ok(42) }
+        });
+        assert_eq!(value, Ok(42));
+        assert_eq!(paths, vec![UTILITY, TIME]);
+        assert!(add_load_counter::<(), _>(|_| Err("missing both")).is_err());
+    }
+
+    #[test]
     fn effective_clock_scales_nominal_frequency() {
         let mhz = effective_clock_mhz(4201.0, 104.35);
         assert!((mhz - 4383.74).abs() < 0.01, "{mhz}");
@@ -1687,13 +1818,13 @@ mod tests {
     #[test]
     fn load_is_capped_at_100() {
         assert_eq!(load_pct(104.0), Some(100.0));
-        assert_eq!(load_pct(-1.0), Some(0.0));
+        assert_eq!(load_pct(-1.0), None);
         assert_eq!(load_pct(f64::NAN), None);
     }
 }
 ```
 
-`crates/oma-win/tests/providers.rs` (smoke test: parlano con Windows vero e girano sia in CI sia sulla macchina di sviluppo in italiano):
+`crates/oma-win/tests/providers.rs` (smoke test: parlano con Windows vero, sono `#[ignore]` in CI (§12) e si eseguono esplicitamente sulla macchina di sviluppo in italiano):
 
 ```rust
 #![cfg(windows)]
@@ -1713,6 +1844,7 @@ fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
 }
 
 #[test]
+#[ignore = "requires real Windows hardware"]
 fn pdh_english_paths_resolve() {
     // Discovery adds every counter with PdhAddEnglishCounterW: on a non-English
     // Windows this fails if a localized API is used by mistake.
@@ -1720,24 +1852,25 @@ fn pdh_english_paths_resolve() {
 }
 
 #[test]
+#[ignore = "requires real Windows hardware"]
 fn cpu_provider_reports_load_and_clock() {
     let mut p = CpuProvider::new();
     let (inventory, values) = discover_and_poll(&mut p);
     assert_eq!(inventory.devices.len(), 1);
     assert!(!inventory.devices[0].name.is_empty());
-    let threads = std::thread::available_parallelism().unwrap().get();
     let thread_sensors = inventory.sensors.iter().filter(|s| s.id.contains("/load/thread-")).count();
-    assert_eq!(thread_sensors, threads);
+    assert!(thread_sensors > 0); // available_parallelism may be restricted by affinity/job limits.
     let total = values[0].expect("total load");
     assert!((0.0..=100.0).contains(&total));
-    let clock = values.last().unwrap().expect("effective clock");
-    assert!(clock > 100.0, "clock {clock} MHz");
+    if let Some(clock) = values.last().copied().flatten() {
+        assert!((0.0..=20_000.0).contains(&clock), "clock {clock} MHz");
+    }
 }
 ```
 
 - [ ] **Step 3: Esegui i test e verifica che falliscano**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: errore di compilazione (`file not found for module cpu` / `pdh`).
 
 - [ ] **Step 4: Implementa il wrapper PDH**
@@ -1753,7 +1886,7 @@ use oma_core::provider::ProviderError;
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhGetFormattedCounterValue, PdhGetRawCounterArrayW, PdhOpenQueryW, PDH_CSTATUS_VALID_DATA, PDH_FMT,
+    PdhGetFormattedCounterValue, PdhGetRawCounterArrayW, PdhOpenQueryW, PDH_CSTATUS_VALID_DATA, PDH_CSTATUS_NEW_DATA, PDH_FMT,
     PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
     PDH_RAW_COUNTER_ITEM_W,
 };
@@ -1793,6 +1926,21 @@ fn check(call: &'static str, status: u32) -> Result<(), PdhError> {
         Ok(())
     } else {
         Err(PdhError { call, status })
+    }
+}
+
+fn valid_status(status: u32) -> bool {
+    matches!(status, PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn accepts_new_and_unchanged_data_only() {
+        assert!(valid_status(PDH_CSTATUS_VALID_DATA));
+        assert!(valid_status(PDH_CSTATUS_NEW_DATA));
+        assert!(!valid_status(PDH_INVALID_DATA));
     }
 }
 
@@ -1840,7 +1988,11 @@ impl Query {
         // SAFETY: the counter belongs to this query; the out-pointer is valid.
         let status = unsafe { PdhGetFormattedCounterValue(counter.0, FMT_DOUBLE_NOCAP, None, &mut value) };
         // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member.
-        (status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA).then(|| unsafe { value.Anonymous.doubleValue })
+        if status == 0 && valid_status(value.CStatus) {
+            Some(unsafe { value.Anonymous.doubleValue })
+        } else {
+            None
+        }
     }
 
     /// Formatted values of a wildcard counter as `(instance, value)`. Empty
@@ -1877,7 +2029,7 @@ impl Query {
                 .map(|item| {
                     // SAFETY: `szName` points into `buffer`.
                     let name = unsafe { item.szName.to_string() }.unwrap_or_default();
-                    let value = if item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA {
+                    let value = if valid_status(item.FmtValue.CStatus) {
                         // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member.
                         unsafe { item.FmtValue.Anonymous.doubleValue }
                     } else {
@@ -1951,6 +2103,7 @@ use crate::pdh::{Counter, Query};
 
 const DEVICE_ID: &str = "cpu/0";
 const UTILITY: &str = r"\Processor Information(*)\% Processor Utility";
+const TIME: &str = r"\Processor Information(*)\% Processor Time";
 const PERFORMANCE: &str = r"\Processor Information(_Total)\% Processor Performance";
 const FREQUENCY: &str = r"\Processor Information(_Total)\Processor Frequency";
 const TOTAL_INSTANCE: &str = "_Total";
@@ -1974,14 +2127,18 @@ pub(crate) fn parse_instance(name: &str) -> Option<LogicalProcessor> {
     Some(LogicalProcessor { group: group.trim().parse().ok()?, number: number.trim().parse().ok()? })
 }
 
-/// Task Manager's effective clock: nominal frequency × % performance.
+fn add_load_counter<T, E>(mut add: impl FnMut(&str) -> Result<T, E>) -> Result<T, E> {
+    add(UTILITY).or_else(|_| add(TIME))
+}
+
+/// Task Manager's estimated clock: nominal frequency × % performance.
 pub(crate) fn effective_clock_mhz(nominal_mhz: f64, performance_pct: f64) -> f64 {
     nominal_mhz * performance_pct / 100.0
 }
 
 /// Processor Utility exceeds 100 % while boosting; Task Manager caps it and so do we.
 pub(crate) fn load_pct(utility: f64) -> Option<f64> {
-    utility.is_finite().then(|| utility.clamp(0.0, 100.0))
+    (utility.is_finite() && utility >= 0.0).then(|| utility.min(100.0))
 }
 
 fn cpu_name() -> String {
@@ -2014,8 +2171,8 @@ fn cpu_name() -> String {
 struct Counters {
     query: Query,
     utility: Counter,
-    performance: Counter,
-    frequency: Counter,
+    performance: Option<Counter>,
+    frequency: Option<Counter>,
 }
 
 #[derive(Default)]
@@ -2037,9 +2194,9 @@ impl Provider for CpuProvider {
 
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
         let mut query = Query::open()?;
-        let utility = query.add_english(UTILITY)?;
-        let performance = query.add_english(PERFORMANCE)?;
-        let frequency = query.add_english(FREQUENCY)?;
+        let utility = add_load_counter(|path| query.add_english(path))?;
+        let performance = query.add_english(PERFORMANCE).ok();
+        let frequency = query.add_english(FREQUENCY).ok();
         query.collect()?;
         let mut processors: Vec<_> = query.instances(utility)?.iter().filter_map(|n| parse_instance(n)).collect();
         processors.sort_unstable();
@@ -2074,7 +2231,7 @@ impl Provider for CpuProvider {
         self.counters = Some(Counters { query, utility, performance, frequency });
         self.processors = processors;
         Ok(Inventory {
-            devices: vec![Device { id: DEVICE_ID.to_owned(), kind: DeviceKind::Cpu, name: cpu_name() }],
+            devices: vec![Device { id: DEVICE_ID.to_owned(), kind: DeviceKind::Cpu, name: cpu_name(), vendor: None, properties: Default::default() }],
             sensors,
         })
     }
@@ -2096,7 +2253,7 @@ impl Provider for CpuProvider {
         values.extend(
             self.processors.iter().map(|p| by_instance.get(p.instance().as_str()).copied().and_then(load_pct)),
         );
-        let clock = match (counters.query.value(counters.frequency), counters.query.value(counters.performance)) {
+        let clock = match (counters.frequency.and_then(|c| counters.query.value(c)), counters.performance.and_then(|c| counters.query.value(c))) {
             (Some(nominal), Some(performance)) => Some(effective_clock_mhz(nominal, performance)),
             _ => None,
         };
@@ -2108,8 +2265,8 @@ impl Provider for CpuProvider {
 
 - [ ] **Step 6: Esegui i test e verifica che passino**
 
-Esegui: `cargo test -p oma-win`
-Risultato atteso: 6 test unitari e 2 test di `providers.rs` OK. Esegui anche sulla macchina di sviluppo con Windows in italiano: `pdh_english_paths_resolve` deve passare.
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
+Risultato atteso: test unitari PASS; i test `providers.rs` restano ignorati nel comando ordinario e devono passare nella sessione hardware esplicita. Esegui anche sulla macchina di sviluppo con Windows in italiano: `pdh_english_paths_resolve` deve passare.
 
 - [ ] **Step 7: Lint e commit**
 
@@ -2162,8 +2319,9 @@ In `crates/oma-win/tests/providers.rs` aggiungi `use oma_win::memory::MemoryProv
 
 ```rust
 #[test]
+#[ignore = "requires real Windows hardware"]
 fn memory_provider_reports_usage() {
-    let mut p = MemoryProvider::default();
+    let mut p = MemoryProvider;
     let (_, values) = discover_and_poll(&mut p);
     let pct = values[0].expect("load");
     assert!((0.0..=100.0).contains(&pct));
@@ -2177,13 +2335,13 @@ In `crates/oma-win/src/lib.rs` aggiungi `pub mod memory;` (dopo `pub mod cpu;`) 
 
 ```rust
 pub fn default_providers() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(cpu::CpuProvider::new()), Box::new(memory::MemoryProvider::default())]
+    vec![Box::new(cpu::CpuProvider::new()), Box::new(memory::MemoryProvider)]
 }
 ```
 
 - [ ] **Step 2: Esegui i test e verifica che falliscano**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: errore di compilazione (`file not found for module memory`).
 
 - [ ] **Step 3: Implementa**
@@ -2226,7 +2384,7 @@ impl Provider for MemoryProvider {
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
         memory_status()?;
         Ok(Inventory {
-            devices: vec![Device { id: DEVICE_ID.to_owned(), kind: DeviceKind::Memory, name: "RAM".to_owned() }],
+            devices: vec![Device { id: DEVICE_ID.to_owned(), kind: DeviceKind::Memory, name: "RAM".to_owned(), vendor: None, properties: Default::default() }],
             sensors: vec![
                 Sensor::new(DEVICE_ID, SensorKind::Load, "used", Unit::Percent, Label::new("memory.load"), Source::Win32),
                 Sensor::new(DEVICE_ID, SensorKind::Data, "used", Unit::Bytes, Label::new("memory.used"), Source::Win32),
@@ -2248,7 +2406,7 @@ impl Provider for MemoryProvider {
 
 - [ ] **Step 4: Esegui i test e verifica che passino**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: tutti OK (compresi `used_*` e `memory_provider_reports_usage`).
 
 - [ ] **Step 5: Lint e commit**
@@ -2265,22 +2423,22 @@ git commit -m "feat(win): memory usage provider"
 ### Task 8: `StorageProvider`
 
 **File:**
-- Crea: `crates/oma-win/src/storage.rs`
+- Crea: `crates/oma-win/src/storage.rs`, `crates/oma-win/src/storage_identity.rs`
 - Modifica: `crates/oma-win/src/lib.rs`, `crates/oma-win/tests/providers.rs`
 
 **Interfacce:**
 - Usa: `crate::pdh::{Query, Counter}` (Task 6) e i tipi di `oma-core`.
 - Produce: `oma_win::storage::StorageProvider` (con `Default`).
-  - Un device per disco fisico, `storage/disk-<n>`, con nome `"Disk <n> (C:, D:)"`, oppure `"Disk <n>"` se il disco non ha volumi.
+  - Un device per disco fisico identificabile, `storage/device-<sha256>`, con nome `"Disk <n> (C:, D:)"`, oppure `"Disk <n>"` se il disco non ha volumi.
   - Sensori per disco, in quest'ordine:
     1. `throughput/read` (BytesPerSecond, `storage.read`)
     2. `throughput/write` (BytesPerSecond, `storage.write`)
     3. `load/active` (Percent, `storage.active`)
   - Per ogni volume con lettera, due sensori in più:
-    - `percent/volume-<L>` (Percent, `storage.volumeUsed`, `arg` = `"C:"`)
-    - `data/volume-<L>-free` (Bytes, `storage.volumeFree`, `arg` = `"C:"`)
+    - `percent/volume-<guid>` (Percent, `storage.volumeUsed`, `arg` = `"C:"`)
+    - `data/volume-<guid>-free` (Bytes, `storage.volumeFree`, `arg` = `"C:"`)
 
-**Nota:** i volumi vengono **solo** dalle lettere che PDH associa a un disco fisico (per esempio l'istanza `"2 C:"`). Le unità di rete mappate non sono dischi fisici, quindi non vengono mai interrogate e non possono bloccare il campionamento.
+**Nota:** le lettere PDH servono solo a trovare i mount point attuali. Anche un disco locale può bloccare una chiamata Win32: il timeout del Task 4 è obbligatorio. Identità persistenti di dischi e volumi: Step 3a, senza usare indice PDH o lettera come ID.
 
 - [ ] **Step 1: Scrivi i test (falliscono)**
 
@@ -2348,6 +2506,7 @@ In `crates/oma-win/tests/providers.rs` aggiungi `use oma_win::storage::StoragePr
 
 ```rust
 #[test]
+#[ignore = "requires real Windows hardware"]
 fn storage_provider_reports_disks_and_volumes() {
     let mut p = StorageProvider::default();
     let (inventory, values) = discover_and_poll(&mut p);
@@ -2361,13 +2520,13 @@ fn storage_provider_reports_disks_and_volumes() {
 }
 ```
 
-In `crates/oma-win/src/lib.rs` aggiungi `pub mod storage;` e il provider in coda a `default_providers()`:
+In `crates/oma-win/src/lib.rs` aggiungi `pub mod storage;` e `mod storage_identity;` e il provider in coda a `default_providers()`:
 
 ```rust
 pub fn default_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(cpu::CpuProvider::new()),
-        Box::new(memory::MemoryProvider::default()),
+        Box::new(memory::MemoryProvider),
         Box::new(storage::StorageProvider::default()),
     ]
 }
@@ -2375,7 +2534,7 @@ pub fn default_providers() -> Vec<Box<dyn Provider>> {
 
 - [ ] **Step 2: Esegui i test e verifica che falliscano**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: errore di compilazione (`file not found for module storage`).
 
 - [ ] **Step 3: Implementa**
@@ -2393,6 +2552,7 @@ use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::pdh::{Counter, Query};
+use crate::storage_identity::{disk_identity, volume_identity};
 
 const READ: &str = r"\PhysicalDisk(*)\Disk Read Bytes/sec";
 const WRITE: &str = r"\PhysicalDisk(*)\Disk Write Bytes/sec";
@@ -2452,14 +2612,6 @@ fn volume_space(volume: &str) -> Option<(u64, u64)> {
     Some((total, free))
 }
 
-fn device_id(index: u32) -> String {
-    format!("storage/disk-{index}")
-}
-
-fn letter(volume: &str) -> &str {
-    &volume[..1]
-}
-
 struct Counters {
     query: Query,
     read: Counter,
@@ -2471,6 +2623,8 @@ struct Counters {
 pub struct StorageProvider {
     counters: Option<Counters>,
     disks: Vec<DiskInstance>,
+    disk_ids: HashMap<u32, String>,
+    volume_ids: HashMap<String, String>,
 }
 
 impl Provider for StorageProvider {
@@ -2486,11 +2640,22 @@ impl Provider for StorageProvider {
         query.collect()?;
         let disks = disk_instances(&query.instances(read)?);
 
+        // Resolve stable identities only during discovery; never persist PDH indices.
+        let mut disk_ids: HashMap<u32, String> = disks.iter()
+            .filter_map(|d| disk_identity(d.index).map(|id| (d.index, id))).collect();
+        let mut counts = HashMap::<String, usize>::new();
+        for id in disk_ids.values() { *counts.entry(id.clone()).or_default() += 1; }
+        disk_ids.retain(|_, id| counts[id] == 1); // Ambiguous serials must not merge disks.
+        let volume_ids: HashMap<String, String> = disks.iter().flat_map(|d| &d.volumes)
+            .filter_map(|v| volume_identity(v).map(|id| (v.clone(), id))).collect();
         let mut devices = Vec::new();
         let mut sensors = Vec::new();
         for disk in &disks {
-            let id = device_id(disk.index);
-            devices.push(Device { id: id.clone(), kind: DeviceKind::Storage, name: disk_name(disk) });
+            let Some(id) = disk_ids.get(&disk.index).cloned() else {
+                tracing::warn!(index = disk.index, "disk has no unique persistent identity; omitted");
+                continue;
+            };
+            devices.push(Device { id: id.clone(), kind: DeviceKind::Storage, name: disk_name(disk), vendor: None, properties: Default::default() });
             sensors.push(Sensor::new(
                 &id,
                 SensorKind::Throughput,
@@ -2516,10 +2681,11 @@ impl Provider for StorageProvider {
                 Source::Pdh,
             ));
             for volume in &disk.volumes {
+                let Some(volume_id) = volume_ids.get(volume) else { continue; };
                 sensors.push(Sensor::new(
                     &id,
                     SensorKind::Percent,
-                    &format!("volume-{}", letter(volume)),
+                    &format!("volume-{}", volume_id),
                     Unit::Percent,
                     Label::with_arg("storage.volumeUsed", volume.clone()),
                     Source::Win32,
@@ -2527,7 +2693,7 @@ impl Provider for StorageProvider {
                 sensors.push(Sensor::new(
                     &id,
                     SensorKind::Data,
-                    &format!("volume-{}-free", letter(volume)),
+                    &format!("volume-{}-free", volume_id),
                     Unit::Bytes,
                     Label::with_arg("storage.volumeFree", volume.clone()),
                     Source::Win32,
@@ -2536,6 +2702,8 @@ impl Provider for StorageProvider {
         }
         self.counters = Some(Counters { query, read, write, idle });
         self.disks = disks;
+        self.disk_ids = disk_ids;
+        self.volume_ids = volume_ids;
         Ok(Inventory { devices, sensors })
     }
 
@@ -2543,11 +2711,9 @@ impl Provider for StorageProvider {
         let counters = self.counters.as_mut().ok_or(ProviderError::Rediscover)?;
         counters.query.collect()?;
         let read = counters.query.array(counters.read)?;
-        if !read.is_empty() {
-            let names: Vec<String> = read.iter().map(|(n, _)| n.clone()).collect();
-            if disks_changed(&self.disks, &names) {
-                return Err(ProviderError::Rediscover);
-            }
+        // Raw instances distinguish a missing disk from rate-counter warm-up.
+        if disks_changed(&self.disks, &counters.query.instances(counters.read)?) {
+            return Err(ProviderError::Rediscover);
         }
         let read: HashMap<String, f64> = read.into_iter().collect();
         let write: HashMap<String, f64> = counters.query.array(counters.write)?.into_iter().collect();
@@ -2556,10 +2722,12 @@ impl Provider for StorageProvider {
 
         let mut values = Vec::new();
         for disk in &self.disks {
+            if !self.disk_ids.contains_key(&disk.index) { continue; }
             values.push(finite(&read, &disk.instance));
             values.push(finite(&write, &disk.instance));
             values.push(finite(&idle, &disk.instance).and_then(active_pct));
             for volume in &disk.volumes {
+                if !self.volume_ids.contains_key(volume) { continue; }
                 match volume_space(volume) {
                     Some((total, free)) => {
                         values.push(used_pct(total, free));
@@ -2574,9 +2742,114 @@ impl Provider for StorageProvider {
 }
 ```
 
+
+- [ ] **Step 3a: Identità persistenti (§3), prima di compilare il provider**
+
+Il numero `PhysicalDriveN` serve solo ad aprire il dispositivo durante la discovery.
+L'ID è un SHA-256 di vendor, modello e seriale, con separatori; la lettera del volume
+è solo un'etichetta, mentre il suffisso dei sensori usa il GUID del volume. Un seriale
+assente, non leggibile o duplicato non viene sostituito con un indice instabile:
+si omette quel disco e si registra la causa nel log. Verificare sulla matrice hardware
+che l'utente standard possa leggere il descrittore; il supporto a identità alternative
+per controller senza seriale richiede un'estensione esplicita, non un falso ID stabile.
+
+`crates/oma-win/src/storage_identity.rs`:
+
+```rust
+//! Persistent identities; raw serial numbers never leave this module.
+use sha2::{Digest, Sha256};
+use windows::core::HSTRING;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Storage::FileSystem::{CreateFileW, GetVolumeNameForVolumeMountPointW,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL};
+use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::{IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY,
+    StorageDeviceProperty, PropertyStandardQuery};
+
+fn descriptor_text(bytes: &[u8], field: usize) -> Option<&str> {
+    let offset = u32::from_le_bytes(bytes.get(field..field + 4)?.try_into().ok()?) as usize;
+    if offset < 36 { return None; }
+    let tail = bytes.get(offset..)?;
+    let end = tail.iter().position(|&b| b == 0)?;
+    let text = std::str::from_utf8(&tail[..end]).ok()?.trim();
+    (!text.is_empty()).then_some(text)
+}
+
+fn identity_from_descriptor(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 36 { return None; }
+    let serial = descriptor_text(bytes, 24)?;
+    let vendor = descriptor_text(bytes, 12).unwrap_or("");
+    let model = descriptor_text(bytes, 16).unwrap_or("");
+    let hash = Sha256::digest(format!("{vendor}\0{model}\0{serial}").as_bytes());
+    Some(format!("storage/device-{hash:x}"))
+}
+
+pub(crate) fn disk_identity(index: u32) -> Option<String> {
+    let path = HSTRING::from(format!(r"\\.\PhysicalDrive{index}"));
+    // SAFETY: valid path; zero desired access only queries metadata, never writes.
+    let handle = unsafe { CreateFileW(&path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None) }.ok()?;
+    let query = STORAGE_PROPERTY_QUERY { PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery, ..Default::default() };
+    let mut bytes = vec![0u8; 65_536];
+    let mut returned = 0u32;
+    // SAFETY: both buffers and the returned-size pointer are valid for the call.
+    let result = unsafe { DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY,
+        Some((&query as *const STORAGE_PROPERTY_QUERY).cast()), std::mem::size_of_val(&query) as u32,
+        Some(bytes.as_mut_ptr().cast()), bytes.len() as u32, Some(&mut returned), None) };
+    // SAFETY: sole owned handle, no longer used after this call.
+    unsafe { let _ = CloseHandle(handle); }
+    result.ok()?;
+    if returned as usize > bytes.len() { return None; }
+    bytes.truncate(returned as usize);
+    identity_from_descriptor(&bytes)
+}
+
+pub(crate) fn volume_identity(letter: &str) -> Option<String> {
+    let mut buffer = [0u16; 64];
+    let root = HSTRING::from(format!("{letter}\\"));
+    // SAFETY: valid mount point and output buffer.
+    unsafe { GetVolumeNameForVolumeMountPointW(&root, &mut buffer) }.ok()?;
+    let end = buffer.iter().position(|&v| v == 0)?;
+    let name = String::from_utf16_lossy(&buffer[..end]).to_ascii_lowercase();
+    Some(name.strip_prefix(r"\\?\volume{")?.strip_suffix("}\\")?.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn descriptor(serial: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 36];
+        bytes[24..28].copy_from_slice(&36u32.to_le_bytes());
+        bytes.extend_from_slice(serial);
+        bytes.push(0);
+        bytes
+    }
+    #[test]
+    fn identity_depends_on_hardware_not_disk_number() {
+        let serial = descriptor(b"serial-a");
+        assert_eq!(identity_from_descriptor(&serial), identity_from_descriptor(&serial));
+        assert_ne!(identity_from_descriptor(&serial), identity_from_descriptor(&descriptor(b"serial-b")));
+        assert!(!identity_from_descriptor(&serial).unwrap().contains("serial-a"));
+    }
+    #[test]
+    fn missing_or_malformed_serial_has_no_identity() {
+        assert!(identity_from_descriptor(&descriptor(b"")).is_none());
+        assert!(identity_from_descriptor(&[0; 36]).is_none());
+        let mut bytes = descriptor(b"abc");
+        bytes[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(identity_from_descriptor(&bytes).is_none());
+    }
+}
+```
+
+Test hardware aggiuntivo: annotare ID, scollegare/ricollegare il disco USB cambiando
+indice e lettera, e verificare gli stessi ID per lo stesso hardware e volume.
+Una sostituzione con altro hardware non deve recuperare lo storico del disco precedente.
+
 - [ ] **Step 4: Esegui i test e verifica che passino**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: tutti OK.
 
 - [ ] **Step 5: Lint e commit**
@@ -2671,6 +2944,7 @@ In `crates/oma-win/tests/providers.rs` aggiungi `use oma_win::network::NetworkPr
 
 ```rust
 #[test]
+#[ignore = "requires real Windows hardware"]
 fn network_provider_values_align_with_sensors() {
     // CI runners may expose no physical adapter: only alignment is guaranteed.
     let mut p = NetworkProvider::default();
@@ -2688,7 +2962,7 @@ In `crates/oma-win/src/lib.rs` aggiungi `pub mod network;` e completa `default_p
 pub fn default_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(cpu::CpuProvider::new()),
-        Box::new(memory::MemoryProvider::default()),
+        Box::new(memory::MemoryProvider),
         Box::new(storage::StorageProvider::default()),
         Box::new(network::NetworkProvider::default()),
     ]
@@ -2697,7 +2971,7 @@ pub fn default_providers() -> Vec<Box<dyn Provider>> {
 
 - [ ] **Step 2: Esegui i test e verifica che falliscano**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: errore di compilazione (`file not found for module network`).
 
 - [ ] **Step 3: Implementa**
@@ -2824,7 +3098,7 @@ impl Provider for NetworkProvider {
         let mut adapters = Vec::new();
         for row in &rows {
             let id = format!("network/{}", row.guid);
-            devices.push(Device { id: id.clone(), kind: DeviceKind::Network, name: row.alias.clone() });
+            devices.push(Device { id: id.clone(), kind: DeviceKind::Network, name: row.alias.clone(), vendor: None, properties: Default::default() });
             sensors.push(Sensor::new(
                 &id,
                 SensorKind::Throughput,
@@ -2882,7 +3156,7 @@ impl Provider for NetworkProvider {
 
 - [ ] **Step 4: Esegui i test e verifica che passino**
 
-Esegui: `cargo test -p oma-win`
+Esegui: `cargo test -p oma-win` (unitari); su hardware reale: `cargo test -p oma-win --test providers -- --ignored`
 Risultato atteso: tutti OK.
 
 - [ ] **Step 5: Lint e commit**
@@ -2910,7 +3184,7 @@ git commit -m "feat(win): network throughput and link speed provider"
 **Interfacce:**
 - Usa: la forma JSON prodotta dal Task 1 (camelCase, enum in snake_case).
 - Produce:
-  - `types.ts`: `DeviceKind`, `SensorKind`, `Unit`, `Source`, `Label`, `Device`, `Sensor`, `Schema`, `Snapshot`, `HistoryWindow`.
+  - `types.ts`: `DeviceKind`, `SensorKind`, `Unit`, `Source`, `Label`, `Device`, `Sensor`, `Schema`, `Snapshot`, `HistoryWindow`, `HistorySeed` (storico con revisione e sequenza atomiche).
   - `view.ts`: `type View = 'simple' | 'advanced'`.
   - `i18n/index.svelte.ts`:
     - `type Locale = 'en' | 'it'`
@@ -3170,6 +3444,8 @@ export interface Device {
   id: string;
   kind: DeviceKind;
   name: string;
+  vendor?: string;
+  properties?: Record<string, string>;
 }
 
 export interface Sensor {
@@ -3179,6 +3455,7 @@ export interface Sensor {
   unit: Unit;
   label: Label;
   source: Source;
+  category: string;
 }
 
 export interface Schema {
@@ -3198,6 +3475,12 @@ export interface Snapshot {
 export interface HistoryWindow {
   timestampsMs: number[];
   series: (number | null)[][];
+}
+
+/** Atomic watermark attached by the backend while holding the engine lock. */
+export interface HistorySeed extends HistoryWindow {
+  revision: number;
+  seq: number;
 }
 ```
 
@@ -3302,6 +3585,8 @@ Risultato atteso: FAIL (`Failed to resolve import "./format"`).
 ```json
 {
   "app.title": "OpenMonitor Advanced",
+  "tray.open": "Open",
+  "tray.quit": "Quit",
   "view.label": "View",
   "view.simple": "Simple",
   "view.advanced": "Advanced",
@@ -3320,7 +3605,7 @@ Risultato atteso: FAIL (`Failed to resolve import "./format"`).
   "advanced.comingSoon": "The Advanced view arrives in milestone 3.",
   "sensor.cpu.load.total": "Total load",
   "sensor.cpu.load.thread": "Thread {arg} load",
-  "sensor.cpu.clock.effective": "Effective clock",
+  "sensor.cpu.clock.effective": "Estimated clock",
   "sensor.memory.load": "Memory load",
   "sensor.memory.used": "Used memory",
   "sensor.memory.total": "Total memory",
@@ -3340,6 +3625,8 @@ Risultato atteso: FAIL (`Failed to resolve import "./format"`).
 ```json
 {
   "app.title": "OpenMonitor Advanced",
+  "tray.open": "Apri",
+  "tray.quit": "Esci",
   "view.label": "Vista",
   "view.simple": "Semplice",
   "view.advanced": "Avanzata",
@@ -3358,7 +3645,7 @@ Risultato atteso: FAIL (`Failed to resolve import "./format"`).
   "advanced.comingSoon": "La vista Avanzata arriva con la milestone 3.",
   "sensor.cpu.load.total": "Carico totale",
   "sensor.cpu.load.thread": "Carico thread {arg}",
-  "sensor.cpu.clock.effective": "Clock effettivo",
+  "sensor.cpu.clock.effective": "Clock stimato",
   "sensor.memory.load": "Memoria in uso",
   "sensor.memory.used": "Memoria usata",
   "sensor.memory.total": "Memoria totale",
@@ -3504,7 +3791,7 @@ git commit -m "feat(ui): frontend scaffold, Synthwave theme, formatting and i18n
 - Produce:
   - `Backend`:
     - `getSchema(): Promise<Schema>`
-    - `getHistory(ids: string[], seconds: number): Promise<HistoryWindow>`
+    - `getHistory(ids: string[], seconds: number): Promise<HistorySeed>`
     - `onSchema(cb): Promise<Unsubscribe>`
     - `onSnapshot(cb): Promise<Unsubscribe>`
     - dove `type Unsubscribe = () => void`
@@ -3529,21 +3816,21 @@ git commit -m "feat(ui): frontend scaffold, Synthwave theme, formatting and i18n
     - `cpuSummary`, `memorySummary`, `storageSummary`, `networkSummary`
     - `sumSeries(series: number[][]): number[]`
 
-**Contratto tra Rust e UI:** i selettori trovano i sensori per `device.kind` + `label.key` (+ `label.arg`), **mai** interpretando l'id. `MOCK_SCHEMA` usa esattamente gli id e le chiavi prodotti dai provider Rust dei Task 6–9.
+**Contratto tra Rust e UI:** i suffissi `mock-ssd`, `mock-guid` e `mock-eth` sono identità sintetiche delle fixture; nessun selettore deve dipendere da questi valori. I selettori trovano i sensori per `device.kind` + `label.key` (+ `label.arg`), **mai** interpretando l'id. `MOCK_SCHEMA` usa la stessa struttura degli ID e le stesse chiavi prodotte dai provider Rust dei Task 6–9.
 
 - [ ] **Step 1: Scrivi l'interfaccia del backend e il fake per i test**
 
 `app/src/lib/backend/backend.ts`:
 
 ```ts
-import type { HistoryWindow, Schema, Snapshot } from '../types';
+import type { HistorySeed, Schema, Snapshot } from '../types';
 
 export type Unsubscribe = () => void;
 
 /** Everything the UI needs from the sampling core (Tauri, or a mock in the browser). */
 export interface Backend {
   getSchema(): Promise<Schema>;
-  getHistory(ids: string[], seconds: number): Promise<HistoryWindow>;
+  getHistory(ids: string[], seconds: number): Promise<HistorySeed>;
   onSchema(cb: (schema: Schema) => void): Promise<Unsubscribe>;
   onSnapshot(cb: (snapshot: Snapshot) => void): Promise<Unsubscribe>;
 }
@@ -3553,7 +3840,7 @@ export interface Backend {
 
 ```ts
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
-import type { HistoryWindow, Schema, Snapshot } from '../lib/types';
+import type { HistorySeed, HistoryWindow, Schema, Snapshot } from '../lib/types';
 
 /** Hand-driven backend for tests: emit events explicitly. */
 export class FakeBackend implements Backend {
@@ -3572,8 +3859,8 @@ export class FakeBackend implements Backend {
     return this.schema;
   }
 
-  async getHistory(ids: string[]): Promise<HistoryWindow> {
-    return { timestampsMs: this.history.timestampsMs, series: ids.map((_, i) => this.history.series[i] ?? []) };
+  async getHistory(ids: string[]): Promise<HistorySeed> {
+    return { revision: this.schema.revision, seq: 0, timestampsMs: this.history.timestampsMs, series: ids.map((_, i) => this.history.series[i] ?? []) };
   }
 
   async onSchema(cb: (s: Schema) => void): Promise<Unsubscribe> {
@@ -3716,11 +4003,39 @@ test('connect seeds sparklines from history', async () => {
   off();
 });
 
+test('late history keeps snapshots received while the request was pending', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  let resolve!: (h: import('./types').HistorySeed) => void;
+  backend.getHistory = () => new Promise((done) => { resolve = done; });
+  const store = new LiveStore();
+  const connecting = connect(store, backend);
+  await vi.waitFor(() => expect(resolve).toBeDefined());
+  backend.emitSnapshot(snapshot(2));
+  resolve({ revision: 1, seq: 1, timestampsMs: [1000], series: MOCK_SCHEMA.sensors.map((_, i) => [mockValues(1)[i]]) });
+  const off = await connecting;
+  expect(store.series('cpu/0/load/total')).toEqual([mockValues(1)[0], mockValues(2)[0]]);
+  expect(store.timestampMs).toBe(2000);
+  backend.emitSnapshot(snapshot(1));
+  expect(store.timestampMs).toBe(2000);
+  off();
+});
+
+test('failed connection unsubscribes and does not mutate the store', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.getHistory = async () => { throw new Error('offline'); };
+  const store = new LiveStore();
+  await expect(connect(store, backend)).rejects.toThrow('offline');
+  backend.emitSchema(MOCK_SCHEMA);
+  backend.emitSnapshot(snapshot(1));
+  expect(store.schema).toBeNull();
+});
+
 test('connect refetches schema on revision mismatch', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new LiveStore();
   const off = await connect(store, backend);
   expect(backend.schemaCalls).toBe(1);
+  backend.schema = { ...MOCK_SCHEMA, revision: 7 };
   backend.emitSnapshot(snapshot(1, 7));
   await vi.waitFor(() => expect(backend.schemaCalls).toBe(2));
   off();
@@ -3757,7 +4072,7 @@ test('memory summary', () => {
 test('storage summary prefers the C: volume', () => {
   const disk = storageSummary(MOCK_SCHEMA, valueOf)!;
   expect(disk.volume).toEqual({ letter: 'C:', usedPct: 65 });
-  expect(disk.readBps).toBe(valueOf('storage/disk-0/throughput/read'));
+  expect(disk.readBps).toBe(valueOf('storage/device-mock-ssd/throughput/read'));
 });
 
 test('network summary sums every adapter', () => {
@@ -3766,7 +4081,7 @@ test('network summary sums every adapter', () => {
     devices: [...MOCK_SCHEMA.devices, { id: 'network/wifi', kind: 'network', name: 'Wi-Fi' }],
     sensors: [
       ...MOCK_SCHEMA.sensors,
-      { id: 'network/wifi/throughput/down', deviceId: 'network/wifi', kind: 'throughput', unit: 'bytes_per_second', label: { key: 'network.down' }, source: 'mock' },
+      { id: 'network/wifi/throughput/down', deviceId: 'network/wifi', kind: 'throughput', unit: 'bytes_per_second', label: { key: 'network.down' }, source: 'mock', category: 'throughput' },
     ],
   };
   const extra = (id: string) => (id === 'network/wifi/throughput/down' ? 100 : valueOf(id));
@@ -3855,6 +4170,7 @@ const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, labe
   unit,
   label,
   source: 'mock',
+  category: kind,
 });
 
 /** Same ids and label keys the Rust providers produce (crates/oma-win). */
@@ -3863,7 +4179,7 @@ export const MOCK_SCHEMA: Schema = {
   devices: [
     { id: 'cpu/0', kind: 'cpu', name: 'Mock Ryzen 7 7800X3D' },
     { id: 'memory/0', kind: 'memory', name: 'RAM' },
-    { id: 'storage/disk-0', kind: 'storage', name: 'Disk 0 (C:)' },
+    { id: 'storage/device-mock-ssd', kind: 'storage', name: 'Disk 0 (C:)' },
     { id: 'network/mock-eth', kind: 'network', name: 'Ethernet' },
   ],
   sensors: [
@@ -3875,11 +4191,11 @@ export const MOCK_SCHEMA: Schema = {
     sensor('memory/0/load/used', 'memory/0', 'load', 'percent', { key: 'memory.load' }),
     sensor('memory/0/data/used', 'memory/0', 'data', 'bytes', { key: 'memory.used' }),
     sensor('memory/0/data/total', 'memory/0', 'data', 'bytes', { key: 'memory.total' }),
-    sensor('storage/disk-0/throughput/read', 'storage/disk-0', 'throughput', 'bytes_per_second', { key: 'storage.read' }),
-    sensor('storage/disk-0/throughput/write', 'storage/disk-0', 'throughput', 'bytes_per_second', { key: 'storage.write' }),
-    sensor('storage/disk-0/load/active', 'storage/disk-0', 'load', 'percent', { key: 'storage.active' }),
-    sensor('storage/disk-0/percent/volume-C', 'storage/disk-0', 'percent', 'percent', { key: 'storage.volumeUsed', arg: 'C:' }),
-    sensor('storage/disk-0/data/volume-C-free', 'storage/disk-0', 'data', 'bytes', { key: 'storage.volumeFree', arg: 'C:' }),
+    sensor('storage/device-mock-ssd/throughput/read', 'storage/device-mock-ssd', 'throughput', 'bytes_per_second', { key: 'storage.read' }),
+    sensor('storage/device-mock-ssd/throughput/write', 'storage/device-mock-ssd', 'throughput', 'bytes_per_second', { key: 'storage.write' }),
+    sensor('storage/device-mock-ssd/load/active', 'storage/device-mock-ssd', 'load', 'percent', { key: 'storage.active' }),
+    sensor('storage/device-mock-ssd/percent/volume-mock-guid', 'storage/device-mock-ssd', 'percent', 'percent', { key: 'storage.volumeUsed', arg: 'C:' }),
+    sensor('storage/device-mock-ssd/data/volume-mock-guid-free', 'storage/device-mock-ssd', 'data', 'bytes', { key: 'storage.volumeFree', arg: 'C:' }),
     sensor('network/mock-eth/throughput/down', 'network/mock-eth', 'throughput', 'bytes_per_second', { key: 'network.down' }),
     sensor('network/mock-eth/throughput/up', 'network/mock-eth', 'throughput', 'bytes_per_second', { key: 'network.up' }),
     sensor('network/mock-eth/throughput/link-speed', 'network/mock-eth', 'throughput', 'bits_per_second', { key: 'network.linkSpeed' }),
@@ -3929,6 +4245,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
       const ticks = Array.from({ length: n }, (_, i) => seq - n + 1 + i);
       const indices = ids.map((id) => MOCK_SCHEMA.sensors.findIndex((s) => s.id === id));
       return {
+        revision: MOCK_SCHEMA.revision,
+        seq,
         timestampsMs: ticks.map((_, i) => now - (n - 1 - i) * intervalMs),
         series: indices.map((k) => ticks.map((tick) => (k < 0 ? null : mockValues(tick)[k]))),
       };
@@ -3954,14 +4272,14 @@ export function createMockBackend(intervalMs = 1000): Backend {
 ```ts
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { HistoryWindow, Schema, Snapshot } from '../types';
+import type { HistorySeed, Schema, Snapshot } from '../types';
 import type { Backend } from './backend';
 
 /** Command and event names are defined in app/src-tauri (commands.rs, main.rs). */
 export function createTauriBackend(): Backend {
   return {
     getSchema: () => invoke<Schema>('get_schema'),
-    getHistory: (ids, seconds) => invoke<HistoryWindow>('get_history', { ids, seconds }),
+    getHistory: (ids, seconds) => invoke<HistorySeed>('get_history', { ids, seconds }),
     onSchema: (cb) => listen<Schema>('oma:schema', (e) => cb(e.payload)),
     onSnapshot: (cb) => listen<Snapshot>('oma:snapshot', (e) => cb(e.payload)),
   };
@@ -3990,7 +4308,7 @@ export function createBackend(): Backend {
 ```ts
 import type { Backend, Unsubscribe } from './backend/backend';
 import { SeriesBuffer } from './series';
-import type { HistoryWindow, Schema, Snapshot } from './types';
+import type { HistorySeed, Schema, Snapshot } from './types';
 
 /** Five minutes at the default 1 s interval. */
 export const SPARKLINE_POINTS = 300;
@@ -4004,6 +4322,7 @@ export class LiveStore {
   firstTimestampMs = $state(0);
   /** Bumped whenever series change, so readers of `series()` re-run. */
   #tick = $state(0);
+  #lastSeq = -1;
   #index = new Map<string, number>();
   #series = new Map<string, SeriesBuffer>();
 
@@ -4012,13 +4331,19 @@ export class LiveStore {
   }
 
   applySchema(schema: Schema): void {
+    if (this.schema && schema.revision <= this.schema.revision) return;
     this.schema = schema;
     this.#index = new Map(schema.sensors.map((s, i) => [s.id, i]));
     for (const id of [...this.#series.keys()]) {
       if (!this.#index.has(id)) this.#series.delete(id);
     }
     for (const s of schema.sensors) {
-      if (!this.#series.has(s.id)) this.#series.set(s.id, new SeriesBuffer(this.capacity));
+      if (!this.#series.has(s.id)) {
+        const buffer = new SeriesBuffer(this.capacity);
+        const previousLength = Math.max(0, ...[...this.#series.values()].map((b) => b.length));
+        for (let i = 0; i < previousLength; i++) buffer.push(null);
+        this.#series.set(s.id, buffer);
+      }
     }
     this.values = schema.sensors.map(() => null);
     this.#tick++;
@@ -4030,6 +4355,12 @@ export class LiveStore {
     if (!schema || snapshot.revision !== schema.revision || snapshot.values.length !== schema.sensors.length) {
       return false;
     }
+    if (snapshot.seq <= this.#lastSeq) return true; // Duplicate/out-of-order event.
+    if (snapshot.timestampMs < this.timestampMs) {
+      for (const buffer of this.#series.values()) buffer.clear();
+      this.firstTimestampMs = snapshot.timestampMs;
+    }
+    this.#lastSeq = snapshot.seq;
     this.values = snapshot.values;
     schema.sensors.forEach((s, i) => this.#series.get(s.id)?.push(snapshot.values[i]));
     this.timestampMs = snapshot.timestampMs;
@@ -4039,13 +4370,20 @@ export class LiveStore {
   }
 
   /** Replaces sparkline buffers with history fetched from the core. */
-  seedHistory(ids: string[], history: HistoryWindow): void {
+  seedHistory(ids: string[], history: HistorySeed): void {
+    if (history.revision !== this.schema?.revision) return;
+    this.#lastSeq = history.seq;
     ids.forEach((id, k) => {
       const buffer = this.#series.get(id);
       if (!buffer) return;
       buffer.clear();
       for (const v of history.series[k] ?? []) buffer.push(v);
     });
+    const last = history.timestampsMs.at(-1);
+    if (last !== undefined) {
+      this.timestampMs = last;
+      this.values = ids.map((_, i) => history.series[i]?.at(-1) ?? null);
+    }
     const first = history.timestampsMs[0];
     if (first !== undefined && (this.firstTimestampMs === 0 || first < this.firstTimestampMs)) {
       this.firstTimestampMs = first;
@@ -4066,27 +4404,56 @@ export class LiveStore {
 
 /** Wires a store to a backend: seeds history, follows schema and snapshot events. */
 export async function connect(store: LiveStore, backend: Backend): Promise<Unsubscribe> {
+  let stopped = false;
   let refreshing: Promise<void> | null = null;
-  const refresh = () => {
+  let initializing = true;
+  let requestedRevision = 0;
+  let queue: Snapshot[] = [];
+  const off: Unsubscribe[] = [];
+  const stop = () => { stopped = true; off.splice(0).forEach((fn) => fn()); queue = []; };
+  const refresh = (): Promise<void> => {
     refreshing ??= (async () => {
-      const schema = await backend.getSchema();
-      store.applySchema(schema);
-      const ids = schema.sensors.map((s) => s.id);
-      store.seedHistory(ids, await backend.getHistory(ids, store.capacity));
-    })().finally(() => {
-      refreshing = null;
-    });
+      do {
+        const schema = await backend.getSchema();
+        const ids = schema.sensors.map((s) => s.id);
+        const history = await backend.getHistory(ids, store.capacity);
+        if (stopped) return;
+        // Hardware may change between the two commands; never seed a different schema.
+        if (history.revision !== schema.revision || schema.revision < requestedRevision) continue;
+        store.applySchema(schema);
+        store.seedHistory(ids, history);
+        for (const snapshot of queue.sort((a, b) => a.seq - b.seq)) {
+          if (snapshot.revision === schema.revision && snapshot.seq > history.seq) store.applySnapshot(snapshot);
+        }
+        queue = [];
+        initializing = false;
+        return;
+      } while (!stopped);
+    })().finally(() => { refreshing = null; });
     return refreshing;
   };
-  const offSchema = await backend.onSchema((schema) => store.applySchema(schema));
-  const offSnapshot = await backend.onSnapshot((snapshot) => {
-    if (!store.applySnapshot(snapshot)) void refresh();
-  });
-  await refresh();
-  return () => {
-    offSchema();
-    offSnapshot();
-  };
+  const recover = () => { void refresh().catch((error) => { stop(); console.error('backend refresh failed', error); }); };
+  try {
+    off.push(await backend.onSchema((schema) => {
+      if (stopped || schema.revision <= (store.schema?.revision ?? 0)) return;
+      requestedRevision = Math.max(requestedRevision, schema.revision);
+      if (!initializing) recover();
+    }));
+    off.push(await backend.onSnapshot((snapshot) => {
+      if (stopped || snapshot.revision < (store.schema?.revision ?? 0)) return;
+      requestedRevision = Math.max(requestedRevision, snapshot.revision);
+      if (initializing || refreshing || snapshot.revision !== store.schema?.revision) {
+        queue.push(snapshot);
+        if (queue.length > store.capacity) queue.shift();
+        if (!initializing) recover();
+      } else if (!store.applySnapshot(snapshot)) recover();
+    }));
+    await refresh();
+    return stop;
+  } catch (error) {
+    stop();
+    throw error;
+  }
 }
 ```
 
@@ -4128,6 +4495,7 @@ export interface MemorySummary {
   usedBytes: number | null;
   totalBytes: number | null;
   usedPct: number | null;
+  loadId: string | null;
 }
 
 export function memorySummary(schema: Schema, valueOf: ValueOf): MemorySummary | null {
@@ -4137,6 +4505,7 @@ export function memorySummary(schema: Schema, valueOf: ValueOf): MemorySummary |
     usedBytes: read(valueOf, sensorsWith(schema, [mem.id], 'memory.used')[0]),
     totalBytes: read(valueOf, sensorsWith(schema, [mem.id], 'memory.total')[0]),
     usedPct: read(valueOf, sensorsWith(schema, [mem.id], 'memory.load')[0]),
+    loadId: sensorsWith(schema, [mem.id], 'memory.load')[0]?.id ?? null,
   };
 }
 
@@ -4144,6 +4513,7 @@ export interface StorageSummary {
   readBps: number | null;
   writeBps: number | null;
   volume: { letter: string; usedPct: number | null } | null;
+  readIds: string[];
 }
 
 export function storageSummary(schema: Schema, valueOf: ValueOf): StorageSummary | null {
@@ -4152,6 +4522,7 @@ export function storageSummary(schema: Schema, valueOf: ValueOf): StorageSummary
   const volumes = sensorsWith(schema, ids, 'storage.volumeUsed');
   const system = volumes.find((s) => s.label.arg === 'C:') ?? volumes[0];
   return {
+    readIds: sensorsWith(schema, ids, 'storage.read').map((s) => s.id),
     readBps: sum(sensorsWith(schema, ids, 'storage.read').map((s) => valueOf(s.id))),
     writeBps: sum(sensorsWith(schema, ids, 'storage.write').map((s) => valueOf(s.id))),
     volume: system ? { letter: system.label.arg ?? '', usedPct: valueOf(system.id) } : null,
@@ -4228,12 +4599,12 @@ git commit -m "feat(ui): backend abstraction, live store and summary selectors"
   - `View` (Task 10)
 - Produce:
   - `sparklinePath(values: number[], width: number, height: number, min?: number, max?: number, capacity?: number): string`
-  - `HealthState { level: 'ok' | 'warn' | 'crit'; messageKey: string; params?: Params; sinceMs: number }` e `monitoringHealth(startedAtMs)`
+  - `HealthState { level: 'neutral' | 'ok' | 'warn' | 'crit'; messageKey: string; params?: Params; sinceMs: number }` e `monitoringHealth(startedAtMs)`
   - il componente `App`, con props opzionali `backend` e `store` per i test
 
 **Note:**
-- Il banner di stato della M1 dice solo "Monitoraggio attivo · da N min". Il motore regole arriva con la M5 e sostituirà `monitoringHealth`.
-- Il badge "Modalità base" è sempre visibile, perché il servizio non esiste ancora (M4). Il clic che apre la spiegazione (§7.1) è della M4; in M1 la spiegazione è nel tooltip.
+- Il banner di M1 è neutro: non assegna lo stato `ok` senza il motore regole. Dice solo "Monitoraggio attivo · da N min" dopo il primo campione. Il motore regole arriva con la M5 e sostituirà `monitoringHealth`.
+- Il badge "Modalità base" è sempre visibile, perché il servizio non esiste ancora (M4). Il badge è un disclosure accessibile già in M1; l’installazione/avvio del servizio arriva in M4.
 - Il tile GPU arriva con la M2.
 
 - [ ] **Step 1: Scrivi i test (falliscono)**
@@ -4268,7 +4639,10 @@ test('flat series sit on the baseline', () => {
 `app/src/App.test.ts`:
 
 ```ts
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { i18n } from './lib/i18n/index.svelte';
+beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
+afterEach(cleanup);
 import { flushSync } from 'svelte';
 import App from './App.svelte';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
@@ -4297,6 +4671,8 @@ test('clicking a tile opens the advanced view, the toggle goes back', async () =
   await vi.waitFor(() => expect(store.schema).not.toBeNull());
   flushSync();
 
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 1000, values: mockValues(1) });
+  flushSync();
   await fireEvent.click(screen.getByText('CPU').closest('button')!);
   expect(screen.getByText('The Advanced view arrives in milestone 3.')).toBeTruthy();
   await fireEvent.click(screen.getByRole('tab', { name: 'Simple' }));
@@ -4356,7 +4732,7 @@ export function sparklinePath(
 ```ts
 import type { Params } from './i18n/index.svelte';
 
-export type HealthLevel = 'ok' | 'warn' | 'crit';
+export type HealthLevel = 'neutral' | 'ok' | 'warn' | 'crit';
 
 export interface HealthState {
   level: HealthLevel;
@@ -4370,7 +4746,7 @@ export interface HealthState {
  * that monitoring is running and for how long.
  */
 export function monitoringHealth(startedAtMs: number): HealthState {
-  return { level: 'ok', messageKey: 'health.monitoring', sinceMs: startedAtMs };
+  return { level: 'neutral', messageKey: 'health.monitoring', sinceMs: startedAtMs };
 }
 ```
 
@@ -4463,7 +4839,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
   class:crit={health.level === 'crit'}
   role="status"
 >
-  <div class="dot" aria-hidden="true">{health.level === 'ok' ? '✓' : '!'}</div>
+  <div class="dot" aria-hidden="true">{health.level === 'neutral' ? '•' : health.level === 'ok' ? '✓' : '!'}</div>
   <div>
     <div class="title">{t(health.messageKey, health.params)}</div>
     <div class="sub">{t('health.since', { duration: formatDuration(nowMs - health.sinceMs, t) })}</div>
@@ -4472,7 +4848,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
 
 <style>
   .banner {
-    --state: var(--ok);
+    --state: var(--text-muted);
     display: flex;
     align-items: center;
     gap: 14px;
@@ -4481,6 +4857,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
     border-radius: var(--radius);
     background: linear-gradient(135deg, color-mix(in srgb, var(--state) 14%, var(--surface)), var(--surface));
   }
+  .ok { --state: var(--ok); }
   .warn {
     --state: var(--warn);
   }
@@ -4573,7 +4950,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
 </script>
 
 <div class="simple">
-  <HealthBanner {health} nowMs={store.timestampMs} />
+  {#if store.timestampMs > 0}<HealthBanner {health} nowMs={store.timestampMs} />{/if}
 
   <div class="grid">
     {#if cpu}
@@ -4595,6 +4972,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
           <i style:width="{mem.usedPct ?? 0}%"></i>
         </div>
         <div class="sub">{formatPercent(mem.usedPct, locale)}</div>
+        {#if mem.loadId}<Sparkline values={store.series(mem.loadId)} capacity={store.capacity} max={100} />{/if}
       </Tile>
     {/if}
 
@@ -4608,6 +4986,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
           <Sparkline values={netSeries} capacity={store.capacity} color="var(--accent-2)" />
         {/if}
         {#if disk}
+          {#if !net}<Sparkline values={sumSeries(disk.readIds.map((id) => store.series(id)))} capacity={store.capacity} />{/if}
           <div class="sub">
             {#if disk.volume}{disk.volume.letter} {formatPercent(disk.volume.usedPct, locale)} ·
             {/if}{t('tile.diskIo', {
@@ -4725,7 +5104,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
 
   <div class="right">
     {#if !serviceAvailable}
-      <span class="badge" title={t('service.baseModeHint')}>{t('service.baseMode')}</span>
+      <details class="badge"><summary>{t('service.baseMode')}</summary><p>{t('service.baseModeHint')}</p></details>
     {/if}
     <button class="icon" type="button" disabled title={t('settings.comingSoon')} aria-label={t('settings.title')}>⚙</button>
   </div>
@@ -4816,9 +5195,13 @@ export function monitoringHealth(startedAtMs: number): HealthState {
   import type { View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
-  let view = $state<View>('simple');
+  let view = $state<View>((localStorage.getItem('oma.view') === 'advanced') ? 'advanced' : 'simple');
+  let visible = $state(!document.hidden);
+  $effect(() => { localStorage.setItem('oma.view', view); });
 
   onMount(() => {
+    const visibility = () => { visible = !document.hidden; };
+    document.addEventListener('visibilitychange', visibility);
     let off: (() => void) | undefined;
     let cancelled = false;
     connect(store, backend)
@@ -4829,6 +5212,7 @@ export function monitoringHealth(startedAtMs: number): HealthState {
       .catch((error) => console.error('backend connection failed', error));
     return () => {
       cancelled = true;
+      document.removeEventListener('visibilitychange', visibility);
       off?.();
     };
   });
@@ -4836,10 +5220,12 @@ export function monitoringHealth(startedAtMs: number): HealthState {
 
 <TopBar {view} onViewChange={(v) => (view = v)} serviceAvailable={false} />
 <main>
+  {#if visible}
   {#if view === 'simple'}
     <SimpleView {store} onOpenAdvanced={() => (view = 'advanced')} />
   {:else}
     <AdvancedPlaceholder />
+  {/if}
   {/if}
 </main>
 
@@ -4909,7 +5295,7 @@ git commit -m "feat(ui): Simple view, top bar and app shell"
   - `oma_win::default_providers()` (Task 9)
 - Produce, per la UI del Task 11:
   - il comando `get_schema() -> Schema`
-  - il comando `get_history(ids: Vec<String>, seconds: u64) -> HistoryWindow`
+  - il comando `get_history(ids: Vec<String>, seconds: u64) -> HistorySeed`
   - l'evento `oma:schema` (payload `Schema`)
   - l'evento `oma:snapshot` (payload `Snapshot`)
 - Riga di comando: il flag `--minimized` avvia l'app solo nella tray.
@@ -4918,7 +5304,7 @@ git commit -m "feat(ui): Simple view, top bar and app shell"
 - La finestra `main` viene creata nel codice, non da `tauri.conf.json`.
 - Chiudere la finestra la **distrugge** (WebView2 esce). `RunEvent::ExitRequested { code: None }` viene intercettato con `prevent_exit()`, così il processo resta nella tray.
 - Tray: "Apri" (o clic sinistro) ricrea o mostra la finestra; "Esci" chiama `app.exit(0)`. Le etichette sono in italiano se la lingua di sistema è italiana, altrimenti in inglese.
-- Il sampler emette gli eventi **solo se la finestra esiste**.
+- Il sampler emette gli eventi **solo se la finestra esiste**. Quando il documento è nascosto, `App` smonta i grafici e le interpolazioni: i campioni continuano ad arrivare nello store ma il rendering riprende solo alla visibilità (§7.5).
 - È consentita una sola istanza: una seconda esecuzione mostra la finestra esistente.
 
 - [ ] **Step 1: Crea il crate, la configurazione e le icone**
@@ -4947,6 +5333,8 @@ oma-core.workspace = true
 serde.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+serde_json.workspace = true
 tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.4"
 sys-locale = "0.3"
@@ -4959,7 +5347,11 @@ oma-win.workspace = true
 
 ```rust
 fn main() {
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(
+            tauri_build::AppManifest::new().commands(&["get_schema", "get_history"]),
+        ),
+    ).expect("Tauri build")
 }
 ```
 
@@ -4997,9 +5389,9 @@ fn main() {
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core APIs and event listening only.",
+  "description": "Main window: sensor reads and event subscriptions only.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-get-schema", "allow-get-history"]
 }
 ```
 
@@ -5085,6 +5477,15 @@ use tauri::State;
 
 use crate::AppState;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySeed {
+    revision: u64,
+    seq: u64,
+    #[serde(flatten)]
+    history: HistoryWindow,
+}
+
 /// Longest history the UI may request: the whole buffer (1 h).
 const MAX_HISTORY_SECONDS: u64 = 3_600;
 
@@ -5098,9 +5499,14 @@ pub fn get_schema(state: State<'_, AppState>) -> Schema {
 }
 
 #[tauri::command]
-pub fn get_history(state: State<'_, AppState>, ids: Vec<String>, seconds: u64) -> HistoryWindow {
+pub fn get_history(state: State<'_, AppState>, ids: Vec<String>, seconds: u64) -> HistorySeed {
     let since = history_since(unix_ms(), seconds);
-    state.engine.lock().unwrap_or_else(PoisonError::into_inner).history().window(&ids, since)
+    let engine = state.engine.lock().unwrap_or_else(PoisonError::into_inner);
+    HistorySeed {
+        revision: engine.schema().revision,
+        seq: engine.sequence(),
+        history: engine.history().window(&ids, since),
+    }
 }
 ```
 
@@ -5145,17 +5551,18 @@ use tauri::AppHandle;
 use crate::window;
 
 pub struct TrayLabels {
-    pub open: &'static str,
-    pub quit: &'static str,
+    pub open: String,
+    pub quit: String,
 }
 
 /// The webview may be destroyed, so tray labels are localized in Rust.
 pub fn labels_for(locale: &str) -> TrayLabels {
-    if locale.to_ascii_lowercase().starts_with("it") {
-        TrayLabels { open: "Apri", quit: "Esci" }
-    } else {
-        TrayLabels { open: "Open", quit: "Quit" }
-    }
+    let en: serde_json::Value = serde_json::from_str(include_str!("../../src/lib/i18n/en.json")).expect("en catalog");
+    let it: serde_json::Value = serde_json::from_str(include_str!("../../src/lib/i18n/it.json")).expect("it catalog");
+    let base = locale.split(['-', '_']).next().unwrap_or("");
+    let catalog = if base.eq_ignore_ascii_case("it") { &it } else { &en };
+    let text = |key: &str| catalog[key].as_str().or_else(|| en[key].as_str()).expect("tray key").to_owned();
+    TrayLabels { open: text("tray.open"), quit: text("tray.quit") }
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -5197,13 +5604,11 @@ use std::time::Duration;
 
 use oma_core::engine::Engine;
 use oma_core::provider::Provider;
-use oma_core::sampler::Sampler;
+use oma_core::sampler::{Sampler, history_capacity};
 use tauri::{Emitter, Manager, RunEvent};
 
 /// Default sampling interval (spec §4.1).
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-/// One hour of history at the default interval (spec §4.2).
-const HISTORY_CAPACITY: usize = 3_600;
 const EVENT_SCHEMA: &str = "oma:schema";
 const EVENT_SNAPSHOT: &str = "oma:snapshot";
 
@@ -5226,14 +5631,22 @@ fn providers() -> Vec<Box<dyn Provider>> {
 }
 
 fn main() {
+    let logs = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+        .join("OpenMonitorAdvanced").join("logs");
+    let file = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("oma-app").max_log_files(7).build(logs).expect("diagnostic log");
+    let (writer, _log_guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(writer)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "oma_core=debug,oma_app=info".into()),
         )
         .init();
 
     let start_minimized = std::env::args().any(|arg| arg == "--minimized");
-    let engine = Arc::new(Mutex::new(Engine::new(providers(), HISTORY_CAPACITY)));
+    let engine = Arc::new(Mutex::new(Engine::new(providers(), history_capacity(SAMPLE_INTERVAL))));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window::show_main(app)))
@@ -5403,26 +5816,41 @@ param(
 $ErrorActionPreference = 'Stop'
 $exePath = (Resolve-Path $Exe).Path
 $proc = if ($Minimized) {
-    Start-Process -FilePath $exePath -ArgumentList '--minimized' -PassThru
+    Start-Process -FilePath $exePath -ArgumentList '--minimized' -WindowStyle Hidden -PassThru
 } else {
-    Start-Process -FilePath $exePath -PassThru
+    Start-Process -FilePath $exePath -WindowStyle Hidden -PassThru
 }
 
 try {
     Start-Sleep -Seconds $WarmupSeconds
     $proc.Refresh()
+    if ($proc.HasExited) { throw "The measured instance exited (another instance may already be running)." }
     $cpuStart = $proc.TotalProcessorTime
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
     Start-Sleep -Seconds $SampleSeconds
     $proc.Refresh()
     $cpuEnd = $proc.TotalProcessorTime
-    $cpuPercent = ($cpuEnd - $cpuStart).TotalMilliseconds / ($SampleSeconds * 1000) / [Environment]::ProcessorCount * 100
+    $cpuPercent = ($cpuEnd - $cpuStart).TotalMilliseconds / $elapsed.Elapsed.TotalMilliseconds / [Environment]::ProcessorCount * 100
 
-    $exeName = [IO.Path]::GetFileName($exePath)
-    $webviews = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
-        Where-Object { $_.CommandLine -like "*$exeName*" })
+    # Follow the actual process tree, including renderer grandchildren.
+    $processes = @(Get-CimInstance Win32_Process)
+    $descendants = [Collections.Generic.HashSet[int]]::new()
+    [void]$descendants.Add($proc.Id)
+    do {
+        $changed = $false
+        foreach ($child in $processes) {
+            if ($descendants.Contains([int]$child.ParentProcessId)) {
+                if ($descendants.Add([int]$child.ProcessId)) { $changed = $true }
+            }
+        }
+    } while ($changed)
+    $webviews = @($processes | Where-Object {
+        $_.Name -eq 'msedgewebview2.exe' -and $descendants.Contains([int]$_.ProcessId)
+    })
     $ids = @($proc.Id) + @($webviews | ForEach-Object { [int]$_.ProcessId })
     $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
         Where-Object { $ids -contains [int]$_.IDProcess })
+    if ($perf.Count -ne $ids.Count) { throw "Missing process memory counters; measurement is invalid." }
     $appPrivate = ($perf | Where-Object { [int]$_.IDProcess -eq $proc.Id }).WorkingSetPrivate
     $totalPrivate = ($perf | Measure-Object -Property WorkingSetPrivate -Sum).Sum
 
@@ -5506,22 +5934,36 @@ git commit -m "ci: Windows checks, footprint measurement and M1 budget results"
 
 ---
 
+## Verifiche di regressione della revisione
+
+**Evidenza raccolta durante questa revisione:** i blocchi del piano sono stati estratti in un workspace temporaneo escluso da Git. Sono passati 39 test unitari `oma-core`, 24 test unitari `oma-win`, 5 test hardware Windows eseguiti esplicitamente, 39 test frontend, Clippy con `-D warnings`, `pnpm check` e `pnpm build`. Non sono stati eseguiti la shell Tauri completa, il ciclo tray/WebView, hot-plug fisico o le misure di footprint: restano gate dell’implementazione qui sotto. Questa verifica del piano non segna come implementati i task.
+
+- [ ] Task 4: provider lento sia in discovery sia in poll; il provider veloce continua, il ciclo resta entro il budget comune, i timeout riusano l’ultimo valore e gli errori espliciti producono `None`. Nessuna crescita di thread o richieste e uscita dell'app anche col worker bloccato.
+- [ ] Task 6: test unitario del fallback e dei due stati PDH validi; test su Windows italiano da utente standard, compreso clock opzionale.
+- [ ] Task 8: riavvio e hot-plug con rinumerazione; identità di disco/volume conservate, sostituzione con altro hardware distinta. Documentare dischi omessi per identità non leggibile/ambigua.
+- [ ] Task 11: ritardare la risposta dello storico mentre arrivano eventi; nessun campione nuovo perso o duplicato. Cambiare revisione fra `get_schema` e `get_history`; scartare la coppia incoerente e ripetere la lettura. Rifiuti delle Promise liberano tutte le sottoscrizioni.
+- [ ] Task 12: minimizzare/ripristinare la finestra senza rendering dei grafici nascosti; provare reduced-motion; verificare RAM e dischi senza rete, badge accessibile e vista ricordata dopo la ricreazione della WebView.
+- [ ] Task 13: da `main` consentire solo i comandi dichiarati; da una WebView senza capability verificare il rifiuto di `get_schema` e `get_history`. Generare un valore anomalo e verificare il file ruotato in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`, anche nella build release.
+- [ ] Task 14: misurare sia l’avvio `--minimized` sia la chiusura di una finestra già aperta; in entrambi i casi zero processi WebView2 discendenti. Rifiutare una misura se il processo avviato esce per single-instance o mancano contatori memoria.
+
+Riferimenti tecnici verificati per queste correzioni: [stati dei contatori PDH](https://learn.microsoft.com/en-us/windows/win32/perfctrs/checking-pdh-interface-return-values), [capability e `AppManifest::commands` in Tauri](https://v2.tauri.app/security/capabilities/). Le firme Win32 sono state confrontate anche con i sorgenti locali di `windows` 0.62.2.
+
 ## Copertura della spec (auto-revisione)
 
 | Spec | Dove |
 |---|---|
 | §2 processi: nucleo Rust nel processo app, WebView distrutta alla chiusura | Task 13 (verificato anche allo Step 5 e nel Task 14) |
 | §2.3 predisposizione per Linux (trait `Provider`, codice Windows isolato) | Task 2, Task 6 (`#![cfg(windows)]`), Task 13 (`providers()` con `cfg`) |
-| §3 modello dati, ID stabili, merge con fonte | Task 1. Il merge tra più fonti arriva con la M2, quando ci saranno fonti concorrenti; in M1 ogni sensore ha una sola fonte, comunque registrata in `source`. |
-| §4.1 un solo timer, niente risoluzione del timer, contatori cumulativi, dati lenti | Task 5, Task 2 (`CounterRate`). La frequenza ridotta per SMART e SMBIOS arriverà con quei dati (M3/M4). |
+| §3 modello dati, ID stabili, merge con fonte | Task 1 (metadati opzionali e categoria), Task 8 Step 3a (identità persistenti). Il merge tra più fonti arriva con la M2, quando ci saranno fonti concorrenti; in M1 ogni sensore ha una sola fonte, comunque registrata in `source`. |
+| §4.1 un solo timer, niente risoluzione del timer, contatori cumulativi, dati lenti | Task 4 (worker persistenti, deadline comune, timeout), Task 5 (intervallo validato e capacità derivata), Task 2 (`CounterRate`). La frequenza ridotta per SMART e SMBIOS arriverà con quei dati (M3/M4). |
 | §4.2 storico di 1 h, buchi nel grafico | Task 3, Task 4, Task 13. Min/max/media: M3. |
 | §4.5 tray minima, istanza singola | Task 13 |
 | §5.1 CPU, RAM, dischi, rete | Task 6–9 |
 | §7.1 barra superiore con badge "Modalità base" | Task 12 |
 | §7.2 vista Semplificata B (senza GPU e senza regole) | Task 12 |
 | §7.5 palette e animazioni | Task 10 (tema), Task 12 (`AnimatedNumber`, `prefers-reduced-motion`) |
-| §7.6 i18n it/en, test di parità delle chiavi | Task 10 |
-| §8 provider isolati con backoff, dati anomali | Task 4, Task 2 |
-| §9 UI non elevata, CSP, nessun contenuto remoto | Task 13 (`tauri.conf.json`, capability `core:default`) |
+| §7.6 i18n it/en, test di parità delle chiavi | Task 10, Task 13 (tray legge gli stessi JSON) |
+| §8 provider isolati con backoff, dati anomali e log ruotato | Task 4 (tempo monotono e reset dopo poll riuscito), Task 2, Task 13 |
+| §9 UI non elevata, CSP, nessun contenuto remoto | Task 13 (`tauri.conf.json`, capability per `main` con soli listen/unlisten e comandi applicativi dichiarati in `AppManifest`) |
 | §12 test (engine con provider finto, backend finto per la UI, smoke test, CI, budget) | Task 1–14 |
 | §14 milestone 1 | Tutto il piano |

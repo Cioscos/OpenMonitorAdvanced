@@ -5,6 +5,7 @@ use std::time::Duration;
 use oma_core::provider::{Inventory, Provider};
 use oma_win::cpu::CpuProvider;
 use oma_win::memory::MemoryProvider;
+use oma_win::storage::StorageProvider;
 
 /// Discovers, waits for a second PDH sample, polls, and checks alignment.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
@@ -59,4 +60,18 @@ fn memory_provider_reports_usage() {
     let used = values[1].expect("used");
     let total = values[2].expect("total");
     assert!(total > 0.0 && used <= total);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn storage_provider_reports_disks_and_volumes() {
+    let mut p = StorageProvider::default();
+    let (inventory, values) = discover_and_poll(&mut p);
+    assert!(!inventory.devices.is_empty(), "at least the system disk");
+    for (sensor, value) in inventory.sensors.iter().zip(&values) {
+        if sensor.label.key == "storage.volumeUsed" {
+            let pct = value.expect("volume usage");
+            assert!((0.0..=100.0).contains(&pct), "{} = {pct}", sensor.id);
+        }
+    }
 }

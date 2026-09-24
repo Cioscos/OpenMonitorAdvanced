@@ -4,6 +4,8 @@
 pub mod cpu;
 pub mod memory;
 mod pdh;
+pub mod storage;
+mod storage_identity;
 
 use oma_core::provider::Provider;
 
@@ -12,5 +14,6 @@ pub fn default_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(cpu::CpuProvider::new()),
         Box::new(memory::MemoryProvider),
+        Box::new(storage::StorageProvider::default()),
     ]
 }

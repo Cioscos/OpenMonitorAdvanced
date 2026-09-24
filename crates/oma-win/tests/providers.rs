@@ -5,6 +5,7 @@ use std::time::Duration;
 use oma_core::provider::{Inventory, Provider};
 use oma_win::cpu::CpuProvider;
 use oma_win::memory::MemoryProvider;
+use oma_win::network::NetworkProvider;
 use oma_win::storage::StorageProvider;
 
 /// Discovers, waits for a second PDH sample, polls, and checks alignment.
@@ -73,5 +74,36 @@ fn storage_provider_reports_disks_and_volumes() {
             let pct = value.expect("volume usage");
             assert!((0.0..=100.0).contains(&pct), "{} = {pct}", sensor.id);
         }
+    }
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn network_provider_values_align_with_sensors() {
+    // CI runners may expose no physical adapter: only alignment is guaranteed.
+    // discover() seeds fresh baselines (no priming), so the first poll after
+    // discover must yield None for down/up; poll a second time to also observe
+    // a real, non-negative rate.
+    let mut p = NetworkProvider::default();
+    let inventory = p.discover().expect("discover");
+    assert_eq!(inventory.sensors.len(), inventory.devices.len() * 3);
+
+    std::thread::sleep(Duration::from_millis(1_100));
+    let first = p.poll().expect("first poll");
+    assert_eq!(first.len(), inventory.sensors.len());
+    for (sensor, value) in inventory.sensors.iter().zip(&first) {
+        if sensor.label.key != "network.linkSpeed" {
+            assert_eq!(
+                *value, None,
+                "{} must have no rate on the first poll",
+                sensor.id
+            );
+        }
+    }
+
+    std::thread::sleep(Duration::from_millis(1_100));
+    let second = p.poll().expect("second poll");
+    for v in second.into_iter().flatten() {
+        assert!(v >= 0.0);
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod cpu;
 pub mod memory;
+pub mod network;
 mod pdh;
 pub mod storage;
 mod storage_identity;
@@ -15,5 +16,6 @@ pub fn default_providers() -> Vec<Box<dyn Provider>> {
         Box::new(cpu::CpuProvider::new()),
         Box::new(memory::MemoryProvider),
         Box::new(storage::StorageProvider::default()),
+        Box::new(network::NetworkProvider::default()),
     ]
 }

@@ -21,6 +21,10 @@ struct Slot {
     worker: Worker,
     inventory: Inventory,
     last: Vec<Option<f64>>,
+    /// Set once a pending request has already missed one deadline: the next
+    /// miss in a row means the provider is still hung, so its values are
+    /// cleared instead of being republished forever (spec §4.1/§8).
+    timed_out: bool,
 }
 
 pub struct Engine {
@@ -39,6 +43,7 @@ impl Engine {
                     worker: Worker::spawn(p),
                     inventory: Inventory::default(),
                     last: Vec::new(),
+                    timed_out: false,
                 })
                 .collect(),
             schema: Schema::default(),
@@ -65,13 +70,22 @@ impl Engine {
         }
         let mut changed = self.schema.revision == 0;
         for slot in &mut self.slots {
-            if let Some(sample) = slot.worker.finish(deadline) {
-                changed |= slot.inventory != sample.inventory;
-                slot.inventory = sample.inventory;
-                slot.last = sample.values;
+            match slot.worker.finish(deadline) {
+                Some(sample) => {
+                    changed |= slot.inventory != sample.inventory;
+                    slot.inventory = sample.inventory;
+                    slot.last = sample.values;
+                    slot.timed_out = false;
+                }
+                // A timeout retains the last values for one cycle only (§4.1); a
+                // request still hung on the next tick means the provider is
+                // degraded, so its sensors go back to unavailable (§8). No extra
+                // worker/request is spawned while busy.
+                None if slot.timed_out => {
+                    slot.last = vec![None; slot.last.len()];
+                }
+                None => slot.timed_out = true,
             }
-            // A timeout retains the last values (§4.1). An explicit error returns
-            // None from the worker (§8). No extra worker/request is spawned while busy.
         }
         if changed {
             self.schema = Schema {
@@ -393,7 +407,9 @@ mod tests {
             e.tick(1_000, 1_000).snapshot.values,
             vec![Some(42.0), Some(2.0)]
         );
-        e.tick(2_000, 2_000);
+        // A second consecutive miss on the same request means the provider is
+        // still hung: its values must go back to None, not stay frozen forever.
+        assert_eq!(e.tick(2_000, 2_000).snapshot.values, vec![None, Some(1.0)]);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         drop(e);
         drop(release);

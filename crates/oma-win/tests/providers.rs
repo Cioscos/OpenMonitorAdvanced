@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use oma_core::provider::{Inventory, Provider};
 use oma_win::cpu::CpuProvider;
+use oma_win::memory::MemoryProvider;
 
 /// Discovers, waits for a second PDH sample, polls, and checks alignment.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
@@ -46,4 +47,16 @@ fn cpu_provider_reports_load_and_clock() {
     if let Some(clock) = values.last().copied().flatten() {
         assert!((0.0..=20_000.0).contains(&clock), "clock {clock} MHz");
     }
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn memory_provider_reports_usage() {
+    let mut p = MemoryProvider;
+    let (_, values) = discover_and_poll(&mut p);
+    let pct = values[0].expect("load");
+    assert!((0.0..=100.0).contains(&pct));
+    let used = values[1].expect("used");
+    let total = values[2].expect("total");
+    assert!(total > 0.0 && used <= total);
 }

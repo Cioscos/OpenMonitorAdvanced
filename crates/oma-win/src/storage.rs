@@ -50,6 +50,13 @@ pub(crate) fn disks_changed(known: &[DiskInstance], names: &[String]) -> bool {
     disk_instances(names) != known
 }
 
+/// True when a volume's identity no longer matches the one recorded at discovery
+/// (including when the volume no longer resolves at all): the letter was reused
+/// by different hardware or a recreated partition, so history must not carry over.
+pub(crate) fn volume_identity_changed(recorded: &str, current: Option<&str>) -> bool {
+    current != Some(recorded)
+}
+
 pub(crate) fn disk_name(disk: &DiskInstance) -> String {
     if disk.volumes.is_empty() {
         format!("Disk {}", disk.index)
@@ -217,8 +224,13 @@ impl Provider for StorageProvider {
             values.push(finite(&write, &disk.instance));
             values.push(finite(&idle, &disk.instance).and_then(active_pct));
             for volume in &disk.volumes {
-                if !self.volume_ids.contains_key(volume) {
+                let Some(recorded_id) = self.volume_ids.get(volume) else {
                     continue;
+                };
+                // The letter alone cannot tell a swapped disk or recreated partition
+                // from the one seen at discovery; the volume GUID can.
+                if volume_identity_changed(recorded_id, volume_identity(volume).as_deref()) {
+                    return Err(ProviderError::Rediscover);
                 }
                 match volume_space(volume) {
                     Some((total, free)) => {
@@ -289,6 +301,13 @@ mod tests {
     fn volume_usage() {
         assert_eq!(used_pct(200, 50), Some(75.0));
         assert_eq!(used_pct(0, 0), None);
+    }
+
+    #[test]
+    fn volume_identity_change_forces_rediscover() {
+        assert!(!volume_identity_changed("guid-a", Some("guid-a")));
+        assert!(volume_identity_changed("guid-a", Some("guid-b")));
+        assert!(volume_identity_changed("guid-a", None));
     }
 
     #[test]

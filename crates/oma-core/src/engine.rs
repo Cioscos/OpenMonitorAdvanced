@@ -1,0 +1,409 @@
+//! Parallel provider sampling with one shared deadline, schema revisions and history.
+use std::time::{Duration, Instant};
+
+use crate::history::History;
+use crate::model::{Schema, Snapshot};
+use crate::provider::{Inventory, Provider};
+use crate::sanitize::sanitize;
+use crate::worker::Worker;
+
+pub fn backoff_ms(failures: u32) -> u64 {
+    (5_000u64 << failures.saturating_sub(1).min(4)).min(60_000)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickOutput {
+    pub snapshot: Snapshot,
+    pub schema: Option<Schema>,
+}
+
+struct Slot {
+    worker: Worker,
+    inventory: Inventory,
+    last: Vec<Option<f64>>,
+}
+
+pub struct Engine {
+    slots: Vec<Slot>,
+    schema: Schema,
+    history: History,
+    seq: u64,
+}
+
+impl Engine {
+    pub fn new(providers: Vec<Box<dyn Provider>>, history_capacity: usize) -> Self {
+        Self {
+            slots: providers
+                .into_iter()
+                .map(|p| Slot {
+                    worker: Worker::spawn(p),
+                    inventory: Inventory::default(),
+                    last: Vec::new(),
+                })
+                .collect(),
+            schema: Schema::default(),
+            history: History::new(history_capacity),
+            seq: 0,
+        }
+    }
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+    pub fn sequence(&self) -> u64 {
+        self.seq
+    }
+
+    /// `timestamp_ms` is Unix time for display; `monotonic_ms` drives retry deadlines.
+    pub fn tick(&mut self, timestamp_ms: u64, monotonic_ms: u64) -> TickOutput {
+        // One budget for the entire cycle, not N sequential provider timeouts.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        for slot in &mut self.slots {
+            slot.worker.start(monotonic_ms);
+        }
+        let mut changed = self.schema.revision == 0;
+        for slot in &mut self.slots {
+            if let Some(sample) = slot.worker.finish(deadline) {
+                changed |= slot.inventory != sample.inventory;
+                slot.inventory = sample.inventory;
+                slot.last = sample.values;
+            }
+            // A timeout retains the last values (§4.1). An explicit error returns
+            // None from the worker (§8). No extra worker/request is spawned while busy.
+        }
+        if changed {
+            self.schema = Schema {
+                revision: self.schema.revision + 1,
+                devices: self
+                    .slots
+                    .iter()
+                    .flat_map(|s| s.inventory.devices.iter().cloned())
+                    .collect(),
+                sensors: self
+                    .slots
+                    .iter()
+                    .flat_map(|s| s.inventory.sensors.iter().cloned())
+                    .collect(),
+            };
+            self.history.set_sensors(
+                &self
+                    .schema
+                    .sensors
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let values: Vec<_> = self
+            .slots
+            .iter()
+            .flat_map(|s| s.last.iter().copied())
+            .zip(&self.schema.sensors)
+            .map(|(value, sensor)| sanitize(sensor.unit, value))
+            .collect();
+        self.history.push(timestamp_ms, &values);
+        self.seq += 1;
+        TickOutput {
+            snapshot: Snapshot {
+                revision: self.schema.revision,
+                seq: self.seq,
+                timestamp_ms,
+                values,
+            },
+            schema: changed.then(|| self.schema.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
+    use crate::provider::ProviderError;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    type PollResult = Result<Vec<Option<f64>>, ProviderError>;
+
+    #[derive(Default)]
+    struct Script {
+        inventory: Inventory,
+        discover_errors: VecDeque<ProviderError>,
+        polls: VecDeque<PollResult>,
+        discover_calls: usize,
+        poll_calls: usize,
+    }
+
+    struct Fake {
+        name: &'static str,
+        script: Arc<Mutex<Script>>,
+    }
+
+    impl Provider for Fake {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            let mut s = self.script.lock().unwrap();
+            s.discover_calls += 1;
+            match s.discover_errors.pop_front() {
+                Some(e) => Err(e),
+                None => Ok(s.inventory.clone()),
+            }
+        }
+
+        fn poll(&mut self) -> PollResult {
+            let mut s = self.script.lock().unwrap();
+            s.poll_calls += 1;
+            let n = s.inventory.sensors.len();
+            s.polls
+                .pop_front()
+                .unwrap_or_else(|| Ok(vec![Some(1.0); n]))
+        }
+    }
+
+    fn inventory(device: &str, sensors: &[&str]) -> Inventory {
+        Inventory {
+            devices: vec![Device {
+                id: device.into(),
+                kind: DeviceKind::Cpu,
+                name: device.into(),
+                vendor: None,
+                properties: Default::default(),
+            }],
+            sensors: sensors
+                .iter()
+                .map(|n| {
+                    Sensor::new(
+                        device,
+                        SensorKind::Load,
+                        n,
+                        Unit::Percent,
+                        Label::new("test"),
+                        Source::Mock,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn fake(name: &'static str, inv: Inventory) -> (Box<dyn Provider>, Arc<Mutex<Script>>) {
+        let script = Arc::new(Mutex::new(Script {
+            inventory: inv,
+            ..Default::default()
+        }));
+        (
+            Box::new(Fake {
+                name,
+                script: script.clone(),
+            }),
+            script,
+        )
+    }
+
+    fn failed() -> ProviderError {
+        ProviderError::Failed("boom".into())
+    }
+
+    #[test]
+    fn first_tick_discovers_and_publishes_schema() {
+        let (p, _) = fake("a", inventory("dev/a", &["x", "y"]));
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(1_000, 1_000);
+        let schema = out.schema.expect("schema on first tick");
+        assert_eq!(schema.revision, 1);
+        assert_eq!(schema.sensors.len(), 2);
+        assert_eq!(out.snapshot.revision, 1);
+        assert_eq!(out.snapshot.seq, 1);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(1.0)]);
+        assert!(e.tick(2_000, 2_000).schema.is_none());
+    }
+
+    #[test]
+    fn engine_without_providers_publishes_an_empty_schema() {
+        let mut e = Engine::new(Vec::new(), 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.schema.map(|s| s.revision), Some(1));
+        assert!(out.snapshot.values.is_empty());
+    }
+
+    #[test]
+    fn implausible_values_become_none() {
+        let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(150.0), Some(f64::NAN)]));
+        let mut e = Engine::new(vec![p], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, None]);
+    }
+
+    #[test]
+    fn failing_provider_backs_off_and_recovers() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script.lock().unwrap().polls.push_back(Err(failed()));
+        let mut e = Engine::new(vec![p], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None]);
+        assert_eq!(e.tick(1_000, 1_000).snapshot.values, vec![None]);
+        assert_eq!(script.lock().unwrap().discover_calls, 1);
+        assert_eq!(e.tick(5_000, 5_000).snapshot.values, vec![Some(1.0)]);
+        assert_eq!(script.lock().unwrap().discover_calls, 2);
+    }
+
+    #[test]
+    fn repeated_failures_grow_the_backoff() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script
+            .lock()
+            .unwrap()
+            .discover_errors
+            .extend([failed(), failed()]);
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(0, 0);
+        e.tick(5_000, 5_000);
+        e.tick(14_999, 14_999);
+        assert_eq!(script.lock().unwrap().discover_calls, 2);
+        let out = e.tick(15_000, 15_000);
+        assert_eq!(script.lock().unwrap().discover_calls, 3);
+        assert_eq!(out.schema.map(|s| s.revision), Some(2));
+        assert_eq!(out.snapshot.values, vec![Some(1.0)]);
+    }
+
+    #[test]
+    fn rediscover_rebuilds_schema_and_keeps_history_by_id() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(1_000, 1_000);
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Err(ProviderError::Rediscover));
+            s.inventory = inventory("dev/a", &["x", "z"]);
+        }
+        let out = e.tick(2_000, 2_000);
+        assert!(out.schema.is_none());
+        assert_eq!(out.snapshot.values, vec![None]);
+        let out = e.tick(3_000, 3_000);
+        assert_eq!(out.schema.map(|s| s.revision), Some(2));
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(1.0)]);
+        let w = e
+            .history()
+            .window(&["dev/a/load/x".into(), "dev/a/load/z".into()], 0);
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000]);
+        assert_eq!(w.series[0], vec![Some(1.0), None, Some(1.0)]);
+        assert_eq!(w.series[1], vec![None, None, Some(1.0)]);
+    }
+
+    #[test]
+    fn wrong_value_count_degrades_provider() {
+        let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
+        script.lock().unwrap().polls.push_back(Ok(vec![Some(1.0)]));
+        let mut e = Engine::new(vec![p], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, None]);
+        e.tick(1_000, 1_000);
+        assert_eq!(script.lock().unwrap().poll_calls, 1);
+    }
+
+    #[test]
+    fn failure_of_one_provider_does_not_affect_another() {
+        let (a, script_a) = fake("a", inventory("dev/a", &["x"]));
+        let (b, _) = fake("b", inventory("dev/b", &["y"]));
+        script_a.lock().unwrap().polls.push_back(Err(failed()));
+        let mut e = Engine::new(vec![a, b], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![None, Some(1.0)]);
+    }
+
+    #[test]
+    fn successful_rediscovery_does_not_reset_poll_backoff() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .extend([Err(failed()), Err(failed())]);
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(100_000, 0);
+        e.tick(1_000, 5_000); // Wall clock moves backwards; retry still occurs.
+        e.tick(2_000, 14_999);
+        assert_eq!(script.lock().unwrap().poll_calls, 2);
+        assert_eq!(e.tick(3_000, 15_000).snapshot.values, vec![Some(1.0)]);
+    }
+
+    struct Blocked(std::sync::mpsc::Receiver<()>);
+    impl Provider for Blocked {
+        fn name(&self) -> &'static str {
+            "blocked"
+        }
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            let _ = self.0.recv();
+            Ok(Inventory::default())
+        }
+        fn poll(&mut self) -> PollResult {
+            Ok(Vec::new())
+        }
+    }
+    #[test]
+    fn blocked_discovery_does_not_block_other_providers_or_drop() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let (fast, _) = fake("fast", inventory("dev/fast", &["x"]));
+        let mut e = Engine::new(vec![Box::new(Blocked(wait)), fast], 10);
+        let start = Instant::now();
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![Some(1.0)]);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let start = Instant::now();
+        drop(e);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        drop(release);
+    }
+
+    struct SlowPoll {
+        wait: std::sync::mpsc::Receiver<()>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Provider for SlowPoll {
+        fn name(&self) -> &'static str {
+            "slow-poll"
+        }
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            Ok(inventory("dev/slow", &["x"]))
+        }
+        fn poll(&mut self) -> PollResult {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                let _ = self.wait.recv();
+            }
+            Ok(vec![Some(42.0)])
+        }
+    }
+    #[test]
+    fn timed_out_poll_reuses_last_value_without_queuing_more_work() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow = SlowPoll {
+            wait,
+            calls: calls.clone(),
+        };
+        let (fast, script) = fake("fast", inventory("dev/fast", &["x"]));
+        let mut e = Engine::new(vec![Box::new(slow), fast], 10);
+        assert_eq!(e.tick(0, 0).snapshot.values, vec![Some(42.0), Some(1.0)]);
+        script.lock().unwrap().polls.push_back(Ok(vec![Some(2.0)]));
+        assert_eq!(
+            e.tick(1_000, 1_000).snapshot.values,
+            vec![Some(42.0), Some(2.0)]
+        );
+        e.tick(2_000, 2_000);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        drop(e);
+        drop(release);
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_one_minute() {
+        assert_eq!(
+            [1, 2, 3, 4, 5, 10].map(backoff_ms),
+            [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]
+        );
+    }
+}

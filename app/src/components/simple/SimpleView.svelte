@@ -60,8 +60,7 @@
         {#if disk}
           {#if !net}<Sparkline values={sumSeries(disk.readIds.map((id) => store.series(id)))} capacity={store.capacity} />{/if}
           <div class="sub">
-            {#if disk.volume}{disk.volume.letter} {formatPercent(disk.volume.usedPct, locale)} ·
-            {/if}{t('tile.diskIo', {
+            {#if disk.volume}{disk.volume.letter} {formatPercent(disk.volume.usedPct, locale)}{' · '}{/if}{t('tile.diskIo', {
               read: formatRate(disk.readBps, 'bytes', locale),
               write: formatRate(disk.writeBps, 'bytes', locale),
             })}

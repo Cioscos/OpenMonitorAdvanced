@@ -10,6 +10,7 @@
   --ok: #3ee8b5;
   --warn: #ffc53d;
   --crit: #ff4d4d;
+  --on-accent: #1a0616; /* text colour on --accent */
 
   --radius: 12px;
   --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;

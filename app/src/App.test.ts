@@ -21,6 +21,7 @@ test('simple view shows the banner and the CPU, RAM and network tiles', async ()
   expect(screen.getByText('CPU')).toBeTruthy();
   expect(screen.getByText('RAM')).toBeTruthy();
   expect(screen.getByText('Network · Disks')).toBeTruthy();
+  expect(screen.getByText((text) => text.startsWith('C: 65% · '))).toBeTruthy();
 });
 
 test('clicking a tile opens the advanced view, the toggle goes back', async () => {

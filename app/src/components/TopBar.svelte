@@ -76,7 +76,7 @@
   }
   .seg button.on {
     background: var(--accent);
-    color: #1a0616;
+    color: var(--on-accent);
     font-weight: 600;
   }
   .right {

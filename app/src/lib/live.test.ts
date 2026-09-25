@@ -114,3 +114,23 @@ test('connect_retries_refresh_after_transient_failure', async () => {
   errorSpy.mockRestore();
   off();
 });
+
+test('applySnapshot records the local arrival time of new snapshots only', () => {
+  const now = vi.spyOn(Date, 'now').mockReturnValue(50_000);
+  try {
+    const store = new LiveStore();
+    store.applySchema(MOCK_SCHEMA);
+    expect(store.lastReceivedAtMs).toBeNull();
+    store.applySnapshot(snapshot(1));
+    expect(store.lastReceivedAtMs).toBe(50_000);
+
+    now.mockReturnValue(60_000);
+    store.applySnapshot(snapshot(1)); // duplicate
+    store.applySnapshot(snapshot(2, 9)); // other revision
+    expect(store.lastReceivedAtMs).toBe(50_000);
+    store.applySnapshot(snapshot(2));
+    expect(store.lastReceivedAtMs).toBe(60_000);
+  } finally {
+    now.mockRestore();
+  }
+});

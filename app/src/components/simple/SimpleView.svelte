@@ -1,8 +1,10 @@
 <script lang="ts">
   import { formatBytes, formatClock, formatPercent, formatPower, formatRate, formatTemperature } from '../../lib/format';
+  import { sectionForTile } from '../../lib/advanced/nav';
   import { monitoringHealth } from '../../lib/health';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
+  import type { DeviceKind } from '../../lib/types';
   import {
     cpuSummary,
     gpuSummaries,
@@ -17,7 +19,17 @@
   import HealthBanner from './HealthBanner.svelte';
   import Tile from './Tile.svelte';
 
-  let { store, onOpenAdvanced }: { store: LiveStore; onOpenAdvanced: () => void } = $props();
+  let {
+    store,
+    startedAtMs = null,
+    onOpenAdvanced,
+  }: {
+    store: LiveStore;
+    /** Start of the core's sampling session (it outlives the window); null while unknown. */
+    startedAtMs?: number | null;
+    /** Opens the Advanced view on a section (null keeps its last page). */
+    onOpenAdvanced: (section: string | null) => void;
+  } = $props();
 
   const valueOf = (id: string) => store.value(id);
   const locale = $derived(i18n.locale);
@@ -27,7 +39,11 @@
   const disk = $derived(store.schema ? storageSummary(store.schema, valueOf) : null);
   const net = $derived(store.schema ? networkSummary(store.schema, valueOf) : null);
   const netSeries = $derived(net ? sumSeries(net.downIds.map((id) => store.series(id))) : []);
-  const health = $derived(monitoringHealth(store.firstTimestampMs));
+  const health = $derived(monitoringHealth(startedAtMs ?? store.firstTimestampMs));
+  const firstDevice = (kind: DeviceKind) => store.schema?.devices.find((d) => d.kind === kind)?.id;
+  const netDiskSection = $derived(
+    net ? sectionForTile('network', firstDevice('network')) : sectionForTile('storage', firstDevice('storage')),
+  );
 </script>
 
 <div class="simple">
@@ -35,7 +51,7 @@
 
   <div class="grid">
     {#if cpu}
-      <Tile label={t('tile.cpu')} onclick={onOpenAdvanced}>
+      <Tile label={t('tile.cpu')} onclick={() => onOpenAdvanced(sectionForTile('cpu'))}>
         <div class="big"><AnimatedNumber value={cpu.load} format={(v) => formatPercent(v, locale)} /></div>
         <div class="sub">{cpu.name} · {formatClock(cpu.clockMhz, locale)}</div>
         {#if cpu.loadId}
@@ -45,7 +61,7 @@
     {/if}
 
     {#each gpus as gpu (gpu.deviceId)}
-      <Tile label={t('tile.gpu')} onclick={onOpenAdvanced}>
+      <Tile label={t('tile.gpu')} onclick={() => onOpenAdvanced(sectionForTile('gpu', gpu.deviceId))}>
         <div class="big"><AnimatedNumber value={gpu.load} format={(v) => formatPercent(v, locale)} /></div>
         <div class="sub">{gpu.name}</div>
         <div class="sub">
@@ -63,7 +79,7 @@
     {/each}
 
     {#if mem}
-      <Tile label={t('tile.memory')} onclick={onOpenAdvanced}>
+      <Tile label={t('tile.memory')} onclick={() => onOpenAdvanced(sectionForTile('memory', firstDevice('memory')))}>
         <div class="big">
           {formatBytes(mem.usedBytes, locale)} <span class="unit">/ {formatBytes(mem.totalBytes, locale)}</span>
         </div>
@@ -76,7 +92,7 @@
     {/if}
 
     {#if net || disk}
-      <Tile label={t('tile.netDisk')} onclick={onOpenAdvanced}>
+      <Tile label={t('tile.netDisk')} onclick={() => onOpenAdvanced(netDiskSection)}>
         {#if net}
           <div class="big rate">
             ↓ {formatRate(net.downBps, 'bits', locale)}

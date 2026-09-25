@@ -12,6 +12,8 @@ export class LiveStore {
   values = $state.raw<(number | null)[]>([]);
   timestampMs = $state(0);
   firstTimestampMs = $state(0);
+  /** Local clock (Date.now()) when the last new snapshot arrived; drives the stale badge. */
+  lastReceivedAtMs = $state<number | null>(null);
   /** Bumped whenever series change, so readers of `series()` re-run. */
   #tick = $state(0);
   #lastSeq = -1;
@@ -53,6 +55,7 @@ export class LiveStore {
       this.firstTimestampMs = snapshot.timestampMs;
     }
     this.#lastSeq = snapshot.seq;
+    this.lastReceivedAtMs = Date.now();
     this.values = snapshot.values;
     schema.sensors.forEach((s, i) => this.#series.get(s.id)?.push(snapshot.values[i]));
     this.timestampMs = snapshot.timestampMs;

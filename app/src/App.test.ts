@@ -4,6 +4,7 @@ beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
 afterEach(cleanup);
 import { flushSync } from 'svelte';
 import App from './App.svelte';
+import { SECTION_KEY } from './lib/advanced/persist';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
 import type { Schema } from './lib/types';
@@ -95,17 +96,99 @@ test('safe mode notice explains the --safe flag in Italian', async () => {
   expect(screen.getByRole('button', { name: 'Riattiva' })).toBeTruthy();
 });
 
-test('clicking a tile opens the advanced view, the toggle goes back', async () => {
+
+test('clicking the GPU tile opens its Advanced page, the toggle goes back', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 1000, values: mockValues(1) });
+  flushSync();
+
+  await fireEvent.click(screen.getByText('Mock GeForce RTX 4080').closest('button')!);
+  expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('GPU');
+  expect(localStorage.getItem(SECTION_KEY)).toBe('gpu/pci-0000:01:00.0');
+  expect(localStorage.getItem('oma.view')).toBe('advanced');
+
+  await fireEvent.click(screen.getByRole('tab', { name: 'Simple' }));
+  expect(screen.getByText('Monitoring active')).toBeTruthy();
+});
+
+test('the network tile opens the network page', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new LiveStore();
   render(App, { backend, store });
   await vi.waitFor(() => expect(store.schema).not.toBeNull());
   flushSync();
 
-  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 1000, values: mockValues(1) });
+  await fireEvent.click(screen.getByText('Network · Disks').closest('button')!);
+  expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('Network');
+  expect(localStorage.getItem(SECTION_KEY)).toBe('network/mock-eth');
+});
+
+test('the health banner counts from the start of the core session', async () => {
+  const now = 50_000_000;
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.session = { startedAtMs: now - 125 * 60_000, intervalMs: 1000 };
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: now, values: mockValues(1) });
+
+  await vi.waitFor(() => expect(screen.getByText('for 2 h 5 min')).toBeTruthy());
+});
+
+test('without a session start the banner counts from the first snapshot', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 50_000_000, values: mockValues(1) });
   flushSync();
-  await fireEvent.click(screen.getByText('CPU').closest('button')!);
-  expect(screen.getByText('The Advanced view arrives in milestone 3.')).toBeTruthy();
-  await fireEvent.click(screen.getByRole('tab', { name: 'Simple' }));
-  expect(screen.getByText('Monitoring active')).toBeTruthy();
+
+  expect(screen.getByText('for 0 min')).toBeTruthy();
+});
+
+test('the stale badge appears after five silent seconds and goes away with new data', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  try {
+    vi.setSystemTime(1_000_000);
+    const backend = new FakeBackend(MOCK_SCHEMA);
+    const store = new LiveStore();
+    render(App, { backend, store });
+    await vi.waitFor(() => expect(store.schema).not.toBeNull());
+    backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: Date.now(), values: mockValues(1) });
+
+    vi.advanceTimersByTime(5000);
+    flushSync();
+    expect(screen.queryByText('Data not updating')).toBeNull();
+
+    vi.advanceTimersByTime(1000);
+    flushSync();
+    expect(screen.getByText('Data not updating')).toBeTruthy();
+
+    backend.emitSnapshot({ revision: 1, seq: 2, timestampMs: Date.now(), values: mockValues(2) });
+    vi.advanceTimersByTime(1000);
+    flushSync();
+    expect(screen.queryByText('Data not updating')).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('the stale badge also appears when no snapshot ever arrives', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  try {
+    vi.setSystemTime(1_000_000);
+    const backend = new FakeBackend(MOCK_SCHEMA);
+    const store = new LiveStore();
+    render(App, { backend, store });
+    await vi.waitFor(() => expect(store.schema).not.toBeNull());
+
+    vi.advanceTimersByTime(6000);
+    flushSync();
+    expect(screen.getByText('Data not updating')).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
 });

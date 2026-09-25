@@ -6,7 +6,8 @@
     view,
     onViewChange,
     serviceAvailable,
-  }: { view: View; onViewChange: (view: View) => void; serviceAvailable: boolean } = $props();
+    stale = false,
+  }: { view: View; onViewChange: (view: View) => void; serviceAvailable: boolean; stale?: boolean } = $props();
 </script>
 
 <header class="topbar">
@@ -27,6 +28,9 @@
   </div>
 
   <div class="right">
+    {#if stale}
+      <span class="stale" role="status">{t('status.stale')}</span>
+    {/if}
     {#if !serviceAvailable}
       <details class="badge"><summary>{t('service.baseMode')}</summary><p>{t('service.baseModeHint')}</p></details>
     {/if}
@@ -92,6 +96,13 @@
     color: var(--warn);
     border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
     cursor: help;
+  }
+  .stale {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+    color: var(--crit);
+    border: 1px solid color-mix(in srgb, var(--crit) 45%, transparent);
   }
   .icon {
     width: 32px;

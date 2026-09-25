@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-schema"
+description = "Enables the get_schema command without any pre-configured scope."
+commands.allow = ["get_schema"]
+
+[[permission]]
+identifier = "deny-get-schema"
+description = "Denies the get_schema command without any pre-configured scope."
+commands.deny = ["get_schema"]

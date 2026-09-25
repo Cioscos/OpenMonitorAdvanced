@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oma-core", "crates/oma-win"]
+members = ["crates/oma-core", "crates/oma-win", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

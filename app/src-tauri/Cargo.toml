@@ -1,0 +1,23 @@
+[package]
+name = "oma-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+oma-core.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+serde_json.workspace = true
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.4"
+sys-locale = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+oma-win.workspace = true

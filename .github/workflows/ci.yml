@@ -5,15 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Installs the toolchain pinned in rust-toolchain.toml (channel and
+      # components), instead of a floating `stable`.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
 
       - uses: Swatinem/rust-cache@v2
 

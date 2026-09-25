@@ -6,8 +6,11 @@ use std::time::Instant;
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
 use oma_core::rate::CounterRate;
+use windows::core::GUID;
 use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use windows::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+};
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
@@ -47,29 +50,67 @@ pub(crate) fn monitored_guids(rows: &[InterfaceRow]) -> Vec<String> {
     guids
 }
 
+/// Formats a GUID explicitly (lowercase 8-4-4-4-12 hex) instead of relying on
+/// `{:?}`, which is not a stability contract and would break M5's persisted
+/// device ids if the `windows` crate ever changes its `Debug` output.
+pub(crate) fn format_guid(guid: &GUID) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7],
+    )
+}
+
 pub(crate) fn wide_to_string(wide: &[u16]) -> String {
     let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
     String::from_utf16_lossy(&wide[..end])
 }
 
+/// Owns a `GetIfTable2` allocation and frees it with `FreeMibTable` on drop,
+/// so every early return (including `?`) still releases it.
+struct MibTable(*mut MIB_IF_TABLE2);
+
+impl Drop for MibTable {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from a successful `GetIfTable2` call and is
+        // not read or used again after this point.
+        unsafe { FreeMibTable(self.0 as *const _) };
+    }
+}
+
 fn read_interfaces() -> Result<Vec<InterfaceRow>, ProviderError> {
-    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    // SAFETY: valid out-pointer; the table is freed below with FreeMibTable.
-    let status = unsafe { GetIfTable2(&mut table) };
-    if status != ERROR_SUCCESS || table.is_null() {
+    let mut ptr: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    // SAFETY: valid out-pointer; on success the table is owned by `MibTable`
+    // below and freed on drop.
+    let status = unsafe { GetIfTable2(&mut ptr) };
+    if status != ERROR_SUCCESS || ptr.is_null() {
         return Err(ProviderError::Failed(format!(
             "GetIfTable2 failed: {status:?}"
         )));
     }
-    // SAFETY: on success `table` points to `NumEntries` rows until freed.
-    let rows = unsafe {
-        let t = &*table;
-        std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize)
-    };
+    let table = MibTable(ptr);
+    // SAFETY: `table.0` is non-null and valid until `table` drops.
+    // `addr_of!` derives the field pointer without materializing a reference
+    // to `MIB_IF_TABLE2` (whose trailing `Table` field is a fixed-size stand-in
+    // for a variable-length array), preserving correct raw-pointer provenance.
+    let num_entries = unsafe { (*table.0).NumEntries };
+    let rows_ptr = unsafe { std::ptr::addr_of!((*table.0).Table) }.cast::<MIB_IF_ROW2>();
+    // SAFETY: on success `rows_ptr` points to `num_entries` valid rows, kept
+    // alive by `table` for the duration of this slice's use.
+    let rows = unsafe { std::slice::from_raw_parts(rows_ptr, num_entries as usize) };
     let result = rows
         .iter()
         .map(|r| InterfaceRow {
-            guid: format!("{:?}", r.InterfaceGuid).to_ascii_lowercase(),
+            guid: format_guid(&r.InterfaceGuid),
             alias: wide_to_string(&r.Alias),
             if_type: r.Type,
             flags: r.InterfaceAndOperStatusFlags._bitfield,
@@ -79,9 +120,8 @@ fn read_interfaces() -> Result<Vec<InterfaceRow>, ProviderError> {
             link_bps: r.ReceiveLinkSpeed,
         })
         .collect();
-    // SAFETY: `table` came from GetIfTable2 and is not used afterwards.
-    unsafe { FreeMibTable(table as *const _) };
     Ok(result)
+    // `table` drops here, freeing the allocation.
 }
 
 struct Adapter {
@@ -235,6 +275,17 @@ mod tests {
             monitored_guids(&rows_after_wifi_connects),
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    #[test]
+    fn guid_formats_as_lowercase_8_4_4_4_12_hex() {
+        let guid = GUID::from_values(
+            0x0123_4567,
+            0x89ab,
+            0xcdef,
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+        );
+        assert_eq!(format_guid(&guid), "01234567-89ab-cdef-0123-456789abcdef");
     }
 
     #[test]

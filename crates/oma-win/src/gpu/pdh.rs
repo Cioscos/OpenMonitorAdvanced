@@ -140,6 +140,12 @@ pub(crate) fn memory_by_luid(rows: &[(String, f64)]) -> BTreeMap<u64, f64> {
 }
 
 /// Fields available for `luid` given the instance names seen at attach.
+///
+/// Engine instances exist only for processes using the adapter, so an idle
+/// GPU (e.g. an Optimus dGPU) has none at attach. LoadCore is therefore also
+/// declared for any adapter PDH knows through "GPU Adapter Memory": the
+/// wildcard engine counter picks up instances that appear later, and until
+/// then the adapter reads 0. Typed engine fields still need an instance at attach.
 pub(crate) fn supported_fields(
     engines: &[EngineInstance],
     dedicated: &BTreeSet<u64>,
@@ -152,9 +158,11 @@ pub(crate) fn supported_fields(
         fields.extend(classify(&engine.engtype));
     }
     if dedicated.contains(&luid) {
+        fields.insert(GpuField::LoadCore);
         fields.insert(GpuField::MemoryDedicatedUsed);
     }
     if shared.contains(&luid) {
+        fields.insert(GpuField::LoadCore);
         fields.insert(GpuField::MemorySharedUsed);
     }
     fields
@@ -587,6 +595,61 @@ mod tests {
     }
 
     #[test]
+    fn idle_adapter_at_attach_still_gets_core_load() {
+        use GpuField::*;
+        // Only the RTX has engine instances at attach; the Radeon only has memory ones.
+        let engines: Vec<_> = this_machine()
+            .into_iter()
+            .filter(|e| e.luid == RTX)
+            .collect();
+        let memory = BTreeSet::from([RTX, RADEON]);
+        let supported = supported_fields(&engines, &memory, &BTreeSet::new(), RADEON);
+        assert_eq!(supported, BTreeSet::from([LoadCore, MemoryDedicatedUsed]));
+        assert_eq!(
+            supported_fields(&engines, &BTreeSet::new(), &memory, RADEON),
+            BTreeSet::from([LoadCore, MemorySharedUsed])
+        );
+        let dedicated = BTreeMap::from([(RADEON, 512.0)]);
+
+        // First sample after attach: no load yet.
+        let r = adapter_readings(None, &dedicated, &BTreeMap::new(), RADEON, &supported);
+        assert_eq!(r, Readings::from([(MemoryDedicatedUsed, 512.0)]));
+
+        // Primed, still idle (only RTX rows): core load reads 0.
+        let rows = vec![(engine(RTX, 0, "3D"), 12.0)];
+        let r = adapter_readings(
+            Some(&rows),
+            &dedicated,
+            &BTreeMap::new(),
+            RADEON,
+            &supported,
+        );
+        assert_eq!(
+            r,
+            Readings::from([(LoadCore, 0.0), (MemoryDedicatedUsed, 512.0)])
+        );
+
+        // A process starts using the Radeon later: its instances show up in the
+        // wildcard counter without re-adding it, and LoadCore follows them.
+        let rows = vec![
+            (engine(RTX, 0, "3D"), 12.0),
+            (engine(RADEON, 0, "3D"), 35.0),
+            (engine(RADEON, 1, "Copy"), f64::NAN),
+        ];
+        let r = adapter_readings(
+            Some(&rows),
+            &dedicated,
+            &BTreeMap::new(),
+            RADEON,
+            &supported,
+        );
+        assert_eq!(
+            r,
+            Readings::from([(LoadCore, 35.0), (MemoryDedicatedUsed, 512.0)])
+        );
+    }
+
+    #[test]
     fn readings_keep_only_supported_fields() {
         let supported = BTreeSet::from([GpuField::LoadCore]);
         let rows = vec![(engine(RTX, 0, "3D"), 40.0)];
@@ -623,7 +686,8 @@ mod tests {
         ] {
             assert!(supported[rtx].contains(&field), "RTX lacks {field:?}");
         }
-        for field in [MemoryDedicatedUsed, MemorySharedUsed] {
+        // Declared even when the iGPU is idle at attach.
+        for field in [LoadCore, MemoryDedicatedUsed, MemorySharedUsed] {
             assert!(supported[radeon].contains(&field), "Radeon lacks {field:?}");
         }
 

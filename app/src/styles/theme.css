@@ -11,6 +11,11 @@
   --warn: #ffc53d;
   --crit: #ff4d4d;
   --on-accent: #1a0616; /* text colour on --accent */
+  /* Chart series 5-8; series 1-4 use --accent, --accent-2, --ok, --warn. */
+  --series-5: #b388ff;
+  --series-6: #ff8c42;
+  --series-7: #c6ff4a;
+  --series-8: #6c8cff;
 
   --radius: 12px;
   --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;

@@ -1,8 +1,11 @@
-import type { Label, Schema, Sensor, SensorKind, Snapshot, StartupStatus, Unit } from '../types';
+import type { GpuProcess, HistoryWindow, Label, Schema, Sensor, SensorKind, Snapshot, StartupStatus, Unit } from '../types';
 import type { Backend } from './backend';
+import { decimateWindow } from './decimate';
+import { StatsAccumulator } from './mockStats';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
 const GPU = 'gpu/pci-0000:01:00.0';
 
 const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, label: Label): Sensor => ({
@@ -94,30 +97,64 @@ export function mockValues(t: number): (number | null)[] {
 /** The mock never starts in GPU safe mode. */
 export const MOCK_STARTUP: StartupStatus = { safeMode: false, reason: null, crashModule: null };
 
+/** Same cap as the core (`MAX_HISTORY_SECONDS`): one hour at 1 s. */
+export const MOCK_HISTORY_SECONDS = 3600;
+
+/** Plausible processes on the mock GPU at tick `t`, unsorted. */
+export function mockGpuProcesses(t: number): GpuProcess[] {
+  const wave = (period: number, phase = 0) => (Math.sin((t + phase) / period) + 1) / 2;
+  const game = 20 + 70 * wave(11, 3);
+  const encoder = 5 + 10 * wave(7);
+  return [
+    { pid: 4, name: 'System', loadPercent: 0, engine: null, dedicatedBytes: 0, sharedBytes: 2 * MIB },
+    { pid: 1188, name: 'dwm.exe', loadPercent: 1 + 3 * wave(5), engine: '3D', dedicatedBytes: 310 * MIB, sharedBytes: 48 * MIB },
+    { pid: 6020, name: 'explorer.exe', loadPercent: 0, engine: null, dedicatedBytes: 42 * MIB, sharedBytes: 12 * MIB },
+    { pid: 9412, name: 'game.exe', loadPercent: game, engine: '3D', dedicatedBytes: 5.5 * GIB, sharedBytes: 180 * MIB },
+    { pid: 10764, name: 'obs64.exe', loadPercent: encoder, engine: 'VideoEncode', dedicatedBytes: 620 * MIB, sharedBytes: 64 * MIB },
+    { pid: 12880, name: 'msedgewebview2.exe', loadPercent: null, engine: null, dedicatedBytes: null, sharedBytes: null },
+  ];
+}
+
+const desc = (a: number | null, b: number | null) => (b ?? -1) - (a ?? -1);
+
+/** Core order: busiest first, then most dedicated memory; at most 20 rows. */
+export function sortGpuProcesses(list: GpuProcess[]): GpuProcess[] {
+  return [...list]
+    .sort((a, b) => desc(a.loadPercent, b.loadPercent) || desc(a.dedicatedBytes, b.dedicatedBytes))
+    .slice(0, 20);
+}
+
+const MOCK_IDS = MOCK_SCHEMA.sensors.map((s) => s.id);
+
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
   let seq = 0;
   let startup = MOCK_STARTUP;
+  let startedAtMs: number | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
+  const stats = new StatsAccumulator();
   const listeners = new Set<(s: Snapshot) => void>();
   const emit = () => {
     seq++;
     const snapshot: Snapshot = { revision: MOCK_SCHEMA.revision, seq, timestampMs: Date.now(), values: mockValues(seq) };
+    startedAtMs ??= snapshot.timestampMs;
+    stats.push(MOCK_IDS, snapshot.values);
     listeners.forEach((cb) => cb(snapshot));
   };
   return {
     getSchema: async () => MOCK_SCHEMA,
-    getHistory: async (ids, seconds) => {
-      const n = Math.max(0, Math.min(seconds, 300));
+    getHistory: async (ids, seconds, maxPoints) => {
+      const n = Math.max(0, Math.min(Math.floor(seconds), MOCK_HISTORY_SECONDS));
       const now = Date.now();
-      const ticks = Array.from({ length: n }, (_, i) => seq - n + 1 + i);
-      const indices = ids.map((id) => MOCK_SCHEMA.sensors.findIndex((s) => s.id === id));
-      return {
-        revision: MOCK_SCHEMA.revision,
-        seq,
-        timestampsMs: ticks.map((_, i) => now - (n - 1 - i) * intervalMs),
-        series: indices.map((k) => ticks.map((tick) => (k < 0 ? null : mockValues(tick)[k]))),
+      const rows = Array.from({ length: n }, (_, i) => mockValues(seq - n + 1 + i));
+      const indices = ids.map((id) => MOCK_IDS.indexOf(id));
+      const raw: HistoryWindow = {
+        timestampsMs: rows.map((_, i) => now - (n - 1 - i) * intervalMs),
+        series: indices.map((k) => rows.map((row) => (k < 0 ? null : row[k]))),
       };
+      const window =
+        maxPoints === undefined ? raw : decimateWindow(raw, Math.min(Math.max(Math.floor(maxPoints), 2), MOCK_HISTORY_SECONDS));
+      return { revision: MOCK_SCHEMA.revision, seq, ...window };
     },
     onSchema: async () => () => {},
     getStartupStatus: async () => startup,
@@ -125,6 +162,10 @@ export function createMockBackend(intervalMs = 1000): Backend {
       startup = { ...startup, safeMode: false };
       return startup;
     },
+    getStats: async (ids) => ({ revision: MOCK_SCHEMA.revision, stats: stats.get(ids) }),
+    resetStats: async (ids) => stats.reset(ids),
+    getSession: async () => ({ startedAtMs, intervalMs }),
+    getGpuProcesses: async (deviceId) => (deviceId === GPU ? sortGpuProcesses(mockGpuProcesses(seq)) : []),
     onSnapshot: async (cb) => {
       listeners.add(cb);
       timer ??= setInterval(emit, intervalMs);

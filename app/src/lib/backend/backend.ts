@@ -1,15 +1,27 @@
-import type { HistorySeed, Schema, Snapshot, StartupStatus } from '../types';
+import type { GpuProcess, HistorySeed, Schema, Session, Snapshot, StartupStatus, StatsReply } from '../types';
 
 export type Unsubscribe = () => void;
 
 /** Everything the UI needs from the sampling core (Tauri, or a mock in the browser). */
 export interface Backend {
   getSchema(): Promise<Schema>;
-  getHistory(ids: string[], seconds: number): Promise<HistorySeed>;
+  /**
+   * Last `seconds` of history (at most 3600). With `maxPoints` the core returns a
+   * min/max envelope of at most that many rows instead of the raw samples.
+   */
+  getHistory(ids: string[], seconds: number, maxPoints?: number): Promise<HistorySeed>;
   onSchema(cb: (schema: Schema) => void): Promise<Unsubscribe>;
   onSnapshot(cb: (snapshot: Snapshot) => void): Promise<Unsubscribe>;
   /** GPU safe-mode status of this session. */
   getStartupStatus(): Promise<StartupStatus>;
   /** Loads the GPU vendor libraries without a restart; returns the new status. */
   enableVendorLibraries(): Promise<StartupStatus>;
+  /** Min/max/avg since the app started (or the last reset), one entry per id. */
+  getStats(ids: string[]): Promise<StatsReply>;
+  /** Restarts min/max/avg of these sensors; unknown ids are ignored. */
+  resetStats(ids: string[]): Promise<void>;
+  /** Start time and sampling interval of the core. */
+  getSession(): Promise<Session>;
+  /** Processes using this GPU, busiest first, at most 20; empty for an unknown device. */
+  getGpuProcesses(deviceId: string): Promise<GpuProcess[]>;
 }

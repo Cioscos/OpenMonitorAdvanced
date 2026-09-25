@@ -21,7 +21,8 @@ export type SensorKind =
   | 'throughput'
   | 'energy'
   | 'flag'
-  | 'percent';
+  | 'percent'
+  | 'link';
 
 export type Unit =
   | 'celsius'
@@ -35,7 +36,9 @@ export type Unit =
   | 'bytes_per_second'
   | 'bits_per_second'
   | 'joule'
-  | 'boolean';
+  | 'boolean'
+  | 'pcie_generation'
+  | 'lanes';
 
 export type Source =
   | 'pdh'
@@ -47,6 +50,7 @@ export type Source =
   | 'nvapi'
   | 'adl'
   | 'igcl'
+  | 'pnp'
   | 'mock';
 
 /** Translation key (looked up as `sensor.<key>`) plus optional `{arg}`. */
@@ -106,4 +110,37 @@ export interface StartupStatus {
   reason: 'flag' | 'crash' | null;
   /** File name of the module that crashed the previous run, e.g. "nvml.dll". */
   crashModule: string | null;
+}
+
+/** Running statistics of one sensor since the app started or its last reset (spec §4.2). */
+export interface SensorStats {
+  min: number;
+  max: number;
+  avg: number;
+  count: number;
+}
+
+/** `stats[i]` belongs to the i-th requested id; null = unknown id or no sample yet. */
+export interface StatsReply {
+  revision: number;
+  stats: (SensorStats | null)[];
+}
+
+/** Sampling session of the core process (it outlives the window). */
+export interface Session {
+  /** Timestamp of the engine's first tick; null before it. */
+  startedAtMs: number | null;
+  intervalMs: number;
+}
+
+/** One process using a GPU (not a sensor: no id, no history). */
+export interface GpuProcess {
+  pid: number;
+  name: string;
+  /** Busiest engine of the process, 0..100; null on the first tick after (re)attach. */
+  loadPercent: number | null;
+  /** Type of that engine (e.g. "3D"), only while the load is above zero. */
+  engine: string | null;
+  dedicatedBytes: number | null;
+  sharedBytes: number | null;
 }

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 oma-core.workspace = true
+serde.workspace = true
 tracing.workspace = true
 sha2 = "0.10"
 
@@ -29,6 +30,7 @@ features = [
   "Win32_NetworkManagement_Ndis",
   "Win32_Storage_FileSystem",
   "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Kernel",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",

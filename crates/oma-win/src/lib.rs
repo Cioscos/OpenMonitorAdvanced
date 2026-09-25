@@ -16,11 +16,15 @@ mod storage_temperature;
 use oma_core::provider::Provider;
 
 /// Every unprivileged Windows provider, in display order. `vendor` is the
-/// safe-mode switch for the GPU vendor libraries (spec §8).
-pub fn default_providers(vendor: gpu::VendorSwitch) -> Vec<Box<dyn Provider>> {
+/// safe-mode switch for the GPU vendor libraries (spec §8); `processes`
+/// receives the per-process GPU usage (read by the shell's `get_gpu_processes`).
+pub fn default_providers(
+    vendor: gpu::VendorSwitch,
+    processes: gpu::GpuProcessTable,
+) -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(cpu::CpuProvider::new()),
-        Box::new(gpu::GpuProvider::new(vendor)),
+        Box::new(gpu::GpuProvider::new(vendor, processes)),
         Box::new(memory::MemoryProvider),
         Box::new(storage::StorageProvider::default()),
         Box::new(network::NetworkProvider::default()),

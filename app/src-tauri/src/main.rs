@@ -12,7 +12,9 @@ use oma_core::provider::Provider;
 use oma_core::sampler::{history_capacity, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
 
-use crate::commands::{StartupState, StartupStatus, VendorSwitch};
+use crate::commands::{
+    GpuProcessState, GpuProcessTable, StartupState, StartupStatus, VendorSwitch,
+};
 
 /// Default sampling interval (spec §4.1).
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -28,14 +30,14 @@ pub struct AppState {
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
-fn providers(vendor: VendorSwitch) -> Vec<Box<dyn Provider>> {
+fn providers(vendor: VendorSwitch, processes: GpuProcessTable) -> Vec<Box<dyn Provider>> {
     #[cfg(windows)]
     {
-        oma_win::default_providers(vendor)
+        oma_win::default_providers(vendor, processes)
     }
     #[cfg(not(windows))]
     {
-        let _ = vendor;
+        let _ = (vendor, processes);
         Vec::new()
     }
 }
@@ -117,8 +119,9 @@ fn main() {
         tracing::warn!(reason = ?status.reason, "safe mode: GPU vendor libraries are not loaded");
     }
     let switch = VendorSwitch::new(!status.safe_mode);
+    let processes = GpuProcessTable::new();
     let engine = Arc::new(Mutex::new(Engine::new(
-        providers(switch.clone()),
+        providers(switch.clone(), processes.clone()),
         history_capacity(SAMPLE_INTERVAL),
     )));
 
@@ -131,12 +134,14 @@ fn main() {
             interval_ms: SAMPLE_INTERVAL.as_millis() as u64,
         })
         .manage(StartupState::new(switch, status))
+        .manage(GpuProcessState(processes))
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
             commands::get_stats,
             commands::reset_stats,
             commands::get_session,
+            commands::get_gpu_processes,
             commands::get_startup_status,
             commands::enable_vendor_libraries,
         ])

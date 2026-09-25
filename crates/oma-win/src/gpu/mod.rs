@@ -15,7 +15,11 @@ pub(crate) mod nvapi;
 pub(crate) mod nvml;
 pub(crate) mod pdh;
 pub(crate) mod pnp;
+pub(crate) mod processes;
+pub(crate) mod procname;
 pub(crate) mod trim;
+
+pub use processes::{GpuProcess, GpuProcessTable};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +89,8 @@ pub struct GpuProvider {
     state: State,
     /// PCI address last seen per LUID, kept across discovers (see `restore_pci`).
     known_pci: HashMap<u64, PciAddress>,
+    /// Per-process table filled by the PDH layer; `discover` maps device ids to LUIDs.
+    processes: GpuProcessTable,
 }
 
 impl GpuProvider {
@@ -104,6 +110,7 @@ impl GpuProvider {
             switch,
             state: State::default(),
             known_pci: HashMap::new(),
+            processes: GpuProcessTable::default(),
         }
     }
 
@@ -118,18 +125,21 @@ impl GpuProvider {
     /// The real provider: DXGI/DXCore/D3DKMT enumeration, the base layers
     /// (D3DKMT, DXGI, PDH, PnP) always on, and the vendor libraries (NVML,
     /// NVAPI, ADL, IGCL) loaded on the first discover that sees `switch` on.
-    pub fn new(switch: VendorSwitch) -> Self {
-        Self::with_layers(
+    /// The PDH layer publishes the per-process GPU usage into `processes`.
+    pub fn new(switch: VendorSwitch, processes: GpuProcessTable) -> Self {
+        let mut provider = Self::with_layers(
             Box::new(enumerate::enumerate),
             vec![
                 Box::new(d3dkmt::D3dkmtLayer::default()),
                 Box::new(dxgi::DxgiLayer::default()),
-                Box::new(pdh::PdhLayer::default()),
+                Box::new(pdh::PdhLayer::new(processes.clone())),
                 Box::new(pnp::PnpLayer::default()),
             ],
             Box::new(load_vendor_layers),
             switch,
-        )
+        );
+        provider.processes = processes;
+        provider
     }
 }
 
@@ -200,6 +210,8 @@ impl Provider for GpuProvider {
     }
 
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
+        self.processes.publish(HashMap::new());
+        self.processes.set_devices(Vec::new());
         self.state = State::default();
         let mut adapters = (self.enumerate)()?;
         restore_pci(&mut self.known_pci, &mut adapters);
@@ -225,6 +237,7 @@ impl Provider for GpuProvider {
 
         let mut inventory = Inventory::default();
         let mut slots = Vec::new();
+        let mut luids = Vec::new();
         let mut ordinal = 0;
         for (index, adapter) in adapters.iter().enumerate() {
             let id = adapter.device_id(ordinal);
@@ -245,6 +258,7 @@ impl Provider for GpuProvider {
                 layers.iter().map(|layer| layer.properties(index)),
             );
             inventory.devices.push(gpu);
+            luids.push((id.clone(), adapter.luid));
             let per_layer: Vec<_> = supported.iter().map(|s| s[index].clone()).collect();
             let owners = merge::assign(&per_layer);
             for field in GpuField::ALL {
@@ -272,6 +286,7 @@ impl Provider for GpuProvider {
             }
         }
         let failing = vec![false; layers.len()];
+        self.processes.set_devices(luids);
         self.state = State {
             adapters: count,
             topology: adapters,
@@ -284,6 +299,17 @@ impl Provider for GpuProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        let result = self.poll_inner();
+        if result.is_err() {
+            // Also clear on failures before PDH is reached, and on Rediscover.
+            self.processes.publish(HashMap::new());
+        }
+        result
+    }
+}
+
+impl GpuProvider {
+    fn poll_inner(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
         // Re-enabling vendor libraries ("Riattiva") is observed only here. While the
         // engine backs this provider off (repeated failures, or repeated Rediscovers
         // per decision D8) poll is not called, so the switch can take up to the
@@ -936,6 +962,66 @@ mod tests {
             .map(|d| d.id.clone())
             .collect();
         assert_eq!(ids, ["gpu/pci-0000:01:00.0", "gpu/ven-10de-dev-2704-0"]);
+    }
+
+    #[test]
+    fn discover_maps_device_ids_to_luids_for_the_process_table() {
+        let (mut p, _) = provider(
+            vec![nvidia(), amd_igpu()],
+            Vec::new(),
+            Vec::new(),
+            &VendorSwitch::new(false),
+        );
+        let table = GpuProcessTable::new();
+        p.processes = table.clone();
+        p.discover().unwrap();
+        let dwm = GpuProcess {
+            pid: 2096,
+            name: "dwm.exe".to_owned(),
+            load_percent: Some(1.0),
+            engine: Some("3D".to_owned()),
+            dedicated_bytes: Some(1 << 30),
+            shared_bytes: None,
+        };
+        table.publish(HashMap::from([(nvidia().luid, vec![dwm.clone()])]));
+        assert_eq!(table.processes("gpu/pci-0000:01:00.0"), vec![dwm]);
+        assert!(table.processes("gpu/pci-0000:11:00.0").is_empty());
+        assert!(table.processes("gpu/pci-0000:02:00.0").is_empty());
+    }
+
+    #[test]
+    fn provider_enumeration_failures_clear_process_rows() {
+        for fail_during_discover in [false, true] {
+            let (mut p, _) = provider(
+                vec![nvidia()],
+                Vec::new(),
+                Vec::new(),
+                &VendorSwitch::new(false),
+            );
+            let table = GpuProcessTable::new();
+            p.processes = table.clone();
+            p.discover().unwrap();
+            table.publish(HashMap::from([(
+                nvidia().luid,
+                vec![GpuProcess {
+                    pid: 99,
+                    name: "old.exe".into(),
+                    load_percent: Some(50.0),
+                    engine: Some("3D".into()),
+                    dedicated_bytes: None,
+                    shared_bytes: None,
+                }],
+            )]));
+            assert_eq!(table.processes("gpu/pci-0000:01:00.0").len(), 1);
+            p.enumerate = Box::new(|| Err(ProviderError::Failed("enumeration failed".into())));
+            if fail_during_discover {
+                assert!(p.discover().is_err());
+            } else {
+                p.state.topology_checked = None; // fail before the PDH layer runs
+                assert!(p.poll().is_err());
+            }
+            assert!(table.processes("gpu/pci-0000:01:00.0").is_empty());
+        }
     }
 
     #[test]

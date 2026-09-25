@@ -11,6 +11,7 @@
     "allow-get-stats",
     "allow-reset-stats",
     "allow-get-session",
+    "allow-get-gpu-processes",
     "allow-get-startup-status",
     "allow-enable-vendor-libraries"
   ]

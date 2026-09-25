@@ -13,9 +13,11 @@ use tauri::State;
 use crate::AppState;
 
 #[cfg(not(windows))]
+pub use no_gpu_processes::{GpuProcess, GpuProcessTable};
+#[cfg(not(windows))]
 pub use no_vendor_libraries::VendorSwitch;
 #[cfg(windows)]
-pub use oma_win::gpu::VendorSwitch;
+pub use oma_win::gpu::{GpuProcess, GpuProcessTable, VendorSwitch};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,6 +227,36 @@ pub fn get_startup_status(state: State<'_, StartupState>) -> StartupStatus {
 pub fn enable_vendor_libraries(state: State<'_, StartupState>) -> StartupStatus {
     tracing::info!("GPU vendor libraries re-enabled from the UI");
     state.enable_vendor_libraries()
+}
+
+/// Per-process GPU usage, published by the GPU provider every tick (decision D5).
+pub struct GpuProcessState(pub GpuProcessTable);
+
+/// Processes using GPU `device_id` (JS argument `deviceId`): busiest first, at
+/// most 20 rows; an unknown device gives an empty list.
+#[tauri::command(async)]
+pub fn get_gpu_processes(state: State<'_, GpuProcessState>, device_id: String) -> Vec<GpuProcess> {
+    state.0.processes(&device_id)
+}
+
+/// Off Windows no provider publishes GPU processes: the table is always empty.
+#[cfg(not(windows))]
+mod no_gpu_processes {
+    /// Never constructed off Windows; any serializable type fits the empty reply.
+    pub type GpuProcess = serde_json::Value;
+
+    #[derive(Clone, Default)]
+    pub struct GpuProcessTable;
+
+    impl GpuProcessTable {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn processes(&self, _device_id: &str) -> Vec<GpuProcess> {
+            Vec::new()
+        }
+    }
 }
 
 /// Off Windows there are no GPU vendor libraries: the switch only keeps state.

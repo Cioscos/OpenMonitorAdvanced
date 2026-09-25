@@ -1,7 +1,8 @@
 //! GPU engine load and adapter memory from the PDH "GPU Engine" and
-//! "GPU Adapter Memory" counters, aggregated the way Task Manager does.
+//! "GPU Adapter Memory" counters, aggregated the way Task Manager does, plus
+//! the per-process table from the same engine rows and "GPU Process Memory".
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use oma_core::model::Source;
 use oma_core::provider::ProviderError;
@@ -9,11 +10,15 @@ use oma_core::provider::ProviderError;
 use super::adapter::Adapter;
 use super::field::GpuField;
 use super::layer::{GpuLayer, Readings};
+use super::processes::{GpuProcess, GpuProcessTable};
+use super::procname::ProcessNames;
 use crate::pdh::{Counter, PdhError, Query};
 
 const ENGINE: &str = r"\GPU Engine(*)\Utilization Percentage";
 const DEDICATED: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
 const SHARED: &str = r"\GPU Adapter Memory(*)\Shared Usage";
+const PROCESS_DEDICATED: &str = r"\GPU Process Memory(*)\Dedicated Usage";
+const PROCESS_SHARED: &str = r"\GPU Process Memory(*)\Shared Usage";
 
 const LOAD_FIELDS: [GpuField; 6] = [
     GpuField::LoadCore,
@@ -28,6 +33,8 @@ const LOAD_FIELDS: [GpuField; 6] = [
 /// by one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EngineInstance {
+    /// Process owning the instance (4 = System).
+    pub pid: u32,
     pub luid: u64,
     /// Engine ordinal (`eng_N`), equal to the D3DKMT node ordinal.
     pub engine: u32,
@@ -52,11 +59,12 @@ fn parse_luid(text: &str) -> Option<(u64, &str)> {
 pub(crate) fn parse_engine(instance: &str) -> Option<EngineInstance> {
     let (head, engtype) = instance.split_once("_engtype_")?;
     let (pid, rest) = head.strip_prefix("pid_")?.split_once("_luid_")?;
-    pid.parse::<u32>().ok()?;
+    let pid = pid.parse::<u32>().ok()?;
     let (luid, rest) = parse_luid(rest)?;
     let (phys, engine) = rest.strip_prefix("_phys_")?.split_once("_eng_")?;
     phys.parse::<u32>().ok()?;
     Some(EngineInstance {
+        pid,
         luid,
         engine: engine.parse().ok()?,
         engtype: engtype.to_owned(),
@@ -69,6 +77,15 @@ pub(crate) fn parse_adapter_memory(instance: &str) -> Option<u64> {
     let (luid, rest) = parse_luid(instance.strip_prefix("luid_")?)?;
     rest.strip_prefix("_phys_")?.parse::<u32>().ok()?;
     Some(luid)
+}
+
+/// `pid_26328_luid_0x00000000_0x00018036_phys_0` → (pid, LUID). Adapter-wide
+/// instances (no `pid_`) are rejected.
+pub(crate) fn parse_process_memory(instance: &str) -> Option<(u32, u64)> {
+    let (pid, rest) = instance.strip_prefix("pid_")?.split_once("_luid_")?;
+    let (luid, rest) = parse_luid(rest)?;
+    rest.strip_prefix("_phys_")?.parse::<u32>().ok()?;
+    Some((pid.parse().ok()?, luid))
 }
 
 /// Maps a driver engine name to its load field (case-insensitive). Engines
@@ -196,11 +213,88 @@ pub(crate) fn adapter_readings(
     readings
 }
 
+/// GPU use of one process on one adapter during a tick.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ProcessUsage {
+    pub load: Option<f64>,
+    pub engine: Option<String>,
+    pub dedicated: Option<u64>,
+    pub shared: Option<u64>,
+}
+
+/// Adds per-process memory rows (bytes) to `usage`; `phys_N` rows of the same
+/// process and adapter are summed, NaN and negative rows ignored.
+fn add_memory(
+    usage: &mut BTreeMap<(u64, u32), ProcessUsage>,
+    rows: &[(String, f64)],
+    slot: fn(&mut ProcessUsage) -> &mut Option<u64>,
+) {
+    for (instance, value) in rows {
+        let Some((pid, luid)) = parse_process_memory(instance) else {
+            continue;
+        };
+        if !value.is_finite() || *value < 0.0 {
+            continue;
+        }
+        let bytes = slot(usage.entry((luid, pid)).or_default());
+        *bytes = Some(bytes.unwrap_or(0) + value.round() as u64);
+    }
+}
+
+/// Per (LUID, pid) usage for a tick (decision D5). The load of a process is its
+/// busiest single engine (not a sum per engine type, which can exceed the
+/// adapter's own LoadCore), clamped to 0..=100; `engine` names that engine only
+/// when the load is above 0. `engines` is `None` when engine load is not
+/// available this tick: every load is then unknown. A process whose engine rows
+/// are all NaN (it just appeared) has an unknown load too.
+pub(crate) fn process_usage(
+    engines: Option<&[(EngineInstance, f64)]>,
+    dedicated: &[(String, f64)],
+    shared: &[(String, f64)],
+) -> BTreeMap<(u64, u32), ProcessUsage> {
+    let mut usage: BTreeMap<(u64, u32), ProcessUsage> = BTreeMap::new();
+    for (instance, value) in engines.unwrap_or_default() {
+        let entry = usage.entry((instance.luid, instance.pid)).or_default();
+        if !value.is_finite() {
+            continue;
+        }
+        let load = value.clamp(0.0, 100.0);
+        if entry.load.is_none_or(|busiest| load > busiest) {
+            entry.load = Some(load);
+            entry.engine = (load > 0.0).then(|| instance.engtype.clone());
+        }
+    }
+    add_memory(&mut usage, dedicated, |u| &mut u.dedicated);
+    add_memory(&mut usage, shared, |u| &mut u.shared);
+    usage
+}
+
+/// Table rows grouped by adapter LUID, named through `name`.
+pub(crate) fn process_rows(
+    usage: BTreeMap<(u64, u32), ProcessUsage>,
+    name: impl Fn(u32) -> String,
+) -> HashMap<u64, Vec<GpuProcess>> {
+    let mut rows: HashMap<u64, Vec<GpuProcess>> = HashMap::new();
+    for ((luid, pid), u) in usage {
+        rows.entry(luid).or_default().push(GpuProcess {
+            pid,
+            name: name(pid),
+            load_percent: u.load,
+            engine: u.engine,
+            dedicated_bytes: u.dedicated,
+            shared_bytes: u.shared,
+        });
+    }
+    rows
+}
+
 struct Counters {
     query: Query,
     engine: Option<Counter>,
     dedicated: Option<Counter>,
     shared: Option<Counter>,
+    process_dedicated: Option<Counter>,
+    process_shared: Option<Counter>,
 }
 
 impl Counters {
@@ -215,16 +309,32 @@ impl Counters {
         let engine = add(ENGINE);
         let dedicated = add(DEDICATED);
         let shared = add(SHARED);
+        let process_dedicated = add(PROCESS_DEDICATED);
+        let process_shared = add(PROCESS_SHARED);
         Ok(Self {
             query,
             engine,
             dedicated,
             shared,
+            process_dedicated,
+            process_shared,
         })
     }
 
     fn instances(&self, counter: Option<Counter>) -> Result<Vec<String>, PdhError> {
         counter.map_or(Ok(Vec::new()), |c| self.query.instances(c))
+    }
+
+    /// Rows of an optional per-process counter. A failed read counts as no rows,
+    /// so the process table never costs the adapter readings.
+    fn process_rows(&self, counter: Option<Counter>) -> Vec<(String, f64)> {
+        let Some(counter) = counter else {
+            return Vec::new();
+        };
+        self.query.array(counter).unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "GPU process memory counter read failed");
+            Vec::new()
+        })
     }
 
     fn memory(&self, counter: Option<Counter>) -> Result<BTreeMap<u64, f64>, PdhError> {
@@ -245,9 +355,59 @@ pub(crate) struct PdhLayer {
     adapters: Vec<(u64, BTreeSet<GpuField>)>,
     /// Set by `attach`, consumed by the next `sample` (CpuProvider's rule).
     fresh: bool,
+    /// Where each tick's per-process rows are published.
+    processes: GpuProcessTable,
+    names: ProcessNames,
 }
 
 impl PdhLayer {
+    pub(crate) fn new(processes: GpuProcessTable) -> Self {
+        Self {
+            processes,
+            ..Self::default()
+        }
+    }
+
+    /// One tick: adapter readings, and the per-process table published as a side effect.
+    fn read(&mut self, fresh: bool) -> Result<Vec<Readings>, ProviderError> {
+        let Some(counters) = self.counters.as_mut() else {
+            self.processes.publish(HashMap::new());
+            return Ok(vec![Readings::new(); self.adapters.len()]);
+        };
+        counters.query.collect()?;
+        let engines: Option<Vec<(EngineInstance, f64)>> = match counters.engine {
+            Some(counter) if !fresh => {
+                let rows: Vec<_> = counters
+                    .query
+                    .array(counter)?
+                    .into_iter()
+                    .filter_map(|(name, value)| parse_engine(&name).map(|e| (e, value)))
+                    .collect();
+                (!rows.is_empty()).then_some(rows)
+            }
+            _ => None,
+        };
+        let dedicated = counters.memory(counters.dedicated)?;
+        let shared = counters.memory(counters.shared)?;
+        let usage = process_usage(
+            engines.as_deref(),
+            &counters.process_rows(counters.process_dedicated),
+            &counters.process_rows(counters.process_shared),
+        );
+        self.names
+            .update(&usage.keys().map(|&(_, pid)| pid).collect());
+        let names = &self.names;
+        self.processes
+            .publish(process_rows(usage, |pid| names.name(pid)));
+        Ok(self
+            .adapters
+            .iter()
+            .map(|(luid, supported)| {
+                adapter_readings(engines.as_deref(), &dedicated, &shared, *luid, supported)
+            })
+            .collect())
+    }
+
     fn open(adapters: &[Adapter]) -> Result<(Counters, Vec<BTreeSet<GpuField>>), PdhError> {
         let mut counters = Counters::open()?;
         counters.query.collect()?;
@@ -303,31 +463,12 @@ impl GpuLayer for PdhLayer {
         // attach spans a few milliseconds and yields noise, so like
         // CpuProvider the first sample only primes it (memory is still read).
         let fresh = std::mem::replace(&mut self.fresh, false);
-        let Some(counters) = self.counters.as_mut() else {
-            return Ok(vec![Readings::new(); self.adapters.len()]);
-        };
-        counters.query.collect()?;
-        let engines: Option<Vec<(EngineInstance, f64)>> = match counters.engine {
-            Some(counter) if !fresh => {
-                let rows: Vec<_> = counters
-                    .query
-                    .array(counter)?
-                    .into_iter()
-                    .filter_map(|(name, value)| parse_engine(&name).map(|e| (e, value)))
-                    .collect();
-                (!rows.is_empty()).then_some(rows)
-            }
-            _ => None,
-        };
-        let dedicated = counters.memory(counters.dedicated)?;
-        let shared = counters.memory(counters.shared)?;
-        Ok(self
-            .adapters
-            .iter()
-            .map(|(luid, supported)| {
-                adapter_readings(engines.as_deref(), &dedicated, &shared, *luid, supported)
-            })
-            .collect())
+        let result = self.read(fresh);
+        if result.is_err() {
+            // No stale rows while the counters fail.
+            self.processes.publish(HashMap::new());
+        }
+        result
     }
 }
 
@@ -340,7 +481,12 @@ mod tests {
     const BASIC_RENDER: u64 = 0x1A2C6;
 
     fn engine(luid: u64, engine: u32, engtype: &str) -> EngineInstance {
+        process_engine(0, luid, engine, engtype)
+    }
+
+    fn process_engine(pid: u32, luid: u64, engine: u32, engtype: &str) -> EngineInstance {
         EngineInstance {
+            pid,
             luid,
             engine,
             engtype: engtype.to_owned(),
@@ -394,19 +540,19 @@ mod tests {
     fn parses_engine_instances() {
         assert_eq!(
             parse_engine("pid_15028_luid_0x00000000_0x00017DB6_phys_0_eng_0_engtype_3D"),
-            Some(engine(RTX, 0, "3D"))
+            Some(process_engine(15028, RTX, 0, "3D"))
         );
         assert_eq!(
             parse_engine("pid_6860_luid_0x00000000_0x0001A331_phys_0_eng_10_engtype_Video Codec 0"),
-            Some(engine(RADEON, 10, "Video Codec 0"))
+            Some(process_engine(6860, RADEON, 10, "Video Codec 0"))
         );
         assert_eq!(
             parse_engine("pid_4_luid_0x00000000_0x00017DB6_phys_0_eng_14_engtype_Security_1"),
-            Some(engine(RTX, 14, "Security_1"))
+            Some(process_engine(4, RTX, 14, "Security_1"))
         );
         assert_eq!(
             parse_engine("pid_4_luid_0x00000001_0x00000002_phys_1_eng_3_engtype_Copy"),
-            Some(engine(0x1_0000_0002, 3, "Copy"))
+            Some(process_engine(4, 0x1_0000_0002, 3, "Copy"))
         );
     }
 
@@ -659,6 +805,151 @@ mod tests {
     }
 
     #[test]
+    fn parses_process_memory_instances() {
+        assert_eq!(
+            parse_process_memory("pid_26328_luid_0x00000000_0x00018036_phys_0"),
+            Some((26328, 0x18036))
+        );
+        assert_eq!(
+            parse_process_memory("pid_4_luid_0x00000001_0x00000002_phys_1"),
+            Some((4, 0x1_0000_0002))
+        );
+        for name in [
+            "luid_0x00000000_0x00018036_phys_0",
+            "pid_x_luid_0x00000000_0x00018036_phys_0",
+            "pid_1_luid_0x00000000_0x00018036",
+            "pid_1_luid_0x00000000_0x00018036_phys_0_eng_0_engtype_3D",
+        ] {
+            assert_eq!(parse_process_memory(name), None, "{name}");
+        }
+    }
+
+    const FFMPEG: u32 = 18796;
+    const DWM: u32 = 2096;
+
+    /// hevc_nvenc ffmpeg on the RTX at one tick (spike): 3D 73.7, two NVENC engines ~50.
+    fn nvenc_tick() -> Vec<(EngineInstance, f64)> {
+        vec![
+            (process_engine(FFMPEG, RTX, 0, "3D"), 73.7),
+            (process_engine(FFMPEG, RTX, 6, "VideoEncode"), 50.1),
+            (process_engine(FFMPEG, RTX, 7, "VideoEncode"), 49.0),
+            (process_engine(FFMPEG, RTX, 3, "Copy"), 0.0),
+            (process_engine(DWM, RTX, 0, "3D"), 0.0),
+            (process_engine(DWM, RTX, 3, "Copy"), 0.0),
+            (process_engine(DWM, RADEON, 0, "3D"), 2.5),
+        ]
+    }
+
+    #[test]
+    fn process_load_is_the_busiest_single_engine() {
+        let usage = process_usage(Some(&nvenc_tick()), &[], &[]);
+        let ffmpeg = &usage[&(RTX, FFMPEG)];
+        // Not 99.1 (the two VideoEncode engines summed): consistent with LoadCore.
+        assert_eq!(ffmpeg.load, Some(73.7));
+        assert_eq!(ffmpeg.engine.as_deref(), Some("3D"));
+        let dwm = &usage[&(RTX, DWM)];
+        assert_eq!(dwm.load, Some(0.0));
+        assert_eq!(dwm.engine, None, "no engine label at 0 %");
+        // The same process on another adapter is a separate row.
+        assert_eq!(usage[&(RADEON, DWM)].load, Some(2.5));
+        assert_eq!(usage.len(), 3);
+    }
+
+    #[test]
+    fn process_load_is_clamped_and_nan_is_unknown() {
+        let rows = vec![
+            (process_engine(1, RTX, 0, "3D"), 130.0),
+            (process_engine(2, RTX, 0, "3D"), f64::NAN),
+            (process_engine(2, RTX, 1, "Copy"), f64::NAN),
+            (process_engine(3, RTX, 0, "3D"), f64::NAN),
+            (process_engine(3, RTX, 1, "Copy"), 4.0),
+        ];
+        let usage = process_usage(Some(&rows), &[], &[]);
+        assert_eq!(usage[&(RTX, 1)].load, Some(100.0));
+        assert_eq!(usage[&(RTX, 2)].load, None, "just appeared: no rate yet");
+        assert_eq!(usage[&(RTX, 3)].load, Some(4.0));
+        assert_eq!(usage[&(RTX, 3)].engine.as_deref(), Some("Copy"));
+    }
+
+    #[test]
+    fn process_memory_is_summed_per_process_and_adapter() {
+        let dedicated = vec![
+            (
+                "pid_2096_luid_0x00000000_0x00017DB6_phys_0".to_owned(),
+                1_900_000_000.0,
+            ),
+            (
+                "pid_2096_luid_0x00000000_0x00017DB6_phys_1".to_owned(),
+                100_000_000.0,
+            ),
+            (
+                "pid_2096_luid_0x00000000_0x0001A331_phys_0".to_owned(),
+                11_600_000.0,
+            ),
+            (
+                "pid_7_luid_0x00000000_0x00017DB6_phys_0".to_owned(),
+                f64::NAN,
+            ),
+            ("luid_0x00000000_0x00017DB6_phys_0".to_owned(), 5.0),
+        ];
+        let shared = vec![(
+            "pid_2096_luid_0x00000000_0x00017DB6_phys_0".to_owned(),
+            69_000_000.4,
+        )];
+        // First tick after attach: no engine rows, memory only.
+        let usage = process_usage(None, &dedicated, &shared);
+        assert_eq!(
+            usage[&(RTX, DWM)],
+            ProcessUsage {
+                load: None,
+                engine: None,
+                dedicated: Some(2_000_000_000),
+                shared: Some(69_000_000),
+            }
+        );
+        assert_eq!(usage[&(RADEON, DWM)].dedicated, Some(11_600_000));
+        assert_eq!(usage[&(RADEON, DWM)].shared, None);
+        assert!(!usage.contains_key(&(RTX, 7)), "a NaN-only row is no row");
+        assert_eq!(usage.len(), 2);
+    }
+
+    #[test]
+    fn process_rows_are_grouped_by_adapter_and_named() {
+        let usage = process_usage(Some(&nvenc_tick()), &[], &[]);
+        let rows = process_rows(usage, |pid| match pid {
+            DWM => "dwm.exe".to_owned(),
+            _ => "ffmpeg.exe".to_owned(),
+        });
+        let mut rtx: Vec<_> = rows[&RTX]
+            .iter()
+            .map(|p| (p.pid, p.name.as_str(), p.load_percent))
+            .collect();
+        rtx.sort_by_key(|r| r.0);
+        assert_eq!(
+            rtx,
+            [
+                (DWM, "dwm.exe", Some(0.0)),
+                (FFMPEG, "ffmpeg.exe", Some(73.7))
+            ]
+        );
+        assert_eq!(rows[&RADEON].len(), 1);
+    }
+
+    #[test]
+    fn layer_without_counters_publishes_an_empty_table() {
+        let table = GpuProcessTable::new();
+        table.set_devices(vec![("gpu/x".to_owned(), RTX)]);
+        table.publish(process_rows(
+            process_usage(Some(&nvenc_tick()), &[], &[]),
+            |_| String::new(),
+        ));
+        assert!(!table.processes("gpu/x").is_empty());
+        let mut layer = PdhLayer::new(table.clone());
+        assert_eq!(layer.sample(), Ok(vec![]));
+        assert!(table.processes("gpu/x").is_empty());
+    }
+
+    #[test]
     #[ignore = "requires real Windows hardware"]
     fn reads_engine_load_and_memory_on_this_machine() {
         use GpuField::*;
@@ -712,5 +1003,48 @@ mod tests {
             second[rtx].keys().copied().collect::<BTreeSet<_>>(),
             supported[rtx]
         );
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn publishes_per_process_rows_on_this_machine() {
+        let adapters = super::super::enumerate::enumerate().expect("enumerate");
+        let rtx = adapters
+            .iter()
+            .find(|a| a.vendor_id == 0x10DE)
+            .expect("NVIDIA adapter");
+        let table = GpuProcessTable::new();
+        table.set_devices(vec![("rtx".to_owned(), rtx.luid)]);
+        let mut layer = PdhLayer::new(table.clone());
+        layer.attach(&adapters);
+
+        layer.sample().expect("first sample");
+        let first = table.processes("rtx");
+        assert!(!first.is_empty(), "the desktop always uses the dGPU");
+        assert!(
+            first.iter().all(|p| p.load_percent.is_none()),
+            "no load on the first tick after attach"
+        );
+        let dwm = first
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case("dwm.exe"))
+            .expect("dwm.exe is named although OpenProcess fails for it");
+        assert!(dwm.dedicated_bytes.is_some_and(|b| b > 0), "{dwm:?}");
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        layer.sample().expect("second sample");
+        let second = table.processes("rtx");
+        assert!(second.len() <= 20);
+        for p in &second {
+            println!(
+                "{:>6} {:<28} load {:?} {:?} ded {:?} shr {:?}",
+                p.pid, p.name, p.load_percent, p.engine, p.dedicated_bytes, p.shared_bytes
+            );
+            if let Some(load) = p.load_percent {
+                assert!((0.0..=100.0).contains(&load), "{p:?}");
+                assert_eq!(p.engine.is_some(), load > 0.0, "{p:?}");
+            }
+        }
+        assert!(second.iter().any(|p| p.load_percent.is_some()));
     }
 }

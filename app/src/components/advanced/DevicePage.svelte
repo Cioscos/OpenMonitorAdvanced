@@ -1,46 +1,60 @@
 <script lang="ts">
+  import { onMount, untrack } from 'svelte';
   import type { SidebarEntry } from '../../lib/advanced/nav';
+  import { defaultSeries, kpisFor } from '../../lib/advanced/pages';
+  import { StatsPoller } from '../../lib/advanced/statsPoller.svelte';
   import type { Backend } from '../../lib/backend';
-  import { formatValue } from '../../lib/format';
-  import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
+  import DeviceInfo from './DeviceInfo.svelte';
+  import GpuProcesses from './GpuProcesses.svelte';
+  import HistoryChart from './HistoryChart.svelte';
+  import KpiRow from './KpiRow.svelte';
+  import SensorTable from './SensorTable.svelte';
 
-  // Minimal page: the live value of every sensor of the section. The full device page
-  // (KPIs, history chart, sensor table, device info) replaces this file with the same props.
-  let { entry, store }: { entry: SidebarEntry; store: LiveStore; backend: Backend } = $props();
+  // One Advanced page (spec §7.3). AdvancedView renders the heading and re-keys this
+  // component per section, so timers and polling start from scratch on every page.
+  let { entry, store, backend }: { entry: SidebarEntry; store: LiveStore; backend: Backend } = $props();
 
-  const sensors = $derived(store.schema?.sensors.filter((s) => entry.deviceIds.includes(s.deviceId)) ?? []);
+  const schema = $derived(store.schema);
+  const devices = $derived(schema?.devices.filter((d) => entry.deviceIds.includes(d.id)) ?? []);
+  const sensors = $derived(schema?.sensors.filter((s) => entry.deviceIds.includes(s.deviceId)) ?? []);
+  const kpis = $derived(schema ? kpisFor(entry.kind, schema, entry.deviceIds) : []);
+  const defaults = $derived(schema ? defaultSeries(entry.kind, schema, entry.deviceIds) : []);
+  const hasProperties = $derived(devices.some((d) => Object.keys(d.properties ?? {}).length > 0));
+  // Network traffic in bit/s, the unit of the Simple view's network tile.
+  const rate = $derived(entry.kind === 'network' ? 'bits' : 'bytes');
+  const valueOf = (id: string) => store.value(id);
+  // The backend of a mounted page never changes.
+  const stats = new StatsPoller(untrack(() => backend), () => sensors.map((s) => s.id), () => schema?.revision ?? null);
+
+  onMount(() => stats.start());
 </script>
 
-<ul class="sensors">
-  {#each sensors as sensor (sensor.id)}
-    <li>
-      <span>{t(`sensor.${sensor.label.key}`, { arg: sensor.label.arg ?? '' })}</span>
-      <span class="value">{formatValue(store.value(sensor.id), sensor.unit, i18n.locale, t)}</span>
-    </li>
-  {/each}
-</ul>
+{#if schema}
+  <div class="page">
+    <KpiRow {kpis} {valueOf} statsOf={stats.statsOf} {rate} />
+    <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} />
+    <SensorTable {sensors} {valueOf} {stats} {rate} />
+    {#if hasProperties || entry.kind === 'gpu'}
+      <div class="extra">
+        {#if hasProperties}<DeviceInfo {devices} />{/if}
+        {#if entry.kind === 'gpu'}<GpuProcesses deviceId={entry.deviceIds[0]} {backend} />{/if}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
-  .sensors {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-  li {
+  .page {
     display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 8px 14px;
-    border-top: 1px solid var(--border);
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
   }
-  li:first-child {
-    border-top: 0;
-  }
-  .value {
-    font-variant-numeric: tabular-nums;
+  .extra {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 14px;
+    align-items: start;
   }
 </style>

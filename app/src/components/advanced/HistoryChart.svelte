@@ -245,6 +245,9 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    /* Without this, the chart (a flex item in DevicePage's column) cannot shrink below
+       uPlot's rendered canvas width, and the page grows past the sidebar layout. */
+    min-width: 0;
     padding: 14px;
     background: var(--surface);
     border: 1px solid var(--border);

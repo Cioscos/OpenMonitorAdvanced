@@ -63,4 +63,21 @@ mod tests {
     fn history_window_never_underflows() {
         assert_eq!(history_since(1_000, 300), 0);
     }
+
+    #[test]
+    fn history_seed_serializes_with_the_ts_contract_keys() {
+        let seed = HistorySeed {
+            revision: 1,
+            seq: 2,
+            history: HistoryWindow {
+                timestamps_ms: vec![1_000],
+                series: vec![vec![Some(3.0)]],
+            },
+        };
+        let value = serde_json::to_value(&seed).expect("serialize");
+        let object = value.as_object().expect("object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["revision", "seq", "series", "timestampsMs"]);
+    }
 }

@@ -10,6 +10,9 @@ oma-core.workspace = true
 tracing.workspace = true
 sha2 = "0.10"
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [

@@ -2388,6 +2388,7 @@ name = "oma-win"
 version = "0.1.0"
 dependencies = [
  "oma-core",
+ "serde_json",
  "sha2",
  "tracing",
  "windows 0.62.2",

@@ -12,10 +12,12 @@ Prerequisites: Windows 10/11, Rust stable ≥ 1.85 (MSVC), Node 22, pnpm 10, Web
 
     cd app
     pnpm install
-    pnpm tauri dev        # run with hot reload
-    pnpm dev              # UI only, in the browser, with a mock backend
+    pnpm tauri dev        # run the Tauri shell against the built UI
+    pnpm dev              # UI only, in the browser, with a mock backend, with hot reload
 
 Tests: `cargo test --workspace` (after `pnpm build` in `app/`) and `pnpm test` in `app/`.
+Before closing a milestone, also run the hardware tests on real Windows hardware:
+`cargo test -p oma-win -- --include-ignored`.
 
 ## Performance budget
 

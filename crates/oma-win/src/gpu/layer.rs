@@ -28,4 +28,10 @@ pub(crate) trait GpuLayer: Send {
     fn is_experimental(&self, _field: GpuField) -> bool {
         false
     }
+
+    /// Static per-adapter properties (index as in the last attach); merged into Device.properties,
+    /// higher-priority layer wins per key. Called once per discover, after attach.
+    fn properties(&self, _adapter: usize) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
 }

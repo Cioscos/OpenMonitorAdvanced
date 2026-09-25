@@ -26,6 +26,8 @@ const KEYS: &[&str] = &[
     "gpu.load.copy",
     "gpu.load.videoDecode",
     "gpu.load.videoEncode",
+    "gpu.load.encoder",
+    "gpu.load.decoder",
     "gpu.memory.dedicatedUsed",
     "gpu.memory.dedicatedTotal",
     "gpu.memory.sharedUsed",
@@ -42,6 +44,8 @@ const KEYS: &[&str] = &[
     "gpu.voltage.core",
     "gpu.throttle.power",
     "gpu.throttle.thermal",
+    "gpu.pcie.gen",
+    "gpu.pcie.width",
 ];
 
 #[test]

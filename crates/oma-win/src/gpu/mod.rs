@@ -1,6 +1,7 @@
 //! GPU provider: one device per physical adapter, each field read from the
 //! highest-priority layer that supports it (spec §5.2): vendor libraries, then
-//! D3DKMT, DXGI and PDH.
+//! D3DKMT, DXGI and PDH. Layers also contribute static device properties
+//! (PnP for the PCIe maximum link, NVML for limits).
 
 pub(crate) mod adapter;
 pub(crate) mod adl;
@@ -13,9 +14,10 @@ pub(crate) mod layer;
 pub(crate) mod nvapi;
 pub(crate) mod nvml;
 pub(crate) mod pdh;
+pub(crate) mod pnp;
 pub(crate) mod trim;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ use oma_core::merge;
 use oma_core::model::{Device, DeviceKind, Label, Sensor};
 use oma_core::provider::{Inventory, Provider, ProviderError};
 
-use adapter::Adapter;
+use adapter::{Adapter, PciAddress};
 use field::GpuField;
 use layer::{GpuLayer, Readings};
 
@@ -81,6 +83,8 @@ pub struct GpuProvider {
     make_vendor: Option<MakeVendor>,
     switch: VendorSwitch,
     state: State,
+    /// PCI address last seen per LUID, kept across discovers (see `restore_pci`).
+    known_pci: HashMap<u64, PciAddress>,
 }
 
 impl GpuProvider {
@@ -88,7 +92,7 @@ impl GpuProvider {
     /// once, on the first discover that sees the switch on; they then stay for the process lifetime (D1).
     pub(crate) fn with_layers(
         enumerate: Enumerate,
-        base: Vec<Box<dyn GpuLayer>>, // priority order: d3dkmt, dxgi, pdh
+        base: Vec<Box<dyn GpuLayer>>, // priority order: d3dkmt, dxgi, pdh, pnp
         make_vendor: MakeVendor,      // priority order: nvml, nvapi, adl, igcl
         switch: VendorSwitch,
     ) -> Self {
@@ -99,6 +103,7 @@ impl GpuProvider {
             make_vendor: Some(make_vendor),
             switch,
             state: State::default(),
+            known_pci: HashMap::new(),
         }
     }
 
@@ -111,8 +116,8 @@ impl GpuProvider {
 
 impl GpuProvider {
     /// The real provider: DXGI/DXCore/D3DKMT enumeration, the base layers
-    /// (D3DKMT, DXGI, PDH) always on, and the vendor libraries (NVML, NVAPI,
-    /// ADL, IGCL) loaded on the first discover that sees `switch` on.
+    /// (D3DKMT, DXGI, PDH, PnP) always on, and the vendor libraries (NVML,
+    /// NVAPI, ADL, IGCL) loaded on the first discover that sees `switch` on.
     pub fn new(switch: VendorSwitch) -> Self {
         Self::with_layers(
             Box::new(enumerate::enumerate),
@@ -120,6 +125,7 @@ impl GpuProvider {
                 Box::new(d3dkmt::D3dkmtLayer::default()),
                 Box::new(dxgi::DxgiLayer::default()),
                 Box::new(pdh::PdhLayer::default()),
+                Box::new(pnp::PnpLayer::default()),
             ],
             Box::new(load_vendor_layers),
             switch,
@@ -146,6 +152,33 @@ fn load_vendor_layers() -> Vec<Box<dyn GpuLayer>> {
     layers
 }
 
+/// Gives back the PCI address of an adapter whose kernel query failed this time but
+/// worked before (same LUID), so its device id does not change; records every address
+/// seen. A failed D3DKMT address query must not rename a GPU (M2 follow-up).
+fn restore_pci(known: &mut HashMap<u64, PciAddress>, adapters: &mut [Adapter]) {
+    for adapter in adapters {
+        match adapter.pci {
+            Some(pci) => {
+                known.insert(adapter.luid, pci);
+            }
+            None => adapter.pci = known.get(&adapter.luid).copied(),
+        }
+    }
+}
+
+/// Adds layer properties to a device's own ones: the first layer (highest priority) wins
+/// per key, and keys the device already has (`pciAddress`, `integrated`) are never replaced.
+fn merge_properties(
+    device: &mut BTreeMap<String, String>,
+    layers: impl IntoIterator<Item = BTreeMap<String, String>>,
+) {
+    for properties in layers {
+        for (key, value) in properties {
+            device.entry(key).or_insert(value);
+        }
+    }
+}
+
 fn device(adapter: &Adapter, id: &str) -> Device {
     let mut properties = std::collections::BTreeMap::new();
     if let Some(pci) = adapter.pci {
@@ -168,7 +201,8 @@ impl Provider for GpuProvider {
 
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
         self.state = State::default();
-        let adapters = (self.enumerate)()?;
+        let mut adapters = (self.enumerate)()?;
+        restore_pci(&mut self.known_pci, &mut adapters);
         let vendor_on = self.switch.enabled();
         if vendor_on {
             if let Some(mut make_vendor) = self.make_vendor.take() {
@@ -205,7 +239,12 @@ impl Provider for GpuProvider {
                 dedicated_bytes = adapter.dedicated_bytes,
                 "GPU adapter"
             );
-            inventory.devices.push(device(adapter, &id));
+            let mut gpu = device(adapter, &id);
+            merge_properties(
+                &mut gpu.properties,
+                layers.iter().map(|layer| layer.properties(index)),
+            );
+            inventory.devices.push(gpu);
             let per_layer: Vec<_> = supported.iter().map(|s| s[index].clone()).collect();
             let owners = merge::assign(&per_layer);
             for field in GpuField::ALL {
@@ -260,7 +299,8 @@ impl Provider for GpuProvider {
             .topology_checked
             .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(5))
         {
-            let topology = (self.enumerate)()?;
+            let mut topology = (self.enumerate)()?;
+            restore_pci(&mut self.known_pci, &mut topology);
             self.state.topology_checked = Some(now);
             if topology != self.state.topology {
                 return Err(ProviderError::Rediscover);
@@ -330,6 +370,8 @@ mod tests {
         wrong_len: Option<usize>,
         attach_calls: usize,
         sample_calls: usize,
+        /// Per adapter: the static properties the layer reports.
+        properties: Vec<BTreeMap<String, String>>,
     }
 
     struct FakeLayer {
@@ -371,6 +413,11 @@ mod tests {
 
         fn is_experimental(&self, field: GpuField) -> bool {
             self.experimental.contains(&field)
+        }
+
+        fn properties(&self, adapter: usize) -> BTreeMap<String, String> {
+            let s = self.script.lock().unwrap();
+            s.properties.get(adapter).cloned().unwrap_or_default()
         }
     }
 
@@ -782,6 +829,123 @@ mod tests {
         b.enable();
         assert!(a.enabled());
         assert!(VendorSwitch::new(true).enabled());
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn layer_properties_are_merged_by_priority() {
+        let (nvml, nvml_script) = fake(Source::Nvml, &[&[], &[]]);
+        let (pnp, pnp_script) = fake(Source::Pnp, &[&[], &[]]);
+        nvml_script.lock().unwrap().properties = vec![props(&[
+            ("pcieMaxGen", "4"),
+            ("powerLimitDefaultW", "320"),
+            ("pciAddress", "9999:99:99.9"),
+        ])];
+        pnp_script.lock().unwrap().properties = vec![
+            props(&[("pcieMaxGen", "3"), ("pcieMaxWidth", "16")]),
+            props(&[("pcieMaxGen", "4"), ("pcieMaxWidth", "16")]),
+        ];
+        let (mut p, _) = provider(
+            vec![nvidia(), amd_igpu()],
+            vec![pnp],
+            vec![nvml],
+            &VendorSwitch::new(true),
+        );
+        let inventory = p.discover().unwrap();
+        let nv = &inventory.devices[0].properties;
+        assert_eq!(nv["pcieMaxGen"], "4", "NVML outranks PnP");
+        assert_eq!(nv["pcieMaxWidth"], "16", "PnP fills the gap");
+        assert_eq!(nv["powerLimitDefaultW"], "320");
+        assert_eq!(nv["pciAddress"], "0000:01:00.0", "not overridable");
+        assert_eq!(nv["integrated"], "false");
+        let amd = &inventory.devices[1].properties;
+        assert_eq!(
+            amd,
+            &props(&[
+                ("integrated", "true"),
+                ("pciAddress", "0000:11:00.0"),
+                ("pcieMaxGen", "4"),
+                ("pcieMaxWidth", "16"),
+            ])
+        );
+        assert!(inventory.sensors.is_empty(), "properties declare no sensor");
+    }
+
+    #[test]
+    fn safe_mode_keeps_base_layer_properties_only() {
+        let (nvml, nvml_script) = fake(Source::Nvml, &[&[]]);
+        let (pnp, pnp_script) = fake(Source::Pnp, &[&[]]);
+        nvml_script.lock().unwrap().properties = vec![props(&[("tempMaxC", "90")])];
+        pnp_script.lock().unwrap().properties = vec![props(&[("pcieMaxGen", "4")])];
+        let (mut p, _) = provider(
+            vec![nvidia()],
+            vec![pnp],
+            vec![nvml],
+            &VendorSwitch::new(false),
+        );
+        let device = &p.discover().unwrap().devices[0];
+        assert_eq!(device.properties["pcieMaxGen"], "4");
+        assert!(!device.properties.contains_key("tempMaxC"));
+    }
+
+    #[test]
+    fn pci_address_is_kept_per_luid_when_the_kernel_query_fails() {
+        let topology = Arc::new(Mutex::new(vec![nvidia()]));
+        let enumerated = topology.clone();
+        let mut gpu = GpuProvider::with_layers(
+            Box::new(move || Ok(enumerated.lock().unwrap().clone())),
+            vec![],
+            Box::new(Vec::new),
+            VendorSwitch::new(false),
+        );
+        assert_eq!(
+            gpu.discover().unwrap().devices[0].id,
+            "gpu/pci-0000:01:00.0"
+        );
+
+        // The next enumeration loses the PCI address of the same adapter (same LUID).
+        topology.lock().unwrap()[0].pci = None;
+        gpu.state.topology_checked =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+        assert_eq!(gpu.poll(), Ok(vec![]), "not a topology change");
+        let device = &gpu.discover().unwrap().devices[0];
+        assert_eq!(device.id, "gpu/pci-0000:01:00.0");
+        assert_eq!(device.properties["pciAddress"], "0000:01:00.0");
+
+        // A different LUID without an address still gets the ordinal id.
+        let mut other = nvidia();
+        other.luid = 0x4242;
+        other.pci = None;
+        topology.lock().unwrap().push(other);
+        let ids: Vec<_> = gpu
+            .discover()
+            .unwrap()
+            .devices
+            .iter()
+            .map(|d| d.id.clone())
+            .collect();
+        assert_eq!(ids, ["gpu/pci-0000:01:00.0", "gpu/ven-10de-dev-2704-0"]);
+    }
+
+    #[test]
+    fn restore_pci_records_and_restores_by_luid() {
+        let mut known = HashMap::new();
+        let mut first = [nvidia(), amd_igpu()];
+        restore_pci(&mut known, &mut first);
+        assert_eq!(known.len(), 2);
+        let mut second = [nvidia(), amd_igpu()];
+        second[1].pci = None;
+        restore_pci(&mut known, &mut second);
+        assert_eq!(second[1].pci, amd_igpu().pci);
+        let mut unknown = [virtual_adapter(0x1414)];
+        restore_pci(&mut known, &mut unknown);
+        assert_eq!(unknown[0].pci, None);
     }
 
     #[test]

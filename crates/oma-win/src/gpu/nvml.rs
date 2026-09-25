@@ -1,5 +1,6 @@
 //! NVIDIA layer over NVML (nvml.dll, loaded from System32 only): core temperature, clocks,
-//! board power and limit, fans, dedicated memory and throttle reasons.
+//! board power and limit, fans, dedicated memory, throttle reasons, encoder/decoder
+//! utilization and the live PCIe link, plus static limits as device properties.
 //!
 //! The declarations below are our own interoperability declarations, written from the public
 //! NVML API reference (symbol names, argument types, constant values, struct layouts). No
@@ -9,7 +10,7 @@
 //! Lifetime (decision D1): NVML is initialised once and never shut down or unloaded.
 //! `nvmlShutdown` touches the 19 MB `.data` section again and a new init would pay it again.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_void, CString};
 
 use oma_core::model::Source;
@@ -47,8 +48,13 @@ const REASON_HW_POWER_BRAKE: u64 = 0x80;
 const POWER_REASONS: u64 = REASON_SW_POWER_CAP | REASON_HW_POWER_BRAKE;
 const THERMAL_REASONS: u64 = REASON_SW_THERMAL | REASON_HW_THERMAL;
 
+/// Temperature threshold kinds of `nvmlDeviceGetTemperatureThreshold`.
+const THRESHOLD_SHUTDOWN: u32 = 0;
+const THRESHOLD_SLOWDOWN: u32 = 1;
+const THRESHOLD_GPU_MAX: u32 = 3;
+
 /// Fields this layer can offer, probed per GPU at attach.
-const FIELDS: [GpuField; 12] = [
+const FIELDS: [GpuField; 16] = [
     GpuField::MemoryDedicatedUsed,
     GpuField::MemoryDedicatedTotal,
     GpuField::TemperatureCore,
@@ -61,6 +67,10 @@ const FIELDS: [GpuField; 12] = [
     GpuField::FanRpm,
     GpuField::ThrottlePower,
     GpuField::ThrottleThermal,
+    GpuField::LoadEncoder,
+    GpuField::LoadDecoder,
+    GpuField::PcieLinkGen,
+    GpuField::PcieLinkWidth,
 ];
 
 /// Version tag of a versioned NVML struct: its size in the low bits, the version in the top byte.
@@ -137,6 +147,8 @@ type ByBusIdFn = unsafe extern "C" fn(*const c_char, *mut DeviceHandle) -> Ret;
 type PciInfoFn = unsafe extern "C" fn(DeviceHandle, *mut PciInfo) -> Ret;
 type U32Fn = unsafe extern "C" fn(DeviceHandle, *mut u32) -> Ret;
 type U32ArgFn = unsafe extern "C" fn(DeviceHandle, u32, *mut u32) -> Ret;
+/// Two u32 out values: (utilization %, sampling period µs) or (min mW, max mW).
+type U32PairFn = unsafe extern "C" fn(DeviceHandle, *mut u32, *mut u32) -> Ret;
 type U64Fn = unsafe extern "C" fn(DeviceHandle, *mut u64) -> Ret;
 type TemperatureVFn = unsafe extern "C" fn(DeviceHandle, *mut TemperatureV1) -> Ret;
 type FanSpeedRpmFn = unsafe extern "C" fn(DeviceHandle, *mut FanSpeedV1) -> Ret;
@@ -231,6 +243,51 @@ fn max_fan(reads: impl IntoIterator<Item = (Ret, u32)>) -> Read {
     }
 }
 
+/// A generation or lane count; 0 means "not reported".
+fn link_value(value: u32) -> Option<f64> {
+    (value > 0).then(|| f64::from(value))
+}
+
+/// Static values read once at attach (decision D9): each is the NVML return code and the raw
+/// value (mW for power, °C for temperatures).
+#[derive(Debug, Clone, Copy)]
+struct StaticReads {
+    max_link_gen: (Ret, u32),
+    max_link_width: (Ret, u32),
+    power_min_mw: (Ret, u32),
+    power_max_mw: (Ret, u32),
+    power_default_mw: (Ret, u32),
+    temp_slowdown: (Ret, u32),
+    temp_shutdown: (Ret, u32),
+    temp_gpu_max: (Ret, u32),
+}
+
+impl StaticReads {
+    /// Device properties (plain decimal strings); a failed call or a zero value is left out.
+    fn properties(&self) -> BTreeMap<String, String> {
+        let entries = [
+            ("pcieMaxGen", self.max_link_gen, 1),
+            ("pcieMaxWidth", self.max_link_width, 1),
+            ("powerLimitMinW", self.power_min_mw, 1000),
+            ("powerLimitMaxW", self.power_max_mw, 1000),
+            ("powerLimitDefaultW", self.power_default_mw, 1000),
+            ("tempSlowdownC", self.temp_slowdown, 1),
+            ("tempShutdownC", self.temp_shutdown, 1),
+            ("tempMaxC", self.temp_gpu_max, 1),
+        ];
+        entries
+            .into_iter()
+            .filter(|(_, (ret, value), _)| *ret == SUCCESS && *value > 0)
+            .map(|(key, (_, value), divisor)| {
+                (
+                    key.to_owned(),
+                    (f64::from(value) / f64::from(divisor)).to_string(),
+                )
+            })
+            .collect()
+    }
+}
+
 /// Bus id string accepted by `nvmlDeviceGetHandleByPciBusId_v2`, e.g. "0000:01:00.0".
 fn bus_id(pci: PciAddress) -> CString {
     CString::new(pci.to_string()).expect("a PCI address has no NUL byte")
@@ -259,6 +316,15 @@ struct Api {
     memory_v1: Option<MemoryV1Fn>,
     event_reasons: Option<U64Fn>,
     throttle_reasons: Option<U64Fn>,
+    encoder_utilization: Option<U32PairFn>,
+    decoder_utilization: Option<U32PairFn>,
+    curr_link_gen: Option<U32Fn>,
+    curr_link_width: Option<U32Fn>,
+    max_link_gen: Option<U32Fn>,
+    max_link_width: Option<U32Fn>,
+    power_constraints: Option<U32PairFn>,
+    power_default_limit: Option<U32Fn>,
+    temperature_threshold: Option<U32ArgFn>,
 }
 
 fn call_u32(f: Option<U32Fn>, device: DeviceHandle) -> (Ret, u32) {
@@ -278,6 +344,16 @@ fn call_u32_arg(f: Option<U32ArgFn>, device: DeviceHandle, arg: u32) -> (Ret, u3
     let mut value = 0u32;
     // SAFETY: as in `call_u32`.
     (unsafe { f(device, arg, &mut value) }, value)
+}
+
+fn call_u32_pair(f: Option<U32PairFn>, device: DeviceHandle) -> (Ret, u32, u32) {
+    let Some(f) = f else {
+        return (ERROR_FUNCTION_NOT_FOUND, 0, 0);
+    };
+    let (mut first, mut second) = (0u32, 0u32);
+    // SAFETY: as in `call_u32`, with two valid out pointers.
+    let ret = unsafe { f(device, &mut first, &mut second) };
+    (ret, first, second)
 }
 
 fn call_u64(f: Option<U64Fn>, device: DeviceHandle) -> (Ret, u64) {
@@ -313,6 +389,15 @@ impl Api {
                 memory_v1: library.symbol(c"nvmlDeviceGetMemoryInfo"),
                 event_reasons: library.symbol(c"nvmlDeviceGetCurrentClocksEventReasons"),
                 throttle_reasons: library.symbol(c"nvmlDeviceGetCurrentClocksThrottleReasons"),
+                encoder_utilization: library.symbol(c"nvmlDeviceGetEncoderUtilization"),
+                decoder_utilization: library.symbol(c"nvmlDeviceGetDecoderUtilization"),
+                curr_link_gen: library.symbol(c"nvmlDeviceGetCurrPcieLinkGeneration"),
+                curr_link_width: library.symbol(c"nvmlDeviceGetCurrPcieLinkWidth"),
+                max_link_gen: library.symbol(c"nvmlDeviceGetMaxPcieLinkGeneration"),
+                max_link_width: library.symbol(c"nvmlDeviceGetMaxPcieLinkWidth"),
+                power_constraints: library.symbol(c"nvmlDeviceGetPowerManagementLimitConstraints"),
+                power_default_limit: library.symbol(c"nvmlDeviceGetPowerManagementDefaultLimit"),
+                temperature_threshold: library.symbol(c"nvmlDeviceGetTemperatureThreshold"),
             })
         }
     }
@@ -413,6 +498,22 @@ impl Api {
         }
     }
 
+    /// Static limits and link capability of `device`, read once at attach.
+    fn static_reads(&self, device: DeviceHandle) -> StaticReads {
+        let (constraints, power_min, power_max) = call_u32_pair(self.power_constraints, device);
+        let threshold = |kind| call_u32_arg(self.temperature_threshold, device, kind);
+        StaticReads {
+            max_link_gen: call_u32(self.max_link_gen, device),
+            max_link_width: call_u32(self.max_link_width, device),
+            power_min_mw: (constraints, power_min),
+            power_max_mw: (constraints, power_max),
+            power_default_mw: call_u32(self.power_default_limit, device),
+            temp_slowdown: threshold(THRESHOLD_SLOWDOWN),
+            temp_shutdown: threshold(THRESHOLD_SHUTDOWN),
+            temp_gpu_max: threshold(THRESHOLD_GPU_MAX),
+        }
+    }
+
     /// Reads one field of `device` (which has `fans` fans).
     fn read(&self, device: DeviceHandle, fans: u32, field: GpuField) -> Read {
         let u32_read = |(ret, value): (Ret, u32), map: fn(u32) -> f64| (ret, Some(map(value)));
@@ -455,6 +556,22 @@ impl Api {
                 let (ret, reasons) = self.reasons(device);
                 (ret, Some(flag(throttle_thermal(reasons))))
             }
+            GpuField::LoadEncoder => {
+                let (ret, percent, _period_us) = call_u32_pair(self.encoder_utilization, device);
+                (ret, Some(f64::from(percent)))
+            }
+            GpuField::LoadDecoder => {
+                let (ret, percent, _period_us) = call_u32_pair(self.decoder_utilization, device);
+                (ret, Some(f64::from(percent)))
+            }
+            GpuField::PcieLinkGen => {
+                let (ret, generation) = call_u32(self.curr_link_gen, device);
+                (ret, link_value(generation))
+            }
+            GpuField::PcieLinkWidth => {
+                let (ret, lanes) = call_u32(self.curr_link_width, device);
+                (ret, link_value(lanes))
+            }
             _ => (ERROR_NOT_SUPPORTED, None),
         }
     }
@@ -465,6 +582,8 @@ struct Bound {
     device: DeviceHandle,
     fans: u32,
     fields: BTreeSet<GpuField>,
+    /// Static limits and link capability (decision D9), read once here.
+    properties: BTreeMap<String, String>,
 }
 
 /// NVML enrichment layer (highest priority, spec §5.2).
@@ -520,10 +639,12 @@ impl NvmlLayer {
         let device = self.api.handle_for(adapter.pci?)?;
         let fans = self.api.fan_count(device);
         let fields = probe(&FIELDS, |field| self.api.read(device, fans, field));
+        let properties = self.api.static_reads(device).properties();
         Some(Bound {
             device,
             fans,
             fields,
+            properties,
         })
     }
 }
@@ -549,6 +670,14 @@ impl GpuLayer for NvmlLayer {
                 None => Ok(Readings::new()),
             })
             .collect()
+    }
+
+    fn properties(&self, adapter: usize) -> BTreeMap<String, String> {
+        self.bound
+            .get(adapter)
+            .and_then(Option::as_ref)
+            .map(|b| b.properties.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -663,6 +792,66 @@ mod tests {
     }
 
     #[test]
+    fn link_values_of_zero_are_missing() {
+        assert_eq!(link_value(4), Some(4.0));
+        assert_eq!(link_value(16), Some(16.0));
+        assert_eq!(link_value(0), None);
+    }
+
+    /// The values the RTX 4080 of the development machine reports (spike, driver 617.14).
+    fn rtx_4080_static() -> StaticReads {
+        StaticReads {
+            max_link_gen: (SUCCESS, 4),
+            max_link_width: (SUCCESS, 16),
+            power_min_mw: (SUCCESS, 150_000),
+            power_max_mw: (SUCCESS, 370_000),
+            power_default_mw: (SUCCESS, 320_000),
+            temp_slowdown: (SUCCESS, 94),
+            temp_shutdown: (SUCCESS, 99),
+            temp_gpu_max: (SUCCESS, 90),
+        }
+    }
+
+    #[test]
+    fn static_reads_become_decimal_properties() {
+        let properties = rtx_4080_static().properties();
+        let expected = [
+            ("pcieMaxGen", "4"),
+            ("pcieMaxWidth", "16"),
+            ("powerLimitMinW", "150"),
+            ("powerLimitMaxW", "370"),
+            ("powerLimitDefaultW", "320"),
+            ("tempSlowdownC", "94"),
+            ("tempShutdownC", "99"),
+            ("tempMaxC", "90"),
+        ];
+        assert_eq!(
+            properties,
+            expected
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        );
+    }
+
+    #[test]
+    fn failed_or_zero_static_reads_are_left_out() {
+        let reads = StaticReads {
+            power_min_mw: (ERROR_NOT_SUPPORTED, 150_000),
+            power_max_mw: (ERROR_NOT_SUPPORTED, 370_000),
+            power_default_mw: (SUCCESS, 152_500),
+            temp_gpu_max: (SUCCESS, 0),
+            ..rtx_4080_static()
+        };
+        let properties = reads.properties();
+        assert!(!properties.contains_key("powerLimitMinW"));
+        assert!(!properties.contains_key("powerLimitMaxW"));
+        assert!(!properties.contains_key("tempMaxC"));
+        assert_eq!(properties["powerLimitDefaultW"], "152.5");
+        assert_eq!(properties.len(), 5);
+    }
+
+    #[test]
     fn pci_lookup_helpers() {
         let pci = PciAddress {
             bus: 1,
@@ -743,6 +932,39 @@ mod tests {
         }
         if let Some(fan) = r.get(&FanPercent) {
             assert!((0.0..=100.0).contains(fan), "fan {fan}");
+        }
+        // M3 extras: encoder/decoder utilization and the live link (Gen 1 at idle with ASPM,
+        // up to Gen 4 under load; always x16 on this board).
+        for field in [LoadEncoder, LoadDecoder, PcieLinkGen, PcieLinkWidth] {
+            assert!(supported[nvidia].contains(&field), "NVML lacks {field:?}");
+        }
+        assert!((0.0..=100.0).contains(&r[&LoadEncoder]));
+        assert!((0.0..=100.0).contains(&r[&LoadDecoder]));
+        let generation = r[&PcieLinkGen];
+        assert!((1.0..=4.0).contains(&generation), "PCIe gen {generation}");
+        assert_eq!(r[&PcieLinkWidth], 16.0);
+        let properties = layer.properties(nvidia);
+        println!("NVML properties: {properties:?}");
+        for (key, value) in [
+            ("pcieMaxGen", "4"),
+            ("pcieMaxWidth", "16"),
+            ("powerLimitMinW", "150"),
+            ("powerLimitMaxW", "370"),
+            ("powerLimitDefaultW", "320"),
+            ("tempSlowdownC", "94"),
+            ("tempShutdownC", "99"),
+            ("tempMaxC", "90"),
+        ] {
+            assert_eq!(
+                properties.get(key).map(String::as_str),
+                Some(value),
+                "{key}"
+            );
+        }
+        for (i, adapter) in adapters.iter().enumerate() {
+            if i != nvidia {
+                assert!(layer.properties(i).is_empty(), "{}", adapter.name);
+            }
         }
     }
 

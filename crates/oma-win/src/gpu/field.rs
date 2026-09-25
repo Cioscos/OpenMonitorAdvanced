@@ -11,6 +11,10 @@ pub(crate) enum GpuField {
     LoadCopy,
     LoadVideoDecode,
     LoadVideoEncode,
+    /// NVENC utilization as NVML reports it (average of the encoder engines).
+    LoadEncoder,
+    /// NVDEC utilization as NVML reports it (average of the decoder engines).
+    LoadDecoder,
     MemoryDedicatedUsed,
     MemoryDedicatedTotal,
     MemorySharedUsed,
@@ -29,16 +33,22 @@ pub(crate) enum GpuField {
     ThrottlePower,
     /// 1.0 while the GPU is limited by temperature, else 0.0.
     ThrottleThermal,
+    /// Current PCIe link generation (live: drops to Gen 1 at idle with ASPM).
+    PcieLinkGen,
+    /// Current PCIe link width in lanes.
+    PcieLinkWidth,
 }
 
 impl GpuField {
-    pub const ALL: [GpuField; 22] = [
+    pub const ALL: [GpuField; 26] = [
         GpuField::LoadCore,
         GpuField::Load3d,
         GpuField::LoadCompute,
         GpuField::LoadCopy,
         GpuField::LoadVideoDecode,
         GpuField::LoadVideoEncode,
+        GpuField::LoadEncoder,
+        GpuField::LoadDecoder,
         GpuField::MemoryDedicatedUsed,
         GpuField::MemoryDedicatedTotal,
         GpuField::MemorySharedUsed,
@@ -55,14 +65,15 @@ impl GpuField {
         GpuField::VoltageCore,
         GpuField::ThrottlePower,
         GpuField::ThrottleThermal,
+        GpuField::PcieLinkGen,
+        GpuField::PcieLinkWidth,
     ];
 
     pub fn kind(self) -> SensorKind {
         use GpuField::*;
         match self {
-            LoadCore | Load3d | LoadCompute | LoadCopy | LoadVideoDecode | LoadVideoEncode => {
-                SensorKind::Load
-            }
+            LoadCore | Load3d | LoadCompute | LoadCopy | LoadVideoDecode | LoadVideoEncode
+            | LoadEncoder | LoadDecoder => SensorKind::Load,
             MemoryDedicatedUsed | MemoryDedicatedTotal | MemorySharedUsed => SensorKind::Data,
             TemperatureCore | TemperatureHotspot | TemperatureMemory => SensorKind::Temperature,
             ClockCore | ClockMemory => SensorKind::Clock,
@@ -71,6 +82,7 @@ impl GpuField {
             FanPercent | FanRpm => SensorKind::Fan,
             VoltageCore => SensorKind::Voltage,
             ThrottlePower | ThrottleThermal => SensorKind::Flag,
+            PcieLinkGen | PcieLinkWidth => SensorKind::Link,
         }
     }
 
@@ -84,6 +96,8 @@ impl GpuField {
             LoadCopy => "copy",
             LoadVideoDecode => "video-decode",
             LoadVideoEncode => "video-encode",
+            LoadEncoder => "encoder",
+            LoadDecoder => "decoder",
             MemoryDedicatedUsed => "memory-dedicated-used",
             MemoryDedicatedTotal => "memory-dedicated-total",
             MemorySharedUsed => "memory-shared-used",
@@ -100,6 +114,8 @@ impl GpuField {
             VoltageCore => "core",
             ThrottlePower => "throttle-power",
             ThrottleThermal => "throttle-thermal",
+            PcieLinkGen => "pcie-gen",
+            PcieLinkWidth => "pcie-width",
         }
     }
 
@@ -107,7 +123,7 @@ impl GpuField {
         use GpuField::*;
         match self {
             LoadCore | Load3d | LoadCompute | LoadCopy | LoadVideoDecode | LoadVideoEncode
-            | PowerLimitPercent | FanPercent => Unit::Percent,
+            | LoadEncoder | LoadDecoder | PowerLimitPercent | FanPercent => Unit::Percent,
             MemoryDedicatedUsed | MemoryDedicatedTotal | MemorySharedUsed => Unit::Bytes,
             TemperatureCore | TemperatureHotspot | TemperatureMemory => Unit::Celsius,
             ClockCore | ClockMemory => Unit::Megahertz,
@@ -115,6 +131,8 @@ impl GpuField {
             FanRpm => Unit::Rpm,
             VoltageCore => Unit::Volt,
             ThrottlePower | ThrottleThermal => Unit::Boolean,
+            PcieLinkGen => Unit::PcieGeneration,
+            PcieLinkWidth => Unit::Lanes,
         }
     }
 
@@ -128,6 +146,8 @@ impl GpuField {
             LoadCopy => "gpu.load.copy",
             LoadVideoDecode => "gpu.load.videoDecode",
             LoadVideoEncode => "gpu.load.videoEncode",
+            LoadEncoder => "gpu.load.encoder",
+            LoadDecoder => "gpu.load.decoder",
             MemoryDedicatedUsed => "gpu.memory.dedicatedUsed",
             MemoryDedicatedTotal => "gpu.memory.dedicatedTotal",
             MemorySharedUsed => "gpu.memory.sharedUsed",
@@ -144,6 +164,8 @@ impl GpuField {
             VoltageCore => "gpu.voltage.core",
             ThrottlePower => "gpu.throttle.power",
             ThrottleThermal => "gpu.throttle.thermal",
+            PcieLinkGen => "gpu.pcie.gen",
+            PcieLinkWidth => "gpu.pcie.width",
         }
     }
 }
@@ -218,6 +240,53 @@ mod tests {
                 "gpu.throttle.thermal"
             )
         );
+    }
+
+    #[test]
+    fn m3_fields_match_the_contract() {
+        let row = |f: GpuField| (f.kind(), f.name(), f.unit(), f.label_key());
+        assert_eq!(
+            row(GpuField::LoadEncoder),
+            (
+                SensorKind::Load,
+                "encoder",
+                Unit::Percent,
+                "gpu.load.encoder"
+            )
+        );
+        assert_eq!(
+            row(GpuField::LoadDecoder),
+            (
+                SensorKind::Load,
+                "decoder",
+                Unit::Percent,
+                "gpu.load.decoder"
+            )
+        );
+        assert_eq!(
+            row(GpuField::PcieLinkGen),
+            (
+                SensorKind::Link,
+                "pcie-gen",
+                Unit::PcieGeneration,
+                "gpu.pcie.gen"
+            )
+        );
+        assert_eq!(
+            row(GpuField::PcieLinkWidth),
+            (
+                SensorKind::Link,
+                "pcie-width",
+                Unit::Lanes,
+                "gpu.pcie.width"
+            )
+        );
+        // Encoder/decoder follow the PDH per-engine loads; the link comes last.
+        let position = |f: GpuField| GpuField::ALL.iter().position(|&x| x == f).unwrap();
+        assert_eq!(position(GpuField::LoadEncoder), 6);
+        assert_eq!(position(GpuField::LoadDecoder), 7);
+        assert_eq!(position(GpuField::PcieLinkGen), 24);
+        assert_eq!(position(GpuField::PcieLinkWidth), 25);
     }
 
     #[test]

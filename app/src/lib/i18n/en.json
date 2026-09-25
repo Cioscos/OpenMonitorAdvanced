@@ -48,6 +48,8 @@
   "sensor.gpu.load.copy": "Copy load",
   "sensor.gpu.load.videoDecode": "Video decode load",
   "sensor.gpu.load.videoEncode": "Video encode load",
+  "sensor.gpu.load.encoder": "Encoder load",
+  "sensor.gpu.load.decoder": "Decoder load",
   "sensor.gpu.memory.dedicatedUsed": "Dedicated memory used",
   "sensor.gpu.memory.dedicatedTotal": "Dedicated memory total",
   "sensor.gpu.memory.sharedUsed": "Shared memory used",
@@ -62,6 +64,8 @@
   "sensor.gpu.fan.percent": "Fan speed (%)",
   "sensor.gpu.fan.rpm": "Fan speed (RPM)",
   "sensor.gpu.voltage.core": "Core voltage",
+  "sensor.gpu.pcie.gen": "PCIe link generation",
+  "sensor.gpu.pcie.width": "PCIe link width",
   "sensor.gpu.throttle.power": "Power limit throttling",
   "sensor.gpu.throttle.thermal": "Thermal throttling"
 }

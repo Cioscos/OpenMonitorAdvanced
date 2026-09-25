@@ -295,6 +295,84 @@ fn gpu_provider_in_safe_mode_uses_only_base_layers() {
     assert_eq!(temperature.source, Source::D3dkmt);
 }
 
+/// Value of device property `key` of GPU `id`.
+fn gpu_property<'a>(inventory: &'a Inventory, id: &str, key: &str) -> Option<&'a str> {
+    inventory
+        .devices
+        .iter()
+        .find(|d| d.id == id)
+        .and_then(|d| d.properties.get(key))
+        .map(String::as_str)
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_reports_pcie_link_and_static_limits() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut p = GpuProvider::new(VendorSwitch::new(true));
+    let (inventory, values) = discover_and_poll(&mut p);
+    assert_gpu_devices(&inventory);
+
+    // Live link from NVML: Gen 1 at idle (ASPM), up to Gen 4 under load; x16 on this board.
+    let (i, generation) = gpu_sensor(&inventory, NVIDIA, "link/pcie-gen");
+    assert_eq!(generation.source, Source::Nvml);
+    let gen = values[i].expect("NVIDIA PCIe generation");
+    assert!((1.0..=4.0).contains(&gen), "Gen {gen}");
+    let (i, width) = gpu_sensor(&inventory, NVIDIA, "link/pcie-width");
+    assert_eq!(width.source, Source::Nvml);
+    assert_eq!(values[i], Some(16.0));
+    for name in ["load/encoder", "load/decoder"] {
+        let (i, sensor) = gpu_sensor(&inventory, NVIDIA, name);
+        assert_eq!(sensor.source, Source::Nvml, "{name}");
+        let pct = values[i].expect(name);
+        assert!((0.0..=100.0).contains(&pct), "{name} {pct}");
+    }
+    // No live link source for the AMD iGPU (PnP "current" is not live, ADL 40/41 excluded).
+    assert!(!inventory
+        .sensors
+        .iter()
+        .any(|s| s.device_id == AMD && s.kind == SensorKind::Link));
+
+    for (key, value) in [
+        ("pcieMaxGen", "4"),
+        ("pcieMaxWidth", "16"),
+        ("powerLimitMinW", "150"),
+        ("powerLimitMaxW", "370"),
+        ("powerLimitDefaultW", "320"),
+        ("tempSlowdownC", "94"),
+        ("tempShutdownC", "99"),
+        ("tempMaxC", "90"),
+    ] {
+        assert_eq!(gpu_property(&inventory, NVIDIA, key), Some(value), "{key}");
+    }
+    // The iGPU gets the vendor-neutral PnP maximum link only.
+    assert_eq!(gpu_property(&inventory, AMD, "pcieMaxGen"), Some("4"));
+    assert_eq!(gpu_property(&inventory, AMD, "pcieMaxWidth"), Some("16"));
+    assert_eq!(gpu_property(&inventory, AMD, "powerLimitMaxW"), None);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_in_safe_mode_keeps_the_pnp_max_link() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut p = GpuProvider::new(VendorSwitch::new(false));
+    let inventory = p.discover().expect("discover");
+    for id in [NVIDIA, AMD] {
+        assert_eq!(
+            gpu_property(&inventory, id, "pcieMaxGen"),
+            Some("4"),
+            "{id}"
+        );
+        assert_eq!(
+            gpu_property(&inventory, id, "pcieMaxWidth"),
+            Some("16"),
+            "{id}"
+        );
+        assert_eq!(gpu_property(&inventory, id, "tempMaxC"), None, "{id}");
+    }
+    assert!(!inventory.sensors.iter().any(|s| s.id.contains("/link/")));
+}
+
 #[test]
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_loads_vendor_libraries_when_reenabled() {

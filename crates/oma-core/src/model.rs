@@ -33,6 +33,8 @@ pub enum SensorKind {
     Energy,
     Flag,
     Percent,
+    /// A bus link, e.g. the PCIe link of a GPU.
+    Link,
 }
 
 impl SensorKind {
@@ -51,6 +53,7 @@ impl SensorKind {
             SensorKind::Energy => "energy",
             SensorKind::Flag => "flag",
             SensorKind::Percent => "percent",
+            SensorKind::Link => "link",
         }
     }
 }
@@ -72,6 +75,10 @@ pub enum Unit {
     BitsPerSecond,
     Joule,
     Boolean,
+    /// PCIe link generation (1 = 2.5 GT/s ... 5 = 32 GT/s).
+    PcieGeneration,
+    /// Number of active link lanes.
+    Lanes,
 }
 
 /// Where a reading comes from; shown as a badge in the Advanced view.
@@ -87,6 +94,8 @@ pub enum Source {
     Nvapi,
     Adl,
     Igcl,
+    /// Windows Plug and Play device properties (cfgmgr32).
+    Pnp,
     Mock,
 }
 
@@ -257,6 +266,20 @@ mod tests {
             serde_json::to_value(sources).unwrap(),
             json!(["dxgi", "d3dkmt", "nvml", "nvapi", "adl", "igcl"])
         );
+    }
+
+    #[test]
+    fn link_kind_units_and_pnp_source_serialize_in_snake_case() {
+        assert_eq!(SensorKind::Link.as_str(), "link");
+        assert_eq!(
+            serde_json::to_value(SensorKind::Link).unwrap(),
+            json!("link")
+        );
+        assert_eq!(
+            serde_json::to_value([Unit::PcieGeneration, Unit::Lanes]).unwrap(),
+            json!(["pcie_generation", "lanes"])
+        );
+        assert_eq!(serde_json::to_value(Source::Pnp).unwrap(), json!("pnp"));
     }
 
     #[test]

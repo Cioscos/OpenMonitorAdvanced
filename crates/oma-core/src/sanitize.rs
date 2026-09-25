@@ -56,6 +56,8 @@ pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
         Unit::Megahertz => (0.0..=20_000.0).contains(&v),
         Unit::Volt => (-20.0..=20.0).contains(&v),
         Unit::Boolean => v == 0.0 || v == 1.0,
+        Unit::PcieGeneration => (1.0..=7.0).contains(&v) && v.fract() == 0.0,
+        Unit::Lanes => (1.0..=32.0).contains(&v),
         _ => v >= 0.0,
     };
     plausible.then_some(v)
@@ -134,6 +136,25 @@ mod tests {
         log.retain(&["b".to_owned()]);
         assert!(log.should_log("a", 1_000));
         assert!(!log.should_log("b", 1_000));
+    }
+
+    #[test]
+    fn pcie_generation_is_a_whole_number_from_1_to_7() {
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(1.0)), Some(1.0));
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(4.0)), Some(4.0));
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(7.0)), Some(7.0));
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(0.0)), None);
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(8.0)), None);
+        assert_eq!(sanitize(Unit::PcieGeneration, Some(3.5)), None);
+    }
+
+    #[test]
+    fn lanes_range_from_1_to_32() {
+        assert_eq!(sanitize(Unit::Lanes, Some(1.0)), Some(1.0));
+        assert_eq!(sanitize(Unit::Lanes, Some(16.0)), Some(16.0));
+        assert_eq!(sanitize(Unit::Lanes, Some(32.0)), Some(32.0));
+        assert_eq!(sanitize(Unit::Lanes, Some(0.0)), None);
+        assert_eq!(sanitize(Unit::Lanes, Some(64.0)), None);
     }
 
     #[test]

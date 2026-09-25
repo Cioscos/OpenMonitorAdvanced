@@ -15,6 +15,12 @@
 //! written by foreign code would be undefined behaviour.
 //!
 //! x86_64: `CTL_APICALL` (cdecl) is the C convention there.
+//!
+//! PCIe link (M3): `ctlPciGetState` gives the current generation/width (sensors). The maximum
+//! link is not read here: it comes from PnP alone (Task 6), the one vendor-neutral source that
+//! reports the device's own capability identically in safe mode. The state record was laid out
+//! from the public IGCL API reference in documented member order and computed by hand for
+//! x86_64 MSVC, not measured against a header; the export is optional.
 
 use std::collections::BTreeSet;
 use std::ffi::c_void;
@@ -221,6 +227,27 @@ struct PowerTelemetry {
     vram_write_bandwidth: TelemetryItem,
 }
 
+/// Link generation, lane count and bandwidth (`ctl_pci_speed_t`); -1 means unknown.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+struct PciSpeed {
+    size: u32,
+    version: u8,
+    generation: i32,
+    width: i32,
+    /// Bytes per second over all lanes.
+    max_bandwidth: i64,
+}
+
+/// Current PCI state (`ctl_pci_state_t`, filled by `ctlPciGetState`).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+struct PciState {
+    size: u32,
+    version: u8,
+    speed: PciSpeed,
+}
+
 macro_rules! pin {
     ($t:ty, $size:expr, $align:expr) => {
         const _: () = assert!(size_of::<$t>() == $size && align_of::<$t>() == $align);
@@ -307,6 +334,12 @@ pin!(PowerTelemetry, vram_read_bandwidth @ 976);
 pin!(PowerTelemetry, vram_write_bandwidth @ 1000);
 const _: () = assert!(offset_of!(PowerTelemetry, gpu_vr_temperature) == TELEMETRY_V0.0 as usize);
 const _: () = assert!(size_of::<PowerTelemetry>() == TELEMETRY_V1.0 as usize);
+pin!(PciSpeed, 24, 8);
+pin!(PciSpeed, generation @ 8);
+pin!(PciSpeed, width @ 12);
+pin!(PciSpeed, max_bandwidth @ 16);
+pin!(PciState, 32, 8);
+pin!(PciState, speed @ 8);
 
 impl InitArgs {
     fn new(app_version: u32) -> Self {
@@ -331,6 +364,58 @@ impl DeviceProperties {
         properties.device_id_size = 8;
         properties
     }
+}
+
+impl PciSpeed {
+    fn new() -> Self {
+        Self {
+            size: size_of::<Self>() as u32,
+            ..Self::default()
+        }
+    }
+}
+
+impl PciState {
+    /// Record with its own and the nested speed record's size filled in (IGCL convention;
+    /// whether the runtime checks the nested one is not documented).
+    fn new() -> Self {
+        Self {
+            size: size_of::<Self>() as u32,
+            version: 0,
+            speed: PciSpeed::new(),
+        }
+    }
+}
+
+/// A generation or lane count; -1 (unknown) and 0 are missing.
+fn link_value(value: i32) -> Option<f64> {
+    (value > 0).then(|| f64::from(value))
+}
+
+/// Link fields a device supports according to one PCI state read.
+fn link_fields(speed: &PciSpeed) -> BTreeSet<GpuField> {
+    let mut fields = BTreeSet::new();
+    if link_value(speed.generation).is_some() {
+        fields.insert(GpuField::PcieLinkGen);
+    }
+    if link_value(speed.width).is_some() {
+        fields.insert(GpuField::PcieLinkWidth);
+    }
+    fields
+}
+
+/// Current link values of one PCI state read, limited to the declared fields.
+fn link_readings(speed: &PciSpeed, fields: &BTreeSet<GpuField>) -> Readings {
+    let mut readings = Readings::new();
+    for (field, value) in [
+        (GpuField::PcieLinkGen, speed.generation),
+        (GpuField::PcieLinkWidth, speed.width),
+    ] {
+        if let (true, Some(value)) = (fields.contains(&field), link_value(value)) {
+            readings.insert(field, value);
+        }
+    }
+    readings
 }
 
 impl TelemetryItem {
@@ -528,6 +613,7 @@ type InitFn = unsafe extern "C" fn(*mut InitArgs, *mut ApiHandle) -> CtlResult;
 type EnumerateFn = unsafe extern "C" fn(ApiHandle, *mut u32, *mut DeviceHandle) -> CtlResult;
 type PropertiesFn = unsafe extern "C" fn(DeviceHandle, *mut DeviceProperties) -> CtlResult;
 type TelemetryFn = unsafe extern "C" fn(DeviceHandle, *mut PowerTelemetry) -> CtlResult;
+type PciStateFn = unsafe extern "C" fn(DeviceHandle, *mut PciState) -> CtlResult;
 
 #[derive(Clone, Copy)]
 struct Api {
@@ -535,6 +621,17 @@ struct Api {
     enumerate: EnumerateFn,
     properties: PropertiesFn,
     telemetry: TelemetryFn,
+    /// Optional: a runtime without the PCI export only loses the link fields.
+    pci_state: Option<PciStateFn>,
+}
+
+/// One `ctlPciGetState` read; `None` without the export or on any failure.
+fn read_pci_state(api: &Api, device: DeviceHandle) -> Option<PciState> {
+    let f = api.pci_state?;
+    let mut state = PciState::new();
+    // SAFETY: `device` came from ctlEnumerateDevices on a live session; `state` is a sized
+    // record that outlives the call.
+    (unsafe { f(device, &mut state) } == SUCCESS).then_some(state)
 }
 
 /// ctlInit, asking for API 1.1 and retrying once with 1.0 when the runtime rejects the
@@ -626,6 +723,7 @@ impl IgclLayer {
                 enumerate: library.symbol(c"ctlEnumerateDevices")?,
                 properties: library.symbol(c"ctlGetDeviceProperties")?,
                 telemetry: library.symbol(c"ctlPowerTelemetryGet")?,
+                pci_state: library.symbol(c"ctlPciGetState"),
             }
         };
         Self::start(api, Some(library))
@@ -691,7 +789,10 @@ impl GpuLayer for IgclLayer {
             let mut layout = TELEMETRY_V1;
             match read_telemetry(&self.api, device, &mut layout) {
                 Ok(t) => {
-                    let (fields, energy) = supported_fields(&t);
+                    let (mut fields, energy) = supported_fields(&t);
+                    if let Some(state) = read_pci_state(&self.api, device) {
+                        fields.extend(link_fields(&state.speed));
+                    }
                     bound[i] = Some(Bound {
                         device,
                         layout,
@@ -745,6 +846,13 @@ impl GpuLayer for IgclLayer {
                     if let Some(counter) = bound.energy {
                         if let Some(watts) = bound.meter.update(energy_sample(&t, counter)) {
                             readings.insert(GpuField::PowerBoard, watts);
+                        }
+                    }
+                    let link = [GpuField::PcieLinkGen, GpuField::PcieLinkWidth];
+                    if link.iter().any(|f| bound.fields.contains(f)) {
+                        // A failed link read only drops the link fields for this tick.
+                        if let Some(state) = read_pci_state(&api, bound.device) {
+                            readings.extend(link_readings(&state.speed, &bound.fields));
                         }
                     }
                     all.push(readings);
@@ -832,6 +940,15 @@ mod tests {
         replies: Vec<Result<PowerTelemetry, CtlResult>>,
     }
 
+    /// PCI state replies of one device, in order; the last one repeats.
+    #[derive(Clone)]
+    struct FakePci {
+        states: Vec<Result<(i32, i32), CtlResult>>,
+    }
+
+    /// Any failure code: the layer treats every non-success the same way.
+    const FAKE_PCI_FAILURE: CtlResult = ERROR_DEVICE_UNAVAILABLE;
+
     #[derive(Default)]
     struct Fake {
         init_replies: Vec<CtlResult>,
@@ -839,6 +956,10 @@ mod tests {
         devices: Vec<FakeDevice>,
         /// (size, version) announced by every telemetry request.
         telemetry_calls: Vec<(u32, u8)>,
+        /// Per device index; a device without an entry fails the PCI state read.
+        pci: Vec<FakePci>,
+        /// (record size, nested speed size) announced by every PCI state request.
+        pci_state_calls: Vec<(u32, u32)>,
     }
 
     thread_local! {
@@ -940,11 +1061,39 @@ mod tests {
         })
     }
 
+    unsafe extern "C" fn fake_pci_state(device: DeviceHandle, out: *mut PciState) -> CtlResult {
+        FAKE.with_borrow_mut(|f| {
+            // SAFETY: the layer passes a sized state record.
+            let sizes = unsafe { ((*out).size, (*out).speed.size) };
+            f.pci_state_calls.push(sizes);
+            let Some(pci) = f.pci.get_mut(device_index(device)) else {
+                return FAKE_PCI_FAILURE;
+            };
+            let reply = if pci.states.len() > 1 {
+                pci.states.remove(0)
+            } else {
+                pci.states[0]
+            };
+            match reply {
+                Ok((generation, width)) => {
+                    // SAFETY: as above.
+                    unsafe {
+                        (*out).speed.generation = generation;
+                        (*out).speed.width = width;
+                    }
+                    SUCCESS
+                }
+                Err(rc) => rc,
+            }
+        })
+    }
+
     const FAKE_API: Api = Api {
         init: fake_init,
         enumerate: fake_enumerate,
         properties: fake_properties,
         telemetry: fake_telemetry,
+        pci_state: Some(fake_pci_state),
     };
 
     fn fake_layer(fake: Fake) -> Option<IgclLayer> {
@@ -1192,6 +1341,114 @@ mod tests {
         assert!(supported[0].contains(&GpuField::TemperatureCore));
     }
 
+    fn speed(generation: i32, width: i32) -> PciSpeed {
+        PciSpeed {
+            generation,
+            width,
+            ..PciSpeed::new()
+        }
+    }
+
+    #[test]
+    fn pci_records_announce_their_sizes() {
+        let state = PciState::new();
+        assert_eq!((state.size, state.speed.size), (32, 24));
+    }
+
+    #[test]
+    fn link_fields_and_readings_skip_unknown_values() {
+        use GpuField::*;
+        assert_eq!(
+            link_fields(&speed(4, 8)),
+            BTreeSet::from([PcieLinkGen, PcieLinkWidth])
+        );
+        assert_eq!(link_fields(&speed(-1, 16)), BTreeSet::from([PcieLinkWidth]));
+        assert!(link_fields(&speed(-1, -1)).is_empty());
+        assert!(link_fields(&speed(0, 0)).is_empty());
+
+        let both = BTreeSet::from([PcieLinkGen, PcieLinkWidth]);
+        assert_eq!(
+            link_readings(&speed(1, 8), &both),
+            Readings::from([(PcieLinkGen, 1.0), (PcieLinkWidth, 8.0)])
+        );
+        // Unknown this tick: missing, not zero.
+        assert_eq!(
+            link_readings(&speed(-1, 8), &both),
+            Readings::from([(PcieLinkWidth, 8.0)])
+        );
+        // A field not declared at attach is never reported.
+        assert_eq!(
+            link_readings(&speed(4, 8), &BTreeSet::from([PcieLinkWidth])),
+            Readings::from([(PcieLinkWidth, 8.0)])
+        );
+    }
+
+    #[test]
+    fn layer_reports_the_live_pcie_link() {
+        use GpuField::*;
+        let mut fake = one_device(vec![Ok(card(1.0, 100.0))]);
+        fake.pci = vec![FakePci {
+            states: vec![
+                Ok((4, 8)),  // attach probe
+                Ok((1, 8)),  // idle
+                Ok((-1, 8)), // generation unknown this tick
+            ],
+        }];
+        let mut layer = fake_layer(fake).expect("init");
+        let adapters = [adapter(0x0000_0001_0000_ABCD, 0x8086, 3)];
+
+        let supported = layer.attach(&adapters);
+        assert!(supported[0].contains(&PcieLinkGen));
+        assert!(supported[0].contains(&PcieLinkWidth));
+
+        let first = layer.sample().expect("first sample");
+        assert_eq!(first[0][&PcieLinkGen], 1.0);
+        assert_eq!(first[0][&PcieLinkWidth], 8.0);
+        assert_eq!(first[0][&ClockCore], 2400.0);
+        let second = layer.sample().expect("second sample");
+        assert!(!second[0].contains_key(&PcieLinkGen));
+        assert_eq!(second[0][&PcieLinkWidth], 8.0);
+
+        let state_calls = FAKE.with_borrow(|f| f.pci_state_calls.clone());
+        assert_eq!(state_calls, [(32, 24); 3]);
+    }
+
+    #[test]
+    fn failed_link_read_drops_only_the_link_fields() {
+        use GpuField::*;
+        let mut fake = one_device(vec![Ok(card(1.0, 100.0))]);
+        fake.pci = vec![FakePci {
+            states: vec![Ok((4, 16)), Err(ERROR_DEVICE_UNAVAILABLE)],
+        }];
+        let mut layer = fake_layer(fake).expect("init");
+        layer.attach(&[adapter(0x0000_0001_0000_ABCD, 0x8086, 3)]);
+
+        let readings = layer.sample().expect("sample");
+        assert!(!readings[0].contains_key(&PcieLinkGen));
+        assert!(!readings[0].contains_key(&PcieLinkWidth));
+        assert_eq!(readings[0][&ClockCore], 2400.0);
+    }
+
+    #[test]
+    fn runtime_without_pci_exports_keeps_telemetry() {
+        FAKE.set(one_device(vec![Ok(card(1.0, 100.0))]));
+        let api = Api {
+            pci_state: None,
+            ..FAKE_API
+        };
+        let mut layer = IgclLayer::start(api, None).expect("init");
+        let supported = layer.attach(&[adapter(0x0000_0001_0000_ABCD, 0x8086, 3)]);
+
+        assert!(supported[0].contains(&GpuField::ClockCore));
+        assert!(!supported[0].contains(&GpuField::PcieLinkGen));
+        assert!(!supported[0].contains(&GpuField::PcieLinkWidth));
+        assert_eq!(
+            layer.sample().expect("sample")[0][&GpuField::ClockCore],
+            2400.0
+        );
+        assert!(FAKE.with_borrow(|f| f.pci_state_calls.is_empty()));
+    }
+
     #[test]
     fn item_values_follow_their_type_tag() {
         let mut unsupported = item(1.0);
@@ -1260,6 +1517,17 @@ mod tests {
         if supported[intel].contains(&GpuField::PowerBoard) {
             let watts = readings[intel][&GpuField::PowerBoard];
             assert!((0.0..=1000.0).contains(&watts), "power {watts}");
+        }
+
+        // PCIe link (unverified layout): print it for a manual comparison with GPU-Z. The
+        // maximum link is not read here (Task 6: PnP alone).
+        println!(
+            "IGCL link {:?} x{:?}",
+            readings[intel].get(&GpuField::PcieLinkGen),
+            readings[intel].get(&GpuField::PcieLinkWidth),
+        );
+        if let Some(generation) = readings[intel].get(&GpuField::PcieLinkGen) {
+            assert!((1.0..=6.0).contains(generation), "PCIe gen {generation}");
         }
     }
 }

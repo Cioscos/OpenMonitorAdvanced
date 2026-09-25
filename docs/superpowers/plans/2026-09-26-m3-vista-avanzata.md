@@ -69,7 +69,7 @@ Ogni feature si aggiunge nel task che la usa per primo.
   - anche l'id dell'istanza PnP del disco si legge senza privilegi;
   - `StorageDeviceTemperatureProperty` funziona senza privilegi su NVMe e HDD. L'SSD SATA non la supporta (`ERROR_INVALID_FUNCTION`: manca il supporto, non è un problema di privilegi). Questo risolve §13.6.
 
-**Verifica del piano.** Prima della consegna, un integratore ha applicato i Task 1–14 in ordine, così come sono scritti, in un worktree temporaneo, correggendo il testo dove non reggeva. Risultati:
+**Verifica della stesura precedente.** La stesura precedente riporta che un integratore ha applicato i Task 1–14 in ordine in un worktree temporaneo. I risultati seguenti sono evidenze storiche riportate nel documento, non una nuova esecuzione del piano corretto in questa revisione:
 - dopo ogni task, test Rust e frontend verdi, clippy e fmt puliti, `pnpm check` a 0 errori, parità delle chiavi en/it;
 - conteggi finali: oma-core 79, oma-app 16, oma-win 194 (+18 ignorati) e labels 1; Vitest 168 test in 22 file;
 - test hardware tutti verdi: 212 della libreria oma-win e 11 del provider;
@@ -80,12 +80,23 @@ Non verificati:
 - la misura con 61 minuti di storico sul profilo reale;
 - IGCL su hardware Intel.
 
+**Revisione del piano (25 settembre 2026).** Dopo la verifica dell'integratore sono stati corretti alcuni algoritmi e contratti:
+- decimazione a intervalli bilanciati con buchi conservativi (Task 2, 9);
+- temperature dei dischi per `Index` del driver, con nuovo tentativo sui dischi in standby (Task 5);
+- pulizia della tabella dei processi sugli errori del provider (Task 8);
+- grafico e statistiche legati alla revisione dello schema e alla visibilità (Task 11, 12, 13);
+- misura con la finestra visibile per 61 minuti (Task 14).
+
+Per queste correzioni sono stati aggiunti test di regressione. I conteggi attesi nei task li includono, ma sono calcolati e non osservati: se un conteggio differisce solo di qualche unità e tutti i test passano, l'implementer lo segnala nel report senza bloccarsi. Le verifiche complete e hardware si rieseguono durante l'implementazione.
+
+Conteggi finali attesi dopo la revisione (quelli dell'integratore sono sopra): oma-core 81, oma-app 16, oma-win 197 (+18 ignorati), labels 1; Vitest 176 test in 22 file.
+
 Limite noto: sulle pagine Rete, KPI e tabella usano i bit/s come la vista Semplificata, mentre l'asse e la legenda del grafico restano in byte/s. La scelta delle unità arriva con le impostazioni (M5).
 
 **Decisioni** (già prese; ognuna con il costo se fosse sbagliata):
 - **D1. Min/max/media nel nucleo, dall'avvio dell'app.** La WebView viene distrutta alla chiusura della finestra, mentre §4.2 chiede statistiche "dall'avvio". L'azzeramento vale per i sensori della pagina. Al cambio di fonte o di unità si azzera il singolo sensore, come per lo storico. *(Costo: trascurabile, un confronto e una somma per sensore a ogni ciclo.)*
 - **D2. `startedAtMs`** è l'istante del primo ciclo del motore, letto con `get_session`. Il banner della vista Semplificata lo usa al posto del primo campione visto dalla finestra (seguito di M1). *(Costo: nessuno.)*
-- **D3. Sottocampionamento nel nucleo per le finestre da 30 minuti in su.** `get_history` accetta `maxPoints`: 900 punti, con l'inviluppo min/max di 2 punti per intervallo. *(Costo: una curva meno fine a 30m/1h, ma i picchi restano visibili.)*
+- **D3. Sottocampionamento nel nucleo per le finestre da 30 minuti in su.** `get_history` accetta `maxPoints`: al massimo 900 punti, con l'inviluppo min/max di 2 punti per intervallo bilanciato. *(Costo: una curva meno fine a 30m/1h; i picchi restano visibili negli intervalli interamente validi, i buchi si ampliano conservativamente all'intervallo.)*
 - **D4. Al massimo 8 serie e 2 unità di misura per grafico.** *(Costo: per confrontare più di 8 sensori bisogna cambiare selezione.)*
 - **D5. Uso GPU per processo nello strato PDH** (per ogni processo, il motore più carico) e pubblicato in `GpuProcessTable`. Non sono sensori: niente id e niente storico. *(Costo: circa 50 µs per ciclo sempre, anche in tray.)*
 - **D6. Nomi dei processi con Toolhelp32**, solo quando compare un pid sconosciuto, con cache. Niente `NtQuerySystemInformation` (non documentata) e niente `OpenProcess`. *(Costo: circa 2,5 ms nei cicli in cui compaiono nuovi processi GPU.)*
@@ -149,12 +160,12 @@ Condizioni che la spec implica ma che un test di funzionalità non coprirebbe da
    - `fitSelection drops unknown ids and whatever breaks the limits` (Task 11);
    - `a missing section falls back to the CPU without forgetting the choice` (Task 10);
    - `a reply that started before a reset is dropped` (Task 12).
-3. **Un'ora di storico su molte serie.** Il budget di 200 MB vale anche con la pagina GPU aperta, 8 serie e finestra di 1 ora: la decimazione non deve mai superare 900 punti e i picchi devono restare visibili. Test:
-   - `decimated_output_never_exceeds_max_points` e `decimation_emits_min_then_max_per_bucket` (Task 2);
+3. **Un'ora di storico su molte serie.** Il budget di 200 MB vale anche con la pagina GPU aperta, 8 serie e finestra di 1 ora: la decimazione non deve mai superare 900 punti, i picchi degli intervalli interamente validi devono restare visibili e i buchi non devono sparire. Test:
+   - `decimated_output_never_exceeds_max_points`, `decimation_emits_min_then_max_per_bucket`, `near_one_hour_has_no_oversized_final_bucket` e `a_mixed_bucket_preserves_the_gap_conservatively` (Task 2);
    - `history_with_max_points_is_decimated_and_clamped` (Task 3);
    - `long windows ask for decimated history and the choice persists` e `trim keeps exactly the window measured back from now` (Task 11);
    - misura del Task 14.
-4. **Finestra ridotta a icona o coperta.** Grafico, statistiche e processi smettono di aggiornarsi. Alla ricomparsa ripartono subito, senza raffiche di richieste accumulate. Test:
+4. **Documento segnalato come nascosto da WebView2 (`visibilityState === 'hidden'`).** Grafico, statistiche e processi smettono di aggiornarsi; anche le risposte già in viaggio non devono ridisegnare il grafico. Alla ricomparsa ripartono subito, senza raffiche di richieste accumulate. La sola sovrapposizione di un'altra finestra non è una condizione rilevata dal codice: il contratto segue l'evento di visibilità. Test:
    - `rendering pauses while hidden and history is reloaded when visible` (Task 11);
    - `stops polling while hidden and polls at once when visible again` e `a slow reply does not pile up requests` (Task 12);
    - `refreshes every 2 s only while visible` (Task 13).
@@ -773,14 +784,14 @@ git commit -m "feat(core): per-sensor min/max/avg since start and monitoring sta
   ```
   `Sampler::spawn` mantiene firma e comportamento; cambia solo il fatto che un panic nel tick non ferma più il thread. `History::push` mantiene la firma. `sanitize(unit, value)` e `sanitize_sensor(sensor, value)` mantengono firme e risultati; non scrivono più righe di log.
 
-**Decimazione (decisione D3).** Nello spike uPlot 20 serie × 3600 punti grezzi occupano 219 MB in totale, oltre il budget di 200 MB; 8 serie × 3600 ne occupano 148. Le finestre di 30 min e 1 h chiedono quindi al core al massimo 900 righe (Task 3 e Task 11), mentre 1 min e 5 min restano grezze. La riduzione è un inviluppo min/max, così picchi e cali brevi restano visibili anche dopo la riduzione:
+**Decimazione (decisione D3).** Nello spike uPlot 20 serie × 3600 punti grezzi occupano 219 MB in totale, oltre il budget di 200 MB; 8 serie × 3600 ne occupano 148. Le finestre di 30 min e 1 h chiedono quindi al core al massimo 900 righe (Task 3 e Task 11), mentre 1 min e 5 min restano grezze. La riduzione è un inviluppo min/max, così picchi e cali brevi degli intervalli interamente validi restano visibili anche dopo la riduzione:
 - con `max_points < 2`, oppure con campioni ≤ `max_points`, il risultato è identico a `window()`;
-- altrimenti i campioni della finestra (già filtrati da `since_ms`) si dividono in `buckets = max_points / 2` gruppi consecutivi di `len / buckets` campioni; l'ultimo gruppo prende anche il resto;
+- altrimenti i campioni della finestra (già filtrati da `since_ms`) si dividono in `buckets = max_points / 2` gruppi consecutivi con confini `b * len / buckets` e `(b + 1) * len / buckets`: le dimensioni differiscono al massimo di un campione, senza concentrare il resto nell'ultimo gruppo;
 - ogni gruppo produce due righe: (primo timestamp del gruppo, minimo di ogni serie) e (ultimo timestamp del gruppo, massimo di ogni serie);
-- una serie senza valori nel gruppo produce `None, None`;
+- una serie con anche un solo valore assente nel gruppo produce `None, None`: il buco viene ampliato conservativamente al gruppo e non nascosto; min/max e picchi si conservano nei gruppi interamente validi;
 - righe in uscita = `2 × buckets` ≤ `max_points`. Esempio reale: 3600 campioni con `max_points = 900` danno 450 gruppi da 8 campioni, cioè 900 righe.
 
-Poiché `len > max_points ≥ 2 × buckets`, ogni gruppo ha almeno 2 campioni: i due timestamp della coppia sono distinti e l'asse x resta ordinato, come richiede uPlot.
+Poiché `len > max_points ≥ 2 × buckets`, ogni gruppo ha almeno 2 campioni. I timestamp sono i confini dell'inviluppo, non gli istanti effettivi degli estremi: l'ordine minimo/massimo non descrive l'ordine temporale delle letture originali. L'asse x conserva l'ordine dello storico.
 
 **Robustezza (decisione D12, follow-up M1 "il thread del sampler muore in silenzio").** In M1 `History::push` fa `assert_eq!` sulla lunghezza dei valori e il sampler chiama `Engine::tick` senza protezione. Un panic lì termina il thread `oma-sampler`: la UI resta ferma sugli ultimi valori per sempre, senza nulla nel log (in release non c'è console e il panic hook scrive su stderr). Ora:
 - `History::push` non va mai in panic. Se i valori sono meno dei sensori, i mancanti diventano "assenti" (NaN); se sono di più, quelli in eccesso si scartano. La prima discrepanza scrive un `tracing::error!`, le successive no.
@@ -925,10 +936,10 @@ In `crates/oma-core/src/history.rs`, nel modulo `tests`, aggiungi subito prima d
     }
 
     #[test]
-    fn the_last_bucket_takes_the_remainder() {
+    fn balanced_buckets_distribute_the_remainder() {
         let v: Vec<Option<f64>> = (1..=11).map(|i| Some(i as f64)).collect();
         let w = filled(&v).window_decimated(&ids(&["a"]), 0, 5);
-        // 5 / 2 = 2 buckets of 11 / 2 = 5 samples; the last one gets 6.
+        // 5 / 2 = 2 balanced buckets: five samples, then six.
         assert_eq!(w.timestamps_ms, vec![1_000, 5_000, 6_000, 11_000]);
         assert_eq!(
             w.series,
@@ -938,11 +949,34 @@ In `crates/oma-core/src/history.rs`, nel modulo `tests`, aggiungi subito prima d
 
     #[test]
     fn a_bucket_without_values_emits_none_twice() {
-        let v = [None, None, None, Some(2.0), None, Some(7.0)];
+        let v = [None, None, None, Some(2.0), Some(4.0), Some(7.0)];
         let w = filled(&v).window_decimated(&ids(&["a", "unknown"]), 0, 4);
         assert_eq!(w.timestamps_ms, vec![1_000, 3_000, 4_000, 6_000]);
         assert_eq!(w.series[0], vec![None, None, Some(2.0), Some(7.0)]);
         assert_eq!(w.series[1], vec![None; 4]);
+    }
+
+    #[test]
+    fn a_mixed_bucket_preserves_the_gap_conservatively() {
+        let v = [Some(1.0), None, Some(3.0), Some(4.0), Some(5.0), Some(6.0)];
+        let w = filled(&v).window_decimated(&ids(&["a"]), 0, 4);
+        assert_eq!(w.series[0], vec![None, None, Some(4.0), Some(6.0)]);
+    }
+
+    #[test]
+    fn near_one_hour_has_no_oversized_final_bucket() {
+        let mut h = History::new(3_600);
+        h.set_sensors(&ids(&["a"]));
+        for i in 1..=3_599 {
+            h.push(i * 1_000, &[Some(i as f64)]);
+        }
+        let w = h.window_decimated(&ids(&["a"]), 0, 900);
+        assert_eq!(w.timestamps_ms.len(), 900);
+        assert_eq!(w.timestamps_ms.first(), Some(&1_000));
+        assert_eq!(w.timestamps_ms.last(), Some(&3_599_000));
+        for pair in w.timestamps_ms.chunks_exact(2) {
+            assert!((6_000..=7_000).contains(&(pair[1] - pair[0])));
+        }
     }
 
     #[test]
@@ -985,11 +1019,12 @@ In `crates/oma-core/src/history.rs`, dentro `impl History`, subito dopo la fine 
 
     /// Like `window`, but at most `max_points` rows: long windows are reduced
     /// to a min/max envelope so a 1 h chart stays light (decision D3).
-    /// Samples are split into `max_points / 2` consecutive buckets of equal
-    /// size (the last one also takes the remainder); each bucket yields two
+    /// Samples are split into `max_points / 2` consecutive balanced buckets
+    /// whose sizes differ by at most one sample; each bucket yields two
     /// rows, (first timestamp, per-series minimum) and (last timestamp,
-    /// per-series maximum), so peaks and dips survive. A series without
-    /// values in a bucket yields `None` twice. With `max_points < 2`, or when
+    /// per-series maximum). These are envelope bounds, not actual extremum
+    /// times. Any missing value makes that series yield `None` twice for the
+    /// bucket; peaks survive in fully valid buckets. With `max_points < 2`, or when
     /// the samples already fit, the result is exactly `window`.
     pub fn window_decimated(
         &self,
@@ -1010,15 +1045,7 @@ fn decimate(raw: HistoryWindow, max_points: usize) -> HistoryWindow {
         return raw;
     }
     let buckets = max_points / 2;
-    let size = len / buckets; // >= 2, because len > max_points >= 2 * buckets
-    let bounds = |b: usize| {
-        let end = if b + 1 == buckets {
-            len
-        } else {
-            (b + 1) * size
-        };
-        (b * size, end)
-    };
+    let bounds = |b: usize| (b * len / buckets, (b + 1) * len / buckets);
     let mut timestamps_ms = Vec::with_capacity(buckets * 2);
     for b in 0..buckets {
         let (start, end) = bounds(b);
@@ -1032,6 +1059,10 @@ fn decimate(raw: HistoryWindow, max_points: usize) -> HistoryWindow {
             let mut out = Vec::with_capacity(buckets * 2);
             for b in 0..buckets {
                 let (start, end) = bounds(b);
+                if values[start..end].iter().any(Option::is_none) {
+                    out.extend([None, None]);
+                    continue;
+                }
                 let mut min: Option<f64> = None;
                 let mut max: Option<f64> = None;
                 for &v in values[start..end].iter().flatten() {
@@ -1056,7 +1087,7 @@ La decimazione lavora sull'uscita di `window`, così eredita senza duplicarli il
 - [ ] **Step 8: Esegui i test e verifica che passino**
 
 Esegui: `cargo test -p oma-core history`
-Risultato atteso: tutti i test di `history::tests` OK (6 nuovi di decimazione, 2 di `push`, i 7 di M1).
+Risultato atteso: tutti i test di `history::tests` OK (8 nuovi di decimazione, 2 di `push`, i 7 di M1).
 
 - [ ] **Step 9: Scrivi i test del sampler (falliscono)**
 
@@ -1476,7 +1507,7 @@ La riga successiva (`self.history.push(timestamp_ms, &values);`) resta invariata
 - [ ] **Step 16: Esegui i test e verifica che passino**
 
 Esegui: `cargo test -p oma-core`
-Risultato atteso: tutti OK, 15 test in più rispetto alla fine del Task 1 (8 in `history`, 4 in `sampler`, 2 in `sanitize`, 1 in `engine`). I test M1 di `sanitize` (`rejects_non_finite`, `temperature_must_be_physically_plausible`, …) passano invariati: i risultati di `sanitize` non cambiano.
+Risultato atteso: tutti OK, 17 test in più rispetto alla fine del Task 1 (10 in `history`, 4 in `sampler`, 2 in `sanitize`, 1 in `engine`). I test M1 di `sanitize` (`rejects_non_finite`, `temperature_must_be_physically_plausible`, …) passano invariati: i risultati di `sanitize` non cambiano.
 
 - [ ] **Step 17: Lint e commit**
 
@@ -3215,7 +3246,7 @@ git commit -m "feat(win): disk identity fallback chain (serial, GPT, MBR, PnP)"
   // storage_temperature.rs
   pub(crate) const TEMPERATURE_PERIOD: Duration; // 30 s
   #[derive(Debug, Clone, PartialEq)]
-  pub(crate) struct TemperatureReport { pub sensors: Vec<Option<f64>>, pub warning_c: Option<i16>, pub critical_c: Option<i16> }
+  pub(crate) struct TemperatureReport { pub sensors: BTreeMap<usize, Option<f64>>, pub warning_c: Option<i16>, pub critical_c: Option<i16> }
   pub(crate) fn parse_temperatures(bytes: &[u8]) -> Option<TemperatureReport>;
   pub(crate) fn query_temperatures(drive: &PhysicalDrive) -> Option<TemperatureReport>;
   pub(crate) fn declared_positions(report: &TemperatureReport) -> Vec<usize>;
@@ -3244,11 +3275,11 @@ git commit -m "feat(win): disk identity fallback chain (serial, GPT, MBR, PnP)"
 - `GetDevicePowerState` sul disco aperto con accesso 0 risponde in 2–9 µs (`Some(true)` per tutti e 4 i dischi, accesi). Serve a non risvegliare un HDD in standby solo per leggerne la temperatura: la spec (§1.1, "Leggerezza") chiede che l'app non falsi ciò che misura.
 
 **Regole fissate qui:**
-- **Dichiarazione** (nella discovery): si legge il disco una volta; ogni posizione dell'array con un valore riportato diventa un sensore. Posizione 0 = temperatura del disco (la "composite" degli NVMe), id `…/temperature/drive`; posizione `i > 0` = `…/temperature/sensor-<i>`. I sensori stanno dopo `…/load/active` e prima dei volumi del disco, nello stesso ordine in `discover` e in `poll`.
+- **Dichiarazione** (nella discovery): si legge il disco una volta; ogni `STORAGE_TEMPERATURE_INFO.Index` con un valore riportato diventa un sensore. Indice 0 = temperatura del disco (la "composite" degli NVMe), id `…/temperature/drive`; indice `i > 0` = `…/temperature/sensor-<i>`. Il campo `Index` identifica il sensore, non la posizione nell'array: gli indici possono essere sparsi o riordinati ([contratto Windows](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_temperature_info)). I sensori stanno dopo `…/load/active` e prima dei volumi del disco, nello stesso ordine in `discover` e in `poll`. Il nome storico degli helper `declared_positions` e dei campi `positions` indica qui gli indici del driver.
 - **Soglie:** `tempWarningC` e `tempCriticalC` diventano proprietà del device solo se riportate (diverse da `0x8000`) e maggiori di 0.
 - **Aggiornamento:** ogni disco si rilegge quando la sua lettura ha almeno 30 s (spec §4.1, "SMART e salute dei dischi: ogni 30 s"); in mezzo si ripete l'ultimo valore. Per ciclo si rilegge al massimo un disco, quello con la lettura più vecchia. La temperatura non è un tasso: anche il primo poll dopo la discovery ha il valore letto nella discovery.
-- **Dischi in standby:** se `GetDevicePowerState` dice che il disco è spento, non lo si interroga. Nel poll i suoi valori sono assenti fino alla lettura successiva; nella discovery il disco non dichiara sensori di temperatura e li riceve alla discovery seguente. Se Windows non sa rispondere (`None`), il disco si legge.
-- Un disco che risponde con meno sensori di quelli dichiarati dà `None` per le posizioni mancanti: l'allineamento dei valori con i sensori non cambia mai fuori dalla discovery.
+- **Dischi in standby:** se `GetDevicePowerState` dice che il disco è spento, non lo si interroga. Nel poll i suoi valori sono assenti fino alla lettura successiva; nella discovery il disco non dichiara sensori di temperatura. Si conserva comunque una voce di pianificazione per ogni disco identificato, anche senza sensori: ogni 30 s viene ritentato, sempre al massimo un disco per poll. Quando compaiono indici riportati non ancora dichiarati, il provider richiede `Rediscover`; il worker non ha una discovery periodica implicita. Se Windows non sa rispondere (`None`), il disco si legge.
+- Un disco che risponde con meno sensori di quelli dichiarati dà `None` per gli indici mancanti: l'allineamento dei valori con i sensori non cambia mai fuori dalla discovery. I tentativi falliti aggiornano anch'essi la scadenza, evitando retry a ogni tick.
 
 - [ ] **Step 1: Feature, modulo, lettori little-endian e stato di alimentazione**
 
@@ -3355,7 +3386,7 @@ mod tests {
     fn parses_an_nvme_report() {
         // Disk 2 of the development machine: composite plus two sensors.
         let report = parse_temperatures(&descriptor(95, 90, &[48, 48, 39])).unwrap();
-        assert_eq!(report.sensors, vec![Some(48.0), Some(48.0), Some(39.0)]);
+        assert_eq!(report.sensors, BTreeMap::from([(0, Some(48.0)), (1, Some(48.0)), (2, Some(39.0))]));
         assert_eq!(report.warning_c, Some(90));
         assert_eq!(report.critical_c, Some(95));
     }
@@ -3365,7 +3396,7 @@ mod tests {
         // Disk 0 of the development machine (SATA HDD): no critical threshold.
         let report =
             parse_temperatures(&descriptor(NOT_REPORTED, 60, &[39, NOT_REPORTED])).unwrap();
-        assert_eq!(report.sensors, vec![Some(39.0), None]);
+        assert_eq!(report.sensors, BTreeMap::from([(0, Some(39.0)), (1, None)]));
         assert_eq!(report.warning_c, Some(60));
         assert_eq!(report.critical_c, None);
         let zero = parse_temperatures(&descriptor(0, -5, &[30])).unwrap();
@@ -3378,7 +3409,7 @@ mod tests {
         bytes.truncate(INFO + INFO_SIZE + 3); // only the first entry fits
         assert_eq!(
             parse_temperatures(&bytes).unwrap().sensors,
-            vec![Some(48.0)]
+            BTreeMap::from([(0, Some(48.0))])
         );
         assert_eq!(parse_temperatures(&bytes[..12]), None);
     }
@@ -3409,6 +3440,22 @@ mod tests {
             vec![Some(47.0), None]
         );
         assert_eq!(declared_values(None, &[0, 2]), vec![None, None]);
+    }
+
+    #[test]
+    fn sparse_reordered_indices_keep_their_identity() {
+        let mut bytes = descriptor(95, 90, &[48, 39]);
+        bytes[INFO..INFO + 2].copy_from_slice(&7u16.to_le_bytes());
+        bytes[INFO + INFO_SIZE..INFO + INFO_SIZE + 2].copy_from_slice(&0u16.to_le_bytes());
+        let report = parse_temperatures(&bytes).unwrap();
+        assert_eq!(declared_positions(&report), vec![0, 7]);
+        assert_eq!(declared_values(Some(&report), &[0, 7, 1]), vec![Some(39.0), Some(48.0), None]);
+        let mut reversed = bytes.clone();
+        reversed[INFO..INFO + INFO_SIZE].copy_from_slice(&bytes[INFO + INFO_SIZE..INFO + 2 * INFO_SIZE]);
+        reversed[INFO + INFO_SIZE..INFO + 2 * INFO_SIZE].copy_from_slice(&bytes[INFO..INFO + INFO_SIZE]);
+        assert_eq!(parse_temperatures(&reversed), Some(report));
+        bytes[INFO..INFO + 2].copy_from_slice(&0u16.to_le_bytes());
+        assert!(parse_temperatures(&bytes).is_none(), "duplicate sensor identity");
     }
 
     #[test]
@@ -3480,7 +3527,7 @@ mod tests {
                 elapsed < Duration::from_millis(200),
                 "disk {index}: {elapsed:?}"
             );
-            if let Some(Some(celsius)) = report.as_ref().and_then(|r| r.sensors.first()) {
+            if let Some(Some(celsius)) = report.as_ref().and_then(|r| r.sensors.get(&0)) {
                 assert!((5.0..=90.0).contains(celsius), "disk {index}: {celsius} °C");
                 with_temperature += 1;
             }
@@ -3548,9 +3595,9 @@ pub(crate) const TEMPERATURE_PERIOD: Duration = Duration::from_secs(30);
 /// One `StorageDeviceTemperatureProperty` answer, in °C.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TemperatureReport {
-    /// One entry per sensor in descriptor order (0 = the drive itself, the
-    /// "composite" temperature on NVMe); `None` = not reported.
-    pub sensors: Vec<Option<f64>>,
+    /// Driver Index -> value (0 = composite); independent of descriptor order.
+    /// `None` = not reported. Duplicate indices invalidate the report.
+    pub sensors: BTreeMap<usize, Option<f64>>,
     pub warning_c: Option<i16>,
     pub critical_c: Option<i16>,
 }
@@ -3561,10 +3608,16 @@ fn reported(raw: i16) -> Option<i16> {
 
 pub(crate) fn parse_temperatures(bytes: &[u8]) -> Option<TemperatureReport> {
     let count = usize::from(le_u16(bytes, INFO_COUNT)?);
-    let sensors = (0..count)
-        .map_while(|i| le_i16(bytes, INFO + i * INFO_SIZE + INFO_TEMPERATURE))
-        .map(|raw| reported(raw).map(f64::from))
-        .collect();
+    let mut sensors = BTreeMap::new();
+    for i in 0..count {
+        let at = INFO + i * INFO_SIZE;
+        let Some(record) = bytes.get(at..at + INFO_SIZE) else { break };
+        let index = usize::from(le_u16(record, 0)?);
+        let value = reported(le_i16(record, INFO_TEMPERATURE)?).map(f64::from);
+        if sensors.insert(index, value).is_some() {
+            return None;
+        }
+    }
     let threshold = |offset| le_i16(bytes, offset).and_then(reported).filter(|&t| t > 0);
     Some(TemperatureReport {
         sensors,
@@ -3578,17 +3631,16 @@ pub(crate) fn query_temperatures(drive: &PhysicalDrive) -> Option<TemperatureRep
     parse_temperatures(&drive.query_property(StorageDeviceTemperatureProperty, 4096)?)
 }
 
-/// Descriptor positions that get a sensor: those reported at discovery.
+/// Driver indices that get a sensor: those reported at discovery, sorted by Index.
 pub(crate) fn declared_positions(report: &TemperatureReport) -> Vec<usize> {
     report
         .sensors
         .iter()
-        .enumerate()
-        .filter_map(|(position, value)| value.map(|_| position))
+        .filter_map(|(&index, value)| value.map(|_| index))
         .collect()
 }
 
-/// Sensor id segment: `drive` for position 0, `sensor-<n>` otherwise.
+/// Sensor id segment: `drive` for driver Index 0, `sensor-<n>` otherwise.
 pub(crate) fn sensor_name(position: usize) -> String {
     if position == 0 {
         "drive".to_owned()
@@ -3605,14 +3657,14 @@ pub(crate) fn sensor_label(position: usize) -> Label {
     }
 }
 
-/// Values of the declared sensors; a missing report or position is `None`.
+/// Values in declared driver-index order; a missing report or index is `None`.
 pub(crate) fn declared_values(
     report: Option<&TemperatureReport>,
     positions: &[usize],
 ) -> Vec<Option<f64>> {
     positions
         .iter()
-        .map(|&p| report.and_then(|r| r.sensors.get(p).copied().flatten()))
+        .map(|&p| report.and_then(|r| r.sensors.get(&p).copied().flatten()))
         .collect()
 }
 
@@ -3700,13 +3752,25 @@ use crate::storage_temperature::{
 4. subito prima di `struct Counters {` aggiungi
 
 ```rust
-/// Temperature sensors of one disk: the descriptor positions declared at
+/// Temperature sensors of one disk: the driver indices declared at
 /// discovery, their latest values (repeated between refreshes) and when they
 /// were read.
 struct DiskTemperatures {
     positions: Vec<usize>,
     values: Vec<Option<f64>>,
     read_at: Instant,
+}
+
+impl DiskTemperatures {
+    /// Refreshes values and the attempt deadline, including failed/asleep reads.
+    /// New driver indices require a schema rebuild, never a value-vector resize.
+    fn refresh(&mut self, report: Option<&TemperatureReport>, now: Instant) -> bool {
+        self.values = declared_values(report, &self.positions);
+        self.read_at = now;
+        report.is_some_and(|r| {
+            declared_positions(r).iter().any(|i| !self.positions.contains(i))
+        })
+    }
 }
 
 /// Temperatures of disk `index`. A disk known to be spun down is not queried,
@@ -3730,7 +3794,7 @@ con
 
 ```rust
     volume_ids: HashMap<String, String>,
-    /// Disk index -> temperature sensors; only disks that declared some.
+    /// Every identified disk, including those waiting for temperature support/wake.
     temperatures: HashMap<u32, DiskTemperatures>,
     /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
 ```
@@ -3767,8 +3831,8 @@ con
 con
 
 ```rust
-            // Which sensors exist is known only from a read; a disk that is
-            // spun down now gets its sensors at the next discovery.
+            // Unknown/asleep disks remain scheduled; a later successful probe
+            // requests rediscovery when it reveals undeclared sensor indices.
             let report = read_temperatures(disk.index);
             devices.push(Device {
                 id: id.clone(),
@@ -3805,16 +3869,14 @@ con
                     Source::Win32,
                 ));
             }
-            if !positions.is_empty() {
-                temperatures.insert(
-                    disk.index,
-                    DiskTemperatures {
-                        values: declared_values(report.as_ref(), &positions),
-                        positions,
-                        read_at: Instant::now(),
-                    },
-                );
-            }
+            temperatures.insert(
+                disk.index,
+                DiskTemperatures {
+                    values: declared_values(report.as_ref(), &positions),
+                    positions,
+                    read_at: Instant::now(),
+                },
+            );
             for volume in &disk.volumes {
 ```
 
@@ -3848,8 +3910,10 @@ con
         let reads = self.temperatures.iter().map(|(&i, t)| (i, t.read_at));
         if let Some(index) = next_refresh(reads, Instant::now()) {
             if let Some(disk) = self.temperatures.get_mut(&index) {
-                disk.values = declared_values(read_temperatures(index).as_ref(), &disk.positions);
-                disk.read_at = Instant::now();
+                let report = read_temperatures(index);
+                if disk.refresh(report.as_ref(), Instant::now()) {
+                    return Err(ProviderError::Rediscover);
+                }
             }
         }
 ```
@@ -3875,6 +3939,36 @@ con
 ```
 
 `StorageProvider` deriva `Default`: `HashMap` lo implementa, quindi non serve altro.
+
+12. nel modulo `tests` di `storage.rs`, aggiungi il test puro del recupero dopo standby o errore transitorio:
+
+```rust
+    #[test]
+    fn sleeping_disk_is_retried_and_new_indices_request_discovery() {
+        use std::time::Duration;
+        use crate::storage_temperature::TEMPERATURE_PERIOD;
+        let start = Instant::now();
+        let mut disk = DiskTemperatures {
+            positions: vec![], values: vec![], read_at: start,
+        };
+        let first = start + TEMPERATURE_PERIOD;
+        assert_eq!(next_refresh([(0, disk.read_at)], first), Some(0));
+        assert!(!disk.refresh(None, first)); // still asleep / transient failure
+        assert_eq!(next_refresh([(0, disk.read_at)], first + Duration::from_secs(1)), None);
+        let awake = TemperatureReport {
+            sensors: BTreeMap::from([(0, Some(42.0))]),
+            warning_c: None, critical_c: None,
+        };
+        assert_eq!(next_refresh([(0, disk.read_at)], first + TEMPERATURE_PERIOD), Some(0));
+        assert!(disk.refresh(Some(&awake), first + TEMPERATURE_PERIOD));
+        assert!(disk.values.is_empty(), "schema changes only in discover");
+        disk.positions = vec![0]; // subsequent discovery declares the new sensor
+        assert!(!disk.refresh(Some(&awake), first + TEMPERATURE_PERIOD));
+        assert_eq!(disk.values, vec![Some(42.0)]);
+        assert!(!disk.refresh(None, first + TEMPERATURE_PERIOD));
+        assert_eq!(disk.values, vec![None]);
+    }
+```
 
 - [ ] **Step 6: Traduzioni ed elenco delle chiavi**
 
@@ -3962,7 +4056,7 @@ cd app && pnpm test src/lib/i18n && cd ..
 ```
 
 Risultato atteso:
-- `cargo test -p oma-win --lib storage`: `test result: ok. 36 passed; 0 failed; 2 ignored` (10 `storage`, 15 `storage_identity`, 2 `storage_ioctl`, 9 `storage_temperature`; ignorati i due test hardware);
+- `cargo test -p oma-win --lib storage`: `test result: ok. 38 passed; 0 failed; 2 ignored` (11 `storage`, 15 `storage_identity`, 2 `storage_ioctl`, 10 `storage_temperature`; ignorati i due test hardware);
 - `labels`: `1 passed`;
 - Vitest: il test di parità delle chiavi en/it passa.
 
@@ -3974,7 +4068,7 @@ cargo test -p oma-win --test providers -- --ignored storage --nocapture
 ```
 
 Risultato atteso sulla macchina di sviluppo (i gradi variano di qualche unità):
-- il primo comando stampa per ogni disco lo stato di alimentazione, il tempo e il resoconto, per esempio `disk 0: powered Some(true), 1.5ms, Some(TemperatureReport { sensors: [Some(39.0)], warning_c: Some(60), critical_c: None })`, `disk 1: powered Some(true), 27µs, None`, `disk 2: … sensors: [Some(48.0), Some(48.0), Some(40.0)], warning_c: Some(90), critical_c: Some(95)`, `disk 3: … warning_c: Some(86), critical_c: Some(87)`; tutti i tempi sotto i 200 ms; `10 passed`. Se l'HDD è in standby, la riga è `disk 0: spun down, not queried` e il test passa lo stesso;
+- il primo comando stampa per ogni disco lo stato di alimentazione, il tempo e il resoconto, per esempio `disk 0: powered Some(true), 1.5ms, Some(TemperatureReport { sensors: {0: Some(39.0)}, warning_c: Some(60), critical_c: None })`, `disk 1: powered Some(true), 27µs, None`, `disk 2: … sensors: {0: Some(48.0), 1: Some(48.0), 2: Some(40.0)}, warning_c: Some(90), critical_c: Some(95)`, `disk 3: … warning_c: Some(86), critical_c: Some(87)`; tutti i test passano, compreso quello degli indici sparsi e riordinati. Se l'HDD è in standby, la riga è `disk 0: spun down, not queried` e il test passa lo stesso;
 - il secondo comando stampa `7 disk temperature sensors` (1 dell'HDD, 3 per ciascun NVMe, nessuno per l'SSD SATA) e termina con `1 passed`. Con l'HDD in standby all'avvio del test sono 6.
 
 - [ ] **Step 10: Lint e commit**
@@ -7097,6 +7191,28 @@ In `with_layers`:
     }
 ```
 
+Prima di modificare `discover`, sposta il corpo attuale di `Provider::poll` in un metodo privato `GpuProvider::poll_inner(&mut self) -> Result<Vec<Option<f64>>, ProviderError>` dentro `impl GpuProvider`. Tutte le uscite anticipate (topologia, switch, errori dei layer) restano nel corpo spostato. Il metodo del trait diventa:
+
+```rust
+    fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        let result = self.poll_inner();
+        if result.is_err() {
+            // Also clear on failures before PDH is reached, and on Rediscover.
+            self.processes.publish(HashMap::new());
+        }
+        result
+    }
+```
+
+All'inizio di `discover`, **prima** di `self.state = State::default()` e della chiamata fallibile a `enumerate`, aggiungi:
+
+```rust
+        self.processes.publish(HashMap::new());
+        self.processes.set_devices(Vec::new());
+```
+
+Così durante il backoff dopo un errore di enumerazione non vengono esposti processi vecchi. La sola pulizia in `PdhLayer::sample` non copre queste uscite del provider.
+
 In `discover`, raccogli le coppie (id, LUID) e consegnale alla tabella:
 
 ```rust
@@ -7143,6 +7259,31 @@ Nel modulo `tests` di `mod.rs`, subito prima di `fn restore_pci_records_and_rest
         assert_eq!(table.processes("gpu/pci-0000:01:00.0"), vec![dwm]);
         assert!(table.processes("gpu/pci-0000:11:00.0").is_empty());
         assert!(table.processes("gpu/pci-0000:02:00.0").is_empty());
+    }
+
+    #[test]
+    fn provider_enumeration_failures_clear_process_rows() {
+        for fail_during_discover in [false, true] {
+            let (mut p, _) = provider(
+                vec![nvidia()], Vec::new(), Vec::new(), &VendorSwitch::new(false),
+            );
+            let table = GpuProcessTable::new();
+            p.processes = table.clone();
+            p.discover().unwrap();
+            table.publish(HashMap::from([(nvidia().luid, vec![GpuProcess {
+                pid: 99, name: "old.exe".into(), load_percent: Some(50.0),
+                engine: Some("3D".into()), dedicated_bytes: None, shared_bytes: None,
+            }])]));
+            assert_eq!(table.processes("gpu/pci-0000:01:00.0").len(), 1);
+            p.enumerate = Box::new(|| Err(ProviderError::Failed("enumeration failed".into())));
+            if fail_during_discover {
+                assert!(p.discover().is_err());
+            } else {
+                p.state.topology_checked = None; // fail before the PDH layer runs
+                assert!(p.poll().is_err());
+            }
+            assert!(table.processes("gpu/pci-0000:01:00.0").is_empty());
+        }
     }
 ```
 
@@ -7193,7 +7334,7 @@ fn gpu_provider_publishes_per_process_usage() {
 - [ ] **Step 8: Esegui i test di `oma-win` e verifica che passino**
 
 Esegui: `cargo test -p oma-win`
-Risultato atteso: tutti OK. In `gpu::pdh` passano i test M2 (con i pid negli attesi di `parses_engine_instances`) e i sei test nuovi (`parses_process_memory_instances`, `process_load_is_the_busiest_single_engine`, `process_load_is_clamped_and_nan_is_unknown`, `process_memory_is_summed_per_process_and_adapter`, `process_rows_are_grouped_by_adapter_and_named`, `layer_without_counters_publishes_an_empty_table`). In `gpu::tests` passa `discover_maps_device_ids_to_luids_for_the_process_table`. `labels` passa; i test di `providers` sono ignorati. `app/src-tauri` non compila ancora con la nuova firma: lo sistema lo Step 9.
+Risultato atteso: tutti OK. In `gpu::pdh` passano i test M2 (con i pid negli attesi di `parses_engine_instances`) e i sei test nuovi (`parses_process_memory_instances`, `process_load_is_the_busiest_single_engine`, `process_load_is_clamped_and_nan_is_unknown`, `process_memory_is_summed_per_process_and_adapter`, `process_rows_are_grouped_by_adapter_and_named`, `layer_without_counters_publishes_an_empty_table`). In `gpu::tests` passano `discover_maps_device_ids_to_luids_for_the_process_table` e `provider_enumeration_failures_clear_process_rows`. `labels` passa; i test di `providers` sono ignorati. `app/src-tauri` non compila ancora con la nuova firma: lo sistema lo Step 9.
 
 - [ ] **Step 9: Comando `get_gpu_processes` nella shell**
 
@@ -7404,9 +7545,9 @@ git commit -m "feat(win): per-process GPU usage table and get_gpu_processes comm
 **Comportamento:**
 - **Storico nel mock.** `getHistory` rispetta `seconds` fino a 3600 (prima era limitato a 300 s), così `pnpm dev` mostra anche le finestre 30m e 1h. Con `maxPoints` restituisce l'inviluppo min/max di `decimateWindow`, con `maxPoints` limitato a 2..3600 come nella shell.
 - **Regola dell'inviluppo** (identica al core, decisione D3): se i campioni sono al massimo `maxPoints`, oppure `maxPoints < 2`, la finestra resta invariata. Altrimenti:
-  - i campioni si dividono in `floor(maxPoints / 2)` bucket consecutivi della stessa dimensione; l'ultimo prende il resto;
+  - i campioni si dividono in `floor(maxPoints / 2)` bucket consecutivi bilanciati, con confini `floor(b * n / buckets)` e `floor((b + 1) * n / buckets)`; le dimensioni differiscono al massimo di un campione;
   - ogni bucket produce due righe: (primo timestamp, minimo per serie) e (ultimo timestamp, massimo per serie);
-  - una serie senza valori finiti nel bucket produce `null` due volte.
+  - una serie con anche un solo valore assente o non finito nel bucket produce `null` due volte: il buco si amplia al bucket; i picchi si conservano nei bucket interamente validi. I timestamp sono confini dell'inviluppo, non gli istanti reali degli estremi.
 - **Statistiche nel mock.** Min/max/media si accumulano sui tick emessi, dall'avvio (decisione D1). `resetStats` azzera gli id indicati.
 - **Sessione nel mock.** `startedAtMs` è il timestamp del primo tick (`null` prima); `intervalMs` è l'intervallo del mock.
 - **`formatValue`**, con "—" per `null` e per i valori non finiti:
@@ -7613,7 +7754,7 @@ test('each bucket emits its first timestamp with the min and its last with the m
   });
 });
 
-test('the last bucket takes the remainder and odd max points round down', () => {
+test('balanced buckets distribute the remainder and odd max points round down', () => {
   // 11 samples, 5 points -> 2 buckets: 0..4 and 5..10.
   const w = window(11, [(i) => i]);
   const d = decimateWindow(w, 5);
@@ -7621,16 +7762,33 @@ test('the last bucket takes the remainder and odd max points round down', () => 
   expect(d.series).toEqual([[0, 4, 5, 10]]);
 });
 
-test('a bucket without finite values emits null twice, the other series keep theirs', () => {
+test('missing or non-finite samples make their bucket a gap, other series keep theirs', () => {
   // 6 samples, 4 points -> 2 buckets of 3; NaN counts as missing.
   const w = window(6, [(i) => (i < 3 ? null : i), (i) => (i === 1 ? Number.NaN : 10 + i)]);
   expect(decimateWindow(w, 4)).toEqual({
     timestampsMs: [1000, 3000, 4000, 6000],
     series: [
       [null, null, 3, 5],
-      [10, 12, 13, 15],
+      [null, null, 13, 15],
     ],
   });
+});
+
+test('a single missing sample preserves the gap conservatively', () => {
+  const w = window(6, [(i) => (i === 1 ? null : i + 1)]);
+  expect(decimateWindow(w, 4).series).toEqual([[null, null, 4, 6]]);
+});
+
+test('near one hour has no oversized final bucket', () => {
+  const d = decimateWindow(window(3599, [(i) => i]), 900);
+  expect(d.timestampsMs).toHaveLength(900);
+  expect(d.timestampsMs[0]).toBe(1000);
+  expect(d.timestampsMs.at(-1)).toBe(3_599_000);
+  for (let i = 0; i < d.timestampsMs.length; i += 2) {
+    const span = d.timestampsMs[i + 1] - d.timestampsMs[i];
+    expect(span).toBeGreaterThanOrEqual(6000);
+    expect(span).toBeLessThanOrEqual(7000);
+  }
 });
 
 test('one hour at 1 s becomes 900 rows', () => {
@@ -8273,23 +8431,26 @@ import type { HistoryWindow } from '../types';
 /**
  * Min/max envelope, the same rule as `History::window_decimated` in oma-core:
  * with more samples than `maxPoints` (and `maxPoints >= 2`) the samples are split into
- * `floor(maxPoints / 2)` consecutive buckets of equal size (the last one takes the
- * remainder); each bucket emits (first timestamp, per-series min) then
- * (last timestamp, per-series max). A series without finite values in a bucket
- * emits null twice.
+ * `floor(maxPoints / 2)` balanced buckets whose sizes differ by at most one;
+ * each bucket emits (first timestamp, per-series min) then
+ * (last timestamp, per-series max). These are envelope bounds, not extremum times.
+ * Any missing or non-finite value makes that series emit null twice for the bucket.
  */
 export function decimateWindow(window: HistoryWindow, maxPoints: number): HistoryWindow {
   const n = window.timestampsMs.length;
   if (n <= maxPoints || maxPoints < 2) return window;
   const buckets = Math.floor(maxPoints / 2);
-  const size = Math.floor(n / buckets);
   const timestampsMs: number[] = [];
   const series: (number | null)[][] = window.series.map(() => []);
   for (let b = 0; b < buckets; b++) {
-    const start = b * size;
-    const end = b === buckets - 1 ? n : start + size;
+    const start = Math.floor(b * n / buckets);
+    const end = Math.floor((b + 1) * n / buckets);
     timestampsMs.push(window.timestampsMs[start], window.timestampsMs[end - 1]);
     window.series.forEach((values, k) => {
+      if (values.slice(start, end).some((v) => v == null || !Number.isFinite(v))) {
+        series[k].push(null, null);
+        return;
+      }
       let min = Infinity;
       let max = -Infinity;
       for (let i = start; i < end; i++) {
@@ -8768,7 +8929,7 @@ pnpm build
 ```
 
 Risultato atteso:
-- `pnpm test`: `Test Files  11 passed (11)`, `Tests  75 passed (75)`;
+- `pnpm test`: `Test Files  11 passed (11)`, `Tests  77 passed (77)`;
 - `pnpm check`: `0 ERRORS 0 WARNINGS`;
 - `pnpm build`: OK. uPlot non è ancora importato, quindi il bundle non cambia.
 
@@ -9377,7 +9538,7 @@ test('the stale badge also appears when no snapshot ever arrives', async () => {
 cd app && pnpm test
 ```
 
-Risultato atteso: `Test Files  6 failed | 9 passed (15)` e `Tests  1 failed | 69 passed (70)`. I file che non si caricano non contano i loro test. Errori:
+Risultato atteso: `Test Files  6 failed | 9 passed (15)` e `Tests  1 failed | 71 passed (72)`. I file che non si caricano non contano i loro test. Errori:
 - `Failed to resolve import "./nav"` (`nav.test.ts`), `"./persist"` (`persist.test.ts`), `"./stale"` (`stale.test.ts`);
 - `Failed to resolve import "../../lib/advanced/persist"` (`AdvancedView.test.ts`) e `"./lib/advanced/persist"` (`App.test.ts`);
 - `applySnapshot records the local arrival time of new snapshots only`: `expected undefined to be null`.
@@ -10184,7 +10345,7 @@ pnpm build
 ```
 
 Risultato atteso:
-- `pnpm test`: `Test Files  15 passed (15)`, `Tests  99 passed (99)`;
+- `pnpm test`: `Test Files  15 passed (15)`, `Tests  101 passed (101)`;
 - `pnpm check`: `0 ERRORS 0 WARNINGS`;
 - `pnpm build`: OK.
 
@@ -10334,6 +10495,7 @@ git commit -m "feat(ui): Advanced view shell with sidebar, deep links, stale bad
     export class ChartBuffer {
       constructor(ids: string[], windowSeconds: number);
       readonly ids: string[];
+      readonly windowSeconds: number;
       readonly length: number;
       readonly lastTimestampMs: number | null;
       seed(h: HistorySeed): void;
@@ -10367,11 +10529,11 @@ git commit -m "feat(ui): Advanced view shell with sidebar, deep links, stale bad
   - `maxPoints` vale 900 per le finestre da 30 minuti in su; sotto i 30 minuti l'argomento manca e lo storico arriva grezzo.
   - Una risposta superata da una richiesta più recente si scarta.
 - **Coda dal vivo.**
-  - Ogni snapshot applicato allo `LiveStore` aggiunge un punto per serie. Un timestamp non più recente dell'ultimo si ignora.
+  - Ogni snapshot applicato allo `LiveStore` aggiunge un punto per serie. Lo store scarta le sequenze duplicate o fuori ordine. Un timestamp uguale all'ultimo si ignora; un timestamp inferiore su una nuova sequenza indica un arretramento dell'orologio e avvia un segmento nuovo, come lo storico del nucleo.
   - Dopo ogni punto si tolgono quelli più vecchi della finestra, misurata all'indietro dall'ultimo timestamp.
   - Uno snapshot arrivato mentre lo storico era in viaggio si aggiunge in coda al seme, così non si perde.
-  - Sopra i 30 minuti il seme è sottocampionato e la coda è a 1 Hz. Con 8 serie e la finestra di 1 h restano al massimo 900 + 3600 righe, dentro la misura dello spike (148 MB in totale con 8 × 3600 punti).
-- **Pausa (spec §7.5).** Con `document.visibilityState === 'hidden'` il grafico non si aggiorna e non chiede nulla. Al ritorno a `visible` ricarica lo storico, che copre il buco.
+  - Da 30 minuti il seme è sottocampionato e la coda è a 1 Hz. Il limite di 900 righe vale per la risposta iniziale, non per il buffer vivo: dopo un'ora aperta la coda può contenere circa 3600 punti. Lo spike a 148 MB è un riferimento precedente; il Task 14 deve misurare anche la finestra mantenuta aperta per 61 minuti.
+- **Pausa (spec §7.5).** Con `document.visibilityState === 'hidden'` il grafico non si aggiorna e non chiede nulla: invalida anche le risposte in viaggio e sospende i ridimensionamenti. Al ritorno a `visible` ricarica lo storico, che copre il buco.
 - **Aspetto.**
   - I colori delle serie si leggono con `getComputedStyle(document.documentElement)` quando si costruisce il grafico: `--accent`, `--accent-2`, `--ok`, `--warn`, poi `--series-5` … `--series-8`. Assi e griglia usano `--text-muted` e `--border`.
   - La prima unità va sull'asse sinistro, la seconda sul destro, senza griglia propria.
@@ -10775,6 +10937,39 @@ test('series colours come from the theme tokens', async () => {
   }
 });
 
+test('a history reply arriving while hidden cannot create a plot', async () => {
+  const backend = fakeBackend();
+  let resolve!: (h: HistorySeed) => void;
+  backend.getHistory = () => new Promise((done) => (resolve = done));
+  renderChart(backend);
+  await vi.waitFor(() => expect(resolve).toBeDefined());
+  setVisibility('hidden');
+  flushSync();
+  resolve({ revision: 1, seq: 0, timestampsMs: [1000], series: [[1], [2]] });
+  await new Promise((done) => setTimeout(done, 0));
+  expect(plots).toHaveLength(0);
+});
+
+test('history from another schema revision is never plotted', async () => {
+  const backend = fakeBackend();
+  backend.getHistory = async () => ({ revision: 2, seq: 0, timestampsMs: [1000], series: [[1], [2]] });
+  renderChart(backend);
+  await new Promise((done) => setTimeout(done, 0));
+  expect(plots).toHaveLength(0);
+});
+
+test('a newer snapshot after a clock rollback starts a new chart segment', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 10_000, values: mockValues(1) });
+  flushSync();
+  store.applySnapshot({ revision: 1, seq: 2, timestampMs: 5000, values: mockValues(2) });
+  flushSync();
+  expect(plots[0].data[0]).toEqual([5]);
+  expect(plots[0].data[1]).toEqual([mockValues(2)[index(LOAD)]]);
+});
+
 test('unmounting destroys the plot', async () => {
   const { unmount } = renderChart(fakeBackend());
   await vi.waitFor(() => expect(plots).toHaveLength(1));
@@ -10789,7 +10984,7 @@ test('unmounting destroys the plot', async () => {
 cd app && pnpm test
 ```
 
-Risultato atteso: `Test Files  2 failed | 15 passed (17)`, `Tests  99 passed (99)`. I conteggi partono dai 99 test frontend dopo il Task 10. I due file nuovi falliscono all'import:
+Risultato atteso: `Test Files  2 failed | 15 passed (17)`, `Tests  101 passed (101)`. I conteggi partono dai 101 test frontend dopo il Task 10. I due file nuovi falliscono all'import:
 - `Failed to resolve import "./chartData" from "src/lib/advanced/chartData.test.ts"`;
 - `Failed to resolve import "./HistoryChart.svelte" from "src/components/advanced/HistoryChart.test.ts"`.
 
@@ -11040,7 +11235,12 @@ export function sensorLabel(sensor: Sensor, t: Translate): string {
 
   async function reseed(ids: string[], seconds: WindowSeconds) {
     const token = ++generation;
-    let history: HistorySeed = { revision: 0, seq: 0, timestampsMs: [], series: [] };
+    const revision = schema.revision;
+    // Never append values from a new schema to a plot of the previous source/unit.
+    buffer = undefined;
+    plot?.destroy();
+    plot = undefined;
+    let history: HistorySeed = { revision, seq: 0, timestampsMs: [], series: [] };
     if (ids.length > 0) {
       try {
         history = await backend.getHistory(ids, seconds, maxPointsFor(seconds));
@@ -11048,7 +11248,8 @@ export function sensorLabel(sensor: Sensor, t: Translate): string {
         console.error('chart history unavailable', error);
       }
     }
-    if (token !== generation || destroyed) return;
+    if (token !== generation || destroyed || paused || schema.revision !== revision) return;
+    if (ids.length > 0 && history.revision !== revision) return;
     const next = new ChartBuffer(ids, seconds);
     next.seed(history);
     // A snapshot applied while the request was in flight is newer than the seed.
@@ -11109,6 +11310,11 @@ export function sensorLabel(sensor: Sensor, t: Translate): string {
 
   function tail(timestampMs: number) {
     if (paused || !buffer || !plot || timestampMs <= 0) return;
+    // LiveStore has already rejected duplicate/out-of-order sequences. A lower
+    // timestamp here is a wall-clock rollback, so begin a new chart segment.
+    if (buffer.lastTimestampMs !== null && timestampMs < buffer.lastTimestampMs) {
+      buffer = new ChartBuffer(buffer.ids, buffer.windowSeconds);
+    }
     buffer.append(timestampMs, buffer.ids.map((id) => store.value(id)));
     buffer.trim(timestampMs);
     plot.setData(buffer.data());
@@ -11132,12 +11338,15 @@ export function sensorLabel(sensor: Sensor, t: Translate): string {
   onMount(() => {
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
+      if (paused) generation++; // Invalidate history that is still in flight.
     };
     document.addEventListener('visibilitychange', onVisibility);
     const observer =
       typeof ResizeObserver === 'undefined'
         ? undefined
-        : new ResizeObserver(() => plot?.setSize({ width: Math.max(320, container.clientWidth), height: HEIGHT }));
+        : new ResizeObserver(() => {
+            if (!paused) plot?.setSize({ width: Math.max(320, container.clientWidth), height: HEIGHT });
+          });
     observer?.observe(container);
     return () => {
       destroyed = true;
@@ -11315,7 +11524,7 @@ pnpm build
 ```
 
 Risultato atteso:
-- `pnpm test`: `Test Files  17 passed (17)`, `Tests  127 passed (127)` (16 in `chartData.test.ts`, 12 in `HistoryChart.test.ts`);
+- `pnpm test`: `Test Files  17 passed (17)`, `Tests  132 passed (132)` (16 in `chartData.test.ts`, 15 in `HistoryChart.test.ts`);
 - `pnpm check`: `0 ERRORS 0 WARNINGS`;
 - `pnpm build`: OK. `HistoryChart` non è ancora montato, quindi uPlot non entra ancora nel bundle.
 
@@ -11370,7 +11579,7 @@ git commit -m "feat(ui): uPlot history chart with window selector, series picker
     ```ts
     export const STATS_INTERVAL_MS = 1000;
     export class StatsPoller {
-      constructor(backend: Backend, ids: () => string[], intervalMs?: number);
+      constructor(backend: Backend, ids: () => string[], revision: () => number | null, intervalMs?: number);
       byId: ReadonlyMap<string, SensorStats>;   // $state.raw
       readonly statsOf: StatsOf;
       start(): () => void;                      // legge subito, poi ogni intervallo; restituisce stop
@@ -11383,6 +11592,8 @@ git commit -m "feat(ui): uPlot history chart with window selector, series picker
   - le chiavi i18n `advanced.table.sensor/current/min/max/avg/reset`, `advanced.experimental`, `advanced.category.<categoria>` per le 13 categorie.
 
   Il Task 13 crea un solo `StatsPoller` in `DevicePage`, sugli id di tutti i sensori della pagina, e lo passa alla tabella e ai KPI: il carico massimo della CPU e il picco di download leggono le stesse statistiche. Così vale il contratto "DevicePage legge `getStats(pageSensorIds)` ogni secondo".
+
+  La callback `revision` legge la revisione dello schema visualizzato. `statsOf` nasconde immediatamente la cache di una revisione diversa; una risposta si pubblica solo se la revisione richiesta, quella restituita e quella ancora visualizzata coincidono. Un cambio di fonte o unità a parità di id non mostra quindi statistiche della fonte precedente.
 
 **Comportamento (spec §4.2, §7.3; decisione D1):**
 - **Gruppi.**
@@ -11507,7 +11718,8 @@ function setup(ids = [A, B]) {
   const resetStats = vi.fn(async () => {});
   backend.getStats = getStats;
   backend.resetStats = resetStats;
-  return { poller: new StatsPoller(backend, () => ids), getStats, resetStats };
+  let revision = 1;
+  return { poller: new StatsPoller(backend, () => ids, () => revision), getStats, resetStats, setRevision: (value: number) => { revision = value; } };
 }
 
 beforeEach(() => {
@@ -11603,6 +11815,37 @@ test('a page without sensors asks nothing', async () => {
   await poller.poll();
   expect(getStats).not.toHaveBeenCalled();
 });
+
+test('cached statistics disappear immediately when the schema changes', async () => {
+  const { poller, setRevision } = setup();
+  await poller.poll();
+  expect(poller.statsOf(A)).toEqual(STATS);
+  setRevision(2);
+  expect(poller.statsOf(A)).toBeNull();
+});
+
+test('a late reply from the previous schema is dropped and the new schema retries', async () => {
+  const { poller, getStats, setRevision } = setup();
+  let release!: () => void;
+  getStats.mockImplementationOnce(
+    (req) => new Promise((done) => (release = () => done({ revision: 1, stats: req.map(() => STATS) }))),
+  );
+  const old = poller.poll();
+  setRevision(2);
+  release();
+  await old;
+  expect(poller.statsOf(A)).toBeNull();
+  getStats.mockImplementationOnce(async (req) => ({ revision: 2, stats: req.map(() => STATS) }));
+  await poller.poll();
+  expect(poller.statsOf(A)).toEqual(STATS);
+});
+
+test('a reply newer than the displayed schema is not published', async () => {
+  const { poller, getStats } = setup();
+  getStats.mockImplementationOnce(async (req) => ({ revision: 2, stats: req.map(() => STATS) }));
+  await poller.poll();
+  expect(poller.statsOf(A)).toBeNull();
+});
 ```
 
 `app/src/components/advanced/SensorTable.test.ts` (nuovo). Usa le statistiche di `FakeBackend`. Il sensore di limitazione con fonte `nvml` si aggiunge ai sensori della GPU mock per provare i flag e il badge:
@@ -11645,7 +11888,7 @@ function setup() {
     [LOAD]: { min: 5, max: 95, avg: 40.4, count: 10 },
     [THROTTLE.id]: { min: 0, max: 1, avg: 0.25, count: 8 },
   };
-  const stats = new StatsPoller(backend, () => ids);
+  const stats = new StatsPoller(backend, () => ids, () => MOCK_SCHEMA.revision);
   render(SensorTable, { sensors, valueOf, stats });
   return { backend, stats };
 }
@@ -11716,7 +11959,7 @@ test('network pages show byte rates in bits, like the Simple view', async () => 
   const netSensors = MOCK_SCHEMA.sensors.filter((s) => s.deviceId === 'network/mock-eth');
   const backend = new FakeBackend(MOCK_SCHEMA);
   backend.stats = { [DOWN]: { min: 125_000, max: 6_000_000, avg: 1_000_000, count: 4 } };
-  const stats = new StatsPoller(backend, () => netSensors.map((s) => s.id));
+  const stats = new StatsPoller(backend, () => netSensors.map((s) => s.id), () => MOCK_SCHEMA.revision);
   render(SensorTable, { sensors: netSensors, valueOf: (id: string) => (id === DOWN ? 6_000_000 : null), stats, rate: 'bits' });
   await stats.poll();
   flushSync();
@@ -11730,7 +11973,7 @@ test('network pages show byte rates in bits, like the Simple view', async () => 
 cd app && pnpm test
 ```
 
-Risultato atteso: `Test Files  3 failed | 17 passed (20)`, `Tests  127 passed (127)`. I tre file nuovi falliscono all'import:
+Risultato atteso: `Test Files  3 failed | 17 passed (20)`, `Tests  132 passed (132)`. I tre file nuovi falliscono all'import:
 - `Failed to resolve import "./pages" from "src/lib/advanced/pages.test.ts"`;
 - `Failed to resolve import "./statsPoller.svelte" from "src/lib/advanced/statsPoller.test.ts"`;
 - `Failed to resolve import "./SensorTable.svelte" from "src/components/advanced/SensorTable.test.ts"`.
@@ -11814,19 +12057,23 @@ export class StatsPoller {
   byId = $state.raw<ReadonlyMap<string, SensorStats>>(new Map());
   readonly #backend: Backend;
   readonly #ids: () => string[];
+  readonly #revision: () => number | null;
+  #byRevision = $state<number | null>(null);
   readonly #intervalMs: number;
   #timer: ReturnType<typeof setInterval> | undefined;
   #inFlight = false;
   /** Number of the newest request; older replies are dropped. */
   #latest = 0;
 
-  constructor(backend: Backend, ids: () => string[], intervalMs = STATS_INTERVAL_MS) {
+  constructor(backend: Backend, ids: () => string[], revision: () => number | null, intervalMs = STATS_INTERVAL_MS) {
     this.#backend = backend;
     this.#ids = ids;
+    this.#revision = revision;
     this.#intervalMs = intervalMs;
   }
 
-  readonly statsOf: StatsOf = (id) => this.byId.get(id) ?? null;
+  readonly statsOf: StatsOf = (id) =>
+    this.#byRevision === this.#revision() ? this.byId.get(id) ?? null : null;
 
   /** Polls now and then every interval; returns the stop function. */
   start(): () => void {
@@ -11853,6 +12100,7 @@ export class StatsPoller {
   async poll(): Promise<void> {
     if (document.visibilityState === 'hidden') return;
     const ids = this.#ids();
+    const revision = this.#revision();
     const request = ++this.#latest;
     if (ids.length === 0) {
       this.#inFlight = false;
@@ -11862,13 +12110,14 @@ export class StatsPoller {
     this.#inFlight = true;
     try {
       const reply = await this.#backend.getStats(ids);
-      if (request !== this.#latest) return;
+      if (request !== this.#latest || revision !== this.#revision() || reply.revision !== revision) return;
       const next = new Map<string, SensorStats>();
       ids.forEach((id, i) => {
         const stats = reply.stats[i];
         if (stats) next.set(id, stats);
       });
       this.byId = next;
+      this.#byRevision = revision;
     } catch (error) {
       console.error('sensor statistics unavailable', error);
     } finally {
@@ -12115,7 +12364,7 @@ pnpm build
 ```
 
 Risultato atteso:
-- `pnpm test`: `Test Files  20 passed (20)`, `Tests  146 passed (146)` (5 in `pages.test.ts`, 7 in `statsPoller.test.ts`, 7 in `SensorTable.test.ts`);
+- `pnpm test`: `Test Files  20 passed (20)`, `Tests  154 passed (154)` (5 in `pages.test.ts`, 10 in `statsPoller.test.ts`, 7 in `SensorTable.test.ts`);
 - `pnpm check`: `0 ERRORS 0 WARNINGS`;
 - `pnpm build`: OK, bundle invariato: la tabella si monta nel Task 13.
 
@@ -12690,7 +12939,7 @@ test('a failed request is logged and the next one retries', async () => {
 cd app && pnpm test
 ```
 
-Risultato atteso: `Test Files  3 failed | 19 passed (22)`, `Tests  17 failed | 146 passed (163)`:
+Risultato atteso: `Test Files  3 failed | 19 passed (22)`, `Tests  17 failed | 154 passed (171)`:
 - `pages.test.ts`: 12 test falliscono con `TypeError: kpisFor is not a function` (e simili per `defaultSeries` e `propertyRows`);
 - `DevicePage.test.ts`: 5 test falliscono, perché la pagina minima del Task 10 non ha KPI, grafico, tabella né processi;
 - `GpuProcesses.test.ts` fallisce all'import: `Failed to resolve import "./GpuProcesses.svelte"`.
@@ -13239,7 +13488,7 @@ export function propertyRows(device: Device, locale: string, t: Translate): Prop
   const rate = $derived(entry.kind === 'network' ? 'bits' : 'bytes');
   const valueOf = (id: string) => store.value(id);
   // The backend of a mounted page never changes.
-  const stats = new StatsPoller(untrack(() => backend), () => sensors.map((s) => s.id));
+  const stats = new StatsPoller(untrack(() => backend), () => sensors.map((s) => s.id), () => schema?.revision ?? null);
 
   onMount(() => stats.start());
 </script>
@@ -13350,7 +13599,7 @@ pnpm build
 ```
 
 Risultato atteso:
-- `pnpm test`: `Test Files  22 passed (22)`, `Tests  168 passed (168)` (17 in `pages.test.ts`, 5 in `DevicePage.test.ts`, 5 in `GpuProcesses.test.ts`). Anche `AdvancedView.test.ts` e `App.test.ts` del Task 10 passano senza modifiche: ora montano la pagina completa, con `FakeUplot` al posto di uPlot;
+- `pnpm test`: `Test Files  22 passed (22)`, `Tests  176 passed (176)` (17 in `pages.test.ts`, 5 in `DevicePage.test.ts`, 5 in `GpuProcesses.test.ts`). Anche `AdvancedView.test.ts` e `App.test.ts` del Task 10 passano senza modifiche: ora montano la pagina completa, con `FakeUplot` al posto di uPlot;
 - `pnpm check`: `0 ERRORS 0 WARNINGS`;
 - `pnpm build`: OK. Il JS passa da circa 79 kB (28 kB gzip) a circa 153 kB (58 kB gzip): uPlot e le pagine, come stimato dallo spike. Il CSS, con `uPlot.min.css`, sale a circa 12,5 kB.
 
@@ -13593,13 +13842,13 @@ Le misure partono poi senza porta DevTools, quindi il processo misurato è ident
 
 **Serie del grafico.** La misura usa il caso peggiore permesso da D4: 8 serie e 2 unità. Serie: `load/core`, `load/3d`, `load/copy`, `load/video-decode`, `load/video-encode`, `fan/percent`, `percent/power-limit` (%) e `temperature/core` (°C) della RTX 4080, tutte presenti su questa macchina dalla M2 (PDH e NVML).
 
-**Storico pieno.** A pochi secondi dall'avvio il grafico a 1 h ha solo qualche decina di punti. Lo stato stabile per la memoria è con lo storico di 1 ora pieno (3600 campioni per sensore nel nucleo, 900 punti decimati per serie nel grafico). Con `-FillHistoryMinutes 61` lo script avvia l'app nella tray, aspetta 61 minuti, misura la tray, poi apre la finestra con un secondo avvio (istanza singola) e misura la finestra. Le righe senza storico pieno restano per il confronto con M1 e M2.
+**Storico pieno.** A pochi secondi dall'avvio il grafico a 1 h ha solo qualche decina di punti. Con `-FillHistoryMinutes 61` lo script avvia l'app nella tray, aspetta 61 minuti, misura la tray, poi apre la finestra con un secondo avvio (istanza singola) e misura la finestra: il nucleo ha 3600 campioni per sensore e il grafico parte da un seed decimato di al massimo 900 punti. Questa prova non misura la memoria della UI rimasta aperta a lungo: il Task 11 aggiunge una coda di campioni live non decimati, che può raggiungere circa 3600 punti per serie. Una misura separata tiene perciò la pagina visibile per 61 minuti prima del campionamento. Lo spike 8 × 3600 è solo un riferimento, non sostituisce questa misura della build finale. Le righe senza storico pieno restano per il confronto con M1 e M2.
 
 - [ ] **Step 1: Prerequisiti — verifica manuale (utente)**
 
 Chiedi all'utente di:
 - chiudere la propria istanza di OpenMonitor Advanced (icona nella tray → **Esci**): con l'istanza singola, ogni avvio degli script passerebbe il controllo a quella istanza e la misura non sarebbe valida;
-- non avviare OpenMonitor Advanced per circa 75 minuti (Step 5–8).
+- non avviare OpenMonitor Advanced per circa 140 minuti (Step 5–8); nella seconda prova lunga la finestra deve restare visibile senza essere minimizzata o completamente coperta.
 
 Poi controlla, in PowerShell dalla radice del repository:
 
@@ -13611,6 +13860,8 @@ Test-Path "$env:LOCALAPPDATA\OpenMonitorAdvanced\crash.txt"
 Risultato atteso: `0` e `False`. Con un crash marker l'app partirebbe in modalità sicura, senza le librerie dei vendor, e la misura sembrerebbe migliore del vero.
 
 Il profilo WebView2 è lo stesso dell'istanza dell'utente: la preparazione dello Step 5 cambia anche la sua vista. Salva il `localStorage` dell'utente per ripristinarlo nello Step 8 (con l'app chiusa i file non sono in uso):
+
+**Cleanup obbligatorio:** dopo un backup riuscito, il ripristino dello Step 8 è una clausola `finally` dell'intera procedura: eseguilo anche se preparazione, CDP, compilazione o misura falliscono, se l'utente interrompe, o se il budget è superato. Conserva il backup finché il ripristino non è verificato. Un errore impedisce di dichiarare la milestone conclusa, non autorizza a saltare il ripristino; termina prima i processi avviati per la prova e verifica che nessuno usi il profilo.
 
 ```powershell
 $webProfile = "$env:LOCALAPPDATA\io.github.openmonitoradvanced\EBWebView"
@@ -14041,6 +14292,15 @@ Poi verifica che lo stato misurato fosse ancora quello preparato:
 
 Risultato atteso: come nello Step 5, con le stesse 8 serie.
 
+Misura poi anche il caso di **pagina continuamente visibile per 61 minuti**, senza `-FillHistoryMinutes`, senza cambiare pagina, finestra temporale o serie. Il parametro esistente `-WarmupSeconds` ritarda la misura mentre la finestra è già aperta:
+
+```powershell
+pwsh -File scripts/measure-footprint.ps1 -WarmupSeconds 3660 -SampleSeconds 30 > "$env:TEMP\oma-m3-visible.txt" 2>&1
+Get-Content "$env:TEMP\oma-m3-visible.txt"
+```
+
+Esegui anche questa prova in background e attendine la conclusione. L'output ha `Mode : window` e `HistoryMinutes : 0`: quest'ultimo campo conta solo il riempimento preliminare nella tray, quindi registra esplicitamente nel risultato i 3660 s di warmup visibile. Se la pagina viene nascosta, minimizzata o ricreata durante l'attesa, la prova non è valida: alla ricomparsa il grafico riparte dal seed decimato. Richiedi conferma manuale all'utente che la finestra sia rimasta visibile. Questa riga deve rispettare lo stesso budget di 200 MB.
+
 **Budget (spec §1.2)** e riferimenti precedenti. I riferimenti non sono risultati da riprodurre: servono solo a riconoscere un'anomalia.
 
 | Modalità | Voce | Budget | Riferimenti |
@@ -14054,7 +14314,7 @@ Risultato atteso: come nello Step 5, con le stesse 8 serie.
 
 In tutte le righe `VendorModules` deve essere `atiadlxx.dll, nvapi64.dll, nvml.dll`: altrimenti la misura è in modalità sicura, quindi non valida.
 
-Se una voce supera il budget, **fermati e segnala l'esito DONE_WITH_CONCERNS**: non allentare il budget e non proseguire con gli step successivi. Prima di segnalarlo, isola la causa:
+Se una voce supera il budget, **fermati e segnala l'esito DONE_WITH_CONCERNS**: non allentare il budget e non proseguire con gli step di consegna o commit. Esegui comunque il ripristino obbligatorio dello Step 8 prima di restituire l'esito. Prima di segnalarlo, isola la causa:
 - **Finestra oltre 200 MB:** ripeti lo Step 5 senza `-Series` (serie predefinite della pagina GPU, 2 serie) e poi lo Step 6 in modalità finestra. La differenza è il costo delle 6 serie in più. Controlla anche che per le finestre di 30 e 60 minuti la UI chieda lo storico decimato: `grep -rnE "maxPoints|MAX_POINTS|DECIMATE_FROM" app/src/components/advanced app/src/lib/advanced` deve mostrare la chiamata `backend.getHistory(ids, seconds, maxPointsFor(seconds))` in `HistoryChart.svelte` e `maxPointsFor`, che restituisce `MAX_POINTS` (900) per `windowSeconds >= DECIMATE_FROM` (1800).
 - **Tray oltre 30 MB:** confronta la riga `tray` dello Step 6 (storico quasi vuoto) con quella dello Step 7 (storico pieno). Poi misura in modalità sicura (`.\target\release\oma-app.exe --minimized --safe`, 15 s di attesa, `(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess=$((Get-Process oma-app).Id)").WorkingSetPrivate / 1MB`) per isolare il costo delle librerie dei vendor, come in M2.
 
@@ -14076,11 +14336,12 @@ Risultato atteso: `0` e `0` prima della copia (se un processo è ancora vivo, as
 
 - [ ] **Step 9: Registra i risultati**
 
-In `docs/perf-budget.md`, nella tabella, aggiungi quattro righe M3 dopo quelle M2, usando **esclusivamente** l'output degli Step 6 e 7:
+In `docs/perf-budget.md`, nella tabella, aggiungi cinque righe M3 dopo quelle M2, usando **esclusivamente** l'output degli Step 6 e 7:
 - `M3`, `same machine, …` con le versioni dei driver lette da `Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion` e la revisione dello Step 4, modalità `window (Advanced view, GPU page, 1 h chart, 8 series)`;
 - `M3`, `same machine, same drivers, build …`, modalità `tray`;
 - `M3`, `same machine, same drivers, build …`, modalità `window, after 61 min in the tray (full 1 h history; Advanced view as above)`;
 - `M3`, `same machine, same drivers, build …`, modalità `tray, after 61 min (full 1 h history)`.
+- `M3`, `same machine, same drivers, build …`, modalità `window, continuously visible for 61 min (Advanced GPU, 1 h, 8 series; raw live tail)`; annota `WarmupSeconds=3660`, senza interpretare `HistoryMinutes=0` come storico vuoto.
 
 Per ogni riga riporta App CPU %, App private MB, WebView2 procs, Total private MB e l'esito del budget (`yes` solo se tutte le soglie sono rispettate).
 
@@ -14125,7 +14386,7 @@ con
   - Il pulsante "azzera" di una pagina della vista Avanzata azzera le statistiche dei soli sensori di quella pagina.
   - Quando cambia lo schema, le statistiche di un sensore restano solo se ID, fonte e unità sono invariati, come lo storico.
 - L'istante del primo ciclo (`startedAtMs`) è esposto all'interfaccia: il banner "monitoraggio attivo da…" conta da lì anche dopo aver riaperto la finestra dalla tray.
-- **Storico inviato all'interfaccia:** le finestre da 1 e 5 minuti arrivano con tutti i campioni. Per 30 minuti e 1 ora lo storico arriva decimato a 900 punti per serie: ogni intervallo dà due punti, il minimo e il massimo, così i picchi restano visibili. La decimazione serve al budget di memoria della finestra: in una prova, 20 serie da 3600 punti portavano il totale a 219 MB.
+- **Storico inviato all'interfaccia:** le finestre da 1 e 5 minuti arrivano con tutti i campioni. Per 30 minuti e 1 ora lo storico arriva decimato ad al massimo 900 punti per serie, in intervalli bilanciati le cui dimensioni differiscono al massimo di un campione. Ogni intervallo interamente valido dà due punti, minimo e massimo, così i picchi restano visibili; i timestamp sono i confini dell'inviluppo, non gli istanti reali degli estremi. Se un intervallo contiene un valore assente, per quella serie entrambi i punti sono assenti: i buchi si ampliano conservativamente all'intervallo. La decimazione serve al budget di memoria della finestra: in una prova, 20 serie da 3600 punti portavano il totale a 219 MB.
 - I periodi in cui una fonte non è disponibile sono registrati come valori assenti e appaiono come buchi nei grafici.
 ```
 
@@ -14246,6 +14507,18 @@ con
 - La voce **Batteria** compare solo quando esiste un device batteria: in M3 nessun provider lo crea ancora.
 ```
 
+**§7.5 Buffer dei grafici.** Il Task 11 introduce un'eccezione esplicita al vincolo dei buffer tipizzati. Sostituisci la riga
+
+```markdown
+  - buffer tipizzati (`Float64Array`).
+```
+
+con
+
+```markdown
+  - buffer tipizzati (`Float64Array`) per le serie interne della vista Semplificata; per il grafico uPlot della vista Avanzata, array di `number | null`, perché `null` rappresenta i buchi. Il costo delle copie e della coda dal vivo rientra nella misura del budget con la finestra aperta per almeno un'ora.
+```
+
 **§8 Gestione errori.** Sostituisci la riga
 
 ```markdown
@@ -14364,7 +14637,7 @@ Updated at the end of every milestone (last update: M3).
 | The label-key test keeps a hand-written list: only GPU keys are cross-checked against the code (`GpuField` self-test); CPU, memory, storage and network keys are not. | `crates/oma-win/tests/labels.rs` | when touched |
 | The CSP has no `devCsp` with `ws://localhost:1420`, so Vite hot reload inside `pnpm tauri dev` may be blocked. | `app/src-tauri/tauri.conf.json` | when touched |
 | NVML is not initialised again after the NVIDIA driver is updated or unloaded while the app runs; its fields fall back to D3DKMT until a restart (README, "Known limits"). | `crates/oma-win/src/gpu/nvml.rs` | M6 |
-| A disk that is spun down during a discovery gets its temperature sensors only at the next discovery: it is never woken up to be read. | `crates/oma-win/src/storage.rs` | M5 (disk rules) |
+| Disk temperature probes retry every 30 s, including disks asleep at startup; new driver sensor indices request rediscovery without waking a sleeping disk. Verify real standby/wake behavior before using these readings in rules. | `crates/oma-win/src/storage.rs` | M5 (disk rules; retry and index identity already covered in M3) |
 | A disk identified only by its PnP instance id (no serial, no unique GPT or MBR id) gets a new id when it is moved to another port: its history and statistics restart. | `crates/oma-win/src/storage_identity.rs` | accepted |
 
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)

@@ -24,6 +24,8 @@ pub(crate) mod d3dkmt;
 pub(crate) mod dxgi;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod enumerate;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod pdh;
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -24,6 +24,17 @@ pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
     }
 }
 
+pub fn sanitize_sensor(sensor: &crate::model::Sensor, value: Option<f64>) -> Option<f64> {
+    if sensor.unit == Unit::Percent
+        && sensor.kind == crate::model::SensorKind::Percent
+        && sensor.device_id.starts_with("gpu/")
+        && sensor.id.ends_with("/percent/power-limit")
+    {
+        return value.filter(|v| v.is_finite() && *v >= 0.0);
+    }
+    sanitize(sensor.unit, value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +74,34 @@ mod tests {
     fn counters_and_rates_cannot_be_negative() {
         assert_eq!(sanitize(Unit::Bytes, Some(-1.0)), None);
         assert_eq!(sanitize(Unit::BytesPerSecond, Some(0.0)), Some(0.0));
+    }
+
+    #[test]
+    fn power_ratio_can_exceed_100_but_utilization_cannot() {
+        use crate::model::{Label, Sensor, SensorKind, Source};
+        let power = Sensor::new(
+            "gpu/test",
+            SensorKind::Percent,
+            "power-limit",
+            Unit::Percent,
+            Label::new("gpu.power.limitPercent"),
+            Source::Nvml,
+        );
+        assert_eq!(sanitize_sensor(&power, Some(125.0)), Some(125.0));
+        assert_eq!(sanitize_sensor(&power, Some(-1.0)), None);
+        assert_eq!(sanitize_sensor(&power, Some(f64::INFINITY)), None);
+        assert_eq!(sanitize_sensor(&power, Some(f64::NAN)), None);
+        for kind in [SensorKind::Load, SensorKind::Fan] {
+            let sensor = Sensor::new(
+                "gpu/test",
+                kind,
+                "percent",
+                Unit::Percent,
+                Label::new("gpu.load.core"),
+                Source::Pdh,
+            );
+            assert_eq!(sanitize_sensor(&sensor, Some(125.0)), None);
+            assert_eq!(sanitize_sensor(&sensor, Some(100.0)), Some(100.0));
+        }
     }
 }

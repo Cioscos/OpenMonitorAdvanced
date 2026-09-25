@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::history::History;
 use crate::model::{Schema, Snapshot};
 use crate::provider::{Inventory, Provider};
-use crate::sanitize::sanitize;
+use crate::sanitize::sanitize_sensor;
 use crate::worker::Worker;
 
 pub fn backoff_ms(failures: u32) -> u64 {
@@ -88,6 +88,21 @@ impl Engine {
             }
         }
         if changed {
+            let retained: Vec<String> = self
+                .schema
+                .sensors
+                .iter()
+                .filter(|old| {
+                    self.slots
+                        .iter()
+                        .flat_map(|slot| &slot.inventory.sensors)
+                        .any(|new| {
+                            old.id == new.id && old.source == new.source && old.unit == new.unit
+                        })
+                })
+                .map(|sensor| sensor.id.clone())
+                .collect();
+            self.history.set_sensors(&retained);
             self.schema = Schema {
                 revision: self.schema.revision + 1,
                 devices: self
@@ -115,7 +130,7 @@ impl Engine {
             .iter()
             .flat_map(|s| s.last.iter().copied())
             .zip(&self.schema.sensors)
-            .map(|(value, sensor)| sanitize(sensor.unit, value))
+            .map(|(value, sensor)| sanitize_sensor(sensor, value))
             .collect();
         self.history.push(timestamp_ms, &values);
         self.seq += 1;
@@ -413,6 +428,25 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         drop(e);
         drop(release);
+    }
+
+    #[test]
+    fn source_change_resets_only_the_changed_series() {
+        let (provider, script) = fake("gpu", inventory("dev/a", &["x", "y"]));
+        let mut engine = Engine::new(vec![provider], 10);
+        engine.tick(1_000, 1_000);
+        {
+            let mut script = script.lock().unwrap();
+            script.inventory.sensors[0].source = Source::Nvml;
+            script.polls.push_back(Err(ProviderError::Rediscover));
+        }
+        engine.tick(2_000, 2_000);
+        engine.tick(3_000, 3_000);
+        let history = engine
+            .history()
+            .window(&["dev/a/load/x".into(), "dev/a/load/y".into()], 0);
+        assert_eq!(history.series[0], vec![None, None, Some(1.0)]);
+        assert_eq!(history.series[1], vec![Some(1.0), None, Some(1.0)]);
     }
 
     #[test]

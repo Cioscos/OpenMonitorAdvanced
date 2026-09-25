@@ -81,6 +81,12 @@ pub enum Source {
     Pdh,
     Win32,
     IpHelper,
+    Dxgi,
+    D3dkmt,
+    Nvml,
+    Nvapi,
+    Adl,
+    Igcl,
     Mock,
 }
 
@@ -131,6 +137,10 @@ pub struct Sensor {
     pub label: Label,
     pub source: Source,
     pub category: String,
+    /// Read through an undocumented or unverified interface (spec §5.2): the
+    /// UI marks it. Serialized only when `true`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub experimental: bool,
 }
 
 impl Sensor {
@@ -151,7 +161,14 @@ impl Sensor {
             label,
             source,
             category: kind.as_str().to_owned(),
+            experimental: false,
         }
+    }
+
+    /// Marks the sensor as experimental.
+    pub fn experimental(mut self) -> Self {
+        self.experimental = true;
+        self
     }
 }
 
@@ -222,6 +239,54 @@ mod tests {
                 "label": { "key": "network.down" },
                 "source": "ip_helper",
                 "category": "throughput"
+            })
+        );
+    }
+
+    #[test]
+    fn gpu_sources_serialize_in_snake_case() {
+        let sources = [
+            Source::Dxgi,
+            Source::D3dkmt,
+            Source::Nvml,
+            Source::Nvapi,
+            Source::Adl,
+            Source::Igcl,
+        ];
+        assert_eq!(
+            serde_json::to_value(sources).unwrap(),
+            json!(["dxgi", "d3dkmt", "nvml", "nvapi", "adl", "igcl"])
+        );
+    }
+
+    #[test]
+    fn experimental_is_serialized_only_when_true() {
+        let s = Sensor::new(
+            "gpu/pci-0000:01:00.0",
+            SensorKind::Temperature,
+            "hotspot",
+            Unit::Celsius,
+            Label::new("gpu.temperature.hotspot"),
+            Source::Nvapi,
+        );
+        assert!(!s.experimental);
+        assert!(serde_json::to_value(&s)
+            .unwrap()
+            .get("experimental")
+            .is_none());
+        let s = s.experimental();
+        assert!(s.experimental);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            json!({
+                "id": "gpu/pci-0000:01:00.0/temperature/hotspot",
+                "deviceId": "gpu/pci-0000:01:00.0",
+                "kind": "temperature",
+                "unit": "celsius",
+                "label": { "key": "gpu.temperature.hotspot" },
+                "source": "nvapi",
+                "category": "temperature",
+                "experimental": true
             })
         );
     }

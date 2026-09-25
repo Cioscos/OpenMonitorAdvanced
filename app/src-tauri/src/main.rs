@@ -12,6 +12,8 @@ use oma_core::provider::Provider;
 use oma_core::sampler::{history_capacity, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
 
+use crate::commands::{StartupState, StartupStatus, VendorSwitch};
+
 /// Default sampling interval (spec §4.1).
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const EVENT_SCHEMA: &str = "oma:schema";
@@ -24,15 +26,49 @@ pub struct AppState {
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
-fn providers() -> Vec<Box<dyn Provider>> {
+fn providers(vendor: VendorSwitch) -> Vec<Box<dyn Provider>> {
     #[cfg(windows)]
     {
-        // Task 12 replaces this with the safe-mode switch (--safe, crash marker).
-        oma_win::default_providers(oma_win::gpu::VendorSwitch::new(true))
+        oma_win::default_providers(vendor)
     }
     #[cfg(not(windows))]
     {
+        let _ = vendor;
         Vec::new()
+    }
+}
+
+/// `%LOCALAPPDATA%\OpenMonitorAdvanced\crash.txt`; `None` without LOCALAPPDATA.
+#[cfg(windows)]
+fn crash_marker_path() -> Option<std::path::PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(local_app_data)
+            .join("OpenMonitorAdvanced")
+            .join("crash.txt"),
+    )
+}
+
+/// Returns (and deletes) the crash marker of the previous run, then arms the
+/// marker for this run so a native crash (e.g. inside a GPU vendor DLL) puts
+/// the next start in safe mode (spec §8).
+fn previous_crash() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let path = crash_marker_path()?;
+        let crash = oma_win::crash::take_crash_marker(&path);
+        if let Some(dir) = path.parent() {
+            // The exception filter cannot create folders while the process dies.
+            if let Err(err) = std::fs::create_dir_all(dir) {
+                tracing::warn!(%err, "cannot create the crash marker folder");
+            }
+        }
+        oma_win::crash::install_crash_marker(path);
+        crash
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -57,7 +93,7 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
         .with_writer(writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oma_core=debug,oma_app=info".into()),
+                .unwrap_or_else(|_| "oma_core=debug,oma_win=info,oma_app=info".into()),
         )
         .init();
     Some(guard)
@@ -69,8 +105,18 @@ fn main() {
     let _log_guard = init_logging();
 
     let start_minimized = std::env::args().any(|arg| arg == "--minimized");
+    let safe_flag = std::env::args().any(|arg| arg == "--safe");
+    let crash = previous_crash();
+    if let Some(marker) = &crash {
+        tracing::warn!(%marker, "the previous run crashed");
+    }
+    let status = StartupStatus::at_startup(safe_flag, crash.as_deref());
+    if status.safe_mode {
+        tracing::warn!(reason = ?status.reason, "safe mode: GPU vendor libraries are not loaded");
+    }
+    let switch = VendorSwitch::new(!status.safe_mode);
     let engine = Arc::new(Mutex::new(Engine::new(
-        providers(),
+        providers(switch.clone()),
         history_capacity(SAMPLE_INTERVAL),
     )));
 
@@ -81,9 +127,12 @@ fn main() {
         .manage(AppState {
             engine: engine.clone(),
         })
+        .manage(StartupState::new(switch, status))
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
-            commands::get_history
+            commands::get_history,
+            commands::get_startup_status,
+            commands::enable_vendor_libraries
         ])
         .setup(move |app| {
             tray::build(app.handle())?;

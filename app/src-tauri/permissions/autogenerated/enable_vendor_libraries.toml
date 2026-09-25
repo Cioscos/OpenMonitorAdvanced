@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enable-vendor-libraries"
+description = "Enables the enable_vendor_libraries command without any pre-configured scope."
+commands.allow = ["enable_vendor_libraries"]
+
+[[permission]]
+identifier = "deny-enable-vendor-libraries"
+description = "Denies the enable_vendor_libraries command without any pre-configured scope."
+commands.deny = ["enable_vendor_libraries"]

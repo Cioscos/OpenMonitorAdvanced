@@ -108,6 +108,9 @@
     const border = read('--border');
     const { scales, seriesScale } = scaleLayout(ids, schema);
     const byId = new Map(sensors.map((s) => [s.id, s]));
+    // Known limit until the M5 unit settings: network sensors carry BytesPerSecond, so the
+    // axis and legend below stay in byte/s even though the KPIs and table (formatRate) show
+    // the same values converted to bit/s (see docs/follow-ups.md).
     const axis = (unit: (typeof scales)[number], side: 1 | 3): uPlot.Axis => ({
       scale: unit,
       side,

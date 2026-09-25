@@ -51,6 +51,9 @@ export function formatAverage(
   opts: FormatOptions = {},
 ): string {
   if (!stats) return formatValue(null, unit, locale, t, opts);
+  // Averaging a PCIe generation or lane count is meaningless (e.g. "Gen 3" from Gen 1 and
+  // Gen 4 readings): show the dash, same as a missing value.
+  if (unit === 'pcie_generation' || unit === 'lanes') return formatValue(null, unit, locale, t, opts);
   return unit === 'boolean' ? formatPercent(stats.avg * 100, locale) : formatValue(stats.avg, unit, locale, t, opts);
 }
 

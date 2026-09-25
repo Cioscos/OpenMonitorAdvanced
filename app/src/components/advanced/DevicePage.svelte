@@ -21,7 +21,9 @@
   const kpis = $derived(schema ? kpisFor(entry.kind, schema, entry.deviceIds) : []);
   const defaults = $derived(schema ? defaultSeries(entry.kind, schema, entry.deviceIds) : []);
   const hasProperties = $derived(devices.some((d) => Object.keys(d.properties ?? {}).length > 0));
-  // Network traffic in bit/s, the unit of the Simple view's network tile.
+  // Network traffic in bit/s, the unit of the Simple view's network tile. `rate` only reaches
+  // KpiRow and SensorTable below: HistoryChart keeps plotting the sensor's stored BytesPerSecond,
+  // so the chart's axis/legend stay in byte/s until the M5 unit settings (docs/follow-ups.md).
   const rate = $derived(entry.kind === 'network' ? 'bits' : 'bytes');
   const valueOf = (id: string) => store.value(id);
   // The backend of a mounted page never changes.

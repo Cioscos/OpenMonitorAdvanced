@@ -73,6 +73,11 @@ test('the average of a flag is the share of time it was on', () => {
   expect(formatAverage({ min: 0, max: 2e6, avg: 1e6, count: 4 }, 'bytes_per_second', 'en', tEn, { rate: 'bits' })).toBe('8.0 Mbit/s');
 });
 
+test('the average of a PCIe link unit is a dash: averaging generations or lanes is meaningless', () => {
+  expect(formatAverage({ min: 1, max: 4, avg: 2.5, count: 4 }, 'pcie_generation', 'en', tEn)).toBe(DASH);
+  expect(formatAverage({ min: 1, max: 16, avg: 8.5, count: 4 }, 'lanes', 'en', tEn)).toBe(DASH);
+});
+
 const values = mockValues(3);
 const valueOf = (id: string) => {
   const i = MOCK_SCHEMA.sensors.findIndex((s) => s.id === id);

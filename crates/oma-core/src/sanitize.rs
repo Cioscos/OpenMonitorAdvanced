@@ -57,7 +57,7 @@ pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
         Unit::Volt => (-20.0..=20.0).contains(&v),
         Unit::Boolean => v == 0.0 || v == 1.0,
         Unit::PcieGeneration => (1.0..=7.0).contains(&v) && v.fract() == 0.0,
-        Unit::Lanes => (1.0..=32.0).contains(&v),
+        Unit::Lanes => (1.0..=32.0).contains(&v) && v.fract() == 0.0,
         _ => v >= 0.0,
     };
     plausible.then_some(v)
@@ -155,6 +155,11 @@ mod tests {
         assert_eq!(sanitize(Unit::Lanes, Some(32.0)), Some(32.0));
         assert_eq!(sanitize(Unit::Lanes, Some(0.0)), None);
         assert_eq!(sanitize(Unit::Lanes, Some(64.0)), None);
+        assert_eq!(
+            sanitize(Unit::Lanes, Some(8.5)),
+            None,
+            "a lane count must be a whole number"
+        );
     }
 
     #[test]

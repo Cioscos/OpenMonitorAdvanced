@@ -24,8 +24,14 @@ pub(crate) mod d3dkmt;
 pub(crate) mod dxgi;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod enumerate;
+// Used only by tests until GpuProvider::new wires the NVML layer in.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod nvml;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod pdh;
+// Used only by tests until GpuProvider::new wires the NVML layer in.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod trim;
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};

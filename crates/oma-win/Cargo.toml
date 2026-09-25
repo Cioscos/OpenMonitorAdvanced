@@ -17,6 +17,7 @@ serde_json.workspace = true
 version = "0.62"
 features = [
   "Wdk_Graphics_Direct3D",
+  "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Foundation",
   "Win32_Graphics_DXCore",
   "Win32_Graphics_Dxgi",

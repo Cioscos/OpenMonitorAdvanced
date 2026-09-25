@@ -10,6 +10,7 @@ pub mod network;
 mod pdh;
 pub mod storage;
 mod storage_identity;
+mod storage_ioctl;
 
 use oma_core::provider::Provider;
 

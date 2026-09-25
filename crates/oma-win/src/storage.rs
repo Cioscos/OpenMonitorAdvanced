@@ -1,6 +1,6 @@
 //! Physical disk throughput and activity (PDH) plus volume usage.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
@@ -8,7 +8,9 @@ use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::pdh::{Counter, Query};
-use crate::storage_identity::{disk_identity, volume_identity};
+use crate::storage_identity::{
+    assign_disk_ids, disk_identity_candidates, volume_identity, DiskIdentityCandidates,
+};
 
 const READ: &str = r"\PhysicalDisk(*)\Disk Read Bytes/sec";
 const WRITE: &str = r"\PhysicalDisk(*)\Disk Write Bytes/sec";
@@ -122,15 +124,15 @@ impl Provider for StorageProvider {
         let disks = disk_instances(&query.instances(read)?);
 
         // Resolve stable identities only during discovery; never persist PDH indices.
-        let mut disk_ids: HashMap<u32, String> = disks
+        // Fallback chain and ambiguity rule: storage_identity::assign_disk_ids.
+        let candidates: BTreeMap<u32, DiskIdentityCandidates> = disks
             .iter()
-            .filter_map(|d| disk_identity(d.index).map(|id| (d.index, id)))
+            .map(|d| (d.index, disk_identity_candidates(d.index)))
             .collect();
-        let mut counts = HashMap::<String, usize>::new();
-        for id in disk_ids.values() {
-            *counts.entry(id.clone()).or_default() += 1;
-        }
-        disk_ids.retain(|_, id| counts[id] == 1); // Ambiguous serials must not merge disks.
+        let disk_ids: HashMap<u32, String> = assign_disk_ids(&candidates)
+            .into_iter()
+            .map(|(index, (id, _tier))| (index, id))
+            .collect();
         let volume_ids: HashMap<String, String> = disks
             .iter()
             .flat_map(|d| &d.volumes)
@@ -139,11 +141,8 @@ impl Provider for StorageProvider {
         let mut devices = Vec::new();
         let mut sensors = Vec::new();
         for disk in &disks {
+            // assign_disk_ids has already logged why a disk has no identity.
             let Some(id) = disk_ids.get(&disk.index).cloned() else {
-                tracing::warn!(
-                    index = disk.index,
-                    "disk has no unique persistent identity; omitted"
-                );
                 continue;
             };
             devices.push(Device {

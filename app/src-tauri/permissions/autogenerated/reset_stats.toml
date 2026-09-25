@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-stats"
+description = "Enables the reset_stats command without any pre-configured scope."
+commands.allow = ["reset_stats"]
+
+[[permission]]
+identifier = "deny-reset-stats"
+description = "Denies the reset_stats command without any pre-configured scope."
+commands.deny = ["reset_stats"]

@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: sensor reads, event subscriptions and leaving GPU safe mode.",
+  "description": "Main window: sensor reads, statistics and session, event subscriptions and leaving GPU safe mode.",
   "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-get-schema", "allow-get-history", "allow-get-startup-status", "allow-enable-vendor-libraries"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-get-schema",
+    "allow-get-history",
+    "allow-get-stats",
+    "allow-reset-stats",
+    "allow-get-session",
+    "allow-get-startup-status",
+    "allow-enable-vendor-libraries"
+  ]
 }

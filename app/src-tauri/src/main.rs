@@ -21,6 +21,8 @@ const EVENT_SNAPSHOT: &str = "oma:snapshot";
 
 pub struct AppState {
     pub engine: Arc<Mutex<Engine>>,
+    /// Sampling interval in milliseconds, reported by `get_session`.
+    pub interval_ms: u64,
 }
 
 /// Owns the sampler so it can be stopped cleanly on exit.
@@ -126,13 +128,17 @@ fn main() {
         }))
         .manage(AppState {
             engine: engine.clone(),
+            interval_ms: SAMPLE_INTERVAL.as_millis() as u64,
         })
         .manage(StartupState::new(switch, status))
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
+            commands::get_stats,
+            commands::reset_stats,
+            commands::get_session,
             commands::get_startup_status,
-            commands::enable_vendor_libraries
+            commands::enable_vendor_libraries,
         ])
         .setup(move |app| {
             tray::build(app.handle())?;

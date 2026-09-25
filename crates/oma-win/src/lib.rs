@@ -4,6 +4,7 @@
 pub mod cpu;
 pub mod crash;
 pub(crate) mod dynlib;
+pub mod gpu;
 pub mod memory;
 pub mod network;
 mod pdh;

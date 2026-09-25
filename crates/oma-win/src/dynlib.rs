@@ -1,14 +1,4 @@
 //! System32-only dynamic loading of GPU vendor libraries (NVML, NVAPI, ADL, IGCL).
-// Remove this attribute when Task 5 adds the optional DXCore loader:
-// the `expect` turns into a warning as soon as
-// the code is no longer dead.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the GPU vendor layers once they are wired in"
-    )
-)]
 
 use std::ffi::CStr;
 

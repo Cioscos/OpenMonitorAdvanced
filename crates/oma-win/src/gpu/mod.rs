@@ -16,6 +16,15 @@ pub(crate) mod adapter;
 pub(crate) mod field;
 pub(crate) mod layer;
 
+// Reached from `GpuProvider::new` only once the real layers are wired in;
+// until then the tests are their only users.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod d3dkmt;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod dxgi;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod enumerate;
+
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

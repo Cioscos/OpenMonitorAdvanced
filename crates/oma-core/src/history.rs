@@ -20,6 +20,8 @@ pub struct History {
     /// NaN marks a missing value; it saves memory compared to `Option<f64>`.
     series: Vec<VecDeque<f64>>,
     index: HashMap<String, usize>,
+    /// A value count that does not match the sensor list is logged once.
+    mismatch_logged: bool,
 }
 
 impl History {
@@ -30,6 +32,7 @@ impl History {
             timestamps: VecDeque::with_capacity(capacity),
             series: Vec::new(),
             index: HashMap::new(),
+            mismatch_logged: false,
         }
     }
 
@@ -65,13 +68,19 @@ impl History {
             .collect();
     }
 
-    /// Appends one sample per sensor, in `set_sensors` order.
+    /// Appends one sample per sensor, in `set_sensors` order. A value count
+    /// that does not match the sensor list is a bug upstream, but it must not
+    /// stop sampling: missing values are stored as missing, extra ones are
+    /// dropped, and the mismatch is logged once.
     pub fn push(&mut self, timestamp_ms: u64, values: &[Option<f64>]) {
-        assert_eq!(
-            values.len(),
-            self.series.len(),
-            "values must match the sensor list"
-        );
+        if values.len() != self.series.len() && !self.mismatch_logged {
+            self.mismatch_logged = true;
+            tracing::error!(
+                expected = self.series.len(),
+                got = values.len(),
+                "history values do not match the sensor list; padding or truncating"
+            );
+        }
         if self.timestamps.len() == self.capacity {
             self.timestamps.pop_front();
             for s in &mut self.series {
@@ -79,8 +88,8 @@ impl History {
             }
         }
         self.timestamps.push_back(timestamp_ms);
-        for (s, v) in self.series.iter_mut().zip(values) {
-            s.push_back(v.unwrap_or(f64::NAN));
+        for (i, s) in self.series.iter_mut().enumerate() {
+            s.push_back(values.get(i).copied().flatten().unwrap_or(f64::NAN));
         }
     }
 
@@ -112,6 +121,66 @@ impl History {
             timestamps_ms: self.timestamps.range(start..).copied().collect(),
             series,
         }
+    }
+
+    /// Like `window`, but at most `max_points` rows: long windows are reduced
+    /// to a min/max envelope so a 1 h chart stays light (decision D3).
+    /// Samples are split into `max_points / 2` consecutive balanced buckets
+    /// whose sizes differ by at most one sample; each bucket yields two
+    /// rows, (first timestamp, per-series minimum) and (last timestamp,
+    /// per-series maximum). These are envelope bounds, not actual extremum
+    /// times. Any missing value makes that series yield `None` twice for the
+    /// bucket; peaks survive in fully valid buckets. With `max_points < 2`, or when
+    /// the samples already fit, the result is exactly `window`.
+    pub fn window_decimated(
+        &self,
+        ids: &[String],
+        since_ms: u64,
+        max_points: usize,
+    ) -> HistoryWindow {
+        decimate(self.window(ids, since_ms), max_points)
+    }
+}
+
+fn decimate(raw: HistoryWindow, max_points: usize) -> HistoryWindow {
+    let len = raw.timestamps_ms.len();
+    if max_points < 2 || len <= max_points {
+        return raw;
+    }
+    let buckets = max_points / 2;
+    let bounds = |b: usize| (b * len / buckets, (b + 1) * len / buckets);
+    let mut timestamps_ms = Vec::with_capacity(buckets * 2);
+    for b in 0..buckets {
+        let (start, end) = bounds(b);
+        timestamps_ms.push(raw.timestamps_ms[start]);
+        timestamps_ms.push(raw.timestamps_ms[end - 1]);
+    }
+    let series = raw
+        .series
+        .iter()
+        .map(|values| {
+            let mut out = Vec::with_capacity(buckets * 2);
+            for b in 0..buckets {
+                let (start, end) = bounds(b);
+                if values[start..end].iter().any(Option::is_none) {
+                    out.extend([None, None]);
+                    continue;
+                }
+                let mut min: Option<f64> = None;
+                let mut max: Option<f64> = None;
+                for &v in values[start..end].iter().flatten() {
+                    min = Some(min.map_or(v, |m| m.min(v)));
+                    max = Some(max.map_or(v, |m| m.max(v)));
+                }
+                out.push(min);
+                out.push(max);
+            }
+            out
+        })
+        .collect();
+    HistoryWindow {
+        timestamps_ms,
+        series,
     }
 }
 
@@ -183,6 +252,125 @@ mod tests {
             h.push(t, &[Some(1.0)]);
         }
         assert_eq!(h.window(&ids(&["a"]), 0).timestamps_ms, vec![5_000, 6_000]);
+    }
+
+    #[test]
+    fn push_with_too_few_values_stores_the_rest_as_missing() {
+        let mut h = History::new(10);
+        h.set_sensors(&ids(&["a", "b"]));
+        h.push(1, &[Some(1.0)]);
+        let w = h.window(&ids(&["a", "b"]), 0);
+        assert_eq!(w.series, vec![vec![Some(1.0)], vec![None]]);
+    }
+
+    #[test]
+    fn push_with_too_many_values_drops_the_extra_ones() {
+        let mut h = History::new(10);
+        h.set_sensors(&ids(&["a"]));
+        h.push(1, &[Some(1.0), Some(2.0)]);
+        h.push(2, &[Some(3.0)]);
+        let w = h.window(&ids(&["a"]), 0);
+        assert_eq!(w.timestamps_ms, vec![1, 2]);
+        assert_eq!(w.series, vec![vec![Some(1.0), Some(3.0)]]);
+    }
+
+    fn filled(values: &[Option<f64>]) -> History {
+        let mut h = History::new(100);
+        h.set_sensors(&ids(&["a"]));
+        for (i, v) in values.iter().enumerate() {
+            h.push((i as u64 + 1) * 1_000, &[*v]);
+        }
+        h
+    }
+
+    #[test]
+    fn decimation_is_the_raw_window_when_samples_fit() {
+        let h = filled(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        let a = ids(&["a"]);
+        assert_eq!(h.window_decimated(&a, 0, 4), h.window(&a, 0));
+        assert_eq!(h.window_decimated(&a, 0, 1), h.window(&a, 0));
+        assert_eq!(h.window_decimated(&a, 0, 0), h.window(&a, 0));
+    }
+
+    #[test]
+    fn decimation_emits_min_then_max_per_bucket() {
+        let v = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0].map(Some);
+        let w = filled(&v).window_decimated(&ids(&["a"]), 0, 4);
+        // Two buckets of five samples: [3 1 4 1 5] and [9 2 6 5 3].
+        assert_eq!(w.timestamps_ms, vec![1_000, 5_000, 6_000, 10_000]);
+        assert_eq!(
+            w.series,
+            vec![vec![Some(1.0), Some(5.0), Some(2.0), Some(9.0)]]
+        );
+    }
+
+    #[test]
+    fn balanced_buckets_distribute_the_remainder() {
+        let v: Vec<Option<f64>> = (1..=11).map(|i| Some(i as f64)).collect();
+        let w = filled(&v).window_decimated(&ids(&["a"]), 0, 5);
+        // 5 / 2 = 2 balanced buckets: five samples, then six.
+        assert_eq!(w.timestamps_ms, vec![1_000, 5_000, 6_000, 11_000]);
+        assert_eq!(
+            w.series,
+            vec![vec![Some(1.0), Some(5.0), Some(6.0), Some(11.0)]]
+        );
+    }
+
+    #[test]
+    fn a_bucket_without_values_emits_none_twice() {
+        let v = [None, None, None, Some(2.0), Some(4.0), Some(7.0)];
+        let w = filled(&v).window_decimated(&ids(&["a", "unknown"]), 0, 4);
+        assert_eq!(w.timestamps_ms, vec![1_000, 3_000, 4_000, 6_000]);
+        assert_eq!(w.series[0], vec![None, None, Some(2.0), Some(7.0)]);
+        assert_eq!(w.series[1], vec![None; 4]);
+    }
+
+    #[test]
+    fn a_mixed_bucket_preserves_the_gap_conservatively() {
+        let v = [Some(1.0), None, Some(3.0), Some(4.0), Some(5.0), Some(6.0)];
+        let w = filled(&v).window_decimated(&ids(&["a"]), 0, 4);
+        assert_eq!(w.series[0], vec![None, None, Some(4.0), Some(6.0)]);
+    }
+
+    #[test]
+    fn near_one_hour_has_no_oversized_final_bucket() {
+        let mut h = History::new(3_600);
+        h.set_sensors(&ids(&["a"]));
+        for i in 1..=3_599 {
+            h.push(i * 1_000, &[Some(i as f64)]);
+        }
+        let w = h.window_decimated(&ids(&["a"]), 0, 900);
+        assert_eq!(w.timestamps_ms.len(), 900);
+        assert_eq!(w.timestamps_ms.first(), Some(&1_000));
+        assert_eq!(w.timestamps_ms.last(), Some(&3_599_000));
+        for pair in w.timestamps_ms.chunks_exact(2) {
+            assert!((6_000..=7_000).contains(&(pair[1] - pair[0])));
+        }
+    }
+
+    #[test]
+    fn decimation_applies_after_the_since_filter() {
+        let v: Vec<Option<f64>> = (1..=10).map(|i| Some(i as f64)).collect();
+        let w = filled(&v).window_decimated(&ids(&["a"]), 5_000, 2);
+        assert_eq!(w.timestamps_ms, vec![5_000, 10_000]);
+        assert_eq!(w.series, vec![vec![Some(5.0), Some(10.0)]]);
+    }
+
+    #[test]
+    fn decimated_output_never_exceeds_max_points() {
+        for n in 0..40 {
+            let v: Vec<Option<f64>> = (0..n).map(|i| Some(i as f64)).collect();
+            let h = filled(&v);
+            for max_points in 2..45 {
+                let w = h.window_decimated(&ids(&["a"]), 0, max_points);
+                assert!(
+                    w.timestamps_ms.len() <= max_points,
+                    "n={n} max={max_points}"
+                );
+                assert_eq!(w.series[0].len(), w.timestamps_ms.len());
+                assert!(w.timestamps_ms.windows(2).all(|p| p[0] <= p[1]));
+            }
+        }
     }
 
     #[test]

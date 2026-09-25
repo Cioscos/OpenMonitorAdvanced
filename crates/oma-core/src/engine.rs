@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::history::History;
 use crate::model::{Schema, Snapshot};
 use crate::provider::{Inventory, Provider};
-use crate::sanitize::sanitize_sensor;
+use crate::sanitize::{sanitize_sensor, DiscardLog};
 use crate::stats::Stats;
 use crate::worker::Worker;
 
@@ -36,6 +36,8 @@ pub struct Engine {
     stats: Stats,
     /// Unix time of the first tick: when monitoring started (not the window).
     started_at_ms: Option<u64>,
+    /// Rate limit of the "discarding implausible value" debug line.
+    discards: DiscardLog,
     seq: u64,
 }
 
@@ -55,6 +57,7 @@ impl Engine {
             history: History::new(history_capacity),
             stats: Stats::new(),
             started_at_ms: None,
+            discards: DiscardLog::default(),
             seq: 0,
         }
     }
@@ -140,13 +143,28 @@ impl Engine {
             let ids: Vec<String> = self.schema.sensors.iter().map(|s| s.id.clone()).collect();
             self.history.set_sensors(&ids);
             self.stats.set_sensors(&ids);
+            self.discards.retain(&ids);
         }
+        let discards = &mut self.discards;
         let values: Vec<_> = self
             .slots
             .iter()
             .flat_map(|s| s.last.iter().copied())
             .zip(&self.schema.sensors)
-            .map(|(value, sensor)| sanitize_sensor(sensor, value))
+            .map(|(value, sensor)| {
+                let clean = sanitize_sensor(sensor, value);
+                if let (Some(raw), None) = (value, clean) {
+                    if discards.should_log(&sensor.id, monotonic_ms) {
+                        tracing::debug!(
+                            sensor = %sensor.id,
+                            unit = ?sensor.unit,
+                            value = raw,
+                            "discarding implausible value"
+                        );
+                    }
+                }
+                clean
+            })
             .collect();
         self.history.push(timestamp_ms, &values);
         self.stats.push(&values);
@@ -286,6 +304,23 @@ mod tests {
             .push_back(Ok(vec![Some(150.0), Some(f64::NAN)]));
         let mut e = Engine::new(vec![p], 10);
         assert_eq!(e.tick(0, 0).snapshot.values, vec![None, None]);
+    }
+
+    #[test]
+    fn discarded_values_are_logged_at_most_once_a_minute_per_sensor() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .extend([Ok(vec![Some(150.0)]), Ok(vec![Some(150.0)])]);
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(0, 0);
+        // The engine used this sensor's budget at 0 ms (monotonic time)...
+        assert!(!e.discards.should_log("dev/a/load/x", 1_000));
+        e.tick(1_000, 1_000);
+        // ...and a new discard within the minute did not renew it.
+        assert!(e.discards.should_log("dev/a/load/x", 60_000));
     }
 
     #[test]

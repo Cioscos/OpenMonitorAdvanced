@@ -1,11 +1,53 @@
 //! Drops values outside the physically plausible range (spec §8).
 
+use std::collections::{HashMap, HashSet};
+
 use crate::model::Unit;
 
+/// Minimum time between two "discarding implausible value" lines for the
+/// same sensor.
+pub const DISCARD_LOG_INTERVAL_MS: u64 = 60_000;
+
+/// Rate limit for the debug line written when a value is discarded. The
+/// release log filter keeps `oma_core=debug`, so without it a sensor stuck on
+/// an implausible reading would write one line per tick for as long as the
+/// app runs.
+#[derive(Debug, Default)]
+pub struct DiscardLog {
+    last_logged_ms: HashMap<String, u64>,
+}
+
+impl DiscardLog {
+    /// True when a discard of `sensor_id` may be logged at `now_ms`
+    /// (monotonic): the first time, then at most once per
+    /// `DISCARD_LOG_INTERVAL_MS`.
+    pub fn should_log(&mut self, sensor_id: &str, now_ms: u64) -> bool {
+        match self.last_logged_ms.get_mut(sensor_id) {
+            Some(last) if now_ms.saturating_sub(*last) < DISCARD_LOG_INTERVAL_MS => false,
+            Some(last) => {
+                *last = now_ms;
+                true
+            }
+            None => {
+                self.last_logged_ms.insert(sensor_id.to_owned(), now_ms);
+                true
+            }
+        }
+    }
+
+    /// Forgets sensors that are no longer in the schema.
+    pub fn retain(&mut self, ids: &[String]) {
+        let keep: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        self.last_logged_ms
+            .retain(|id, _| keep.contains(id.as_str()));
+    }
+}
+
+/// Plausible value or `None`. It does not log: the engine logs discards per
+/// sensor through `DiscardLog`.
 pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
     let v = value?;
     if !v.is_finite() {
-        tracing::debug!(?unit, v, "discarding non-finite value");
         return None;
     }
     let plausible = match unit {
@@ -16,12 +58,7 @@ pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
         Unit::Boolean => v == 0.0 || v == 1.0,
         _ => v >= 0.0,
     };
-    if plausible {
-        Some(v)
-    } else {
-        tracing::debug!(?unit, v, "discarding implausible value");
-        None
-    }
+    plausible.then_some(v)
 }
 
 pub fn sanitize_sensor(sensor: &crate::model::Sensor, value: Option<f64>) -> Option<f64> {
@@ -74,6 +111,29 @@ mod tests {
     fn counters_and_rates_cannot_be_negative() {
         assert_eq!(sanitize(Unit::Bytes, Some(-1.0)), None);
         assert_eq!(sanitize(Unit::BytesPerSecond, Some(0.0)), Some(0.0));
+    }
+
+    #[test]
+    fn discard_log_allows_one_line_per_sensor_per_minute() {
+        let mut log = DiscardLog::default();
+        assert!(log.should_log("a", 1_000));
+        assert!(!log.should_log("a", 2_000));
+        assert!(!log.should_log("a", 60_999));
+        // Another sensor has its own budget.
+        assert!(log.should_log("b", 2_000));
+        assert!(log.should_log("a", 61_000));
+        assert!(!log.should_log("a", 120_999));
+        assert!(log.should_log("a", 121_000));
+    }
+
+    #[test]
+    fn discard_log_forgets_removed_sensors() {
+        let mut log = DiscardLog::default();
+        assert!(log.should_log("a", 0));
+        assert!(log.should_log("b", 0));
+        log.retain(&["b".to_owned()]);
+        assert!(log.should_log("a", 1_000));
+        assert!(!log.should_log("b", 1_000));
     }
 
     #[test]

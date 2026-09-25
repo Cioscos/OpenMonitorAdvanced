@@ -591,6 +591,9 @@ struct Bound {
     energy: Option<EnergyCounter>,
     meter: EnergyMeter,
     warned: bool,
+    /// The attach probe found the device transiently unavailable: no fields declared yet.
+    /// `sample` keeps re-probing and asks for a rediscover once it answers again.
+    pending: bool,
 }
 
 pub(crate) struct IgclLayer {
@@ -686,18 +689,34 @@ impl GpuLayer for IgclLayer {
                 continue;
             }
             let mut layout = TELEMETRY_V1;
-            let Ok(t) = read_telemetry(&self.api, device, &mut layout) else {
-                continue;
-            };
-            let (fields, energy) = supported_fields(&t);
-            bound[i] = Some(Bound {
-                device,
-                layout,
-                fields,
-                energy,
-                meter: EnergyMeter::default(),
-                warned: false,
-            });
+            match read_telemetry(&self.api, device, &mut layout) {
+                Ok(t) => {
+                    let (fields, energy) = supported_fields(&t);
+                    bound[i] = Some(Bound {
+                        device,
+                        layout,
+                        fields,
+                        energy,
+                        meter: EnergyMeter::default(),
+                        warned: false,
+                        pending: false,
+                    });
+                }
+                // Low-power state or TDR recovery: bind it with no fields yet; `sample` will
+                // ask for a rediscover once the device answers again.
+                Err(ERROR_DEVICE_UNAVAILABLE) => {
+                    bound[i] = Some(Bound {
+                        device,
+                        layout,
+                        fields: BTreeSet::new(),
+                        energy: None,
+                        meter: EnergyMeter::default(),
+                        warned: false,
+                        pending: true,
+                    });
+                }
+                Err(_) => continue,
+            }
         }
         let supported = bound
             .iter()
@@ -716,6 +735,10 @@ impl GpuLayer for IgclLayer {
                 continue;
             };
             match read_telemetry(&api, bound.device, &mut bound.layout) {
+                // A device bound as "pending" (unavailable at attach) answering now means its
+                // fields were never declared: ask for a rediscover so the next attach picks
+                // them up, instead of silently reporting values `attach` never advertised.
+                Ok(_) if bound.pending => return Err(ProviderError::Rediscover),
                 Ok(t) => {
                     bound.warned = false;
                     let mut readings = readings_from(&t, &bound.fields);
@@ -1147,6 +1170,26 @@ mod tests {
         layer.attach(&[adapter(0x0000_0001_0000_ABCD, 0x8086, 3)]);
 
         assert_eq!(layer.sample(), Err(ProviderError::Rediscover));
+    }
+
+    #[test]
+    fn pending_device_asks_for_rediscover_once_it_answers() {
+        let mut layer = fake_layer(one_device(vec![
+            Err(ERROR_DEVICE_UNAVAILABLE), // attach probe: transiently unavailable
+            Err(ERROR_DEVICE_UNAVAILABLE), // still unavailable on the first sample
+            Ok(card(1.0, 100.0)),          // now answers: ask for a rediscover
+        ]))
+        .expect("init");
+        let adapters = [adapter(0x0000_0001_0000_ABCD, 0x8086, 3)];
+
+        let supported = layer.attach(&adapters);
+        assert!(supported[0].is_empty());
+        assert_eq!(layer.sample(), Ok(vec![Readings::new()]));
+        assert_eq!(layer.sample(), Err(ProviderError::Rediscover));
+
+        // The next discover's attach probes it again and, now that it answers, declares fields.
+        let supported = layer.attach(&adapters);
+        assert!(supported[0].contains(&GpuField::TemperatureCore));
     }
 
     #[test]

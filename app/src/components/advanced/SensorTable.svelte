@@ -52,11 +52,11 @@
     {#each groups as group (group.category)}
       <tbody>
         <tr class="group">
-          <th scope="colgroup" colspan="5">{categoryLabel(group.category, t)}</th>
+          <th scope="rowgroup" colspan="5">{categoryLabel(group.category, t)}</th>
         </tr>
         {#each group.sensors as sensor (sensor.id)}
           {@const s = stats.statsOf(sensor.id)}
-          <tr>
+          <tr tabindex="0">
             <th scope="row">
               <span class="name">{sensorLabel(sensor, t)}</span>
               {#if sensor.experimental}<span class="tag exp">{t('advanced.experimental')}</span>{/if}
@@ -142,7 +142,8 @@
     color: var(--warn);
     border-color: color-mix(in srgb, var(--warn) 45%, transparent);
   }
-  /* Spec §7.3: the source badge shows on hover. */
+  /* Spec §7.3: the source badge shows on hover or with focus; opacity keeps it in the
+     accessibility tree (unlike display/visibility), so screen readers still read it. */
   .source {
     opacity: 0;
     cursor: help;
@@ -151,5 +152,9 @@
   tr:hover .source,
   tr:focus-within .source {
     opacity: 1;
+  }
+  tbody tr:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 </style>

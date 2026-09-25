@@ -45,7 +45,7 @@ const cells = (label: string) => [...screen.getByText(label).closest('tr')!.quer
 
 test('groups follow the category order', () => {
   setup();
-  const headings = screen.getAllByRole('columnheader').filter((th) => th.getAttribute('scope') === 'colgroup');
+  const headings = screen.getAllByRole('rowheader').filter((th) => th.getAttribute('scope') === 'rowgroup');
   expect(headings.map((h) => h.textContent)).toEqual(
     ['temperature', 'load', 'clock', 'power', 'data', 'flag'].map((c) => t(`advanced.category.${c}`)),
   );
@@ -74,6 +74,14 @@ test('experimental sensors are marked and every row has its source badge', () =>
   expect(screen.getAllByText(t('advanced.experimental'))).toHaveLength(1);
   expect(screen.getByText('NVML').getAttribute('title')).toBe(t('source.nvml'));
   expect(screen.getAllByTitle(t('source.mock'))).toHaveLength(sensors.length - 1);
+});
+
+test('the source badge is present and readable without hover, and its row is focusable', () => {
+  setup();
+  const badge = screen.getByText('NVML');
+  expect(document.body.contains(badge)).toBe(true);
+  const row = badge.closest('tr')!;
+  expect(row.getAttribute('tabindex')).toBe('0');
 });
 
 test('reset clears the page sensors in the core and reads them again', async () => {

@@ -38,7 +38,9 @@ Clicking a tile in the Simple view opens the matching page. If no data arrives f
 top bar shows *Data not updating*.
 
 **Disks.** Drive temperatures come from the drive itself where it reports them (most NVMe drives,
-some SATA drives), refreshed every 30 seconds; a spun-down disk is not woken up to read it. Disks
+some SATA drives), refreshed every 30 seconds; a disk that Windows reports in standby is not
+queried. Whether the periodic query keeps an idle HDD from spinning down is not yet verified on
+hardware. Disks
 without a readable serial number (virtual machines, some RAID or USB enclosures) are still shown:
 they are identified by their GPT disk GUID, their MBR signature or, as a last resort, the port they
 are connected to.

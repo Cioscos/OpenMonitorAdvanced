@@ -17,6 +17,9 @@ Updated at the end of every milestone (last update: M3).
 | Disk temperature probes retry every 30 s, including disks asleep at startup; new driver sensor indices request rediscovery without waking a sleeping disk. Verify real standby/wake behavior before using these readings in rules. | `crates/oma-win/src/storage.rs` | M5 (disk rules; retry and index identity already covered in M3) |
 | A disk identified only by its PnP instance id (no serial, no unique GPT or MBR id) gets a new id when it is moved to another port: its history and statistics restart. | `crates/oma-win/src/storage_identity.rs` | accepted |
 | Intel and other GPUs whose PnP maximum-link read fails show no maximum link at all: `pcieMaxGen`/`pcieMaxWidth` come only from the PnP base layer (device capability, identical in safe mode), because NVML's max-link calls report the device+slot-limited value and IGCL does not read `ctlPciGetProperties`. Not yet exercised on Intel or non-NVIDIA hardware. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
+| Network pages show KPIs and the sensor table in bit/s but the history chart's axis and legend stay in byte/s: a known limit until per-sensor unit settings arrive. | `app/src/components/advanced/HistoryChart.svelte` | M5 (settings/units) |
+| Discovery reads every disk's temperature in one tick; with several NVMe drives waking from a low-power state this can exceed the 200 ms tick budget, so the value arrives one tick late. | `crates/oma-win/src/storage.rs` | M5 (disk rules) |
+| `gpu/pnp.rs` `display_interfaces` has no retry on `CR_BUFFER_SMALL`: a GPU hot-plugged between the two calls gets no maximum link on that discovery. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
 
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
@@ -29,7 +32,9 @@ Updated at the end of every milestone (last update: M3).
 
 - Tray left click and the "Open" menu item re-create the window after it was closed (M1).
 - USB disk hot-plug keeps or changes disk ids correctly (M1). Since M3 also: a disk without a serial number (for example a VHDX mounted by an administrator) appears with a `storage/gpt-…` id and keeps it across a restart.
-- IGCL telemetry and PCIe link on Intel hardware; ADL on a dedicated Radeon (hardware matrix, spec §12).
+- IGCL telemetry and PCIe link on Intel hardware, including `ctlPciGetState` layout and per-tick cost (unmeasured, no Intel hardware available); ADL on a dedicated Radeon (hardware matrix, spec §12).
+- Set the power plan's "turn off hard disk after" to 1-2 minutes, put the app in the tray, and confirm the SATA HDD spins down and stays down. If it does not, gate the 30 s refresh on observed disk activity (PDH idle time) — M5 disk rules.
+- An MBR disk or a VHD without a serial number gets a `storage/mbr-…` id: the MBR identity tier and the geometry IOCTL were never exercised on real hardware (every disk in the M3 hardware matrix is GPT).
 
 ## Closed in M3
 

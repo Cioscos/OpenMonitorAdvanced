@@ -143,9 +143,11 @@ The last block is the continuously-visible run (`-WarmupSeconds 3660
 means the preliminary tray fill was not used here, not that the history was
 empty — the window stayed open and visible for the full 3660 s warm-up
 before the 30 s sample, so the chart's live, non-decimated tail (up to
-about 3600 points per series) had time to build up. The user was asked to
-keep the window visible, unminimized and uncovered for the whole run;
-confirmation of that is still pending.
+about 3600 points per series) had time to build up. The user confirmed the
+window stayed visible (never minimised or closed) for the whole 61-minute
+run; the window was on a second screen while a game ran on the other
+screen, so app CPU for that row was measured with a GPU-heavy process
+present, not an idle system.
 
 All five M3 rows meet the budget (app CPU < 1 %; tray < 30 MB; window
 < 200 MB total) on all counts, and `VendorModules` lists all three vendor

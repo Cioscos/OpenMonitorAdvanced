@@ -139,6 +139,9 @@ fn main() {
             if !start_minimized {
                 window::show_main(app.handle());
             }
+            // The window stack (tao, WebView2) may have replaced the crash marker filter.
+            #[cfg(windows)]
+            oma_win::crash::rearm_crash_marker();
             let handle = app.handle().clone();
             let sampler = Sampler::spawn(engine, SAMPLE_INTERVAL, move |out| {
                 // Nobody listens while the window is closed: skip serialization.

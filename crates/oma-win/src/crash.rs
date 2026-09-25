@@ -46,6 +46,42 @@ pub fn install_crash_marker(marker: PathBuf) {
     let _ = PREVIOUS.set(previous);
 }
 
+/// What `rearm` found in place of our filter.
+#[derive(Debug, PartialEq, Eq)]
+enum Rearm {
+    NotInstalled,
+    Kept,
+    Restored,
+}
+
+fn address(filter: LPTOP_LEVEL_EXCEPTION_FILTER) -> usize {
+    filter.map_or(0, |f| f as usize)
+}
+
+fn rearm() -> Rearm {
+    // PREVIOUS is set last by `install_crash_marker`: before that there is nothing to re-arm.
+    if PREVIOUS.get().is_none() {
+        return Rearm::NotInstalled;
+    }
+    // SAFETY: as in `install_crash_marker`. PREVIOUS keeps the filter found at
+    // install time, so ours never chains to itself.
+    let current = unsafe { SetUnhandledExceptionFilter(Some(write_marker)) };
+    if address(current) == address(Some(write_marker)) {
+        Rearm::Kept
+    } else {
+        Rearm::Restored
+    }
+}
+
+/// Puts the crash marker filter back in place if a component loaded after
+/// `install_crash_marker` (the WebView2 window, a GPU vendor DLL) replaced it.
+/// The replacing filter is not chained. No-op when the marker was never installed.
+pub fn rearm_crash_marker() {
+    if rearm() == Rearm::Restored {
+        tracing::warn!("the crash marker filter had been replaced; re-armed");
+    }
+}
+
 /// Reads and deletes the marker left by a previous run that crashed; None if there is none.
 pub fn take_crash_marker(marker: &Path) -> Option<String> {
     let bytes = match std::fs::read(marker) {
@@ -155,6 +191,7 @@ mod tests {
     use windows::Win32::System::Diagnostics::Debug::{SetErrorMode, SEM_NOGPFAULTERRORBOX};
 
     const CHILD_ENV: &str = "OMA_CRASH_CHILD";
+    const REARM_CHILD_ENV: &str = "OMA_REARM_CHILD";
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
@@ -248,6 +285,81 @@ mod tests {
         let exe_name = exe.file_name().unwrap().to_string_lossy().to_lowercase();
         assert!(text.to_lowercase().ends_with(&exe_name), "{text}");
         assert!(!marker.exists());
+    }
+
+    /// Re-launches this test binary running only `rearm_child`: the top-level
+    /// filter is process-wide, so the checks run in a process of their own.
+    #[test]
+    fn rearm_restores_only_our_filter() {
+        let marker = temp_marker("rearm");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "crash::tests::rearm_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(REARM_CHILD_ENV, &marker)
+            .output()
+            .expect("start the re-arm child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("rearm-child-ok"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!marker.exists(), "no crash, so no marker");
+    }
+
+    unsafe extern "system" fn other_filter(_: *const EXCEPTION_POINTERS) -> i32 {
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    unsafe extern "system" fn intruder_filter(_: *const EXCEPTION_POINTERS) -> i32 {
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    /// Address of the current top-level filter (0 for none), left in place.
+    fn current_filter() -> usize {
+        // SAFETY: swaps the filter out and straight back in.
+        let current = unsafe { SetUnhandledExceptionFilter(None) };
+        // SAFETY: as above.
+        unsafe { SetUnhandledExceptionFilter(current) };
+        address(current)
+    }
+
+    #[test]
+    #[ignore = "child process of rearm_restores_only_our_filter"]
+    fn rearm_child() {
+        // Without the variable (e.g. under `--include-ignored`) this is a no-op.
+        let Some(marker) = std::env::var_os(REARM_CHILD_ENV) else {
+            return;
+        };
+        let other = address(Some(other_filter));
+        // SAFETY: test filters with the right signature, in this child only.
+        unsafe { SetUnhandledExceptionFilter(Some(other_filter)) };
+
+        // Not installed: nothing changes.
+        assert_eq!(rearm(), Rearm::NotInstalled);
+        assert_eq!(current_filter(), other);
+
+        install_crash_marker(PathBuf::from(marker));
+        let ours = address(Some(write_marker));
+        assert_eq!(current_filter(), ours);
+        assert_eq!(rearm(), Rearm::Kept);
+        assert_eq!(current_filter(), ours);
+
+        // Another component (e.g. a vendor DLL) replaces the filter: re-arm puts
+        // ours back and keeps chaining to the original one, not to the intruder.
+        // SAFETY: as above.
+        unsafe { SetUnhandledExceptionFilter(Some(intruder_filter)) };
+        assert_eq!(rearm(), Rearm::Restored);
+        assert_eq!(current_filter(), ours);
+        assert_eq!(address(PREVIOUS.get().copied().flatten()), other);
+        assert_eq!(rearm(), Rearm::Kept);
+        rearm_crash_marker();
+        assert_eq!(current_filter(), ours);
+        println!("rearm-child-ok");
     }
 
     #[test]

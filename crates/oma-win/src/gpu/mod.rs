@@ -141,6 +141,8 @@ fn load_vendor_layers() -> Vec<Box<dyn GpuLayer>> {
     let layers: Vec<Box<dyn GpuLayer>> = candidates.into_iter().flatten().collect();
     let sources: Vec<_> = layers.iter().map(|layer| layer.source()).collect();
     tracing::info!(?sources, "GPU vendor libraries loaded");
+    // A vendor DLL may have installed its own top-level exception filter.
+    crate::crash::rearm_crash_marker();
     layers
 }
 

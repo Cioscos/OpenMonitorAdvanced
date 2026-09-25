@@ -17,6 +17,11 @@ Prerequisites: Windows 10/11, Rust stable ≥ 1.85 (MSVC), Node 22, pnpm 10, Web
 
 Tests: `cargo test --workspace` (after `pnpm build` in `app/`) and `pnpm test` in `app/`.
 
+## Performance budget
+
+The monitor must not distort what it measures. Budgets and the latest measurements are in
+`docs/perf-budget.md`; run `scripts/measure-footprint.ps1` on a release build to reproduce them.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE`.

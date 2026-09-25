@@ -8,11 +8,21 @@ use oma_win::memory::MemoryProvider;
 use oma_win::network::NetworkProvider;
 use oma_win::storage::StorageProvider;
 
-/// Discovers, waits for a second PDH sample, polls, and checks alignment.
+/// Discovers, polls twice a second apart, and checks alignment. The first
+/// poll after a discover only primes the PDH rate counters (fresh baseline,
+/// no elapsed interval yet) and is discarded; the second poll carries real
+/// rate values.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
     let inventory = p.discover().expect("discover");
     std::thread::sleep(Duration::from_millis(1_100));
-    let values = p.poll().expect("poll");
+    let first = p.poll().expect("first poll");
+    assert_eq!(
+        first.len(),
+        inventory.sensors.len(),
+        "values must align with sensors"
+    );
+    std::thread::sleep(Duration::from_millis(1_100));
+    let values = p.poll().expect("second poll");
     assert_eq!(
         values.len(),
         inventory.sensors.len(),

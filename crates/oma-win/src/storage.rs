@@ -95,6 +95,17 @@ pub struct StorageProvider {
     disks: Vec<DiskInstance>,
     disk_ids: HashMap<u32, String>,
     volume_ids: HashMap<String, String>,
+    /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
+    fresh: bool,
+}
+
+/// `true` only for the first call after a discover: PDH rate counters were
+/// just added, so the collect a few milliseconds later has too short an
+/// interval to yield a meaningful rate (noisy throughput/active time),
+/// mirroring the network provider's first-sample rule. Resets the flag as a
+/// side effect.
+fn take_fresh(fresh: &mut bool) -> bool {
+    std::mem::replace(fresh, false)
 }
 
 impl Provider for StorageProvider {
@@ -197,10 +208,12 @@ impl Provider for StorageProvider {
         self.disks = disks;
         self.disk_ids = disk_ids;
         self.volume_ids = volume_ids;
+        self.fresh = true;
         Ok(Inventory { devices, sensors })
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        let fresh = take_fresh(&mut self.fresh);
         let counters = self.counters.as_mut().ok_or(ProviderError::Rediscover)?;
         counters.query.collect()?;
         let read = counters.query.array(counters.read)?;
@@ -220,9 +233,14 @@ impl Provider for StorageProvider {
             if !self.disk_ids.contains_key(&disk.index) {
                 continue;
             }
-            values.push(finite(&read, &disk.instance));
-            values.push(finite(&write, &disk.instance));
-            values.push(finite(&idle, &disk.instance).and_then(active_pct));
+            if fresh {
+                // Prime the PDH rate counters but report no value yet.
+                values.extend([None, None, None]);
+            } else {
+                values.push(finite(&read, &disk.instance));
+                values.push(finite(&write, &disk.instance));
+                values.push(finite(&idle, &disk.instance).and_then(active_pct));
+            }
             for volume in &disk.volumes {
                 let Some(recorded_id) = self.volume_ids.get(volume) else {
                     continue;
@@ -308,6 +326,14 @@ mod tests {
         assert!(!volume_identity_changed("guid-a", Some("guid-a")));
         assert!(volume_identity_changed("guid-a", Some("guid-b")));
         assert!(volume_identity_changed("guid-a", None));
+    }
+
+    #[test]
+    fn fresh_flag_is_consumed_by_the_first_poll_only() {
+        let mut fresh = true;
+        assert!(take_fresh(&mut fresh));
+        assert!(!take_fresh(&mut fresh));
+        assert!(!take_fresh(&mut fresh));
     }
 
     #[test]

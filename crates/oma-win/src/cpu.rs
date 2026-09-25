@@ -91,6 +91,16 @@ struct Counters {
 pub struct CpuProvider {
     counters: Option<Counters>,
     processors: Vec<LogicalProcessor>,
+    /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
+    fresh: bool,
+}
+
+/// `true` only for the first call after a discover: PDH rate counters were
+/// just added, so the collect a few milliseconds later has too short an
+/// interval to yield a meaningful rate (noisy load/clock), mirroring the
+/// network provider's first-sample rule. Resets the flag as a side effect.
+fn take_fresh(fresh: &mut bool) -> bool {
+    std::mem::replace(fresh, false)
 }
 
 impl CpuProvider {
@@ -107,8 +117,12 @@ impl Provider for CpuProvider {
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
         let mut query = Query::open()?;
         let utility = add_load_counter(|path| query.add_english(path))?;
-        let performance = query.add_english(PERFORMANCE).ok();
-        let frequency = query.add_english(FREQUENCY).ok();
+        let performance = query.add_english(PERFORMANCE).map_err(|e| {
+            tracing::warn!(error = %e, "failed to add processor performance counter; effective clock will be unavailable");
+        }).ok();
+        let frequency = query.add_english(FREQUENCY).map_err(|e| {
+            tracing::warn!(error = %e, "failed to add processor frequency counter; effective clock will be unavailable");
+        }).ok();
         query.collect()?;
         let mut processors: Vec<_> = query
             .instances(utility)?
@@ -151,6 +165,7 @@ impl Provider for CpuProvider {
             frequency,
         });
         self.processors = processors;
+        self.fresh = true;
         Ok(Inventory {
             devices: vec![Device {
                 id: DEVICE_ID.to_owned(),
@@ -164,8 +179,13 @@ impl Provider for CpuProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        let fresh = take_fresh(&mut self.fresh);
         let counters = self.counters.as_mut().ok_or(ProviderError::Rediscover)?;
         counters.query.collect()?;
+        if fresh {
+            // Prime the PDH rate counters but report no value yet.
+            return Ok(vec![None; self.processors.len() + 2]);
+        }
         let utility = counters.query.array(counters.utility)?;
         if !utility.is_empty() {
             let seen = utility
@@ -261,5 +281,13 @@ mod tests {
         assert_eq!(load_pct(104.0), Some(100.0));
         assert_eq!(load_pct(-1.0), None);
         assert_eq!(load_pct(f64::NAN), None);
+    }
+
+    #[test]
+    fn fresh_flag_is_consumed_by_the_first_poll_only() {
+        let mut fresh = true;
+        assert!(take_fresh(&mut fresh));
+        assert!(!take_fresh(&mut fresh));
+        assert!(!take_fresh(&mut fresh));
     }
 }

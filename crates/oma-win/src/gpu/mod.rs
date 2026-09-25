@@ -17,6 +17,9 @@ pub(crate) mod adapter;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod adl;
 pub(crate) mod field;
+// Wired into `GpuProvider::new` by Task 11; until then only tests use it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod igcl;
 pub(crate) mod layer;
 
 // Reached from `GpuProvider::new` only once the real layers are wired in;

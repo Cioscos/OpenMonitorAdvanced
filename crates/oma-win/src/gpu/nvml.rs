@@ -208,7 +208,13 @@ fn throttle_thermal(reasons: u64) -> bool {
     reasons & THERMAL_REASONS != 0
 }
 
-/// Highest duty among the fans that answered; the last failure code when none did.
+/// Core temperature in °C; 0 (or below) means no reading, as in the other layers.
+fn celsius(raw: i64) -> Option<f64> {
+    (raw > 0).then_some(raw as f64)
+}
+
+/// Highest duty among the fans that answered, clamped to 100 % (NVML reports the target
+/// duty, which can exceed 100); the last failure code when none answered.
 fn max_fan(reads: impl IntoIterator<Item = (Ret, u32)>) -> Read {
     let mut best: Option<u32> = None;
     let mut failure = ERROR_NOT_SUPPORTED;
@@ -220,7 +226,7 @@ fn max_fan(reads: impl IntoIterator<Item = (Ret, u32)>) -> Read {
         }
     }
     match best {
-        Some(percent) => (SUCCESS, Some(f64::from(percent))),
+        Some(percent) => (SUCCESS, Some(f64::from(percent).min(100.0))),
         None => (failure, None),
     }
 }
@@ -357,11 +363,11 @@ impl Api {
             // SAFETY: `t` is a valid, versioned in/out struct.
             let ret = unsafe { f(device, &mut t) };
             if ret == SUCCESS || self.temperature.is_none() {
-                return (ret, Some(f64::from(t.celsius)));
+                return (ret, celsius(i64::from(t.celsius)));
             }
         }
-        let (ret, celsius) = call_u32_arg(self.temperature, device, SENSOR_GPU);
-        (ret, Some(f64::from(celsius)))
+        let (ret, raw) = call_u32_arg(self.temperature, device, SENSOR_GPU);
+        (ret, celsius(i64::from(raw)))
     }
 
     fn fan_rpm(&self, device: DeviceHandle) -> Read {
@@ -637,10 +643,23 @@ mod tests {
             (SUCCESS, Some(40.0))
         );
         assert_eq!(max_fan([]), (ERROR_NOT_SUPPORTED, None));
+        // NVML reports the target duty, which can exceed 100 %: clamp, do not drop.
+        assert_eq!(
+            max_fan([(SUCCESS, 30), (SUCCESS, 115)]),
+            (SUCCESS, Some(100.0))
+        );
         assert_eq!(
             max_fan([(ERROR_GPU_IS_LOST, 0), (ERROR_GPU_IS_LOST, 0)]),
             (ERROR_GPU_IS_LOST, None)
         );
+    }
+
+    #[test]
+    fn zero_temperature_is_missing() {
+        assert_eq!(celsius(54), Some(54.0));
+        assert_eq!(celsius(1), Some(1.0));
+        assert_eq!(celsius(0), None);
+        assert_eq!(celsius(-5), None);
     }
 
     #[test]

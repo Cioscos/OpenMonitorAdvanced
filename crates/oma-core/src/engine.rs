@@ -5,6 +5,7 @@ use crate::history::History;
 use crate::model::{Schema, Snapshot};
 use crate::provider::{Inventory, Provider};
 use crate::sanitize::sanitize_sensor;
+use crate::stats::Stats;
 use crate::worker::Worker;
 
 pub fn backoff_ms(failures: u32) -> u64 {
@@ -31,6 +32,10 @@ pub struct Engine {
     slots: Vec<Slot>,
     schema: Schema,
     history: History,
+    /// Min/max/average since start, same retention rule as `history`.
+    stats: Stats,
+    /// Unix time of the first tick: when monitoring started (not the window).
+    started_at_ms: Option<u64>,
     seq: u64,
 }
 
@@ -48,6 +53,8 @@ impl Engine {
                 .collect(),
             schema: Schema::default(),
             history: History::new(history_capacity),
+            stats: Stats::new(),
+            started_at_ms: None,
             seq: 0,
         }
     }
@@ -60,11 +67,22 @@ impl Engine {
     pub fn sequence(&self) -> u64 {
         self.seq
     }
+    pub fn stats(&self) -> &Stats {
+        &self.stats
+    }
+    pub fn stats_mut(&mut self) -> &mut Stats {
+        &mut self.stats
+    }
+    /// `timestamp_ms` of the first tick; `None` before it.
+    pub fn started_at_ms(&self) -> Option<u64> {
+        self.started_at_ms
+    }
 
     /// `timestamp_ms` is Unix time for display; `monotonic_ms` drives retry deadlines.
     pub fn tick(&mut self, timestamp_ms: u64, monotonic_ms: u64) -> TickOutput {
         // One budget for the entire cycle, not N sequential provider timeouts.
         let deadline = Instant::now() + Duration::from_millis(200);
+        self.started_at_ms.get_or_insert(timestamp_ms);
         for slot in &mut self.slots {
             slot.worker.start(monotonic_ms);
         }
@@ -102,7 +120,10 @@ impl Engine {
                 })
                 .map(|sensor| sensor.id.clone())
                 .collect();
+            // Series and statistics survive only for sensors whose id, source
+            // and unit are unchanged; the second call adds the new sensors.
             self.history.set_sensors(&retained);
+            self.stats.set_sensors(&retained);
             self.schema = Schema {
                 revision: self.schema.revision + 1,
                 devices: self
@@ -116,14 +137,9 @@ impl Engine {
                     .flat_map(|s| s.inventory.sensors.iter().cloned())
                     .collect(),
             };
-            self.history.set_sensors(
-                &self
-                    .schema
-                    .sensors
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect::<Vec<_>>(),
-            );
+            let ids: Vec<String> = self.schema.sensors.iter().map(|s| s.id.clone()).collect();
+            self.history.set_sensors(&ids);
+            self.stats.set_sensors(&ids);
         }
         let values: Vec<_> = self
             .slots
@@ -133,6 +149,7 @@ impl Engine {
             .map(|(value, sensor)| sanitize_sensor(sensor, value))
             .collect();
         self.history.push(timestamp_ms, &values);
+        self.stats.push(&values);
         self.seq += 1;
         TickOutput {
             snapshot: Snapshot {
@@ -509,6 +526,83 @@ mod tests {
             .window(&["dev/a/load/x".into(), "dev/a/load/y".into()], 0);
         assert_eq!(history.series[0], vec![None, None, Some(1.0)]);
         assert_eq!(history.series[1], vec![Some(1.0), None, Some(1.0)]);
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn stats_cover_every_tick_since_start() {
+        let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
+        script.lock().unwrap().polls.extend([
+            Ok(vec![Some(10.0), None]),
+            Ok(vec![Some(30.0), Some(150.0)]),
+            Ok(vec![Some(20.0), Some(5.0)]),
+        ]);
+        let mut e = Engine::new(vec![p], 10);
+        for t in [1_000, 2_000, 3_000] {
+            e.tick(t, t);
+        }
+        let got = e.stats().get(&ids(&["dev/a/load/x", "dev/a/load/y"]));
+        let x = got[0].expect("x has samples");
+        assert_eq!((x.min, x.max, x.avg, x.count), (10.0, 30.0, 20.0, 3));
+        // 150 % is implausible and sanitized away before it reaches the stats.
+        let y = got[1].expect("y has samples");
+        assert_eq!((y.min, y.max, y.avg, y.count), (5.0, 5.0, 5.0, 1));
+    }
+
+    #[test]
+    fn stats_follow_the_history_retention_rule() {
+        let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(1_000, 1_000);
+        {
+            let mut s = script.lock().unwrap();
+            s.inventory.sensors[0].source = Source::Nvml;
+            s.inventory.sensors.push(Sensor::new(
+                "dev/a",
+                SensorKind::Load,
+                "z",
+                Unit::Percent,
+                Label::new("test"),
+                Source::Mock,
+            ));
+            s.polls.push_back(Err(ProviderError::Rediscover));
+        }
+        e.tick(2_000, 2_000);
+        e.tick(3_000, 3_000);
+        let got = e
+            .stats()
+            .get(&ids(&["dev/a/load/x", "dev/a/load/y", "dev/a/load/z"]));
+        // x changed source: its statistics restart with the new schema.
+        assert_eq!(got[0].map(|s| s.count), Some(1));
+        // y is unchanged: the sample of the first tick is still counted.
+        assert_eq!(got[1].map(|s| s.count), Some(2));
+        assert_eq!(got[2].map(|s| s.count), Some(1));
+    }
+
+    #[test]
+    fn stats_reset_through_the_engine() {
+        let (p, _) = fake("a", inventory("dev/a", &["x", "y"]));
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(1_000, 1_000);
+        e.stats_mut().reset(&ids(&["dev/a/load/x"]));
+        let got = e.stats().get(&ids(&["dev/a/load/x", "dev/a/load/y"]));
+        assert_eq!(got[0], None);
+        assert_eq!(got[1].map(|s| s.count), Some(1));
+        e.tick(2_000, 2_000);
+        let got = e.stats().get(&ids(&["dev/a/load/x"]));
+        assert_eq!(got[0].map(|s| s.count), Some(1));
+    }
+
+    #[test]
+    fn started_at_is_the_timestamp_of_the_first_tick() {
+        let mut e = Engine::new(Vec::new(), 10);
+        assert_eq!(e.started_at_ms(), None);
+        e.tick(5_000, 0);
+        e.tick(6_000, 1_000);
+        assert_eq!(e.started_at_ms(), Some(5_000));
     }
 
     #[test]

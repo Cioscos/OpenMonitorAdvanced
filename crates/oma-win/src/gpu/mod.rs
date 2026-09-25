@@ -24,6 +24,9 @@ pub(crate) mod d3dkmt;
 pub(crate) mod dxgi;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod enumerate;
+// Used only by tests until GpuProvider::new wires the NVAPI layer in.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod nvapi;
 // Used only by tests until GpuProvider::new wires the NVML layer in.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod nvml;

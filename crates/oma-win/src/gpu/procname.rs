@@ -64,6 +64,13 @@ impl ProcessNames {
             return;
         }
         let listed: HashMap<u32, String> = (self.snapshot)().into_iter().collect();
+        // An empty snapshot means the Toolhelp call itself failed (`toolhelp_processes` returns
+        // no entries on error), not that every missing pid just ended. Do not cache "PID n"
+        // fallbacks in that case, so the next tick retries the snapshot instead of being stuck
+        // with placeholder names.
+        if listed.is_empty() {
+            return;
+        }
         for pid in missing {
             let name = listed
                 .get(&pid)
@@ -162,6 +169,34 @@ mod tests {
         assert_eq!(names.name(9), "PID 9", "empty names are not shown");
         names.update(&BTreeSet::from([777, 9]));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "no second snapshot");
+    }
+
+    #[test]
+    fn a_failed_snapshot_is_retried_next_tick_instead_of_caching_fallbacks() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        // First snapshot fails (empty, as `toolhelp_processes` returns on error); the second
+        // succeeds.
+        let mut names = ProcessNames::with_snapshot(Box::new(move || {
+            let call = counter.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Vec::new()
+            } else {
+                vec![(2096, "dwm.exe".to_owned())]
+            }
+        }));
+        names.update(&BTreeSet::from([2096]));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // The fallback is shown for this tick, but not cached: the next tick retries.
+        assert_eq!(names.name(2096), "PID 2096");
+
+        names.update(&BTreeSet::from([2096]));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the empty snapshot must not be cached"
+        );
+        assert_eq!(names.name(2096), "dwm.exe");
     }
 
     #[test]

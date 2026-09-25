@@ -366,7 +366,7 @@ fn pnp_instance_id(index: u32) -> Option<String> {
             ..Default::default()
         };
         // SAFETY: valid set, class GUID and interface data with cbSize set.
-        // Failure (ERROR_NO_MORE_ITEMS) ends the enumeration.
+        // Any error here ends the enumeration, not only ERROR_NO_MORE_ITEMS.
         let more = unsafe {
             SetupDiEnumDeviceInterfaces(
                 set.0,

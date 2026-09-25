@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { formatBytes, formatClock, formatPercent, formatRate } from '../../lib/format';
+  import { formatBytes, formatClock, formatPercent, formatPower, formatRate, formatTemperature } from '../../lib/format';
   import { monitoringHealth } from '../../lib/health';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import { cpuSummary, memorySummary, networkSummary, storageSummary, sumSeries } from '../../lib/select';
+  import {
+    cpuSummary,
+    gpuSummaries,
+    memorySummary,
+    networkSummary,
+    simpleViewGpus,
+    storageSummary,
+    sumSeries,
+  } from '../../lib/select';
   import AnimatedNumber from '../common/AnimatedNumber.svelte';
   import Sparkline from '../common/Sparkline.svelte';
   import HealthBanner from './HealthBanner.svelte';
@@ -14,6 +22,7 @@
   const valueOf = (id: string) => store.value(id);
   const locale = $derived(i18n.locale);
   const cpu = $derived(store.schema ? cpuSummary(store.schema, valueOf) : null);
+  const gpus = $derived(store.schema ? simpleViewGpus(gpuSummaries(store.schema, valueOf)) : []);
   const mem = $derived(store.schema ? memorySummary(store.schema, valueOf) : null);
   const disk = $derived(store.schema ? storageSummary(store.schema, valueOf) : null);
   const net = $derived(store.schema ? networkSummary(store.schema, valueOf) : null);
@@ -34,6 +43,24 @@
         {/if}
       </Tile>
     {/if}
+
+    {#each gpus as gpu (gpu.deviceId)}
+      <Tile label={t('tile.gpu')} onclick={onOpenAdvanced}>
+        <div class="big"><AnimatedNumber value={gpu.load} format={(v) => formatPercent(v, locale)} /></div>
+        <div class="sub">{gpu.name}</div>
+        <div class="sub">
+          {formatTemperature(gpu.temperatureC, locale)} · {formatClock(gpu.clockMhz, locale)} · {formatPower(gpu.powerW, locale)}
+        </div>
+        {#if gpu.memUsedBytes !== null && gpu.memTotalBytes !== null}
+          <div class="sub">
+            {t('tile.vram', { used: formatBytes(gpu.memUsedBytes, locale), total: formatBytes(gpu.memTotalBytes, locale) })}
+          </div>
+        {/if}
+        {#if gpu.loadId}
+          <Sparkline values={store.series(gpu.loadId)} capacity={store.capacity} max={100} />
+        {/if}
+      </Tile>
+    {/each}
 
     {#if mem}
       <Tile label={t('tile.memory')} onclick={onOpenAdvanced}>

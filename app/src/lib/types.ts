@@ -37,7 +37,17 @@ export type Unit =
   | 'joule'
   | 'boolean';
 
-export type Source = 'pdh' | 'win32' | 'ip_helper' | 'mock';
+export type Source =
+  | 'pdh'
+  | 'win32'
+  | 'ip_helper'
+  | 'dxgi'
+  | 'd3dkmt'
+  | 'nvml'
+  | 'nvapi'
+  | 'adl'
+  | 'igcl'
+  | 'mock';
 
 /** Translation key (looked up as `sensor.<key>`) plus optional `{arg}`. */
 export interface Label {
@@ -61,6 +71,8 @@ export interface Sensor {
   label: Label;
   source: Source;
   category: string;
+  /** Present (true) only for readings from undocumented vendor calls (spec §5.2). */
+  experimental?: boolean;
 }
 
 export interface Schema {
@@ -86,4 +98,12 @@ export interface HistoryWindow {
 export interface HistorySeed extends HistoryWindow {
   revision: number;
   seq: number;
+}
+
+/** GPU safe mode (spec §8): vendor libraries off after `--safe` or a crash. */
+export interface StartupStatus {
+  safeMode: boolean;
+  reason: 'flag' | 'crash' | null;
+  /** File name of the module that crashed the previous run, e.g. "nvml.dll". */
+  crashModule: string | null;
 }

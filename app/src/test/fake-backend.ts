@@ -1,11 +1,13 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
-import type { HistorySeed, HistoryWindow, Schema, Snapshot } from '../lib/types';
+import type { HistorySeed, HistoryWindow, Schema, Snapshot, StartupStatus } from '../lib/types';
 
 /** Hand-driven backend for tests: emit events explicitly. */
 export class FakeBackend implements Backend {
   schema: Schema;
   history: HistoryWindow = { timestampsMs: [], series: [] };
   schemaCalls = 0;
+  startup: StartupStatus = { safeMode: false, reason: null, crashModule: null };
+  enableCalls = 0;
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
 
@@ -30,6 +32,16 @@ export class FakeBackend implements Backend {
   async onSnapshot(cb: (s: Snapshot) => void): Promise<Unsubscribe> {
     this.#snapshotListeners.add(cb);
     return () => this.#snapshotListeners.delete(cb);
+  }
+
+  async getStartupStatus(): Promise<StartupStatus> {
+    return this.startup;
+  }
+
+  async enableVendorLibraries(): Promise<StartupStatus> {
+    this.enableCalls++;
+    this.startup = { ...this.startup, safeMode: false };
+    return this.startup;
   }
 
   emitSchema(schema: Schema): void {

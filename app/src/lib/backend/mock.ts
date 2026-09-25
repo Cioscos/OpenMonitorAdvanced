@@ -1,8 +1,9 @@
-import type { Label, Schema, Sensor, SensorKind, Snapshot, Unit } from '../types';
+import type { Label, Schema, Sensor, SensorKind, Snapshot, StartupStatus, Unit } from '../types';
 import type { Backend } from './backend';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
+const GPU = 'gpu/pci-0000:01:00.0';
 
 const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, label: Label): Sensor => ({
   id,
@@ -19,6 +20,13 @@ export const MOCK_SCHEMA: Schema = {
   revision: 1,
   devices: [
     { id: 'cpu/0', kind: 'cpu', name: 'Mock Ryzen 7 7800X3D' },
+    {
+      id: GPU,
+      kind: 'gpu',
+      name: 'Mock GeForce RTX 4080',
+      vendor: 'NVIDIA',
+      properties: { pciAddress: '0000:01:00.0', integrated: 'false' },
+    },
     { id: 'memory/0', kind: 'memory', name: 'RAM' },
     { id: 'storage/device-mock-ssd', kind: 'storage', name: 'Disk 0 (C:)' },
     { id: 'network/mock-eth', kind: 'network', name: 'Ethernet' },
@@ -29,6 +37,13 @@ export const MOCK_SCHEMA: Schema = {
       sensor(`cpu/0/load/thread-0-${i}`, 'cpu/0', 'load', 'percent', { key: 'cpu.load.thread', arg: String(i) }),
     ),
     sensor('cpu/0/clock/effective', 'cpu/0', 'clock', 'megahertz', { key: 'cpu.clock.effective' }),
+    sensor(`${GPU}/load/core`, GPU, 'load', 'percent', { key: 'gpu.load.core' }),
+    sensor(`${GPU}/data/memory-dedicated-used`, GPU, 'data', 'bytes', { key: 'gpu.memory.dedicatedUsed' }),
+    sensor(`${GPU}/data/memory-dedicated-total`, GPU, 'data', 'bytes', { key: 'gpu.memory.dedicatedTotal' }),
+    sensor(`${GPU}/temperature/core`, GPU, 'temperature', 'celsius', { key: 'gpu.temperature.core' }),
+    { ...sensor(`${GPU}/temperature/hotspot`, GPU, 'temperature', 'celsius', { key: 'gpu.temperature.hotspot' }), experimental: true },
+    sensor(`${GPU}/clock/core`, GPU, 'clock', 'megahertz', { key: 'gpu.clock.core' }),
+    sensor(`${GPU}/power/board`, GPU, 'power', 'watt', { key: 'gpu.power.board' }),
     sensor('memory/0/load/used', 'memory/0', 'load', 'percent', { key: 'memory.load' }),
     sensor('memory/0/data/used', 'memory/0', 'data', 'bytes', { key: 'memory.used' }),
     sensor('memory/0/data/total', 'memory/0', 'data', 'bytes', { key: 'memory.total' }),
@@ -50,10 +65,18 @@ export function mockValues(t: number): (number | null)[] {
   const threads = Array.from({ length: THREADS }, (_, i) => Math.min(100, total * (0.6 + 0.1 * i)));
   const memTotal = 32 * GIB;
   const memUsed = memTotal * (0.5 + 0.1 * wave(30));
+  const gpuLoad = 10 + 80 * wave(11, 3);
   return [
     total,
     ...threads,
     4200 + 400 * wave(7),
+    gpuLoad,
+    (2 + 6 * wave(40)) * GIB,
+    16 * GIB,
+    40 + gpuLoad * 0.3,
+    52 + gpuLoad * 0.35,
+    1500 + 12 * gpuLoad,
+    25 + 2.9 * gpuLoad,
     (memUsed / memTotal) * 100,
     memUsed,
     memTotal,
@@ -68,9 +91,13 @@ export function mockValues(t: number): (number | null)[] {
   ];
 }
 
+/** The mock never starts in GPU safe mode. */
+export const MOCK_STARTUP: StartupStatus = { safeMode: false, reason: null, crashModule: null };
+
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
   let seq = 0;
+  let startup = MOCK_STARTUP;
   let timer: ReturnType<typeof setInterval> | undefined;
   const listeners = new Set<(s: Snapshot) => void>();
   const emit = () => {
@@ -93,6 +120,11 @@ export function createMockBackend(intervalMs = 1000): Backend {
       };
     },
     onSchema: async () => () => {},
+    getStartupStatus: async () => startup,
+    enableVendorLibraries: async () => {
+      startup = { ...startup, safeMode: false };
+      return startup;
+    },
     onSnapshot: async (cb) => {
       listeners.add(cb);
       timer ??= setInterval(emit, intervalMs);

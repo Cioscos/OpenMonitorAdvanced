@@ -1,4 +1,4 @@
-import type { HistorySeed, Schema, Snapshot } from '../types';
+import type { HistorySeed, Schema, Snapshot, StartupStatus } from '../types';
 
 export type Unsubscribe = () => void;
 
@@ -8,4 +8,8 @@ export interface Backend {
   getHistory(ids: string[], seconds: number): Promise<HistorySeed>;
   onSchema(cb: (schema: Schema) => void): Promise<Unsubscribe>;
   onSnapshot(cb: (snapshot: Snapshot) => void): Promise<Unsubscribe>;
+  /** GPU safe-mode status of this session. */
+  getStartupStatus(): Promise<StartupStatus>;
+  /** Loads the GPU vendor libraries without a restart; returns the new status. */
+  enableVendorLibraries(): Promise<StartupStatus>;
 }

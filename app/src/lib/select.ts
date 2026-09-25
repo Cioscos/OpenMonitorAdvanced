@@ -29,6 +29,45 @@ export function cpuSummary(schema: Schema, valueOf: ValueOf): CpuSummary | null 
   return { name: cpu.name, load: read(valueOf, load), loadId: load?.id ?? null, clockMhz: read(valueOf, clock) };
 }
 
+export interface GpuSummary {
+  deviceId: string;
+  name: string;
+  integrated: boolean;
+  load: number | null;
+  loadId: string | null;
+  temperatureC: number | null;
+  clockMhz: number | null;
+  powerW: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+}
+
+/** One summary per GPU, in schema order (the Rust enumeration order). */
+export function gpuSummaries(schema: Schema, valueOf: ValueOf): GpuSummary[] {
+  return devicesOf(schema, 'gpu').map((gpu) => {
+    const find = (key: string) => sensorsWith(schema, [gpu.id], key)[0];
+    const load = find('gpu.load.core');
+    return {
+      deviceId: gpu.id,
+      name: gpu.name,
+      integrated: gpu.properties?.integrated === 'true',
+      load: read(valueOf, load),
+      loadId: load?.id ?? null,
+      temperatureC: read(valueOf, find('gpu.temperature.core')),
+      clockMhz: read(valueOf, find('gpu.clock.core')),
+      powerW: read(valueOf, find('gpu.power.board')),
+      memUsedBytes: read(valueOf, find('gpu.memory.dedicatedUsed')),
+      memTotalBytes: read(valueOf, find('gpu.memory.dedicatedTotal')),
+    };
+  });
+}
+
+/** Spec §7.2: one tile per discrete GPU; integrated GPUs only when there is no discrete one. */
+export function simpleViewGpus(list: GpuSummary[]): GpuSummary[] {
+  const discrete = list.filter((gpu) => !gpu.integrated);
+  return discrete.length > 0 ? discrete : list;
+}
+
 export interface MemorySummary {
   usedBytes: number | null;
   totalBytes: number | null;

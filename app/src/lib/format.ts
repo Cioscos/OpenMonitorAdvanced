@@ -53,6 +53,14 @@ export function formatClock(mhz: number | null, locale: Locale): string {
   return mhz >= 1000 ? `${num(mhz / 1000, 2, locale)} GHz` : `${num(mhz, 0, locale)} MHz`;
 }
 
+export function formatTemperature(celsius: number | null, locale: Locale): string {
+  return missing(celsius) ? DASH : `${num(celsius, 0, locale)} °C`;
+}
+
+export function formatPower(watt: number | null, locale: Locale): string {
+  return missing(watt) ? DASH : `${num(watt, 0, locale)} W`;
+}
+
 export function formatDuration(ms: number, t: Translate): string {
   const minutes = Math.max(0, Math.floor(ms / 60_000));
   if (minutes < 60) return t('duration.minutes', { n: minutes });

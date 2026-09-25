@@ -1,5 +1,14 @@
 import { MOCK_SCHEMA, mockValues } from './backend/mock';
-import { cpuSummary, memorySummary, networkSummary, storageSummary, sumSeries } from './select';
+import {
+  cpuSummary,
+  gpuSummaries,
+  memorySummary,
+  networkSummary,
+  simpleViewGpus,
+  storageSummary,
+  sumSeries,
+  type GpuSummary,
+} from './select';
 import type { Schema } from './types';
 
 const values = mockValues(1);
@@ -14,6 +23,67 @@ test('cpu summary', () => {
   expect(cpu.loadId).toBe('cpu/0/load/total');
   expect(cpu.load).toBe(values[0]);
   expect(cpu.clockMhz).toBe(valueOf('cpu/0/clock/effective'));
+});
+
+test('gpu summaries read the core sensors of each GPU', () => {
+  const [gpu] = gpuSummaries(MOCK_SCHEMA, valueOf);
+  expect(gpu).toEqual({
+    deviceId: 'gpu/pci-0000:01:00.0',
+    name: 'Mock GeForce RTX 4080',
+    integrated: false,
+    load: valueOf('gpu/pci-0000:01:00.0/load/core'),
+    loadId: 'gpu/pci-0000:01:00.0/load/core',
+    temperatureC: valueOf('gpu/pci-0000:01:00.0/temperature/core'),
+    clockMhz: valueOf('gpu/pci-0000:01:00.0/clock/core'),
+    powerW: valueOf('gpu/pci-0000:01:00.0/power/board'),
+    memUsedBytes: valueOf('gpu/pci-0000:01:00.0/data/memory-dedicated-used'),
+    memTotalBytes: 16 * 1024 ** 3,
+  });
+});
+
+test('gpu summaries report missing sensors as null', () => {
+  const schema: Schema = {
+    revision: 1,
+    devices: [{ id: 'gpu/pci-0000:11:00.0', kind: 'gpu', name: 'iGPU', properties: { integrated: 'true' } }],
+    sensors: [],
+  };
+  expect(gpuSummaries(schema, valueOf)).toEqual([
+    {
+      deviceId: 'gpu/pci-0000:11:00.0',
+      name: 'iGPU',
+      integrated: true,
+      load: null,
+      loadId: null,
+      temperatureC: null,
+      clockMhz: null,
+      powerW: null,
+      memUsedBytes: null,
+      memTotalBytes: null,
+    },
+  ]);
+});
+
+const gpu = (deviceId: string, integrated: boolean): GpuSummary => ({
+  deviceId,
+  name: deviceId,
+  integrated,
+  load: null,
+  loadId: null,
+  temperatureC: null,
+  clockMhz: null,
+  powerW: null,
+  memUsedBytes: null,
+  memTotalBytes: null,
+});
+
+test('simple view keeps discrete GPUs and hides the integrated one', () => {
+  const list = [gpu('nvidia', false), gpu('igpu', true), gpu('second', false)];
+  expect(simpleViewGpus(list).map((g) => g.deviceId)).toEqual(['nvidia', 'second']);
+});
+
+test('simple view falls back to integrated GPUs when there is no discrete one', () => {
+  expect(simpleViewGpus([gpu('igpu', true)]).map((g) => g.deviceId)).toEqual(['igpu']);
+  expect(simpleViewGpus([])).toEqual([]);
 });
 
 test('memory summary', () => {
@@ -49,6 +119,7 @@ test('summaries are null when the device kind is missing', () => {
   expect(memorySummary(empty, valueOf)).toBeNull();
   expect(storageSummary(empty, valueOf)).toBeNull();
   expect(networkSummary(empty, valueOf)).toBeNull();
+  expect(gpuSummaries(empty, valueOf)).toEqual([]);
 });
 
 test('sumSeries right-aligns and ignores gaps', () => {

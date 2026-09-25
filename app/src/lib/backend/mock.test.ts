@@ -13,6 +13,19 @@ test('every mock sensor label has a translation', () => {
   }
 });
 
+test('mock gpu is a discrete card with an experimental hotspot', () => {
+  const gpu = MOCK_SCHEMA.devices.find((d) => d.kind === 'gpu');
+  expect(gpu?.properties?.integrated).toBe('false');
+  const hotspot = MOCK_SCHEMA.sensors.find((s) => s.id === 'gpu/pci-0000:01:00.0/temperature/hotspot');
+  expect(hotspot?.experimental).toBe(true);
+});
+
+test('mock backend never starts in safe mode', async () => {
+  const backend = createMockBackend();
+  expect(await backend.getStartupStatus()).toEqual({ safeMode: false, reason: null, crashModule: null });
+  expect((await backend.enableVendorLibraries()).safeMode).toBe(false);
+});
+
 test('mock backend emits one snapshot per interval while subscribed', async () => {
   vi.useFakeTimers();
   try {

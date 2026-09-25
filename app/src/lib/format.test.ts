@@ -1,4 +1,13 @@
-import { DASH, formatBytes, formatClock, formatDuration, formatPercent, formatRate } from './format';
+import {
+  DASH,
+  formatBytes,
+  formatClock,
+  formatDuration,
+  formatPercent,
+  formatPower,
+  formatRate,
+  formatTemperature,
+} from './format';
 import { translate } from './i18n/index.svelte';
 
 const tEn = (key: string, params?: Record<string, string | number>) => translate('en', key, params);
@@ -8,6 +17,8 @@ test('null values render as a dash', () => {
   expect(formatBytes(null, 'en')).toBe(DASH);
   expect(formatRate(null, 'bits', 'en')).toBe(DASH);
   expect(formatClock(null, 'en')).toBe(DASH);
+  expect(formatTemperature(null, 'en')).toBe(DASH);
+  expect(formatPower(Number.NaN, 'en')).toBe(DASH);
 });
 
 test('percent has no decimals', () => {
@@ -37,6 +48,13 @@ test('clock switches to GHz from 1000 MHz', () => {
   expect(formatClock(4383.7, 'en')).toBe('4.38 GHz');
   expect(formatClock(4383.7, 'it')).toBe('4,38 GHz');
   expect(formatClock(800, 'en')).toBe('800 MHz');
+});
+
+test('temperature and power have no decimals', () => {
+  expect(formatTemperature(54.4, 'en')).toBe('54 °C');
+  expect(formatTemperature(99.6, 'it')).toBe('100 °C');
+  expect(formatPower(147.8, 'en')).toBe('148 W');
+  expect(formatPower(1234, 'en')).toBe('1,234 W');
 });
 
 test('durations', () => {

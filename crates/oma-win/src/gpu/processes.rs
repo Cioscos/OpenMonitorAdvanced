@@ -5,9 +5,17 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Rows returned per device, busiest first.
 const MAX_ROWS: usize = 20;
+
+/// Rows older than this are hidden (two and a half 1 s ticks): if the provider's worker
+/// thread hangs (a vendor layer stuck in the driver, or a stuck PDH collect), it stops
+/// calling `publish`, but without this check the last tick's rows would keep answering
+/// `get_gpu_processes` with frozen, non-zero loads next to GPU sensors the engine has since
+/// blanked after two missed 200 ms deadlines (spec §8).
+const MAX_ROW_AGE: Duration = Duration::from_millis(2_500);
 
 /// One process using one GPU during the last tick.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -31,6 +39,8 @@ pub struct GpuProcess {
 struct Inner {
     by_luid: HashMap<u64, Vec<GpuProcess>>,
     devices: HashMap<String, u64>,
+    /// Set by `publish`; `None` before the first publish.
+    last_publish: Option<Instant>,
 }
 
 /// Latest per-process GPU usage, keyed by adapter; cheap to clone (shared state).
@@ -55,10 +65,23 @@ impl GpuProcessTable {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Processes of GPU `device_id`, busiest first, at most 20; empty for an unknown device.
+    /// Processes of GPU `device_id`, busiest first, at most 20; empty for an unknown device
+    /// or when the last publish is older than `MAX_ROW_AGE` (the provider's worker thread
+    /// has hung).
     pub fn processes(&self, device_id: &str) -> Vec<GpuProcess> {
+        self.processes_at(device_id, Instant::now())
+    }
+
+    /// `processes`, with the "now" used for the staleness check made explicit for testing.
+    fn processes_at(&self, device_id: &str, now: Instant) -> Vec<GpuProcess> {
         let mut rows = {
             let inner = self.lock();
+            let stale = inner
+                .last_publish
+                .is_none_or(|last| now.duration_since(last) >= MAX_ROW_AGE);
+            if stale {
+                return Vec::new();
+            }
             let Some(luid) = inner.devices.get(device_id) else {
                 return Vec::new();
             };
@@ -74,9 +97,11 @@ impl GpuProcessTable {
         self.lock().devices = devices.into_iter().collect();
     }
 
-    /// Replaces the whole table with the rows of the last tick.
+    /// Replaces the whole table with the rows of the last tick and records the publish time.
     pub(crate) fn publish(&self, by_luid: HashMap<u64, Vec<GpuProcess>>) {
-        self.lock().by_luid = by_luid;
+        let mut inner = self.lock();
+        inner.by_luid = by_luid;
+        inner.last_publish = Some(Instant::now());
     }
 }
 
@@ -165,6 +190,39 @@ mod tests {
         table.publish(HashMap::from([(RADEON, vec![row(2, None, Some(5))])]));
         table.set_devices(vec![("gpu/pci-0000:01:00.0".to_owned(), RTX)]);
         assert!(reader.processes("gpu/pci-0000:11:00.0").is_empty());
+    }
+
+    #[test]
+    fn stale_rows_are_hidden_once_the_provider_hangs() {
+        let table = table();
+        table.publish(HashMap::from([(RTX, vec![row(1, Some(50.0), None)])]));
+        // The exact publish instant is not observable from the test; using it as a
+        // baseline with a small margin avoids flakiness from the call above.
+        let published_around = Instant::now();
+        assert!(
+            !table
+                .processes_at("gpu/pci-0000:01:00.0", published_around)
+                .is_empty(),
+            "fresh rows are visible"
+        );
+        assert!(
+            !table
+                .processes_at(
+                    "gpu/pci-0000:01:00.0",
+                    published_around + MAX_ROW_AGE - Duration::from_millis(50)
+                )
+                .is_empty(),
+            "just under the limit: still visible"
+        );
+        assert!(
+            table
+                .processes_at(
+                    "gpu/pci-0000:01:00.0",
+                    published_around + MAX_ROW_AGE + Duration::from_millis(50)
+                )
+                .is_empty(),
+            "a hung provider's stale rows must not be shown"
+        );
     }
 
     #[test]

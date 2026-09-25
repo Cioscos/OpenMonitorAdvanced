@@ -3,9 +3,8 @@
 //! marked experimental (spec §5.2, decision D7).
 //!
 //! Interface ids of the public calls (Initialize, EnumPhysicalGPUs, GPU_GetBusId,
-//! GPU_GetBusSlotId) and the struct-version rule come from NVIDIA's NVAPI headers:
-//! SPDX-FileCopyrightText: Copyright (c) 2019-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-//! SPDX-License-Identifier: MIT (see THIRD_PARTY_NOTICES.md).
+//! GPU_GetBusSlotId) and the struct-version rule come from NVIDIA's NVAPI headers,
+//! Copyright (c) NVIDIA CORPORATION & AFFILIATES, MIT License (see THIRD_PARTY_NOTICES.md).
 //! The ids and layouts of GPU_ThermalGetSensors (0x65FE3AAD) and GPU_ClientVoltRailsGetStatus
 //! (0x465F9BCF) are interoperability facts documented by LibreHardwareMonitor (credited in
 //! THIRD_PARTY_NOTICES.md); no LibreHardwareMonitor code is used.

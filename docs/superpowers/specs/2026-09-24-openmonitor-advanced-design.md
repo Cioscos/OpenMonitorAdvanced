@@ -84,7 +84,7 @@ I provider implementano un trait `Provider`. Su Linux si aggiungerà un provider
 - **`Device`**: `id` stabile, `kind` (`cpu`, `gpu`, `memory`, `storage`, `network`, `motherboard`, `battery`, `fan_controller`, `psu`), `name`, `vendor`, proprietà statiche (modello, driver, capacità…).
 - **`Sensor`**: `id` stabile, `device_id`, `kind` (`temperature`, `load`, `clock`, `power`, `voltage`, `current`, `fan`, `data`, `throughput`, `energy`, `flag`, `percent`), `unit`, `label` (chiave i18n oppure testo fornito dal driver), `source` (`pdh`, `dxgi`, `d3dkmt`, `nvml`, `nvapi`, `adl`, `igcl`, `lhm`, `wmi`…), `category` (per il raggruppamento nella tabella della vista Avanzata), `experimental` (vero per le letture ottenute da chiamate non documentate, vedi §5.2: l'interfaccia le segna come sperimentali).
 - **`Reading`**: `sensor_id`, `value: f64` oppure assente, `timestamp`.
-- **ID stabili tra riavvii**, costruiti dall'identità hardware. Esempi: `gpu/pci-0000:01:00.0/temperature/hotspot`, `storage/nvme-<seriale-hash>/temperature/composite`. Regole, impostazioni e selezione dei sensori per il log vi fanno riferimento.
+- **ID stabili tra riavvii**, costruiti dall'identità hardware. Esempi: `gpu/pci-0000:01:00.0/temperature/hotspot`, `storage/device-<hash>/temperature/drive`. Regole, impostazioni e selezione dei sensori per il log vi fanno riferimento. Per i dischi l'identità segue una catena di ripiego (§5.1).
 - **Merge:**
   - quando più fonti forniscono lo stesso sensore logico, vince quella con priorità più alta (priorità per campo, vedi §5.2);
   - la fonte scelta viene registrata e mostrata nell'interfaccia;
@@ -105,7 +105,11 @@ I provider implementano un trait `Provider`. Su Linux si aggiungerà un provider
 ### 4.2 Storico
 
 - Un ring buffer per sensore, **1 ora di campioni** alla frequenza corrente, con i timestamp condivisi. Con circa 300 sensori a 1 s sono circa 5 MB.
-- Min, max e media partono dall'avvio dell'app e si possono azzerare dall'interfaccia.
+- **Min, max e media** si calcolano nel nucleo (`oma-core`), per ogni sensore, dal primo ciclo dopo l'avvio dell'app, e non nell'interfaccia: la WebView viene distrutta quando si chiude la finestra (§2.2), mentre le statistiche devono coprire anche il tempo passato nella tray. I valori assenti non contano.
+  - Il pulsante "azzera" di una pagina della vista Avanzata azzera le statistiche dei soli sensori di quella pagina.
+  - Quando cambia lo schema, le statistiche di un sensore restano solo se ID, fonte e unità sono invariati, come lo storico.
+- L'istante del primo ciclo (`startedAtMs`) è esposto all'interfaccia: il banner "monitoraggio attivo da…" conta da lì anche dopo aver riaperto la finestra dalla tray.
+- **Storico inviato all'interfaccia:** le finestre da 1 e 5 minuti arrivano con tutti i campioni. Per 30 minuti e 1 ora lo storico arriva decimato ad al massimo 900 punti per serie, in intervalli bilanciati le cui dimensioni differiscono al massimo di un campione. Ogni intervallo interamente valido dà due punti, minimo e massimo, così i picchi restano visibili; i timestamp sono i confini dell'inviluppo, non gli istanti reali degli estremi. Se un intervallo contiene un valore assente, per quella serie entrambi i punti sono assenti: i buchi si ampliano conservativamente all'intervallo. La decimazione serve al budget di memoria della finestra: in una prova, 20 serie da 3600 punti portavano il totale a 219 MB.
 - I periodi in cui una fonte non è disponibile sono registrati come valori assenti e appaiono come buchi nei grafici.
 
 ### 4.3 Motore regole (banner di stato e notifiche)
@@ -183,7 +187,8 @@ File `%APPDATA%\OpenMonitorAdvanced\settings.json`, con versione dello schema e 
 | Clock CPU (stima) | PDH `% Processor Performance` × frequenza base, lo stesso metodo di Task Manager. Il clock effettivo per core arriva dal servizio. |
 | RAM | `GlobalMemoryStatusEx`, `GetPerformanceInfo`; SMBIOS tipo 17 e `Win32_PhysicalMemory` per velocità e moduli |
 | Dischi: spazio e throughput | `GetDiskFreeSpaceEx`; PDH `PhysicalDisk(*)` (letture e scritture al secondo, byte/s, % tempo attivo) |
-| Temperatura NVMe (fallback) | `IOCTL_STORAGE_QUERY_PROPERTY` con `StorageDeviceTemperatureProperty`, se accessibile senza privilegi |
+| Dischi: identità | Catena di ripiego, dal livello più forte: numero di serie (`storage/device-…`, invariato dalla M1; un seriale non UTF-8 si usa come byte grezzi) → GUID del disco GPT (`storage/gpt-…`, da `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`) → firma MBR più dimensione del disco (`storage/mbr-…`) → instance id PnP (`storage/pnp-…`, da SetupAPI; legato alla porta, cambia se il disco viene spostato). Ogni valore entra nell'ID solo come hash SHA-256. Un livello si usa solo se il suo valore è unico tra i dischi della macchina, perché i cloni copiano GUID e firma. Un disco si omette solo se falliscono tutti i livelli, con un avviso nel log che indica il motivo per ciascuno. Tutte le chiamate usano `\\.\PhysicalDriveN` aperto con accesso 0, senza privilegi. |
+| Temperatura dei dischi | `IOCTL_STORAGE_QUERY_PROPERTY` con `StorageDeviceTemperatureProperty`, senza privilegi (verificato in M3 su NVMe e SATA). Il supporto dipende da disco e driver: un disco senza supporto risponde `ERROR_INVALID_FUNCTION` e non ha sensori. Il sensore 0 è la temperatura del disco (la "composite" degli NVMe, `…/temperature/drive`), gli altri sono sensori aggiuntivi (`…/temperature/sensor-<n>`); `0x8000` significa "non riportato". Le soglie warning e critical diventano proprietà del device (`tempWarningC`, `tempCriticalC`) per le regole della M5. Lettura ogni 30 s (§4.1), al massimo un disco per ciclo (fino a circa 140 ms per un NVMe che esce da uno stato a basso consumo). Un disco in standby (`GetDevicePowerState`) non viene interrogato, per non risvegliarlo. |
 | Rete | `GetIfTable2` (byte, velocità del collegamento), con filtro sulle interfacce fisiche e attive |
 | Wi-Fi | `WlanQueryInterface` con `wlan_intf_opcode_rssi`. SSID e qualità della connessione richiedono il consenso alla posizione su Windows 11 24H2 o successivi: se negato vengono omessi. |
 | Batteria | `GetSystemPowerStatus`, `IOCTL_BATTERY_QUERY_INFORMATION/STATUS` (capacità di progetto e attuale, cicli, potenza) |
@@ -202,8 +207,8 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
      - Il tipo di motore è la parte del nome dell'istanza dopo `_engtype_` e può contenere spazi (`Video Codec 0`).
      - Si sommano i processi per LUID e motore. Il carico core è il massimo tra i motori; il carico di un tipo è il massimo tra i motori di quel tipo, come in Task Manager.
      - Il contatore è un tasso: il primo campione dopo la discovery serve solo da base.
-     - L'utilizzo per processo arriva con la vista Avanzata (M3).
-   - **PDH `GPU Adapter Memory(*)`:** memoria dedicata e condivisa in uso. `GPU Process Memory` (per processo) arriva in M3.
+     - Lo stesso contatore dà l'utilizzo per processo (M3, punto 5).
+   - **PDH `GPU Adapter Memory(*)`:** memoria dedicata e condivisa in uso. `GPU Process Memory(*)` dà la memoria per processo (M3, punto 5).
    - **D3DKMT `KMTQAITYPE_ADAPTERPERFDATA` (62):**
      - temperatura in decimi di °C;
      - potenza in decimi di % del limite (non in watt);
@@ -243,13 +248,28 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
    - **Intel — IGCL (`ControlLib.dll`, solo a 64 bit):**
      - **Sensori:** con `ctlPowerTelemetryGet`, temperature di GPU e VRAM, clock, tensione, ventola, potenza (calcolata dalla variazione del contatore di energia tra due campioni) e flag dei limiti di potenza e temperatura, usati come motivi del throttling.
      - **Versioni:** struttura di telemetria da 1024 byte (versione 1), con ripiego a 808 byte (versione 0) per i runtime più vecchi.
-     - **Stato:** implementato e coperto da test con funzioni finte, **non ancora verificato su hardware Intel**. `ctlPciGetState` arriva in M3.
+     - **Stato:** implementato e coperto da test con funzioni finte, **non ancora verificato su hardware Intel**. Dalla M3 legge anche il link PCIe correnti (`ctlPciGetState` per generazione e larghezza correnti); i massimi non si leggono da IGCL, ma dal livello base PnP (punto 5), identico su ogni vendor.
 4. **Priorità nel merge**, per ogni GPU e per ogni campo: NVML → NVAPI → ADL → IGCL → D3DKMT → DXGI → PDH.
    - La fonte si sceglie alla discovery: è il livello con la priorità più alta che dichiara quel campo per quella GPU. Viene registrata nel sensore (`source`).
    - Se in un ciclo la fonte scelta non dà un valore, il valore è assente. Non si ripiega su un'altra fonte a runtime. Se una successiva discovery cambia fonte o unità, si azzera lo storico del solo sensore interessato, senza cambiarne l'ID.
    - Ogni 5 s si verifica anche la topologia, compreso il caso di zero adattatori: una GPU riconnessa viene scoperta anche quando non esistono più handle da invalidare. A topologia invariata non si riattaccano i livelli.
    - Il carico per motore viene sempre da PDH.
-5. **Fuori dalla M2, rimandati alla M3:** generazione e larghezza PCIe; utilizzo GPU per processo; utilizzo di encoder e decoder da NVML; contatori di energia; soglie del limite di potenza per le regole.
+   - Le proprietà statiche del device (punto 5) seguono la stessa priorità: per ogni chiave vince il livello più prioritario che la fornisce. PnP fornisce solo proprietà, nessun sensore. `pciAddress` e `integrated` vengono dall'enumerazione e nessun livello li sovrascrive.
+5. **Aggiunte della M3** (vista Avanzata):
+   - **Utilizzo per processo**, dal livello PDH, che già legge `GPU Engine(*)`, più `GPU Process Memory(*)` (`Dedicated Usage`, `Shared Usage`; circa +50 µs per ciclo).
+     - Il carico di un processo è quello del suo motore più occupato (massimo tra i motori, limitato a 0–100), coerente con il carico core dell'adattatore. Il tipo di motore si indica solo se il carico è maggiore di zero.
+     - I nomi dei processi vengono da `CreateToolhelp32Snapshot` (documentata e senza aprire i processi; circa 2,4 ms), al massimo una volta per ciclo e solo quando compare un pid sconosciuto, con una cache che scarta i pid spariti. Non si usano `OpenProcess` (fallisce per dwm, System e i servizi) né la chiamata non documentata `NtQuerySystemInformation` (88). Pid 0 = "Idle", pid 4 = "System".
+     - Non sono sensori: niente ID né storico. La vista Avanzata legge l'elenco con il comando `get_gpu_processes` (al massimo 20 righe, per carico e poi per memoria dedicata). Il primo campione dopo un attach non ha il carico, perché il contatore è un tasso.
+     - La tabella nasconde le sue righe se il provider non ha pubblicato un aggiornamento da più di 2,5 s (provider bloccato), oltre ad azzerarle sugli errori del provider.
+   - **Encoder e decoder da NVML** (`EncoderUtilization`, `DecoderUtilization`): campi nuovi, solo NVML, distinti dal carico dei motori video di PDH, che resta solo PDH.
+   - **Link PCIe:** generazione e larghezza correnti come sensori (tipo `link`, unità `pcie_generation` e `lanes`) da NVML e IGCL. Generazione e larghezza massime sono proprietà del device (`pcieMaxGen`, `pcieMaxWidth`), lette **solo** dal nuovo livello base **PnP** (`CM_Get_DevNode_PropertyW`, proprietà PCI del device, letta alla discovery), identico per ogni vendor perché è una capacità del device, non del driver: `nvmlDeviceGetMaxPcieLinkGeneration/Width` di NVML riportano il valore limitato da device e slot insieme, non il solo massimo del device, e non si leggono; IGCL non legge `ctlPciGetProperties` per lo stesso motivo. Il valore "corrente" di PnP non si usa: viene fissato all'avvio del device e non si aggiorna.
+   - **Limiti statici come proprietà** del device, letti una volta all'attach da NVML: limite di potenza minimo, massimo e predefinito (`powerLimitMinW`, `powerLimitMaxW`, `powerLimitDefaultW`) e soglie di temperatura slowdown, shutdown e massima (`tempSlowdownC`, `tempShutdownC`, `tempMaxC`). Servono alla vista Avanzata e alle regole della M5.
+   - **Indirizzo PCI conservato per LUID:** se un'enumerazione successiva non riporta l'indirizzo di un adattatore, resta quello già noto, così l'ID del device non cambia.
+
+   **Esclusi (decisione D10 del piano M3):**
+   - NVML `TotalEnergyConsumption` (p95 circa 9 ms, e nessun uso prima del log CSV e delle regole della M5) e `PcieThroughput` (blocca per 31 ms);
+   - gli elenchi dei processi di NVML: `usedGpuMemory` non è disponibile sotto WDDM;
+   - i sensori ADL 40 e 41 (valori costanti, unità non documentata).
 
 **Licenze:**
 - Nessun header proprietario è incluso nel repository e nessuno viene scaricato durante la build.
@@ -316,11 +336,19 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
   
   Le voci senza dati non compaiono. La vista si apre sull'ultima sezione visitata, oppure sulla CPU.
 - **Ogni pagina ha:**
-  - **4 KPI** in alto, definiti per tipo di componente;
-  - un **grafico storico** uPlot, con finestra 1m / 5m / 30m / 1h e con le serie da mostrare selezionabili;
-  - una **tabella dei sensori** raggruppata per categoria (temperature, carico, clock, potenza, tensioni, ventole…), con colonne attuale, min, max e media, e un pulsante "azzera min/max";
-  - un **badge della fonte** su ogni sensore, visibile passandoci sopra.
-- **I sensori che richiedono il servizio**, quando questo non è attivo, non compaiono uno per uno. Al loro posto c'è un solo avviso: "N sensori in più disponibili con il servizio".
+  - **4 KPI** in alto, definiti per tipo di componente: i primi quattro disponibili di un elenco per tipo (per la GPU: carico, temperatura, potenza, VRAM, poi clock);
+  - un **grafico storico** uPlot, con finestra 1m / 5m / 30m / 1h e con le serie da mostrare selezionabili:
+    - **al massimo 8 serie e 2 unità di misura** insieme, con due assi verticali (sinistro e destro); oltre questi limiti il selettore non aggiunge serie. È il limite che tiene la finestra nel budget di memoria;
+    - le finestre da 30 minuti e 1 ora usano lo storico decimato (§4.2), quelle da 1 e 5 minuti tutti i campioni;
+    - le etichette dell'asse del tempo seguono la lingua dell'app (24 ore in italiano);
+    - il grafico si aggiorna al ritmo dei dati e si ferma quando la finestra non è visibile;
+  - una **tabella dei sensori** raggruppata per categoria (temperature, carico, clock, potenza, tensioni, ventole…), con colonne attuale, min, max e media, e un pulsante "azzera min/max", che azzera le statistiche dei sensori della pagina (§4.2). I sensori sperimentali sono segnati come tali;
+  - un **badge della fonte** su ogni sensore, visibile al passaggio del mouse o con il focus da tastiera (le righe della tabella sono raggiungibili da tastiera);
+  - le **informazioni del device**: le proprietà statiche, per esempio indirizzo PCI, link PCIe massimo, limiti di potenza e soglie di temperatura;
+  - per le GPU, la **tabella dei processi** che usano la GPU, con carico, motore, memoria dedicata e condivisa: al massimo 20 righe, aggiornate ogni 2 s mentre la pagina è visibile, nascoste se il provider non pubblica un aggiornamento da più di 2,5 s.
+- Sezione, finestra del grafico e serie scelte per ogni pagina restano salvate nella WebView (`localStorage`) finché le impostazioni della M5 non le sostituiscono. Un clic su un riquadro della vista Semplificata apre la pagina corrispondente.
+- **I sensori che richiedono il servizio**, quando questo non è attivo, non compaiono uno per uno. Al loro posto c'è un solo avviso: "N sensori in più disponibili con il servizio". L'avviso arriva con il servizio (M4): in M3 non esistono ancora sensori del servizio.
+- La voce **Batteria** compare solo quando esiste un device batteria: in M3 nessun provider lo crea ancora.
 - **Nessuna pagina "Panoramica"**: quel ruolo lo svolge la vista Semplificata.
 
 ### 7.4 Impostazioni
@@ -359,7 +387,7 @@ Tutti i colori sono token CSS, così un tema chiaro o un accento personalizzabil
   - un solo ciclo di rendering condiviso;
   - aggiornamento al ritmo dei dati;
   - rendering sospeso quando la finestra non è visibile;
-  - buffer tipizzati (`Float64Array`).
+  - buffer tipizzati (`Float64Array`) per le serie interne della vista Semplificata; per il grafico uPlot della vista Avanzata, array di `number | null`, perché `null` rappresenta i buchi. Il costo delle copie e della coda dal vivo rientra nella misura del budget con la finestra aperta per almeno un'ora.
 
 ### 7.6 Internazionalizzazione
 
@@ -382,7 +410,8 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - All'avvio successivo l'app legge e cancella il file e parte in modalità sicura.
   - Sotto la barra superiore un avviso spiega il motivo, con il nome della DLL, e offre **"Riattiva"**: le librerie si caricano subito, senza riavviare l'app, e restano caricate fino alla chiusura.
 - **Servizio:** disconnessioni, timeout e versione del protocollo non compatibile portano alla modalità base, con badge e spiegazione. Non producono mai errori bloccanti.
-- **Dati anomali:** valori fuori dall'intervallo fisico plausibile vengono scartati come assenti e registrati nel log di diagnostica. Esempi: temperature < −50 °C o > 150 °C, percentuali < 0 o > 100 dove non ha senso.
+- **Dati anomali:** valori fuori dall'intervallo fisico plausibile vengono scartati come assenti e registrati nel log di diagnostica, al massimo una riga al minuto per sensore. Esempi: temperature < −50 °C o > 150 °C, percentuali < 0 o > 100 dove non ha senso.
+- **Nucleo:** un panic durante un ciclo di campionamento viene registrato nel log e il ciclo successivo parte regolarmente. Un disallineamento tra valori e sensori non ferma lo storico: i valori mancanti diventano assenti e quelli in più si scartano. Se l'interfaccia non riceve dati per più di max(5 s, 5 intervalli), la barra superiore mostra "Dati non aggiornati".
 - **Log di diagnostica:** `tracing` in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`, a rotazione. Il servizio scrive in un file proprio.
 
 ## 9. Sicurezza
@@ -446,7 +475,7 @@ docs/
 3. **Valore corretto dell'enum per `D3DKMT_NODE_PERFDATA`** (clock ed eventuale tensione per motore): una prima prova ha restituito `STATUS_INVALID_PARAMETER`. **Risolto in M2:** `KMTQAITYPE_NODEPERFDATA` vale 61. La struttura va passata con la dimensione esatta di 56 byte: con una dimensione diversa la chiamata restituisce `STATUS_INVALID_PARAMETER`. La `Frequency` del nodo 0 è il clock core e coincide con `nvidia-smi`. La tensione vale 0 su NVIDIA e circa 1110–1125 (probabilmente mV) sull'iGPU AMD, quindi non si usa.
 4. **Driver Intel e Qualcomm e `ADAPTERPERFDATA`:** lo popolano? **In parte risolto in M2:** i driver NVIDIA e AMD lo popolano, anche per l'iGPU AMD (temperatura a passi di 1 °C, potenza in % del limite, frequenza della DRAM). Intel e Qualcomm restano da verificare, perché non c'era hardware disponibile. Se un driver non lo popola (temperatura 0), quei sensori semplicemente non compaiono.
 5. **Licenza di ADL (legacy):** va verificata prima di usarne i binding; in alternativa si resta sul livello base per AMD. **Risolto in M2:** si usano binding scritti a mano dalla documentazione pubblica e `atiadlxx.dll` si carica a runtime da `System32`. Gli header di AMD non si includono e non si scaricano, perché la loro EULA esclude le licenze come la GPL. ADLX resta escluso.
-6. **NVMe via `IOCTL_STORAGE_QUERY_PROPERTY` senza privilegi:** funziona?
+6. **NVMe via `IOCTL_STORAGE_QUERY_PROPERTY` senza privilegi:** funziona? **Risolto in M3:** sì. `StorageDeviceTemperatureProperty` su `\\.\PhysicalDriveN` aperto con accesso 0 funziona da utente normale su Windows 11 (build 26200), sia per NVMe sia per SATA. Il supporto dipende dal disco: un SSD SATA risponde `ERROR_INVALID_FUNCTION` (non supportato, non un problema di permessi). Vedi §5.1.
 7. **Firma del codice:** va verificata l'idoneità a SignPath.io.
 
 ## 14. Milestone

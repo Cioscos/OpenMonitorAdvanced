@@ -3,7 +3,7 @@
 Open-source hardware monitor for Windows with a modern UI: a Simple view that tells you at a glance
 whether your PC is fine, and an Advanced view with every sensor.
 
-**Status:** milestone 2 (GPU) — CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) without admin rights.
+**Status:** milestone 3 (Advanced view) — CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) without admin rights, with a page per component in the Advanced view.
 Design: `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`.
 
 ## Build
@@ -18,6 +18,30 @@ Prerequisites: Windows 10/11, Rust stable ≥ 1.85 (MSVC), Node 22, pnpm 10, Web
 Tests: `cargo test --workspace` (after `pnpm build` in `app/`) and `pnpm test` in `app/`.
 Before closing a milestone, also run the hardware tests on real Windows hardware:
 `cargo test -p oma-win -- --include-ignored`.
+
+## Advanced view
+
+A sidebar lists every component: the CPU, each GPU (the integrated one too), RAM, each disk and each
+network adapter. The view reopens on the last page you visited. Each page shows:
+
+- four key figures for the component;
+- a history chart for the last 1 minute, 5 minutes, 30 minutes or 1 hour, with up to 8 series and
+  2 units at once; the 30-minute and 1-hour windows draw a min/max envelope, so peaks stay visible;
+- a table of every sensor, grouped by category, with current, minimum, maximum and average values.
+  The monitor keeps these statistics from the moment the app starts, also while it sits in the tray;
+  the reset button clears them for the sensors of that page. Hover a sensor to see where its value
+  comes from; *experimental* marks readings from undocumented calls;
+- the device's static details, such as PCIe link, power limits and temperature thresholds;
+- for GPUs, the processes using the GPU, with their load and dedicated/shared memory.
+
+Clicking a tile in the Simple view opens the matching page. If no data arrives for a few seconds, the
+top bar shows *Data not updating*.
+
+**Disks.** Drive temperatures come from the drive itself where it reports them (most NVMe drives,
+some SATA drives), refreshed every 30 seconds; a spun-down disk is not woken up to read it. Disks
+without a readable serial number (virtual machines, some RAID or USB enclosures) are still shown:
+they are identified by their GPT disk GUID, their MBR signature or, as a last resort, the port they
+are connected to.
 
 ## GPU support
 

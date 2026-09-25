@@ -3,7 +3,7 @@
 Open-source hardware monitor for Windows with a modern UI: a Simple view that tells you at a glance
 whether your PC is fine, and an Advanced view with every sensor.
 
-**Status:** milestone 1 (foundations) — CPU, RAM, disks and network without admin rights.
+**Status:** milestone 2 (GPU) — CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) without admin rights.
 Design: `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`.
 
 ## Build
@@ -12,12 +12,33 @@ Prerequisites: Windows 10/11, Rust stable ≥ 1.85 (MSVC), Node 22, pnpm 10, Web
 
     cd app
     pnpm install
-    pnpm tauri dev        # run the Tauri shell against the built UI
+    pnpm tauri dev        # run the Tauri shell; the UI comes from the Vite dev server (pnpm dev)
     pnpm dev              # UI only, in the browser, with a mock backend, with hot reload
 
 Tests: `cargo test --workspace` (after `pnpm build` in `app/`) and `pnpm test` in `app/`.
 Before closing a milestone, also run the hardware tests on real Windows hardware:
 `cargo test -p oma-win -- --include-ignored`.
+
+## GPU support
+
+No admin rights are needed for GPU data. Every GPU gets per-engine load and dedicated/shared memory
+(Windows performance counters), plus core temperature, clocks and power as a percentage of the limit
+where the driver reports them (D3DKMT). On top of that, the app uses the libraries installed with the
+graphics driver:
+
+- **NVIDIA:** NVML (temperature, clocks, board power and limit, fan, VRAM, throttle reasons) and NVAPI
+  (hotspot and memory junction temperatures, core voltage; marked *experimental* because these calls
+  are undocumented);
+- **AMD:** ADL (`atiadlxx.dll`): temperatures, clocks, power, fan and voltage where the GPU exposes them;
+- **Intel Arc / Xe:** IGCL (`ControlLib.dll`), implemented but not yet verified on Intel hardware.
+
+Vendor libraries are loaded from `System32` only and never redistributed; see `THIRD_PARTY_NOTICES.md`.
+The Simple view shows one tile per discrete GPU (the integrated GPU only when there is no discrete one).
+
+**Safe mode.** A crash inside a vendor library cannot be caught. Start with `oma-app.exe --safe` to skip
+the vendor libraries and keep only the Windows data. After a native crash the app writes
+`%LOCALAPPDATA%\OpenMonitorAdvanced\crash.txt` and starts the next time in safe mode by itself.
+In both cases a notice under the top bar offers **Re-enable**, which loads the libraries without a restart.
 
 ## Performance budget
 
@@ -26,4 +47,4 @@ The monitor must not distort what it measures. Budgets and the latest measuremen
 
 ## License
 
-GPL-3.0-or-later. See `LICENSE`.
+GPL-3.0-or-later. See `LICENSE`. Third-party notices: `THIRD_PARTY_NOTICES.md`.

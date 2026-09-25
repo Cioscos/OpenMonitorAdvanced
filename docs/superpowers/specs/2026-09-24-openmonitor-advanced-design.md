@@ -82,7 +82,7 @@ I provider implementano un trait `Provider`. Su Linux si aggiungerà un provider
 ## 3. Modello dati
 
 - **`Device`**: `id` stabile, `kind` (`cpu`, `gpu`, `memory`, `storage`, `network`, `motherboard`, `battery`, `fan_controller`, `psu`), `name`, `vendor`, proprietà statiche (modello, driver, capacità…).
-- **`Sensor`**: `id` stabile, `device_id`, `kind` (`temperature`, `load`, `clock`, `power`, `voltage`, `current`, `fan`, `data`, `throughput`, `energy`, `flag`, `percent`), `unit`, `label` (chiave i18n oppure testo fornito dal driver), `source` (`pdh`, `d3dkmt`, `nvml`, `nvapi`, `adl`, `igcl`, `lhm`, `wmi`…), `category` (per il raggruppamento nella tabella della vista Avanzata).
+- **`Sensor`**: `id` stabile, `device_id`, `kind` (`temperature`, `load`, `clock`, `power`, `voltage`, `current`, `fan`, `data`, `throughput`, `energy`, `flag`, `percent`), `unit`, `label` (chiave i18n oppure testo fornito dal driver), `source` (`pdh`, `dxgi`, `d3dkmt`, `nvml`, `nvapi`, `adl`, `igcl`, `lhm`, `wmi`…), `category` (per il raggruppamento nella tabella della vista Avanzata), `experimental` (vero per le letture ottenute da chiamate non documentate, vedi §5.2: l'interfaccia le segna come sperimentali).
 - **`Reading`**: `sensor_id`, `value: f64` oppure assente, `timestamp`.
 - **ID stabili tra riavvii**, costruiti dall'identità hardware. Esempi: `gpu/pci-0000:01:00.0/temperature/hotspot`, `storage/nvme-<seriale-hash>/temperature/composite`. Regole, impostazioni e selezione dei sensori per il log vi fanno riferimento.
 - **Merge:**
@@ -191,23 +191,71 @@ File `%APPDATA%\OpenMonitorAdvanced\settings.json`, con versione dello schema e 
 
 ### 5.2 Provider `gpu` (senza privilegi, a strati)
 
-1. **Enumerazione:** DXGI e D3DKMT per LUID e ID PCI. Si scartano gli adattatori software (Microsoft Basic Render Driver). Ogni GPU ha un solo record, identificato da LUID e indirizzo PCI.
+Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU AMD Raphael (RDNA2).
+
+1. **Enumerazione:**
+   - DXGI `EnumAdapters1`, scartando gli adattatori software (`DXGI_ADAPTER_FLAG_SOFTWARE`, per esempio Microsoft Basic Render Driver). Ogni GPU ha un solo record, identificato dal LUID.
+   - L'indirizzo PCI viene da D3DKMT `ADAPTERADDRESS` (bus `0xFFFFFFFF` = nessun indirizzo). Il dominio PCI non è noto e vale sempre `0000`. ID del device: `gpu/pci-0000:01:00.0`; senza indirizzo PCI, `gpu/ven-<vendor>-dev-<device>-<n>`.
+   - **Integrata o dedicata:** DXCore `IsIntegrated`, letto solo se `IsPropertySupported` lo conferma; in alternativa il bit `HybridIntegrated` (bit 5) di D3DKMT `ADAPTERTYPE`; altrimenti la GPU è considerata dedicata. `DedicatedVideoMemory` non basta a distinguerle. Il risultato è la proprietà `integrated` del device.
 2. **Livello base, per ogni vendor, sempre attivo:**
-   - PDH `GPU Engine(*)`: utilizzo per motore (3D, compute, copy, video encode/decode) e per processo. Si sommano le istanze per LUID e motore, poi si prende il massimo per tipo di motore, come fa Task Manager.
-   - PDH `GPU Adapter Memory` e `GPU Process Memory`.
-   - D3DKMT `KMTQAITYPE_ADAPTERPERFDATA`: temperatura, frequenza della memoria, potenza in percentuale del limite (non in watt).
-   - DXGI `QueryVideoMemoryInfo`.
+   - **PDH `GPU Engine(*)\Utilization Percentage`:** carico per motore (3D, compute, copy, video decode, video encode).
+     - Il tipo di motore è la parte del nome dell'istanza dopo `_engtype_` e può contenere spazi (`Video Codec 0`).
+     - Si sommano i processi per LUID e motore. Il carico core è il massimo tra i motori; il carico di un tipo è il massimo tra i motori di quel tipo, come in Task Manager.
+     - Il contatore è un tasso: il primo campione dopo la discovery serve solo da base.
+     - L'utilizzo per processo arriva con la vista Avanzata (M3).
+   - **PDH `GPU Adapter Memory(*)`:** memoria dedicata e condivisa in uso. `GPU Process Memory` (per processo) arriva in M3.
+   - **D3DKMT `KMTQAITYPE_ADAPTERPERFDATA` (62):**
+     - temperatura in decimi di °C;
+     - potenza in decimi di % del limite (non in watt);
+     - frequenza della memoria in Hz;
+     - ventola in RPM, solo se `ADAPTERPERFDATA_CAPS` riporta un `MaxFanRPM` maggiore di zero: in quel caso 0 RPM è un valore vero (ventola ferma).
+
+     Il driver AMD popola la struttura anche per l'iGPU (temperatura a passi di 1 °C, potenza %, frequenza della DRAM). Potenza % e frequenza della memoria si usano solo per le GPU dedicate.
+   - **D3DKMT `KMTQAITYPE_NODEPERFDATA` (61):** il clock core è la `Frequency` del nodo 0 e coincide con il clock grafico di `nvidia-smi`. La struttura va passata con la dimensione esatta (56 byte), altrimenti la chiamata restituisce `STATUS_INVALID_PARAMETER`. La tensione del nodo non si usa: vale 0 su NVIDIA.
+   - **DXGI:** memoria dedicata totale (`DedicatedVideoMemory`), solo per le GPU dedicate.
+   - **`QueryVideoMemoryInfo` di DXGI è escluso:** riporta solo la memoria del processo chiamante.
+   - Un `NTSTATUS` negativo da D3DKMT durante il campionamento avvia una nuova discovery. Succede, per esempio, dopo un aggiornamento del driver o un TDR, quando l'handle non è più valido.
 3. **Arricchimento con le librerie dei vendor**, tutte caricate dinamicamente con `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)` e con i simboli risolti uno alla volta. Un simbolo mancante o `NOT_SUPPORTED` significa "sensore assente".
-   - **NVIDIA — NVML:** clock, potenza e limiti, motivi del throttling (`ClocksEventReasons`), PCIe (generazione e larghezza attuali e massime), utilizzo di encoder e decoder, ventola in %.
-   - **NVIDIA — NVAPI:** temperature hotspot e memory junction, RPM della ventola, tensione. Le chiamate per hotspot e junction non sono documentate, quindi sono segnate come **sperimentali** (stesso approccio di LibreHardwareMonitor).
-   - **AMD — ADL (legacy, `atiadlxx.dll`):** Overdrive e PMLog per hotspot, memoria, VRM, potenza, ventola e tensione. **ADLX è escluso**, perché la sua licenza vieta l'uso in software con licenza libera.
-   - **Intel — IGCL (`ControlLib.dll`, solo a 64 bit):** `ctlPowerTelemetryGet` per energia, tensione, clock, temperature, attività, ventole e flag dei limiti (usati come motivi del throttling); `ctlPciGetState`.
-4. **Priorità nel merge:** libreria del vendor → D3DKMT → PDH, con la fonte registrata per ogni campo. Utilizzo per motore e per processo vengono sempre da PDH.
+
+   **Ogni libreria si carica una sola volta e resta caricata fino alla fine del processo:**
+   - ADL non restituisce la memoria quando viene scaricata;
+   - dopo `NvAPI_Unload` i puntatori di NVAPI restano pendenti (crash verificato);
+   - `nvmlShutdown` riscrive circa 18 MB di pagine.
+   - **NVIDIA — NVML (`nvml.dll`):**
+     - **Sensori:** temperatura core; clock core e memoria; potenza della scheda e limite applicato; potenza in % del limite (può superare 100); ventola in % e in RPM; VRAM usata e totale; throttling da `ClocksEventReasons` (per potenza con i bit `0x4`, `0x80`; termico con `0x20`, `0x40`). Il bit generico `HwSlowdown` (`0x8`) da solo non identifica una causa termica.
+     - **Chiamate escluse dal campionamento:** `TotalEnergyConsumption` (p95 8 ms) e `PcieThroughput` (blocca per 30 ms).
+     - **Memoria:** `nvmlInit_v2` scrive i 19,4 MB della sezione `.data` della `nvml.dll` del DriverStore e li lascia nel working set privato. Subito dopo l'inizializzazione l'app chiama `VirtualUnlock` su quella sezione (`ERROR_NOT_LOCKED` è l'esito atteso), e l'aumento scende da +19,3 MB a +0,5 MB. Se la sezione non si trova, l'app lo registra nel log e prosegue.
+   - **NVIDIA — NVAPI (`nvapi64.dll`):** temperature hotspot e memory junction (`GPU_ThermalGetSensors`, valori divisi per 256, maschera dei sensori scelta provando la più ampia accettata) e tensione core (`GPU_ClientVoltRailsGetStatus`, in µV). Sono chiamate non documentate, quindi i tre sensori sono **sperimentali** (stesso approccio di LibreHardwareMonitor) e l'interfaccia li segna come tali. Gli indici dei sensori dipendono dall'architettura, ricavata dal device ID PCI:
+
+     | Architettura | Device ID | Hotspot | Junction |
+     |---|---|---|---|
+     | Turing / Ampere | `0x1E00`–`0x25FF` | 1 | 9 (solo con maschera ≥ `0x3FF`) |
+     | Ada | `0x2680`–`0x28FF` | 1 | 7 |
+     | Blackwell | `0x2B80`–`0x2FFF` | — | 2 |
+
+     Con un'architettura sconosciuta non c'è nessuno dei tre sensori. Gli RPM della ventola vengono da NVML: `GetTachReading` restituisce `NOT_SUPPORTED` sulla RTX 4080.
+   - **AMD — ADL (legacy, `atiadlxx.dll`):**
+     - **Lettura:** PMLog in memoria condivisa (`Overdrive8_PMLog_ShareMemory`, circa 3 µs per lettura); in alternativa `New_QueryPMLogData_Get`.
+     - **Associazione:** l'elenco degli adattatori di ADL ha un record per ogni uscita video e comprende anche le GPU di altri vendor. Si tengono i record con `iVendorID == 1002`, si deduplicano per bus/device/function e si associano all'indirizzo PCI.
+     - **iGPU:** temperatura (`TEMP_GFX`) e clock core (`GFXCLK`). `GFX_POWER`, `ASIC_POWER` e `GFX_VOLTAGE` seguono la CPU sulle APU desktop e non si usano.
+     - **GPU dedicate** (non ancora verificate su hardware): temperature core, hotspot e memoria; clock core e memoria; potenza della scheda (`BOARD_POWER`, altrimenti `ASIC_POWER`); ventola in RPM e in %; tensione core.
+     - **ADLX è escluso**, perché la sua licenza vieta l'uso in software con licenza libera.
+   - **Intel — IGCL (`ControlLib.dll`, solo a 64 bit):**
+     - **Sensori:** con `ctlPowerTelemetryGet`, temperature di GPU e VRAM, clock, tensione, ventola, potenza (calcolata dalla variazione del contatore di energia tra due campioni) e flag dei limiti di potenza e temperatura, usati come motivi del throttling.
+     - **Versioni:** struttura di telemetria da 1024 byte (versione 1), con ripiego a 808 byte (versione 0) per i runtime più vecchi.
+     - **Stato:** implementato e coperto da test con funzioni finte, **non ancora verificato su hardware Intel**. `ctlPciGetState` arriva in M3.
+4. **Priorità nel merge**, per ogni GPU e per ogni campo: NVML → NVAPI → ADL → IGCL → D3DKMT → DXGI → PDH.
+   - La fonte si sceglie alla discovery: è il livello con la priorità più alta che dichiara quel campo per quella GPU. Viene registrata nel sensore (`source`).
+   - Se in un ciclo la fonte scelta non dà un valore, il valore è assente. Non si ripiega su un'altra fonte a runtime. Se una successiva discovery cambia fonte o unità, si azzera lo storico del solo sensore interessato, senza cambiarne l'ID.
+   - Ogni 5 s si verifica anche la topologia, compreso il caso di zero adattatori: una GPU riconnessa viene scoperta anche quando non esistono più handle da invalidare. A topologia invariata non si riattaccano i livelli.
+   - Il carico per motore viene sempre da PDH.
+5. **Fuori dalla M2, rimandati alla M3:** generazione e larghezza PCIe; utilizzo GPU per processo; utilizzo di encoder e decoder da NVML; contatori di energia; soglie del limite di potenza per le regole.
 
 **Licenze:**
-- Nessun header proprietario viene incluso nel repository, a meno che la licenza lo consenta: l'SDK di NVAPI è MIT.
-- Per NVML, ADL e IGCL si scrivono binding propri a partire dalla documentazione pubblica, oppure si scaricano gli header al momento della build.
-- Le DLL dei vendor non vengono mai ridistribuite: si caricano da quelle installate con il driver.
+- Nessun header proprietario è incluso nel repository e nessuno viene scaricato durante la build.
+- **NVAPI:** ID e strutture vengono dagli header dell'SDK (MIT); l'avviso è in `THIRD_PARTY_NOTICES.md`. Gli ID non documentati (`0x65FE3AAD`, `0x465F9BCF`) sono fatti di interoperabilità documentati da LibreHardwareMonitor, citato come fonte. Il suo codice non viene copiato.
+- **NVML, ADL e IGCL:** binding scritti a mano dalla documentazione pubblica (nomi dei simboli, layout, costanti) e verificati sulle librerie installate. Per ADL è l'unica via compatibile, perché l'EULA degli header AMD esclude la GPL.
+- Le DLL dei vendor non vengono mai ridistribuite: si caricano solo da `System32`, dove le installa il driver.
 
 ### 5.3 Servizio `oma-service`
 
@@ -324,10 +372,15 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - i suoi sensori mostrano "—" e l'indicazione della fonte non disponibile;
   - un provider non può bloccare lo scheduler.
 - **Librerie dei vendor:** un crash dentro una DLL non si può intercettare. Per questo ci sono:
-  - un interruttore per ogni provider nelle impostazioni;
-  - l'avvio `--safe`, che disattiva tutti gli SDK dei vendor e lascia solo PDH e D3DKMT.
-  
-  Se l'avvio precedente non si è concluso correttamente, l'app propone la modalità sicura.
+  - un interruttore per ogni provider nelle impostazioni (M5);
+  - la **modalità sicura**: le librerie dei vendor GPU (NVML, NVAPI, ADL, IGCL) non vengono caricate e restano solo D3DKMT, DXGI e PDH. Si attiva con l'avvio `--safe` oppure automaticamente dopo un crash.
+
+  **Rilevamento dei crash:**
+  - All'avvio l'app installa un filtro per le eccezioni non gestite (`SetUnhandledExceptionFilter`).
+  - Se il processo sta per terminare per un crash nativo, il filtro scrive `%LOCALAPPDATA%\OpenMonitorAdvanced\crash.txt` con il codice dell'eccezione e il percorso del modulo in cui è avvenuta.
+  - Il filtro è best-effort: non copre `__fastfail`/abort, terminazioni forzate, né garantisce di riuscire a scrivere su un processo corrotto. Il file non viene scritto durante una normale chiusura o uno spegnimento.
+  - All'avvio successivo l'app legge e cancella il file e parte in modalità sicura.
+  - Sotto la barra superiore un avviso spiega il motivo, con il nome della DLL, e offre **"Riattiva"**: le librerie si caricano subito, senza riavviare l'app, e restano caricate fino alla chiusura.
 - **Servizio:** disconnessioni, timeout e versione del protocollo non compatibile portano alla modalità base, con badge e spiegazione. Non producono mai errori bloccanti.
 - **Dati anomali:** valori fuori dall'intervallo fisico plausibile vengono scartati come assenti e registrati nel log di diagnostica. Esempi: temperature < −50 °C o > 150 °C, percentuali < 0 o > 100 dove non ha senso.
 - **Log di diagnostica:** `tracing` in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`, a rotazione. Il servizio scrive in un file proprio.
@@ -390,9 +443,9 @@ docs/
 
 1. **FACEIT e PawnIO:** basta fermare il servizio perché l'anti-cheat accetti il sistema, o bisogna fermare anche il driver?
 2. **LibreHardwareMonitorLib con trimming e NativeAOT:** incide sulla dimensione dell'installer.
-3. **Valore corretto dell'enum per `D3DKMT_NODE_PERFDATA`** (clock ed eventuale tensione per motore): una prima prova ha restituito `STATUS_INVALID_PARAMETER`.
-4. **Driver Intel e Qualcomm e `ADAPTERPERFDATA`:** lo popolano?
-5. **Licenza di ADL (legacy):** va verificata prima di usarne i binding; in alternativa si resta sul livello base per AMD.
+3. **Valore corretto dell'enum per `D3DKMT_NODE_PERFDATA`** (clock ed eventuale tensione per motore): una prima prova ha restituito `STATUS_INVALID_PARAMETER`. **Risolto in M2:** `KMTQAITYPE_NODEPERFDATA` vale 61. La struttura va passata con la dimensione esatta di 56 byte: con una dimensione diversa la chiamata restituisce `STATUS_INVALID_PARAMETER`. La `Frequency` del nodo 0 è il clock core e coincide con `nvidia-smi`. La tensione vale 0 su NVIDIA e circa 1110–1125 (probabilmente mV) sull'iGPU AMD, quindi non si usa.
+4. **Driver Intel e Qualcomm e `ADAPTERPERFDATA`:** lo popolano? **In parte risolto in M2:** i driver NVIDIA e AMD lo popolano, anche per l'iGPU AMD (temperatura a passi di 1 °C, potenza in % del limite, frequenza della DRAM). Intel e Qualcomm restano da verificare, perché non c'era hardware disponibile. Se un driver non lo popola (temperatura 0), quei sensori semplicemente non compaiono.
+5. **Licenza di ADL (legacy):** va verificata prima di usarne i binding; in alternativa si resta sul livello base per AMD. **Risolto in M2:** si usano binding scritti a mano dalla documentazione pubblica e `atiadlxx.dll` si carica a runtime da `System32`. Gli header di AMD non si includono e non si scaricano, perché la loro EULA esclude le licenze come la GPL. ADLX resta escluso.
 6. **NVMe via `IOCTL_STORAGE_QUERY_PROPERTY` senza privilegi:** funziona?
 7. **Firma del codice:** va verificata l'idoneità a SignPath.io.
 

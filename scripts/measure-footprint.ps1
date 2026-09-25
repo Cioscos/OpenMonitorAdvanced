@@ -4,7 +4,9 @@
 .DESCRIPTION
   Starts the release build, waits for warm-up, then reports the app's CPU
   usage and the private working set (Task Manager "Memory" column) of the app
-  and of its WebView2 child processes.
+  and of its WebView2 child processes. VendorModules lists the GPU vendor
+  libraries loaded in the app, so a measurement taken in safe mode (or on a
+  machine without a vendor driver) is recognisable.
 .EXAMPLE
   ./scripts/measure-footprint.ps1              # window open
   ./scripts/measure-footprint.ps1 -Minimized   # tray only
@@ -58,6 +60,9 @@ try {
         Where-Object { $ids -contains [int]$_.IDProcess })
     if ($perf.Count -ne $ids.Count) { throw "Missing process memory counters; measurement is invalid." }
     $appPrivate = ($perf | Where-Object { [int]$_.IDProcess -eq $proc.Id }).WorkingSetPrivate
+    $vendorDlls = @('nvml.dll', 'nvapi64.dll', 'atiadlxx.dll', 'ControlLib.dll')
+    $vendorModules = @($proc.Modules | Where-Object { $vendorDlls -contains $_.ModuleName } |
+        ForEach-Object { $_.ModuleName } | Sort-Object -Unique)
     $totalPrivate = ($perf | Measure-Object -Property WorkingSetPrivate -Sum).Sum
 
     [pscustomobject]@{
@@ -66,6 +71,7 @@ try {
         AppPrivateMB      = [math]::Round($appPrivate / 1MB, 1)
         WebView2Processes = $webviews.Count
         TotalPrivateMB    = [math]::Round($totalPrivate / 1MB, 1)
+        VendorModules     = if ($vendorModules.Count) { $vendorModules -join ', ' } else { '(none)' }
     } | Format-List
 }
 finally {

@@ -11,10 +11,40 @@ use oma_win::memory::MemoryProvider;
 use oma_win::network::NetworkProvider;
 use oma_win::storage::StorageProvider;
 
+/// Label keys of the PDH rate sensors: the first poll after a discover only
+/// primes their counters, so it must report `None` instead of a value
+/// computed over a few milliseconds.
+const PRIMED_RATE_KEYS: &[&str] = &[
+    "cpu.load.total",
+    "cpu.load.thread",
+    "cpu.clock.effective",
+    "storage.read",
+    "storage.write",
+    "storage.active",
+    "gpu.load.core",
+    "gpu.load.3d",
+    "gpu.load.compute",
+    "gpu.load.copy",
+    "gpu.load.videoDecode",
+    "gpu.load.videoEncode",
+];
+
+fn assert_first_poll_has_no_rates(inventory: &Inventory, first: &[Option<f64>]) {
+    for (sensor, value) in inventory.sensors.iter().zip(first) {
+        if PRIMED_RATE_KEYS.contains(&sensor.label.key.as_str()) {
+            assert_eq!(
+                *value, None,
+                "{} must have no rate on the first poll",
+                sensor.id
+            );
+        }
+    }
+}
+
 /// Discovers, polls twice a second apart, and checks alignment. The first
 /// poll after a discover only primes the PDH rate counters (fresh baseline,
-/// no elapsed interval yet) and is discarded; the second poll carries real
-/// rate values.
+/// no elapsed interval yet): its rate sensors must be `None`. The second poll
+/// carries real rate values.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
     let inventory = p.discover().expect("discover");
     std::thread::sleep(Duration::from_millis(1_100));
@@ -24,6 +54,7 @@ fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
         inventory.sensors.len(),
         "values must align with sensors"
     );
+    assert_first_poll_has_no_rates(&inventory, &first);
     std::thread::sleep(Duration::from_millis(1_100));
     let values = p.poll().expect("second poll");
     assert_eq!(

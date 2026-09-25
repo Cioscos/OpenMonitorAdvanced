@@ -327,6 +327,68 @@ mod tests {
     }
 
     #[test]
+    fn rediscover_storm_is_backed_off() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .extend((0..6).map(|_| Err(ProviderError::Rediscover)));
+        let discovers = || script.lock().unwrap().discover_calls;
+        let mut e = Engine::new(vec![p], 10);
+        // Three rediscoveries in a row are free: discover runs on every tick.
+        for t in [0, 1_000, 2_000] {
+            assert_eq!(e.tick(t, t).snapshot.values, vec![None]);
+        }
+        assert_eq!(discovers(), 3);
+        // The 4th Rediscover (at 3 s) arms backoff_ms(1) = 5 s: nothing runs before 8 s.
+        for t in [3_000, 4_000, 5_000, 6_000, 7_000] {
+            assert_eq!(e.tick(t, t).snapshot.values, vec![None]);
+        }
+        assert_eq!(discovers(), 4);
+        // The 5th (at 8 s) arms backoff_ms(2) = 10 s: next attempt at 18 s.
+        e.tick(8_000, 8_000);
+        assert_eq!(discovers(), 5);
+        for t in (9_000..18_000).step_by(1_000) {
+            assert_eq!(e.tick(t, t).snapshot.values, vec![None]);
+        }
+        assert_eq!(discovers(), 5);
+        // The 6th (at 18 s) arms backoff_ms(3) = 20 s: next attempt at 38 s.
+        e.tick(18_000, 18_000);
+        e.tick(37_999, 37_999);
+        assert_eq!(discovers(), 6);
+        // The script is exhausted: the retry at 38 s succeeds.
+        assert_eq!(e.tick(38_000, 38_000).snapshot.values, vec![Some(1.0)]);
+        assert_eq!(discovers(), 7);
+    }
+
+    #[test]
+    fn successful_poll_resets_the_rediscover_streak() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        let rediscover = || Err(ProviderError::Rediscover);
+        script.lock().unwrap().polls.extend([
+            rediscover(),
+            rediscover(),
+            rediscover(),
+            Ok(vec![Some(2.0)]),
+            rediscover(),
+            rediscover(),
+            rediscover(),
+        ]);
+        let mut e = Engine::new(vec![p], 10);
+        for t in [0, 1_000, 2_000] {
+            assert_eq!(e.tick(t, t).snapshot.values, vec![None]);
+        }
+        assert_eq!(e.tick(3_000, 3_000).snapshot.values, vec![Some(2.0)]);
+        // After the successful poll the next three Rediscover are free again.
+        for t in [4_000, 5_000, 6_000] {
+            assert_eq!(e.tick(t, t).snapshot.values, vec![None]);
+        }
+        assert_eq!(e.tick(7_000, 7_000).snapshot.values, vec![Some(1.0)]);
+        assert_eq!(script.lock().unwrap().discover_calls, 7);
+    }
+
+    #[test]
     fn wrong_value_count_degrades_provider() {
         let (p, script) = fake("a", inventory("dev/a", &["x", "y"]));
         script.lock().unwrap().polls.push_back(Ok(vec![Some(1.0)]));

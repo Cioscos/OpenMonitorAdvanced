@@ -5,6 +5,12 @@ use std::time::Instant;
 use crate::engine::backoff_ms;
 use crate::provider::{Inventory, Provider, ProviderError};
 
+/// Consecutive `Rediscover` results retried on the very next tick; from the
+/// next one on, the retry waits `backoff_ms(n - FREE_REDISCOVERS)`, so a
+/// flapping provider (e.g. a GPU layer after a driver reset) cannot
+/// rediscover every second forever.
+const FREE_REDISCOVERS: u32 = 3;
+
 pub(crate) struct Sample {
     pub inventory: Inventory,
     pub values: Vec<Option<f64>>,
@@ -26,6 +32,7 @@ impl Worker {
                 let mut inventory = Inventory::default();
                 let mut discover = true;
                 let mut failures = 0u32;
+                let mut rediscovers = 0u32;
                 let mut retry_at = 0u64;
                 while let Ok(now) = requests.recv() {
                     let mut values = vec![None; inventory.sensors.len()];
@@ -46,11 +53,23 @@ impl Worker {
                         match result {
                             Ok(polled) => {
                                 values = polled;
-                                failures = 0; // Only a successful poll ends a failure streak.
+                                // Only a successful poll ends a failure or rediscovery streak.
+                                failures = 0;
+                                rediscovers = 0;
                             }
                             Err(ProviderError::Rediscover) => {
                                 discover = true;
                                 values = vec![None; inventory.sensors.len()];
+                                rediscovers = rediscovers.saturating_add(1);
+                                if rediscovers > FREE_REDISCOVERS {
+                                    let extra = rediscovers - FREE_REDISCOVERS;
+                                    retry_at = now.saturating_add(backoff_ms(extra));
+                                    tracing::warn!(
+                                        provider = provider.name(),
+                                        rediscovers,
+                                        "provider keeps requesting rediscovery"
+                                    );
+                                }
                             }
                             Err(err) => {
                                 failures = failures.saturating_add(1);

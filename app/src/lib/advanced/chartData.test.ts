@@ -7,6 +7,7 @@ import {
   WINDOWS,
   canAdd,
   fitSelection,
+  formatTimeTick,
   initialSeries,
   maxPointsFor,
   scaleLayout,
@@ -132,6 +133,13 @@ test('percent and flag scales include their natural bounds, others auto-range', 
 test('palette reads the eight tokens in order', () => {
   expect(seriesPalette((token) => ` ${token}-value `)).toEqual(PALETTE_TOKENS.map((t) => `${t}-value`));
   expect(PALETTE_TOKENS).toHaveLength(MAX_SERIES);
+});
+
+test('formatTimeTick renders the axis split in the app locale', () => {
+  const seconds = Date.UTC(2026, 0, 1, 15, 45) / 1000;
+  expect(formatTimeTick(seconds, 'it')).toBe(new Date(seconds * 1000).toLocaleTimeString('it', { hour: '2-digit', minute: '2-digit' }));
+  expect(formatTimeTick(seconds, 'it')).toMatch(/^\d{2}:\d{2}$/); // 24-hour, e.g. "15:45" (UTC offset notwithstanding)
+  expect(formatTimeTick(seconds, 'en')).toBe(new Date(seconds * 1000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }));
 });
 
 test('theme.css defines every palette token', () => {

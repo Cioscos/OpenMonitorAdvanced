@@ -144,3 +144,8 @@ export function scaleOptions(unit: Unit): uPlot.Scale {
   if (!bounds) return {};
   return { range: { min: { soft: bounds[0], mode: 1, pad: 0 }, max: { soft: bounds[1], mode: 1, pad: 0 } } };
 }
+
+/** Locale time-of-day for an x-axis split (uPlot gives seconds), 24-hour in `it`, matching the legend. */
+export function formatTimeTick(seconds: number, locale: string): string {
+  return new Date(seconds * 1000).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+}

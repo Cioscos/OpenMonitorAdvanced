@@ -61,6 +61,13 @@ test('seeds the default series and draws them on two unit scales', async () => {
   expect(plot.opts.axes?.map((a) => [a.scale, a.side])).toEqual([[undefined, undefined], ['percent', 3], ['celsius', 1]]);
   expect(plot.data).toEqual([[1, 2], [10, 20], [11, 21]]);
   expect(screen.getByRole('button', { name: t('advanced.chart.window.300') }).getAttribute('aria-pressed')).toBe('true');
+
+  const xValues = plot.opts.axes?.[0].values;
+  expect(xValues).toBeTypeOf('function');
+  const seconds = Date.UTC(2026, 0, 1, 15, 45) / 1000;
+  expect((xValues as (u: unknown, splits: number[]) => string[])(plot, [seconds])).toEqual([
+    new Date(seconds * 1000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }),
+  ]);
 });
 
 test('long windows ask for decimated history and the choice persists', async () => {

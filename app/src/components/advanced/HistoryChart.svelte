@@ -10,6 +10,7 @@
     WINDOWS,
     canAdd,
     fitSelection,
+    formatTimeTick,
     initialSeries,
     maxPointsFor,
     scaleLayout,
@@ -137,7 +138,12 @@
         }),
       ],
       axes: [
-        { stroke: muted, grid: { stroke: border, width: 1 }, ticks: { stroke: border, width: 1 } },
+        {
+          stroke: muted,
+          grid: { stroke: border, width: 1 },
+          ticks: { stroke: border, width: 1 },
+          values: (_u, splits) => splits.map((v) => formatTimeTick(v, i18n.locale)),
+        },
         axis(scales[0], 3),
         ...(scales[1] ? [axis(scales[1], 1)] : []),
       ],
@@ -321,5 +327,14 @@
   .plot :global(.u-legend) {
     color: var(--text);
     font-size: 12px;
+  }
+  /* uPlot.min.css hard-codes #607D8B / rgba(0,0,0,.07) for cursor and select chrome;
+     keep them on our palette even though drag-select is disabled. */
+  .plot :global(.u-cursor-x),
+  .plot :global(.u-cursor-y) {
+    border-color: var(--text-muted);
+  }
+  .plot :global(.u-select) {
+    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
   }
 </style>

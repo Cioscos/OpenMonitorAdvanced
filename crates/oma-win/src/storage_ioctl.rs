@@ -16,7 +16,14 @@ use windows::Win32::System::IO::DeviceIoControl;
 /// `FILE_DEVICE_DISK` device type (winioctl.h); not exported by the `windows` crate.
 const FILE_DEVICE_DISK: u32 = 7;
 
-const _: () = assert!(size_of::<STORAGE_PROPERTY_QUERY>() == 12);
+/// Size of a `STORAGE_PROPERTY_QUERY` for a standard query with no
+/// additional parameters (`PropertyId` + `QueryType` + the 1-byte
+/// `AdditionalParameters` placeholder, plus trailing padding).
+const QUERY_SIZE: usize = size_of::<STORAGE_PROPERTY_QUERY>();
+
+const _: () = assert!(QUERY_SIZE == 12);
+const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, PropertyId) == 0);
+const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, QueryType) == 4);
 const _: () = assert!(size_of::<STORAGE_DEVICE_NUMBER>() == 12);
 const _: () = assert!(std::mem::offset_of!(STORAGE_DEVICE_NUMBER, DeviceNumber) == 4);
 
@@ -110,20 +117,13 @@ impl PhysicalDrive {
         property: STORAGE_PROPERTY_ID,
         capacity: usize,
     ) -> Option<Vec<u8>> {
-        let query = STORAGE_PROPERTY_QUERY {
-            PropertyId: property,
-            QueryType: PropertyStandardQuery,
-            ..Default::default()
-        };
-        // SAFETY: STORAGE_PROPERTY_QUERY is plain data; the slice covers
-        // exactly its bytes and does not outlive `query`.
-        let input = unsafe {
-            std::slice::from_raw_parts(
-                (&query as *const STORAGE_PROPERTY_QUERY).cast::<u8>(),
-                size_of::<STORAGE_PROPERTY_QUERY>(),
-            )
-        };
-        self.ioctl(IOCTL_STORAGE_QUERY_PROPERTY, Some(input), capacity)
+        // A fully initialised byte buffer, rather than a view over
+        // `STORAGE_PROPERTY_QUERY`'s trailing padding (not guaranteed
+        // initialised by a struct literal with `..Default::default()`).
+        let mut input = [0u8; QUERY_SIZE];
+        input[0..4].copy_from_slice(&property.0.to_le_bytes());
+        input[4..8].copy_from_slice(&PropertyStandardQuery.0.to_le_bytes());
+        self.ioctl(IOCTL_STORAGE_QUERY_PROPERTY, Some(&input), capacity)
     }
 
     /// The N of `\\.\PhysicalDriveN` for this device; `None` if it is not a disk.

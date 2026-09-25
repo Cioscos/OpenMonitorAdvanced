@@ -1,45 +1,18 @@
 //! GPU provider: one device per physical adapter, each field read from the
 //! highest-priority layer that supports it (spec §5.2): vendor libraries, then
 //! D3DKMT, DXGI and PDH.
-// Until `GpuProvider::new` wires the real layers into `default_providers`,
-// most of this module is reachable only from tests. Remove this attribute
-// then: `expect` turns into a warning as soon as nothing here is dead.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "GpuProvider is only built by tests until the real layers are wired in"
-    )
-)]
 
 pub(crate) mod adapter;
-// Wired into `GpuProvider::new` by Task 11; until then only tests use it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod adl;
+pub(crate) mod d3dkmt;
+pub(crate) mod dxgi;
+pub(crate) mod enumerate;
 pub(crate) mod field;
-// Wired into `GpuProvider::new` by Task 11; until then only tests use it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod igcl;
 pub(crate) mod layer;
-
-// Reached from `GpuProvider::new` only once the real layers are wired in;
-// until then the tests are their only users.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod d3dkmt;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod dxgi;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod enumerate;
-// Used only by tests until GpuProvider::new wires the NVAPI layer in.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod nvapi;
-// Used only by tests until GpuProvider::new wires the NVML layer in.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod nvml;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod pdh;
-// Used only by tests until GpuProvider::new wires the NVML layer in.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod trim;
 
 use std::collections::BTreeSet;
@@ -134,6 +107,41 @@ impl GpuProvider {
         let vendor: &mut [Box<dyn GpuLayer>] = if vendor_on { &mut self.vendor } else { &mut [] };
         vendor.iter_mut().chain(self.base.iter_mut()).collect()
     }
+}
+
+impl GpuProvider {
+    /// The real provider: DXGI/DXCore/D3DKMT enumeration, the base layers
+    /// (D3DKMT, DXGI, PDH) always on, and the vendor libraries (NVML, NVAPI,
+    /// ADL, IGCL) loaded on the first discover that sees `switch` on.
+    pub fn new(switch: VendorSwitch) -> Self {
+        Self::with_layers(
+            Box::new(enumerate::enumerate),
+            vec![
+                Box::new(d3dkmt::D3dkmtLayer::default()),
+                Box::new(dxgi::DxgiLayer::default()),
+                Box::new(pdh::PdhLayer::default()),
+            ],
+            Box::new(load_vendor_layers),
+            switch,
+        )
+    }
+}
+
+/// Loads every GPU vendor library installed on this machine, in merge
+/// priority order. A library that is absent or fails to initialise is
+/// skipped. Called at most once per provider: loaded libraries stay for the
+/// process lifetime (decision D1).
+fn load_vendor_layers() -> Vec<Box<dyn GpuLayer>> {
+    let candidates: [Option<Box<dyn GpuLayer>>; 4] = [
+        nvml::NvmlLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
+        nvapi::NvapiLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
+        adl::AdlLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
+        igcl::IgclLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
+    ];
+    let layers: Vec<Box<dyn GpuLayer>> = candidates.into_iter().flatten().collect();
+    let sources: Vec<_> = layers.iter().map(|layer| layer.source()).collect();
+    tracing::info!(?sources, "GPU vendor libraries loaded");
+    layers
 }
 
 fn device(adapter: &Adapter, id: &str) -> Device {

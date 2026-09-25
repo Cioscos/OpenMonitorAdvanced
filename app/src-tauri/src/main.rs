@@ -27,7 +27,8 @@ struct SamplerGuard(Mutex<Option<Sampler>>);
 fn providers() -> Vec<Box<dyn Provider>> {
     #[cfg(windows)]
     {
-        oma_win::default_providers()
+        // Task 12 replaces this with the safe-mode switch (--safe, crash marker).
+        oma_win::default_providers(oma_win::gpu::VendorSwitch::new(true))
     }
     #[cfg(not(windows))]
     {

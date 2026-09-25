@@ -1,9 +1,12 @@
 #![cfg(windows)]
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use oma_core::provider::{Inventory, Provider};
+use oma_core::model::{Sensor, Source};
+use oma_core::provider::{Inventory, Provider, ProviderError};
 use oma_win::cpu::CpuProvider;
+use oma_win::gpu::{GpuProvider, VendorSwitch};
 use oma_win::memory::MemoryProvider;
 use oma_win::network::NetworkProvider;
 use oma_win::storage::StorageProvider;
@@ -116,4 +119,138 @@ fn network_provider_values_align_with_sensors() {
     for v in second.into_iter().flatten() {
         assert!(v >= 0.0);
     }
+}
+
+/// Vendor libraries are process-wide state: the GPU tests run one at a time.
+static GPU_TESTS: Mutex<()> = Mutex::new(());
+
+/// The development machine: RTX 4080 (discrete) and a Raphael iGPU (integrated).
+const NVIDIA: &str = "gpu/pci-0000:01:00.0";
+const AMD: &str = "gpu/pci-0000:11:00.0";
+const VENDOR_SOURCES: [Source; 4] = [Source::Nvml, Source::Nvapi, Source::Adl, Source::Igcl];
+
+/// Index and definition of the sensor with id `<device>/<rest>`.
+fn gpu_sensor<'a>(inventory: &'a Inventory, device: &str, rest: &str) -> (usize, &'a Sensor) {
+    let id = format!("{device}/{rest}");
+    inventory
+        .sensors
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.id == id)
+        .unwrap_or_else(|| panic!("missing sensor {id}"))
+}
+
+fn assert_gpu_devices(inventory: &Inventory) {
+    let mut ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [NVIDIA, AMD]);
+    for (id, vendor, pci, integrated) in [
+        (NVIDIA, "NVIDIA", "0000:01:00.0", "false"),
+        (AMD, "AMD", "0000:11:00.0", "true"),
+    ] {
+        let device = inventory
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .expect("device");
+        assert_eq!(device.vendor.as_deref(), Some(vendor), "{id}");
+        assert_eq!(
+            device.properties.get("pciAddress").map(String::as_str),
+            Some(pci),
+            "{id}"
+        );
+        assert_eq!(
+            device.properties.get("integrated").map(String::as_str),
+            Some(integrated),
+            "{id}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_finds_both_gpus_with_merged_sources() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut p = GpuProvider::new(VendorSwitch::new(true));
+    let (inventory, values) = discover_and_poll(&mut p);
+    assert_gpu_devices(&inventory);
+
+    let (i, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_eq!(temperature.source, Source::Nvml);
+    let celsius = values[i].expect("NVIDIA core temperature");
+    assert!((20.0..=100.0).contains(&celsius), "{celsius} °C");
+
+    let (i, hotspot) = gpu_sensor(&inventory, NVIDIA, "temperature/hotspot");
+    assert_eq!(hotspot.source, Source::Nvapi);
+    assert!(
+        hotspot.experimental,
+        "NVAPI hotspot is an undocumented call"
+    );
+    let celsius = values[i].expect("NVIDIA hotspot temperature");
+    assert!((20.0..=110.0).contains(&celsius), "{celsius} °C");
+
+    let (i, power) = gpu_sensor(&inventory, NVIDIA, "power/board");
+    assert_eq!(power.source, Source::Nvml);
+    let watt = values[i].expect("NVIDIA board power");
+    assert!((1.0..=600.0).contains(&watt), "{watt} W");
+
+    let (i, load) = gpu_sensor(&inventory, NVIDIA, "load/core");
+    assert_eq!(load.source, Source::Pdh);
+    let pct = values[i].expect("NVIDIA load on the second poll");
+    assert!((0.0..=100.0).contains(&pct), "{pct} %");
+
+    let (i, temperature) = gpu_sensor(&inventory, AMD, "temperature/core");
+    assert_eq!(temperature.source, Source::Adl);
+    let celsius = values[i].expect("AMD core temperature");
+    assert!((20.0..=100.0).contains(&celsius), "{celsius} °C");
+
+    let (_, clock) = gpu_sensor(&inventory, AMD, "clock/core");
+    assert_eq!(clock.source, Source::Adl);
+    let (_, used) = gpu_sensor(&inventory, AMD, "data/memory-dedicated-used");
+    assert_eq!(used.source, Source::Pdh);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_in_safe_mode_uses_only_base_layers() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut p = GpuProvider::new(VendorSwitch::new(false));
+    let (inventory, values) = discover_and_poll(&mut p);
+    assert_gpu_devices(&inventory);
+    for sensor in &inventory.sensors {
+        assert!(
+            !VENDOR_SOURCES.contains(&sensor.source),
+            "{} from {:?}",
+            sensor.id,
+            sensor.source
+        );
+        assert!(!sensor.experimental, "{}", sensor.id);
+    }
+
+    let (i, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_eq!(temperature.source, Source::D3dkmt);
+    let celsius = values[i].expect("NVIDIA core temperature from D3DKMT");
+    assert!((20.0..=100.0).contains(&celsius), "{celsius} °C");
+
+    let (_, total) = gpu_sensor(&inventory, NVIDIA, "data/memory-dedicated-total");
+    assert_eq!(total.source, Source::Dxgi);
+
+    let (_, temperature) = gpu_sensor(&inventory, AMD, "temperature/core");
+    assert_eq!(temperature.source, Source::D3dkmt);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_loads_vendor_libraries_when_reenabled() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let switch = VendorSwitch::new(false);
+    let mut p = GpuProvider::new(switch.clone());
+    p.discover().expect("discover in safe mode");
+    p.poll().expect("poll in safe mode");
+
+    switch.enable();
+    assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+    let inventory = p.discover().expect("discover with vendor libraries");
+    let (_, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_eq!(temperature.source, Source::Nvml);
 }

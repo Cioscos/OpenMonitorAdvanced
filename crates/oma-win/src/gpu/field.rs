@@ -234,3 +234,23 @@ mod tests {
         assert_eq!(s.id, "gpu/pci-0000:01:00.0/temperature/hotspot");
     }
 }
+
+/// `GpuField` is crate-private, so the integration test tests/labels.rs keeps
+/// its own copy of the label keys: this check keeps that copy complete.
+#[cfg(test)]
+mod label_key_tests {
+    use super::GpuField;
+
+    #[test]
+    fn every_label_key_is_checked_by_the_labels_test() {
+        let labels_test = include_str!("../../tests/labels.rs");
+        for field in GpuField::ALL {
+            let quoted = format!("\"{}\",", field.label_key());
+            assert!(
+                labels_test.contains(&quoted),
+                "tests/labels.rs KEYS lacks {}",
+                field.label_key()
+            );
+        }
+    }
+}

@@ -3,7 +3,7 @@
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use oma_core::model::{Sensor, Source};
+use oma_core::model::{Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
 use oma_win::cpu::CpuProvider;
 use oma_win::gpu::{GpuProvider, VendorSwitch};
@@ -117,6 +117,31 @@ fn storage_provider_reports_disks_and_volumes() {
         if sensor.label.key == "storage.volumeUsed" {
             let pct = value.expect("volume usage");
             assert!((0.0..=100.0).contains(&pct), "{} = {pct}", sensor.id);
+        }
+        if sensor.kind == SensorKind::Temperature {
+            assert_eq!(sensor.unit, Unit::Celsius, "{}", sensor.id);
+            // Read at discovery and repeated until the 30 s refresh.
+            let celsius = value.expect("disk temperature");
+            assert!((5.0..=90.0).contains(&celsius), "{} = {celsius}", sensor.id);
+        }
+    }
+    let temperatures = inventory
+        .sensors
+        .iter()
+        .filter(|s| s.kind == SensorKind::Temperature)
+        .count();
+    println!("{temperatures} disk temperature sensors");
+    assert!(temperatures > 0, "at least one disk reports a temperature");
+    for device in &inventory.devices {
+        for key in ["tempWarningC", "tempCriticalC"] {
+            if let Some(value) = device.properties.get(key) {
+                let celsius: i16 = value.parse().expect("integer °C");
+                assert!(
+                    (40..=150).contains(&celsius),
+                    "{} {key} = {celsius}",
+                    device.id
+                );
+            }
         }
     }
 }

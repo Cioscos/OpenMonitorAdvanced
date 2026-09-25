@@ -15,6 +15,8 @@ const KEYS: &[&str] = &[
     "storage.active",
     "storage.volumeUsed",
     "storage.volumeFree",
+    "storage.temperature",
+    "storage.temperatureSensor",
     "network.down",
     "network.up",
     "network.linkSpeed",

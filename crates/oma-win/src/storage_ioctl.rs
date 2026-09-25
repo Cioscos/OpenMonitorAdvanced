@@ -2,7 +2,7 @@
 //! path) opened with zero desired access, so no administrator rights are
 //! needed and no data is ever read or written.
 
-use windows::core::HSTRING;
+use windows::core::{BOOL, HSTRING};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -11,6 +11,7 @@ use windows::Win32::System::Ioctl::{
     PropertyStandardQuery, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
     STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
 };
+use windows::Win32::System::Power::GetDevicePowerState;
 use windows::Win32::System::IO::DeviceIoControl;
 
 /// `FILE_DEVICE_DISK` device type (winioctl.h); not exported by the `windows` crate.
@@ -26,6 +27,18 @@ const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, PropertyId) =
 const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, QueryType) == 4);
 const _: () = assert!(size_of::<STORAGE_DEVICE_NUMBER>() == 12);
 const _: () = assert!(std::mem::offset_of!(STORAGE_DEVICE_NUMBER, DeviceNumber) == 4);
+
+/// Little-endian `u16` at `offset`, `None` past the end.
+pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+/// Little-endian `i16` at `offset`, `None` past the end.
+pub(crate) fn le_i16(bytes: &[u8], offset: usize) -> Option<i16> {
+    le_u16(bytes, offset).map(|v| v as i16)
+}
 
 /// Little-endian `u32` at `offset`, `None` past the end.
 pub(crate) fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -135,6 +148,15 @@ impl PhysicalDrive {
         )?;
         parse_disk_number(&bytes)
     }
+
+    /// `Some(false)` while the disk is spun down or in a low-power state,
+    /// `None` if Windows cannot tell. Asking does not wake the disk.
+    pub(crate) fn powered_on(&self) -> Option<bool> {
+        let mut on = BOOL(0);
+        // SAFETY: the handle is open and `on` is a valid out-pointer.
+        let known = unsafe { GetDevicePowerState(self.0, &mut on) }.as_bool();
+        known.then(|| on.as_bool())
+    }
 }
 
 impl Drop for PhysicalDrive {
@@ -158,6 +180,9 @@ mod tests {
         assert_eq!(le_u32(&bytes, 9), None);
         assert_eq!(le_i64(&bytes, 5), None);
         assert_eq!(le_u32(&bytes, usize::MAX), None);
+        assert_eq!(le_u16(&bytes, 0), Some(1));
+        assert_eq!(le_i16(&bytes, 4), Some(-1));
+        assert_eq!(le_i16(&bytes, 11), None);
     }
 
     #[test]

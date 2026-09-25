@@ -37,6 +37,8 @@
   "sensor.storage.active": "Tempo attivo",
   "sensor.storage.volumeUsed": "Volume {arg} occupato",
   "sensor.storage.volumeFree": "Volume {arg} libero",
+  "sensor.storage.temperature": "Temperatura",
+  "sensor.storage.temperatureSensor": "Sensore di temperatura {arg}",
   "sensor.network.down": "Download",
   "sensor.network.up": "Upload",
   "sensor.network.linkSpeed": "Velocità del collegamento",

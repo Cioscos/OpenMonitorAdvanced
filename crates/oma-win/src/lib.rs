@@ -11,6 +11,7 @@ mod pdh;
 pub mod storage;
 mod storage_identity;
 mod storage_ioctl;
+mod storage_temperature;
 
 use oma_core::provider::Provider;
 

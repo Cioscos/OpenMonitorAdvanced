@@ -37,6 +37,8 @@
   "sensor.storage.active": "Active time",
   "sensor.storage.volumeUsed": "Volume {arg} used",
   "sensor.storage.volumeFree": "Volume {arg} free",
+  "sensor.storage.temperature": "Temperature",
+  "sensor.storage.temperatureSensor": "Temperature sensor {arg}",
   "sensor.network.down": "Download",
   "sensor.network.up": "Upload",
   "sensor.network.linkSpeed": "Link speed",

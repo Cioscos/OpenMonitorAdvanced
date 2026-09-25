@@ -1,6 +1,7 @@
-//! Physical disk throughput and activity (PDH) plus volume usage.
+//! Physical disk throughput and activity (PDH), disk temperatures and volume usage.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
@@ -10,6 +11,11 @@ use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use crate::pdh::{Counter, Query};
 use crate::storage_identity::{
     assign_disk_ids, disk_identity_candidates, volume_identity, DiskIdentityCandidates,
+};
+use crate::storage_ioctl::PhysicalDrive;
+use crate::storage_temperature::{
+    declared_positions, declared_values, may_query, next_refresh, query_temperatures, sensor_label,
+    sensor_name, temperature_properties, TemperatureReport,
 };
 
 const READ: &str = r"\PhysicalDisk(*)\Disk Read Bytes/sec";
@@ -84,6 +90,37 @@ fn volume_space(volume: &str) -> Option<(u64, u64)> {
     Some((total, free))
 }
 
+/// Temperature sensors of one disk: the driver indices declared at
+/// discovery, their latest values (repeated between refreshes) and when they
+/// were read.
+struct DiskTemperatures {
+    positions: Vec<usize>,
+    values: Vec<Option<f64>>,
+    read_at: Instant,
+}
+
+impl DiskTemperatures {
+    /// Refreshes values and the attempt deadline, including failed/asleep reads.
+    /// New driver indices require a schema rebuild, never a value-vector resize.
+    fn refresh(&mut self, report: Option<&TemperatureReport>, now: Instant) -> bool {
+        self.values = declared_values(report, &self.positions);
+        self.read_at = now;
+        report.is_some_and(|r| {
+            declared_positions(r)
+                .iter()
+                .any(|i| !self.positions.contains(i))
+        })
+    }
+}
+
+/// Temperatures of disk `index`. A disk known to be spun down is not queried,
+/// because the query could wake it up: `None`, as for an unsupported disk.
+fn read_temperatures(index: u32) -> Option<TemperatureReport> {
+    PhysicalDrive::open(index)
+        .filter(|drive| may_query(drive.powered_on()))
+        .and_then(|drive| query_temperatures(&drive))
+}
+
 struct Counters {
     query: Query,
     read: Counter,
@@ -97,6 +134,8 @@ pub struct StorageProvider {
     disks: Vec<DiskInstance>,
     disk_ids: HashMap<u32, String>,
     volume_ids: HashMap<String, String>,
+    /// Every identified disk, including those waiting for temperature support/wake.
+    temperatures: HashMap<u32, DiskTemperatures>,
     /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
     fresh: bool,
 }
@@ -140,17 +179,21 @@ impl Provider for StorageProvider {
             .collect();
         let mut devices = Vec::new();
         let mut sensors = Vec::new();
+        let mut temperatures = HashMap::new();
         for disk in &disks {
             // assign_disk_ids has already logged why a disk has no identity.
             let Some(id) = disk_ids.get(&disk.index).cloned() else {
                 continue;
             };
+            // Unknown/asleep disks remain scheduled; a later successful probe
+            // requests rediscovery when it reveals undeclared sensor indices.
+            let report = read_temperatures(disk.index);
             devices.push(Device {
                 id: id.clone(),
                 kind: DeviceKind::Storage,
                 name: disk_name(disk),
                 vendor: None,
-                properties: Default::default(),
+                properties: temperature_properties(report.as_ref()),
             });
             sensors.push(Sensor::new(
                 &id,
@@ -176,6 +219,25 @@ impl Provider for StorageProvider {
                 Label::new("storage.active"),
                 Source::Pdh,
             ));
+            let positions = report.as_ref().map(declared_positions).unwrap_or_default();
+            for &position in &positions {
+                sensors.push(Sensor::new(
+                    &id,
+                    SensorKind::Temperature,
+                    &sensor_name(position),
+                    Unit::Celsius,
+                    sensor_label(position),
+                    Source::Win32,
+                ));
+            }
+            temperatures.insert(
+                disk.index,
+                DiskTemperatures {
+                    values: declared_values(report.as_ref(), &positions),
+                    positions,
+                    read_at: Instant::now(),
+                },
+            );
             for volume in &disk.volumes {
                 let Some(volume_id) = volume_ids.get(volume) else {
                     continue;
@@ -207,6 +269,7 @@ impl Provider for StorageProvider {
         self.disks = disks;
         self.disk_ids = disk_ids;
         self.volume_ids = volume_ids;
+        self.temperatures = temperatures;
         self.fresh = true;
         Ok(Inventory { devices, sensors })
     }
@@ -226,6 +289,15 @@ impl Provider for StorageProvider {
         let idle: HashMap<String, f64> = counters.query.array(counters.idle)?.into_iter().collect();
         let finite =
             |map: &HashMap<String, f64>, key: &str| map.get(key).copied().filter(|v| v.is_finite());
+        let reads = self.temperatures.iter().map(|(&i, t)| (i, t.read_at));
+        if let Some(index) = next_refresh(reads, Instant::now()) {
+            if let Some(disk) = self.temperatures.get_mut(&index) {
+                let report = read_temperatures(index);
+                if disk.refresh(report.as_ref(), Instant::now()) {
+                    return Err(ProviderError::Rediscover);
+                }
+            }
+        }
 
         let mut values = Vec::new();
         for disk in &self.disks {
@@ -239,6 +311,10 @@ impl Provider for StorageProvider {
                 values.push(finite(&read, &disk.instance));
                 values.push(finite(&write, &disk.instance));
                 values.push(finite(&idle, &disk.instance).and_then(active_pct));
+            }
+            // Not a rate: the last read is valid on the first poll too.
+            if let Some(temperatures) = self.temperatures.get(&disk.index) {
+                values.extend(temperatures.values.iter().copied());
             }
             for volume in &disk.volumes {
                 let Some(recorded_id) = self.volume_ids.get(volume) else {
@@ -333,6 +409,41 @@ mod tests {
         assert!(take_fresh(&mut fresh));
         assert!(!take_fresh(&mut fresh));
         assert!(!take_fresh(&mut fresh));
+    }
+
+    #[test]
+    fn sleeping_disk_is_retried_and_new_indices_request_discovery() {
+        use crate::storage_temperature::TEMPERATURE_PERIOD;
+        use std::time::Duration;
+        let start = Instant::now();
+        let mut disk = DiskTemperatures {
+            positions: vec![],
+            values: vec![],
+            read_at: start,
+        };
+        let first = start + TEMPERATURE_PERIOD;
+        assert_eq!(next_refresh([(0, disk.read_at)], first), Some(0));
+        assert!(!disk.refresh(None, first)); // still asleep / transient failure
+        assert_eq!(
+            next_refresh([(0, disk.read_at)], first + Duration::from_secs(1)),
+            None
+        );
+        let awake = TemperatureReport {
+            sensors: BTreeMap::from([(0, Some(42.0))]),
+            warning_c: None,
+            critical_c: None,
+        };
+        assert_eq!(
+            next_refresh([(0, disk.read_at)], first + TEMPERATURE_PERIOD),
+            Some(0)
+        );
+        assert!(disk.refresh(Some(&awake), first + TEMPERATURE_PERIOD));
+        assert!(disk.values.is_empty(), "schema changes only in discover");
+        disk.positions = vec![0]; // subsequent discovery declares the new sensor
+        assert!(!disk.refresh(Some(&awake), first + TEMPERATURE_PERIOD));
+        assert_eq!(disk.values, vec![Some(42.0)]);
+        assert!(!disk.refresh(None, first + TEMPERATURE_PERIOD));
+        assert_eq!(disk.values, vec![None]);
     }
 
     #[test]

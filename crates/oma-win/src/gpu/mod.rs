@@ -843,7 +843,6 @@ mod tests {
         let (nvml, nvml_script) = fake(Source::Nvml, &[&[], &[]]);
         let (pnp, pnp_script) = fake(Source::Pnp, &[&[], &[]]);
         nvml_script.lock().unwrap().properties = vec![props(&[
-            ("pcieMaxGen", "4"),
             ("powerLimitDefaultW", "320"),
             ("pciAddress", "9999:99:99.9"),
         ])];
@@ -859,8 +858,14 @@ mod tests {
         );
         let inventory = p.discover().unwrap();
         let nv = &inventory.devices[0].properties;
-        assert_eq!(nv["pcieMaxGen"], "4", "NVML outranks PnP");
-        assert_eq!(nv["pcieMaxWidth"], "16", "PnP fills the gap");
+        assert_eq!(
+            nv["pcieMaxGen"], "3",
+            "PnP is the only source of the max link"
+        );
+        assert_eq!(
+            nv["pcieMaxWidth"], "16",
+            "PnP is the only source of the max link"
+        );
         assert_eq!(nv["powerLimitDefaultW"], "320");
         assert_eq!(nv["pciAddress"], "0000:01:00.0", "not overridable");
         assert_eq!(nv["integrated"], "false");

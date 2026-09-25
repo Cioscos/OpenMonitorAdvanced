@@ -250,10 +250,14 @@ fn link_value(value: u32) -> Option<f64> {
 
 /// Static values read once at attach (decision D9): each is the NVML return code and the raw
 /// value (mW for power, °C for temperatures).
+///
+/// `pcieMaxGen`/`pcieMaxWidth` are NOT read here: NVML's max-link getters report the maximum
+/// "possible with this device AND system" (a x16 card in a x4 slot reports 4), so on
+/// slot-limited systems they disagree with the device's own capability and change between
+/// normal and safe mode. The vendor-neutral, device-only capability comes from PnP
+/// (`gpu::pnp::link_properties`) instead; see that module's doc comment.
 #[derive(Debug, Clone, Copy)]
 struct StaticReads {
-    max_link_gen: (Ret, u32),
-    max_link_width: (Ret, u32),
     power_min_mw: (Ret, u32),
     power_max_mw: (Ret, u32),
     power_default_mw: (Ret, u32),
@@ -266,8 +270,6 @@ impl StaticReads {
     /// Device properties (plain decimal strings); a failed call or a zero value is left out.
     fn properties(&self) -> BTreeMap<String, String> {
         let entries = [
-            ("pcieMaxGen", self.max_link_gen, 1),
-            ("pcieMaxWidth", self.max_link_width, 1),
             ("powerLimitMinW", self.power_min_mw, 1000),
             ("powerLimitMaxW", self.power_max_mw, 1000),
             ("powerLimitDefaultW", self.power_default_mw, 1000),
@@ -320,8 +322,6 @@ struct Api {
     decoder_utilization: Option<U32PairFn>,
     curr_link_gen: Option<U32Fn>,
     curr_link_width: Option<U32Fn>,
-    max_link_gen: Option<U32Fn>,
-    max_link_width: Option<U32Fn>,
     power_constraints: Option<U32PairFn>,
     power_default_limit: Option<U32Fn>,
     temperature_threshold: Option<U32ArgFn>,
@@ -393,8 +393,6 @@ impl Api {
                 decoder_utilization: library.symbol(c"nvmlDeviceGetDecoderUtilization"),
                 curr_link_gen: library.symbol(c"nvmlDeviceGetCurrPcieLinkGeneration"),
                 curr_link_width: library.symbol(c"nvmlDeviceGetCurrPcieLinkWidth"),
-                max_link_gen: library.symbol(c"nvmlDeviceGetMaxPcieLinkGeneration"),
-                max_link_width: library.symbol(c"nvmlDeviceGetMaxPcieLinkWidth"),
                 power_constraints: library.symbol(c"nvmlDeviceGetPowerManagementLimitConstraints"),
                 power_default_limit: library.symbol(c"nvmlDeviceGetPowerManagementDefaultLimit"),
                 temperature_threshold: library.symbol(c"nvmlDeviceGetTemperatureThreshold"),
@@ -503,8 +501,6 @@ impl Api {
         let (constraints, power_min, power_max) = call_u32_pair(self.power_constraints, device);
         let threshold = |kind| call_u32_arg(self.temperature_threshold, device, kind);
         StaticReads {
-            max_link_gen: call_u32(self.max_link_gen, device),
-            max_link_width: call_u32(self.max_link_width, device),
             power_min_mw: (constraints, power_min),
             power_max_mw: (constraints, power_max),
             power_default_mw: call_u32(self.power_default_limit, device),
@@ -801,8 +797,6 @@ mod tests {
     /// The values the RTX 4080 of the development machine reports (spike, driver 617.14).
     fn rtx_4080_static() -> StaticReads {
         StaticReads {
-            max_link_gen: (SUCCESS, 4),
-            max_link_width: (SUCCESS, 16),
             power_min_mw: (SUCCESS, 150_000),
             power_max_mw: (SUCCESS, 370_000),
             power_default_mw: (SUCCESS, 320_000),
@@ -816,8 +810,6 @@ mod tests {
     fn static_reads_become_decimal_properties() {
         let properties = rtx_4080_static().properties();
         let expected = [
-            ("pcieMaxGen", "4"),
-            ("pcieMaxWidth", "16"),
             ("powerLimitMinW", "150"),
             ("powerLimitMaxW", "370"),
             ("powerLimitDefaultW", "320"),
@@ -831,6 +823,10 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect::<BTreeMap<_, _>>()
+        );
+        assert!(
+            !properties.contains_key("pcieMaxGen") && !properties.contains_key("pcieMaxWidth"),
+            "NVML no longer emits the max link; PnP is the single source (fix round 1)"
         );
     }
 
@@ -848,7 +844,7 @@ mod tests {
         assert!(!properties.contains_key("powerLimitMaxW"));
         assert!(!properties.contains_key("tempMaxC"));
         assert_eq!(properties["powerLimitDefaultW"], "152.5");
-        assert_eq!(properties.len(), 5);
+        assert_eq!(properties.len(), 3);
     }
 
     #[test]
@@ -945,9 +941,12 @@ mod tests {
         assert_eq!(r[&PcieLinkWidth], 16.0);
         let properties = layer.properties(nvidia);
         println!("NVML properties: {properties:?}");
+        // pcieMaxGen/pcieMaxWidth come from PnP only (fix round 1): NVML's max-link getters
+        // report what the device AND the current slot allow, which disagrees with the
+        // device's own capability on slot-limited systems.
+        assert!(!properties.contains_key("pcieMaxGen"));
+        assert!(!properties.contains_key("pcieMaxWidth"));
         for (key, value) in [
-            ("pcieMaxGen", "4"),
-            ("pcieMaxWidth", "16"),
             ("powerLimitMinW", "150"),
             ("powerLimitMaxW", "370"),
             ("powerLimitDefaultW", "320"),

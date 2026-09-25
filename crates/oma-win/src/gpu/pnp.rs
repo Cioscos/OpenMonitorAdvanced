@@ -1,9 +1,14 @@
 //! Vendor-neutral PCIe link capability from the Plug and Play property store (cfgmgr32).
 //!
 //! Each display adapter interface is opened once with D3DKMT to learn its LUID, then its
-//! device node gives the PCI "max link speed/width" properties. These are static (what the
-//! link can do). The PnP "current link" pair is a snapshot taken when the device started and
-//! is never refreshed (it reads Gen 4 while NVML reports Gen 1 at idle), so it is not used.
+//! device node gives the PCI "max link speed/width" properties. These come from the device's
+//! own Link Capabilities register, i.e. the device capability alone, independent of whatever
+//! slot it is plugged into: unlike NVML's max-link getters (which report the maximum
+//! "possible with this device AND system", so a x16 card in a x4 slot reports 4 there), the
+//! PnP values do not change between normal and safe mode and agree across vendors. This is
+//! why `pcieMaxGen`/`pcieMaxWidth` are sourced from PnP only (fix round 1) and not from NVML.
+//! The PnP "current link" pair is a snapshot taken when the device started and is never
+//! refreshed (it reads Gen 4 while NVML reports Gen 1 at idle), so it is not used.
 //! The layer declares no sensors: it only contributes device properties.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

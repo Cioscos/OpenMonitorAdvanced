@@ -333,6 +333,8 @@ fn gpu_provider_reports_pcie_link_and_static_limits() {
         .iter()
         .any(|s| s.device_id == AMD && s.kind == SensorKind::Link));
 
+    // pcieMaxGen/pcieMaxWidth are the device's own link capability, sourced from PnP only
+    // (NVML's max-link getters mix in the current slot and are not used for this property).
     for (key, value) in [
         ("pcieMaxGen", "4"),
         ("pcieMaxWidth", "16"),

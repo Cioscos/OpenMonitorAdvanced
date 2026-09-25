@@ -51,7 +51,8 @@ Note: private working set is not the same as committed memory.
 from the working set without freeing the library's underlying allocations, so
 a low `AppPrivateMB`/`TotalPrivateMB` here does not by itself mean the vendor
 libraries hold no committed memory — only that it is not currently resident.
-The M1 spike table's finer-grained numbers (e.g. the ~19 MB NVML `.data`
-section before/after `VirtualUnlock`, or the isolated per-library vendor
-delta) are prior spike evidence, not reproduced against this final build; see
-the plan for those references.
+The finer-grained figures from the spike recorded in the M2 plan
+(`docs/superpowers/plans/2026-09-25-m2-gpu.md`), e.g. the ~19 MB NVML `.data`
+section before/after `VirtualUnlock` or the isolated per-library vendor delta,
+are prior spike evidence, not reproduced against this final build; see the
+plan for those references.

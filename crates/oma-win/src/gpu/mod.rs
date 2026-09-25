@@ -245,6 +245,10 @@ impl Provider for GpuProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        // Re-enabling vendor libraries ("Riattiva") is observed only here. While the
+        // engine backs this provider off (repeated failures, or repeated Rediscovers
+        // per decision D8) poll is not called, so the switch can take up to the
+        // 60 s maximum backoff to be picked up.
         if self.switch.enabled() != self.state.vendor_on {
             return Err(ProviderError::Rediscover);
         }

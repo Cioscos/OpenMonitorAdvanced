@@ -40,6 +40,9 @@ the vendor libraries and keep only the Windows data. After a native crash the ap
 `%LOCALAPPDATA%\OpenMonitorAdvanced\crash.txt` and starts the next time in safe mode by itself.
 In both cases a notice under the top bar offers **Re-enable**, which loads the libraries without a restart.
 
+**Known limits.** If the NVIDIA driver is updated or unloaded while the app runs, NVML is not initialised
+again: its fields fall back to the Windows data (D3DKMT) until the app is restarted.
+
 ## Performance budget
 
 The monitor must not distort what it measures. Budgets and the latest measurements are in

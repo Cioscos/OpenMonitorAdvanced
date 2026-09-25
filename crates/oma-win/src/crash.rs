@@ -99,8 +99,10 @@ pub fn take_crash_marker(marker: &Path) -> Option<String> {
 }
 
 /// Top-level filter. It runs on the crashing thread while the process is in an
-/// unknown state (the heap may be corrupt or its lock held), so it uses only
-/// stack buffers and direct Win32 calls: no allocation, no locks.
+/// unknown state (the heap may be corrupt or its lock held), so it makes no Rust
+/// allocation and takes no Rust lock: only stack buffers and direct Win32 calls.
+/// Those calls (module lookup, file creation) may still take the heap or loader
+/// lock internally, so writing the marker is best effort.
 unsafe extern "system" fn write_marker(info: *const EXCEPTION_POINTERS) -> i32 {
     // SAFETY: the system passes a valid EXCEPTION_POINTERS (null is tolerated anyway).
     let record = unsafe { info.as_ref().and_then(|i| i.ExceptionRecord.as_ref()) };

@@ -1,0 +1,17 @@
+[package]
+name = "msgpack-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+rmpv = { version = "1", features = ["with-serde"] }
+
+[[bin]]
+name = "gen_fixtures"
+path = "src/gen_fixtures.rs"
+
+[[bin]]
+name = "check_decode"
+path = "src/check_decode.rs"

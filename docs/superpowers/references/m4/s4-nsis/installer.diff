@@ -1,0 +1,62 @@
+--- upstream-2.11.5.nsi
++++ installer.nsi
+@@ -384,6 +384,8 @@
+   reinst_done:
+ FunctionEnd
+ 
++!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive ; OMA
++!insertmacro MUI_PAGE_COMPONENTS ; OMA "Advanced sensors" section
+ ; 5. Choose install directory page
+ !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+ !insertmacro MUI_PAGE_DIRECTORY
+@@ -473,6 +475,7 @@
+ {{#each language_files}}
+   !include "{{this}}"
+ {{/each}}
++!insertmacro OMA_LANGSTRINGS ; OMA
+ 
+ Function .onInit
+   ${GetOptions} $CMDLINE "/P" $PassiveMode
+@@ -495,6 +498,7 @@
+   !endif
+ 
+   !insertmacro SetContext
++  !insertmacro OMA_ONINIT ; OMA
+ 
+   ${If} $INSTDIR == "${PLACEHOLDER_INSTALL_DIR}"
+     ; Set default install location
+@@ -524,7 +528,7 @@
+ FunctionEnd
+ 
+ 
+-Section EarlyChecks
++Section -EarlyChecks ; OMA hidden
+   ; Abort silent installer if downgrades is disabled
+   !if "${ALLOWDOWNGRADES}" == "false"
+   ${If} ${Silent}
+@@ -543,7 +547,7 @@
+ 
+ SectionEnd
+ 
+-Section WebView2
++Section -WebView2 ; OMA hidden
+   ; Check if Webview2 is already installed and skip this section
+   ${If} ${RunningX64}
+     ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+@@ -635,7 +639,7 @@
+   ${EndIf}
+ SectionEnd
+ 
+-Section Install
++Section -Install ; OMA hidden
+   SetOutPath $INSTDIR
+ 
+   !ifmacrodef NSIS_HOOK_PREINSTALL
+@@ -740,6 +744,7 @@
+   ${EndIf}
+ SectionEnd
+ 
++!insertmacro OMA_SECTIONS ; OMA
+ Function .onInstSuccess
+   ; Check for `/R` flag only in silent and passive installers because
+   ; GUI installer has a toggle for the user to (re)start the app

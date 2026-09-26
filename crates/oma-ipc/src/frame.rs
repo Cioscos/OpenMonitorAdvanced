@@ -4,8 +4,11 @@
 //! length: [`validate_message`] walks the raw MessagePack bytes first,
 //! bounding nesting depth and array/map element counts, using only bounds
 //! checks over the existing byte slice (no allocation proportional to a
-//! declared length). Only after that structural check passes do we hand the
-//! bytes to `rmp_serde::from_slice`.
+//! declared length), and rejecting a map with a duplicate string key. Only
+//! after that structural check passes do we hand the bytes to
+//! `rmp_serde::from_slice`.
+
+use std::collections::HashSet;
 
 use crate::message::Message;
 use crate::{IpcError, MAX_FRAME_BYTES};
@@ -14,11 +17,15 @@ use crate::{IpcError, MAX_FRAME_BYTES};
 /// MessagePack bytes before decoding.
 const MAX_DEPTH: usize = 64;
 
-/// Maximum element count accepted for a single array or map header.
+/// Maximum element count accepted for a single array or map header
+/// (ruling R9): for an array, the number of items; for a map, the number of
+/// key/value **entries** (not doubled for the two values per entry). Both
+/// sides of the wire (this crate and the .NET codec, Task 3) must apply the
+/// same rule — see `protocol/fixtures/README.md`.
 const MAX_ELEMENTS: usize = 100_000;
 
-/// Maximum number of bytes `FrameDecoder` will ever buffer at once: one
-/// frame's worth (length prefix + the largest allowed payload).
+/// Maximum number of bytes `FrameDecoder` will ever buffer *before* a call
+/// to [`FrameDecoder::push`] — see that method's contract (ruling R8).
 const MAX_BUFFERED_BYTES: usize = MAX_FRAME_BYTES + 4;
 
 fn eof() -> IpcError {
@@ -139,16 +146,16 @@ fn validate_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<(), Ipc
         }
         0xde => {
             let n = read_u16(bytes, pos)? as usize;
-            validate_elements(bytes, pos, n.saturating_mul(2), depth)
+            validate_map(bytes, pos, n, depth)
         }
         0xdf => {
             let n = read_u32(bytes, pos)? as usize;
-            validate_elements(bytes, pos, n.saturating_mul(2), depth)
+            validate_map(bytes, pos, n, depth)
         }
         // fixmap
         0x80..=0x8f => {
             let n = (marker & 0x0f) as usize;
-            validate_elements(bytes, pos, n * 2, depth)
+            validate_map(bytes, pos, n, depth)
         }
         // fixarray
         0x90..=0x9f => {
@@ -163,6 +170,8 @@ fn validate_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<(), Ipc
     }
 }
 
+/// Validates `count` array elements (ruling R9: an array's limit is its item
+/// count, checked directly against [`MAX_ELEMENTS`]).
 fn validate_elements(
     bytes: &[u8],
     pos: &mut usize,
@@ -171,7 +180,7 @@ fn validate_elements(
 ) -> Result<(), IpcError> {
     if count > MAX_ELEMENTS {
         return Err(IpcError::Decode(format!(
-            "array/map declares {count} elements, exceeding the {MAX_ELEMENTS} limit"
+            "array declares {count} elements, exceeding the {MAX_ELEMENTS} limit"
         )));
     }
     for _ in 0..count {
@@ -180,9 +189,50 @@ fn validate_elements(
     Ok(())
 }
 
+/// Validates `count` map entries (ruling R9: a map's limit is its
+/// key/value-pair count, not the number of values scanned — so a map
+/// declaring exactly [`MAX_ELEMENTS`] pairs passes the count check, even
+/// though `2 * MAX_ELEMENTS` individual values are then visited).
+///
+/// Also rejects a map that repeats the same string key twice: a `HashSet`
+/// keyed by the raw encoded bytes of each string key (never allocated
+/// larger than `count`, which is itself bounded by `MAX_ELEMENTS`) is used
+/// instead of pairwise comparison, to stay well clear of `O(n^2)` behaviour
+/// even at the limit. Non-string keys are not deduplicated: the wire
+/// protocol only ever uses string keys for struct fields and for
+/// `WireDevice.properties`.
+fn validate_map(bytes: &[u8], pos: &mut usize, count: usize, depth: usize) -> Result<(), IpcError> {
+    if count > MAX_ELEMENTS {
+        return Err(IpcError::Decode(format!(
+            "map declares {count} entries, exceeding the {MAX_ELEMENTS} limit"
+        )));
+    }
+    let mut seen_keys: HashSet<&[u8]> = HashSet::new();
+    for _ in 0..count {
+        let key_start = *pos;
+        validate_value(bytes, pos, depth + 1)?;
+        let key_bytes = &bytes[key_start..*pos];
+        if is_string_key(key_bytes) && !seen_keys.insert(key_bytes) {
+            return Err(IpcError::Decode("map has a duplicate key".to_owned()));
+        }
+        validate_value(bytes, pos, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// True if `key_bytes` (a fully-scanned MessagePack value) starts with a
+/// string marker (fixstr, str8, str16 or str32).
+fn is_string_key(key_bytes: &[u8]) -> bool {
+    matches!(
+        key_bytes.first(),
+        Some(0xa0..=0xbf) | Some(0xd9) | Some(0xda) | Some(0xdb)
+    )
+}
+
 /// Structurally validates `bytes` as exactly one MessagePack value, bounding
-/// depth and element counts before any `serde`-driven allocation happens.
-/// Returns an error if there are leftover bytes after the value.
+/// depth and element counts and rejecting duplicate map keys before any
+/// `serde`-driven allocation happens. Returns an error if there are leftover
+/// bytes after the value.
 fn validate_message(bytes: &[u8]) -> Result<(), IpcError> {
     if bytes.is_empty() {
         return Err(IpcError::Decode("empty payload".to_owned()));
@@ -244,6 +294,31 @@ pub fn decode_payload(bytes: &[u8]) -> Result<Message, IpcError> {
 /// from the sensor pipe. Fed by an overlapped reader (Task 8): bytes arrive
 /// in arbitrary chunks, and `push`/`next_message` must never block or
 /// allocate proportionally to an attacker-declared length.
+///
+/// # Contract (ruling R8)
+///
+/// The caller must call [`next_message`](Self::next_message) repeatedly
+/// after every [`push`](Self::push), until it returns `Ok(None)`, before
+/// pushing more bytes. Under that contract the buffer can briefly hold more
+/// than one frame's worth of bytes — for example when a single read returns
+/// the tail of one frame fused with the head of the next — but it always
+/// starts each `push` at or below `MAX_FRAME_BYTES + 4` buffered bytes,
+/// because the previous `push`'s frames were drained down to at most one
+/// incomplete frame first. `push` only rejects a call that starts with
+/// *more* than `MAX_FRAME_BYTES + 4` bytes already buffered, which can only
+/// happen if the caller violated the contract (kept pushing without
+/// draining). The incoming chunk itself is expected to be bounded by the
+/// caller's own read buffer size (Task 8's reader uses at most 64 KiB per
+/// read); `push` does not re-validate that.
+///
+/// # Errors are fatal
+///
+/// Any `Err` returned by `push`, `next_message` or `finish` means the byte
+/// stream is no longer trustworthy (a hostile/corrupt frame, an oversized
+/// declared length, or a contract violation). The caller must drop the
+/// connection; a `FrameDecoder` makes no attempt to resynchronize with the
+/// stream after an error, and continuing to feed it more bytes is not
+/// supported.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
@@ -254,14 +329,16 @@ impl FrameDecoder {
         Self { buf: Vec::new() }
     }
 
-    /// Buffers `bytes`. Rejects the push if it would grow the internal
-    /// buffer past `MAX_FRAME_BYTES + 4` (one frame's worth) — the buffer
-    /// never grows unboundedly no matter how the reader feeds it.
+    /// Buffers `bytes`. See the struct-level contract (ruling R8): this
+    /// only rejects the push if *more* than `MAX_FRAME_BYTES + 4` bytes were
+    /// already buffered before this call — a contract violation, not a
+    /// declared frame length, so it never carries a length in its error.
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), IpcError> {
-        let new_len = self.buf.len().saturating_add(bytes.len());
-        if new_len > MAX_BUFFERED_BYTES {
-            return Err(IpcError::FrameTooLarge(
-                new_len.min(u32::MAX as usize) as u32
+        if self.buf.len() > MAX_BUFFERED_BYTES {
+            return Err(IpcError::Decode(
+                "push called with more than one frame's worth already buffered; \
+                 drain next_message() to Ok(None) after every push"
+                    .to_owned(),
             ));
         }
         self.buf.extend_from_slice(bytes);
@@ -363,6 +440,98 @@ mod tests {
     }
 
     #[test]
+    fn push_accepts_a_frame_tail_fused_with_the_next_frames_head() {
+        // Build a payload of exactly MAX_FRAME_BYTES: measure the envelope's
+        // fixed overhead with a placeholder length (long enough to already
+        // need a str32 header, same as the final message), then size the
+        // filler so the total lands exactly on the limit.
+        let overhead_probe_len = MAX_FRAME_BYTES - 100;
+        let overhead_probe = encode_payload(&Message::Error(crate::message::WireError {
+            code: "bad_request".to_owned(),
+            message: "x".repeat(overhead_probe_len),
+        }))
+        .unwrap();
+        let overhead = overhead_probe.len() - overhead_probe_len;
+        let big_msg = Message::Error(crate::message::WireError {
+            code: "bad_request".to_owned(),
+            message: "x".repeat(MAX_FRAME_BYTES - overhead),
+        });
+        let big_frame = encode_frame(&big_msg).unwrap();
+        // The big frame fills the buffer to exactly its cap.
+        assert_eq!(big_frame.len(), MAX_FRAME_BYTES + 4);
+
+        let next_msg = Message::Error(crate::message::WireError {
+            code: "bad_request".to_owned(),
+            message: "y".repeat(40),
+        });
+        let next_frame = encode_frame(&next_msg).unwrap();
+
+        let split = big_frame.len() - 5;
+        let (head, tail) = big_frame.split_at(split);
+
+        let mut decoder = FrameDecoder::new();
+        decoder.push(head).unwrap();
+        assert_eq!(decoder.next_message().unwrap(), None);
+        assert!(decoder.buf.len() <= MAX_BUFFERED_BYTES);
+
+        // Fuse the big frame's tail with the head of the next frame, as one
+        // read from the pipe legitimately could. The buffer briefly holds
+        // more than MAX_BUFFERED_BYTES once this is appended -- legal per
+        // ruling R8, since the buffer was drained to Ok(None) beforehand.
+        let next_head_len = 40.min(next_frame.len() - 1);
+        let mut fused = tail.to_vec();
+        fused.extend_from_slice(&next_frame[..next_head_len]);
+        let buffered_before_fuse = decoder.buf.len();
+        decoder.push(&fused).unwrap();
+        assert!(
+            decoder.buf.len() > MAX_BUFFERED_BYTES,
+            "test setup should have pushed the buffer transiently over the cap \
+             ({buffered_before_fuse} + {} = {}, cap {MAX_BUFFERED_BYTES})",
+            fused.len(),
+            decoder.buf.len()
+        );
+
+        assert_eq!(decoder.next_message().unwrap(), Some(big_msg));
+        assert_eq!(decoder.buf.len(), next_head_len);
+        assert_eq!(decoder.next_message().unwrap(), None);
+
+        decoder.push(&next_frame[next_head_len..]).unwrap();
+        assert_eq!(decoder.next_message().unwrap(), Some(next_msg));
+    }
+
+    #[test]
+    fn buffer_stays_bounded_under_fragmented_pushes() {
+        let msg = Message::Error(crate::message::WireError {
+            code: "bad_request".to_owned(),
+            message: "z".repeat(MAX_FRAME_BYTES - 1000),
+        });
+        let frame = encode_frame(&msg).unwrap();
+
+        let mut decoder = FrameDecoder::new();
+        let mut decoded = None;
+        for chunk in frame.chunks(4096) {
+            decoder.push(chunk).unwrap();
+            assert!(
+                decoder.buf.len() <= MAX_BUFFERED_BYTES,
+                "buffer grew to {} bytes while feeding fragmented input",
+                decoder.buf.len()
+            );
+            if let Some(m) = decoder.next_message().unwrap() {
+                decoded = Some(m);
+            }
+        }
+        assert_eq!(decoded, Some(msg));
+    }
+
+    #[test]
+    fn zero_length_frame_is_a_decode_error() {
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&0u32.to_le_bytes()).unwrap();
+        let err = decoder.next_message().unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
     fn encode_frame_refuses_a_payload_over_the_limit() {
         let huge = "x".repeat(MAX_FRAME_BYTES + 1);
         let msg = Message::Error(crate::message::WireError {
@@ -458,6 +627,179 @@ mod tests {
 
         // Never having pushed anything is also a clean EOF.
         assert!(FrameDecoder::new().finish().is_ok());
+    }
+
+    #[test]
+    fn empty_payload_is_rejected() {
+        let err = decode_payload(&[]).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = encode_payload(&subscribe(500)).unwrap();
+        bytes.push(0xc0); // an extra nil byte tacked on after a valid message
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn reserved_marker_c1_is_rejected() {
+        let err = decode_payload(&[0xc1]).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn missing_required_field_is_rejected() {
+        // {"type": "subscribe", "body": {}}
+        let mut bytes = vec![0x82];
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("subscribe"));
+        bytes.extend_from_slice(&encode_fixstr("body"));
+        bytes.push(0x80);
+
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn duplicate_field_in_body_is_rejected() {
+        // {"type": "subscribe", "body": {"interval_ms": 500, "interval_ms": 999}}
+        let mut bytes = vec![0x82];
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("subscribe"));
+        bytes.extend_from_slice(&encode_fixstr("body"));
+        bytes.push(0x82);
+        bytes.extend_from_slice(&encode_fixstr("interval_ms"));
+        bytes.push(0xcd);
+        bytes.extend_from_slice(&500u16.to_be_bytes());
+        bytes.extend_from_slice(&encode_fixstr("interval_ms"));
+        bytes.push(0xcd);
+        bytes.extend_from_slice(&999u16.to_be_bytes());
+
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn duplicate_envelope_type_key_is_rejected() {
+        // {"type": "subscribe", "type": "hello", "body": {"interval_ms": 500}}
+        let mut bytes = vec![0x83];
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("subscribe"));
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("hello"));
+        bytes.extend_from_slice(&encode_fixstr("body"));
+        bytes.push(0x81);
+        bytes.extend_from_slice(&encode_fixstr("interval_ms"));
+        bytes.push(0xcd);
+        bytes.extend_from_slice(&500u16.to_be_bytes());
+
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn array32_declaring_u32_max_elements_is_rejected() {
+        let bytes = [0xdd, 0xff, 0xff, 0xff, 0xff];
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn map32_over_limit_is_rejected() {
+        let count: u32 = 100_001;
+        let mut bytes = vec![0xdf];
+        bytes.extend_from_slice(&count.to_be_bytes());
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn map_with_exactly_100000_entries_header_passes_the_count_check() {
+        let count: u32 = 100_000;
+        let mut bytes = vec![0xdf];
+        bytes.extend_from_slice(&count.to_be_bytes());
+        // No entries follow: the count check itself must accept exactly
+        // MAX_ELEMENTS, so the failure that does occur must come from
+        // running out of bytes while reading the first entry, not from the
+        // element-count limit.
+        let err = decode_payload(&bytes).unwrap_err();
+        match err {
+            IpcError::Decode(msg) => assert!(
+                !msg.contains("exceeding"),
+                "expected an EOF-style error, not a limit violation: {msg}"
+            ),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn str32_declaring_4gb_is_rejected_without_allocating() {
+        let bytes = [0xdb, 0xff, 0xff, 0xff, 0xff];
+        let err = decode_payload(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn nesting_deeper_than_64_is_rejected() {
+        let mut bytes = vec![0x91; 65]; // 65 nested one-element fixarrays
+        bytes.push(0xc0); // innermost nil
+        let err = validate_message(&bytes).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)));
+    }
+
+    #[test]
+    fn nesting_of_exactly_64_is_accepted_by_the_scanner() {
+        let mut bytes = vec![0x91; 64];
+        bytes.push(0xc0);
+        assert!(validate_message(&bytes).is_ok());
+    }
+
+    #[test]
+    fn omitted_optional_key_decodes_as_none() {
+        // WireDevice with `vendor` entirely absent (not `nil`) -- ruling R10:
+        // the decoder tolerates this even though an encoder must never do it.
+        use crate::message::{WireDevice, WireSchema};
+        use std::collections::BTreeMap;
+
+        // {"type": "schema", "body": {"devices": [{"id":"d","kind":"cpu","name":"n","properties":{},"hint":nil}], "sensors": []}}
+        let mut bytes = vec![0x82];
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("schema"));
+        bytes.extend_from_slice(&encode_fixstr("body"));
+        bytes.push(0x82); // body: devices, sensors
+        bytes.extend_from_slice(&encode_fixstr("devices"));
+        bytes.push(0x91); // 1 device
+        bytes.push(0x85); // device map: 5 entries (vendor omitted on purpose)
+        bytes.extend_from_slice(&encode_fixstr("id"));
+        bytes.extend_from_slice(&encode_fixstr("d"));
+        bytes.extend_from_slice(&encode_fixstr("kind"));
+        bytes.extend_from_slice(&encode_fixstr("cpu"));
+        bytes.extend_from_slice(&encode_fixstr("name"));
+        bytes.extend_from_slice(&encode_fixstr("n"));
+        bytes.extend_from_slice(&encode_fixstr("properties"));
+        bytes.push(0x80); // {}
+        bytes.extend_from_slice(&encode_fixstr("hint"));
+        bytes.push(0xc0); // nil
+        bytes.extend_from_slice(&encode_fixstr("sensors"));
+        bytes.push(0x90); // []
+
+        let decoded = decode_payload(&bytes).unwrap();
+        assert_eq!(
+            decoded,
+            Message::Schema(WireSchema {
+                devices: vec![WireDevice {
+                    id: "d".to_owned(),
+                    kind: "cpu".to_owned(),
+                    name: "n".to_owned(),
+                    vendor: None,
+                    properties: BTreeMap::new(),
+                    hint: None,
+                }],
+                sensors: vec![],
+            })
+        );
     }
 
     fn encode_fixstr(s: &str) -> Vec<u8> {

@@ -16,6 +16,33 @@ order**, never alphabetical. `BTreeMap<String, String>` fields (such as
 ordinal UTF-8 byte order, which `BTreeMap`'s own iteration order already
 gives for free in Rust.
 
+`WireDevice.hint` uses the same adjacently-tagged shape, but with field
+names `kind`/`value` instead of `type`/`body` (to avoid colliding with
+`WireDevice.kind`): `{"kind": <snake_case tag>, "value": <payload>}`. The
+three tags are `cpu` (`{"index": <u32>}`), `storage`
+(`{"physical_drive": <u32>, "model": <string or nil>, "serial": <string or
+nil>}`) and `memory`, whose `value` is an **empty map** (`0x80`), not
+`nil` — `Memory {}` has no fields, but the `value` key is still a
+(zero-length) map, exactly as any other struct-as-map would be encoded
+with no fields.
+
+## Absent optional fields are tolerated on decode, but never on encode (ruling R10)
+
+Every encoder (both languages) must always write every declared key, using
+`nil` for an absent `Option`/nullable value — this is what makes the
+fixtures byte-identical, see "Encoding rules" below. The **decoder**,
+however, is intentionally more lenient than the encoder: a MessagePack map
+that omits an optional field's key entirely (not just sets it to `nil`)
+still decodes successfully, with that field defaulting to `None`/absent.
+This is `serde`'s ordinary behaviour for `Option<T>` fields with no
+`#[serde(deny_unknown_fields)]` or `#[serde(default)]` needed, and the
+.NET codec should match it (accept a missing key for an `Option`-shaped
+field as `null`) for forward compatibility — a future encoder version is
+allowed to stop sending a since-retired optional field without breaking
+older readers. This asymmetry (strict encoder, lenient decoder) is
+deliberate: it is *never* an excuse to add `skip_serializing_if` back to
+an encoder.
+
 ## Logical content
 
 - **`hello.msgpack`**: `Hello { protocol_version: 1, service_version: "0.1.0" }`.
@@ -54,20 +81,58 @@ gives for free in Rust.
   readings to `nil` before sending, and `decode_payload` on the receiving
   side treats any `Some(x)` with `!x.is_finite()` as `None` defensively.
 
+## Decoder hardening limits (ruling R9 — both codecs must agree)
+
+Both the Rust decoder (`crates/oma-ipc/src/frame.rs`) and the .NET decoder
+(Task 3) validate the raw MessagePack structure before deserializing, to
+make sure a small header can never trigger an oversized allocation from a
+declared length. The limits, and precisely what they count:
+
+- **Nesting depth: 64.** Each array or map entered adds one level; a value
+  nested 64 levels deep is the deepest accepted.
+- **Element count: 100 000, counted as *entries*, not raw values scanned.**
+  For an **array**, this is the number of items (an `array32` header
+  declaring more than 100 000 items is rejected outright, before reading
+  any of them). For a **map**, this is the number of key/value **pairs** —
+  a `map32` header declaring exactly 100 000 pairs passes the count check
+  (even though the scanner then visits 200 000 individual values, two per
+  pair); only a header declaring *more* than 100 000 pairs is rejected.
+  Do **not** double the map limit to "200 000 values" on the .NET side —
+  the check is against the pair count the header itself declares.
+- **Duplicate keys are rejected.** A map (including the outer envelope
+  `{"type", "body"}` and any nested struct-as-map) that repeats the same
+  string key twice is malformed and rejected, before deserializing.
+- A **trailing byte** after the one top-level MessagePack value is
+  malformed and rejected (frames never contain more than one payload).
+- An **empty payload** (zero bytes) is rejected.
+
+These are structural/hostile-input checks, independent from the ordinary
+serde-level checks that already reject a **missing required field** and
+tolerate (ignore) an **unrecognized extra field** — see "Absent optional
+fields" above for the one exception (an *optional* field's key may be
+omitted, decoding as `None`).
+
 ## Regenerating the fixtures
 
 The Rust crate (`crates/oma-ipc`) is the source of truth. To regenerate
-all files, from the repository root, in PowerShell:
+all files, from the repository root, in PowerShell. Use `--test-threads=1`
+for the write pass: the two tests in `tests/fixtures.rs` otherwise run
+concurrently, and with `OMA_WRITE_FIXTURES=1` the decode-and-compare test
+can race the write test and read a file before it exists.
 
 ```powershell
 $env:OMA_WRITE_FIXTURES = '1'
-try { cargo test -p oma-ipc --test fixtures } finally { Remove-Item Env:OMA_WRITE_FIXTURES }
+try {
+    cargo test -p oma-ipc --test fixtures -- --test-threads=1
+} finally {
+    Remove-Item Env:OMA_WRITE_FIXTURES
+}
 cargo test -p oma-ipc --test fixtures
 ```
 
-The second run (without the environment variable) must pass, asserting
-the freshly written files still match the encoder byte-for-byte and
-decode back to the reference messages.
+The second run (without the environment variable, default threading) must
+pass, asserting the freshly written files still match the encoder
+byte-for-byte and decode back to the reference messages.
 
 ## File sizes (current fixtures)
 

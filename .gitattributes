@@ -7,3 +7,4 @@
 *.png binary
 *.ico binary
 *.icns binary
+*.msgpack binary

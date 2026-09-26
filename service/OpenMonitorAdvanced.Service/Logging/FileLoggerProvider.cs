@@ -19,6 +19,19 @@ public sealed class FileLoggerProvider(string directory, int maxFiles = 7, TimeP
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private readonly Lock _writeLock = new();
 
+    /// <summary>
+    /// Date stamp (yyyyMMdd) of the last prune, or <c>null</c> before the first write. Pruning
+    /// re-enumerates the whole log directory, so it only needs to run once per calendar day (the
+    /// day is also the only thing that can add a new file), not on every log line.
+    /// </summary>
+    private string? _lastPrunedDateStamp;
+
+    /// <summary>
+    /// Test-only introspection: how many times <see cref="PruneOldFiles"/> actually ran. Internal
+    /// (visible to OpenMonitorAdvanced.Service.Tests) rather than a public API.
+    /// </summary>
+    internal int PruneInvocationCountForTests { get; private set; }
+
     public ILogger CreateLogger(string categoryName) => new FileLogger(this, categoryName);
 
     public void Dispose()
@@ -30,7 +43,8 @@ public sealed class FileLoggerProvider(string directory, int maxFiles = 7, TimeP
         try
         {
             var now = _time.GetLocalNow();
-            var fileName = $"oma-service-{now:yyyyMMdd}.log";
+            var dateStamp = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+            var fileName = $"oma-service-{dateStamp}.log";
             var line = string.Create(
                 CultureInfo.InvariantCulture,
                 $"{now:O} [{logLevel}] {categoryName}: {message}");
@@ -45,7 +59,12 @@ public sealed class FileLoggerProvider(string directory, int maxFiles = 7, TimeP
             {
                 Directory.CreateDirectory(directory);
                 File.AppendAllText(Path.Combine(directory, fileName), line);
-                PruneOldFiles();
+
+                if (_lastPrunedDateStamp != dateStamp)
+                {
+                    PruneOldFiles();
+                    _lastPrunedDateStamp = dateStamp;
+                }
             }
         }
         catch
@@ -56,6 +75,8 @@ public sealed class FileLoggerProvider(string directory, int maxFiles = 7, TimeP
 
     private void PruneOldFiles()
     {
+        PruneInvocationCountForTests++;
+
         var files = new DirectoryInfo(directory).GetFiles("oma-service-*.log");
         if (files.Length <= maxFiles)
         {

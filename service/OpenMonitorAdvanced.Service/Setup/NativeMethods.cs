@@ -42,6 +42,8 @@ internal static class NativeMethods
     internal const int ERROR_SERVICE_MARKED_FOR_DELETE = 1072;
     internal const int ERROR_SERVICE_DOES_NOT_EXIST = 1060;
     internal const int ERROR_INSUFFICIENT_BUFFER = 122;
+    internal const int ERROR_SERVICE_CANNOT_ACCEPT_CTRL = 1061;
+    internal const int ERROR_SERVICE_NOT_ACTIVE = 1062;
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr OpenSCManagerW(string? lpMachineName, string? lpDatabaseName, uint dwDesiredAccess);
@@ -131,6 +133,12 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr LocalFree(IntPtr hMem);
 
+    // Struct layouts below are documented and asserted (not by a static constructor, which only
+    // runs on first access of a static member and can be skipped entirely when a struct is only
+    // ever used as a parameter/field type) in
+    // OpenMonitorAdvanced.Service.Tests/Setup/NativeMethodsStructLayoutTests.cs, which calls
+    // Marshal.SizeOf<T> directly for every one of them.
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct SERVICE_STATUS
     {
@@ -141,17 +149,6 @@ internal static class NativeMethods
         public uint dwServiceSpecificExitCode;
         public uint dwCheckPoint;
         public uint dwWaitHint;
-
-        // Compile-time-equivalent size check (FFI struct convention): SERVICE_STATUS is
-        // documented as 7 DWORDs = 28 bytes.
-        static SERVICE_STATUS()
-        {
-            if (Marshal.SizeOf<SERVICE_STATUS>() != 28)
-            {
-                throw new InvalidOperationException(
-                    $"SERVICE_STATUS layout drifted: expected 28 bytes, got {Marshal.SizeOf<SERVICE_STATUS>()}.");
-            }
-        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -166,16 +163,6 @@ internal static class NativeMethods
         public uint dwWaitHint;
         public uint dwProcessId;
         public uint dwServiceFlags;
-
-        // Verified against the SCM spike: "SERVICE_STATUS_PROCESS is 36 bytes".
-        static SERVICE_STATUS_PROCESS()
-        {
-            if (Marshal.SizeOf<SERVICE_STATUS_PROCESS>() != 36)
-            {
-                throw new InvalidOperationException(
-                    $"SERVICE_STATUS_PROCESS layout drifted: expected 36 bytes, got {Marshal.SizeOf<SERVICE_STATUS_PROCESS>()}.");
-            }
-        }
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -199,15 +186,5 @@ internal static class NativeMethods
     {
         public int Type;
         public uint Delay;
-
-        // Verified against the Win32 SC_ACTION layout: one int32 + one uint32 = 8 bytes.
-        static SC_ACTION()
-        {
-            if (Marshal.SizeOf<SC_ACTION>() != 8)
-            {
-                throw new InvalidOperationException(
-                    $"SC_ACTION layout drifted: expected 8 bytes, got {Marshal.SizeOf<SC_ACTION>()}.");
-            }
-        }
     }
 }

@@ -66,6 +66,38 @@ public sealed class FileLoggerProviderTests : IDisposable
     }
 
     [Fact]
+    public void PrunesOnlyOnceWhenLoggingMultipleLinesOnTheSameDay()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 0, 0, 0, TimeSpan.Zero));
+        using var provider = new FileLoggerProvider(_directory, time: time);
+        var logger = provider.CreateLogger("Cat");
+
+        for (var i = 0; i < 5; i++)
+        {
+            logger.LogInformation("line {I}", i);
+        }
+
+        // One prune for the first write of the day; the other 4 lines on the same day must not
+        // each re-enumerate the log directory.
+        Assert.Equal(1, provider.PruneInvocationCountForTests);
+    }
+
+    [Fact]
+    public void PrunesOnceMorePerNewDay()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 0, 0, 0, TimeSpan.Zero));
+        using var provider = new FileLoggerProvider(_directory, time: time);
+        var logger = provider.CreateLogger("Cat");
+
+        logger.LogInformation("day one, line one");
+        logger.LogInformation("day one, line two");
+        time.Advance(TimeSpan.FromDays(1));
+        logger.LogInformation("day two, line one");
+
+        Assert.Equal(2, provider.PruneInvocationCountForTests);
+    }
+
+    [Fact]
     public void DoesNotThrowWhenTheDirectoryIsNotWritable()
     {
         // A path with an embedded NUL character is never a valid directory on Windows,

@@ -27,8 +27,25 @@ public static class ServiceInstaller
     private const int StopWaitTimeoutSeconds = 30;
     private const int StopPollDelayMs = 250;
 
+    /// <summary>Account the service runs as; also the value enforced on every reconfigure.</summary>
+    private const string LocalSystemAccount = "LocalSystem";
+
     /// <summary>Installs (or reconfigures, if already installed) the service. 0 = ok, 1 = failed.</summary>
     public static int Install(string exePath, TextWriter log)
+    {
+        try
+        {
+            return InstallCore(exePath, log);
+        }
+        catch (Exception ex)
+        {
+            // Nothing may escape Main: log and report failure instead.
+            log.WriteLine($"Install: unexpected exception: {ex}");
+            return 1;
+        }
+    }
+
+    private static int InstallCore(string exePath, TextWriter log)
     {
         var scm = NativeMethods.OpenSCManagerW(
             null, null, NativeMethods.SC_MANAGER_CONNECT | NativeMethods.SC_MANAGER_CREATE_SERVICE);
@@ -79,6 +96,20 @@ public static class ServiceInstaller
     /// <summary>Stops and removes the service. 0 also when it was not installed.</summary>
     public static int Uninstall(TextWriter log)
     {
+        try
+        {
+            return UninstallCore(log);
+        }
+        catch (Exception ex)
+        {
+            // Nothing may escape Main: log and report failure instead.
+            log.WriteLine($"Uninstall: unexpected exception: {ex}");
+            return 1;
+        }
+    }
+
+    private static int UninstallCore(TextWriter log)
+    {
         var scm = NativeMethods.OpenSCManagerW(null, null, NativeMethods.SC_MANAGER_CONNECT);
         if (scm == IntPtr.Zero)
         {
@@ -103,19 +134,22 @@ public static class ServiceInstaller
 
             try
             {
-                var status = default(NativeMethods.SERVICE_STATUS);
-                if (!NativeMethods.ControlService(svc, NativeMethods.SERVICE_CONTROL_STOP, ref status))
+                var deadline = DateTime.UtcNow.AddSeconds(StopWaitTimeoutSeconds);
+                if (!StopAndWait(svc, log, deadline))
                 {
-                    // ERROR_SERVICE_NOT_ACTIVE (1062) just means it was already stopped; anything
-                    // else is worth logging, but we still try to delete the service afterwards.
-                    LogWin32(log, "ControlService(STOP)");
+                    return 1;
                 }
-
-                WaitUntilStopped(svc, log);
 
                 if (!NativeMethods.DeleteService(svc))
                 {
-                    LogWin32(log, "DeleteService");
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == NativeMethods.ERROR_SERVICE_MARKED_FOR_DELETE)
+                    {
+                        // Already on its way out (e.g. another handle deleted it first): success.
+                        return 0;
+                    }
+
+                    LogWin32(log, "DeleteService", error);
                     return 1;
                 }
 
@@ -130,6 +164,47 @@ public static class ServiceInstaller
         {
             NativeMethods.CloseServiceHandle(scm);
         }
+    }
+
+    /// <summary>
+    /// Sends STOP and waits for SERVICE_STOPPED, both within <paramref name="deadline"/>.
+    /// ERROR_SERVICE_NOT_ACTIVE (1062) means it is already stopped, not a failure.
+    /// ERROR_SERVICE_CANNOT_ACCEPT_CTRL (1061, e.g. START_PENDING) means the service is in a
+    /// transitional state: wait briefly and retry STOP, still within the same deadline.
+    /// </summary>
+    private static bool StopAndWait(IntPtr svc, TextWriter log, DateTime deadline)
+    {
+        while (DateTime.UtcNow < deadline)
+        {
+            var status = default(NativeMethods.SERVICE_STATUS);
+            if (!NativeMethods.ControlService(svc, NativeMethods.SERVICE_CONTROL_STOP, ref status))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error == NativeMethods.ERROR_SERVICE_NOT_ACTIVE)
+                {
+                    return true;
+                }
+
+                if (error == NativeMethods.ERROR_SERVICE_CANNOT_ACCEPT_CTRL)
+                {
+                    Thread.Sleep(StopPollDelayMs);
+                    continue;
+                }
+
+                LogWin32(log, "ControlService(STOP)", error);
+                return false;
+            }
+
+            if (WaitUntilStopped(svc, log, deadline))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        log.WriteLine($"Uninstall: the service did not reach a stoppable state within {StopWaitTimeoutSeconds} s.");
+        return false;
     }
 
     private static IntPtr CreateOrOpenExisting(IntPtr scm, string binaryPath, TextWriter log)
@@ -194,9 +269,9 @@ public static class ServiceInstaller
                 null,
                 IntPtr.Zero,
                 null,
+                LocalSystemAccount,
                 null,
-                null,
-                null))
+                DisplayName))
         {
             LogWin32(log, "ChangeServiceConfigW");
             NativeMethods.CloseServiceHandle(svc);
@@ -380,25 +455,25 @@ public static class ServiceInstaller
         return true;
     }
 
-    private static void WaitUntilStopped(IntPtr svc, TextWriter log)
+    private static bool WaitUntilStopped(IntPtr svc, TextWriter log, DateTime deadline)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(StopWaitTimeoutSeconds);
         while (DateTime.UtcNow < deadline)
         {
             if (!TryQueryState(svc, log, out var state))
             {
-                return;
+                return false;
             }
 
             if (state == NativeMethods.SERVICE_STOPPED)
             {
-                return;
+                return true;
             }
 
             Thread.Sleep(StopPollDelayMs);
         }
 
         log.WriteLine($"Uninstall: the service did not reach SERVICE_STOPPED within {StopWaitTimeoutSeconds} s.");
+        return false;
     }
 
     private static bool TryQueryState(IntPtr svc, TextWriter log, out uint state)

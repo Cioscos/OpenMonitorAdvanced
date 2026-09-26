@@ -6,8 +6,9 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 
 /// <summary>
 /// The LibreHardwareMonitor 0.9.6 <see cref="IHardwareTree"/>, and the only type that touches
-/// <see cref="Computer"/>. Not unit-tested (it needs administrator rights and the real
-/// hardware); exercised live in Task 15. See <c>docs/superpowers/references/m4/s1-lhm.md</c>.
+/// <see cref="Computer"/>. Its hardware paths need administrator rights and the real hardware, so
+/// they are exercised live in Task 15; only <see cref="Dispose"/> is unit-tested, over a
+/// <see cref="Computer"/> with no group enabled. See <c>docs/superpowers/references/m4/s1-lhm.md</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -35,6 +36,7 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 public sealed class LhmTree : IHardwareTree
 {
     private readonly ILogger<LhmTree> _log;
+    private readonly Func<Computer> _createComputer;
     private readonly object _structureLock = new();
     private readonly List<Entry> _entries = []; // guarded by _structureLock
     private volatile Composition _composition = Composition.Empty;
@@ -44,8 +46,15 @@ public sealed class LhmTree : IHardwareTree
     private int _disposed;
 
     public LhmTree(ILogger<LhmTree> log)
+        : this(log, CreateComputer)
+    {
+    }
+
+    /// <summary>Tests only: <paramref name="createComputer"/> replaces the configured <see cref="Computer"/>.</summary>
+    internal LhmTree(ILogger<LhmTree> log, Func<Computer> createComputer)
     {
         _log = log;
+        _createComputer = createComputer;
     }
 
     /// <inheritdoc />
@@ -74,19 +83,7 @@ public sealed class LhmTree : IHardwareTree
             return Roots;
         }
 
-        var computer = new Computer
-        {
-            IsCpuEnabled = true,
-            IsMotherboardEnabled = true,
-            IsMemoryEnabled = true,
-            IsControllerEnabled = true,
-            IsPsuEnabled = true,
-            IsStorageEnabled = false, // D6: see EnableStorage
-            IsGpuEnabled = false,
-            IsNetworkEnabled = false,
-            IsBatteryEnabled = false,
-            IsPowerMonitorEnabled = false,
-        };
+        Computer computer = _createComputer();
         computer.HardwareAdded += OnMembershipChanged;
         computer.HardwareRemoved += OnMembershipChanged;
         try
@@ -170,10 +167,20 @@ public sealed class LhmTree : IHardwareTree
     }
 
     /// <summary>
-    /// <c>Computer.Close()</c>, then <c>RAMSPDToolkit.Windows.Driver.DriverManager.UnloadDriver()</c>
-    /// (LHM's memory group never releases its SMBus PawnIO modules), then a full collection so
-    /// the failed module loads' handles are finalized (s1-lhm.md §6d, §9.5).
+    /// <c>Computer.Close()</c> only. The tree is disposed once, when the process is about to exit
+    /// (spec §2.2), and the OS releases every PawnIO handle then.
     /// </summary>
+    /// <remarks>
+    /// Task 15: never <c>RAMSPDToolkit…DriverManager.UnloadDriver()</c> and never a forced
+    /// collection here. <c>MemoryGroup.Close()</c> drops the DIMMs, so their RAMSPDToolkit
+    /// <c>SPDAccessor</c>s become finalizable, and <c>~SPDAccessor</c> restores the SPD page over
+    /// SMBus through LHM's PawnIO module. Unloading the driver nulls that module, so the next
+    /// finalizer run throws a NullReferenceException on the finalizer thread, which kills the
+    /// stopping service (exit 1, SCM event 7031, restart after 60 s). With the driver loaded for
+    /// the whole process lifetime (the static <c>DriverManager.Driver</c> keeps its modules
+    /// reachable), a finalizer that runs after this point still finds a live module; .NET runs no
+    /// finalizers at process exit.
+    /// </remarks>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
@@ -209,20 +216,21 @@ public sealed class LhmTree : IHardwareTree
         {
             _log.LogWarning(e, "LibreHardwareMonitor Close() failed");
         }
-
-        try
-        {
-            RAMSPDToolkit.Windows.Driver.DriverManager.UnloadDriver();
-        }
-        catch (Exception e)
-        {
-            _log.LogWarning(e, "Unloading the RAMSPDToolkit SMBus driver failed");
-        }
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
     }
+
+    private static Computer CreateComputer() => new()
+    {
+        IsCpuEnabled = true,
+        IsMotherboardEnabled = true,
+        IsMemoryEnabled = true,
+        IsControllerEnabled = true,
+        IsPsuEnabled = true,
+        IsStorageEnabled = false, // D6: see EnableStorage
+        IsGpuEnabled = false,
+        IsNetworkEnabled = false,
+        IsBatteryEnabled = false,
+        IsPowerMonitorEnabled = false,
+    };
 
     private void OnMembershipChanged(IHardware hardware)
     {

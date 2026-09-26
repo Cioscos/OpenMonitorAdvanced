@@ -445,7 +445,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>
     /// Stops both workers and waits up to <see cref="WorkerJoinTimeout"/> for each. If both
-    /// stopped, disposes the tree (LHM Close, SMBus driver unload, GC); otherwise leaves it open,
+    /// stopped, disposes the tree (LHM <c>Close()</c> only); otherwise leaves it open,
     /// since a stuck worker may still be inside it.
     /// </summary>
     public void Dispose()

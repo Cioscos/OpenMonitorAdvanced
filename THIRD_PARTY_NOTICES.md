@@ -57,16 +57,22 @@ compatible with free software licenses.
 packages unmodified; none of their source is copied into this repository.
 
 - **LibreHardwareMonitorLib 0.9.6** (MPL-2.0) —
-  https://github.com/LibreHardwareMonitor/LibreHardwareMonitor. `service/OpenMonitorAdvanced.Service/Sensors/`
+  https://github.com/LibreHardwareMonitor/LibreHardwareMonitor, tag `v0.9.6`
+  (commit `3d331e3`). `service/OpenMonitorAdvanced.Service/Sensors/`
   reads its `Hardware`/`Sensor` tree through the public API only; no
   LibreHardwareMonitor source is included here. MPL-2.0 source for the exact
-  published version stays available upstream at the tag/commit above.
+  published version stays available upstream at that tag and commit.
 - **DiskInfoToolkit 1.1.2** (MPL-2.0) — https://github.com/Blacktempel/DiskInfoToolkit,
   a LibreHardwareMonitor dependency (disk SMART/NVMe access).
 - **RAMSPDToolkit-NDD 1.4.2** (MPL-2.0) — https://github.com/Blacktempel/RAMSPDToolkit,
   a LibreHardwareMonitor dependency (RAM SPD over PawnIO SMBus).
 - **BlackSharp.Core 1.0.7** (MPL-2.0) — https://github.com/Blacktempel/BlackSharp,
   a shared dependency of DiskInfoToolkit and RAMSPDToolkit-NDD.
+- **Mono.Posix.NETStandard 1.0.0** (Microsoft; licence terms at
+  https://go.microsoft.com/fwlink/?linkid=869050) — a LibreHardwareMonitor
+  dependency used only on Linux and macOS code paths. Its native helper
+  libraries (`MonoPosixHelper.dll`, `libMonoPosixHelper.dll`) are excluded from
+  the publish.
 - **HidSharp 2.6.4** (Apache-2.0) — a LibreHardwareMonitor dependency (HID
   enumeration for fan/RGB controllers), copyright 2010-2025 James F. Bellinger.
 - **System.Management 10.0.2** (MIT, part of the .NET runtime) — WMI access used
@@ -85,11 +91,13 @@ the client.
 
 ## PawnIO
 
-The "Sensori avanzati" installer component redistributes the official,
-Microsoft-signed `PawnIO_setup.exe` 2.2.0 unmodified
-(https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0), with its
-SHA-256 pinned in `scripts/build-installer-payload.ps1` and
-`app/src-tauri/nsis/pawnio.sha256`; the setup file itself is never committed
+The "Sensori avanzati" installer component redistributes the official
+`PawnIO_setup.exe` 2.2.0 unmodified
+(https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0). The setup is
+Authenticode-signed by its author (namazso.eu, certificate issued by
+GLOBALTRUST); the kernel driver it installs is the Microsoft-signed part. The
+setup's SHA-256 is pinned in `app/src-tauri/nsis/pawnio.sha256` and its signer
+in `scripts/build-installer-payload.ps1`; the setup file itself is never committed
 to this repository, only downloaded (or read from a cached, verified copy) at
 build time. PawnIO's kernel driver is GPL-2.0 with an exception for programs
 that only use its IOCTL interface (https://github.com/namazso/PawnIO); its

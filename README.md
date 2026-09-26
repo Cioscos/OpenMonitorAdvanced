@@ -72,7 +72,7 @@ voltages, RAM SPD, fan/RGB controllers and disk SMART/NVMe health, via
 [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
 and the [PawnIO](https://pawnio.eu/) driver. It is installed by the "Sensori
 avanzati" component of the NSIS installer (on by default; see "Building the
-installer" below) and runs as `LocalSystem`, because PawnIO needs that.
+installer" above) and runs as `LocalSystem`, because PawnIO needs that.
 
 - **Base mode vs. service connected.** The app works without the service:
   everything under "Advanced view" above (CPU, RAM, disks, network, GPUs)

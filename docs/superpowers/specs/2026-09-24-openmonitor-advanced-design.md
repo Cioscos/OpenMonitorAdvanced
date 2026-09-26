@@ -27,7 +27,8 @@ OpenMonitor Advanced è un software **open source** per il monitoraggio delle ri
 - **Budget di prestazioni**, misurato a ogni milestone:
   - nucleo a riposo < 1% di CPU;
   - processo in tray (finestra chiusa) < 30 MB di RAM;
-  - finestra aperta < 200 MB in totale, WebView2 compresa.
+  - finestra aperta < 200 MB in totale, WebView2 compresa;
+  - servizio `oma-service` con un client sottoscritto a 1 s: < 1% di CPU e < 80 MB di memoria privata (limite separato da quello dell'app, introdotto in M4).
 - Senza privilegi amministrativi, e quindi anche in "modalità anti-cheat", l'app funziona in **modalità base** con utilizzo di CPU, RAM, dischi e rete e con **tutte le metriche GPU**.
 
 ## 2. Architettura
@@ -72,8 +73,14 @@ Si è scelto l'**approccio A**: app Tauri con nucleo Rust senza privilegi, più 
   - Contiene il nucleo Rust, che raccoglie, registra e valuta le regole, e la WebView.
   - **Quando si chiude la finestra la WebView viene distrutta**, liberando circa 100 MB. Il processo Rust resta nella tray e continua a raccogliere dati, scrivere il log e valutare le regole.
 - **oma-service** è un servizio Windows che gira come LocalSystem, perché PawnIO richiede privilegi amministrativi.
-  - Interroga i sensori **solo mentre almeno un client è sottoscritto**.
+  - Interroga i sensori **solo mentre almeno un client è sottoscritto**. LibreHardwareMonitor, e quindi l'accesso a PawnIO, si apre alla prima sottoscrizione e si chiude quando se ne va l'ultimo client.
   - Non espone rete né comandi di scrittura verso l'hardware.
+  - **Avvio manuale, avviato dall'app** (decisione M4). Il servizio non parte con Windows. L'installer, l'unico passaggio elevato, aggiunge al descrittore di sicurezza del servizio un ACE che concede agli utenti interattivi (`IU`) **solo** l'avvio e l'arresto (`RP`, `WP`). Non concede mai `SERVICE_CHANGE_CONFIG`, `WRITE_DAC` o `WRITE_OWNER`, che permetterebbero di ottenere privilegi di amministratore. È lo stesso schema di EasyAntiCheat_EOS e dei servizi Epic, che anzi concedono avvio e arresto a chiunque.
+  - L'app, all'apertura, avvia il servizio se è installato e la modalità anti-cheat è spenta, poi si collega. Senza client per 2 minuti il servizio si ferma da solo con codice d'uscita 0: Windows lo vede come un arresto pulito e non applica le azioni di ripristino. Chiusa l'app, quindi, non resta nulla in esecuzione.
+  - Limite accettato: su un PC con più utenti collegati, uno può fermare il servizio anche per gli altri.
+- **Modalità compatibile anti-cheat:** l'app ferma il servizio e non lo riavvia finché la modalità resta attiva; lo stato persiste tra i riavvii (in M4 in un file in `%LOCALAPPDATA%\OpenMonitorAdvanced\`, dalla M5 in `settings.json`). Si attiva dal menu della tray (§4.5); si disattiva dalla tray o dal badge della barra superiore (§7.1).
+  - Il driver PawnIO **resta caricato**: è un device Plug and Play (`ROOT\PAWNIO\0000`) che Windows carica all'avvio, indipendentemente da chi lo usa, e non si scarica quando si chiude l'ultimo handle. Toglierlo richiede privilegi di amministratore e disturberebbe altri programmi che lo usano (per esempio FanControl), quindi l'app non lo fa. Fermare il servizio chiude comunque ogni handle verso PawnIO e ogni processo del progetto con privilegi, cioè ciò che un anti-cheat euristico può notare.
+  - Il blocco di FACEIT su PawnIO dipendeva dal certificato di firma delle versioni precedenti alla 2.1.0, non dall'uso del driver: con PawnIO 2.2.0 (firmato da Microsoft) FACEIT lo accetta. Per questo l'installer aggiorna PawnIO se è più vecchio della 2.2.0 (§10). Per Vanguard, EAC e BattlEye non risultano blocchi di PawnIO (ricerca di settembre 2026).
 
 ### 2.3 Predisposizione per Linux
 
@@ -88,7 +95,8 @@ I provider implementano un trait `Provider`. Su Linux si aggiungerà un provider
 - **Merge:**
   - quando più fonti forniscono lo stesso sensore logico, vince quella con priorità più alta (priorità per campo, vedi §5.2);
   - la fonte scelta viene registrata e mostrata nell'interfaccia;
-  - la scelta segue la fonte, mai il nome del vendor.
+  - la scelta segue la fonte, mai il nome del vendor;
+  - **tra provider** (M4): se due provider espongono lo stesso ID di sensore vince quello che viene prima nell'elenco dei provider, e il sensore dell'altro si scarta. Il provider `svc` è l'ultimo, quindi sui doppioni vince sempre il nucleo senza privilegi e il servizio aggiunge solo ciò che manca: quando il servizio parte o si ferma, i sensori che esistevano già non cambiano fonte e il loro storico non si azzera. I device con lo stesso ID si fondono: nome e vendor del primo provider, proprietà unite con precedenza al primo.
 
 ## 4. Nucleo `oma-core`
 
@@ -161,7 +169,7 @@ Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia
   - mostra il valore di un sensore scelto dall'utente, di default la temperatura core della GPU principale, oppure della CPU se non c'è una GPU dedicata;
   - il colore segue lo stato del motore regole.
 - **Tooltip:** i valori chiave (CPU, GPU, RAM).
-- **Menu:** Apri, vista Semplificata/Avanzata, Avvia/Ferma log, Modalità compatibile anti-cheat, Esci.
+- **Menu:** Apri, vista Semplificata/Avanzata, Avvia/Ferma log, Modalità compatibile anti-cheat, Esci. La voce anti-cheat (una casella) arriva in M4; il resto del menu completo in M5.
 - **Comportamento:**
   - chiudere la finestra la riduce nella tray (disattivabile);
   - avvio automatico con Windows opzionale;
@@ -282,8 +290,14 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
 - **.NET 10**, Worker Service ospitato come servizio Windows, **LibreHardwareMonitorLib** (NuGet, MPL-2.0).
 - **Moduli attivi:** `Cpu`, `Motherboard`, `Memory` (SPD tramite PawnIO SMBus), `Storage` (SMART/NVMe), `Controller` (controller ventole e RGB USB), `Psu`.
 - **Moduli spenti:** `Gpu`, `Network`, `Battery`, già coperti dal nucleo Rust.
-- **Conversione:** l'albero Hardware/Sensor di LibreHardwareMonitor viene tradotto nel modello di §3, con ID stabili basati sull'identificatore hardware di LibreHardwareMonitor.
-- **Build self-contained**, ridotta (trimmed) se LibreHardwareMonitorLib lo tollera (da verificare), altrimenti non ridotta.
+- **Conversione:** l'albero Hardware/Sensor di LibreHardwareMonitor viene tradotto nel modello di §3 dal servizio stesso.
+  - **Nomi canonici:** i sensori che misurano una grandezza che il nucleo già conosce ricevono lo stesso nome del nucleo (per esempio il carico totale della CPU diventa `…/load/total`, la temperatura di un disco `…/temperature/drive`), così il merge tra provider (§3) riconosce i doppioni. Gli altri ricevono un nome stabile derivato dall'identificatore del sensore di LibreHardwareMonitor.
+  - **Etichette:** i sensori noti usano chiavi i18n; gli altri portano il testo di LibreHardwareMonitor, mostrato così com'è.
+  - **Aggancio ai device del nucleo:** per ogni hardware lo `Schema` porta un **indizio d'identità**: l'indice per la CPU, il numero `PhysicalDriveN` con il numero di serie come controllo per i dischi, nessuno per la RAM (un solo device). Il provider `svc` usa l'indizio per dare al device l'ID che il nucleo usa già (`cpu/…`, `memory/…`, `storage/…`), così i sensori del servizio compaiono nelle pagine esistenti. Scheda madre, controller delle ventole e alimentatori, e ogni hardware senza un device corrispondente nel nucleo, diventano device propri con ID `<kind>/lhm-<hash>`, dove l'hash (SHA-256) è quello dell'identificatore hardware di LibreHardwareMonitor.
+  - La fonte dei sensori del servizio è `lhm`.
+- **Frequenze:** dati dinamici all'intervallo della sottoscrizione più rapida; SMART e salute dei dischi ogni 30 s (§4.1). Un disco in standby non si interroga, se LibreHardwareMonitor permette di saperlo senza svegliarlo (da verificare con uno spike in M4). Un errore su un singolo hardware rende assenti solo i suoi sensori e finisce nel log.
+- **Build:** self-contained, file singolo, win-x64. Ridotta (trimmed) solo se i sensori letti sono identici con e senza riduzione: LibreHardwareMonitorLib si dichiara compatibile ma sopprime gli avvisi di trimming sui percorsi WMI. Senza riduzione il servizio aggiunge circa 23 MB compressi all'installer.
+- **Log:** file proprio a rotazione in `%ProgramData%\OpenMonitorAdvanced\logs`.
 
 ## 6. Protocollo IPC
 
@@ -291,15 +305,18 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
   - SYSTEM e Administrators: controllo completo;
   - utenti interattivi: lettura e scrittura dei messaggi.
   
-  Il client si connette con `SECURITY_IDENTIFICATION`.
+  Il client si connette con `SECURITY_IDENTIFICATION`. Il servizio accetta al massimo 8 client insieme.
+- **Verifica del server (M4):** mentre il servizio è fermo un altro processo potrebbe creare una pipe con lo stesso nome. Dopo la connessione il client confronta il PID del server della pipe (`GetNamedPipeServerProcessId`) con il PID del servizio registrato (`QueryServiceStatusEx`); se non coincidono si scollega e lo registra nel log.
 - **Frame:** lunghezza `u32` little-endian seguita dal payload **MessagePack**. Dimensione massima di 4 MB; un frame più grande chiude la connessione.
+- **Codifica:** ogni messaggio è una mappa con chiavi stringa in un ordine fisso, interi nella forma più corta, numeri reali sempre `float64`, valori assenti `nil`. Così Rust (`rmp-serde`) e .NET (MessagePack-CSharp) producono gli stessi byte.
 - **Messaggi:**
   - `Hello { protocol_version, service_version }` (servizio → client); se la versione del protocollo non è compatibile, l'interfaccia chiede di aggiornare il servizio;
   - `Subscribe { interval_ms }` (client → servizio); il servizio limita l'intervallo a 250–5000 ms;
-  - `Schema { devices[], sensors[] }` (servizio → client), inviato all'avvio della sottoscrizione e quando cambia l'hardware;
+  - `Schema { devices[], sensors[] }` (servizio → client), inviato all'avvio della sottoscrizione e quando cambia l'hardware; ogni device porta l'indizio d'identità di §5.3. Per il client un nuovo `Schema` equivale a una nuova discovery;
   - `Snapshot { seq, timestamp, values[] }` (servizio → client); `values` è indicizzato secondo l'ordine dello schema corrente e i valori assenti sono `nil`;
   - `Error { code, message }`.
-- **Nessun messaggio di scrittura verso l'hardware.** Il servizio espone solo letture di alto livello, mai accesso grezzo a MSR, porte I/O o memoria fisica.
+- **Nessun messaggio di scrittura verso l'hardware.** Il servizio espone solo letture di alto livello, mai accesso grezzo a MSR, porte I/O o memoria fisica. Ignora i codici di controllo personalizzati del servizio (128–255), che gli utenti interattivi possono inviare con i diritti predefiniti.
+- **Valori non aggiornati:** il provider `svc` legge la pipe in un thread proprio e al tick restituisce l'ultimo `Snapshot` ricevuto, senza bloccare lo scheduler. Se quell'ultimo `Snapshot` ha più di 3 intervalli, i valori del servizio sono assenti (buchi nei grafici, non valori congelati).
 - **Riconnessione:** il client riprova ogni 5 s. Mentre è disconnesso l'app è in modalità base.
 - **Riferimenti condivisi:** `protocol/fixtures/` contiene i messaggi MessagePack di riferimento, usati dai test di entrambi i lati.
 
@@ -310,7 +327,14 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
 - Nome dell'app.
 - Selettore **Semplice / Avanzata**; l'app ricorda l'ultima scelta.
 - Icona delle impostazioni.
-- **Badge "Modalità base"** quando il servizio è assente, fermato o non raggiungibile. Cliccandolo si apre una spiegazione di cosa si perde e l'invito a installare o avviare il servizio.
+- **Badge "Modalità base"** quando il servizio è assente, fermato o non raggiungibile. Cliccandolo si apre una spiegazione di cosa si perde, con il motivo e l'azione adatta (M4):
+  - servizio non installato: invito a reinstallare con l'opzione "Sensori avanzati";
+  - modalità anti-cheat attiva: "Disattiva modalità anti-cheat";
+  - servizio in avvio: nessuna azione;
+  - servizio non raggiungibile (fermo, avvio fallito, verifica del PID fallita): "Avvia";
+  - versione del protocollo incompatibile: invito ad aggiornare.
+
+  Con il servizio collegato il badge non c'è: la modalità anti-cheat si attiva dal menu della tray (dalla M5 anche dalle impostazioni, §7.4).
 
 ### 7.2 Vista Semplificata (layout "B")
 
@@ -347,7 +371,7 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
   - le **informazioni del device**: le proprietà statiche, per esempio indirizzo PCI, link PCIe massimo, limiti di potenza e soglie di temperatura;
   - per le GPU, la **tabella dei processi** che usano la GPU, con carico, motore, memoria dedicata e condivisa: al massimo 20 righe, aggiornate ogni 2 s mentre la pagina è visibile, nascoste se il provider non pubblica un aggiornamento da più di 2,5 s.
 - Sezione, finestra del grafico e serie scelte per ogni pagina restano salvate nella WebView (`localStorage`) finché le impostazioni della M5 non le sostituiscono. Un clic su un riquadro della vista Semplificata apre la pagina corrispondente.
-- **I sensori che richiedono il servizio**, quando questo non è attivo, non compaiono uno per uno. Al loro posto c'è un solo avviso: "N sensori in più disponibili con il servizio". L'avviso arriva con il servizio (M4): in M3 non esistono ancora sensori del servizio.
+- **I sensori che richiedono il servizio**, quando questo non è attivo, non compaiono uno per uno. Al loro posto, nelle pagine CPU, RAM e dischi, c'è un solo avviso generico, senza numero (decisione M4): "Temperature, tensioni e altri sensori disponibili con il servizio". Il numero non si mostra perché senza il servizio l'app non può saperlo.
 - La voce **Batteria** compare solo quando esiste un device batteria: in M3 nessun provider lo crea ancora.
 - **Nessuna pagina "Panoramica"**: quel ruolo lo svolge la vista Semplificata.
 
@@ -409,7 +433,7 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - Il filtro è best-effort: non copre `__fastfail`/abort, terminazioni forzate, né garantisce di riuscire a scrivere su un processo corrotto. Il file non viene scritto durante una normale chiusura o uno spegnimento.
   - All'avvio successivo l'app legge e cancella il file e parte in modalità sicura.
   - Sotto la barra superiore un avviso spiega il motivo, con il nome della DLL, e offre **"Riattiva"**: le librerie si caricano subito, senza riavviare l'app, e restano caricate fino alla chiusura.
-- **Servizio:** disconnessioni, timeout e versione del protocollo non compatibile portano alla modalità base, con badge e spiegazione. Non producono mai errori bloccanti.
+- **Servizio:** disconnessioni, timeout, versione del protocollo non compatibile e verifica del PID fallita (§6) portano alla modalità base, con badge, motivo e spiegazione. Non producono mai errori bloccanti. Un crash del servizio fa scattare il riavvio automatico configurato dall'installer (§10); l'app si ricollega da sola.
 - **Dati anomali:** valori fuori dall'intervallo fisico plausibile vengono scartati come assenti e registrati nel log di diagnostica, al massimo una riga al minuto per sensore. Esempi: temperature < −50 °C o > 150 °C, percentuali < 0 o > 100 dove non ha senso.
 - **Nucleo:** un panic durante un ciclo di campionamento viene registrato nel log e il ciclo successivo parte regolarmente. Un disallineamento tra valori e sensori non ferma lo storico: i valori mancanti diventano assenti e quelli in più si scartano. Se l'interfaccia non riceve dati per più di max(5 s, 5 intervalli), la barra superiore mostra "Dati non aggiornati".
 - **Log di diagnostica:** `tracing` in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`, a rotazione. Il servizio scrive in un file proprio.
@@ -417,10 +441,13 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
 ## 9. Sicurezza
 
 - L'interfaccia non gira mai con privilegi elevati.
-- Il servizio ha una superficie minima: nessuna rete, sola lettura, validazione di ogni messaggio, limiti sulla dimensione dei frame, ACL sulla pipe.
+- Il servizio ha una superficie minima: nessuna rete, sola lettura, validazione di ogni messaggio, limiti sulla dimensione dei frame e sul numero di client, ACL sulla pipe, codici di controllo personalizzati ignorati.
+- **Diritti sul servizio:** gli utenti interattivi possono solo avviarlo e fermarlo (§2.2). L'installer aggiunge l'ACE al descrittore esistente, letto al momento, invece di sostituirlo con una stringa fissa: `sc sdset` sostituisce l'intero descrittore e un errore toglierebbe i diritti a SYSTEM e agli amministratori. L'eseguibile sta in `Program Files`, scrivibile solo dagli amministratori, e il percorso del servizio è tra virgolette.
+- **Pipe impersonata:** il client verifica che il server della pipe sia il processo del servizio (§6).
 - CSP stretta in Tauri, nessun contenuto remoto; i comandi Tauri sono limitati tramite capability.
 - **PawnIO:**
-  - si includono solo il setup ufficiale firmato (ridistribuibile) e i moduli ufficiali;
+  - si includono solo il setup ufficiale firmato (ridistribuibile) e i moduli ufficiali; è pratica comune (LibreHardwareMonitor e FanControl lo includono), ma prima della 1.0 si chiede conferma all'autore;
+  - versione minima 2.2.0 (§10);
   - nessun modulo proprio nella v1;
   - niente WinRing0 né inpoutx64.
 - **Aggiornamenti nella v1:** solo un controllo opzionale delle nuove release su GitHub, con link al download, senza installazione automatica.
@@ -428,20 +455,25 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
 
 ## 10. Installazione e distribuzione
 
-- Un solo **installer NSIS**, generato dal bundler di Tauri e personalizzato, che contiene app e servizio. Dimensione stimata: circa 50 MB, per via di .NET self-contained.
-- **Opzione "Sensori avanzati", attiva di default:**
-  - installa e avvia `oma-service`;
-  - se PawnIO non è presente (chiave di registro `Uninstall\PawnIO`), esegue il suo setup ufficiale incluso;
-  - richiede una sola conferma UAC.
-- **Modalità compatibile anti-cheat:** ferma il servizio e lo reimposta sull'avvio manuale; si disattiva con un clic. ⚠️ Da verificare: se basta questo, o se va fermato anche il driver PawnIO perché FACEIT non lo rilevi.
-- La disinstallazione rimuove app e servizio. PawnIO resta, perché può essere condiviso con altri programmi come FanControl.
+- Un solo **installer NSIS**, generato dal bundler di Tauri, che contiene app e servizio. Dimensione stimata: circa 50 MB, per via di .NET self-contained.
+- **Installazione per tutta la macchina** (`installMode: perMachine`): una sola conferma UAC all'avvio dell'installer, cartella in `Program Files`.
+- **Template NSIS proprio** (decisione M4), copiato dal template di tauri-cli 2.11.5: gli hook di Tauri (`NSIS_HOOK_*`) non permettono di aggiungere una pagina di scelta nel punto giusto. Un test confronta il template con la copia di riferimento di Tauri da cui deriva, così un aggiornamento di Tauri segnala le differenze da riallineare.
+- **Opzione "Sensori avanzati"**, una pagina Componenti attiva di default. In modalità silenziosa (`/S`) vale il default; `/NOSENSORS` la esclude. La scelta resta registrata in HKLM, così gli aggiornamenti la mantengono. Se è attiva:
+  - copia i file del servizio e crea `oma-service` in avvio manuale, con il percorso tra virgolette e il riavvio automatico dopo un crash;
+  - aggiunge i diritti di avvio e arresto per gli utenti interattivi (§2.2, §9);
+  - se PawnIO manca o è più vecchio della 2.2.0 (chiave `Uninstall\PawnIO`, valore `DisplayVersion`, vista a 64 bit), esegue in silenzio il setup ufficiale incluso (`-install -silent`). L'esito 3010 significa che serve un riavvio e l'installer lo segnala.
+- **Prima di copiare i file** l'installer ferma il servizio e aspetta che sia davvero fermo: il template di Tauri chiude solo l'app.
+- **Build:** uno script pubblica il servizio e scarica il setup ufficiale di PawnIO nella versione fissata, verificandone lo SHA-256. Il setup non si versiona in git.
+- **Modalità compatibile anti-cheat:** vedi §2.2. Non cambia la configurazione del servizio e non richiede privilegi.
+- La disinstallazione ferma e rimuove il servizio; in modalità aggiornamento non lo tocca. PawnIO resta, perché può essere condiviso con altri programmi come FanControl.
 
 ## 11. Struttura del repository
 
 ```
 crates/oma-core/                    modello dati, scheduler, merge, storico, regole, logger CSV
-crates/oma-win/                     provider Windows: sys, gpu (PDH, D3DKMT, NVML, NVAPI, ADL, IGCL)
-crates/oma-ipc/                     tipi del protocollo + client named pipe
+crates/oma-win/                     provider Windows: sys, gpu (PDH, D3DKMT, NVML, NVAPI, ADL, IGCL),
+                                    svc (client named pipe, controllo del servizio)
+crates/oma-ipc/                     tipi del protocollo, codifica e framing (portabile, senza codice Windows)
 app/src-tauri/                      shell Tauri: comandi, eventi, tray, ciclo di vita della WebView
 app/src/                            UI Svelte 5 + TypeScript + uPlot + i18n
 service/OpenMonitorAdvanced.Service/        servizio .NET + LibreHardwareMonitorLib
@@ -461,7 +493,9 @@ docs/
   
   Un `Provider` finto riproduce snapshot registrati da macchine reali.
 - **Protocollo:** i test Rust e .NET codificano e decodificano le fixture di `protocol/fixtures/` e verificano che i byte coincidano.
-- **`oma-service`:** xUnit sulla conversione da LibreHardwareMonitor al modello, con sensori finti.
+- **`oma-service`:** xUnit sulla conversione da LibreHardwareMonitor al modello, con sensori finti; limiti del protocollo (intervallo, dimensione dei frame, messaggi non validi); arresto dopo 2 minuti senza client, con un orologio finto.
+- **Provider `svc` e client (M4):** trasporto finto per snapshot vecchi, nuovo schema e disconnessione; verifica del PID e stati del servizio come funzioni pure; pipe vera con un server di prova non privilegiato e un nome di pipe diverso (`#[ignore]`).
+- **Merge tra provider:** a parità di ID vince il primo provider; device con lo stesso ID fusi.
 - **`oma-win`:** test di integrazione eseguiti su hardware reale, marcati `#[ignore]` in CI. Test unitari sulla logica di aggregazione PDH e sull'associazione LUID ↔ PCI, con dati registrati.
 - **UI:** Vitest su store, formattazione delle unità e completezza delle traduzioni. **Modalità "backend finto"**: la UI gira nel browser con dati registrati, per sviluppare la grafica e per i test dei componenti.
 - **Hardware reale:** checklist manuale per ogni release su una matrice di macchine (NVIDIA, AMD, Intel dedicata e integrata, un portatile), più il "report sensori" inviato dalla community.
@@ -470,8 +504,8 @@ docs/
 
 ## 13. Punti aperti da verificare in implementazione
 
-1. **FACEIT e PawnIO:** basta fermare il servizio perché l'anti-cheat accetti il sistema, o bisogna fermare anche il driver?
-2. **LibreHardwareMonitorLib con trimming e NativeAOT:** incide sulla dimensione dell'installer.
+1. **FACEIT e PawnIO:** basta fermare il servizio perché l'anti-cheat accetti il sistema, o bisogna fermare anche il driver? **In gran parte risolto in M4 (ricerca):** il blocco di FACEIT dipendeva dal certificato delle versioni di PawnIO precedenti alla 2.1.0; con la 2.2.0 FACEIT funziona anche con il driver caricato (conferme dell'autore di PawnIO e di FanControl, 2026). Il driver resta caricato comunque, perché lo carica Windows (§2.2). Resta una verifica manuale con un gioco vero.
+2. **LibreHardwareMonitorLib con trimming e NativeAOT:** incide sulla dimensione dell'installer. Si decide con lo spike di M4 (§5.3): NativeAOT è escluso, perché i percorsi WMI di LibreHardwareMonitorLib non sono sicuri sotto AOT.
 3. **Valore corretto dell'enum per `D3DKMT_NODE_PERFDATA`** (clock ed eventuale tensione per motore): una prima prova ha restituito `STATUS_INVALID_PARAMETER`. **Risolto in M2:** `KMTQAITYPE_NODEPERFDATA` vale 61. La struttura va passata con la dimensione esatta di 56 byte: con una dimensione diversa la chiamata restituisce `STATUS_INVALID_PARAMETER`. La `Frequency` del nodo 0 è il clock core e coincide con `nvidia-smi`. La tensione vale 0 su NVIDIA e circa 1110–1125 (probabilmente mV) sull'iGPU AMD, quindi non si usa.
 4. **Driver Intel e Qualcomm e `ADAPTERPERFDATA`:** lo popolano? **In parte risolto in M2:** i driver NVIDIA e AMD lo popolano, anche per l'iGPU AMD (temperatura a passi di 1 °C, potenza in % del limite, frequenza della DRAM). Intel e Qualcomm restano da verificare, perché non c'era hardware disponibile. Se un driver non lo popola (temperatura 0), quei sensori semplicemente non compaiono.
 5. **Licenza di ADL (legacy):** va verificata prima di usarne i binding; in alternativa si resta sul livello base per AMD. **Risolto in M2:** si usano binding scritti a mano dalla documentazione pubblica e `atiadlxx.dll` si carica a runtime da `System32`. Gli header di AMD non si includono e non si scaricano, perché la loro EULA esclude le licenze come la GPL. ADLX resta escluso.
@@ -504,3 +538,8 @@ Ogni milestone avrà un proprio piano di implementazione.
 - Riferimenti di codice con licenza compatibile: PresentMon (MIT), System Informer `gpumon.c` (MIT), nvml-wrapper (MIT/Apache), amdgpu_top (MIT), nvtop e Mission Center (GPL-3.0)
 - Tauri 2: https://v2.tauri.app/ — uPlot: https://github.com/leeoniya/uPlot
 - Wi-Fi e consenso alla posizione: https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes
+- PawnIO e FACEIT, blocco risolto dalla 2.1.0/2.2.0 (nuovo certificato): https://github.com/namazso/PawnIO.Setup/issues/1, https://github.com/Rem0o/FanControl.Releases/issues/3660, https://github.com/Rem0o/FanControl.Releases/issues/4114
+- PawnIO come device PnP con avvio a richiesta (INF): https://github.com/namazso/PawnIO/blob/master/PawnIO/PawnIO.inf.in — setup ufficiale: https://github.com/namazso/PawnIO.Setup/releases
+- Diritti di accesso ai servizi e rischi: https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights — modifica del DACL: https://learn.microsoft.com/en-us/windows/win32/services/modifying-the-dacl-for-a-service
+- Worker Service come servizio Windows (.NET): https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service
+- Installer NSIS di Tauri (installMode, hook, template): https://v2.tauri.app/distribute/windows-installer/

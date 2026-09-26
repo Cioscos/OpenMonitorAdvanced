@@ -6,13 +6,12 @@ using Microsoft.Win32.SafeHandles;
 namespace OpenMonitorAdvanced.Service.Logging;
 
 /// <summary>
-/// Defence in depth for the LocalSystem service's log directory
-/// (<c>%ProgramData%\OpenMonitorAdvanced\logs</c>, final review C1). Any user can create folders
-/// in <c>C:\ProgramData</c>, so a folder planted before the installer ran (owned by that user, or
-/// with a junction in it) would let the service's writes and prune deletes land anywhere as
-/// SYSTEM. The installer creates and locks both folders down (<c>OmaProtectLogDir</c> in
-/// <c>app/src-tauri/nsis/oma.nsh</c>); the service still checks before it writes, and gives up
-/// file logging rather than follow a path it does not trust.
+/// Defence in depth for the LocalSystem service's log directory (final review C1). Since ruling
+/// R30 the logs live in <c>&lt;service folder&gt;\logs</c>, i.e. <c>$INSTDIR\service\logs</c> under
+/// Program Files, which the installer locks down (<c>OmaProtectServiceDir</c> in
+/// <c>app/src-tauri/nsis/oma.nsh</c>) and no user can create first. The service still checks the
+/// service folder and <c>logs</c> before it writes, and gives up file logging rather than follow a
+/// path it does not trust (for example a development run from a user-owned <c>bin</c> folder).
 /// </summary>
 internal static class LogDirectoryGuard
 {
@@ -48,16 +47,19 @@ internal static class LogDirectoryGuard
 
     /// <summary>
     /// Makes sure <paramref name="directory"/> may be written by the service: it must lie strictly
-    /// inside <paramref name="root"/> (<c>%ProgramData%</c>); the root and every folder below it
-    /// down to <paramref name="directory"/> must be a real directory, never a junction or link;
-    /// a missing folder is created with an explicit protected DACL (<see cref="CreateProtected"/>);
-    /// and every folder below the root must pass <see cref="CheckSecurity(RawSecurityDescriptor)"/>,
-    /// so that no other user can rename, replace or fill any of them afterwards. Each folder is
-    /// opened without following a reparse point, and its attributes and security are read from
-    /// that same handle. Returns <see langword="null"/> when the directory is safe, otherwise the
-    /// reason (nothing below a refused folder is touched).
+    /// inside <paramref name="root"/> (the service's own folder); the root and every folder below
+    /// it down to <paramref name="directory"/> must be a real directory, never a junction or link,
+    /// and must pass <see cref="CheckSecurity(RawSecurityDescriptor)"/>, so that no other user can
+    /// rename, replace or fill any of them; a missing folder below the root is created with an
+    /// explicit protected DACL (<see cref="CreateProtected"/>). Each folder is opened without
+    /// following a reparse point, and its attributes and security are read from that same handle.
+    /// Returns <see langword="null"/> when the directory is safe, otherwise the reason (nothing
+    /// below a refused folder is touched or created).
     /// </summary>
-    internal static string? Prepare(string root, string directory)
+    internal static string? Prepare(string root, string directory) => Prepare(root, directory, CheckSecurity);
+
+    /// <summary><see cref="Prepare(string, string)"/> with the security check injected (tests).</summary>
+    internal static string? Prepare(string root, string directory, Func<RawSecurityDescriptor, string?> checkSecurity)
     {
         string fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         string fullDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
@@ -66,7 +68,7 @@ internal static class LogDirectoryGuard
             return $"{fullDirectory} is not inside {fullRoot}";
         }
 
-        string? problem = CheckEntry(fullRoot, checkSecurity: false, create: false);
+        string? problem = CheckEntry(fullRoot, checkSecurity, create: false);
         string current = fullRoot;
         foreach (string part in fullDirectory[(fullRoot.Length + 1)..].Split(Path.DirectorySeparatorChar))
         {
@@ -76,7 +78,7 @@ internal static class LogDirectoryGuard
             }
 
             current = Path.Combine(current, part);
-            problem = CheckEntry(current, checkSecurity: true, create: true);
+            problem = CheckEntry(current, checkSecurity, create: true);
         }
 
         return problem;
@@ -136,9 +138,10 @@ internal static class LogDirectoryGuard
 
     /// <summary>
     /// Creates <paramref name="path"/> (its parent must exist) with an explicit protected DACL,
-    /// never by inheritance from <c>C:\ProgramData</c>: SYSTEM and Administrators full control,
+    /// never by inheritance from whatever folder the exe runs from: SYSTEM and Administrators full control,
     /// Users read and execute (to read the logs for a bug report without elevation), all inherited
-    /// by files and subfolders. The same ACL the installer sets. Does nothing if it already exists.
+    /// by files and subfolders. The same ACL the installer sets on the service folder. Does nothing
+    /// if it already exists.
     /// </summary>
     internal static void CreateProtected(string path)
     {
@@ -160,7 +163,7 @@ internal static class LogDirectoryGuard
     /// <paramref name="create"/> is set, then checks through that one handle that it is a real
     /// directory and, with <paramref name="checkSecurity"/>, that its security passes.
     /// </summary>
-    private static string? CheckEntry(string path, bool checkSecurity, bool create)
+    private static string? CheckEntry(string path, Func<RawSecurityDescriptor, string?>? checkSecurity, bool create)
     {
         SafeFileHandle handle = OpenEntry(path, out int error);
         if (handle.IsInvalid && create && error == ErrorFileNotFound)
@@ -188,13 +191,13 @@ internal static class LogDirectoryGuard
                 return $"{path} is not a directory";
             }
 
-            if (!checkSecurity)
+            if (checkSecurity is null)
             {
                 return null;
             }
 
             var descriptor = new RawSecurityDescriptor(new HandleSecurity(handle).GetSecurityDescriptorBinaryForm(), 0);
-            string? problem = CheckSecurity(descriptor);
+            string? problem = checkSecurity(descriptor);
             return problem is null ? null : $"{path}: {problem}";
         }
     }

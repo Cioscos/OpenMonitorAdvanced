@@ -24,10 +24,11 @@ static int RunHost(bool console)
 {
     // Never follows a log directory another user could have planted or redirected (it would make
     // the SYSTEM writes and prune deletes land elsewhere): file logging is then disabled, once,
-    // with the reason on the console or in the Application event log.
+    // with the reason on the console or in the Application event log. A development run from a
+    // user-owned folder ends up here too; `run` still logs to the console.
     var fileLogs = new FileLoggerProvider(
         ServiceHost.LogDirectory,
-        directory => LogDirectoryGuard.Prepare(ServiceHost.ProgramDataRoot, directory),
+        directory => LogDirectoryGuard.Prepare(ServiceHost.ServiceDirectory, directory),
         onDisabled: message =>
         {
             if (console)

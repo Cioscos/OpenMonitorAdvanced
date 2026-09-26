@@ -26,17 +26,17 @@ internal static class ServiceHost
     internal static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// <c>%ProgramData%</c> as the system knows it (<c>FOLDERID_ProgramData</c>, from the registry,
-    /// never from the environment): the root below which <see cref="LogDirectory"/> is checked.
+    /// The folder of <c>oma-service.exe</c> (<c>$INSTDIR\service</c> once installed, locked down
+    /// by the installer): the root below which <see cref="LogDirectory"/> is checked.
     /// </summary>
-    internal static string ProgramDataRoot { get; } = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+    internal static string ServiceDirectory { get; } = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
 
     /// <summary>
-    /// <c>%ProgramData%\OpenMonitorAdvanced\logs</c>, created and locked down by the installer
-    /// (<c>OmaProtectLogDir</c>) and checked again before the service writes to it
+    /// <c>&lt;service folder&gt;\logs</c> (ruling R30: never a folder another user could create
+    /// first, unlike <c>%ProgramData%</c>), checked before the service writes to it
     /// (<see cref="Logging.LogDirectoryGuard"/>).
     /// </summary>
-    internal static string LogDirectory { get; } = Path.Combine(ProgramDataRoot, "OpenMonitorAdvanced", "logs");
+    internal static string LogDirectory { get; } = Path.Combine(ServiceDirectory, "logs");
 
     internal static IHost Build(
         bool console,

@@ -9,7 +9,8 @@ using Xunit;
 namespace OpenMonitorAdvanced.Service.Tests.Logging;
 
 /// <summary>
-/// The log directory checks (final review C1): the decision logic runs on in-memory security
+/// The log directory checks (final review C1, ruling R30: the logs live in the service folder):
+/// the decision logic runs on in-memory security
 /// descriptors written as SDDL, the path checks on a temp directory with junctions
 /// (<c>mklink /J</c> needs no administrator rights). Nothing here needs elevation.
 /// </summary>
@@ -80,9 +81,9 @@ public sealed class LogDirectoryGuardTests : IDisposable
     }
 
     [Fact]
-    public void ProgramDatasInheritedUserRightsAreRefusedEvenInheritOnly()
+    public void InheritedUserWriteRightsAreRefusedEvenInheritOnly()
     {
-        // C:\ProgramData: BUILTIN\Users:(CI)(WD,AD,WEA,WA), what a child inherits unless protected.
+        // As C:\ProgramData grants: BUILTIN\Users:(CI)(WD,AD,WEA,WA), inherited unless protected.
         Assert.NotNull(Check("O:SYD:(A;OICI;FA;;;SY)(A;CIID;0x116;;;BU)"));
 
         // Inherit-only still reaches the log files created inside.
@@ -95,55 +96,93 @@ public sealed class LogDirectoryGuardTests : IDisposable
         Assert.Null(Check("O:BAD:P(D;OICI;0x1301bf;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GA;;;CO)(A;OICI;0x1200a9;;;WD)"));
     }
 
+    /// <summary>
+    /// A security check that accepts everything, for the path-level tests: unelevated, every
+    /// folder we create is ours, so the real <see cref="LogDirectoryGuard.CheckSecurity"/> would
+    /// stop at the root before the path logic is reached.
+    /// </summary>
+    private static string? Trust(RawSecurityDescriptor descriptor) => null;
+
     [Fact]
-    public void MissingDirectoriesAreCreatedWithAnExplicitProtectedDacl()
+    public void CreateProtectedSetsAnExplicitProtectedDacl()
     {
-        string logs = Path.Combine(_root, "OpenMonitorAdvanced", "logs");
+        string logs = Path.Combine(_root, "logs");
 
-        string? verdict = LogDirectoryGuard.Prepare(_root, logs);
+        LogDirectoryGuard.CreateProtected(logs);
 
-        // Unelevated, we own what we created, so the first folder is refused and nothing is
-        // created below it. Elevated, the owner is Administrators and both folders pass.
-        string[] created = IsElevated() ? [Path.GetDirectoryName(logs)!, logs] : [Path.GetDirectoryName(logs)!];
-        Assert.Equal(IsElevated(), Directory.Exists(logs));
-        foreach (string dir in created)
-        {
-            Assert.True(Directory.Exists(dir), dir);
-            var raw = new RawSecurityDescriptor(new DirectoryInfo(dir).GetAccessControl(AccessControlSections.Access).GetSecurityDescriptorBinaryForm(), 0);
-            Assert.True(raw.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected), $"{dir} must not inherit");
-            var aces = raw.DiscretionaryAcl!.Cast<CommonAce>()
-                .Select(a => (Sid: a.SecurityIdentifier.Value, a.AccessMask, a.AceFlags, a.AceQualifier))
-                .OrderBy(a => a.Sid, StringComparer.Ordinal)
-                .ToArray();
-            Assert.Equal(
-                new[]
-                {
-                    ("S-1-5-18", 0x1f01ff, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
-                    ("S-1-5-32-544", 0x1f01ff, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
-                    ("S-1-5-32-545", 0x1200a9, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
-                }.OrderBy(a => a.Item1, StringComparer.Ordinal),
-                aces);
-        }
-
-        if (IsElevated())
-        {
-            Assert.Null(verdict);
-        }
-        else
-        {
-            Assert.Contains("owner", verdict);
-        }
+        var raw = new RawSecurityDescriptor(new DirectoryInfo(logs).GetAccessControl(AccessControlSections.Access).GetSecurityDescriptorBinaryForm(), 0);
+        Assert.True(raw.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected), "logs must not inherit");
+        var aces = raw.DiscretionaryAcl!.Cast<CommonAce>()
+            .Select(a => (Sid: a.SecurityIdentifier.Value, a.AccessMask, a.AceFlags, a.AceQualifier))
+            .OrderBy(a => a.Sid, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(
+            new[]
+            {
+                ("S-1-5-18", 0x1f01ff, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
+                ("S-1-5-32-544", 0x1f01ff, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
+                ("S-1-5-32-545", 0x1200a9, AceFlags.ObjectInherit | AceFlags.ContainerInherit, AceQualifier.AccessAllowed),
+            }.OrderBy(a => a.Item1, StringComparer.Ordinal),
+            aces);
     }
 
     [Fact]
-    public void AJunctionAnywhereBelowTheRootIsRefusedAndNeverFollowed()
+    public void AMissingLogFolderIsCreatedInATrustedServiceFolder()
+    {
+        string logs = Path.Combine(_root, "logs");
+
+        Assert.Null(LogDirectoryGuard.Prepare(_root, logs, Trust));
+
+        Assert.True(Directory.Exists(logs));
+        var raw = new RawSecurityDescriptor(new DirectoryInfo(logs).GetAccessControl(AccessControlSections.Access).GetSecurityDescriptorBinaryForm(), 0);
+        Assert.True(raw.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected));
+    }
+
+    [Fact]
+    public void TheServiceFolderItselfIsCheckedToo()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "logs"));
+        int checks = 0;
+
+        LogDirectoryGuard.Prepare(_root, Path.Combine(_root, "logs"), _ =>
+        {
+            checks++;
+            return null;
+        });
+
+        Assert.Equal(2, checks); // the exe folder, then logs
+    }
+
+    [Fact]
+    public void AnUntrustedServiceFolderDisablesLoggingAndCreatesNothing()
+    {
+        // A dev run from a user-owned bin folder: the real check refuses the exe folder itself
+        // (unelevated, we own it), and logs is never created there.
+        string logs = Path.Combine(_root, "logs");
+
+        string? verdict = LogDirectoryGuard.Prepare(_root, logs);
+
+        if (IsElevated())
+        {
+            return; // elevated, the temp folder's owner can be Administrators: nothing to prove here
+        }
+
+        Assert.NotNull(verdict);
+        Assert.Contains("owner", verdict);
+        Assert.Contains(_root, verdict);
+        Assert.False(Directory.Exists(logs));
+    }
+
+    [Fact]
+    public void ALogFolderThatIsAJunctionIsRefusedAndNeverFollowed()
     {
         string target = Path.Combine(_root, "elsewhere");
         Directory.CreateDirectory(target);
-        string oma = Path.Combine(_root, "OpenMonitorAdvanced");
-        MakeJunction(oma, target);
+        string service = Path.Combine(_root, "service");
+        Directory.CreateDirectory(service);
+        MakeJunction(Path.Combine(service, "logs"), target);
 
-        string? verdict = LogDirectoryGuard.Prepare(_root, Path.Combine(oma, "logs"));
+        string? verdict = LogDirectoryGuard.Prepare(service, Path.Combine(service, "logs"), Trust);
 
         Assert.NotNull(verdict);
         Assert.Contains("junction or link", verdict);
@@ -151,14 +190,14 @@ public sealed class LogDirectoryGuardTests : IDisposable
     }
 
     [Fact]
-    public void ARootThatIsAJunctionIsRefused()
+    public void AServiceFolderThatIsAJunctionIsRefused()
     {
         string target = Path.Combine(_root, "real");
         Directory.CreateDirectory(target);
-        string root = Path.Combine(_root, "linked-root");
-        MakeJunction(root, target);
+        string service = Path.Combine(_root, "linked-service");
+        MakeJunction(service, target);
 
-        string? verdict = LogDirectoryGuard.Prepare(root, Path.Combine(root, "OpenMonitorAdvanced", "logs"));
+        string? verdict = LogDirectoryGuard.Prepare(service, Path.Combine(service, "logs"), Trust);
 
         Assert.NotNull(verdict);
         Assert.Contains("junction or link", verdict);
@@ -168,19 +207,19 @@ public sealed class LogDirectoryGuardTests : IDisposable
     [Fact]
     public void ADirectoryOutsideTheRootIsRefused()
     {
-        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "ab", "logs")));
-        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "a")));
-        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "a", "..", "b")));
+        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "ab", "logs"), Trust));
+        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "a"), Trust));
+        Assert.NotNull(LogDirectoryGuard.Prepare(Path.Combine(_root, "a"), Path.Combine(_root, "a", "..", "b"), Trust));
         Assert.False(Directory.Exists(Path.Combine(_root, "ab")));
         Assert.False(Directory.Exists(Path.Combine(_root, "b")));
     }
 
     [Fact]
-    public void AFileWhereAFolderShouldBeIsRefused()
+    public void AFileWhereTheLogFolderShouldBeIsRefused()
     {
-        File.WriteAllText(Path.Combine(_root, "OpenMonitorAdvanced"), "not a folder");
+        File.WriteAllText(Path.Combine(_root, "logs"), "not a folder");
 
-        Assert.Contains("not a directory", LogDirectoryGuard.Prepare(_root, Path.Combine(_root, "OpenMonitorAdvanced", "logs")));
+        Assert.Contains("not a directory", LogDirectoryGuard.Prepare(_root, Path.Combine(_root, "logs"), Trust));
     }
 
     [Fact]

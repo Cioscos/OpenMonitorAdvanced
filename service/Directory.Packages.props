@@ -1,0 +1,23 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- LHM mapping (Task 5). -->
+    <PackageVersion Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    <!-- Wire protocol codec (Task 3): hand-written MessagePackWriter/MessagePackReader usage,
+         see protocol/fixtures/README.md and docs/superpowers/references/m4/s2-msgpack.md. -->
+    <PackageVersion Include="MessagePack" Version="3.1.10" />
+    <!-- Windows service host (Task 7). -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
+    <!-- Sampling hub tests (Task 6). -->
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />
+    <!-- Test stack: xunit.v3 with the VSTest runner (dotnet test service/OpenMonitorAdvanced.slnx). -->
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+  </ItemGroup>
+
+</Project>

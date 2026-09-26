@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <AssemblyName>oma-service</AssemblyName>
+    <RootNamespace>OpenMonitorAdvanced.Service</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- SelfContained, PublishSingleFile and trimming are set only in
+         Properties/PublishProfiles/Service.pubxml (published with
+         -p:PublishProfile=Service), never here: a plain `dotnet build`/
+         `dotnet test` — including the Tests project's ProjectReference to
+         this project — must not attempt a self-contained/single-file build. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MessagePack" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+  </ItemGroup>
+
+</Project>

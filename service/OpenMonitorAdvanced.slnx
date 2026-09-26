@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="OpenMonitorAdvanced.Service/OpenMonitorAdvanced.Service.csproj" />
+  <Project Path="OpenMonitorAdvanced.Service.Tests/OpenMonitorAdvanced.Service.Tests.csproj" />
+</Solution>

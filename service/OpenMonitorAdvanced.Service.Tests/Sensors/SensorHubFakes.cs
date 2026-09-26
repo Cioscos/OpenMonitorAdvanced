@@ -18,6 +18,8 @@ internal sealed class FakeTree : IHardwareTree
     private int _openCount;
     private int _closeCount;
     private int _enableStorageCount;
+    private int _updatesAfterClose;
+    private int _throwOnNextRoots;
 
     public event Action? HardwareChanged;
 
@@ -38,10 +40,23 @@ internal sealed class FakeTree : IHardwareTree
 
     public int EnableStorageCount => Volatile.Read(ref _enableStorageCount);
 
+    /// <summary><see cref="Update"/> calls made after <see cref="Dispose"/> (= LHM Close).</summary>
+    public int UpdatesAfterClose => Volatile.Read(ref _updatesAfterClose);
+
+    public string? OpenThreadName { get; private set; }
+
+    /// <summary>The next <see cref="Roots"/> read throws once (a failing schema rebuild).</summary>
+    public void ThrowOnNextRoots() => Volatile.Write(ref _throwOnNextRoots, 1);
+
     public IReadOnlyList<HardwareNode> Roots
     {
         get
         {
+            if (Interlocked.Exchange(ref _throwOnNextRoots, 0) == 1)
+            {
+                throw new InvalidOperationException("roots unavailable");
+            }
+
             lock (_gate)
             {
                 return _roots.ToArray();
@@ -52,6 +67,7 @@ internal sealed class FakeTree : IHardwareTree
     public IReadOnlyList<HardwareNode> Open()
     {
         Interlocked.Increment(ref _openCount);
+        OpenThreadName = Thread.CurrentThread.Name;
         lock (_gate)
         {
             _roots = [.. Initial];
@@ -62,6 +78,11 @@ internal sealed class FakeTree : IHardwareTree
 
     public void Update(HardwareNode root)
     {
+        if (CloseCount > 0)
+        {
+            Interlocked.Increment(ref _updatesAfterClose);
+        }
+
         BeforeUpdate?.Invoke(root);
         _updates.AddOrUpdate(root.Identifier, 1, (_, n) => n + 1);
         if (Failing.ContainsKey(root.Identifier))
@@ -109,6 +130,7 @@ internal sealed class FakeDisks : IDiskPowerProbe
 {
     private int _spunDownQueries;
     private int _allActiveQueries;
+    private int _describeCalls;
 
     public volatile bool AllActive = true;
 
@@ -117,6 +139,26 @@ internal sealed class FakeDisks : IDiskPowerProbe
     public int SpunDownQueries => Volatile.Read(ref _spunDownQueries);
 
     public int AllActiveQueries => Volatile.Read(ref _allActiveQueries);
+
+    public int DescribeCalls => Volatile.Read(ref _describeCalls);
+
+    /// <summary>Per-drive facts; a drive not listed is described as a spinning SATA HDD.</summary>
+    public ConcurrentDictionary<int, DriveFacts?> Facts { get; } = new();
+
+    /// <summary>Runs at the start of <see cref="Describe"/>, on the calling thread.</summary>
+    public Action<int>? BeforeDescribe { get; set; }
+
+    public ConcurrentQueue<string?> DescribeThreads { get; } = new();
+
+    public DriveFacts? Describe(int driveNumber)
+    {
+        Interlocked.Increment(ref _describeCalls);
+        DescribeThreads.Enqueue(Thread.CurrentThread.Name);
+        BeforeDescribe?.Invoke(driveNumber);
+        return Facts.TryGetValue(driveNumber, out DriveFacts? facts)
+            ? facts
+            : new DriveFacts(driveNumber, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true);
+    }
 
     public bool? IsSpunDown(int driveNumber)
     {

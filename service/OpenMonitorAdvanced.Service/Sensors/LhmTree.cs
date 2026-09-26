@@ -35,7 +35,6 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 public sealed class LhmTree : IHardwareTree
 {
     private readonly ILogger<LhmTree> _log;
-    private readonly Func<int, bool?> _hasSeekPenalty;
     private readonly object _structureLock = new();
     private readonly List<Entry> _entries = []; // guarded by _structureLock
     private volatile Composition _composition = Composition.Empty;
@@ -44,15 +43,9 @@ public sealed class LhmTree : IHardwareTree
     private int _storageEnabled;
     private int _disposed;
 
-    /// <param name="log">Logger.</param>
-    /// <param name="hasSeekPenalty">
-    /// Rotational check for a <c>PhysicalDriveN</c> (<see cref="DiskPowerProbe.HasSeekPenalty"/>);
-    /// <see langword="null"/> (unknown) counts as rotational.
-    /// </param>
-    public LhmTree(ILogger<LhmTree> log, Func<int, bool?> hasSeekPenalty)
+    public LhmTree(ILogger<LhmTree> log)
     {
         _log = log;
-        _hasSeekPenalty = hasSeekPenalty;
     }
 
     /// <inheritdoc />
@@ -267,7 +260,7 @@ public sealed class LhmTree : IHardwareTree
                 }
 
                 // Nobody updates this hardware before it is published below, so reading its
-                // sensors here is safe from any thread.
+                // (in-memory) sensors here is safe from any thread. No disk I/O under this lock.
                 Entry entry = CreateEntry(hardware);
                 _entries.Add(entry);
                 _log.LogInformation("Hardware added: {Identifier} ({Type}, {Name})", entry.Identifier, hardware.HardwareType, hardware.Name);
@@ -287,6 +280,13 @@ public sealed class LhmTree : IHardwareTree
         return entry;
     }
 
+    /// <summary>
+    /// In-memory identity only (DiskInfoToolkit's drive number and IDENTIFY serial): no I/O here,
+    /// since this runs under <c>_structureLock</c> and possibly on the sampler thread. The
+    /// descriptor model/serial and the rotational flag are left unknown (<c>Rotational: true</c>);
+    /// the hub's storage worker resolves them through <see cref="IDiskPowerProbe.Describe"/>
+    /// before the disk enters the schema.
+    /// </summary>
     private StorageInfo? StorageInfoOf(IHardware hardware)
     {
         if (hardware is not StorageDevice device)
@@ -295,17 +295,12 @@ public sealed class LhmTree : IHardwareTree
         }
 
         DiskInfoToolkit.Storage storage = device.Storage;
-        int drive = storage.DriveNumber;
-        if (drive < 0)
+        if (storage.DriveNumber < 0)
         {
-            // No PhysicalDriveN: no descriptor, no hint, never a power-mode query (treated as
-            // rotational with an unknown state, so it is never updated).
             _log.LogWarning("{Identifier} has no PhysicalDrive number; its values stay absent", hardware.Identifier.ToString());
-            return new StorageInfo(drive, null, null, storage.SerialNumber, Rotational: true);
         }
 
-        (string? model, string? serial) = DriveDescriptor.Read(drive);
-        return new StorageInfo(drive, model, serial, storage.SerialNumber, Rotational: _hasSeekPenalty(drive) ?? true);
+        return new StorageInfo(storage.DriveNumber, null, null, storage.SerialNumber, Rotational: true);
     }
 
     /// <summary>Must hold <c>_structureLock</c>.</summary>

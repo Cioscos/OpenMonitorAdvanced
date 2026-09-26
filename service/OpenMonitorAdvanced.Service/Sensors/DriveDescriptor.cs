@@ -16,6 +16,7 @@ public static class DriveDescriptor
 {
     private const int ProductIdOffsetField = 16;
     private const int SerialNumberOffsetField = 24;
+    private const int BusTypeField = 28;
 
     /// <summary>
     /// Parses the model (<c>ProductIdOffset</c> field) and serial
@@ -94,6 +95,26 @@ public static class DriveDescriptor
             return (null, null);
         }
 
+        byte[]? descriptor = Query(handle, out _);
+        return descriptor is null ? (null, null) : Parse(descriptor);
+    }
+
+    /// <summary>
+    /// <c>STORAGE_DEVICE_DESCRIPTOR.BusType</c> (<c>STORAGE_BUS_TYPE</c>, a little-endian u32 at
+    /// offset 28), or <see langword="null"/> when the buffer is too short.
+    /// </summary>
+    public static uint? ParseBusType(ReadOnlySpan<byte> storageDeviceDescriptor) =>
+        storageDeviceDescriptor.Length >= BusTypeField + sizeof(uint)
+            ? BinaryPrimitives.ReadUInt32LittleEndian(storageDeviceDescriptor.Slice(BusTypeField, sizeof(uint)))
+            : null;
+
+    /// <summary>
+    /// <c>IOCTL_STORAGE_QUERY_PROPERTY</c> / <c>StorageDeviceProperty</c> on an already open
+    /// handle (access 0 is enough): the raw descriptor, or <see langword="null"/> with the Win32
+    /// error in <paramref name="win32Error"/> (0 for an empty reply).
+    /// </summary>
+    internal static byte[]? Query(SafeFileHandle handle, out int win32Error)
+    {
         byte[] query = new byte[12]; // STORAGE_PROPERTY_QUERY: PropertyId=StorageDeviceProperty(0), QueryType=PropertyStandardQuery(0), both zero already.
         byte[] output = new byte[8192];
 
@@ -109,12 +130,14 @@ public static class DriveDescriptor
             out uint returned,
             IntPtr.Zero);
 
-        if (!ok || returned == 0)
+        if (!ok)
         {
-            return (null, null);
+            win32Error = Marshal.GetLastPInvokeError();
+            return null;
         }
 
-        return Parse(output.AsSpan(0, (int)returned));
+        win32Error = 0;
+        return returned == 0 ? null : output[..(int)returned];
     }
 
     private static class NativeMethods

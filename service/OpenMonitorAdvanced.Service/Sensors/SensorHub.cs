@@ -17,23 +17,33 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// non-storage root once per <c>min(subscriber intervals)</c>, publishes one snapshot per tick and
 /// delivers it to the subscribers that are due; between sampling ticks it also wakes for a
 /// subscriber's delivery deadline, reusing the latest snapshot instead of running LHM again.
-/// <c>oma-storage</c> owns every storage read: every 30 s (only while someone is subscribed) it
-/// applies the D6 gate, updates each disk that is known to be spinning and publishes an immutable
-/// cache of raw values keyed by LHM sensor identifier, which the sampler only looks up. The two
+/// Sampling and delivery deadlines are anchored to their schedule (<c>+= interval</c>, resynced
+/// only when more than one interval behind), and a subscriber's phase starts from the sample it
+/// first receives, so one subscriber costs one wake per interval.
+/// <c>oma-storage</c> owns every disk access: every 30 s (only while someone is subscribed) it
+/// applies the D6 gate, resolves each new disk's identity (<see cref="IDiskPowerProbe.Describe"/>),
+/// updates each disk that is known to be spinning and publishes an immutable, timestamped cache
+/// of raw values keyed by LHM sensor identifier, which the sampler only looks up (values older
+/// than two rounds, or from before an idle period, count as absent). A disk enters the schema
+/// only once the storage worker has resolved it, so the sampler never waits on disk I/O. The two
 /// threads share no lock across hardware I/O: <c>_subLock</c> only guards subscriber bookkeeping,
 /// and schema, bindings and snapshot are swapped as one immutable <see cref="Published"/> reference.
 /// </para>
 /// <para>
 /// <b>D6.</b> The tree is opened without storage. <see cref="IHardwareTree.EnableStorage"/> is
-/// called only when <see cref="IDiskPowerProbe.AllRotationalDisksActive"/> says every rotational
-/// (or unknown) disk is spinning, re-checked on every storage round until it succeeds; afterwards
-/// each rotational disk is updated only when <see cref="IDiskPowerProbe.IsSpunDown"/> is
-/// <see langword="false"/>, otherwise its values are absent.
+/// called only when <see cref="IDiskPowerProbe.AllRotationalDisksActive"/> says every drive that
+/// needs it (controller ruling R17) is spinning, re-checked on every storage round until it
+/// succeeds; afterwards each disk whose <see cref="DriveFacts.RequiresPowerCheck"/> holds is
+/// updated only when <see cref="IDiskPowerProbe.IsSpunDown"/> is <see langword="false"/>,
+/// otherwise its values are absent.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The tree is never closed while the hub lives: without subscribers sampling
 /// stops and the tree stays open (the service exits after two idle minutes, Task 7).
-/// <see cref="Dispose"/> stops and joins both threads, then disposes the tree.
+/// <see cref="Dispose"/> stops both threads and waits up to <see cref="WorkerJoinTimeout"/> for
+/// each; only if both stopped does it dispose the tree (a worker stuck in a driver call may still
+/// be inside LHM, and closing it under that worker is worse than leaving it to process exit).
+/// A subscription after <see cref="Dispose"/> is a no-op.
 /// </para>
 /// </remarks>
 public sealed class SensorHub : ISensorFeed, IDisposable
@@ -53,11 +63,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly object _subLock = new();
     private readonly List<Subscriber> _subscribers = [];
     private long _minIntervalTicks;
-    private long _lastSampleStart;
+    private long _sampleAnchor;
     private bool _sampled;
-    private long _nextSampleDue;
+    private long _nextSampleDue = long.MinValue;
     private long _nextStorageDue;
     private int _nextSubscriberId;
+    private Thread? _samplerThread;
+    private Thread? _storageThread;
+    private bool _disposed;
 
     // Sampler-owned state.
     private readonly List<Subscriber> _dueScratch = [];
@@ -73,7 +86,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     // Shared, published by reference swap.
     private volatile Published? _published;
-    private volatile IReadOnlyDictionary<string, double?> _storageValues = new Dictionary<string, double?>();
+    private volatile StorageCache _storageCache = StorageCache.Empty;
+    private volatile IReadOnlyDictionary<string, StorageInfo> _resolvedDisks = new Dictionary<string, StorageInfo>();
     private volatile bool _opened;
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
@@ -82,10 +96,6 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly ManualResetEventSlim _samplerWake = new();
     private readonly ManualResetEventSlim _storageWake = new();
-    private Thread? _samplerThread;
-    private Thread? _storageThread;
-    private int _workersStarted;
-    private int _disposed;
 
     public SensorHub(IHardwareTree tree, IDiskPowerProbe disks, Func<bool> pawnIoAvailable, TimeProvider time, ILogger<SensorHub> log)
     {
@@ -100,6 +110,20 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// <summary>Test seam: <see langword="false"/> keeps the worker threads off, so tests drive the hub deterministically.</summary>
     internal bool StartWorkers { get; init; } = true;
 
+    /// <summary>How long <see cref="Dispose"/> waits for each worker before giving up on it.</summary>
+    internal TimeSpan WorkerJoinTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    internal bool AnyWorkerAlive
+    {
+        get
+        {
+            lock (_subLock)
+            {
+                return (_samplerThread?.IsAlive ?? false) || (_storageThread?.IsAlive ?? false);
+            }
+        }
+    }
+
     /// <summary>Current schema revision: 1 after opening, +1 on every structural change; 0 before opening.</summary>
     internal int Revision => _published?.Revision ?? 0;
 
@@ -108,36 +132,42 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfZero(intervalMs);
         ArgumentNullException.ThrowIfNull(onUpdate);
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
 
         Subscriber subscriber;
         lock (_subLock)
         {
-            subscriber = new Subscriber(this, Interlocked.Increment(ref _nextSubscriberId), MsToTicks(intervalMs), onUpdate)
+            if (_disposed)
+            {
+                // Shutting down: nothing will ever be delivered, and no thread may start now.
+                return NoSubscription.Instance;
+            }
+
+            subscriber = new Subscriber(this, ++_nextSubscriberId, MsToTicks(intervalMs), onUpdate)
             {
                 NextDue = _time.GetTimestamp(), // the first delivery is due at once (with the schema)
             };
             _subscribers.Add(subscriber);
             RecomputeSamplingLocked();
+
+            // Started under the lock that Dispose takes first, so no thread can start after it.
+            if (StartWorkers && _samplerThread is null)
+            {
+                _samplerThread = new Thread(SamplerLoop) { Name = "oma-sampler", IsBackground = true };
+                _storageThread = new Thread(StorageLoop) { Name = "oma-storage", IsBackground = true };
+                _samplerThread.Start();
+                _storageThread.Start();
+            }
         }
 
-        if (StartWorkers && Interlocked.Exchange(ref _workersStarted, 1) == 0)
-        {
-            _samplerThread = new Thread(SamplerLoop) { Name = "oma-sampler", IsBackground = true };
-            _storageThread = new Thread(StorageLoop) { Name = "oma-storage", IsBackground = true };
-            _samplerThread.Start();
-            _storageThread.Start();
-        }
-
-        _samplerWake.Set();
-        _storageWake.Set();
+        SetQuietly(_samplerWake);
+        SetQuietly(_storageWake);
         return subscriber;
     }
 
     /// <summary>One sampling tick: opens the tree the first time, updates every non-storage root, publishes a snapshot and delivers it to the due subscribers.</summary>
     internal void TickOnce()
     {
-        if (Volatile.Read(ref _disposed) == 1)
+        if (IsDisposed)
         {
             return;
         }
@@ -161,14 +191,23 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         // Rebuilt after the updates, so sensors LHM activates during an Update() are published
-        // (with their value) in this very tick.
+        // (with their value) in this very tick. A failed rebuild keeps the current schema and is
+        // retried on the next tick.
         if (Interlocked.Exchange(ref _structureDirty, 0) == 1)
         {
-            plan = RebuildPlan(plan);
+            try
+            {
+                plan = RebuildPlan(plan);
+            }
+            catch (Exception e)
+            {
+                Interlocked.Exchange(ref _structureDirty, 1);
+                LogRateLimited("schema-rebuild", e, "Rebuilding the schema failed; revision {Revision} stays in use and the rebuild is retried on the next tick", plan.Revision);
+            }
         }
 
         var values = new double?[plan.LhmIds.Length];
-        IReadOnlyDictionary<string, double?> storage = _storageValues;
+        IReadOnlyDictionary<string, double?> storage = FreshStorageValues(tickStart);
         bool anyFailed = _failedRoots.Count > 0;
         for (int i = 0; i < values.Length; i++)
         {
@@ -189,23 +228,28 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             values[i] = raw is double r && double.IsFinite(r * plan.Scales[i]) ? r * plan.Scales[i] : null;
         }
 
-        _seq++;
-        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values));
-
+        long anchor;
         lock (_subLock)
         {
-            _lastSampleStart = tickStart;
+            // Anchored to the schedule when this tick is on time (or late by less than an
+            // interval); resynced to the actual start when early (a direct call) or further behind.
+            long scheduled = _nextSampleDue;
+            bool onSchedule = scheduled != long.MinValue && scheduled <= tickStart && tickStart - scheduled < _minIntervalTicks;
+            anchor = onSchedule ? scheduled : tickStart;
+            _sampleAnchor = anchor;
             _sampled = true;
-            _nextSampleDue = tickStart + _minIntervalTicks;
+            _nextSampleDue = anchor + _minIntervalTicks;
         }
 
+        _seq++;
+        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values), anchor);
         DeliverDue(_time.GetTimestamp());
     }
 
     /// <summary>One wake of the sampler loop: a sampling tick if one is due, otherwise only the due deliveries. Returns the delay until the next wake.</summary>
     internal TimeSpan RunDue()
     {
-        if (Volatile.Read(ref _disposed) == 1)
+        if (IsDisposed)
         {
             return Timeout.InfiniteTimeSpan;
         }
@@ -248,10 +292,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
     }
 
-    /// <summary>One storage round: the D6 gate, then an update of every disk known to be spinning, then a new value cache.</summary>
+    /// <summary>
+    /// One storage round: the D6 gate, then for every disk its identity (first touch only), its
+    /// power check and its update, then a new timestamped value cache.
+    /// </summary>
     internal void StorageOnce()
     {
-        if (!_opened || Volatile.Read(ref _disposed) == 1)
+        if (!_opened || IsDisposed)
         {
             return;
         }
@@ -261,6 +308,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return;
         }
 
+        long roundStart = _time.GetTimestamp();
+        IReadOnlyDictionary<string, StorageInfo> previous = _resolvedDisks;
+        var resolved = new Dictionary<string, StorageInfo>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
         foreach (HardwareNode root in _tree.Roots)
         {
@@ -274,13 +324,19 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return;
             }
 
-            if (root.Storage?.Rotational ?? true)
+            StorageInfo? info = Resolve(root, previous);
+            if (info is null)
             {
-                int drive = root.Storage?.DriveNumber ?? -1;
+                continue; // identity unknown: not published, not touched, retried next round
+            }
+
+            resolved[root.Identifier] = info;
+            if (info.Rotational)
+            {
                 bool? spunDown;
                 try
                 {
-                    spunDown = drive >= 0 ? _disks.IsSpunDown(drive) : null;
+                    spunDown = _disks.IsSpunDown(info.DriveNumber);
                 }
                 catch (Exception e)
                 {
@@ -288,7 +344,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                     spunDown = null;
                 }
 
-                LogDiskStateChange(root.Identifier, drive, spunDown);
+                LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown);
                 if (spunDown != false)
                 {
                     continue; // standby or unknown: no SMART read, values absent
@@ -305,17 +361,24 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 continue;
             }
 
-            CollectValues(root, cache);
+            // Re-fetched: the update may have activated sensors (a new node for this root).
+            CollectValues(FindRoot(root.Identifier) ?? root, cache);
+        }
+
+        if (!SameResolution(previous, resolved))
+        {
+            _resolvedDisks = resolved;
+            Interlocked.Exchange(ref _structureDirty, 1);
         }
 
         // Never mutated after publication: the sampler only looks values up.
-        _storageValues = cache;
+        _storageCache = new StorageCache(roundStart, cache);
     }
 
     /// <summary>One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber, only once open). Returns the delay until the next round.</summary>
     internal TimeSpan RunStorageDue()
     {
-        if (Volatile.Read(ref _disposed) == 1)
+        if (IsDisposed)
         {
             return Timeout.InfiniteTimeSpan;
         }
@@ -338,31 +401,59 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         lock (_subLock)
         {
-            _nextStorageDue = now + (long)(StorageInterval.TotalSeconds * _time.TimestampFrequency);
+            _nextStorageDue = now + SecondsToTicks(StorageInterval);
             return TicksUntil(_nextStorageDue);
         }
     }
 
-    /// <summary>Stops and joins both workers, then disposes the tree (LHM Close, SMBus driver unload, GC).</summary>
+    /// <summary>
+    /// Stops both workers and waits up to <see cref="WorkerJoinTimeout"/> for each. If both
+    /// stopped, disposes the tree (LHM Close, SMBus driver unload, GC); otherwise leaves it open,
+    /// since a stuck worker may still be inside it.
+    /// </summary>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        Thread? sampler;
+        Thread? storage;
+        lock (_subLock)
         {
-            return;
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            sampler = _samplerThread;
+            storage = _storageThread;
         }
 
         _stop.Cancel();
-        _samplerWake.Set();
-        _storageWake.Set();
-        foreach (Thread? worker in new[] { _samplerThread, _storageThread })
+        SetQuietly(_samplerWake);
+        SetQuietly(_storageWake);
+
+        bool allStopped = true;
+        foreach (Thread? worker in new[] { sampler, storage })
         {
-            if (worker is not null && worker != Thread.CurrentThread)
+            // Dispose() from a subscriber callback runs on oma-sampler itself; that thread only
+            // finishes delivering and then leaves its loop, without touching the tree again.
+            if (worker is null || worker == Thread.CurrentThread || worker.Join(WorkerJoinTimeout))
             {
-                worker.Join();
+                continue;
             }
+
+            allStopped = false;
+            _log.LogWarning(
+                "The {Worker} thread did not stop within {Seconds} s; the hardware tree is left open (released at process exit)",
+                worker.Name,
+                WorkerJoinTimeout.TotalSeconds);
         }
 
         _tree.HardwareChanged -= OnHardwareChanged;
+        if (!allStopped)
+        {
+            return; // the wake events and the token stay alive for the stuck worker
+        }
+
         try
         {
             _tree.Dispose();
@@ -371,10 +462,17 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             _log.LogError(e, "Closing the hardware tree failed");
         }
+    }
 
-        _samplerWake.Dispose();
-        _storageWake.Dispose();
-        _stop.Dispose();
+    private bool IsDisposed
+    {
+        get
+        {
+            lock (_subLock)
+            {
+                return _disposed;
+            }
+        }
     }
 
     private Plan OpenTree()
@@ -386,13 +484,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         // Changes raised during Open() are covered by the Roots read right after.
         Interlocked.Exchange(ref _structureDirty, 0);
-        IReadOnlyList<HardwareNode> roots = _tree.Roots;
-        Plan plan = new(roots, SchemaBuilder.Build(roots, _pawnIo), revision: 1);
+        Plan plan = BuildPlan(_tree.Roots, current: null);
         _plan = plan;
         _log.LogInformation(
             "Hardware tree opened in {Elapsed} ms: {Roots} roots, {Devices} devices, {Sensors} sensors (storage deferred until every rotational disk is active)",
             (long)_time.GetElapsedTime(started).TotalMilliseconds,
-            roots.Count,
+            plan.UpdateRoots.Length,
             plan.Built.Schema.Devices.Count,
             plan.Built.Schema.Sensors.Count);
 
@@ -405,28 +502,122 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             _opened = true;
         }
 
-        _storageWake.Set();
+        SetQuietly(_storageWake);
         return plan;
     }
 
     private Plan RebuildPlan(Plan current)
     {
-        IReadOnlyList<HardwareNode> roots = _tree.Roots;
-        BuiltSchema built = SchemaBuilder.Build(roots, _pawnIo);
-        Plan plan = SchemaComparer.SameStructure(current.Built, built)
-            ? new Plan(roots, current.Built, current.Revision)
-            : new Plan(roots, built, current.Revision + 1);
+        Plan plan = BuildPlan(_tree.Roots, current);
         if (plan.Revision != current.Revision)
         {
             _log.LogInformation(
                 "Hardware changed: schema revision {Revision}, {Devices} devices, {Sensors} sensors",
                 plan.Revision,
-                built.Schema.Devices.Count,
-                built.Schema.Sensors.Count);
+                plan.Built.Schema.Devices.Count,
+                plan.Built.Schema.Sensors.Count);
         }
 
         _plan = plan;
         return plan;
+    }
+
+    /// <summary>
+    /// The schema covers every non-storage root plus the disks the storage worker has resolved
+    /// (with their resolved identity); unresolved disks stay out until then.
+    /// </summary>
+    private Plan BuildPlan(IReadOnlyList<HardwareNode> roots, Plan? current)
+    {
+        IReadOnlyDictionary<string, StorageInfo> resolved = _resolvedDisks;
+        var schemaRoots = new List<HardwareNode>(roots.Count);
+        foreach (HardwareNode root in roots)
+        {
+            if (root.Type != HardwareType.Storage)
+            {
+                schemaRoots.Add(root);
+            }
+            else if (resolved.TryGetValue(root.Identifier, out StorageInfo? info))
+            {
+                schemaRoots.Add(root with { Storage = info });
+            }
+        }
+
+        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo);
+        if (current is null)
+        {
+            return new Plan(roots, built, revision: 1);
+        }
+
+        return SchemaComparer.SameStructure(current.Built, built)
+            ? new Plan(roots, current.Built, current.Revision)
+            : new Plan(roots, built, current.Revision + 1);
+    }
+
+    /// <summary>
+    /// The disk's identity with the descriptor model/serial and the rotational flag, from
+    /// <see cref="IDiskPowerProbe.Describe"/> the first time the storage worker meets it (or when
+    /// its drive number or serial changed); <see langword="null"/> when it cannot be described.
+    /// </summary>
+    private StorageInfo? Resolve(HardwareNode root, IReadOnlyDictionary<string, StorageInfo> previous)
+    {
+        StorageInfo? fromTree = root.Storage;
+        if (fromTree is null || fromTree.DriveNumber < 0)
+        {
+            return null;
+        }
+
+        if (previous.TryGetValue(root.Identifier, out StorageInfo? known)
+            && known.DriveNumber == fromTree.DriveNumber
+            && known.DriveSerial == fromTree.DriveSerial)
+        {
+            return known;
+        }
+
+        DriveFacts? facts;
+        try
+        {
+            facts = _disks.Describe(fromTree.DriveNumber);
+        }
+        catch (Exception e)
+        {
+            LogRateLimited("describe:" + root.Identifier, e, "Describing {Root} failed", root.Identifier);
+            facts = null;
+        }
+
+        if (facts is null)
+        {
+            return null;
+        }
+
+        return fromTree with
+        {
+            DescriptorModel = facts.Model,
+            DescriptorSerial = facts.Serial,
+            Rotational = facts.RequiresPowerCheck,
+        };
+    }
+
+    private static bool SameResolution(IReadOnlyDictionary<string, StorageInfo> a, IReadOnlyDictionary<string, StorageInfo> b) =>
+        a.Count == b.Count && a.All(pair => b.TryGetValue(pair.Key, out StorageInfo? other) && other == pair.Value);
+
+    private HardwareNode? FindRoot(string identifier)
+    {
+        foreach (HardwareNode root in _tree.Roots)
+        {
+            if (root.Identifier == identifier)
+            {
+                return root;
+            }
+        }
+
+        return null;
+    }
+
+    private IReadOnlyDictionary<string, double?> FreshStorageValues(long now)
+    {
+        StorageCache cache = _storageCache;
+        bool fresh = cache.Timestamp != long.MinValue && now - cache.Timestamp <= 2 * SecondsToTicks(StorageInterval);
+        return fresh ? cache.Values : StorageCache.Empty.Values;
     }
 
     private bool TryEnableStorage()
@@ -510,11 +701,17 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             foreach (Subscriber s in _subscribers)
             {
-                if (now >= s.NextDue)
+                if (now < s.NextDue)
                 {
-                    s.NextDue = now + s.IntervalTicks;
-                    _dueScratch.Add(s);
+                    continue;
                 }
+
+                // Anchored to the schedule; the first delivery sets the phase from the sample it
+                // carries, so a subscriber and the sampling it drives share one wake per interval.
+                long next = s.Scheduled ? s.NextDue + s.IntervalTicks : published.SampleAnchor + s.IntervalTicks;
+                s.NextDue = next <= now ? now + s.IntervalTicks : next;
+                s.Scheduled = true;
+                _dueScratch.Add(s);
             }
         }
 
@@ -537,6 +734,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     private void Unsubscribe(Subscriber subscriber)
     {
+        bool idle;
         lock (_subLock)
         {
             if (!_subscribers.Remove(subscriber))
@@ -545,6 +743,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             RecomputeSamplingLocked();
+            idle = _subscribers.Count == 0;
+        }
+
+        if (idle)
+        {
+            // Sampling and storage rounds stop: values read before the idle period must not be
+            // published as current when a client comes back.
+            _storageCache = StorageCache.Empty;
         }
 
         SetQuietly(_samplerWake); // recompute the next wake (or sleep until a new subscriber)
@@ -559,7 +765,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         _minIntervalTicks = _subscribers.Count == 0 ? 0 : min;
-        _nextSampleDue = _sampled ? _lastSampleStart + _minIntervalTicks : long.MinValue;
+        _nextSampleDue = _sampled ? _sampleAnchor + _minIntervalTicks : long.MinValue;
     }
 
     private void OnHardwareChanged() => Interlocked.Exchange(ref _structureDirty, 1);
@@ -567,8 +773,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private void LogRateLimited(string key, Exception e, string message, params object?[] args)
     {
         long now = _time.GetTimestamp();
-        long minimum = (long)(ErrorLogInterval.TotalSeconds * _time.TimestampFrequency);
-        if (_errorLoggedAt.TryGetValue(key, out long last) && now - last < minimum)
+        if (_errorLoggedAt.TryGetValue(key, out long last) && now - last < SecondsToTicks(ErrorLogInterval))
         {
             return;
         }
@@ -581,10 +786,24 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     private long MsToTicks(uint ms) => (long)(ms * (double)_time.TimestampFrequency / 1000d);
 
+    private long SecondsToTicks(TimeSpan span) => (long)(span.TotalSeconds * _time.TimestampFrequency);
+
     private TimeSpan TicksUntil(long due)
     {
-        long remaining = due - _time.GetTimestamp();
-        return remaining <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds(remaining / (double)_time.TimestampFrequency);
+        long now = _time.GetTimestamp();
+        return due <= now ? TimeSpan.Zero : TimeSpan.FromSeconds((due - now) / (double)_time.TimestampFrequency);
+    }
+
+    private static void SetQuietly(ManualResetEventSlim wake)
+    {
+        try
+        {
+            wake.Set();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Nothing left to wake.
+        }
     }
 
     private void SamplerLoop() => RunLoop(_samplerWake, RunDue, "sampler");
@@ -623,27 +842,24 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             {
                 wake.Wait(stop);
             }
-            catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
+            catch (OperationCanceledException)
             {
                 break; // Dispose()
             }
         }
     }
 
-    private static void SetQuietly(ManualResetEventSlim wake)
-    {
-        try
-        {
-            wake.Set();
-        }
-        catch (ObjectDisposedException)
-        {
-            // A timer that fired after Dispose(): nothing left to wake.
-        }
-    }
+    /// <summary>
+    /// Schema, bindings and snapshot published together, so a snapshot always matches the schema
+    /// sent with it; <paramref name="SampleAnchor"/> is the scheduled (monotonic) time of the sample.
+    /// </summary>
+    private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot, long SampleAnchor);
 
-    /// <summary>Schema, bindings and snapshot published together, so a snapshot always matches the schema sent with it.</summary>
-    private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot);
+    /// <summary>Raw storage values of one round, keyed by LHM sensor identifier, with the round's monotonic start.</summary>
+    private sealed record StorageCache(long Timestamp, IReadOnlyDictionary<string, double?> Values)
+    {
+        public static StorageCache Empty { get; } = new(long.MinValue, new Dictionary<string, double?>());
+    }
 
     /// <summary>A schema revision with its per-binding sampling plan (sampler-owned, replaced as a whole).</summary>
     private sealed class Plan
@@ -721,10 +937,22 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         /// <summary>Monotonic (<see cref="TimeProvider.GetTimestamp"/>) deadline of the next delivery; guarded by <c>_subLock</c>.</summary>
         public long NextDue { get; set; }
 
+        /// <summary>Whether <see cref="NextDue"/> is on the subscriber's schedule yet (after the first delivery); guarded by <c>_subLock</c>.</summary>
+        public bool Scheduled { get; set; }
+
         /// <summary>Schema revision last delivered (0 = none yet); sampler-owned.</summary>
         public int DeliveredRevision { get; set; }
 
         public void Dispose() => hub.Unsubscribe(this);
+    }
+
+    private sealed class NoSubscription : IDisposable
+    {
+        public static NoSubscription Instance { get; } = new();
+
+        public void Dispose()
+        {
+        }
     }
 }
 

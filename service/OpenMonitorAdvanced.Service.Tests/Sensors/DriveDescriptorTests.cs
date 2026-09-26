@@ -115,4 +115,15 @@ public sealed class DriveDescriptorTests
         Assert.Null(model);
         Assert.Null(serial);
     }
+
+    [Fact]
+    public void ParsesTheBusType()
+    {
+        // STORAGE_DEVICE_DESCRIPTOR.BusType: u32 at offset 28 (BusTypeNvme = 0x11).
+        byte[] descriptor = BuildDescriptor("Model"u8.ToArray(), null);
+        BitConverter.GetBytes(0x11u).CopyTo(descriptor, 28);
+
+        Assert.Equal(0x11u, DriveDescriptor.ParseBusType(descriptor));
+        Assert.Null(DriveDescriptor.ParseBusType(descriptor.AsSpan(0, 31)));
+    }
 }

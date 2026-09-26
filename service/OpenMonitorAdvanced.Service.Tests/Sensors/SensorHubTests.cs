@@ -347,8 +347,7 @@ public sealed class SensorHubTests
     {
         bool? spunDown = null;
         var probe = new DiskPowerProbe(
-            enumerateDrives: () => [0],
-            hasSeekPenalty: _ => null, // unknown => treated as rotational
+            enumerateDrives: () => [new DriveFacts(0, DriveAvailability.Present, "Disk", null, BusType: 0x0B, SeekPenalty: null)], // unknown => treated as rotational
             isSpunDown: _ => spunDown);
         using var h = new Harness(probe);
         h.Tree.Initial.Add(Cpu());
@@ -598,38 +597,285 @@ public sealed class SensorHubTests
     }
 
     [Fact]
-    public void TheWorkersOpenOnTheSamplerThreadAndAreJoinedBeforeTheTreeCloses()
+    public void WorkersOpenOnTheSamplerThreadAndNeverUpdateAfterClose()
     {
         var tree = new FakeTree();
         tree.Initial.Add(Cpu());
         tree.Storage.Add(Hdd());
-        var disks = new FakeDisks();
-        var hub = new SensorHub(tree, disks, () => true, new FakeTimeProvider(), new ListLogger<SensorHub>());
+        var hub = new SensorHub(tree, new FakeDisks(), () => true, new FakeTimeProvider(), new ListLogger<SensorHub>());
         CancellationToken ct = TestContext.Current.CancellationToken;
         using var delivered = new ManualResetEventSlim();
-        using var storageEnabled = new ManualResetEventSlim();
-        string? deliveringThread = null;
+        using var storageUpdated = new ManualResetEventSlim();
         tree.BeforeUpdate = root =>
         {
             if (root.Type == HardwareType.Storage)
             {
-                storageEnabled.Set();
+                storageUpdated.Set();
             }
         };
 
-        hub.Subscribe(1000, _ =>
-        {
-            deliveringThread ??= Thread.CurrentThread.Name;
-            delivered.Set();
-        });
+        hub.Subscribe(1000, _ => delivered.Set());
 
         Assert.True(delivered.Wait(TimeSpan.FromSeconds(10), ct), "the sampler thread never delivered");
-        Assert.True(storageEnabled.Wait(TimeSpan.FromSeconds(10), ct), "the storage thread never ran its first round");
+        Assert.True(storageUpdated.Wait(TimeSpan.FromSeconds(10), ct), "the storage thread never ran its first round");
         hub.Dispose();
 
-        Assert.Equal("oma-sampler", deliveringThread);
+        Assert.Equal("oma-sampler", tree.OpenThreadName);
         Assert.Equal(1, tree.OpenCount);
         Assert.Equal(1, tree.CloseCount);
+        Assert.Equal(0, tree.UpdatesAfterClose);
+    }
+
+    [Fact]
+    public void SubscribeRacingDisposeIsSafe()
+    {
+        for (int round = 0; round < 50; round++)
+        {
+            var tree = new FakeTree();
+            tree.Initial.Add(Cpu());
+            var hub = new SensorHub(tree, new FakeDisks(), () => true, new FakeTimeProvider(), new ListLogger<SensorHub>());
+            var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            using var start = new Barrier(2);
+            var subscriber = new Thread(() =>
+            {
+                start.SignalAndWait(ct);
+                for (int i = 0; i < 20; i++)
+                {
+                    try
+                    {
+                        hub.Subscribe(1000, _ => { }).Dispose();
+                        hub.Subscribe(1000, _ => { });
+                    }
+                    catch (Exception e)
+                    {
+                        errors.Enqueue(e);
+                    }
+                }
+            })
+            { IsBackground = true };
+            subscriber.Start();
+            start.SignalAndWait(ct);
+            hub.Dispose();
+            Assert.True(subscriber.Join(TimeSpan.FromSeconds(10)));
+
+            // After Dispose a subscription is a no-op: no exception, no worker thread.
+            hub.Subscribe(1000, _ => { }).Dispose();
+
+            Assert.Empty(errors);
+            Assert.False(hub.AnyWorkerAlive);
+            Assert.True(tree.CloseCount <= 1);
+            Assert.Equal(0, tree.UpdatesAfterClose);
+        }
+    }
+
+    [Fact]
+    public void DisposeGivesUpOnAStuckWorkerWithoutClosingTheTree()
+    {
+        var tree = new FakeTree();
+        tree.Initial.Add(Cpu());
+        tree.Storage.Add(Hdd());
+        var log = new ListLogger<SensorHub>();
+        var hub = new SensorHub(tree, new FakeDisks(), () => true, new FakeTimeProvider(), log) { WorkerJoinTimeout = TimeSpan.FromMilliseconds(200) };
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        tree.BeforeUpdate = root =>
+        {
+            if (root.Type == HardwareType.Storage)
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(30), ct);
+            }
+        };
+        hub.Subscribe(1000, _ => { });
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10), ct), "the storage worker never reached the disk");
+
+        hub.Dispose();
+
+        // A worker may still be inside the tree: it is left open (the process is exiting).
+        Assert.Equal(0, tree.CloseCount);
+        Assert.Contains(log.Entries, e => e.Level >= LogLevel.Warning && e.Message.Contains("oma-storage", StringComparison.Ordinal));
+        release.Set();
+    }
+
+    [Fact]
+    public void DiskIdentityIsResolvedOnlyByTheStorageWorker()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000);
+        for (int i = 0; i < 3; i++)
+        {
+            h.Hub.TickOnce();
+            h.Advance(1000);
+        }
+
+        Assert.Equal(0, h.Disks.DescribeCalls);
+        Assert.DoesNotContain(LatestSchema(a).Devices, d => d.Kind == "storage");
+
+        var storage = new Thread(() => h.Hub.StorageOnce()) { Name = "oma-storage" };
+        storage.Start();
+        Assert.True(storage.Join(TimeSpan.FromSeconds(10)));
+        h.Hub.TickOnce();
+
+        Assert.NotEmpty(h.Disks.DescribeThreads);
+        Assert.All(h.Disks.DescribeThreads, name => Assert.Equal("oma-storage", name));
+        WireDevice disk = Assert.Single(LatestSchema(a).Devices, d => d.Kind == "storage");
+        Assert.Equal(new StorageHint(0, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL"), disk.Hint);
+    }
+
+    [Fact]
+    public void ABlockingDiskIdentityQueryDoesNotBlockSampling()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        h.Disks.BeforeDescribe = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(30), ct);
+        };
+
+        var storage = new Thread(() => h.Hub.StorageOnce()) { IsBackground = true };
+        storage.Start();
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10), ct), "the storage round never asked for the disk identity");
+
+        var ticks = new Thread(() =>
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                h.Advance(1000);
+                h.Hub.TickOnce();
+            }
+        })
+        { IsBackground = true };
+        ticks.Start();
+        bool finished = ticks.Join(TimeSpan.FromSeconds(10));
+        release.Set();
+
+        Assert.True(finished, "CPU sampling was blocked by a disk identity query");
+        Assert.Equal(4, a.Count);
+        Assert.True(storage.Join(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public void OneSamplingAndOneWakePerIntervalDespiteSlowTicks()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        int ticks = 0;
+        h.Tree.BeforeUpdate = _ => h.Advance(ticks++ % 2 == 0 ? 50 : 10); // LHM updates take 50 or 10 ms of fake time
+        long start = h.Time.GetUtcNow().ToUnixTimeMilliseconds();
+        List<FeedUpdate> a = h.Subscribe(1000);
+
+        int wakes = 0;
+        while (h.Time.GetUtcNow().ToUnixTimeMilliseconds() - start < 60_000)
+        {
+            Assert.True(wakes < 1000, "the sampler loop did not make progress");
+            TimeSpan delay = h.Hub.RunDue();
+            wakes++;
+            h.Time.Advance(delay + TimeSpan.FromMilliseconds(3)); // the OS timer fires a little late
+        }
+
+        Assert.Equal(60, h.Tree.Updates("/amdcpu/0"));
+        Assert.Equal(60, a.Count);
+        Assert.Equal(60, wakes);
+    }
+
+    [Fact]
+    public void ADiskSensorActivatedByItsUpdateIsReadInTheSameRound()
+    {
+        const string HddLife = "/hdd/0/level/20";
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddLife] = 97;
+        bool activated = false;
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (!activated && root.Type == HardwareType.Storage)
+            {
+                activated = true;
+                h.Tree.Replace(Cpu(), Hdd() with { Sensors = [.. Hdd().Sensors, new SensorNode(HddLife, SensorType.Level, "Life", 20)] });
+            }
+        };
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+
+        Assert.Equal(97, ValueOf(a, a.Count - 1, "percent", "life"));
+    }
+
+    [Fact]
+    public void AFailedSchemaRebuildIsRetriedOnTheNextTick()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Values[RamUsed] = 1;
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+
+        h.Tree.Replace(Cpu(), Ram());
+        h.Tree.ThrowOnNextRoots();
+        h.Advance(1000);
+        h.Hub.TickOnce(); // the rebuild fails: the old schema keeps being served
+        h.Advance(1000);
+        h.Hub.TickOnce(); // retried
+
+        Assert.Equal(3, a.Count);
+        Assert.Null(a[1].Schema);
+        Assert.Equal(a[0].Schema!.Sensors.Count, a[1].Snapshot.Values.Count);
+        Assert.NotNull(a[2].Schema);
+        Assert.Equal(TwoPow30, ValueOf(a, 2, "data", "used"));
+        Assert.Contains(h.Log.Entries, e => e.Level >= LogLevel.Warning && e.Exception is InvalidOperationException { Message: "roots unavailable" });
+    }
+
+    [Fact]
+    public void StorageValuesDoNotSurviveAnIdlePeriod()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        h.Subscribe(1000, out IDisposable first);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        first.Dispose();
+
+        h.Advance(5_000);
+        List<FeedUpdate> b = h.Subscribe(1000);
+        h.Hub.TickOnce(); // before any new storage round
+
+        Assert.Null(ValueOf(b, 0, "temperature", "drive"));
+    }
+
+    [Fact]
+    public void StorageValuesOlderThanTwoRoundsAreAbsent()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(59_000);
+        h.Hub.TickOnce();
+        Assert.Equal(40, ValueOf(a, a.Count - 1, "temperature", "drive"));
+
+        h.Advance(2_000); // the storage worker is stuck: no round for more than 60 s
+        h.Hub.TickOnce();
+        Assert.Null(ValueOf(a, a.Count - 1, "temperature", "drive"));
     }
 
     [Fact]

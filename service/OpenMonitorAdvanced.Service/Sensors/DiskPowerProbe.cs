@@ -8,17 +8,20 @@ using Microsoft.Win32.SafeHandles;
 namespace OpenMonitorAdvanced.Service.Sensors;
 
 /// <summary>
-/// Disk power checks for decision D6, done without LHM/DiskInfoToolkit so they can run before
-/// the storage group exists:
+/// Disk checks for decision D6, done without LHM/DiskInfoToolkit so they can run before the
+/// storage group exists and never wake a disk:
 /// <list type="bullet">
-/// <item>rotational = <c>IOCTL_STORAGE_QUERY_PROPERTY</c> / <c>StorageDeviceSeekPenaltyProperty</c>
-/// on <c>\\.\PhysicalDriveN</c> opened with access 0 (metadata only); unknown counts as rotational;</item>
-/// <item>standby = ATA <c>CHECK POWER MODE</c> (0xE5) through <c>IOCTL_ATA_PASS_THROUGH</c>, a
-/// non-media command that never spins a drive up (needs read/write access: the service runs as
-/// LocalSystem).</item>
+/// <item><see cref="Describe"/>: <c>STORAGE_DEVICE_DESCRIPTOR</c> (model, serial, bus type) and
+/// <c>StorageDeviceSeekPenaltyProperty</c> through <c>IOCTL_STORAGE_QUERY_PROPERTY</c> on
+/// <c>\\.\PhysicalDriveN</c> opened with access 0 (metadata only);</item>
+/// <item><see cref="IsSpunDown"/>: ATA <c>CHECK POWER MODE</c> (0xE5) through
+/// <c>IOCTL_ATA_PASS_THROUGH</c>, a non-media command that never spins a drive up (needs
+/// read/write access: the service runs as LocalSystem);</item>
+/// <item><see cref="AllRotationalDisksActive"/>: the gate of controller ruling R17 over those
+/// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="FindGateBlockers"/>).</item>
 /// </list>
 /// The IOCTLs need an elevated process and a real disk (verified in Task 15); the decision
-/// logic, the register interpretation and the struct layouts are unit-tested.
+/// logic, the register interpretation, the error logging and the struct layouts are unit-tested.
 /// </summary>
 public sealed class DiskPowerProbe : IDiskPowerProbe
 {
@@ -29,63 +32,76 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     private const byte AtaStatusError = 0x01;
     private const uint AtaTimeoutSeconds = 5;
 
-    private readonly Func<IEnumerable<int>> _enumerateDrives;
-    private readonly Func<int, bool?> _hasSeekPenalty;
+    private const string OpenMetadata = "open (access 0)";
+    private const string OpenReadWrite = "open (read/write)";
+    private const string QueryDescriptor = "IOCTL_STORAGE_QUERY_PROPERTY(Device)";
+    private const string QuerySeekPenalty = "IOCTL_STORAGE_QUERY_PROPERTY(SeekPenalty)";
+    private const string CheckPowerMode = "IOCTL_ATA_PASS_THROUGH(CHECK POWER MODE)";
+
+    private readonly Func<IReadOnlyList<DriveFacts>> _enumerateDrives;
+    private readonly Func<int, DriveFacts?> _describe;
     private readonly Func<int, bool?> _isSpunDown;
     private readonly ILogger _log;
-
-    /// <summary>Last Win32 error logged per (drive, operation): a failure repeated every 30 s is logged once, until it changes.</summary>
-    private readonly ConcurrentDictionary<(int Drive, string Operation), int> _lastLoggedError = new();
+    private readonly Win32ErrorLog _errors;
+    private readonly object _gateLogLock = new();
+    private string? _lastBlockers;
 
     public DiskPowerProbe(ILogger<DiskPowerProbe> log)
     {
         _log = log;
+        _errors = new Win32ErrorLog(log);
         _enumerateDrives = EnumeratePhysicalDrives;
-        _hasSeekPenalty = QuerySeekPenalty;
+        _describe = DescribePhysicalDrive;
         _isSpunDown = QueryCheckPowerMode;
     }
 
-    /// <summary>Test seam: the decision logic over scripted drive answers.</summary>
-    internal DiskPowerProbe(Func<IEnumerable<int>> enumerateDrives, Func<int, bool?> hasSeekPenalty, Func<int, bool?> isSpunDown, ILogger? log = null)
+    /// <summary>Test seam: the decision logic over scripted drive facts and power-mode answers.</summary>
+    internal DiskPowerProbe(Func<IReadOnlyList<DriveFacts>> enumerateDrives, Func<int, bool?> isSpunDown, ILogger? log = null)
     {
-        _enumerateDrives = enumerateDrives;
-        _hasSeekPenalty = hasSeekPenalty;
-        _isSpunDown = isSpunDown;
         _log = log ?? NullLogger.Instance;
+        _errors = new Win32ErrorLog(_log);
+        _enumerateDrives = enumerateDrives;
+        _describe = n => enumerateDrives().FirstOrDefault(d => d.DriveNumber == n);
+        _isSpunDown = isSpunDown;
     }
 
     /// <inheritdoc />
     public bool? IsSpunDown(int driveNumber) => driveNumber < 0 ? null : _isSpunDown(driveNumber);
 
-    /// <summary>
-    /// <c>StorageDeviceSeekPenaltyProperty</c> on <c>\\.\PhysicalDriveN</c> (access 0):
-    /// <see langword="true"/> rotational, <see langword="false"/> solid state,
-    /// <see langword="null"/> unknown (callers treat unknown as rotational).
-    /// </summary>
-    public bool? HasSeekPenalty(int driveNumber) => driveNumber < 0 ? null : _hasSeekPenalty(driveNumber);
+    /// <inheritdoc />
+    public DriveFacts? Describe(int driveNumber) => driveNumber < 0 ? null : _describe(driveNumber);
 
     /// <inheritdoc />
     public bool AllRotationalDisksActive()
     {
-        foreach (int drive in _enumerateDrives())
+        IReadOnlyList<DriveBlocker> blockers = FindGateBlockers(_enumerateDrives(), IsSpunDown);
+        LogBlockersOnChange(blockers);
+        return blockers.Count == 0;
+    }
+
+    /// <summary>
+    /// Controller ruling R17: the drives that keep the D6 gate closed. A drive whose
+    /// <see cref="DriveFacts.RequiresPowerCheck"/> is false is skipped without being asked; every
+    /// other drive blocks unless <paramref name="isSpunDown"/> answers <see langword="false"/>.
+    /// </summary>
+    internal static IReadOnlyList<DriveBlocker> FindGateBlockers(IEnumerable<DriveFacts> drives, Func<int, bool?> isSpunDown)
+    {
+        var blockers = new List<DriveBlocker>();
+        foreach (DriveFacts drive in drives)
         {
-            if (HasSeekPenalty(drive) == false)
+            if (!drive.RequiresPowerCheck)
             {
-                continue; // solid state: identification cannot wake it
+                continue;
             }
 
-            bool? spunDown = IsSpunDown(drive);
+            bool? spunDown = isSpunDown(drive.DriveNumber);
             if (spunDown != false)
             {
-                _log.LogDebug(
-                    "PhysicalDrive{Drive} is rotational (or unknown) and {State}: storage stays disabled",
-                    drive,
-                    spunDown == true ? "in standby" : "of unknown power state");
-                return false;
+                blockers.Add(new DriveBlocker(drive, spunDown));
             }
         }
 
-        return true;
+        return blockers;
     }
 
     /// <summary>
@@ -108,41 +124,106 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     internal static bool? ParseSeekPenalty(ReadOnlySpan<byte> descriptor) =>
         descriptor.Length > 8 ? descriptor[8] != 0 : null;
 
+    private static bool IsNoMedia(int error) => error is NativeMethods.ErrorNotReady or NativeMethods.ErrorNoMediaInDrive;
+
     private static string DrivePath(int drive) => @"\\.\PhysicalDrive" + drive.ToString(CultureInfo.InvariantCulture);
 
-    private IEnumerable<int> EnumeratePhysicalDrives()
+    private void LogBlockersOnChange(IReadOnlyList<DriveBlocker> blockers)
     {
-        var drives = new List<int>();
-        for (int drive = 0; drive < MaxProbedDrives; drive++)
+        string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{b.SpunDown}"));
+        lock (_gateLogLock)
         {
-            // SAFETY: access 0 opens the device for metadata queries only; no media I/O.
-            using SafeFileHandle handle = NativeMethods.CreateFileW(DrivePath(drive), 0, NativeMethods.FileShareReadWrite, IntPtr.Zero, NativeMethods.OpenExisting, 0, IntPtr.Zero);
-            if (!handle.IsInvalid)
+            if (key == _lastBlockers)
             {
-                drives.Add(drive);
-                continue;
+                return;
             }
 
-            int error = Marshal.GetLastPInvokeError();
-            if (error is not (NativeMethods.ErrorFileNotFound or NativeMethods.ErrorPathNotFound))
+            _lastBlockers = key;
+        }
+
+        if (blockers.Count == 0)
+        {
+            _log.LogInformation("No drive keeps storage disabled any more");
+            return;
+        }
+
+        foreach (DriveBlocker blocker in blockers)
+        {
+            _log.LogInformation(
+                "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
+                blocker.Drive.DriveNumber,
+                blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
+                blocker.Drive.Model ?? "unknown",
+                blocker.SpunDown == true ? "in standby" : "power state unknown");
+        }
+    }
+
+    private IReadOnlyList<DriveFacts> EnumeratePhysicalDrives()
+    {
+        var drives = new List<DriveFacts>();
+        for (int drive = 0; drive < MaxProbedDrives; drive++)
+        {
+            if (DescribePhysicalDrive(drive) is { } facts)
             {
-                LogWin32Error(drive, "open (access 0)", error);
+                drives.Add(facts);
             }
         }
 
         return drives;
     }
 
-    private bool? QuerySeekPenalty(int drive)
+    private DriveFacts? DescribePhysicalDrive(int drive)
     {
         // SAFETY: access 0 opens the device for metadata queries only; no media I/O.
         using SafeFileHandle handle = NativeMethods.CreateFileW(DrivePath(drive), 0, NativeMethods.FileShareReadWrite, IntPtr.Zero, NativeMethods.OpenExisting, 0, IntPtr.Zero);
         if (handle.IsInvalid)
         {
-            LogWin32Error(drive, "open (access 0)", Marshal.GetLastPInvokeError());
-            return null;
+            int error = Marshal.GetLastPInvokeError();
+            if (error is NativeMethods.ErrorFileNotFound or NativeMethods.ErrorPathNotFound)
+            {
+                return null; // no such drive
+            }
+
+            if (IsNoMedia(error))
+            {
+                return new DriveFacts(drive, DriveAvailability.NoMedia, null, null, null, null);
+            }
+
+            _errors.Failed(drive, OpenMetadata, error);
+            return new DriveFacts(drive, DriveAvailability.Unreadable, null, null, null, null);
         }
 
+        _errors.Succeeded(drive, OpenMetadata);
+
+        byte[]? descriptor = DriveDescriptor.Query(handle, out int descriptorError);
+        if (descriptor is null && IsNoMedia(descriptorError))
+        {
+            return new DriveFacts(drive, DriveAvailability.NoMedia, null, null, null, null);
+        }
+
+        if (descriptor is null)
+        {
+            _errors.Failed(drive, QueryDescriptor, descriptorError);
+        }
+        else
+        {
+            _errors.Succeeded(drive, QueryDescriptor);
+        }
+
+        (string? model, string? serial) = descriptor is null ? (null, null) : DriveDescriptor.Parse(descriptor);
+        uint? busType = descriptor is null ? null : DriveDescriptor.ParseBusType(descriptor);
+
+        bool? seekPenalty = QuerySeekPenaltyOf(handle, drive, out int seekError);
+        if (seekPenalty is null && IsNoMedia(seekError))
+        {
+            return new DriveFacts(drive, DriveAvailability.NoMedia, model, serial, busType, null);
+        }
+
+        return new DriveFacts(drive, DriveAvailability.Present, model, serial, busType, seekPenalty);
+    }
+
+    private bool? QuerySeekPenaltyOf(SafeFileHandle handle, int drive, out int error)
+    {
         var query = new NativeMethods.StoragePropertyQuery
         {
             PropertyId = NativeMethods.StorageDeviceSeekPenaltyProperty,
@@ -162,10 +243,17 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             IntPtr.Zero);
         if (!ok)
         {
-            LogWin32Error(drive, "IOCTL_STORAGE_QUERY_PROPERTY(SeekPenalty)", Marshal.GetLastPInvokeError());
+            error = Marshal.GetLastPInvokeError();
+            if (!IsNoMedia(error))
+            {
+                _errors.Failed(drive, QuerySeekPenalty, error);
+            }
+
             return null;
         }
 
+        error = 0;
+        _errors.Succeeded(drive, QuerySeekPenalty);
         ReadOnlySpan<byte> bytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref descriptor, 1));
         return ParseSeekPenalty(bytes[..(int)Math.Min(returned, (uint)bytes.Length)]);
     }
@@ -184,10 +272,11 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
-            LogWin32Error(drive, "open (read/write)", Marshal.GetLastPInvokeError());
+            _errors.Failed(drive, OpenReadWrite, Marshal.GetLastPInvokeError());
             return null;
         }
 
+        _errors.Succeeded(drive, OpenReadWrite);
         var request = new NativeMethods.AtaPassThroughEx
         {
             Length = (ushort)Marshal.SizeOf<NativeMethods.AtaPassThroughEx>(),
@@ -212,11 +301,11 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             IntPtr.Zero);
         if (!ok)
         {
-            LogWin32Error(drive, "IOCTL_ATA_PASS_THROUGH(CHECK POWER MODE)", Marshal.GetLastPInvokeError());
+            _errors.Failed(drive, CheckPowerMode, Marshal.GetLastPInvokeError());
             return null;
         }
 
-        _lastLoggedError.TryRemove((drive, "IOCTL_ATA_PASS_THROUGH(CHECK POWER MODE)"), out _);
+        _errors.Succeeded(drive, CheckPowerMode);
         byte[]? taskFile = reply.CurrentTaskFile;
         if (taskFile is not { Length: 8 })
         {
@@ -232,15 +321,27 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         return spunDown;
     }
 
-    private void LogWin32Error(int drive, string operation, int error)
+    /// <summary>
+    /// Logs a Win32 failure once per (drive, operation) until its error code changes; any success
+    /// of that operation resets it, so a failure that comes back after a success is logged again.
+    /// Every call made every 30 s would otherwise flood the log.
+    /// </summary>
+    internal sealed class Win32ErrorLog(ILogger log)
     {
-        if (_lastLoggedError.TryGetValue((drive, operation), out int last) && last == error)
+        private readonly ConcurrentDictionary<(int Drive, string Operation), int> _last = new();
+
+        public void Failed(int drive, string operation, int error)
         {
-            return;
+            if (_last.TryGetValue((drive, operation), out int last) && last == error)
+            {
+                return;
+            }
+
+            _last[(drive, operation)] = error;
+            log.LogWarning("PhysicalDrive{Drive}: {Operation} failed with Win32 error {Error}", drive, operation, error);
         }
 
-        _lastLoggedError[(drive, operation)] = error;
-        _log.LogWarning("PhysicalDrive{Drive}: {Operation} failed with Win32 error {Error}", drive, operation, error);
+        public void Succeeded(int drive, string operation) => _last.TryRemove((drive, operation), out _);
     }
 
     internal static class NativeMethods
@@ -251,6 +352,8 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         internal const uint OpenExisting = 3;
         internal const int ErrorFileNotFound = 2;
         internal const int ErrorPathNotFound = 3;
+        internal const int ErrorNotReady = 21;
+        internal const int ErrorNoMediaInDrive = 1112;
 
         /// <c>CTL_CODE(IOCTL_STORAGE_BASE, 0x0500, METHOD_BUFFERED, FILE_ANY_ACCESS)</c> (winioctl.h).
         internal const uint IoctlStorageQueryProperty = 0x002D1400;

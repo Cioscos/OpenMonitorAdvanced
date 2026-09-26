@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
 using OpenMonitorAdvanced.Service.Sensors;
 using Xunit;
 
@@ -45,27 +46,77 @@ public sealed class DiskPowerProbeTests
         Assert.Null(DiskPowerProbe.ParseSeekPenalty(hdd.AsSpan(0, 8)));
     }
 
-    [Fact]
-    public void EveryRotationalOrUnknownDiskMustBeActive()
-    {
-        static bool All(bool? seekPenalty, bool? spunDown) =>
-            new DiskPowerProbe(() => [0], _ => seekPenalty, _ => spunDown).AllRotationalDisksActive();
+    private static DriveFacts Drive(int n, uint? bus, bool? seekPenalty, DriveAvailability availability = DriveAvailability.Present, string? model = "Model") =>
+        new(n, availability, model, null, bus, seekPenalty);
 
-        Assert.True(All(seekPenalty: true, spunDown: false));
-        Assert.False(All(seekPenalty: true, spunDown: true));
-        Assert.False(All(seekPenalty: true, spunDown: null));
-        Assert.False(All(seekPenalty: null, spunDown: null)); // unknown = rotational
-        Assert.True(All(seekPenalty: null, spunDown: false));
-        Assert.True(All(seekPenalty: false, spunDown: null)); // SSD/NVMe: never asked
+    /// <summary>Drives the rule would ask (a callback that records and answers "unknown", i.e. would block).</summary>
+    private static (IReadOnlyList<DriveBlocker> Blockers, List<int> Asked) Gate(params DriveFacts[] drives)
+    {
+        var asked = new List<int>();
+        IReadOnlyList<DriveBlocker> blockers = DiskPowerProbe.FindGateBlockers(drives, n =>
+        {
+            asked.Add(n);
+            return null;
+        });
+        return (blockers, asked);
     }
 
     [Fact]
-    public void SolidStateDisksAreNeverAskedForTheirPowerMode()
+    public void ADriveWithoutMediaDoesNotBlockTheGate()
+    {
+        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(4, bus: null, seekPenalty: null, DriveAvailability.NoMedia));
+        Assert.Empty(blockers);
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void VirtualDisksDoNotBlockTheGate()
+    {
+        // STORAGE_BUS_TYPE BusTypeVirtual (0xE) and BusTypeFileBackedVirtual (0xF): VHD/VHDX, ramdisks.
+        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(5, bus: 0x0E, seekPenalty: null), Drive(6, bus: 0x0F, seekPenalty: true));
+        Assert.Empty(blockers);
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void NvmeDoesNotBlockTheGate()
+    {
+        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(2, bus: 0x11, seekPenalty: null));
+        Assert.Empty(blockers);
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void ASolidStateDriveDoesNotBlockTheGate()
+    {
+        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(1, bus: 0x0B, seekPenalty: false));
+        Assert.Empty(blockers);
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public void RotationalUnknownAndUnreadableDrivesMustBeActive()
+    {
+        DriveFacts hdd = Drive(0, bus: 0x0B, seekPenalty: true);
+        DriveFacts unknown = Drive(3, bus: 0x07, seekPenalty: null); // e.g. USB, seek penalty not answered
+        DriveFacts unreadable = Drive(7, bus: null, seekPenalty: null, DriveAvailability.Unreadable);
+
+        foreach (DriveFacts drive in new[] { hdd, unknown, unreadable })
+        {
+            Assert.Empty(DiskPowerProbe.FindGateBlockers([drive], _ => false));
+            DriveBlocker standby = Assert.Single(DiskPowerProbe.FindGateBlockers([drive], _ => true));
+            Assert.Equal((drive, (bool?)true), (standby.Drive, standby.SpunDown));
+            DriveBlocker unanswered = Assert.Single(DiskPowerProbe.FindGateBlockers([drive], _ => null));
+            Assert.Null(unanswered.SpunDown);
+        }
+    }
+
+    [Fact]
+    public void OnlyTheDrivesThatNeedItAreAskedForTheirPowerMode()
     {
         var asked = new List<int>();
         var probe = new DiskPowerProbe(
-            () => [0, 1, 2],
-            n => n == 1,
+            () => [Drive(0, 0x0B, true), Drive(1, 0x0B, false), Drive(2, 0x11, null), Drive(3, 0x0E, null), Drive(4, null, null, DriveAvailability.NoMedia)],
             n =>
             {
                 asked.Add(n);
@@ -73,16 +124,60 @@ public sealed class DiskPowerProbeTests
             });
 
         Assert.True(probe.AllRotationalDisksActive());
-        Assert.Equal([1], asked);
+        Assert.Equal([0], asked);
+    }
+
+    [Fact]
+    public void TheBlockingDrivesAreLoggedOncePerChange()
+    {
+        var log = new ListLogger<DiskPowerProbe>();
+        var drives = new List<DriveFacts> { Drive(0, 0x0B, true, model: "ST2000DM008-2FR102") };
+        var probe = new DiskPowerProbe(() => drives, _ => true, log);
+
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.False(probe.AllRotationalDisksActive());
+        }
+
+        LogEntry first = Assert.Single(log.Entries, e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive0", StringComparison.Ordinal));
+        Assert.Contains("ST2000DM008-2FR102", first.Message, StringComparison.Ordinal);
+        Assert.Contains("0x0B", first.Message, StringComparison.Ordinal);
+
+        drives.Add(Drive(3, 0x07, null, model: "USB Stick"));
+        Assert.False(probe.AllRotationalDisksActive());
+        Assert.False(probe.AllRotationalDisksActive());
+
+        Assert.Single(log.Entries, e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive3", StringComparison.Ordinal));
+        Assert.Equal(2, log.Entries.Count(e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive0", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Win32ErrorsAreLoggedOncePerChangeAndResetOnSuccess()
+    {
+        var log = new ListLogger<DiskPowerProbe>();
+        var errors = new DiskPowerProbe.Win32ErrorLog(log);
+
+        errors.Failed(0, "open", 5);
+        errors.Failed(0, "open", 5);
+        Assert.Single(log.Entries);
+
+        errors.Failed(0, "ioctl", 5); // another operation
+        Assert.Equal(2, log.Entries.Count);
+
+        errors.Succeeded(0, "open");
+        errors.Failed(0, "open", 5); // same error again after a success: logged again
+        Assert.Equal(3, log.Entries.Count);
+        Assert.All(log.Entries, e => Assert.Equal(LogLevel.Warning, e.Level));
     }
 
     [Fact]
     public void ANegativeDriveNumberIsUnknown()
     {
-        var probe = new DiskPowerProbe(() => [], _ => true, _ => false);
+        var probe = new DiskPowerProbe(() => [Drive(0, 0x0B, true)], _ => false);
         Assert.Null(probe.IsSpunDown(-1));
-        Assert.Null(probe.HasSeekPenalty(-1));
-        Assert.True(probe.HasSeekPenalty(0));
+        Assert.Null(probe.Describe(-1));
+        Assert.Equal(Drive(0, 0x0B, true), probe.Describe(0));
+        Assert.Null(probe.Describe(9));
     }
 
     [Fact]

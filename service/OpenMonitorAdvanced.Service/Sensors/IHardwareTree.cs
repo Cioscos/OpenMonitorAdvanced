@@ -47,6 +47,60 @@ public interface IDiskPowerProbe
     /// <summary>ATA CHECK POWER MODE on <c>\\.\PhysicalDriveN</c>: <see langword="true"/> in standby, <see langword="null"/> when unknown.</summary>
     bool? IsSpunDown(int driveNumber);
 
-    /// <summary>Every <c>PhysicalDriveN</c> with a seek penalty (or an unknown one) answers <see cref="IsSpunDown"/> == <see langword="false"/>.</summary>
+    /// <summary>
+    /// The D6 gate (controller ruling R17): every <c>PhysicalDriveN</c> whose
+    /// <see cref="DriveFacts.RequiresPowerCheck"/> is true answers <see cref="IsSpunDown"/> ==
+    /// <see langword="false"/>.
+    /// </summary>
     bool AllRotationalDisksActive();
+
+    /// <summary>
+    /// Model, serial, bus type and seek penalty of <c>\\.\PhysicalDriveN</c>, read with access 0
+    /// (never wakes a disk); <see langword="null"/> when there is no such drive. May block on a
+    /// slow device: the hub calls it only from its storage worker.
+    /// </summary>
+    DriveFacts? Describe(int driveNumber);
 }
+
+/// <summary>Whether a <c>PhysicalDriveN</c> could be described.</summary>
+public enum DriveAvailability
+{
+    /// <summary>Opened and queried (some facts may still be unknown).</summary>
+    Present,
+
+    /// <summary>The open or a query failed with "not ready" / "no media" (an empty card reader).</summary>
+    NoMedia,
+
+    /// <summary>The open failed for another reason: nothing is known about the drive.</summary>
+    Unreadable,
+}
+
+/// <summary>
+/// What can be learned about a <c>PhysicalDriveN</c> without waking it (access 0):
+/// <c>STORAGE_DEVICE_DESCRIPTOR</c> model/serial/bus type and <c>DEVICE_SEEK_PENALTY_DESCRIPTOR</c>.
+/// </summary>
+public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability, string? Model, string? Serial, uint? BusType, bool? SeekPenalty)
+{
+    /// <summary><c>STORAGE_BUS_TYPE.BusTypeVirtual</c>.</summary>
+    public const uint BusTypeVirtual = 0x0E;
+
+    /// <summary><c>STORAGE_BUS_TYPE.BusTypeFileBackedVirtual</c>.</summary>
+    public const uint BusTypeFileBackedVirtual = 0x0F;
+
+    /// <summary><c>STORAGE_BUS_TYPE.BusTypeNvme</c>.</summary>
+    public const uint BusTypeNvme = 0x11;
+
+    /// <summary>
+    /// Controller ruling R17: whether identifying or reading SMART from this drive could spin up
+    /// a platter, so it must be known to be active first. Not for a drive without media, a
+    /// virtual disk, NVMe or a drive without seek penalty; for every other drive (seek penalty
+    /// true or unknown, or unreadable) yes.
+    /// </summary>
+    public bool RequiresPowerCheck =>
+        Availability != DriveAvailability.NoMedia
+        && BusType is not (BusTypeVirtual or BusTypeFileBackedVirtual or BusTypeNvme)
+        && SeekPenalty != false;
+}
+
+/// <summary>A drive that keeps the D6 gate closed, with its power-mode answer (standby or unknown).</summary>
+public sealed record DriveBlocker(DriveFacts Drive, bool? SpunDown);

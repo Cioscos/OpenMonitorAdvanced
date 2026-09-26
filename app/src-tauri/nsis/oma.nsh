@@ -51,8 +51,6 @@ Var OmaPath
 Var OmaAttr
 ; OmaCheckDirInside: the directory $INSTDIR must be strictly inside.
 Var OmaBase
-; OmaLockLogDir, OmaCleanLogDir: the service log folder being locked down or cleaned.
-Var OmaLogDir
 
 ; Strings for our section. Inserted after the MUI_LANGUAGE macros.
 !macro OMA_LANGSTRINGS
@@ -223,6 +221,28 @@ FunctionEnd
 !insertmacro OMA_DELETE_SERVICE ""
 !insertmacro OMA_DELETE_SERVICE "un."
 
+; Removes $INSTDIR\service\logs, the service's logs (ruling R30: they go with
+; the service on uninstall or deselection; an upgrade keeps them). A junction or
+; link in its place is removed as a link, never followed; RMDir /r only runs on
+; a real folder, which only SYSTEM and Administrators can fill.
+!macro OMA_REMOVE_SERVICE_LOGS un
+Function ${un}OmaRemoveServiceLogs
+  Push $0
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\service\logs") i.r0'
+  ${If} $0 <> -1
+    IntOp $0 $0 & 0x400
+    ${If} $0 <> 0
+      RMDir "$INSTDIR\service\logs"
+    ${Else}
+      RMDir /r "$INSTDIR\service\logs"
+    ${EndIf}
+  ${EndIf}
+  Pop $0
+FunctionEnd
+!macroend
+!insertmacro OMA_REMOVE_SERVICE_LOGS ""
+!insertmacro OMA_REMOVE_SERVICE_LOGS "un."
+
 ; One icacls call on $INSTDIR\service, skipped once $OmaResult holds a failure.
 ; Exit code compared as a string ("error" if icacls could not start).
 !macro OMA_ICACLS args
@@ -235,11 +255,10 @@ FunctionEnd
   ${EndIf}
 !macroend
 
-; One icacls call on a service log folder or file, skipped once $OmaResult holds
-; a failure. /L: on the entry itself, never on a link's target, should a user
-; swap a junction in before the folder is locked down. Exit code compared as a
-; string ("error" if icacls could not start).
-!macro OMA_ICACLS_LOG path args
+; One icacls call on a path inside the service folder, skipped once $OmaResult
+; holds a failure. /L: on the entry itself, never on a link's target. Exit code
+; compared as a string ("error" if icacls could not start).
+!macro OMA_ICACLS_PATH path args
   ${If} $OmaResult == "0"
     nsExec::ExecToLog '"$SYSDIR\icacls.exe" "${path}" ${args} /L'
     Pop $0
@@ -397,7 +416,11 @@ FunctionEnd
 ;   Users (S-1-5-32-545) RX granted, inherited by files and subfolders.
 ; Then empties the directory, so no file planted before the lock-down (a DLL
 ; next to the exe, an exe with its own ACL) survives: everything written
-; afterwards inherits the protected ACL. Called after the service is stopped.
+; afterwards inherits the protected ACL. The one exception is the service's own
+; logs folder (ruling R30: the logs live here, where no user can create a folder
+; first): on an upgrade a real logs folder is kept with its files and reset to
+; inherit the ACL just granted, while a junction or link in its place is removed
+; as a link, never followed. Called after the service is stopped.
 ; Sets $OmaResult to "0" or to a description of the failure.
 Function OmaProtectServiceDir
   Push $0
@@ -429,11 +452,38 @@ Function OmaProtectServiceDir
   !insertmacro OMA_ICACLS "/reset"
   !insertmacro OMA_ICACLS "/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX"
   ${If} $OmaResult == "0"
+    StrCpy $OmaPath "$1\logs"
+    Call OmaPathAttributes
+    ${If} $OmaResult == "0"
+    ${AndIf} $OmaAttr != "absent"
+      IntOp $2 $OmaAttr & 0x400
+      ${If} $2 <> 0
+        IntOp $2 $OmaAttr & 0x10
+        ${If} $2 <> 0
+          RMDir "$1\logs"
+        ${Else}
+          Delete "$1\logs"
+        ${EndIf}
+        Call OmaPathAttributes
+        ${If} $OmaResult == "0"
+        ${AndIf} $OmaAttr != "absent"
+          StrCpy $OmaResult "cannot remove the junction or link $1\logs"
+        ${EndIf}
+      ${Else}
+        IntOp $2 $OmaAttr & 0x10
+        ${If} $2 <> 0
+          !insertmacro OMA_ICACLS_PATH "$1\logs" "/reset /T"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ${If} $OmaResult == "0"
     Delete "$1\*.*"
     FindFirst $0 $2 "$1\*.*"
     ${DoWhile} $2 != ""
       ${If} $2 != "."
       ${AndIf} $2 != ".."
+      ${AndIf} $2 != "logs"
         StrCpy $OmaResult "$1 still contains $2"
         ${Break}
       ${EndIf}
@@ -444,177 +494,6 @@ Function OmaProtectServiceDir
   ${If} $OmaResult != "0"
     DetailPrint "$OmaResult"
   ${EndIf}
-  Pop $2
-  Pop $1
-  Pop $0
-FunctionEnd
-
-; Final review C1: the LocalSystem service writes and prunes its logs in
-; %ProgramData%\OpenMonitorAdvanced\logs, and any user can create folders in
-; C:\ProgramData. A folder a user planted there first (theirs, or a junction)
-; would redirect those SYSTEM writes and deletes, so both folders are created or
-; taken over here, before the service can first run, with the service folder's
-; ACL: owner Administrators, no inheritance, SYSTEM and Administrators full
-; control, Users read and execute (so a user can read the logs for a bug report
-; without elevation; the logs hold no secrets). The service checks the same
-; again before it writes (LogDirectoryGuard). %ProgramData% is $APPDATA in the
-; all-users context: CSIDL_COMMON_APPDATA, read from the registry (never from the
-; environment, which the user could override) and not redirected for this 32-bit
-; process, i.e. C:\ProgramData. Controller ruling R27: uninstall leaves the folder
-; in place (logs are diagnostic data). Sets $OmaResult.
-Function OmaProtectLogDir
-  Push $0
-  StrCpy $OmaResult "0"
-  SetShellVarContext all
-  StrCpy $OmaPath "$APPDATA"
-  Call OmaPathAttributes
-  ${If} $OmaResult == "0"
-    ; FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY: a real folder, not a link
-    IntOp $0 $OmaAttr & 0x410
-    ${If} $OmaAttr == "absent"
-    ${OrIf} $0 <> 0x10
-      StrCpy $OmaResult "$APPDATA is not a real folder"
-    ${EndIf}
-  ${EndIf}
-  ${If} $OmaResult == "0"
-    StrCpy $OmaLogDir "$APPDATA\OpenMonitorAdvanced"
-    Call OmaLockLogDir
-  ${EndIf}
-  ${If} $OmaResult == "0"
-    StrCpy $OmaLogDir "$APPDATA\OpenMonitorAdvanced\logs"
-    Call OmaLockLogDir
-  ${EndIf}
-  ${If} $OmaResult == "0"
-    Call OmaCleanLogDir
-  ${EndIf}
-  ${If} $OmaResult != "0"
-    DetailPrint "$OmaResult"
-  ${EndIf}
-  Pop $0
-FunctionEnd
-
-; Makes $OmaLogDir a real folder that only SYSTEM and Administrators can change:
-; a junction or link in its place is removed as a link (its target is never
-; touched), a missing folder is created, then owner, reset and protected ACL by
-; SID (as in OmaProtectServiceDir, but with /L). Checked once more afterwards:
-; from then on no user can rename or replace it, so a swap that raced in before
-; the lock-down is caught here. Sets $OmaResult.
-Function OmaLockLogDir
-  Push $0
-  Push $1
-  StrCpy $1 $OmaLogDir
-  StrCpy $OmaPath $1
-  Call OmaPathAttributes
-  ${If} $OmaResult == "0"
-  ${AndIf} $OmaAttr != "absent"
-    IntOp $0 $OmaAttr & 0x400
-    ${If} $0 <> 0
-      DetailPrint "Removing the junction or link $1"
-      IntOp $0 $OmaAttr & 0x10
-      ${If} $0 <> 0
-        RMDir "$1"
-      ${Else}
-        Delete "$1"
-      ${EndIf}
-      Call OmaPathAttributes
-      ${If} $OmaResult == "0"
-      ${AndIf} $OmaAttr != "absent"
-        StrCpy $OmaResult "cannot remove the junction or link $1"
-      ${EndIf}
-    ${Else}
-      IntOp $0 $OmaAttr & 0x10
-      ${If} $0 = 0
-        StrCpy $OmaResult "$1 is not a folder"
-      ${EndIf}
-    ${EndIf}
-  ${EndIf}
-  ${If} $OmaResult == "0"
-  ${AndIf} $OmaAttr == "absent"
-    ClearErrors
-    CreateDirectory "$1"
-    ${If} ${Errors}
-      StrCpy $OmaResult "cannot create $1"
-    ${EndIf}
-  ${EndIf}
-  !insertmacro OMA_ICACLS_LOG "$1" "/setowner *S-1-5-32-544"
-  !insertmacro OMA_ICACLS_LOG "$1" "/reset"
-  !insertmacro OMA_ICACLS_LOG "$1" "/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX"
-  ${If} $OmaResult == "0"
-    StrCpy $OmaPath $1
-    Call OmaPathAttributes
-    ${If} $OmaResult == "0"
-      IntOp $0 $OmaAttr & 0x410
-      ${If} $OmaAttr == "absent"
-      ${OrIf} $0 <> 0x10
-        StrCpy $OmaResult "$1 changed while it was being protected"
-      ${EndIf}
-    ${EndIf}
-  ${EndIf}
-  Pop $1
-  Pop $0
-FunctionEnd
-
-; Cleans the (locked) $OmaLogDir of whatever was planted before the lock-down:
-; junctions and links are removed as links, a real subfolder stops the install
-; (removing it would mean walking it), files other than our daily logs are
-; deleted, and our old daily logs are kept (R27) but handed to Administrators
-; with the folder's inherited ACL. Sets $OmaResult.
-Function OmaCleanLogDir
-  Push $0 ; attribute bit, then name prefix
-  Push $1 ; the log folder
-  Push $2 ; find handle
-  Push $3 ; entry name
-  Push $4 ; attribute bit, then name suffix
-  StrCpy $1 $OmaLogDir
-  FindFirst $2 $3 "$1\*.*"
-  ${DoWhile} $3 != ""
-    ${If} $3 != "."
-    ${AndIf} $3 != ".."
-      StrCpy $OmaPath "$1\$3"
-      Call OmaPathAttributes
-      ${If} $OmaResult != "0"
-        ${Break}
-      ${EndIf}
-      ${If} $OmaAttr != "absent"
-        IntOp $0 $OmaAttr & 0x400
-        IntOp $4 $OmaAttr & 0x10
-        ${If} $0 <> 0
-          ClearErrors
-          ${If} $4 <> 0
-            RMDir "$OmaPath"
-          ${Else}
-            Delete "$OmaPath"
-          ${EndIf}
-          ${If} ${Errors}
-            StrCpy $OmaResult "cannot remove the junction or link $OmaPath"
-          ${EndIf}
-        ${ElseIf} $4 <> 0
-          StrCpy $OmaResult "$OmaPath is a folder: remove it and run setup again"
-        ${Else}
-          StrCpy $0 $3 12
-          StrCpy $4 $3 "" -4
-          ${If} $0 == "oma-service-"
-          ${AndIf} $4 == ".log"
-            !insertmacro OMA_ICACLS_LOG "$OmaPath" "/setowner *S-1-5-32-544"
-            !insertmacro OMA_ICACLS_LOG "$OmaPath" "/reset"
-          ${Else}
-            ClearErrors
-            Delete "$OmaPath"
-            ${If} ${Errors}
-              StrCpy $OmaResult "cannot delete $OmaPath"
-            ${EndIf}
-          ${EndIf}
-        ${EndIf}
-      ${EndIf}
-      ${If} $OmaResult != "0"
-        ${Break}
-      ${EndIf}
-    ${EndIf}
-    FindNext $2 $3
-  ${Loop}
-  FindClose $2
-  Pop $4
-  Pop $3
   Pop $2
   Pop $1
   Pop $0
@@ -668,13 +547,6 @@ Section "$(omaSensorsSection)" SecSensors
   Call OmaProtectServiceDir
   ${If} $OmaResult != "0"
     !insertmacro OMA_FAIL "$(omaSensorsFailed)" "protecting the service folder: $OmaResult"
-  ${EndIf}
-
-  ; 2b. Create or take over %ProgramData%\OpenMonitorAdvanced\logs (final
-  ;     review C1), before the service is registered and can first run.
-  Call OmaProtectLogDir
-  ${If} $OmaResult != "0"
-    !insertmacro OMA_FAIL "$(omaSensorsFailed)" "protecting the log folder: $OmaResult"
   ${EndIf}
 
   ; 3. Copy the exe. A locked or unwritable file sets the error flag (the
@@ -754,6 +626,7 @@ Section -OmaSensorsBookkeeping
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "${OMA_SERVICE_EXE} uninstall exited with $0"
       ${EndIf}
       Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
+      Call OmaRemoveServiceLogs
       RMDir "$INSTDIR\service"
     ${Else}
       ; No exe, but the service may still be registered (orphan): stop it and
@@ -766,6 +639,8 @@ Section -OmaSensorsBookkeeping
       ${If} $OmaResult != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "delete: $OmaResult"
       ${EndIf}
+      Call OmaRemoveServiceLogs
+      RMDir "$INSTDIR\service"
     ${EndIf}
     WriteRegDWORD HKLM "${OMA_REGKEY}" "${OMA_REGVALUE}" 0
   ${EndIf}
@@ -818,8 +693,8 @@ FunctionEnd
 ; first (the template's own check, repeated later, then finds nothing): if the
 ; user cancels the "app is running" prompt, the uninstall stops before the
 ; service is touched. Keeps the uninstaller diff at zero.
-; PawnIO is never touched: it can be shared with other programs. Neither is the
-; service log folder in %ProgramData% (controller ruling R27: diagnostic data).
+; PawnIO is never touched: it can be shared with other programs. The service's
+; logs go with the service, except on an upgrade (ruling R30).
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Call un.OmaStopService
@@ -842,6 +717,9 @@ FunctionEnd
     ${EndIf}
   ${EndIf}
   Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
+  ${If} $UpdateMode <> 1
+    Call un.OmaRemoveServiceLogs
+  ${EndIf}
   RMDir "$INSTDIR\service"
   ${If} $UpdateMode <> 1
     SetRegView 64

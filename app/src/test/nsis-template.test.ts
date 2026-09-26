@@ -474,6 +474,96 @@ describe('oma.nsh failure paths', () => {
     expect(nsh.match(/LangString omaSensorsNeedProgramFiles \$\{LANG_(ENGLISH|ITALIAN)\} /g)).toHaveLength(2);
   });
 
+  it('locks the service log folders down before the service is installed (final review C1)', () => {
+    const section = block(all, /^Section "\$\(omaSensorsSection\)" SecSensors$/, /^SectionEnd$/);
+    const protectService = indexOf(section, /^Call OmaProtectServiceDir$/);
+    const protectLogs = indexOf(section, /^Call OmaProtectLogDir$/);
+    expect(protectLogs).toBeGreaterThan(protectService);
+    expect(section[protectLogs + 1]).toMatch(STOP_CHECK);
+    expect(section[protectLogs + 2]).toMatch(FAIL);
+    // Before the service is registered (it may start right after) and before PawnIO runs.
+    expect(indexOf(section, HELPER)).toBeGreaterThan(protectLogs + 2);
+    expect(indexOf(section, /^ExecWait /)).toBeGreaterThan(protectLogs + 2);
+    expectCheckedFailures(all, /^Call OmaProtectLogDir$/, STOP_CHECK);
+
+    // %ProgramData% from the all-users shell folder (the registry), never from the environment,
+    // which the user could override. The root must be a real folder; then each level in turn.
+    const fn = block(all, /^Function OmaProtectLogDir$/, /^FunctionEnd$/);
+    expect(fn.join('\n')).not.toMatch(/ReadEnvStr|%ProgramData%/i);
+    const context = indexOf(fn, /^SetShellVarContext all$/);
+    const root = indexOf(fn, /^StrCpy \$OmaPath "\$APPDATA"$/);
+    const top = indexOf(fn, /^StrCpy \$OmaLogDir "\$APPDATA\\OpenMonitorAdvanced"$/);
+    const logs = indexOf(fn, /^StrCpy \$OmaLogDir "\$APPDATA\\OpenMonitorAdvanced\\logs"$/);
+    const clean = indexOf(fn, /^Call OmaCleanLogDir$/);
+    expect(context).toBeGreaterThan(0);
+    expect(root).toBeGreaterThan(context);
+    expect(fn[root + 1]).toBe('Call OmaPathAttributes');
+    expect(fn.slice(root + 2).join('\n')).toMatch(/^IntOp \$0 \$OmaAttr & 0x410\n\$\{If\} \$OmaAttr == "absent"\n\$\{OrIf\} \$0 <> 0x10\nStrCpy \$OmaResult "(?!0")/m);
+    expect(top).toBeGreaterThan(root);
+    expect(fn[top + 1]).toBe('Call OmaLockLogDir');
+    expect(logs).toBeGreaterThan(top);
+    expect(fn[logs + 1]).toBe('Call OmaLockLogDir');
+    expect(clean).toBeGreaterThan(logs);
+  });
+
+  it('never follows a link while locking a log folder down, and checks it again afterwards', () => {
+    const icacls = block(all, /^!macro OMA_ICACLS_LOG path args$/, /^!macroend$/);
+    const run = indexOf(icacls, /^nsExec::ExecToLog /);
+    // /L: the link itself, never its target, should one be swapped in before the lock-down.
+    expect(icacls[run]).toBe(`nsExec::ExecToLog '"$SYSDIR\\icacls.exe" "\${path}" \${args} /L'`);
+    expect(icacls.slice(run + 1, run + 4)).toEqual([
+      'Pop $0',
+      '${If} $0 != "0"',
+      expect.stringMatching(/^StrCpy \$OmaResult "(?!0")/),
+    ]);
+
+    const fn = block(all, /^Function OmaLockLogDir$/, /^FunctionEnd$/);
+    const text = fn.join('\n');
+    // A planted junction or link is removed as a link (RMDir without /r, Delete), then checked gone.
+    const reparse = indexOf(fn, /& 0x400$/);
+    expect(reparse).toBeGreaterThan(0);
+    expect(text).toMatch(/RMDir "\$1"/);
+    expect(text).not.toMatch(/RMDir \/r/i);
+    expect(text).toMatch(/Delete "\$1"/);
+    const create = indexOf(fn, /^CreateDirectory "\$1"$/);
+    expect(create).toBeGreaterThan(reparse);
+    const owner = indexOf(fn, /^!insertmacro OMA_ICACLS_LOG "\$1" "\/setowner \*S-1-5-32-544"$/);
+    const reset = indexOf(fn, /^!insertmacro OMA_ICACLS_LOG "\$1" "\/reset"$/);
+    const grant = indexOf(
+      fn,
+      /^!insertmacro OMA_ICACLS_LOG "\$1" "\/inheritance:r \/grant:r \*S-1-5-18:\(OI\)\(CI\)F \*S-1-5-32-544:\(OI\)\(CI\)F \*S-1-5-32-545:\(OI\)\(CI\)RX"$/,
+    );
+    expect(owner).toBeGreaterThan(create);
+    expect(reset).toBeGreaterThan(owner);
+    expect(grant).toBeGreaterThan(reset);
+    // Checked again once locked: a swap raced in before the lock-down fails the install.
+    const recheck = indexOf(fn, /^Call OmaPathAttributes$/, grant);
+    expect(recheck).toBeGreaterThan(grant);
+    expect(fn.slice(recheck).join('\n')).toMatch(/IntOp \$0 \$OmaAttr & 0x410\n\$\{If\} \$OmaAttr == "absent"\n\$\{OrIf\} \$0 <> 0x10\nStrCpy \$OmaResult "(?!0")/);
+    expect(fn.filter((s) => /OMA_ICACLS/.test(s)).join('\n')).not.toMatch(/SYSTEM|Administrators|Users|Everyone/i);
+  });
+
+  it('empties the log folder of links, folders and foreign files, and re-owns the old logs', () => {
+    const fn = block(all, /^Function OmaCleanLogDir$/, /^FunctionEnd$/);
+    const text = fn.join('\n');
+    expect(text).toMatch(/^FindFirst \$2 \$3 "\$1\\\*\.\*"$/m);
+    expect(text).not.toMatch(/RMDir \/r/i);
+    // Links: removed as links. Real folders: refused. Our daily logs: kept, re-owned, ACL reset.
+    // Anything else: deleted. Every failure sets $OmaResult.
+    expect(text).toMatch(/IntOp \$0 \$OmaAttr & 0x400\nIntOp \$4 \$OmaAttr & 0x10\n\$\{If\} \$0 <> 0\nClearErrors\n\$\{If\} \$4 <> 0\nRMDir "\$OmaPath"\n\$\{Else\}\nDelete "\$OmaPath"\n\$\{EndIf\}\n\$\{If\} \$\{Errors\}\nStrCpy \$OmaResult "(?!0")/);
+    expect(text).toMatch(/\$\{ElseIf\} \$4 <> 0\nStrCpy \$OmaResult "(?!0")/);
+    expect(text).toMatch(
+      /\$\{If\} \$0 == "oma-service-"\n\$\{AndIf\} \$4 == "\.log"\n!insertmacro OMA_ICACLS_LOG "\$OmaPath" "\/setowner \*S-1-5-32-544"\n!insertmacro OMA_ICACLS_LOG "\$OmaPath" "\/reset"\n\$\{Else\}\nClearErrors\nDelete "\$OmaPath"\n\$\{If\} \$\{Errors\}\nStrCpy \$OmaResult "(?!0")/,
+    );
+    expect(indexOf(fn, /^FindClose \$2$/)).toBeGreaterThan(0);
+  });
+
+  it('leaves the service log folder in place on uninstall (controller ruling R27)', () => {
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    expect(hook.join('\n')).not.toMatch(/APPDATA|logs|OmaProtectLogDir|OmaCleanLogDir/);
+    expect(read(resolve(nsisDir, 'installer.nsi'))).not.toMatch(/OpenMonitorAdvanced\\logs/);
+  });
+
   it('turns the reboot flag into exit code 3010 only on success', () => {
     const lines = all.filter((s) => /SetErrorLevel 3010/.test(s));
     expect(lines).toHaveLength(1);

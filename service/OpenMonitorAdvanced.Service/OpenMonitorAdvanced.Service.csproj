@@ -14,6 +14,9 @@
   <ItemGroup>
     <PackageReference Include="MessagePack" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <!-- LHM tree -> wire schema mapping (Task 5); Sensors/HardwareNode.cs is a
+         read-only view so the mapping is testable without LHM or admin rights. -->
+    <PackageReference Include="LibreHardwareMonitorLib" />
   </ItemGroup>
 
   <ItemGroup>

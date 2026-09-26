@@ -50,6 +50,8 @@
 .EXAMPLE
   ./scripts/check-trim-warnings.ps1 -ParseOnly -InputLog scripts/testdata/trim-warnings-sample-unlisted.log
 #>
+#Requires -Version 7
+
 param(
     [string]$AllowlistPath = (Join-Path $PSScriptRoot '..\service\trim-allowlist.txt'),
     [string]$PublishOutputDir,

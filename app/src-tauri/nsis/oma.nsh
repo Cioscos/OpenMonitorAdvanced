@@ -36,6 +36,11 @@
 !else
   !error "Missing ${OMA_PAYLOAD}\PawnIO_setup.exe: run scripts/build-installer-payload.ps1 first"
 !endif
+; Never embed a PawnIO setup that the payload script did not verify: compare it with the
+; pinned hash (pawnio.sha256, the same file the payload script checks against). A mismatch
+; stops the compilation. pwsh (PowerShell 7), which the payload script requires anyway:
+; Windows PowerShell started from pwsh inherits its PSModulePath and cannot load Get-FileHash.
+!system `pwsh.exe -NoProfile -NonInteractive -Command "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '${OMA_PAYLOAD}\PawnIO_setup.exe').Hash -ne (Get-Content -Raw -LiteralPath '${__FILEDIR__}\pawnio.sha256').Trim()) { Write-Host 'PawnIO_setup.exe does not match pawnio.sha256: run scripts/build-installer-payload.ps1'; exit 1 }"` = 0
 
 ; "0" on success, otherwise a short English description (OmaStopService).
 Var OmaResult
@@ -162,6 +167,124 @@ FunctionEnd
 !insertmacro OMA_STOP_SERVICE ""
 !insertmacro OMA_STOP_SERVICE "un."
 
+; Deletes the oma-service registration through the SCM, without running any exe.
+; Used when the service may still be registered but oma-service.exe is gone, so
+; the helper cannot run. Call OmaStopService first. Sets $OmaResult like
+; OmaStopService: "0" also when the service does not exist or is already marked
+; for deletion.
+!macro OMA_DELETE_SERVICE un
+Function ${un}OmaDeleteService
+  Push $0 ; SCM handle
+  Push $1 ; service handle
+  Push $2 ; call result
+  Push $5 ; last error
+  StrCpy $OmaResult "0"
+  System::Call 'advapi32::OpenSCManagerW(p 0, p 0, i 0x0001) p.r0 ?e' ; SC_MANAGER_CONNECT
+  Pop $5
+  ${If} $0 P= 0
+    StrCpy $OmaResult "OpenSCManager failed, error $5"
+  ${Else}
+    System::Call 'advapi32::OpenServiceW(p r0, w "${OMA_SERVICE_NAME}", i 0x00010000) p.r1 ?e' ; DELETE
+    Pop $5
+    ${If} $1 P= 0
+      ${If} $5 <> 1060 ; ERROR_SERVICE_DOES_NOT_EXIST: nothing to delete
+        StrCpy $OmaResult "OpenService for delete failed, error $5"
+      ${EndIf}
+    ${Else}
+      DetailPrint "${OMA_SERVICE_NAME} is registered without ${OMA_SERVICE_EXE}: removing the orphaned service"
+      System::Call 'advapi32::DeleteService(p r1) i.r2 ?e'
+      Pop $5
+      ${If} $2 = 0
+      ${AndIf} $5 <> 1072 ; ERROR_SERVICE_MARKED_FOR_DELETE: already going away
+        StrCpy $OmaResult "DeleteService failed, error $5"
+      ${EndIf}
+      System::Call 'advapi32::CloseServiceHandle(p r1)'
+    ${EndIf}
+    System::Call 'advapi32::CloseServiceHandle(p r0)'
+  ${EndIf}
+  ${If} $OmaResult != "0"
+    DetailPrint "$OmaResult"
+  ${EndIf}
+  Pop $5
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+!macroend
+!insertmacro OMA_DELETE_SERVICE ""
+!insertmacro OMA_DELETE_SERVICE "un."
+
+; One icacls call on $INSTDIR\service, skipped once $OmaResult holds a failure.
+; Exit code compared as a string ("error" if icacls could not start).
+!macro OMA_ICACLS args
+  ${If} $OmaResult == "0"
+    nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\service" ${args}'
+    Pop $0
+    ${If} $0 != "0"
+      StrCpy $OmaResult "icacls ${args} exited with $0"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; Makes $INSTDIR\service a directory that only SYSTEM and Administrators can
+; write, whatever $INSTDIR is: an administrator may pick a custom directory (for
+; example under C:\Apps or D:\) whose inherited ACL lets every user modify it,
+; and this directory holds a LocalSystem service binary and the PawnIO setup,
+; both run elevated. SIDs, not names, so it works in every language:
+;   owner Administrators; explicit ACEs dropped (/reset); inheritance removed and
+;   exactly SYSTEM (S-1-5-18) F, Administrators (S-1-5-32-544) F,
+;   Users (S-1-5-32-545) RX granted, inherited by files and subfolders.
+; Then empties the directory, so no file planted before the lock-down (a DLL
+; next to the exe, an exe with its own ACL) survives: everything written
+; afterwards inherits the protected ACL. Called after the service is stopped.
+; Sets $OmaResult to "0" or to a description of the failure.
+Function OmaProtectServiceDir
+  Push $0
+  Push $1
+  Push $2
+  StrCpy $OmaResult "0"
+  StrCpy $1 "$INSTDIR\service"
+  System::Call 'kernel32::GetFileAttributesW(w r1) i.r0'
+  ${If} $0 = -1 ; INVALID_FILE_ATTRIBUTES: not there yet
+    ClearErrors
+    CreateDirectory "$1"
+    ${If} ${Errors}
+      StrCpy $OmaResult "cannot create $1"
+    ${EndIf}
+  ${Else}
+    IntOp $2 $0 & 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT: never follow a planted junction or link
+    ${If} $2 <> 0
+      StrCpy $OmaResult "$1 is a junction or link"
+    ${EndIf}
+    IntOp $2 $0 & 0x10 ; FILE_ATTRIBUTE_DIRECTORY
+    ${If} $2 = 0
+      StrCpy $OmaResult "$1 is not a directory"
+    ${EndIf}
+  ${EndIf}
+  !insertmacro OMA_ICACLS "/setowner *S-1-5-32-544"
+  !insertmacro OMA_ICACLS "/reset"
+  !insertmacro OMA_ICACLS "/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX"
+  ${If} $OmaResult == "0"
+    Delete "$1\*.*"
+    FindFirst $0 $2 "$1\*.*"
+    ${DoWhile} $2 != ""
+      ${If} $2 != "."
+      ${AndIf} $2 != ".."
+        StrCpy $OmaResult "$1 still contains $2"
+        ${Break}
+      ${EndIf}
+      FindNext $0 $2
+    ${Loop}
+    FindClose $0
+  ${EndIf}
+  ${If} $OmaResult != "0"
+    DetailPrint "$OmaResult"
+  ${EndIf}
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+
 ; Runs the service helper verb ($INSTDIR\service\oma-service.exe <verb>),
 ; hidden console, output in the details log. Exit code left in $0, or the
 ; string "error" if the process could not be started: compare with != "0",
@@ -198,7 +321,14 @@ Section "$(omaSensorsSection)" SecSensors
     !insertmacro OMA_FAIL "$(omaSensorsFailed)" "stop: $OmaResult"
   ${EndIf}
 
-  ; 2. Copy the exe. A locked or unwritable file sets the error flag (the
+  ; 2. Lock $INSTDIR\service down (SYSTEM/Administrators only) and empty it,
+  ;    before anything is written or run from it.
+  Call OmaProtectServiceDir
+  ${If} $OmaResult != "0"
+    !insertmacro OMA_FAIL "$(omaSensorsFailed)" "protecting the service folder: $OmaResult"
+  ${EndIf}
+
+  ; 3. Copy the exe. A locked or unwritable file sets the error flag (the
   ;    Retry/Ignore prompt answers Ignore when silent).
   SetOutPath "$INSTDIR\service"
   ClearErrors
@@ -208,14 +338,14 @@ Section "$(omaSensorsSection)" SecSensors
   ${EndIf}
   SetOutPath $INSTDIR
 
-  ; 3. install: create or update the service (demand start, quoted path,
+  ; 4. install: create or update the service (demand start, quoted path,
   ;    failure actions) and add the IU start/stop rights. Idempotent.
   !insertmacro OMA_HELPER "install"
   ${If} $0 != "0"
     !insertmacro OMA_FAIL "$(omaSensorsFailed)" "${OMA_SERVICE_EXE} install exited with $0"
   ${EndIf}
 
-  ; 4. PawnIO >= ${OMA_PAWNIO_MIN}. The key only exists in the 64-bit view.
+  ; 5. PawnIO >= ${OMA_PAWNIO_MIN}. The key only exists in the 64-bit view.
   ;    The setup runs from $INSTDIR\service (writable by administrators only),
   ;    never from the user-writable temp directory, and is deleted after use.
   SetRegView 64
@@ -276,6 +406,17 @@ Section -OmaSensorsBookkeeping
       ${EndIf}
       Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
       RMDir "$INSTDIR\service"
+    ${Else}
+      ; No exe, but the service may still be registered (orphan): stop it and
+      ; delete it through the SCM. Both are no-ops when there is no service.
+      Call OmaStopService
+      ${If} $OmaResult != "0"
+        !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
+      ${EndIf}
+      Call OmaDeleteService
+      ${If} $OmaResult != "0"
+        !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "delete: $OmaResult"
+      ${EndIf}
     ${EndIf}
     WriteRegDWORD HKLM "${OMA_REGKEY}" "${OMA_REGVALUE}" 0
   ${EndIf}
@@ -303,27 +444,35 @@ Function OmaInitComponents
 FunctionEnd
 !macroend
 
-; Tauri hook: runs at the top of the Uninstall section, before the template's
-; CheckIfAppIsRunning and before any file is deleted, so a failure here leaves
-; the installation intact. Stopping the service while the app is still open is
-; harmless: the app only starts it at launch. Keeps the uninstaller diff at zero.
+; Tauri hook: runs at the top of the Uninstall section, before any file is
+; deleted, so a failure here leaves the installation intact. It closes the app
+; first (the template's own check, repeated later, then finds nothing): if the
+; user cancels the "app is running" prompt, the uninstall stops before the
+; service is touched. Keeps the uninstaller diff at zero.
 ; PawnIO is never touched: it can be shared with other programs.
 !macro NSIS_HOOK_PREUNINSTALL
-  ${If} ${FileExists} "$INSTDIR\service\${OMA_SERVICE_EXE}"
-    Call un.OmaStopService
-    ${If} $OmaResult != "0"
-      !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
-    ${EndIf}
-    ${If} $UpdateMode <> 1
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  Call un.OmaStopService
+  ${If} $OmaResult != "0"
+    !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
+  ${EndIf}
+  ${If} $UpdateMode <> 1
+    ${If} ${FileExists} "$INSTDIR\service\${OMA_SERVICE_EXE}"
       ; stop + delete the service
       !insertmacro OMA_HELPER "uninstall"
       ${If} $0 != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "${OMA_SERVICE_EXE} uninstall exited with $0"
       ${EndIf}
+    ${Else}
+      ; No exe, but the service may still be registered (orphan).
+      Call un.OmaDeleteService
+      ${If} $OmaResult != "0"
+        !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "delete: $OmaResult"
+      ${EndIf}
     ${EndIf}
-    Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
-    RMDir "$INSTDIR\service"
   ${EndIf}
+  Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
+  RMDir "$INSTDIR\service"
   ${If} $UpdateMode <> 1
     SetRegView 64
     DeleteRegValue HKLM "${OMA_REGKEY}" "${OMA_REGVALUE}"

@@ -117,6 +117,38 @@ describe('installer payload script', { timeout: 120_000 }, () => {
     expect(output).toMatch(/IL2026\|Oma\.Fake\.Unlisted\(\)/);
     expect(output).toMatch(/trim warning gate failed/);
   });
+
+  it('rejects a cached PawnIO setup with the wrong hash and never uses it (no network)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oma-pawnio-'));
+    scratch.push(dir);
+    const out = join(dir, 'payload');
+    mkdirSync(out, { recursive: true });
+    const cached = join(out, 'PawnIO_setup.exe');
+    writeFileSync(cached, 'not the pinned PawnIO setup');
+    const source = join(dir, 'PawnIO_setup.exe');
+    writeFileSync(source, 'also not the pinned PawnIO setup');
+    const run = spawnSync(
+      'pwsh',
+      ['-NoProfile', '-NonInteractive', '-File', payloadScript, '-PawnIoOnly', '-PawnIoSource', source, '-OutputRoot', out],
+      { encoding: 'utf8', timeout: 120_000 },
+    );
+    const output = `${run.stdout}\n${run.stderr}`;
+    expect(run.status, output).not.toBe(0);
+    expect(output).toMatch(/cached copy rejected \(SHA-256 /);
+    expect(output).toMatch(/PawnIO_setup\.exe rejected: SHA-256 /);
+    expect(existsSync(cached), 'the rejected file must not stay in the payload').toBe(false);
+    expect(existsSync(`${cached}.partial`)).toBe(false);
+  });
+
+  it('reads the PawnIO hash from the single pinned file and requires PowerShell 7', () => {
+    const script = read(payloadScript);
+    expect(script).toMatch(/^#Requires -Version 7$/m);
+    expect(read(resolve(repoDir, 'scripts/check-trim-warnings.ps1'))).toMatch(/^#Requires -Version 7$/m);
+    expect(script).toMatch(/pawnio\.sha256/);
+    // No second copy of the hash in the script.
+    expect(script).not.toMatch(/[0-9A-Fa-f]{64}/);
+    expect(read(resolve(nsisDir, 'pawnio.sha256'))).toMatch(/^[0-9A-F]{64}\n?$/);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -256,6 +288,77 @@ describe('oma.nsh failure paths', () => {
     expect(helper).toBeGreaterThan(stop);
     expect(del).toBeGreaterThan(helper + 2);
     expect(hook.join('\n')).not.toMatch(/pawnio/i);
+  });
+
+  it('locks $INSTDIR\\service down with icacls, by SID, before anything is written into it', () => {
+    const section = block(all, /^Section "\$\(omaSensorsSection\)" SecSensors$/, /^SectionEnd$/);
+    const stop = indexOf(section, STOP);
+    const protect = indexOf(section, /^Call OmaProtectServiceDir$/);
+    expect(protect).toBeGreaterThan(stop + 2);
+    expect(section[protect + 1]).toMatch(STOP_CHECK);
+    expect(section[protect + 2]).toMatch(FAIL);
+    // Nothing is copied, extracted or deleted in the service dir before it is protected.
+    expect(indexOf(section, /^(File|Delete|RMDir|ExecWait|nsExec)\b/)).toBeGreaterThan(protect + 2);
+    expect(indexOf(section, /^File /)).toBeGreaterThan(protect + 2);
+
+    const icacls = block(all, /^!macro OMA_ICACLS args$/, /^!macroend$/);
+    expect(icacls).toContain(`nsExec::ExecToLog '"$SYSDIR\\icacls.exe" "$INSTDIR\\service" \${args}'`);
+    const run = indexOf(icacls, /^nsExec::ExecToLog /);
+    expect(icacls.slice(run + 1, run + 4)).toEqual([
+      'Pop $0',
+      '${If} $0 != "0"',
+      expect.stringMatching(/^StrCpy \$OmaResult "(?!0")/),
+    ]);
+
+    const fn = block(all, /^Function OmaProtectServiceDir$/, /^FunctionEnd$/);
+    const owner = indexOf(fn, /^!insertmacro OMA_ICACLS "\/setowner \*S-1-5-32-544"$/);
+    const reset = indexOf(fn, /^!insertmacro OMA_ICACLS "\/reset"$/);
+    const grant = indexOf(
+      fn,
+      /^!insertmacro OMA_ICACLS "\/inheritance:r \/grant:r \*S-1-5-18:\(OI\)\(CI\)F \*S-1-5-32-544:\(OI\)\(CI\)F \*S-1-5-32-545:\(OI\)\(CI\)RX"$/,
+    );
+    const reparse = indexOf(fn, /0x400/);
+    expect(reparse).toBeGreaterThan(0);
+    expect(owner).toBeGreaterThan(reparse);
+    expect(reset).toBeGreaterThan(owner);
+    expect(grant).toBeGreaterThan(reset);
+    // Leftovers (a planted DLL, a file with its own ACL) are removed after the lock-down.
+    expect(indexOf(fn, /^Delete "\$1\\\*\.\*"$/)).toBeGreaterThan(grant);
+    // Locale-independent: SIDs only, never account names.
+    expect(fn.filter((s) => /OMA_ICACLS/.test(s)).join('\n')).not.toMatch(/SYSTEM|Administrators|Users|Everyone/i);
+  });
+
+  it('checks the protection and orphan-removal results too', () => {
+    expectCheckedFailures(all, /^Call OmaProtectServiceDir$/, STOP_CHECK);
+    expectCheckedFailures(all, /^Call (un\.)?OmaDeleteService$/, STOP_CHECK);
+    const fn = block(all, /^Function \$\{un\}OmaDeleteService$/, /^FunctionEnd$/);
+    expect(fn.join('\n')).toMatch(/DeleteService\(/);
+    expect(fn.join('\n')).toMatch(/1060/); // not installed = nothing to do
+    expect(fn.join('\n')).toMatch(/1072/); // already marked for deletion = done
+    expect(fn.filter((s) => /^StrCpy \$OmaResult "(?!0")/.test(s)).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('removes a service left registered without its exe (deselection and uninstall)', () => {
+    const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    expect(indexOf(book, /^Call OmaDeleteService$/)).toBeGreaterThan(0);
+    expect(indexOf(hook, /^Call un\.OmaDeleteService$/)).toBeGreaterThan(0);
+  });
+
+  it('the uninstall hook closes the app before touching the service', () => {
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    expect(hook[1]).toBe('!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"');
+  });
+
+  it('refuses to compile with a PawnIO setup that does not match the pinned hash', () => {
+    const check = all.find((s) => /^!system /.test(s));
+    expect(check).toBeDefined();
+    // pwsh, not Windows PowerShell: launched from pwsh it cannot load Get-FileHash.
+    expect(check).toMatch(/^!system `pwsh\.exe /);
+    expect(check).toMatch(/Get-FileHash/);
+    expect(check).toMatch(/\$\{OMA_PAYLOAD\}\\PawnIO_setup\.exe/);
+    expect(check).toMatch(/\$\{__FILEDIR__\}\\pawnio\.sha256/);
+    expect(check).toMatch(/ = 0$/);
   });
 
   it('turns the reboot flag into exit code 3010 only on success', () => {

@@ -151,13 +151,9 @@ fn main() {
         history_capacity(SAMPLE_INTERVAL),
     )));
 
+    // The link to the service starts in `.setup()` below, not here.
     #[cfg(windows)]
-    let service_shell = ServiceShell::new(
-        service::anti_cheat_path(),
-        svc_status.clone(),
-        svc_feed,
-        SAMPLE_INTERVAL.as_millis() as u32,
-    );
+    let service_shell = ServiceShell::new(service::anti_cheat_path(), svc_status.clone());
     #[cfg(not(windows))]
     let service_shell = ServiceShell::new(service::anti_cheat_path());
 
@@ -186,6 +182,13 @@ fn main() {
             service::start_service,
         ])
         .setup(move |app| {
+            // Only the surviving instance gets here: a second launch has
+            // already exited in the single-instance plugin while the app was
+            // being built, so it never probes, starts or connects to the
+            // service (final review M2).
+            #[cfg(windows)]
+            app.state::<ServiceShell>()
+                .spawn_link(svc_feed, SAMPLE_INTERVAL.as_millis() as u32);
             tray::build(app.handle())?;
             if !start_minimized {
                 window::show_main(app.handle());

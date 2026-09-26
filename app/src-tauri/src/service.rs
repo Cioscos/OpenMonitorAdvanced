@@ -173,8 +173,9 @@ struct ToggleState {
     path: Option<PathBuf>,
     /// `Arc` (not a plain `AtomicBool`) so `refresh_indicator` can hand a
     /// `'static` reader of it to the indicator without needing `self` to
-    /// outlive that call (fix round 2: the reader runs later, on the main
-    /// thread, after every lock below has already been released).
+    /// outlive that call: the reader runs later, on the main thread, after
+    /// every lock below has already been released, so that a main-thread
+    /// indicator update can never deadlock a concurrent toggle.
     flag: Arc<AtomicBool>,
     tray_item: Mutex<Option<Arc<dyn ToggleIndicator>>>,
     /// Serializes the whole mutation below (save, in-memory flag, `apply`):
@@ -184,7 +185,8 @@ struct ToggleState {
     /// and its doc comment) or across an `await` — nothing here is `async`.
     /// Each `save_anti_cheat` call also picks its own unique temp file name
     /// regardless, so the two can never write the same temp file at once.
-    /// Locked only by `set`, which off Windows only a test calls.
+    /// Locked by `set` (which off Windows only a test calls) and, on
+    /// Windows, by `ServiceShell::spawn_link`.
     #[cfg_attr(not(windows), allow(dead_code))]
     write: Mutex<()>,
 }
@@ -277,33 +279,48 @@ pub struct ServiceShell {
 }
 
 impl ServiceShell {
-    /// Reads the persisted preference, starts the link (Windows) and sets
-    /// the initial status on `status_table` (the same one `default_providers`
-    /// hands to the `svc` provider through [`oma_win::ServiceHandles`]).
+    /// Reads the persisted preference. The link is not started here but by
+    /// [`Self::spawn_link`], from Tauri's `.setup()` hook: `status_table` is
+    /// the one `default_providers` hands to the `svc` provider through
+    /// [`oma_win::ServiceHandles`], and the link writes it once running.
     #[cfg(windows)]
-    pub fn new(
-        path: Option<PathBuf>,
-        status_table: oma_win::svc::ServiceStatusTable,
-        feed: oma_win::svc::SvcFeed,
-        interval_ms: u32,
-    ) -> Self {
+    pub fn new(path: Option<PathBuf>, status_table: oma_win::svc::ServiceStatusTable) -> Self {
+        Self {
+            toggle: ToggleState::new(path),
+            link: Mutex::new(None),
+            status_table,
+        }
+    }
+
+    /// Starts the link to the service (once; later calls do nothing). Called
+    /// from Tauri's `.setup()` hook, which only the surviving instance
+    /// reaches: `tauri_plugin_single_instance` ends a second launch while the
+    /// app is being built, so that process never probes or starts the
+    /// service, nor connects to its pipe (final review M2). Holds the
+    /// toggle's `write` lock, so a concurrent toggle is either read here or
+    /// sent to the new link, never lost in between (same lock order as
+    /// `ToggleState::set`: `write`, then `link`).
+    #[cfg(windows)]
+    pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed, interval_ms: u32) {
         use oma_win::svc::{pipe_connector, LinkSettings, ServiceLink, WindowsScm, SERVICE_NAME};
 
-        let toggle = ToggleState::new(path);
-        let anti_cheat = toggle.enabled();
-        let link = ServiceLink::spawn(
+        let _write = self
+            .toggle
+            .write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut link = self.link.lock().unwrap_or_else(PoisonError::into_inner);
+        if link.is_some() {
+            return;
+        }
+        *link = Some(ServiceLink::spawn(
             Arc::new(WindowsScm::new(SERVICE_NAME)),
             pipe_connector(),
             LinkSettings::new(oma_ipc::PIPE_NAME, interval_ms),
-            anti_cheat,
-            status_table.clone(),
+            self.toggle.enabled(),
+            self.status_table.clone(),
             feed,
-        );
-        Self {
-            toggle,
-            link: Mutex::new(Some(link)),
-            status_table,
-        }
+        ));
     }
 
     #[cfg(not(windows))]
@@ -545,6 +562,41 @@ mod tests {
         );
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Final review M2: a second launch (the Start menu shortcut while the
+    /// app sits in the tray) must never probe or start the service, nor
+    /// connect to its pipe. `tauri_plugin_single_instance` ends that process
+    /// while the app is being built, before the `.setup()` hook runs, so the
+    /// link is spawned there and nowhere earlier. Checked on the source: a
+    /// runtime check would drive this machine's real SCM.
+    #[test]
+    fn the_link_starts_only_in_the_setup_hook() {
+        let main = include_str!("main.rs");
+        let builder = main.find("tauri::Builder::default()").expect("the builder");
+        let setup = main.find(".setup(move |app|").expect("the setup hook");
+        let spawn = main.find(".spawn_link(").expect("spawn_link is called");
+        assert!(
+            builder < setup && setup < spawn,
+            "spawn_link runs inside .setup()"
+        );
+        assert_eq!(main.matches(".spawn_link(").count(), 1);
+        let before_builder = &main[..builder];
+        assert!(
+            !before_builder.contains("svc_feed,\n") && !before_builder.contains("ServiceLink"),
+            "nothing before the builder hands the feed to a link"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_shell_has_no_link_until_it_is_spawned() {
+        let shell = ServiceShell::new(
+            Some(temp_path("no-link")),
+            oma_win::svc::ServiceStatusTable::default(),
+        );
+        assert!(shell.link.lock().unwrap().is_none());
+        shell.shutdown(); // nothing to stop
     }
 
     #[test]

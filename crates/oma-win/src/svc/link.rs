@@ -16,7 +16,11 @@
 //!   several users logged on, one can already stop the service for the
 //!   others: the accepted multi-user limit of spec §2.2).
 //! - The reconnect loop never starts the service: only the launch probe, a
-//!   `Start` command and leaving anti-cheat mode call `start()`.
+//!   `Start` command and leaving anti-cheat mode call `start()`. The launch
+//!   probe starts the service only when its first conclusive answer is
+//!   `Stopped` (ruling R21): a service found missing, refused, on its way
+//!   down or in any other state at launch may be in the hands of an
+//!   installer or an administrator, and a later `Stopped` is only reported.
 //! - [`ServiceLink::shutdown`] interrupts every wait of the thread (Hello,
 //!   first sample, stream, retry, STOP verification) at once, but not a call
 //!   already running: a pipe write can block for up to 2 s (the client's
@@ -52,6 +56,10 @@ const READER_CHANNEL: usize = 8;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
 const ERROR_SERVICE_CANNOT_ACCEPT_CTRL: u32 = 1061;
+
+/// Launch probe: how many times a transient query error is retried before
+/// it counts as the answer (ruling R21).
+const LAUNCH_QUERY_RETRIES: u8 = 3;
 
 /// `WireError::code` of a service that does not speak our protocol version.
 const UNSUPPORTED_VERSION: &str = "unsupported_version";
@@ -175,7 +183,8 @@ impl LinkSettings {
 
 /// Checks what the provider relies on before a schema reaches the feed:
 /// non-empty device ids without `/`, unique; every sensor on an existing
-/// device, with a non-empty name without `/`.
+/// device, with a non-empty kind and name without `/`, and a unique
+/// `device_id/kind/name`.
 pub fn validate_schema(schema: &WireSchema) -> Result<(), String> {
     let mut devices = HashSet::with_capacity(schema.devices.len());
     for device in &schema.devices {
@@ -186,6 +195,7 @@ pub fn validate_schema(schema: &WireSchema) -> Result<(), String> {
             return Err(format!("duplicate device id {:?}", device.id));
         }
     }
+    let mut sensors = HashSet::with_capacity(schema.sensors.len());
     for sensor in &schema.sensors {
         if !devices.contains(sensor.device_id.as_str()) {
             return Err(format!(
@@ -193,8 +203,22 @@ pub fn validate_schema(schema: &WireSchema) -> Result<(), String> {
                 sensor.name, sensor.device_id
             ));
         }
+        if sensor.kind.is_empty() || sensor.kind.contains('/') {
+            return Err(format!("invalid sensor kind {:?}", sensor.kind));
+        }
         if sensor.name.is_empty() || sensor.name.contains('/') {
             return Err(format!("invalid sensor name {:?}", sensor.name));
+        }
+        let id = (
+            sensor.device_id.as_str(),
+            sensor.kind.as_str(),
+            sensor.name.as_str(),
+        );
+        if !sensors.insert(id) {
+            return Err(format!(
+                "duplicate sensor id {}/{}/{}",
+                sensor.device_id, sensor.kind, sensor.name
+            ));
         }
     }
     Ok(())
@@ -234,16 +258,18 @@ enum Effect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Launch probe: the query is out.
-    Probing,
+    /// Launch probe: the query is out; `errors` transient errors so far.
+    Probing { errors: u8 },
     /// Launch probe: query again at the deadline.
-    ProbeWait,
+    ProbeWait { errors: u8 },
     /// A `start()` is out.
     StartSent,
     /// Connect at the deadline.
     ConnectWait,
     /// The connector is out.
     Connecting,
+    /// The connection failed; the query that tells why is out.
+    Refreshing { error: ConnectError },
     /// Connected; the query that checks the server PID is out.
     Verifying { server_pid: Option<u32> },
     /// Waiting for `Hello` until the deadline.
@@ -254,7 +280,9 @@ enum Phase {
     FirstSample { schema_len: Option<usize> },
     /// Snapshots are arriving; the deadline is the silence limit.
     Streaming { schema_len: usize },
-    /// Anti-cheat stop: the query is out.
+    /// Anti-cheat stop: the query is out. In these three phases a cleared
+    /// `anti_cheat` means the preference was turned off while a STOP was on
+    /// its way: the one `start()` follows the confirmed stop (or its timeout).
     StopQuery { since: Instant, stop_sent: bool },
     /// Anti-cheat stop: `stop()` is out.
     StopSent { since: Instant },
@@ -265,6 +293,31 @@ enum Phase {
 }
 
 impl Phase {
+    /// The verified stop is in progress.
+    fn is_stopping(self) -> bool {
+        matches!(
+            self,
+            Phase::StopQuery { .. } | Phase::StopSent { .. } | Phase::StopWait { .. }
+        )
+    }
+
+    /// A STOP has been accepted (or is out) and the service may still be
+    /// on its way down.
+    fn stop_in_flight(self) -> bool {
+        matches!(
+            self,
+            Phase::StopSent { .. }
+                | Phase::StopQuery {
+                    stop_sent: true,
+                    ..
+                }
+                | Phase::StopWait {
+                    stop_sent: true,
+                    ..
+                }
+        )
+    }
+
     /// A connection is open in this phase.
     fn has_connection(self) -> bool {
         matches!(
@@ -309,7 +362,7 @@ impl Machine {
             settings,
             anti_cheat,
             status,
-            phase: Phase::Probing,
+            phase: Phase::Probing { errors: 0 },
             deadline: None,
             grace_until: None,
         }
@@ -321,7 +374,7 @@ impl Machine {
         if self.anti_cheat {
             self.begin_stop(now)
         } else {
-            self.go(Phase::Probing, None);
+            self.go(Phase::Probing { errors: 0 }, None);
             vec![Effect::Query]
         }
     }
@@ -343,7 +396,8 @@ impl Machine {
         match (event, self.phase) {
             (Event::Command(command), _) => self.on_command(command, now),
             (Event::Timer, _) => self.on_timer(now),
-            (Event::Queried(q), Phase::Probing) => self.on_probe(q, now),
+            (Event::Queried(q), Phase::Probing { errors }) => self.on_probe(q, errors, now),
+            (Event::Queried(q), Phase::Refreshing { error }) => self.on_refresh(q, error, now),
             (Event::Queried(q), Phase::Verifying { server_pid }) => {
                 self.on_verify(q, server_pid, now)
             }
@@ -376,6 +430,12 @@ impl Machine {
 
     fn on_command(&mut self, command: LinkCommand, now: Instant) -> Vec<Effect> {
         match command {
+            LinkCommand::SetAntiCheat(true) if !self.anti_cheat && self.phase.is_stopping() => {
+                // Back on before the pending start: the stop simply goes on.
+                self.anti_cheat = true;
+                self.status = status(ServiceState::AntiCheat, Some(ServiceDetail::Stopping));
+                Vec::new()
+            }
             LinkCommand::SetAntiCheat(true) if !self.anti_cheat => {
                 self.anti_cheat = true;
                 let mut effects = Vec::new();
@@ -388,10 +448,23 @@ impl Machine {
             }
             LinkCommand::SetAntiCheat(false) if self.anti_cheat => {
                 self.anti_cheat = false;
+                if self.phase.stop_in_flight() {
+                    // Wait for the stop to be confirmed, then start once.
+                    self.status = status(ServiceState::Starting, None);
+                    Vec::new()
+                } else {
+                    self.start()
+                }
+            }
+            LinkCommand::Start
+                if !self.anti_cheat
+                    && !self.phase.has_connection()
+                    && !self.phase.is_stopping() =>
+            {
                 self.start()
             }
-            LinkCommand::Start if !self.anti_cheat && !self.phase.has_connection() => self.start(),
-            // Same preference again, or Start while anti-cheat or connected.
+            // Same preference again, or Start while anti-cheat, connected or
+            // already due after a pending stop.
             _ => Vec::new(),
         }
     }
@@ -410,14 +483,11 @@ impl Machine {
         self.go(Phase::ConnectWait, Some(now + self.settings.retry));
     }
 
-    fn probe_later(&mut self, now: Instant) {
-        self.go(Phase::ProbeWait, Some(now + self.settings.retry));
-    }
-
     /// Closes the connection and empties the feed; reconnects after `retry`,
-    /// never starting the service.
+    /// never starting the service. Ends any start grace.
     fn close(&mut self, status: ServiceStatus, now: Instant) -> Vec<Effect> {
         self.status = status;
+        self.grace_until = None;
         self.connect_later(now);
         vec![Effect::Close, Effect::ClearFeed]
     }
@@ -427,8 +497,8 @@ impl Machine {
             return Vec::new();
         }
         match self.phase {
-            Phase::ProbeWait => {
-                self.go(Phase::Probing, None);
+            Phase::ProbeWait { errors } => {
+                self.go(Phase::Probing { errors }, None);
                 vec![Effect::Query]
             }
             Phase::ConnectWait => self.connect_now(),
@@ -459,45 +529,50 @@ impl Machine {
         }
     }
 
-    /// The launch probe: start a stopped service once, wait for one that is
-    /// missing or on its way down, connect to one that runs.
-    fn on_probe(&mut self, query: ServiceQuery, now: Instant) -> Vec<Effect> {
+    /// The launch probe (ruling R21): the service is started only when the
+    /// first conclusive answer is `Stopped`; a transient error is asked
+    /// again at most [`LAUNCH_QUERY_RETRIES`] times. Any other answer leads
+    /// to the connect loop, which never starts the service.
+    fn on_probe(&mut self, query: ServiceQuery, errors: u8, now: Instant) -> Vec<Effect> {
         match query {
-            ServiceQuery::NotInstalled => {
-                self.status = status(ServiceState::NotInstalled, None);
-                self.probe_later(now);
-                Vec::new()
-            }
-            ServiceQuery::AccessDenied => {
-                self.status = status(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
-                self.probe_later(now);
-                Vec::new()
+            ServiceQuery::Error(code) if errors < LAUNCH_QUERY_RETRIES => {
+                tracing::info!("cannot query the sensor service (error {code}); asking again");
+                self.go(
+                    Phase::ProbeWait { errors: errors + 1 },
+                    Some(now + self.settings.retry),
+                );
+                return Vec::new();
             }
             ServiceQuery::Error(code) => {
                 tracing::warn!("cannot query the sensor service: error {code}");
                 self.status = status(ServiceState::Unreachable, None);
-                self.probe_later(now);
-                Vec::new()
+            }
+            ServiceQuery::NotInstalled => {
+                self.status = status(ServiceState::NotInstalled, None);
+            }
+            ServiceQuery::AccessDenied => {
+                self.status = status(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
             }
             ServiceQuery::State { state, .. } => match state {
-                RunState::Stopped => self.start(),
+                RunState::Stopped => return self.start(),
                 RunState::StartPending => {
                     self.status = status(ServiceState::Starting, None);
                     self.grace_until = Some(now + self.settings.start_grace);
-                    self.connect_now()
+                    return self.connect_now();
                 }
                 RunState::Running => {
                     self.status = status(ServiceState::Starting, None);
-                    self.connect_now()
+                    return self.connect_now();
                 }
-                // On its way down (or paused): look again, and start it once stopped.
+                // On its way down or in a state we do not drive: leave it be.
                 RunState::StopPending | RunState::Other(_) => {
-                    self.status = status(ServiceState::Starting, None);
-                    self.probe_later(now);
-                    Vec::new()
+                    tracing::info!("sensor service is {state:?} at launch; not starting it");
+                    self.status = disconnected();
                 }
             },
         }
+        self.connect_later(now);
+        Vec::new()
     }
 
     fn on_started(&mut self, result: Result<(), u32>, now: Instant) -> Vec<Effect> {
@@ -509,7 +584,7 @@ impl Machine {
             }
             Err(ERROR_SERVICE_DOES_NOT_EXIST) => {
                 self.status = status(ServiceState::NotInstalled, None);
-                self.probe_later(now);
+                self.connect_later(now);
                 Vec::new()
             }
             Err(code) => {
@@ -536,20 +611,55 @@ impl Machine {
                 self.go(Phase::Verifying { server_pid }, None);
                 vec![Effect::Query]
             }
-            Err(error) => {
-                if error == ConnectError::AccessDenied {
-                    self.status =
-                        status(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
-                } else if self.grace_until.is_some_and(|g| now < g) {
-                    self.status = status(ServiceState::Starting, None);
-                } else if self.status.state == ServiceState::Starting {
-                    self.status = disconnected();
-                }
-                // Otherwise keep the known reason (Incompatible, AccessDenied, ...).
+            Err(_) if self.grace_until.is_some_and(|g| now < g) => {
+                self.status = status(ServiceState::Starting, None);
                 self.connect_later(now);
                 Vec::new()
             }
+            Err(error) => {
+                self.go(Phase::Refreshing { error }, None);
+                vec![Effect::Query]
+            }
         }
+    }
+
+    /// No pipe (or no access to it): the SCM says why. Queries only, never
+    /// a start; the connect loop goes on after `retry`.
+    fn on_refresh(
+        &mut self,
+        query: ServiceQuery,
+        error: ConnectError,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let denied = status(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
+        match query {
+            ServiceQuery::NotInstalled => self.status = status(ServiceState::NotInstalled, None),
+            ServiceQuery::AccessDenied => self.status = denied,
+            // Transient: nothing new to say.
+            ServiceQuery::Error(code) => {
+                tracing::debug!("cannot query the sensor service: error {code}");
+            }
+            ServiceQuery::State { state, .. } => match state {
+                RunState::Running if error == ConnectError::AccessDenied => self.status = denied,
+                // The service still speaks another protocol, as far as we know.
+                RunState::Running if self.status.state == ServiceState::Incompatible => {}
+                // Started by someone else: a first sighting opens a grace.
+                RunState::StartPending if self.grace_until.is_none() => {
+                    self.grace_until = Some(now + self.settings.start_grace);
+                    self.status = status(ServiceState::Starting, None);
+                }
+                // Stopped after our start() failed: that failure still says why.
+                RunState::Stopped
+                    if self.status.state == ServiceState::Unreachable
+                        && matches!(
+                            self.status.detail,
+                            Some(ServiceDetail::AccessDenied | ServiceDetail::StartFailed)
+                        ) => {}
+                _ => self.status = disconnected(),
+            },
+        }
+        self.connect_later(now);
+        Vec::new()
     }
 
     /// Accepts the connection only if the registered service process, read
@@ -565,6 +675,7 @@ impl Machine {
                 state: RunState::Running,
                 pid,
             } if pid != 0 && server_pid == Some(pid) => {
+                self.grace_until = None;
                 self.go(Phase::Hello, Some(now + self.settings.hello_timeout));
                 Vec::new()
             }
@@ -572,6 +683,17 @@ impl Machine {
                 status(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied)),
                 now,
             ),
+            ServiceQuery::NotInstalled => {
+                tracing::warn!(
+                    "sensor pipe served by pid {server_pid:?} while the service is not \
+                     installed; disconnecting"
+                );
+                self.close(status(ServiceState::NotInstalled, None), now)
+            }
+            ServiceQuery::Error(code) => {
+                tracing::warn!("cannot verify the sensor pipe server: query error {code}");
+                self.close(disconnected(), now)
+            }
             other => {
                 let mismatch = status(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch));
                 if self.status != mismatch {
@@ -696,6 +818,11 @@ impl Machine {
                 ..
             } => self.stopped(),
             ServiceQuery::AccessDenied => self.stop_failed("cannot query the service"),
+            // Turned off before any STOP went out: nothing to wait for.
+            ServiceQuery::State {
+                state: RunState::Running | RunState::Other(_),
+                ..
+            } if !stop_sent && !self.anti_cheat => self.start(),
             ServiceQuery::State {
                 state: RunState::Running | RunState::Other(_),
                 ..
@@ -735,15 +862,24 @@ impl Machine {
     }
 
     fn stopped(&mut self) -> Vec<Effect> {
+        if !self.anti_cheat {
+            // Turned off while the STOP was on its way: the one start.
+            return self.start();
+        }
         self.status = status(ServiceState::AntiCheat, None);
         self.go(Phase::AntiCheatIdle, None);
         Vec::new()
     }
 
     /// The preference stays on: no connection and no start until it is
-    /// turned off, and no further STOP either.
+    /// turned off, and no further STOP either. If it was turned off while
+    /// waiting, the one `start()` follows.
     fn stop_failed(&mut self, why: &str) -> Vec<Effect> {
         tracing::warn!("anti-cheat mode could not stop the sensor service: {why}");
+        if !self.anti_cheat {
+            // Turned off meanwhile: the wait is over, start once anyway.
+            return self.start();
+        }
         self.status = status(ServiceState::AntiCheat, Some(ServiceDetail::StopFailed));
         self.go(Phase::AntiCheatIdle, None);
         Vec::new()
@@ -1268,6 +1404,15 @@ mod tests {
         }
     }
 
+    /// A retry long enough to observe a status before the next attempt
+    /// refreshes it.
+    fn slow_retry() -> LinkSettings {
+        LinkSettings {
+            retry: Duration::from_millis(300),
+            ..test_settings()
+        }
+    }
+
     struct Harness {
         control: Arc<FakeControl>,
         script: Arc<Script>,
@@ -1384,8 +1529,7 @@ mod tests {
         h.wait_for(is(st(ServiceState::NotInstalled, None)));
         cycles(5);
         assert_eq!(h.control.starts(), 0);
-        assert!(h.control.queries() >= 3, "the probe repeats at every retry");
-        assert_eq!(h.script.connects(), 0);
+        assert!(h.control.queries() >= 3, "the query repeats at every retry");
         assert_eq!(h.status(), st(ServiceState::NotInstalled, None));
     }
 
@@ -1437,7 +1581,7 @@ mod tests {
     fn pid_mismatch_is_unreachable_not_connected() {
         let control = FakeControl::new(running());
         let (conn, ctl) = streaming_conn(Some(PID + 1));
-        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        let h = Harness::spawn_with(control, Script::with(vec![conn]), false, slow_retry());
         h.wait_for(is(st(
             ServiceState::Unreachable,
             Some(ServiceDetail::PidMismatch),
@@ -1454,7 +1598,7 @@ mod tests {
     fn missing_server_pid_is_rejected() {
         let control = FakeControl::new(running());
         let (conn, ctl) = streaming_conn(None);
-        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        let h = Harness::spawn_with(control, Script::with(vec![conn]), false, slow_retry());
         h.wait_for(is(st(
             ServiceState::Unreachable,
             Some(ServiceDetail::PidMismatch),
@@ -1468,7 +1612,7 @@ mod tests {
         // Someone else serves the pipe while the service is stopped (pid 0).
         let control = FakeControl::new(in_state(RunState::StartPending));
         let (conn, _ctl) = streaming_conn(Some(0));
-        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        let h = Harness::spawn_with(control, Script::with(vec![conn]), false, slow_retry());
         h.wait_for(is(st(
             ServiceState::Unreachable,
             Some(ServiceDetail::PidMismatch),
@@ -1726,17 +1870,21 @@ mod tests {
     fn start_command_starts_once_and_connects() {
         let control = FakeControl::new(in_state(RunState::Stopped));
         control.with(|s| s.start_result = Err(1058));
-        let h = Harness::spawn(Arc::clone(&control), Script::with(vec![]), false);
+        // No retry fires during the test: only the command can use the
+        // scripted connection.
+        let settings = LinkSettings {
+            retry: Duration::from_secs(10),
+            ..test_settings()
+        };
+        let h = Harness::spawn_with(Arc::clone(&control), Script::with(vec![]), false, settings);
         h.wait_for(is(st(
             ServiceState::Unreachable,
             Some(ServiceDetail::StartFailed),
         )));
         control.with(|s| s.start_result = Ok(()));
-        // Scripted after the command, so a retry cannot pick it up while the
-        // fake SCM still reports the service as stopped.
-        h.send(LinkCommand::Start);
         let (conn, _ctl) = streaming_conn(Some(PID));
         h.script.add(conn);
+        h.send(LinkCommand::Start);
         h.wait_for(is(connected()));
         h.send(LinkCommand::Start);
         cycles(2);
@@ -1838,6 +1986,108 @@ mod tests {
         assert_eq!(control.stops(), 1);
     }
 
+    // ---- fix round 1: launch rule R21 and fresh reasons ----
+
+    /// The service turns up stopped; the link reports it and never starts it.
+    fn assert_never_started(h: &Harness, expected: ServiceStatus) {
+        h.control.set_query(in_state(RunState::Stopped));
+        h.wait_for(is(expected));
+        cycles(5);
+        assert_eq!(h.control.starts(), 0);
+        assert_eq!(h.status(), expected);
+    }
+
+    #[test]
+    fn a_service_being_stopped_at_launch_is_not_restarted() {
+        let control = FakeControl::new(in_state(RunState::StopPending));
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        h.wait_for(is(disconnected()));
+        assert_never_started(&h, disconnected());
+    }
+
+    #[test]
+    fn a_service_in_another_state_at_launch_is_not_started() {
+        let control = FakeControl::new(in_state(RunState::Other(7)));
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        h.wait_for(is(disconnected()));
+        assert_never_started(&h, disconnected());
+    }
+
+    #[test]
+    fn a_service_installed_after_launch_is_not_started_automatically() {
+        let control = FakeControl::new(ServiceQuery::NotInstalled);
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        h.wait_for(is(st(ServiceState::NotInstalled, None)));
+        assert_never_started(&h, disconnected());
+    }
+
+    #[test]
+    fn access_denied_at_launch_is_never_followed_by_a_start() {
+        let control = FakeControl::new(ServiceQuery::AccessDenied);
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
+        h.wait_for(is(denied));
+        assert_never_started(&h, denied);
+    }
+
+    #[test]
+    fn transient_query_error_at_launch_is_retried_at_most_three_times() {
+        let control = FakeControl::new(ServiceQuery::Error(1115));
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        h.wait_for(is(st(ServiceState::Unreachable, None)));
+        assert!(h.control.queries() >= 4);
+        assert_never_started(&h, disconnected());
+    }
+
+    #[test]
+    fn a_vanished_impostor_is_reported_as_disconnected() {
+        let control = FakeControl::new(running());
+        let (conn, _ctl) = streaming_conn(Some(PID + 1));
+        let h = Harness::spawn_with(control, Script::with(vec![conn]), false, slow_retry());
+        h.wait_for(is(st(
+            ServiceState::Unreachable,
+            Some(ServiceDetail::PidMismatch),
+        )));
+        // The next attempt finds no pipe: the SCM says why.
+        wait_for(&h.status, is(disconnected()), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_uninstalled_service_is_reported_as_not_installed() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        h.control.set_query(ServiceQuery::NotInstalled);
+        ctl.close();
+        h.wait_for(is(st(ServiceState::NotInstalled, None)));
+        assert_eq!(h.control.starts(), 0);
+    }
+
+    #[test]
+    fn disabling_anti_cheat_during_the_stop_waits_then_starts_once() {
+        let control = FakeControl::new(running());
+        control.with(|s| s.after_stop = Some(in_state(RunState::StopPending)));
+        let (conn, _ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(Arc::clone(&control), Script::with(vec![conn]), true);
+        let end = Instant::now() + WAIT;
+        while control.stops() == 0 {
+            assert!(Instant::now() < end, "STOP never sent");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        h.send(LinkCommand::SetAntiCheat(false));
+        h.wait_for(is(st(ServiceState::Starting, None)));
+        cycles(3);
+        assert_eq!(control.starts(), 0, "no start while the STOP is pending");
+        assert_eq!(h.script.connects(), 0);
+
+        control.set_query(in_state(RunState::Stopped));
+        h.wait_for(is(connected()));
+        assert_eq!(control.starts(), 1);
+        assert_eq!(control.stops(), 1);
+    }
+
     // ---- shutdown ----
 
     fn assert_quick_shutdown(h: &mut Harness, what: &str) {
@@ -1886,7 +2136,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         assert_quick_shutdown(&mut h, "during the STOP wait");
 
-        // Idle in anti-cheat mode, and in the retry wait.
+        // Idle in anti-cheat mode: stop confirmed, no deadline at all.
+        let control = FakeControl::new(in_state(RunState::Stopped));
+        let mut h = Harness::spawn(control, Script::with(vec![]), true);
+        h.wait_for(is(st(ServiceState::AntiCheat, None)));
+        assert_quick_shutdown(&mut h, "idle in anti-cheat mode");
+
+        // In the retry wait.
         let control = FakeControl::new(ServiceQuery::NotInstalled);
         let settings = LinkSettings {
             retry: Duration::from_secs(5),
@@ -1903,12 +2159,17 @@ mod tests {
     fn validate_schema_accepts_a_good_schema() {
         assert_eq!(validate_schema(&wire_schema(3)), Ok(()));
         assert_eq!(validate_schema(&wire_schema(0)), Ok(()));
+        // The same name under another kind is another sensor id.
+        let mut schema = wire_schema(2);
+        schema.sensors[1].name = schema.sensors[0].name.clone();
+        schema.sensors[1].kind = "load".to_owned();
+        assert_eq!(validate_schema(&schema), Ok(()));
     }
 
     #[test]
     fn validate_schema_rejects_what_the_provider_cannot_bind() {
         type Spoil = fn(&mut WireSchema);
-        let cases: [(&str, Spoil); 6] = [
+        let cases: [(&str, Spoil); 9] = [
             ("duplicate device", |s| s.devices.push(s.devices[0].clone())),
             ("empty device id", |s| s.devices[0].id.clear()),
             ("slash in device id", |s| {
@@ -1920,6 +2181,13 @@ mod tests {
             ("empty sensor name", |s| s.sensors[0].name.clear()),
             ("slash in sensor name", |s| {
                 s.sensors[0].name = "a/b".to_owned()
+            }),
+            ("duplicate sensor id", |s| {
+                s.sensors.push(s.sensors[1].clone())
+            }),
+            ("empty sensor kind", |s| s.sensors[0].kind.clear()),
+            ("slash in sensor kind", |s| {
+                s.sensors[0].kind = "a/b".to_owned()
             }),
         ];
         for (what, spoil) in cases {
@@ -1996,7 +2264,9 @@ mod tests {
 
         let t2 = t0 + Duration::from_millis(60);
         assert_eq!(m.decide(Event::Timer, t2), vec![Effect::Connect]);
-        assert_eq!(m.decide(not_found(), t2), vec![]);
+        // Past the grace the reason comes from the SCM.
+        assert_eq!(m.decide(not_found(), t2), vec![Effect::Query]);
+        assert_eq!(m.decide(Event::Queried(running()), t2), vec![]);
         assert_eq!(m.status, disconnected());
     }
 
@@ -2018,7 +2288,11 @@ mod tests {
             m.decide(Event::Queried(running()), t0),
             vec![Effect::Connect]
         );
-        m.decide(Event::Connected(Err(ConnectError::NotFound)), t0);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t0),
+            vec![Effect::Query]
+        );
+        m.decide(Event::Queried(running()), t0);
         assert_eq!(m.status, disconnected());
     }
 
@@ -2117,7 +2391,11 @@ mod tests {
 
         let t1 = t0 + Duration::from_millis(20);
         assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Connect]);
-        m.decide(Event::Connected(Err(ConnectError::NotFound)), t1);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t1),
+            vec![Effect::Query]
+        );
+        m.decide(Event::Queried(running()), t1);
         assert_eq!(m.status, st(ServiceState::Incompatible, None));
     }
 
@@ -2212,6 +2490,291 @@ mod tests {
             assert_eq!(m.decide(Event::Started(Err(code)), t0), vec![]);
             assert_eq!(m.status, status, "start error {code}");
         }
+    }
+
+    #[test]
+    fn decide_launch_starts_only_when_the_first_answer_is_stopped() {
+        let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
+        for (first, status, later) in [
+            (
+                ServiceQuery::NotInstalled,
+                st(ServiceState::NotInstalled, None),
+                disconnected(),
+            ),
+            (ServiceQuery::AccessDenied, denied, denied),
+            (
+                in_state(RunState::StopPending),
+                disconnected(),
+                disconnected(),
+            ),
+            (in_state(RunState::Other(7)), disconnected(), disconnected()),
+        ] {
+            let (mut m, t0) = machine(false);
+            assert_eq!(m.decide(Event::Queried(first), t0), vec![], "{first:?}");
+            assert_eq!(m.status, status, "{first:?}");
+            // Later a stopped service is reported, never started.
+            let t1 = t0 + Duration::from_millis(20);
+            assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Connect]);
+            assert_eq!(
+                m.decide(Event::Connected(Err(ConnectError::NotFound)), t1),
+                vec![Effect::Query]
+            );
+            assert_eq!(
+                m.decide(Event::Queried(in_state(RunState::Stopped)), t1),
+                vec![]
+            );
+            assert_eq!(m.status, later, "{first:?} then Stopped");
+        }
+    }
+
+    #[test]
+    fn decide_launch_error_is_retried_three_times_then_conclusive() {
+        let (mut m, t0) = machine(false);
+        let error = || Event::Queried(ServiceQuery::Error(1115));
+        let mut t = t0;
+        for _ in 0..3 {
+            assert_eq!(m.decide(error(), t), vec![]);
+            assert_eq!(m.status, st(ServiceState::Starting, None));
+            t += Duration::from_millis(20);
+            assert_eq!(m.decide(Event::Timer, t), vec![Effect::Query]);
+        }
+        assert_eq!(m.decide(error(), t), vec![]);
+        assert_eq!(m.status, st(ServiceState::Unreachable, None));
+        t += Duration::from_millis(20);
+        // The connect loop now, not the probe: a stopped service stays stopped.
+        assert_eq!(m.decide(Event::Timer, t), vec![Effect::Connect]);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t),
+            vec![Effect::Query]
+        );
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t),
+            vec![]
+        );
+        assert_eq!(m.status, disconnected());
+    }
+
+    #[test]
+    fn decide_stopped_after_transient_errors_is_the_first_answer() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(ServiceQuery::Error(1115)), t0);
+        let t1 = t0 + Duration::from_millis(20);
+        assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Query]);
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t1),
+            vec![Effect::Start]
+        );
+    }
+
+    #[test]
+    fn decide_explicit_starts_never_reenter_the_launch_probe() {
+        // A Start command on a service that turns out not installed.
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(ServiceQuery::NotInstalled), t0);
+        let t1 = t0 + Duration::from_millis(5);
+        assert_eq!(
+            m.decide(Event::Command(LinkCommand::Start), t1),
+            vec![Effect::Start]
+        );
+        assert_eq!(
+            m.decide(Event::Started(Err(ERROR_SERVICE_DOES_NOT_EXIST)), t1),
+            vec![]
+        );
+        assert_eq!(m.status, st(ServiceState::NotInstalled, None));
+        let t2 = t1 + Duration::from_millis(20);
+        assert_eq!(m.decide(Event::Timer, t2), vec![Effect::Connect]);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t2),
+            vec![Effect::Query]
+        );
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t2),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn decide_connect_loop_refreshes_the_reason_from_the_scm() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID + 1))), t0);
+        m.decide(Event::Queried(running()), t0);
+        let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
+        assert_eq!(
+            m.status,
+            st(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch))
+        );
+        let mut t = t0;
+        for (answer, expected) in [
+            (in_state(RunState::Stopped), disconnected()),
+            (
+                ServiceQuery::NotInstalled,
+                st(ServiceState::NotInstalled, None),
+            ),
+            (ServiceQuery::AccessDenied, denied),
+            // A transient error says nothing new.
+            (ServiceQuery::Error(1115), denied),
+            (running(), disconnected()),
+            (in_state(RunState::StopPending), disconnected()),
+            (
+                in_state(RunState::StartPending),
+                st(ServiceState::Starting, None),
+            ),
+        ] {
+            t += Duration::from_millis(20);
+            assert_eq!(m.decide(Event::Timer, t), vec![Effect::Connect]);
+            assert_eq!(
+                m.decide(Event::Connected(Err(ConnectError::NotFound)), t),
+                vec![Effect::Query]
+            );
+            assert_eq!(m.decide(Event::Queried(answer), t), vec![], "{answer:?}");
+            assert_eq!(m.status, expected, "{answer:?}");
+        }
+        // StartPending opened a grace: no query while it lasts.
+        t += Duration::from_millis(20);
+        m.decide(Event::Timer, t);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t),
+            vec![]
+        );
+        assert_eq!(m.status, st(ServiceState::Starting, None));
+    }
+
+    #[test]
+    fn decide_a_refused_pipe_on_a_running_service_is_access_denied() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::AccessDenied)), t0),
+            vec![Effect::Query]
+        );
+        m.decide(Event::Queried(running()), t0);
+        assert_eq!(
+            m.status,
+            st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied))
+        );
+    }
+
+    #[test]
+    fn decide_grace_ends_when_a_connection_is_accepted_or_closed() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(in_state(RunState::Stopped)), t0);
+        m.decide(Event::Started(Ok(())), t0);
+        assert!(m.grace_until.is_some());
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        m.decide(Event::Queried(running()), t0);
+        assert_eq!(m.grace_until, None, "accepted");
+        m.decide(Event::Closed(CloseReason::Disconnected), t0);
+        // Well within the old grace, a missing pipe is no longer "starting".
+        let t1 = t0 + Duration::from_millis(20);
+        m.decide(Event::Timer, t1);
+        assert_eq!(
+            m.decide(Event::Connected(Err(ConnectError::NotFound)), t1),
+            vec![Effect::Query]
+        );
+
+        // Closed before being accepted: an impostor right after our start().
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(in_state(RunState::Stopped)), t0);
+        m.decide(Event::Started(Ok(())), t0);
+        m.decide(Event::Connected(Ok(Some(PID + 1))), t0);
+        m.decide(Event::Queried(running()), t0);
+        assert_eq!(m.grace_until, None, "closed");
+    }
+
+    #[test]
+    fn decide_query_error_during_verification_is_disconnected() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        assert_eq!(
+            m.decide(Event::Queried(ServiceQuery::Error(1115)), t0),
+            vec![Effect::Close, Effect::ClearFeed]
+        );
+        assert_eq!(m.status, disconnected());
+    }
+
+    #[test]
+    fn decide_a_service_gone_during_verification_is_not_installed() {
+        let (mut m, t0) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        assert_eq!(
+            m.decide(Event::Queried(ServiceQuery::NotInstalled), t0),
+            vec![Effect::Close, Effect::ClearFeed]
+        );
+        assert_eq!(m.status, st(ServiceState::NotInstalled, None));
+    }
+
+    #[test]
+    fn decide_disabling_anti_cheat_waits_for_a_pending_stop() {
+        let (mut m, t0) = machine(true);
+        assert_eq!(m.decide(Event::Queried(running()), t0), vec![Effect::Stop]);
+        assert_eq!(m.decide(Event::StopSent(Ok(())), t0), vec![]);
+        assert_eq!(
+            m.decide(Event::Command(LinkCommand::SetAntiCheat(false)), t0),
+            vec![]
+        );
+        assert_eq!(m.status, st(ServiceState::Starting, None));
+        // A Start command changes nothing: the start is already due.
+        assert_eq!(m.decide(Event::Command(LinkCommand::Start), t0), vec![]);
+        let t1 = t0 + Duration::from_millis(5);
+        assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Query]);
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::StopPending)), t1),
+            vec![]
+        );
+        let t2 = t1 + Duration::from_millis(5);
+        assert_eq!(m.decide(Event::Timer, t2), vec![Effect::Query]);
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t2),
+            vec![Effect::Start]
+        );
+        assert_eq!(m.decide(Event::Started(Ok(())), t2), vec![Effect::Connect]);
+    }
+
+    #[test]
+    fn decide_a_stop_timeout_after_disabling_still_starts_once() {
+        let (mut m, t0) = machine(true);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::StopSent(Ok(())), t0);
+        m.decide(Event::Command(LinkCommand::SetAntiCheat(false)), t0);
+        let late = t0 + m.settings.stop_timeout;
+        assert_eq!(m.decide(Event::Timer, late), vec![Effect::Start]);
+    }
+
+    #[test]
+    fn decide_disabling_anti_cheat_before_any_stop_starts_at_once() {
+        let (mut m, t0) = machine(true);
+        // Still StartPending: no STOP has gone out, nothing to wait for.
+        m.decide(Event::Queried(in_state(RunState::StartPending)), t0);
+        assert_eq!(
+            m.decide(Event::Command(LinkCommand::SetAntiCheat(false)), t0),
+            vec![Effect::Start]
+        );
+    }
+
+    #[test]
+    fn decide_reenabling_anti_cheat_cancels_the_pending_start() {
+        let (mut m, t0) = machine(true);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::StopSent(Ok(())), t0);
+        m.decide(Event::Command(LinkCommand::SetAntiCheat(false)), t0);
+        assert_eq!(
+            m.decide(Event::Command(LinkCommand::SetAntiCheat(true)), t0),
+            vec![]
+        );
+        assert_eq!(
+            m.status,
+            st(ServiceState::AntiCheat, Some(ServiceDetail::Stopping))
+        );
+        let t1 = t0 + Duration::from_millis(5);
+        assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Query]);
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t1),
+            vec![]
+        );
+        assert_eq!(m.status, st(ServiceState::AntiCheat, None));
     }
 
     // ---- the real pipe ----

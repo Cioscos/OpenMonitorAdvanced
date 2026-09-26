@@ -25,11 +25,18 @@ internal static class ServiceHost
     /// </summary>
     internal static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(30);
 
-    /// <summary><c>%ProgramData%\OpenMonitorAdvanced\logs</c>.</summary>
-    internal static string LogDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "OpenMonitorAdvanced",
-        "logs");
+    /// <summary>
+    /// <c>%ProgramData%</c> as the system knows it (<c>FOLDERID_ProgramData</c>, from the registry,
+    /// never from the environment): the root below which <see cref="LogDirectory"/> is checked.
+    /// </summary>
+    internal static string ProgramDataRoot { get; } = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+
+    /// <summary>
+    /// <c>%ProgramData%\OpenMonitorAdvanced\logs</c>, created and locked down by the installer
+    /// (<c>OmaProtectLogDir</c>) and checked again before the service writes to it
+    /// (<see cref="Logging.LogDirectoryGuard"/>).
+    /// </summary>
+    internal static string LogDirectory { get; } = Path.Combine(ProgramDataRoot, "OpenMonitorAdvanced", "logs");
 
     internal static IHost Build(
         bool console,

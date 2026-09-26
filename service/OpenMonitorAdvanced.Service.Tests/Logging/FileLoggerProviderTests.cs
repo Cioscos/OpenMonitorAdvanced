@@ -16,19 +16,23 @@ public sealed class FileLoggerProviderTests : IDisposable
         _directory = Path.Combine(Path.GetTempPath(), "oma-service-log-tests-" + Guid.NewGuid().ToString("N"));
     }
 
+    /// <summary>The directory check of a temp directory: create it, trust it (the guard has its own tests).</summary>
+    private static string? TrustAndCreate(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        return null;
+    }
+
     public void Dispose()
     {
-        if (Directory.Exists(_directory))
-        {
-            Directory.Delete(_directory, recursive: true);
-        }
+        LogDirectoryGuardTests.DeleteTree(_directory);
     }
 
     [Fact]
     public void WritesToTheDailyFile()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 12, 0, 0, TimeSpan.Zero));
-        using var provider = new FileLoggerProvider(_directory, time: time);
+        using var provider = new FileLoggerProvider(_directory, TrustAndCreate, time: time);
         var logger = provider.CreateLogger("OpenMonitorAdvanced.Service.SomeCategory");
 
         logger.LogInformation("hello from the test");
@@ -46,7 +50,7 @@ public sealed class FileLoggerProviderTests : IDisposable
     {
         var start = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
         var time = new FakeTimeProvider(start);
-        using var provider = new FileLoggerProvider(_directory, maxFiles: 7, time: time);
+        using var provider = new FileLoggerProvider(_directory, TrustAndCreate, maxFiles: 7, time: time);
         var logger = provider.CreateLogger("Cat");
 
         for (var day = 0; day < 9; day++)
@@ -69,7 +73,7 @@ public sealed class FileLoggerProviderTests : IDisposable
     public void PrunesOnlyOnceWhenLoggingMultipleLinesOnTheSameDay()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 0, 0, 0, TimeSpan.Zero));
-        using var provider = new FileLoggerProvider(_directory, time: time);
+        using var provider = new FileLoggerProvider(_directory, TrustAndCreate, time: time);
         var logger = provider.CreateLogger("Cat");
 
         for (var i = 0; i < 5; i++)
@@ -86,7 +90,7 @@ public sealed class FileLoggerProviderTests : IDisposable
     public void PrunesOnceMorePerNewDay()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 0, 0, 0, TimeSpan.Zero));
-        using var provider = new FileLoggerProvider(_directory, time: time);
+        using var provider = new FileLoggerProvider(_directory, TrustAndCreate, time: time);
         var logger = provider.CreateLogger("Cat");
 
         logger.LogInformation("day one, line one");
@@ -104,11 +108,93 @@ public sealed class FileLoggerProviderTests : IDisposable
         // which is the simplest reliable way to force every filesystem call to fail
         // without depending on ACL manipulation.
         var unwritable = Path.Combine(_directory, "sub\0dir");
-        using var provider = new FileLoggerProvider(unwritable);
+        using var provider = new FileLoggerProvider(unwritable, TrustAndCreate);
         var logger = provider.CreateLogger("Cat");
 
         var exception = Record.Exception(() => logger.LogInformation("this must not throw"));
 
         Assert.Null(exception);
+    }
+
+    [Fact]
+    public void ARefusedDirectoryDisablesFileLoggingAndIsReportedOnce()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 12, 0, 0, TimeSpan.Zero));
+        var reports = new List<string>();
+        int checks = 0;
+        using var provider = new FileLoggerProvider(
+            _directory,
+            _ =>
+            {
+                checks++;
+                return "owner S-1-5-21-1 is not SYSTEM or Administrators";
+            },
+            time: time,
+            onDisabled: reports.Add);
+        var logger = provider.CreateLogger("Cat");
+
+        logger.LogInformation("first");
+        logger.LogInformation("second");
+        time.Advance(TimeSpan.FromDays(1));
+        logger.LogInformation("next day");
+
+        Assert.False(Directory.Exists(_directory));
+        Assert.Equal(1, checks);
+        string report = Assert.Single(reports);
+        Assert.Contains("owner S-1-5-21-1 is not SYSTEM or Administrators", report);
+        Assert.Contains(_directory, report);
+    }
+
+    [Fact]
+    public void AThrowingCheckDisablesFileLoggingToo()
+    {
+        var reports = new List<string>();
+        using var provider = new FileLoggerProvider(_directory, _ => throw new UnauthorizedAccessException("denied"), onDisabled: reports.Add);
+
+        var exception = Record.Exception(() => provider.CreateLogger("Cat").LogInformation("x"));
+
+        Assert.Null(exception);
+        Assert.Contains("denied", Assert.Single(reports));
+    }
+
+    [Fact]
+    public void TheDirectoryIsCheckedBeforeTheFirstWriteAndAgainWhenTheDayRolls()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 12, 0, 0, TimeSpan.Zero));
+        var checkedBefore = new List<bool>();
+        using var provider = new FileLoggerProvider(
+            _directory,
+            d =>
+            {
+                checkedBefore.Add(Directory.Exists(d) && Directory.EnumerateFiles(d).Any());
+                return TrustAndCreate(d);
+            },
+            time: time);
+        var logger = provider.CreateLogger("Cat");
+
+        logger.LogInformation("one");
+        logger.LogInformation("two");
+        time.Advance(TimeSpan.FromDays(1));
+        logger.LogInformation("three");
+
+        Assert.Equal([false, true], checkedBefore); // before any file; then once more on the new day
+        Assert.Equal(2, Directory.GetFiles(_directory, "oma-service-*.log").Length);
+    }
+
+    [Fact]
+    public void ADailyFileThatIsAReparsePointIsNeverFollowed()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 12, 0, 0, TimeSpan.Zero));
+        Directory.CreateDirectory(_directory);
+        string target = Path.Combine(_directory, "target");
+        Directory.CreateDirectory(target);
+        LogDirectoryGuardTests.MakeJunction(Path.Combine(_directory, "oma-service-20260926.log"), target);
+        var reports = new List<string>();
+        using var provider = new FileLoggerProvider(_directory, TrustAndCreate, time: time, onDisabled: reports.Add);
+
+        provider.CreateLogger("Cat").LogInformation("must not be written through the link");
+
+        Assert.Contains("junction or link", Assert.Single(reports));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(target));
     }
 }

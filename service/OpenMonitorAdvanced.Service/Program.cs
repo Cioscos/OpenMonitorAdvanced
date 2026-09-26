@@ -22,7 +22,23 @@ return args switch
 
 static int RunHost(bool console)
 {
-    var fileLogs = new FileLoggerProvider(ServiceHost.LogDirectory);
+    // Never follows a log directory another user could have planted or redirected (it would make
+    // the SYSTEM writes and prune deletes land elsewhere): file logging is then disabled, once,
+    // with the reason on the console or in the Application event log.
+    var fileLogs = new FileLoggerProvider(
+        ServiceHost.LogDirectory,
+        directory => LogDirectoryGuard.Prepare(ServiceHost.ProgramDataRoot, directory),
+        onDisabled: message =>
+        {
+            if (console)
+            {
+                Console.Error.WriteLine(message);
+            }
+            else
+            {
+                EventLogReport.Warning(ServiceInstaller.ServiceName, message);
+            }
+        });
     ILogger log = fileLogs.CreateLogger("OpenMonitorAdvanced.Service.Program");
 
     // Anything unhandled on any thread: log it and exit with code 1, so the SCM applies the

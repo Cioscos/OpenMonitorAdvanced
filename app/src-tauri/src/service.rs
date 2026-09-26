@@ -18,7 +18,9 @@ use tauri::State;
 
 /// Stable, non-localized error code the UI matches to show its own
 /// `service.action.failed` text (Task 12); the `io::Error` detail behind it
-/// only ever reaches the log.
+/// only ever reaches the log. Only reached through `ToggleState::save`,
+/// which off Windows is only ever called from a test.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ERR_PERSIST_FAILED: &str = "persist_failed";
 
 /// What every command answers off Windows: there is no service, so the
@@ -44,7 +46,10 @@ pub(crate) fn not_installed_set_anti_cheat(_enabled: bool) -> Result<ServiceStat
     Ok(not_installed_status())
 }
 
-/// Event the sampler callback emits when the service status changes.
+/// Event the sampler callback emits when the service status changes. Only
+/// `main.rs`'s `#[cfg(windows)]` sampler callback reads this off the lib
+/// itself (there is no status-change event to emit off Windows).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const EVENT_SERVICE: &str = "oma:service";
 
 /// `%LOCALAPPDATA%\OpenMonitorAdvanced\service.json`; `None` without
@@ -78,6 +83,7 @@ pub fn load_anti_cheat(path: &Path) -> bool {
 /// Distinguishes the temp file of one `save_anti_cheat` call from another so
 /// concurrent writers (an async command and the tray handler, say) never
 /// share, and so never clobber, the same temp file.
+#[cfg_attr(not(windows), allow(dead_code))]
 static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Saves the flag atomically: a temporary file (unique to this process and
@@ -85,6 +91,10 @@ static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// the target, so a crash between the two never leaves a half-written file.
 /// The saved JSON is `{"antiCheat":<enabled>}`. The temp file is removed if
 /// the write or the rename fails; a failed `create_dir_all` never creates one.
+/// Off Windows this is only reached from a test: `ToggleState::save`, its
+/// only non-test caller, is itself only reached through the Windows link
+/// (see the module doc comment).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn save_anti_cheat(path: &Path, enabled: bool) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -125,16 +135,20 @@ pub trait ToggleIndicator: Send + Sync {
 }
 
 // `CheckMenuItem<Wry>` and `AppHandle` are portable Tauri types (not Win32),
-// so this impl is not `#[cfg(windows)]`: off Windows the tray still shows a
-// (harmless, no-op-backed) checkbox, and `Arc::new(item) as Arc<dyn
+// so this impl is not `#[cfg(windows)]`: `Arc::new(item) as Arc<dyn
 // ToggleIndicator>` in `tray.rs` — which is not cfg-gated either — compiles
-// on every platform (fix round 2, finding #3).
+// on every platform. Off Windows, `ServiceShell::set_anti_cheat`'s
+// `#[cfg(not(windows))]` impl never calls `ToggleState::set` or
+// `refresh_indicator`, so a click's native, self-toggling checkbox state is
+// never corrected back to the (always-`false`, off Windows) in-memory flag:
+// the checkbox can drift from it permanently. Harmless, since off Windows
+// the flag drives no real behaviour, but worth knowing before wiring this
+// checkbox to anything else off Windows.
 impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
     /// `CheckMenuItem::set_checked` blocks the calling thread until the main
     /// thread runs it (`tauri::menu::run_item_main_thread!`), and if that
     /// call happened while this process held a lock the main thread's own
-    /// event handler also needs, the two threads deadlock (fix round 2,
-    /// finding #2 — reproduced by
+    /// event handler also needs, the two threads deadlock (reproduced by
     /// `tests::a_stuck_indicator_update_never_blocks_a_concurrent_toggle`).
     /// `run_on_main_thread` avoids that: it posts the closure and returns at
     /// once — synchronously, if already on the main thread, since
@@ -153,6 +167,9 @@ impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
 /// dependency on [`oma_win::svc::ServiceLink`] or a Tauri app, so it is
 /// tested directly (see the `tests` module below).
 struct ToggleState {
+    /// Read only by `save` (via `set`), which off Windows only a test calls
+    /// (see `ServiceShell::set_anti_cheat`'s `#[cfg(not(windows))]` impl).
+    #[cfg_attr(not(windows), allow(dead_code))]
     path: Option<PathBuf>,
     /// `Arc` (not a plain `AtomicBool`) so `refresh_indicator` can hand a
     /// `'static` reader of it to the indicator without needing `self` to
@@ -167,6 +184,8 @@ struct ToggleState {
     /// and its doc comment) or across an `await` — nothing here is `async`.
     /// Each `save_anti_cheat` call also picks its own unique temp file name
     /// regardless, so the two can never write the same temp file at once.
+    /// Locked only by `set`, which off Windows only a test calls.
+    #[cfg_attr(not(windows), allow(dead_code))]
     write: Mutex<()>,
 }
 
@@ -194,12 +213,11 @@ impl ToggleState {
     }
 
     /// Hands the indicator a way to read the flag whenever it actually
-    /// updates the checkbox, and nothing more: this method never calls into
-    /// the indicator itself, and holds `tray_item` only long enough to clone
-    /// the `Arc` out of it (fix round 2, finding #1 — this is deliberately
-    /// called with no other lock of `self` held, in particular not `write`,
+    /// updates the checkbox, and nothing more: this method holds `tray_item`
+    /// only long enough to clone the `Arc` out of it, then calls into the
+    /// indicator with every lock of `self` already released — deliberately,
     /// so a slow or main-thread-bound indicator update can never block a
-    /// concurrent [`Self::set`]).
+    /// concurrent [`Self::set`] (see the `CheckMenuItem` impl above).
     fn refresh_indicator(&self) {
         let item = self
             .tray_item
@@ -217,6 +235,9 @@ impl ToggleState {
     /// with `write` already released — schedules the tray checkbox update.
     /// On a save error nothing else runs, the previous preference is kept
     /// and shown, and the error is returned — never a silent success.
+    /// Off Windows only a test calls this (`ServiceShell::set_anti_cheat`'s
+    /// `#[cfg(not(windows))]` impl never persists, so it never reaches here).
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn set(&self, enabled: bool, apply: impl FnOnce()) -> Result<(), String> {
         let result = {
             let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
@@ -231,6 +252,8 @@ impl ToggleState {
         result
     }
 
+    /// Off Windows only reached from `set`, so only from a test.
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn save(&self, enabled: bool) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             tracing::warn!("cannot persist the anti-cheat flag: no LOCALAPPDATA path");
@@ -307,7 +330,9 @@ impl ServiceShell {
 
     /// The one toggle path: the `set_anti_cheat` command and the tray's
     /// check item both call this and nothing else. Order: save, then the
-    /// link command, then the tray checkbox (via `ToggleState::set`'s `apply`).
+    /// link command (`apply`, run by `ToggleState::set` while `write` is
+    /// still held), then — with `write` released — the tray checkbox, via
+    /// `ToggleState::set`'s call to `refresh_indicator`.
     pub(crate) fn set_anti_cheat(&self, enabled: bool) -> Result<ServiceStatus, String> {
         self.toggle.set(enabled, || {
             self.send_link(oma_win::svc::LinkCommand::SetAntiCheat(enabled));
@@ -590,7 +615,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Fix round 2, finding #2: models a "busy main thread" — the first
+    /// Regression test for the deadlock described on the `CheckMenuItem`
+    /// impl above: models a "busy main thread" — the first
     /// `refresh` call blocks (as `CheckMenuItem::set_checked` would while
     /// waiting for the real main thread) until released; every later call is
     /// unaffected. Confirmed RED against the round-1 code (which called the

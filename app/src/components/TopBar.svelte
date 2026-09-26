@@ -21,6 +21,9 @@
 
   let busy = $state(false);
   let failed = $state(false);
+  // Collapsed by default (R23): the badge must not occupy permanent space for users without
+  // the service. A command failure opens it so the error is visible.
+  let open = $state(false);
 
   const showBadge = $derived(service !== null && service.state !== 'connected');
 
@@ -31,6 +34,7 @@
       await action();
     } catch {
       failed = true;
+      open = true;
     } finally {
       busy = false;
     }
@@ -59,19 +63,21 @@
       <span class="stale" role="status">{t('status.stale')}</span>
     {/if}
     {#if showBadge && service}
-      <div class="badge" role="status">
-        <span class="label">{t('service.baseMode')}</span>
+      <details class="badge" bind:open>
+        <summary>{t('service.baseMode')}</summary>
         <div class="panel">
-          <p>{t(`service.state.${service.state}`)}</p>
-          {#if service.detail}<p>{t(`service.detail.${service.detail}`)}</p>{/if}
+          <div class="status" role="status">
+            <p>{t(`service.state.${service.state}`)}</p>
+            {#if service.detail}<p>{t(`service.detail.${service.detail}`)}</p>{/if}
+            {#if failed}<p class="error">{t('service.action.failed')}</p>{/if}
+          </div>
           {#if service.state === 'antiCheat'}
             <button type="button" disabled={busy} onclick={() => run(onLeaveAntiCheat)}>{t('service.action.leaveAntiCheat')}</button>
           {:else if service.state === 'unreachable'}
             <button type="button" disabled={busy} onclick={() => run(onStartService)}>{t('service.action.start')}</button>
           {/if}
-          {#if failed}<p class="error">{t('service.action.failed')}</p>{/if}
         </div>
-      </div>
+      </details>
     {/if}
     <button class="icon" type="button" disabled title={t('settings.comingSoon')} aria-label={t('settings.title')}>⚙</button>
   </div>
@@ -135,7 +141,8 @@
     color: var(--warn);
     border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   }
-  .label {
+  .badge summary {
+    cursor: help;
     font-weight: 600;
   }
   .panel {

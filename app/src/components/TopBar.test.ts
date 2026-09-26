@@ -78,3 +78,21 @@ test('anti-cheat stop failure is visible', async () => {
   await fireEvent.click(screen.getByRole('button', { name: t('service.action.leaveAntiCheat') }));
   await vi.waitFor(() => expect(screen.getByText(t('service.action.failed'))).toBeTruthy());
 });
+
+test('the badge is a closed disclosure by default and opens on a command failure (R23)', async () => {
+  const onLeaveAntiCheat = vi.fn().mockRejectedValue(new Error('persist_failed'));
+  setup({ state: 'antiCheat', detail: null }, { onLeaveAntiCheat });
+  const details = document.querySelector('details.badge') as HTMLDetailsElement;
+  expect(details).toBeTruthy();
+  expect(details.open).toBe(false);
+
+  await fireEvent.click(screen.getByRole('button', { name: t('service.action.leaveAntiCheat') }));
+  await vi.waitFor(() => expect(details.open).toBe(true));
+});
+
+test('the live status region does not wrap the action button', () => {
+  setup({ state: 'antiCheat', detail: null });
+  const status = screen.getByRole('status');
+  expect(status.querySelector('button')).toBeNull();
+  expect(status.textContent).toContain(t('service.state.antiCheat'));
+});

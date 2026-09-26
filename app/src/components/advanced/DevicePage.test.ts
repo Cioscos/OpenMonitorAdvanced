@@ -108,8 +108,10 @@ test('leaving the page stops the statistics polling and destroys the chart', asy
 test('the generic notice appears on CPU, memory and disk pages only without the service', async () => {
   const { backend, store } = setup();
   const NOTICE = t('service.pageNotice');
+  const MEMORY = 'memory/0';
   const DISK = 'storage/device-mock-ssd';
   const NIC = 'network/mock-eth';
+  const MEMORY_ENTRY: SidebarEntry = { id: MEMORY, kind: 'memory', deviceIds: [MEMORY], labelKey: 'advanced.section.memory' };
   const DISK_ENTRY: SidebarEntry = { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
   const NIC_ENTRY: SidebarEntry = { id: NIC, kind: 'network', deviceIds: [NIC], labelKey: 'advanced.section.network', labelArg: 'Ethernet' };
   const notConnected: ServiceStatus = { state: 'unreachable', detail: null };
@@ -118,6 +120,10 @@ test('the generic notice appears on CPU, memory and disk pages only without the 
   const { unmount: u1 } = render(DevicePage, { entry: CPU_ENTRY, store, backend, service: notConnected });
   expect(screen.getByText(NOTICE)).toBeTruthy();
   u1();
+
+  const { unmount: u1b } = render(DevicePage, { entry: MEMORY_ENTRY, store, backend, service: notConnected });
+  expect(screen.getByText(NOTICE)).toBeTruthy();
+  u1b();
 
   const { unmount: u2 } = render(DevicePage, { entry: DISK_ENTRY, store, backend, service: notConnected });
   expect(screen.getByText(NOTICE)).toBeTruthy();

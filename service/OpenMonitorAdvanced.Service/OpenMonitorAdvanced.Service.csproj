@@ -27,6 +27,11 @@
     <!-- LHM tree -> wire schema mapping (Task 5); Sensors/HardwareNode.cs is a
          read-only view so the mapping is testable without LHM or admin rights. -->
     <PackageReference Include="LibreHardwareMonitorLib" />
+    <!-- LHM's Unix helper: its native MonoPosixHelper.dll/libMonoPosixHelper.dll are only loaded on
+         Linux/macOS code paths. Without them the publish output is oma-service.exe alone, which is
+         all the installer copies (scripts/build-installer-payload.ps1 enforces it), and nothing
+         native is bundled for a LocalSystem process to extract at run time. -->
+    <PackageReference Include="Mono.Posix.NETStandard" ExcludeAssets="native" />
   </ItemGroup>
 
   <ItemGroup>

@@ -71,7 +71,10 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** Runs the payload script against a fake `dotnet` (a .cmd with the given body) in a temp dir. */
+/**
+ * Runs the payload script against a fake `dotnet` (a .cmd with the given body, where `{OUT}` stands
+ * for the payload directory) in a temp dir.
+ */
 function runPayload(fakeDotnetBody: string) {
   const dir = mkdtempSync(join(tmpdir(), 'oma-payload-'));
   scratch.push(dir);
@@ -83,7 +86,7 @@ function runPayload(fakeDotnetBody: string) {
   const staleExe = join(out, 'service', 'oma-service.exe');
   writeFileSync(staleExe, 'stale');
   const fake = join(dir, 'fake-dotnet.cmd');
-  writeFileSync(fake, `@echo off\r\n${fakeDotnetBody}\r\n`);
+  writeFileSync(fake, `@echo off\r\n${fakeDotnetBody.replaceAll('{OUT}', out)}\r\n`);
   const run = spawnSync(
     'pwsh',
     ['-NoProfile', '-NonInteractive', '-File', payloadScript, '-DotnetExe', fake, '-ServiceProject', project, '-OutputRoot', out],
@@ -107,6 +110,21 @@ describe('installer payload script', { timeout: 120_000 }, () => {
     expect(run.status, output).not.toBe(0);
     expect(output).toMatch(/oma-service\.exe is missing/);
     expect(existsSync(staleExe)).toBe(false);
+  });
+
+  it('fails when publish leaves anything but oma-service.exe and its .pdb (the installer copies only the exe)', () => {
+    const { run, out, output } = runPayload(
+      'echo publishing & mkdir "{OUT}\\service" & echo exe> "{OUT}\\service\\oma-service.exe" & echo pdb> "{OUT}\\service\\oma-service.pdb" & echo dll> "{OUT}\\service\\native.dll" & exit /b 0',
+    );
+    expect(run.status, output).not.toBe(0);
+    expect(output).toMatch(/unexpected files? in the publish output: native\.dll/);
+    expect(existsSync(join(out, 'service')), 'the incomplete payload must be gone').toBe(false);
+  });
+
+  it('publishes without native libraries extracted at run time', () => {
+    const pubxml = read(resolve(repoDir, 'service/OpenMonitorAdvanced.Service/Properties/PublishProfiles/Service.pubxml'));
+    expect(pubxml).toMatch(/<IncludeNativeLibrariesForSelfExtract>false<\/IncludeNativeLibrariesForSelfExtract>/);
+    expect(pubxml).not.toMatch(/<IncludeNativeLibrariesForSelfExtract>true/);
   });
 
   it('fails on a trim warning that is not on the allowlist', () => {

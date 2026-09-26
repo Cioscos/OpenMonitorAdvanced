@@ -17,7 +17,9 @@
   3. Trim gate (controller ruling R16): the publish log goes through
      scripts/check-trim-warnings.ps1 -ParseOnly, so any trim warning whose (code, origin) is
      not in service/trim-allowlist.txt fails the payload build.
-  4. Checks that oma-service.exe exists and carries the expected file version.
+  4. Checks that the publish output holds nothing but oma-service.exe (and its .pdb), since the
+     installer copies only the exe, and that oma-service.exe exists and carries the expected file
+     version.
   5. Downloads PawnIO_setup.exe 2.2.0 (or reuses the cached copy) and verifies its SHA-256
      against the pinned hash (app/src-tauri/nsis/pawnio.sha256, the single source also read by
      oma.nsh at compile time) and its Authenticode signature (Valid, pinned signer). The pins
@@ -114,6 +116,17 @@ function Build-ServicePayload {
     if ($LASTEXITCODE -ne 0) {
         Remove-Item -Recurse -Force $serviceOut -ErrorAction SilentlyContinue
         Fail 'trim warning gate failed (see above; the allowlist is service/trim-allowlist.txt)'
+    }
+
+    # --- 3b. nothing but the exe and its symbols ---------------------------------------------------
+    # The installer copies only oma-service.exe: anything else the single file might need next to
+    # it (a native DLL, a config file) would be missing from the installed service.
+    $unexpected = @(Get-ChildItem -LiteralPath $serviceOut -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @('oma-service.exe', 'oma-service.pdb') } |
+            ForEach-Object Name)
+    if ($unexpected.Count -gt 0) {
+        Remove-Item -Recurse -Force $serviceOut -ErrorAction SilentlyContinue
+        Fail "unexpected files in the publish output: $($unexpected -join ', ') (the installer copies only oma-service.exe)"
     }
 
     # --- 4. the exe we just built -----------------------------------------------------------------

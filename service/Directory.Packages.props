@@ -7,6 +7,9 @@
   <ItemGroup>
     <!-- LHM mapping (Task 5). -->
     <PackageVersion Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    <!-- LibreHardwareMonitorLib 0.9.6's own dependency, referenced directly only to drop its
+         native assets (see OpenMonitorAdvanced.Service.csproj). Keep in step with LHM. -->
+    <PackageVersion Include="Mono.Posix.NETStandard" Version="1.0.0" />
     <!-- Wire protocol codec (Task 3): hand-written MessagePackWriter/MessagePackReader usage,
          see protocol/fixtures/README.md and docs/superpowers/references/m4/s2-msgpack.md. -->
     <PackageVersion Include="MessagePack" Version="3.1.10" />

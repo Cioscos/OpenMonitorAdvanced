@@ -85,7 +85,8 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
 /// ids, a `Storage` hint maps onto a disk of `drives` only when
 /// [`storage_binding`] agrees, and every other device (or a hint that did
 /// not match) gets `<kind>/<device id>`; such an unbound storage device keeps
-/// only its SMART data ([`is_core_disk_io`]). A device or sensor whose kind/unit
+/// only its SMART data ([`is_core_disk_io`]), and is left out when nothing
+/// (no sensor, no property) remains. A device or sensor whose kind/unit
 /// is not one `oma_core::model` knows is skipped, with one log warning for
 /// the whole schema. Returns the kept sensors' wire indices, in the same
 /// order as `Inventory::sensors`, for `poll` to read the matching values.
@@ -144,20 +145,6 @@ pub(crate) fn bind(
         }
     }
 
-    let mut devices = Vec::with_capacity(bound.len());
-    for device in &schema.devices {
-        let Some(b) = bound.get(device.id.as_str()) else {
-            continue;
-        };
-        devices.push(Device {
-            id: b.final_id.clone(),
-            kind: b.kind,
-            name: device.name.clone(),
-            vendor: device.vendor.clone(),
-            properties: device.properties.clone(),
-        });
-    }
-
     let mut sensors = Vec::new();
     let mut kept = Vec::new();
     for (index, sensor) in schema.sensors.iter().enumerate() {
@@ -189,6 +176,29 @@ pub(crate) fn bind(
         };
         sensors.push(s);
         kept.push(index);
+    }
+
+    // An unbound disk left with no sensor and no property (e.g. a USB disk
+    // without SMART, once its I/O duplicates are gone) would be an empty page.
+    let with_sensors: HashSet<&str> = sensors.iter().map(|s| s.device_id.as_str()).collect();
+    let mut devices = Vec::with_capacity(bound.len());
+    for device in &schema.devices {
+        let Some(b) = bound.get(device.id.as_str()) else {
+            continue;
+        };
+        if b.unbound_storage
+            && device.properties.is_empty()
+            && !with_sensors.contains(b.final_id.as_str())
+        {
+            continue;
+        }
+        devices.push(Device {
+            id: b.final_id.clone(),
+            kind: b.kind,
+            name: device.name.clone(),
+            vendor: device.vendor.clone(),
+            properties: device.properties.clone(),
+        });
     }
 
     if unknown {
@@ -332,6 +342,8 @@ mod tests {
 
     #[test]
     fn storage_hint_binds_only_when_model_and_serial_match() {
+        // An unbound disk needs a SMART sensor to be published at all.
+        let smart = |id: &str| sensor(id, "temperature", "drive", "celsius", "temperature");
         let drives = drive_table(vec![
             drive(0, "storage/device-aaa", Some("WD Black"), Some("SN-1")),
             drive(1, "storage/device-bbb", Some("Other"), Some("SN-2")),
@@ -395,7 +407,7 @@ mod tests {
                     "storage",
                     Some(hint.clone()),
                 )],
-                sensors: vec![],
+                sensors: vec![smart(&format!("svc-disk-{i}"))],
             };
             let (inventory, _) = bind(&schema, &drives).expect("bind");
             assert_eq!(
@@ -417,7 +429,7 @@ mod tests {
                     serial: None,
                 }),
             )],
-            sensors: vec![],
+            sensors: vec![smart("svc-disk-none")],
         };
         let (inventory, _) = bind(&schema, &no_identity_drives).expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/svc-disk-none");
@@ -437,7 +449,7 @@ mod tests {
                     serial: Some("Same-SN".to_owned()),
                 }),
             )],
-            sensors: vec![],
+            sensors: vec![smart("svc-disk-amb")],
         };
         let (inventory, _) = bind(&schema, &ambiguous).expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/svc-disk-amb");
@@ -500,6 +512,38 @@ mod tests {
             ]
         );
         assert_eq!(kept, vec![0, 1, 2, 3, 4, 8, 9, 13, 14]);
+    }
+
+    #[test]
+    fn an_unbound_disk_left_empty_is_not_published() {
+        // A USB disk without SMART: once its I/O duplicates are gone nothing is
+        // left, so no empty page. With a property (or any SMART sensor) it stays.
+        let io_only = |id: &str| {
+            vec![
+                sensor(id, "throughput", "read", "bytes_per_second", "throughput"),
+                sensor(id, "throughput", "write", "bytes_per_second", "throughput"),
+                sensor(id, "load", "active", "percent", "load"),
+            ]
+        };
+        let mut with_property = device("svc-prop", "storage", None);
+        with_property
+            .properties
+            .insert("availableSpareThresholdPct".to_owned(), "10".to_owned());
+        let schema = WireSchema {
+            devices: vec![
+                device("svc-usb", "storage", None),
+                with_property,
+                device("mb-1", "motherboard", None),
+            ],
+            sensors: [io_only("svc-usb"), io_only("svc-prop")].concat(),
+        };
+
+        let (inventory, kept) = bind(&schema, &DriveIds::default()).expect("bind");
+
+        let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["storage/svc-prop", "motherboard/mb-1"]);
+        assert!(inventory.sensors.is_empty());
+        assert!(kept.is_empty());
     }
 
     fn drives_with_no_identity() -> DriveIds {

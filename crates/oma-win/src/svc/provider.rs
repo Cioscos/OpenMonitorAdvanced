@@ -64,13 +64,28 @@ fn storage_binding<'a>(
 struct Bound {
     final_id: String,
     kind: DeviceKind,
+    /// A storage device that did not bind onto a core disk: its own page
+    /// shows the SMART data only (spec D3), see [`is_core_disk_io`].
+    unbound_storage: bool,
+}
+
+/// The service's per-disk I/O sensors, which duplicate what the core's
+/// storage provider already shows for every disk. On a bound disk they
+/// merge with the core's (D2); on an unbound one they would repeat the same
+/// I/O under a second entry, so they are dropped there.
+fn is_core_disk_io(kind: &str, name: &str) -> bool {
+    matches!(
+        (kind, name),
+        ("throughput", "read") | ("throughput", "write") | ("load", "active")
+    )
 }
 
 /// Binds `schema`'s devices onto core ids and builds the resulting
 /// inventory: `Cpu`/`Memory` hints map to the CPU/memory provider's device
 /// ids, a `Storage` hint maps onto a disk of `drives` only when
 /// [`storage_binding`] agrees, and every other device (or a hint that did
-/// not match) gets `<kind>/<device id>`. A device or sensor whose kind/unit
+/// not match) gets `<kind>/<device id>`; such an unbound storage device keeps
+/// only its SMART data ([`is_core_disk_io`]). A device or sensor whose kind/unit
 /// is not one `oma_core::model` knows is skipped, with one log warning for
 /// the whole schema. Returns the kept sensors' wire indices, in the same
 /// order as `Inventory::sensors`, for `poll` to read the matching values.
@@ -91,6 +106,7 @@ pub(crate) fn bind(
             unknown = true;
             continue;
         };
+        let mut bound_to_disk = false;
         let final_id = match &device.hint {
             Some(IdentityHint::Cpu { index }) => format!("cpu/{index}"),
             Some(IdentityHint::Memory {}) => "memory/0".to_owned(),
@@ -99,12 +115,23 @@ pub(crate) fn bind(
                 model,
                 serial,
             }) => match storage_binding(model, serial, *physical_drive, drives) {
-                Some(entry) => entry.device_id.clone(),
+                Some(entry) => {
+                    bound_to_disk = true;
+                    entry.device_id.clone()
+                }
                 None => format!("{}/{}", device.kind, device.id),
             },
             None => format!("{}/{}", device.kind, device.id),
         };
-        bound.insert(device.id.as_str(), Bound { final_id, kind });
+        let unbound_storage = kind == DeviceKind::Storage && !bound_to_disk;
+        bound.insert(
+            device.id.as_str(),
+            Bound {
+                final_id,
+                kind,
+                unbound_storage,
+            },
+        );
     }
 
     let mut seen_ids = HashSet::with_capacity(bound.len());
@@ -137,6 +164,9 @@ pub(crate) fn bind(
         let Some(b) = bound.get(sensor.device_id.as_str()) else {
             continue;
         };
+        if b.unbound_storage && is_core_disk_io(&sensor.kind, &sensor.name) {
+            continue;
+        }
         let Some(kind) = parse_wire::<SensorKind>(&sensor.kind) else {
             unknown = true;
             continue;
@@ -411,6 +441,65 @@ mod tests {
         };
         let (inventory, _) = bind(&schema, &ambiguous).expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/svc-disk-amb");
+    }
+
+    #[test]
+    fn an_unbound_disk_keeps_only_its_smart_data() {
+        // The core already shows every disk's I/O (spec D3): a disk the service could not
+        // bind onto a core disk gets its own page with the SMART data only, never a second
+        // copy of read/write/active under another entry.
+        let drives = drive_table(vec![drive(0, "storage/device-aaa", Some("M"), Some("S"))]);
+        let bound_hint = IdentityHint::Storage {
+            physical_drive: 0,
+            model: Some("M".to_owned()),
+            serial: Some("S".to_owned()),
+        };
+        let unbound_hint = IdentityHint::Storage {
+            physical_drive: 1,
+            model: Some("Other".to_owned()),
+            serial: Some("X".to_owned()),
+        };
+        let io_and_smart = |id: &str| {
+            vec![
+                sensor(id, "throughput", "read", "bytes_per_second", "throughput"),
+                sensor(id, "throughput", "write", "bytes_per_second", "throughput"),
+                sensor(id, "load", "active", "percent", "load"),
+                sensor(id, "temperature", "drive", "celsius", "temperature"),
+                sensor(id, "percent", "life", "percent", "percent"),
+            ]
+        };
+        let schema = WireSchema {
+            devices: vec![
+                device("svc-bound", "storage", Some(bound_hint)),
+                device("svc-unbound", "storage", Some(unbound_hint)),
+                device("svc-nohint", "storage", None),
+            ],
+            sensors: [
+                io_and_smart("svc-bound"),
+                io_and_smart("svc-unbound"),
+                io_and_smart("svc-nohint"),
+            ]
+            .concat(),
+        };
+
+        let (inventory, kept) = bind(&schema, &drives).expect("bind");
+
+        let ids: Vec<&str> = inventory.sensors.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "storage/device-aaa/throughput/read",
+                "storage/device-aaa/throughput/write",
+                "storage/device-aaa/load/active",
+                "storage/device-aaa/temperature/drive",
+                "storage/device-aaa/percent/life",
+                "storage/svc-unbound/temperature/drive",
+                "storage/svc-unbound/percent/life",
+                "storage/svc-nohint/temperature/drive",
+                "storage/svc-nohint/percent/life",
+            ]
+        );
+        assert_eq!(kept, vec![0, 1, 2, 3, 4, 8, 9, 13, 14]);
     }
 
     fn drives_with_no_identity() -> DriveIds {

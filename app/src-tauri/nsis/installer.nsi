@@ -388,6 +388,7 @@ FunctionEnd
 !insertmacro MUI_PAGE_COMPONENTS ; OMA "Advanced sensors" section
 ; 5. Choose install directory page
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE OmaDirectoryLeave ; OMA
 !insertmacro MUI_PAGE_DIRECTORY
 
 ; 6. Start menu shortcut page

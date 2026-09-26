@@ -361,6 +361,119 @@ describe('oma.nsh failure paths', () => {
     expect(check).toMatch(/ = 0$/);
   });
 
+  it('requires $INSTDIR strictly inside $PROGRAMFILES64, by normalized path and trailing backslash', () => {
+    const outer = block(all, /^Function OmaCheckInstallDir$/, /^FunctionEnd$/);
+    expect(outer).toContain('StrCpy $OmaBase "$PROGRAMFILES64"');
+    expect(outer).toContain('Call OmaCheckDirInside');
+    const fn = block(all, /^Function OmaCheckDirInside$/, /^FunctionEnd$/);
+    const base = indexOf(fn, /^System::Call 'kernel32::GetFullPathNameW\(w "\$OmaBase", /);
+    const inst = indexOf(fn, /^System::Call 'kernel32::GetFullPathNameW\(w "\$INSTDIR", /);
+    expect(base).toBeGreaterThan(0);
+    expect(inst).toBeGreaterThan(base);
+    // Both normalized, trailing backslash trimmed, then compared as "<base>\" prefix of "<dir>\",
+    // so C:\Program FilesX never matches C:\Program Files and the root itself is refused.
+    const withSlash = indexOf(fn, /^StrCpy \$0 "\$0\\"$/, inst);
+    const len = indexOf(fn, /^StrLen \$2 \$0$/, withSlash);
+    const prefix = indexOf(fn, /^StrCpy \$3 "\$1\\" \$2$/, len);
+    const dirLen = indexOf(fn, /^StrLen \$4 "\$1\\"$/, prefix);
+    expect(withSlash).toBeGreaterThan(inst);
+    expect(len).toBe(withSlash + 1);
+    expect(prefix).toBe(len + 1);
+    expect(dirLen).toBe(prefix + 1);
+    expect(fn.slice(dirLen + 1, dirLen + 4)).toEqual([
+      '${If} $3 != $0',
+      '${OrIf} $4 <= $2',
+      expect.stringMatching(/^StrCpy \$OmaResult "(?!0")/),
+    ]);
+    expect(fn.filter((s) => s === '!insertmacro OMA_TRIM_BACKSLASH $0' || s === '!insertmacro OMA_TRIM_BACKSLASH $1')).toHaveLength(2);
+  });
+
+  it('refuses a junction or link anywhere from $PROGRAMFILES64 down to $INSTDIR\\service', () => {
+    const fn = block(all, /^Function OmaCheckDirInside$/, /^FunctionEnd$/);
+    expect(fn).toContain('StrCpy $5 "$1\\service"');
+    const walk = indexOf(fn, /^\$\{Do\}$/);
+    expect(walk).toBeGreaterThan(indexOf(fn, /^StrCpy \$5 /));
+    // The walk starts at the backslash right after the base, i.e. with the base itself.
+    expect(fn[walk - 1]).toBe('IntOp $3 $2 - 1');
+    const body = fn.slice(walk);
+    const attrs = indexOf(body, /^Call OmaPathAttributes$/);
+    expect(attrs).toBeGreaterThan(0);
+    // An error stops with a failure, "absent" ends the walk (nothing deeper exists), anything
+    // else is checked for a reparse point before going one level deeper.
+    expect(body.slice(attrs + 1, attrs + 11)).toEqual([
+      '${If} $OmaResult != "0"',
+      '${Break}',
+      '${EndIf}',
+      '${If} $OmaAttr == "absent"',
+      '${Break}',
+      '${EndIf}',
+      'IntOp $6 $OmaAttr & 0x400',
+      '${If} $6 <> 0',
+      expect.stringMatching(/^StrCpy \$OmaResult "(?!0")/),
+      '${Break}',
+    ]);
+  });
+
+  it('treats a path as absent only for FILE_NOT_FOUND or PATH_NOT_FOUND', () => {
+    const fn = block(all, /^Function OmaPathAttributes$/, /^FunctionEnd$/);
+    expect(fn.join('\n')).toMatch(
+      /\$\{If\} \$0 = -1\n\$\{If\} \$1 = 2\n\$\{OrIf\} \$1 = 3\nStrCpy \$OmaAttr "absent"\n\$\{Else\}\nStrCpy \$OmaAttr "error"\nStrCpy \$OmaResult "(?!0")/,
+    );
+    // The service folder lock-down goes through it too, not through a bare GetFileAttributesW.
+    const protect = block(all, /^Function OmaProtectServiceDir$/, /^FunctionEnd$/);
+    expect(protect.join('\n')).not.toMatch(/GetFileAttributesW/);
+    const call = indexOf(protect, /^Call OmaPathAttributes$/);
+    expect(protect.slice(call + 1, call + 3)).toEqual(['${If} $OmaResult != "0"', expect.stringMatching(/^Goto |^\$\{/)]);
+  });
+
+  it('checks the install folder before the app files, again before the sensors, and on the directory page', () => {
+    // Before the template copies anything (silent: exit 2 via OMA_FAIL unless /NOSENSORS unselected it).
+    const pre = block(all, /^!macro NSIS_HOOK_PREINSTALL$/, /^!macroend$/);
+    expect(pre.slice(1, 4)).toEqual([
+      'Call OmaCheckSensorsInstallDir',
+      '${If} $OmaResult != "0"',
+      expect.stringMatching(/^!insertmacro OMA_FAIL "\$\(omaSensorsNeedProgramFiles\)" /),
+    ]);
+    const only = block(all, /^Function OmaCheckSensorsInstallDir$/, /^FunctionEnd$/);
+    expect(only).toEqual([
+      'Function OmaCheckSensorsInstallDir',
+      'StrCpy $OmaResult "0"',
+      '${If} ${SectionIsSelected} ${SecSensors}',
+      'Call OmaCheckInstallDir',
+      '${EndIf}',
+      'FunctionEnd',
+    ]);
+    // /NOSENSORS unselects the section, so the check does not apply then.
+    const init = block(all, /^Function OmaInitComponents$/, /^FunctionEnd$/);
+    expect(init.join('\n')).toMatch(/\$\{GetOptions\} \$CMDLINE "\/NOSENSORS" \$0\n\$\{IfNot\} \$\{Errors\}\n!insertmacro UnselectSection \$\{SecSensors\}/);
+
+    // First thing in the sensors section, before STOP and any File/ExecWait/nsExec.
+    const section = block(all, /^Section "\$\(omaSensorsSection\)" SecSensors$/, /^SectionEnd$/);
+    expect(section.slice(1, 4)).toEqual([
+      'Call OmaCheckInstallDir',
+      '${If} $OmaResult != "0"',
+      expect.stringMatching(/^!insertmacro OMA_FAIL "\$\(omaSensorsNeedProgramFiles\)" /),
+    ]);
+    expect(indexOf(section, /^(File|ExecWait|nsExec|Call OmaStopService)\b/)).toBeGreaterThan(3);
+
+    // Directory page: stay on the page with a message.
+    const leave = block(all, /^Function OmaDirectoryLeave$/, /^FunctionEnd$/);
+    expect(leave.slice(1)).toEqual([
+      'Call OmaCheckSensorsInstallDir',
+      '${If} $OmaResult != "0"',
+      'StrCpy $OmaDetail $OmaResult',
+      'MessageBox MB_ICONEXCLAMATION|MB_OK "$(omaSensorsNeedProgramFiles)"',
+      'Abort',
+      '${EndIf}',
+      'FunctionEnd',
+    ]);
+    const tpl = read(resolve(nsisDir, 'installer.nsi')).split('\n');
+    const leaveAt = tpl.indexOf('!define MUI_PAGE_CUSTOMFUNCTION_LEAVE OmaDirectoryLeave ; OMA');
+    expect(leaveAt).toBeGreaterThan(0);
+    expect(tpl[leaveAt + 1]).toBe('!insertmacro MUI_PAGE_DIRECTORY');
+    expect(nsh.match(/LangString omaSensorsNeedProgramFiles \$\{LANG_(ENGLISH|ITALIAN)\} /g)).toHaveLength(2);
+  });
+
   it('turns the reboot flag into exit code 3010 only on success', () => {
     const lines = all.filter((s) => /SetErrorLevel 3010/.test(s));
     expect(lines).toHaveLength(1);

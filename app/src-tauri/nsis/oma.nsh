@@ -46,17 +46,24 @@
 Var OmaResult
 ; What failed, shown inside the omaSensorsFailed / omaServiceRemoveFailed texts.
 Var OmaDetail
+; OmaPathAttributes: in = path, out = attributes or "absent".
+Var OmaPath
+Var OmaAttr
+; OmaCheckDirInside: the directory $INSTDIR must be strictly inside.
+Var OmaBase
 
 ; Strings for our section. Inserted after the MUI_LANGUAGE macros.
 !macro OMA_LANGSTRINGS
   LangString omaSensorsSection ${LANG_ENGLISH} "Advanced sensors"
   LangString omaSensorsDesc ${LANG_ENGLISH} "Windows service and PawnIO driver for CPU temperatures, voltages, fans and SMART data. Requires administrator rights only now, during setup."
   LangString omaSensorsFailed ${LANG_ENGLISH} "Advanced sensors could not be set up ($OmaDetail).$\r$\n$\r$\nSetup stopped before finishing. Run it again, or clear the Advanced sensors option to install without them."
+  LangString omaSensorsNeedProgramFiles ${LANG_ENGLISH} "Advanced sensors can only be installed inside $PROGRAMFILES64, which only administrators can change ($OmaDetail).$\r$\n$\r$\nChoose a folder there, or go back and clear the Advanced sensors option (/NOSENSORS when silent)."
   LangString omaServiceRemoveFailed ${LANG_ENGLISH} "The Advanced sensors service could not be removed ($OmaDetail).$\r$\n$\r$\nNo files were deleted. Close OpenMonitor Advanced and try again."
   !ifdef LANG_ITALIAN
     LangString omaSensorsSection ${LANG_ITALIAN} "Sensori avanzati"
     LangString omaSensorsDesc ${LANG_ITALIAN} "Servizio Windows e driver PawnIO per temperature, tensioni e ventole della CPU e dati SMART. Servono i privilegi di amministratore solo ora, durante l'installazione."
     LangString omaSensorsFailed ${LANG_ITALIAN} "Non è stato possibile configurare i sensori avanzati ($OmaDetail).$\r$\n$\r$\nL'installazione si è fermata prima della fine. Riprova, oppure togli l'opzione Sensori avanzati per installare senza."
+    LangString omaSensorsNeedProgramFiles ${LANG_ITALIAN} "I sensori avanzati si possono installare solo dentro $PROGRAMFILES64, che solo gli amministratori possono modificare ($OmaDetail).$\r$\n$\r$\nScegli una cartella lì, oppure torna indietro e togli l'opzione Sensori avanzati (/NOSENSORS in modalità silenziosa)."
     LangString omaServiceRemoveFailed ${LANG_ITALIAN} "Non è stato possibile rimuovere il servizio dei sensori avanzati ($OmaDetail).$\r$\n$\r$\nNessun file è stato eliminato. Chiudi OpenMonitor Advanced e riprova."
   !endif
 !macroend
@@ -226,11 +233,149 @@ FunctionEnd
   ${EndIf}
 !macroend
 
+; Attributes of $OmaPath into $OmaAttr, or "absent". INVALID_FILE_ATTRIBUTES
+; means "absent" only for ERROR_FILE_NOT_FOUND (2) and ERROR_PATH_NOT_FOUND (3);
+; any other error (access denied, bad name...) sets $OmaResult.
+Function OmaPathAttributes
+  Push $0
+  Push $1
+  System::Call 'kernel32::GetFileAttributesW(w "$OmaPath") i.r0 ?e'
+  Pop $1
+  ${If} $0 = -1
+    ${If} $1 = 2
+    ${OrIf} $1 = 3
+      StrCpy $OmaAttr "absent"
+    ${Else}
+      StrCpy $OmaAttr "error"
+      StrCpy $OmaResult "cannot read the attributes of $OmaPath, error $1"
+    ${EndIf}
+  ${Else}
+    StrCpy $OmaAttr $0
+  ${EndIf}
+  Pop $1
+  Pop $0
+FunctionEnd
+
+; Drops one trailing backslash from a variable (scratch: $6).
+!macro OMA_TRIM_BACKSLASH var
+  StrCpy $6 ${var} "" -1
+  ${If} $6 == "\"
+    StrCpy ${var} ${var} -1
+  ${EndIf}
+!macroend
+
+; Controller ruling R25 (spec §9): with Advanced sensors, $INSTDIR must be inside
+; $PROGRAMFILES64, which only administrators can write. A custom folder under a
+; user-writable parent (C:\Apps, D:\) would let a user rename or replace folders
+; around the LocalSystem service binary, the elevated PawnIO setup and
+; uninstall.exe, and no ACL on a child can fix a parent that grants delete-child.
+; Sets $OmaResult to "0" or to the reason.
+Function OmaCheckInstallDir
+  StrCpy $OmaBase "$PROGRAMFILES64"
+  Call OmaCheckDirInside
+FunctionEnd
+
+; $INSTDIR must be strictly inside $OmaBase, both as normalized full paths
+; (GetFullPathNameW: "..", "/" and relative parts resolved), compared without
+; case as "<base>\" against the start of "<dir>\", so a sibling such as
+; "C:\Program FilesX" never matches and the base itself is refused. Then every
+; directory that already exists from $OmaBase down to $INSTDIR\service must not
+; be a reparse point (junction, symlink, mount point). 8.3 short names are not
+; expanded: such a path is refused, which is safe. Sets $OmaResult.
+Function OmaCheckDirInside
+  Push $0 ; base
+  Push $1 ; dir
+  Push $2 ; call result, then length of "<base>\"
+  Push $3 ; prefix of "<dir>\", then walk index
+  Push $4 ; length of "<dir>\", then length of the walked path
+  Push $5 ; walked path
+  Push $6 ; scratch
+  StrCpy $OmaResult "0"
+  System::Call 'kernel32::GetFullPathNameW(w "$OmaBase", i ${NSIS_MAX_STRLEN}, w .r0, p 0) i.r2'
+  ${If} $2 = 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    StrCpy $OmaResult "cannot resolve $OmaBase"
+  ${EndIf}
+  System::Call 'kernel32::GetFullPathNameW(w "$INSTDIR", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i.r2'
+  ${If} $2 = 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    StrCpy $OmaResult "cannot resolve $INSTDIR"
+  ${EndIf}
+  ${If} $OmaResult == "0"
+    !insertmacro OMA_TRIM_BACKSLASH $0
+    !insertmacro OMA_TRIM_BACKSLASH $1
+    StrCpy $0 "$0\"
+    StrLen $2 $0
+    StrCpy $3 "$1\" $2
+    StrLen $4 "$1\"
+    ${If} $3 != $0
+    ${OrIf} $4 <= $2
+      StrCpy $OmaResult "$1 is not inside $0"
+    ${EndIf}
+  ${EndIf}
+  ${If} $OmaResult == "0"
+    ; Walk "<dir>\service" from the backslash after the base: check the base,
+    ; then each deeper folder, until one does not exist yet.
+    StrCpy $5 "$1\service"
+    StrLen $4 $5
+    IntOp $3 $2 - 1
+    ${Do}
+      ${If} $3 < $4
+        StrCpy $6 $5 1 $3
+        ${If} $6 != "\"
+          IntOp $3 $3 + 1
+          ${Continue}
+        ${EndIf}
+        StrCpy $OmaPath $5 $3
+      ${Else}
+        StrCpy $OmaPath $5
+      ${EndIf}
+      Call OmaPathAttributes
+      ${If} $OmaResult != "0"
+        ${Break}
+      ${EndIf}
+      ${If} $OmaAttr == "absent"
+        ${Break}
+      ${EndIf}
+      ; FILE_ATTRIBUTE_REPARSE_POINT
+      IntOp $6 $OmaAttr & 0x400
+      ${If} $6 <> 0
+        StrCpy $OmaResult "$OmaPath is a junction or link"
+        ${Break}
+      ${EndIf}
+      ${If} $3 >= $4
+        ${Break}
+      ${EndIf}
+      IntOp $3 $3 + 1
+    ${Loop}
+  ${EndIf}
+  ${If} $OmaResult != "0"
+    DetailPrint "$OmaResult"
+  ${EndIf}
+  Pop $6
+  Pop $5
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+
+; Tauri hook: first thing in the template's Install section, before any app file
+; is copied. With Advanced sensors selected, a folder outside Program Files stops
+; the install here (exit code 2 when silent; /NOSENSORS unselects the section).
+!macro NSIS_HOOK_PREINSTALL
+  Call OmaCheckSensorsInstallDir
+  ${If} $OmaResult != "0"
+    !insertmacro OMA_FAIL "$(omaSensorsNeedProgramFiles)" "$OmaResult"
+  ${EndIf}
+!macroend
+
 ; Makes $INSTDIR\service a directory that only SYSTEM and Administrators can
-; write, whatever $INSTDIR is: an administrator may pick a custom directory (for
-; example under C:\Apps or D:\) whose inherited ACL lets every user modify it,
-; and this directory holds a LocalSystem service binary and the PawnIO setup,
-; both run elevated. SIDs, not names, so it works in every language:
+; write. Defence in depth: OmaCheckInstallDir already requires Program Files,
+; where no user can race us; this also covers a folder left behind with a
+; different ACL. The service folder holds a LocalSystem service binary and the
+; PawnIO setup, both run elevated. SIDs, not names, so it works in every language:
 ;   owner Administrators; explicit ACEs dropped (/reset); inheritance removed and
 ;   exactly SYSTEM (S-1-5-18) F, Administrators (S-1-5-32-544) F,
 ;   Users (S-1-5-32-545) RX granted, inherited by files and subfolders.
@@ -244,19 +389,22 @@ Function OmaProtectServiceDir
   Push $2
   StrCpy $OmaResult "0"
   StrCpy $1 "$INSTDIR\service"
-  System::Call 'kernel32::GetFileAttributesW(w r1) i.r0'
-  ${If} $0 = -1 ; INVALID_FILE_ATTRIBUTES: not there yet
+  StrCpy $OmaPath $1
+  Call OmaPathAttributes
+  ${If} $OmaResult != "0"
+    ; attributes unreadable for another reason than "not found": $OmaResult says why
+  ${ElseIf} $OmaAttr == "absent"
     ClearErrors
     CreateDirectory "$1"
     ${If} ${Errors}
       StrCpy $OmaResult "cannot create $1"
     ${EndIf}
   ${Else}
-    IntOp $2 $0 & 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT: never follow a planted junction or link
+    IntOp $2 $OmaAttr & 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT: never follow a planted junction or link
     ${If} $2 <> 0
       StrCpy $OmaResult "$1 is a junction or link"
     ${EndIf}
-    IntOp $2 $0 & 0x10 ; FILE_ATTRIBUTE_DIRECTORY
+    IntOp $2 $OmaAttr & 0x10 ; FILE_ATTRIBUTE_DIRECTORY
     ${If} $2 = 0
       StrCpy $OmaResult "$1 is not a directory"
     ${EndIf}
@@ -314,6 +462,13 @@ FunctionEnd
 ; app has already been closed by CheckIfAppIsRunning when we stop the service.
 !macro OMA_SECTIONS
 Section "$(omaSensorsSection)" SecSensors
+  ; 0. Program Files only (checked in NSIS_HOOK_PREINSTALL too; again here in
+  ;    case anything changed $INSTDIR since).
+  Call OmaCheckInstallDir
+  ${If} $OmaResult != "0"
+    !insertmacro OMA_FAIL "$(omaSensorsNeedProgramFiles)" "$OmaResult"
+  ${EndIf}
+
   ; 1. Stop the running service before replacing its exe. On failure we abort
   ;    with the old exe and the old service untouched.
   Call OmaStopService
@@ -425,6 +580,26 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecSensors} "$(omaSensorsDesc)"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+; "0" when Advanced sensors is not selected, otherwise OmaCheckInstallDir's result.
+Function OmaCheckSensorsInstallDir
+  StrCpy $OmaResult "0"
+  ${If} ${SectionIsSelected} ${SecSensors}
+    Call OmaCheckInstallDir
+  ${EndIf}
+FunctionEnd
+
+; Leave callback of the directory page (template line marked OMA). Simplest
+; robust UX: the user stays on the page and either picks a folder inside
+; Program Files or goes back to the components page to clear the option.
+Function OmaDirectoryLeave
+  Call OmaCheckSensorsInstallDir
+  ${If} $OmaResult != "0"
+    StrCpy $OmaDetail $OmaResult
+    MessageBox MB_ICONEXCLAMATION|MB_OK "$(omaSensorsNeedProgramFiles)"
+    Abort
+  ${EndIf}
+FunctionEnd
 
 Function OmaInitComponents
   Push $0

@@ -8,6 +8,7 @@ mod fake_server;
 pub mod feed;
 pub mod link;
 pub mod pipe;
+pub mod provider;
 pub mod scm;
 pub mod status;
 
@@ -16,6 +17,7 @@ pub use link::{
     pipe_connector, validate_schema, Connection, Connector, LinkCommand, LinkSettings, ServiceLink,
 };
 pub use pipe::{CloseReason, ConnectError, PipeClient, PipeEvent, PipeReader};
+pub use provider::SvcProvider;
 pub use scm::{RunState, ServiceControl, ServiceQuery, WindowsScm, SERVICE_NAME};
 pub use status::{ServiceDetail, ServiceState, ServiceStatus, ServiceStatusTable};
 

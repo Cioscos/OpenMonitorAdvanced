@@ -33,7 +33,9 @@ struct SamplerGuard(Mutex<Option<Sampler>>);
 fn providers(vendor: VendorSwitch, processes: GpuProcessTable) -> Vec<Box<dyn Provider>> {
     #[cfg(windows)]
     {
-        oma_win::default_providers(vendor, processes)
+        // The real service link/drive table is wired in a later task; this
+        // keeps the app compiling against the new signature meanwhile.
+        oma_win::default_providers(vendor, processes, oma_win::ServiceHandles::default())
     }
     #[cfg(not(windows))]
     {

@@ -132,6 +132,31 @@ pub(crate) fn disk_identity(index: u32) -> Option<String> {
     identity_from_descriptor(&bytes)
 }
 
+/// Model (`ProductId`) and serial (`SerialNumber`) texts of a
+/// `STORAGE_DEVICE_DESCRIPTOR`, trimmed of leading/trailing whitespace;
+/// `None` when unavailable, empty or (for the serial) not UTF-8.
+fn descriptor_model_and_serial(bytes: &[u8]) -> (Option<String>, Option<String>) {
+    let model = descriptor_text(bytes, 16).map(str::to_owned);
+    let serial = descriptor_serial(bytes)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::to_owned);
+    (model, serial)
+}
+
+/// Model and serial texts of `\\.\PhysicalDrive<index>` (see
+/// [`descriptor_model_and_serial`]). Used by the `svc` provider to bind a
+/// service device onto the same disk (S1: LHM and the descriptor can
+/// disagree on an NVMe's serial, so both sides must compare the
+/// descriptor's own text).
+pub(crate) fn descriptor_texts(index: u32) -> (Option<String>, Option<String>) {
+    let Some(bytes) = PhysicalDrive::open(index)
+        .and_then(|drive| drive.query_property(StorageDeviceProperty, 65_536))
+    else {
+        return (None, None);
+    };
+    descriptor_model_and_serial(&bytes)
+}
+
 /// Identity tiers, strongest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentityTier {
@@ -440,6 +465,45 @@ mod tests {
             identity_from_descriptor(&descriptor(b"  serial-a ")).as_deref(),
             Some("storage/device-1963b90ffdd2185fc60ac5ebd1a877aa8bca8a2098d890bd4ffcb4b5d9ec4cee")
         );
+    }
+
+    fn descriptor_with_model(model: &[u8], serial: &[u8]) -> Vec<u8> {
+        // ProductId at field 16, SerialNumber at field 24; a header long
+        // enough to hold both offsets plus their two NUL-terminated strings.
+        let mut bytes = vec![0u8; 36];
+        bytes[16..20].copy_from_slice(&36u32.to_le_bytes());
+        bytes.extend_from_slice(model);
+        bytes.push(0);
+        let serial_offset = bytes.len() as u32;
+        bytes[24..28].copy_from_slice(&serial_offset.to_le_bytes());
+        bytes.extend_from_slice(serial);
+        bytes.push(0);
+        bytes
+    }
+
+    #[test]
+    fn descriptor_model_and_serial_are_trimmed() {
+        let bytes = descriptor_with_model(b" WD Black ", b" ABC123 ");
+        assert_eq!(
+            descriptor_model_and_serial(&bytes),
+            (Some("WD Black".to_owned()), Some("ABC123".to_owned()))
+        );
+    }
+
+    #[test]
+    fn descriptor_model_and_serial_are_none_when_missing_or_empty() {
+        assert_eq!(
+            descriptor_model_and_serial(&descriptor_with_model(b"", b"")),
+            (None, None)
+        );
+        assert_eq!(descriptor_model_and_serial(&[0; 36]), (None, None));
+    }
+
+    #[test]
+    fn descriptor_serial_text_is_none_when_not_utf8() {
+        let (_, serial) =
+            descriptor_model_and_serial(&descriptor_with_model(b"model", b"\xFF\xFE"));
+        assert_eq!(serial, None);
     }
 
     #[test]

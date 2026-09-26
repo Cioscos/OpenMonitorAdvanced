@@ -1,6 +1,7 @@
 //! Physical disk throughput and activity (PDH), disk temperatures and volume usage.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
@@ -10,7 +11,8 @@ use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::pdh::{Counter, Query};
 use crate::storage_identity::{
-    assign_disk_ids, disk_identity_candidates, volume_identity, DiskIdentityCandidates,
+    assign_disk_ids, descriptor_texts, disk_identity_candidates, volume_identity,
+    DiskIdentityCandidates,
 };
 use crate::storage_ioctl::PhysicalDrive;
 use crate::storage_temperature::{
@@ -128,8 +130,53 @@ struct Counters {
     idle: Counter,
 }
 
-#[derive(Default)]
+/// One physical disk's stable id, model and serial (descriptor texts,
+/// trimmed), published at discovery for the `svc` provider to bind service
+/// storage devices onto the same core disk (spec §M4, D3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DriveEntry {
+    pub index: u32,
+    pub device_id: String,
+    pub model: Option<String>,
+    pub serial: Option<String>,
+}
+
+/// Snapshot of every identified disk; `generation` bumps only when the set
+/// of drives (or their model/serial texts) actually changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DriveIds {
+    pub generation: u64,
+    pub drives: Vec<DriveEntry>,
+}
+
+/// Shared handle: written by `StorageProvider::discover`, read by the `svc`
+/// provider on its own tick. Cheap to clone.
+#[derive(Clone, Default)]
+pub struct DriveIdTable(Arc<Mutex<DriveIds>>);
+
+impl DriveIdTable {
+    fn lock(&self) -> std::sync::MutexGuard<'_, DriveIds> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Replaces the drive list; the generation bumps only when it differs
+    /// from the one already published, so a provider comparing generations
+    /// does not rediscover on every tick.
+    pub fn publish(&self, drives: Vec<DriveEntry>) {
+        let mut inner = self.lock();
+        if inner.drives != drives {
+            inner.drives = drives;
+            inner.generation += 1;
+        }
+    }
+
+    pub fn get(&self) -> DriveIds {
+        self.lock().clone()
+    }
+}
+
 pub struct StorageProvider {
+    drives: DriveIdTable,
     counters: Option<Counters>,
     disks: Vec<DiskInstance>,
     disk_ids: HashMap<u32, String>,
@@ -138,6 +185,26 @@ pub struct StorageProvider {
     temperatures: HashMap<u32, DiskTemperatures>,
     /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
     fresh: bool,
+}
+
+impl Default for StorageProvider {
+    fn default() -> Self {
+        Self::new(DriveIdTable::default())
+    }
+}
+
+impl StorageProvider {
+    pub fn new(drives: DriveIdTable) -> Self {
+        Self {
+            drives,
+            counters: None,
+            disks: Vec::new(),
+            disk_ids: HashMap::new(),
+            volume_ids: HashMap::new(),
+            temperatures: HashMap::new(),
+            fresh: false,
+        }
+    }
 }
 
 /// `true` only for the first call after a discover: PDH rate counters were
@@ -180,11 +247,19 @@ impl Provider for StorageProvider {
         let mut devices = Vec::new();
         let mut sensors = Vec::new();
         let mut temperatures = HashMap::new();
+        let mut drive_entries = Vec::new();
         for disk in &disks {
             // assign_disk_ids has already logged why a disk has no identity.
             let Some(id) = disk_ids.get(&disk.index).cloned() else {
                 continue;
             };
+            let (model, serial) = descriptor_texts(disk.index);
+            drive_entries.push(DriveEntry {
+                index: disk.index,
+                device_id: id.clone(),
+                model,
+                serial,
+            });
             // Unknown/asleep disks remain scheduled; a later successful probe
             // requests rediscovery when it reveals undeclared sensor indices.
             let report = read_temperatures(disk.index);
@@ -271,6 +346,7 @@ impl Provider for StorageProvider {
         self.volume_ids = volume_ids;
         self.temperatures = temperatures;
         self.fresh = true;
+        self.drives.publish(drive_entries);
         Ok(Inventory { devices, sensors })
     }
 
@@ -444,6 +520,34 @@ mod tests {
         assert_eq!(disk.values, vec![Some(42.0)]);
         assert!(!disk.refresh(None, first + TEMPERATURE_PERIOD));
         assert_eq!(disk.values, vec![None]);
+    }
+
+    fn entry(index: u32) -> DriveEntry {
+        DriveEntry {
+            index,
+            device_id: format!("storage/device-{index}"),
+            model: Some("Model".to_owned()),
+            serial: Some(format!("SN{index}")),
+        }
+    }
+
+    #[test]
+    fn publish_bumps_generation_only_on_change() {
+        let table = DriveIdTable::default();
+        assert_eq!(table.get(), DriveIds::default());
+
+        table.publish(vec![entry(0)]);
+        let after_first = table.get();
+        assert_eq!(after_first.generation, 1);
+        assert_eq!(after_first.drives, vec![entry(0)]);
+
+        // Publishing the same list again changes nothing.
+        table.publish(vec![entry(0)]);
+        assert_eq!(table.get().generation, 1);
+
+        // A real change bumps the generation again.
+        table.publish(vec![entry(0), entry(1)]);
+        assert_eq!(table.get().generation, 2);
     }
 
     #[test]

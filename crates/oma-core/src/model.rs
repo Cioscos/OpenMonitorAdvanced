@@ -1,9 +1,9 @@
 //! Data model shared by providers, the engine and the UI.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Kind of hardware component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
     Cpu,
@@ -18,7 +18,7 @@ pub enum DeviceKind {
 }
 
 /// What a sensor measures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SensorKind {
     Temperature,
@@ -63,7 +63,7 @@ impl SensorKind {
 
 /// Unit of a sensor value. Values are stored in these base units; the UI
 /// converts for display (e.g. bytes/s to bit/s).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Unit {
     Celsius,

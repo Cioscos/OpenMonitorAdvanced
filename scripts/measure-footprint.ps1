@@ -16,11 +16,16 @@
   `oma-service` Windows service (spec §1.2 service budget): CPU % normalised
   by the number of logical processors, and Private Bytes (not the private
   working set used for the app), both read from
-  Win32_PerfFormattedData_PerfProc_Process matched by IDProcess — the PID the
+  Win32_PerfRawData_PerfProc_Process matched by IDProcess — the PID the
   SCM reports for the service, never a locale-dependent PDH counter name or
-  an ambiguous `oma-service#n` instance. The PID is checked again after
-  sampling; if the service is not running, its PID changed, or its counters
-  are missing, the service measurement is reported INVALID, never as zero.
+  an ambiguous `oma-service#n` instance. CPU % is computed from the raw
+  PercentProcessorTime and Timestamp_Sys100NS counters sampled at the start
+  and end of the window, because the formatted class' PercentProcessorTime is
+  an integer percent of one core computed by WMI over its own short internal
+  interval and always reads 0 for light services. The PID is checked again
+  after sampling; if the service is not running, its PID changed, or its
+  counters are missing, the service measurement is reported INVALID, never
+  as zero.
   Reading another account's (LocalSystem) process counters can require an
   elevated PowerShell session on some machines; an invalid reading whose
   cause looks like a permissions issue says so.
@@ -60,6 +65,16 @@ function Get-ServiceProcessId([string]$Name) {
 # whose PID changes mid-sample is caught and reported invalid, never as a
 # zero reading. Both parameters are script blocks so this function can be
 # unit-tested without starting or stopping oma-service, or anything else.
+#
+# CPU is computed from Win32_PerfRawData_PerfProc_Process rather than the
+# formatted class: the formatted PercentProcessorTime is an INTEGER percent
+# of one core that WMI itself computes over its own short internal interval,
+# so a service using less than ~1% of one core always reads 0, and the value
+# does not cover this function's own (much longer) sample window. The raw
+# counters give PercentProcessorTime as 100ns units of CPU time consumed
+# (summed across all cores) and Timestamp_Sys100NS as a 100ns system clock
+# reading; the delta of each across the sample window, divided by the number
+# of logical processors, gives the CPU % of the whole machine.
 function Measure-ServiceSample {
     param(
         [Parameter(Mandatory)][scriptblock]$PidProvider,
@@ -73,12 +88,13 @@ function Measure-ServiceSample {
         return [pscustomobject]@{ Valid = $false; Reason = "$ServiceLabel is not running (the SCM reported no PID); measurement is INVALID." }
     }
 
-    # Prime the formatted counter: WMI's perf provider computes a rate from
-    # the previous raw sample it has cached for this PID, so the very first
-    # read after the process started (or after this script's first query)
-    # can reflect its whole lifetime rather than a short interval. Discard it
-    # before running the timed sample.
-    [void](Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess=$pidStart" -ErrorAction SilentlyContinue)
+    $rawStart = @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$pidStart" -ErrorAction SilentlyContinue)
+    if ($rawStart.Count -eq 0) {
+        return [pscustomobject]@{ Valid = $false; Reason = "No perf counters for PID $pidStart at the start of the sample; measurement is INVALID (an elevated PowerShell session may be required to read a LocalSystem process's counters on this machine)." }
+    }
+    if ($rawStart.Count -gt 1) {
+        return [pscustomobject]@{ Valid = $false; Reason = "Ambiguous perf-counter match for PID $pidStart (more than one instance); measurement is INVALID." }
+    }
 
     & $SampleAction
 
@@ -90,19 +106,30 @@ function Measure-ServiceSample {
         return [pscustomobject]@{ Valid = $false; Reason = "$ServiceLabel PID changed during sampling ($pidStart -> $pidEnd); measurement is INVALID." }
     }
 
-    $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess=$pidEnd" -ErrorAction SilentlyContinue)
-    if ($perf.Count -eq 0) {
+    $rawEnd = @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$pidEnd" -ErrorAction SilentlyContinue)
+    if ($rawEnd.Count -eq 0) {
         return [pscustomobject]@{ Valid = $false; Reason = "No perf counters for PID $pidEnd; measurement is INVALID (an elevated PowerShell session may be required to read a LocalSystem process's counters on this machine)." }
     }
-    if ($perf.Count -gt 1) {
+    if ($rawEnd.Count -gt 1) {
         return [pscustomobject]@{ Valid = $false; Reason = "Ambiguous perf-counter match for PID $pidEnd (more than one instance); measurement is INVALID." }
     }
+
+    $deltaCpu100ns = $rawEnd[0].PercentProcessorTime - $rawStart[0].PercentProcessorTime
+    $deltaTimestamp = $rawEnd[0].Timestamp_Sys100NS - $rawStart[0].Timestamp_Sys100NS
+    if ($deltaTimestamp -le 0) {
+        return [pscustomobject]@{ Valid = $false; Reason = "Non-positive sample-window timestamp delta for PID $pidEnd; measurement is INVALID." }
+    }
+
+    $cpuPercent = ($deltaCpu100ns / $deltaTimestamp) / $LogicalProcessors * 100
+    # Keep more precision for very small values, which would otherwise round
+    # to a misleading 0.
+    $decimals = if ($cpuPercent -lt 0.01) { 3 } else { 2 }
 
     [pscustomobject]@{
         Valid          = $true
         ServicePid     = $pidEnd
-        CpuPercent     = [math]::Round($perf[0].PercentProcessorTime / $LogicalProcessors, 2)
-        PrivateBytesMB = [math]::Round($perf[0].PrivateBytes / 1MB, 1)
+        CpuPercent     = [math]::Round($cpuPercent, $decimals)
+        PrivateBytesMB = [math]::Round($rawEnd[0].PrivateBytes / 1MB, 1)
     }
 }
 
@@ -189,7 +216,7 @@ $proc = if ($Minimized -or $fill) {
 }
 
 if ($Service) {
-    Write-Host "Also measuring service '$ServiceName': CPU normalised by $([Environment]::ProcessorCount) logical processors, Private Bytes via Win32_PerfFormattedData_PerfProc_Process by IDProcess. Reading a LocalSystem process's counters can require an elevated PowerShell session on some machines; an invalid reading whose cause looks like a permissions issue will say so."
+    Write-Host "Also measuring service '$ServiceName': CPU normalised by $([Environment]::ProcessorCount) logical processors from raw counters (Win32_PerfRawData_PerfProc_Process) sampled at the start and end of the window, Private Bytes from the same raw counters by IDProcess. Reading a LocalSystem process's counters can require an elevated PowerShell session on some machines; an invalid reading whose cause looks like a permissions issue will say so."
 }
 
 try {

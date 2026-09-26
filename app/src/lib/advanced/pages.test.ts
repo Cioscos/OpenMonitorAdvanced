@@ -49,7 +49,7 @@ test('gpu sensors of the mock group by category in table order', () => {
 });
 
 test('every known category has a heading in both languages', () => {
-  expect(CATEGORY_ORDER).toEqual(['temperature', 'load', 'clock', 'power', 'percent', 'voltage', 'current', 'fan', 'data', 'throughput', 'link', 'energy', 'flag']);
+  expect(CATEGORY_ORDER).toEqual(['temperature', 'load', 'clock', 'power', 'percent', 'voltage', 'current', 'fan', 'data', 'counter', 'throughput', 'link', 'energy', 'flag']);
   for (const category of CATEGORY_ORDER) {
     expect(catalogs.en[`advanced.category.${category}`], category).toBeDefined();
     expect(catalogs.it[`advanced.category.${category}`], category).toBeDefined();

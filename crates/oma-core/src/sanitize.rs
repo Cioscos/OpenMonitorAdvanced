@@ -58,6 +58,8 @@ pub fn sanitize(unit: Unit, value: Option<f64>) -> Option<f64> {
         Unit::Boolean => v == 0.0 || v == 1.0,
         Unit::PcieGeneration => (1.0..=7.0).contains(&v) && v.fract() == 0.0,
         Unit::Lanes => (1.0..=32.0).contains(&v) && v.fract() == 0.0,
+        Unit::Hours => (0.0..=10_000_000.0).contains(&v) && v.fract() == 0.0,
+        Unit::Count => (0.0..=1_000_000_000.0).contains(&v) && v.fract() == 0.0,
         _ => v >= 0.0,
     };
     plausible.then_some(v)
@@ -70,6 +72,13 @@ pub fn sanitize_sensor(sensor: &crate::model::Sensor, value: Option<f64>) -> Opt
         && sensor.id.ends_with("/percent/power-limit")
     {
         return value.filter(|v| v.is_finite() && *v >= 0.0);
+    }
+    // NVMe "Percentage Used" (spec §M4) can legitimately exceed 100.
+    if sensor.unit == Unit::Percent
+        && sensor.device_id.starts_with("storage/")
+        && sensor.id.ends_with("/percent/wear")
+    {
+        return value.filter(|v| v.is_finite() && (0.0..=255.0).contains(v));
     }
     sanitize(sensor.unit, value)
 }
@@ -160,6 +169,37 @@ mod tests {
             None,
             "a lane count must be a whole number"
         );
+    }
+
+    #[test]
+    fn counters_must_be_whole_and_in_range() {
+        assert_eq!(sanitize(Unit::Hours, Some(12345.0)), Some(12345.0));
+        assert_eq!(sanitize(Unit::Hours, Some(1.5)), None);
+        assert_eq!(sanitize(Unit::Hours, Some(-1.0)), None);
+        assert_eq!(sanitize(Unit::Count, Some(1e10)), None);
+    }
+
+    #[test]
+    fn nvme_wear_may_exceed_one_hundred() {
+        use crate::model::{Label, Sensor, SensorKind, Source};
+        let wear = Sensor::new(
+            "storage/x",
+            SensorKind::Percent,
+            "wear",
+            Unit::Percent,
+            Label::new("storage.wear"),
+            Source::Lhm,
+        );
+        assert_eq!(sanitize_sensor(&wear, Some(120.0)), Some(120.0));
+        let other = Sensor::new(
+            "storage/x",
+            SensorKind::Percent,
+            "active",
+            Unit::Percent,
+            Label::new("storage.active"),
+            Source::Lhm,
+        );
+        assert_eq!(sanitize_sensor(&other, Some(120.0)), None);
     }
 
     #[test]

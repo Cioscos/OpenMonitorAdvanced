@@ -12,7 +12,7 @@ export interface SensorGroup {
 }
 
 /** Table order of the sensor categories (spec §7.3); unknown categories follow alphabetically. */
-export const CATEGORY_ORDER = ['temperature', 'load', 'clock', 'power', 'percent', 'voltage', 'current', 'fan', 'data', 'throughput', 'link', 'energy', 'flag'];
+export const CATEGORY_ORDER = ['temperature', 'load', 'clock', 'power', 'percent', 'voltage', 'current', 'fan', 'data', 'counter', 'throughput', 'link', 'energy', 'flag'];
 
 /** Groups by `category`, keeping the schema order inside each group. */
 export function groupSensors(sensors: Sensor[]): SensorGroup[] {

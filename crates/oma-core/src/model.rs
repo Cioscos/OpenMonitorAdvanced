@@ -35,6 +35,8 @@ pub enum SensorKind {
     Percent,
     /// A bus link, e.g. the PCIe link of a GPU.
     Link,
+    /// A cumulative count, e.g. a disk's power-on cycles.
+    Counter,
 }
 
 impl SensorKind {
@@ -54,6 +56,7 @@ impl SensorKind {
             SensorKind::Flag => "flag",
             SensorKind::Percent => "percent",
             SensorKind::Link => "link",
+            SensorKind::Counter => "counter",
         }
     }
 }
@@ -79,6 +82,10 @@ pub enum Unit {
     PcieGeneration,
     /// Number of active link lanes.
     Lanes,
+    /// Power-on hours of a storage device.
+    Hours,
+    /// A whole-number count, e.g. power-on cycles.
+    Count,
 }
 
 /// Where a reading comes from; shown as a badge in the Advanced view.
@@ -97,6 +104,8 @@ pub enum Source {
     /// Windows Plug and Play device properties (cfgmgr32).
     Pnp,
     Mock,
+    /// LibreHardwareMonitor, read by the privileged service (spec §M4).
+    Lhm,
 }
 
 /// Translatable label. The UI looks up `sensor.<key>` in its catalogs and
@@ -335,6 +344,16 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&d).unwrap()["kind"],
             json!("fan_controller")
+        );
+    }
+
+    #[test]
+    fn lhm_source_serializes_as_lhm() {
+        assert_eq!(serde_json::to_value(Source::Lhm).unwrap(), json!("lhm"));
+        assert_eq!(serde_json::to_value(Unit::Hours).unwrap(), json!("hours"));
+        assert_eq!(
+            serde_json::to_value(SensorKind::Counter).unwrap(),
+            json!("counter")
         );
     }
 

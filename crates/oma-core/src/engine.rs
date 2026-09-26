@@ -1,8 +1,9 @@
 //! Parallel provider sampling with one shared deadline, schema revisions and history.
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::history::History;
-use crate::model::{Schema, Snapshot};
+use crate::model::{Device, Schema, Snapshot};
 use crate::provider::{Inventory, Provider};
 use crate::sanitize::{sanitize_sensor, DiscardLog};
 use crate::stats::Stats;
@@ -26,6 +27,42 @@ struct Slot {
     /// miss in a row means the provider is still hung, so its values are
     /// cleared instead of being republished forever (spec §4.1/§8).
     timed_out: bool,
+    /// One entry per sensor of `inventory`, recomputed on every schema
+    /// rebuild: `false` when a provider earlier in the list already claimed
+    /// that sensor id (spec §M4 merge rule). `tick` uses it to line up poll
+    /// values with the merged schema even on ticks where the schema itself
+    /// does not change.
+    keep: Vec<bool>,
+}
+
+/// Merges devices with the same id across providers, in provider order: the
+/// first provider to expose an id wins its `name`, `vendor` and `kind`, and
+/// its properties take precedence over later duplicates' (spec §M4).
+fn merge_devices(slots: &[Slot]) -> Vec<Device> {
+    let mut order: Vec<String> = Vec::new();
+    let mut merged: std::collections::HashMap<String, Device> = std::collections::HashMap::new();
+    for slot in slots {
+        for device in &slot.inventory.devices {
+            match merged.get_mut(&device.id) {
+                Some(existing) => {
+                    for (key, value) in &device.properties {
+                        existing
+                            .properties
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
+                None => {
+                    order.push(device.id.clone());
+                    merged.insert(device.id.clone(), device.clone());
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|id| merged.remove(&id).expect("id was just inserted"))
+        .collect()
 }
 
 pub struct Engine {
@@ -51,6 +88,7 @@ impl Engine {
                     inventory: Inventory::default(),
                     last: Vec::new(),
                     timed_out: false,
+                    keep: Vec::new(),
                 })
                 .collect(),
             schema: Schema::default(),
@@ -109,36 +147,46 @@ impl Engine {
             }
         }
         if changed {
+            // A sensor id already claimed by an earlier provider is dropped,
+            // together with its value (spec §M4): `keep[i]` tells `i` apart.
+            let mut seen_ids: HashSet<String> = HashSet::new();
+            let mut new_sensors = Vec::new();
+            for slot in &mut self.slots {
+                let keep: Vec<bool> = slot
+                    .inventory
+                    .sensors
+                    .iter()
+                    .map(|sensor| seen_ids.insert(sensor.id.clone()))
+                    .collect();
+                for (sensor, &kept) in slot.inventory.sensors.iter().zip(&keep) {
+                    if kept {
+                        new_sensors.push(sensor.clone());
+                    }
+                }
+                slot.keep = keep;
+            }
+            // Series and statistics survive only for sensors whose id, source
+            // and unit are unchanged among the sensors that win the new
+            // merge; comparing against the raw (pre-merge) inventories would
+            // wrongly keep history when the old winner becomes a discarded
+            // duplicate. The second call adds the new sensors.
             let retained: Vec<String> = self
                 .schema
                 .sensors
                 .iter()
                 .filter(|old| {
-                    self.slots
-                        .iter()
-                        .flat_map(|slot| &slot.inventory.sensors)
-                        .any(|new| {
-                            old.id == new.id && old.source == new.source && old.unit == new.unit
-                        })
+                    new_sensors.iter().any(|new| {
+                        old.id == new.id && old.source == new.source && old.unit == new.unit
+                    })
                 })
                 .map(|sensor| sensor.id.clone())
                 .collect();
-            // Series and statistics survive only for sensors whose id, source
-            // and unit are unchanged; the second call adds the new sensors.
             self.history.set_sensors(&retained);
             self.stats.set_sensors(&retained);
             self.schema = Schema {
                 revision: self.schema.revision + 1,
-                devices: self
-                    .slots
-                    .iter()
-                    .flat_map(|s| s.inventory.devices.iter().cloned())
-                    .collect(),
-                sensors: self
-                    .slots
-                    .iter()
-                    .flat_map(|s| s.inventory.sensors.iter().cloned())
-                    .collect(),
+                devices: merge_devices(&self.slots),
+                sensors: new_sensors,
             };
             let ids: Vec<String> = self.schema.sensors.iter().map(|s| s.id.clone()).collect();
             self.history.set_sensors(&ids);
@@ -149,7 +197,13 @@ impl Engine {
         let values: Vec<_> = self
             .slots
             .iter()
-            .flat_map(|s| s.last.iter().copied())
+            .flat_map(|slot| {
+                slot.keep
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &kept)| kept)
+                    .map(move |(i, _)| slot.last.get(i).copied().flatten())
+            })
             .zip(&self.schema.sensors)
             .map(|(value, sensor)| {
                 let clean = sanitize_sensor(sensor, value);
@@ -638,6 +692,245 @@ mod tests {
         e.tick(5_000, 0);
         e.tick(6_000, 1_000);
         assert_eq!(e.started_at_ms(), Some(5_000));
+    }
+
+    #[test]
+    fn duplicate_sensor_id_keeps_the_first_provider() {
+        let (a, script_a) = fake("a", inventory("dev/a", &["x"]));
+        let b_inv = Inventory {
+            devices: vec![Device {
+                id: "dev/a".into(),
+                kind: DeviceKind::Cpu,
+                name: "dev/a".into(),
+                vendor: None,
+                properties: Default::default(),
+            }],
+            sensors: vec![
+                Sensor::new(
+                    "dev/a",
+                    SensorKind::Load,
+                    "x",
+                    Unit::Percent,
+                    Label::new("test"),
+                    Source::Lhm,
+                ),
+                Sensor::new(
+                    "dev/a",
+                    SensorKind::Load,
+                    "y",
+                    Unit::Percent,
+                    Label::new("test"),
+                    Source::Lhm,
+                ),
+            ],
+        };
+        let (b, script_b) = fake("b", b_inv);
+        script_a
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(1.0)]));
+        script_b
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(9.0), Some(2.0)]));
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(1_000, 1_000);
+        let schema = out.schema.expect("schema on first tick");
+        assert_eq!(schema.sensors.len(), 2);
+        assert_eq!(schema.sensors[0].source, Source::Mock);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+    }
+
+    #[test]
+    fn devices_with_the_same_id_are_merged() {
+        let mut props_a = std::collections::BTreeMap::new();
+        props_a.insert("k".to_string(), "1".to_string());
+        let inv_a = Inventory {
+            devices: vec![Device {
+                id: "dev/a".into(),
+                kind: DeviceKind::Cpu,
+                name: "Core".into(),
+                vendor: None,
+                properties: props_a,
+            }],
+            sensors: vec![Sensor::new(
+                "dev/a",
+                SensorKind::Load,
+                "x",
+                Unit::Percent,
+                Label::new("test"),
+                Source::Mock,
+            )],
+        };
+        let mut props_b = std::collections::BTreeMap::new();
+        props_b.insert("k".to_string(), "2".to_string());
+        props_b.insert("j".to_string(), "3".to_string());
+        let inv_b = Inventory {
+            devices: vec![Device {
+                id: "dev/a".into(),
+                kind: DeviceKind::Cpu,
+                name: "LHM".into(),
+                vendor: None,
+                properties: props_b,
+            }],
+            sensors: vec![Sensor::new(
+                "dev/a",
+                SensorKind::Load,
+                "y",
+                Unit::Percent,
+                Label::new("test"),
+                Source::Lhm,
+            )],
+        };
+        let (a, _) = fake("a", inv_a);
+        let (b, _) = fake("b", inv_b);
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(1_000, 1_000);
+        let schema = out.schema.expect("schema on first tick");
+        assert_eq!(schema.devices.len(), 1);
+        let device = &schema.devices[0];
+        assert_eq!(device.name, "Core");
+        assert_eq!(device.properties.get("k").map(String::as_str), Some("1"));
+        assert_eq!(device.properties.get("j").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn values_follow_the_kept_sensors_when_a_provider_polls_short() {
+        let (a, script_a) = fake("a", inventory("dev/a", &["x"]));
+        let b_inv = Inventory {
+            devices: vec![Device {
+                id: "dev/b".into(),
+                kind: DeviceKind::Cpu,
+                name: "dev/b".into(),
+                vendor: None,
+                properties: Default::default(),
+            }],
+            sensors: vec![
+                Sensor::new(
+                    "dev/a",
+                    SensorKind::Load,
+                    "x",
+                    Unit::Percent,
+                    Label::new("test"),
+                    Source::Lhm,
+                ),
+                Sensor::new(
+                    "dev/b",
+                    SensorKind::Load,
+                    "p",
+                    Unit::Percent,
+                    Label::new("test"),
+                    Source::Lhm,
+                ),
+                Sensor::new(
+                    "dev/b",
+                    SensorKind::Load,
+                    "q",
+                    Unit::Percent,
+                    Label::new("test"),
+                    Source::Lhm,
+                ),
+            ],
+        };
+        let (b, script_b) = fake("b", b_inv);
+        script_a
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(1.0)]));
+        // Only 1 value for 3 sensors: the worker turns this into a poll failure.
+        script_b
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(5.0)]));
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(1_000, 1_000);
+        let schema = out.schema.expect("schema on first tick");
+        assert_eq!(schema.sensors.len(), 3);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), None, None]);
+    }
+
+    #[test]
+    fn svc_sensors_vanish_without_touching_core_history() {
+        let (a, _) = fake("a", inventory("dev/a", &["x"]));
+        let (b, script_b) = fake("b", inventory("dev/b", &["y"]));
+        let mut e = Engine::new(vec![a, b], 10);
+        e.tick(1_000, 1_000);
+        e.tick(2_000, 2_000);
+        script_b
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Err(ProviderError::Rediscover));
+        e.tick(3_000, 3_000);
+        script_b.lock().unwrap().inventory = Inventory::default();
+        let out = e.tick(4_000, 4_000);
+        let schema = out.schema.expect("schema changes when b vanishes");
+        assert!(schema.sensors.iter().all(|s| s.id != "dev/b/load/y"));
+        let w = e.history().window(&["dev/a/load/x".into()], 0);
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000, 4_000]);
+        assert_eq!(
+            w.series[0],
+            vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0)]
+        );
+    }
+
+    #[test]
+    fn winner_change_resets_history_and_stats() {
+        let (a, script_a) = fake("a", Inventory::default());
+        let b_inv = Inventory {
+            devices: vec![Device {
+                id: "dev/a".into(),
+                kind: DeviceKind::Cpu,
+                name: "B".into(),
+                vendor: None,
+                properties: Default::default(),
+            }],
+            sensors: vec![Sensor::new(
+                "dev/a",
+                SensorKind::Load,
+                "x",
+                Unit::Percent,
+                Label::new("test"),
+                Source::Lhm,
+            )],
+        };
+        let (b, script_b) = fake("b", b_inv);
+        script_b
+            .lock()
+            .unwrap()
+            .polls
+            .extend([Ok(vec![Some(1.0)]), Ok(vec![Some(2.0)])]);
+        let mut e = Engine::new(vec![a, b], 10);
+        e.tick(1_000, 1_000);
+        e.tick(2_000, 2_000);
+        {
+            let mut s = script_a.lock().unwrap();
+            s.inventory = inventory("dev/a", &["x"]);
+            s.polls.push_back(Err(ProviderError::Rediscover));
+        }
+        e.tick(3_000, 3_000);
+        script_a
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(9.0)]));
+        let out = e.tick(4_000, 4_000);
+        let schema = out.schema.expect("schema changes when a claims the id");
+        let winner = schema
+            .sensors
+            .iter()
+            .find(|s| s.id == "dev/a/load/x")
+            .expect("winner present");
+        assert_eq!(winner.source, Source::Mock);
+        let w = e.history().window(&["dev/a/load/x".into()], 0);
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000, 4_000]);
+        assert_eq!(w.series[0], vec![None, None, None, Some(9.0)]);
+        let stats = e.stats().get(&["dev/a/load/x".to_string()]);
+        assert_eq!(stats[0].map(|s| s.count), Some(1));
     }
 
     #[test]

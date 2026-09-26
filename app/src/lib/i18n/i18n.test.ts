@@ -38,6 +38,7 @@ const SOURCES: Record<Source, true> = {
   igcl: true,
   pnp: true,
   mock: true,
+  lhm: true,
 };
 
 test('every sensor source has a badge name', () => {

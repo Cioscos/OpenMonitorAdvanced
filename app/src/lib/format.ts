@@ -13,7 +13,11 @@ function num(value: number, digits: number, locale: string): string {
   const key = `${locale}:${digits}`;
   let formatter = formatters.get(key);
   if (!formatter) {
-    formatter = new Intl.NumberFormat(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    formatter = new Intl.NumberFormat(locale, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+      useGrouping: true,
+    });
     formatters.set(key, formatter);
   }
   return formatter.format(value);
@@ -123,6 +127,10 @@ export function formatValue(
       return `Gen ${Math.round(value)}`;
     case 'lanes':
       return `x${Math.round(value)}`;
+    case 'hours':
+      return `${num(value, 0, locale)} h`;
+    case 'count':
+      return num(value, 0, locale);
     default: {
       const unknown: never = unit;
       return `${num(value, 1, locale)} ${String(unknown)}`;

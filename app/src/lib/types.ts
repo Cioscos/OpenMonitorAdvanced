@@ -22,7 +22,8 @@ export type SensorKind =
   | 'energy'
   | 'flag'
   | 'percent'
-  | 'link';
+  | 'link'
+  | 'counter';
 
 export type Unit =
   | 'celsius'
@@ -38,7 +39,9 @@ export type Unit =
   | 'joule'
   | 'boolean'
   | 'pcie_generation'
-  | 'lanes';
+  | 'lanes'
+  | 'hours'
+  | 'count';
 
 export type Source =
   | 'pdh'
@@ -51,7 +54,8 @@ export type Source =
   | 'adl'
   | 'igcl'
   | 'pnp'
-  | 'mock';
+  | 'mock'
+  | 'lhm';
 
 /** Translation key (looked up as `sensor.<key>`) plus optional `{arg}`. */
 export interface Label {

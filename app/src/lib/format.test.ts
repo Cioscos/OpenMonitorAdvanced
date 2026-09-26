@@ -82,6 +82,8 @@ const EXAMPLES: Record<Unit, [number, string]> = {
   boolean: [1, 'Active'],
   pcie_generation: [4, 'Gen 4'],
   lanes: [16, 'x16'],
+  hours: [1234, '1,234 h'],
+  count: [56, '56'],
 };
 
 test('formatValue formats every unit', () => {
@@ -110,6 +112,11 @@ test('formatValue rounds link values and scales energy', () => {
   expect(formatValue(8, 'lanes', 'en', tEn)).toBe('x8');
   expect(formatValue(950, 'joule', 'en', tEn)).toBe('950 J');
   expect(formatValue(2.5e6, 'joule', 'en', tEn)).toBe('2.5 MJ');
+});
+
+test('formats hours and counts', () => {
+  expect(formatValue(1234, 'hours', 'it', tIt)).toBe('1.234 h');
+  expect(formatValue(56, 'count', 'en', tEn)).toBe('56');
 });
 
 test('formatValue shows byte rates in bits on request, like the Simple view network tile', () => {

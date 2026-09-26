@@ -6,12 +6,14 @@
 
 mod frame;
 mod message;
+mod status;
 
 pub use frame::{decode_payload, encode_frame, encode_payload, FrameDecoder};
 pub use message::{
     Hello, IdentityHint, Message, Subscribe, WireDevice, WireError, WireSchema, WireSensor,
     WireSnapshot,
 };
+pub use status::{ServiceDetail, ServiceState, ServiceStatus};
 
 /// Current sensor IPC protocol version, sent in [`Hello::protocol_version`].
 pub const PROTOCOL_VERSION: u32 = 1;

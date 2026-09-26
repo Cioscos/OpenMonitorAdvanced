@@ -10,8 +10,11 @@ Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplif
 
 - `crates/oma-core`: modello dati, scheduler/worker, merge per fonte, storico. Niente codice Windows.
 - `crates/oma-win`: provider Windows (PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete). Tutto il codice specifico di Windows sta qui.
+- `crates/oma-ipc`: tipi del protocollo, codifica MessagePack e framing verso `oma-service`; portabile, senza codice Windows.
 - `app/src-tauri` (crate `oma-app`): shell Tauri 2.11 (comandi, tray, finestra, modalità sicura).
 - `app/`: UI Svelte 5 + TypeScript 6, test Vitest, i18n `en.json`/`it.json` con le stesse chiavi.
+- `service/`: servizio Windows `oma-service` (.NET 10) con LibreHardwareMonitorLib e i suoi test (`OpenMonitorAdvanced.Service`, `OpenMonitorAdvanced.Service.Tests`).
+- `protocol/fixtures/`: messaggi MessagePack di riferimento condivisi tra i test Rust e .NET del protocollo.
 
 ## Comandi
 
@@ -22,6 +25,9 @@ cargo test --workspace
 cargo test -p oma-win -- --include-ignored   # test hardware (RTX 4080 + iGPU AMD su questa macchina)
 cd app && pnpm test && pnpm check && pnpm build
 cd app && pnpm tauri dev                     # app in sviluppo; pnpm dev = solo UI nel browser con backend finto
+dotnet test service/OpenMonitorAdvanced.slnx # test del servizio, dalla radice del repository
+pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in staging il setup di PawnIO
+cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio e PawnIO
 ```
 
 ## Tecniche e convenzioni
@@ -31,9 +37,11 @@ cd app && pnpm tauri dev                     # app in sviluppo; pnpm dev = solo 
 - **FFI:** binding scritti a mano. Un commento `// SAFETY:` su ogni blocco `unsafe`; un assert di dimensione a compile time per ogni struct FFI. Le DLL dei vendor si caricano solo da System32 (`dynlib::Library`) e non si scaricano mai.
 - **Licenze:** nessun header proprietario (NVML, ADL, IGCL) e nessun testo copiato da essi. Le attribuzioni vanno in `THIRD_PARTY_NOTICES.md`; nei nostri sorgenti niente tag SPDX di terzi.
 - **Contratto Rust↔UI:** id dei sensori nella forma `<device_id>/<kind>/<name>`, etichette come chiavi i18n.
+- **Protocollo IPC (`crates/oma-ipc`, `service/OpenMonitorAdvanced.Service/Protocol/`):** mai `skip_serializing_if` sui tipi del protocollo, perché le chiavi devono essere sempre presenti (`nil` per gli assenti, §6 della spec); le fixture di `protocol/fixtures/` si rigenerano solo con `OMA_WRITE_FIXTURES=1`, a thread singolo.
 - **Stile:** codice, commenti e commit in inglese (conventional commits); documentazione e prosa dei piani in italiano con gli accenti corretti.
 - Fine riga LF ovunque (`.gitattributes`).
 - **Verifiche dal vivo:** mai clic sintetici o UI Automation sul desktop, perché l'utente usa il PC mentre gli agenti lavorano. Le azioni su tray e finestre si chiedono all'utente.
+- **Ricerche nel filesystem:** mai una ricerca a tutto il disco (`find /`, `Get-ChildItem C:\ -Recurse`): può restare bloccata per ore. Restringere sempre l'ambito: pacchetti NuGet in `$USERPROFILE/.nuget/packages/<id>/<versione>/`, crate Rust in `$USERPROFILE/.cargo/registry/src/`, il repository o `node_modules`.
 
 ## Skill e strumenti installati (usali quando servono)
 

@@ -1,12 +1,19 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M3).
+Updated at the end of every milestone (last update: M4).
 
 ## Open: code
 
 | Item | Where | Pick up |
 |---|---|---|
+| A USB HDD whose bridge rejects ATA pass-through gets no LHM SMART at all, because a disk that can't confirm its power state keeps SMART off for every disk (D6). Needs a per-module switch to disable storage SMART for just that disk instead. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 filter) | M5 (per-module LHM switches, disk rules) |
+| On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
+| The service's private memory measured 63–84 MB in the S1 spike against the 80 MB budget (spec §1.2); Task 6's countermeasures (non-concurrent GC, `ConserveMemory`, LHM history off, post-`Open` compaction) narrow this but Task 15's real measurement is the gate. | `service/OpenMonitorAdvanced.Service/` | M6 (perf budget) — report to the user rather than widen the budget if still over 80 MB |
+| `app/src-tauri/nsis/*.dll` helper (`nsExec.dll`) ships unsigned, so SmartScreen may still warn even after the main binaries are signed. | `app/src-tauri/nsis/` | M6 (SignPath phase) |
+| A third-party folder inside `Program Files` that grants `Users` Modify rights passes the Advanced-sensors-component install-path check, which only verifies the path is under `Program Files` and free of reparse points, not its ACL. | `app/src-tauri/nsis/oma.nsh` (install-path check) | accepted; verify/document |
+| A silent install refused for a reason other than the path check (for example a missing `/NOSENSORS` outside `Program Files`) may still have created an empty `$INSTDIR` and installed the WebView2 runtime before refusing. | `app/src-tauri/nsis/installer.nsi` | accepted; verify/document |
+| Redistributing the official PawnIO setup is common practice (LibreHardwareMonitor and FanControl both do it), but the PawnIO author has not been asked to confirm it for this project. | `THIRD_PARTY_NOTICES.md`, `scripts/build-installer-payload.ps1` | before 1.0 |
 | The log guard is never dropped: `App::run` ends the process with `process::exit`, so the last buffered log lines can be lost. Use `run_return`, or flush on `RunEvent::Exit`. | `app/src-tauri/src/main.rs` | M5 (tray and settings) |
 | The single-instance callback ignores the second launch's arguments, so a second `--minimized` launch opens the window. `scripts/measure-footprint.ps1 -FillHistoryMinutes` relies on a second launch *without* arguments opening the window: keep that working. | `app/src-tauri/src/main.rs` | M5 (tray) |
 | `used_pct` is duplicated in the memory and storage providers. | `crates/oma-win/src/memory.rs`, `crates/oma-win/src/storage.rs` | when touched |
@@ -25,8 +32,12 @@ Updated at the end of every milestone (last update: M3).
 
 - NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick, when the CSV log or the rules need them (M5).
 - Battery page: appears when a battery provider exists.
-- "N more sensors available with the service": M4.
 - Advanced view state (section, chart window, series) lives in the WebView `localStorage` until `settings.json` (M5).
+- Per-module LibreHardwareMonitor switches (M5), including turning storage SMART off for a specific disk (see the USB HDD row above).
+- **Not covered yet, despite LibreHardwareMonitor exposing related sensors — do not assume the mapping surfaces them without re-checking `SchemaBuilder.cs`:**
+  - **CPU throttling / distance to TjMax:** `MatchCpuSensor` (`service/OpenMonitorAdvanced.Service/Sensors/SchemaBuilder.cs`) maps load, temperature and power/voltage sensors only; no throttle-reason or "Distance to TjMax" sensor is matched. To check availability, dump `SensorNode` names/types for the `Cpu` hardware (the S1 spike's `LhmDump` tool, or a `SchemaBuilderTests` fixture) on Intel and AMD CPUs and look for a temperature/factor sensor named along those lines before adding a match.
+  - **RAM SPD timings:** `SchemaBuilder.cs` (around the DIMM temperature match, see the comment there) explicitly discards the SPD timing and capacity sensors RAMSPDToolkit exposes on each DIMM. To check availability, enable PawnIO and dump a DIMM's `SensorNode`s: the timing values are present but currently thrown away, not absent from LHM.
+  - **SMART critical warning:** `MatchStorageSensor` discards any sensor whose name starts with `"Warning"` or `"Critical"` (temperature limits and NVMe/SMART warning sensors alike). To check availability, dump a drive's `SensorNode`s and confirm which of those discarded sensors carry an actual critical/warning boolean or threshold worth mapping as a `flag` sensor before an M5 rule tries to consume it.
 
 ## Manual checks owed by a human
 
@@ -35,6 +46,16 @@ Updated at the end of every milestone (last update: M3).
 - IGCL telemetry and PCIe link on Intel hardware, including `ctlPciGetState` layout and per-tick cost (unmeasured, no Intel hardware available); ADL on a dedicated Radeon (hardware matrix, spec §12).
 - Set the power plan's "turn off hard disk after" to 1-2 minutes, put the app in the tray, and confirm the SATA HDD spins down and stays down. If it does not, gate the 30 s refresh on observed disk activity (PDH idle time) — M5 disk rules.
 - An MBR disk or a VHD without a serial number gets a `storage/mbr-…` id: the MBR identity tier and the geometry IOCTL were never exercised on real hardware (every disk in the M3 hardware matrix is GPT).
+- Anti-cheat compatible mode has not been verified against a real anti-cheat-protected game (FACEIT with PawnIO 2.2.0 loaded, spec §13 point 1).
+- D6 (disk standby detection) checks on real hardware: first open, hot-plug, sampling cadence; empty card readers' error codes; the R17 bus-class exclusions (NVMe, virtual disks, Storage Spaces).
+- The service's memory footprint (Task 15 measurement) against the 80 MB budget, on the hardware matrix.
+- Task 15's VM fault-injection scenarios for the installer and service: STOP stuck, uninstall helper exit 1, PawnIO setup exit code other than 0/3010, upgrade over an existing install, deselecting the Advanced sensors component, `/NOSENSORS`, a refused custom install directory, and the 3010 (reboot required) path.
+
+## Closed in M4
+
+- "N more sensors available with the service" (M3 deferred item, spec §7.3): implemented as a single generic notice, without a count, on the CPU/RAM/disk pages when the service is not connected — the app cannot know the count without the service.
+- Spec §13 point 1 (FACEIT and PawnIO): resolved by research — the earlier FACEIT block was tied to the signing certificate of PawnIO versions before 2.1.0, not to the driver's presence; PawnIO 2.2.0 (Microsoft-signed) is accepted with the driver loaded. A real-game check stays open (see "Manual checks" above).
+- Spec §13 point 2 (LibreHardwareMonitorLib trimming and NativeAOT): decided by the S1 spike — trimmed self-contained publish ships (identical sensor set trimmed vs. untrimmed, `docs/superpowers/references/m4/trim-warnings.md`), NativeAOT is excluded because LibreHardwareMonitorLib's WMI paths are unsafe under it.
 
 ## Closed in M3
 

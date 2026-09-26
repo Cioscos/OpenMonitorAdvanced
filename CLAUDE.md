@@ -12,6 +12,7 @@ Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplif
 - `crates/oma-win`: provider Windows (PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete). Tutto il codice specifico di Windows sta qui.
 - `crates/oma-ipc`: tipi del protocollo, codifica MessagePack e framing verso `oma-service`; portabile, senza codice Windows.
 - `app/src-tauri` (crate `oma-app`): shell Tauri 2.11 (comandi, tray, finestra, modalità sicura).
+- `app/src-tauri/nsis`: template NSIS proprio (`oma.nsh`, copiato e adattato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5), con lo SHA-256 fissato di PawnIO (`pawnio.sha256`).
 - `app/`: UI Svelte 5 + TypeScript 6, test Vitest, i18n `en.json`/`it.json` con le stesse chiavi.
 - `service/`: servizio Windows `oma-service` (.NET 10) con LibreHardwareMonitorLib e i suoi test (`OpenMonitorAdvanced.Service`, `OpenMonitorAdvanced.Service.Tests`).
 - `protocol/fixtures/`: messaggi MessagePack di riferimento condivisi tra i test Rust e .NET del protocollo.
@@ -27,6 +28,7 @@ cd app && pnpm test && pnpm check && pnpm build
 cd app && pnpm tauri dev                     # app in sviluppo; pnpm dev = solo UI nel browser con backend finto
 dotnet test service/OpenMonitorAdvanced.slnx # test del servizio, dalla radice del repository
 pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in staging il setup di PawnIO
+pwsh scripts/check-trim-warnings.ps1         # confronta gli avvisi di trimming del servizio con service/trim-allowlist.txt
 cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio e PawnIO
 ```
 

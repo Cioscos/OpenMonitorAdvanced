@@ -12,6 +12,13 @@
 # warnings; do not edit that file from here — it stays the narrative source of truth with the
 # full per-line reasoning). Update this file only after re-validating a new/changed warning the
 # same way the spike did: identical hardware/sensor ids trimmed vs untrimmed.
+#
+# Origins below are copied verbatim from the REAL captured ILLink output
+# (scripts/testdata/trim-warnings-sample.log, from the spike's publish-trimmed.log),
+# not retyped from trim-warnings.md's prose — the two can differ (e.g. BytesToStruct's
+# real signature includes a second `Int32` parameter that the narrative doc's table omits).
+# No `|` is allowed inside an origin: scripts/check-trim-warnings.ps1 rejects it outright,
+# in both this file and a parsed warning, rather than guess at an ambiguous split.
 
 IL2026|LibreHardwareMonitor.Hardware.OpCode.Open()
 IL2026|LibreHardwareMonitor.Hardware.OpCode.Close()
@@ -20,5 +27,5 @@ IL2075|LibreHardwareMonitor.Hardware.OpCode.Close()
 IL2067|System.Management.MTAHelper.CreateInMTA(Type)
 IL2077|System.Management.MTAHelper.WorkerThread()
 IL2075|HidSharp.Platform.Linux.NativeMethods.<>c__DisplayClass10_0.<uname>b__0(String)
-IL2091|LibreHardwareMonitor.Hardware.Controller.MSI.MsiCoreLiquidController.BytesToStruct<T>(Byte[])
+IL2091|LibreHardwareMonitor.Hardware.Controller.MSI.MsiCoreLiquidController.BytesToStruct<T>(Byte[], Int32)
 IL2091|LibreHardwareMonitor.Hardware.PowerMonitor.WireViewPro2.BytesToStructure<T>(Byte[])

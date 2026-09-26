@@ -1,0 +1,18 @@
+# Real lines from the same spike capture (publish-trimmed.log) as
+# trim-warnings-sample.log, but from LhmDump's OWN Program.cs (the spike's
+# diagnostic dump code, never part of oma-service) — kept separate to prove
+# scripts/check-trim-warnings.ps1 correctly fails on both of these real shapes:
+#
+# 1. A Roslyn compile-time trim-analyzer warning with NO origin member printed
+#    at all (just "warning ILxxxx: <prose message>"), unlike the ILLink
+#    publish-time warning for the same call site. The parser must not guess an
+#    origin here: this counts as unparseable and fails closed (requirement 2).
+# 2. A path-prefixed "Trim analysis warning" WITH an origin the parser CAN
+#    extract (Program.Main(String[])), but that origin is not on
+#    ../../service/trim-allowlist.txt — a normal "unlisted" failure, proving a
+#    real, well-formed origin still isn't waved through just because it parses.
+#
+# Expected: scripts/check-trim-warnings.ps1 -ParseOnly -InputLog <this file>
+# exits 1 on both lines.
+<spike>\LhmDump\Program.cs(181,30): warning IL2026: Using member 'System.Text.Json.Nodes.JsonArray.Add<T>(T)' which has 'RequiresUnreferencedCodeAttribute' can break functionality when trimming application code. Creating JsonValue instances with non-primitive types is not compatible with trimming. It can result in non-primitive types being serialized, which may have their members trimmed. [<spike>\LhmDump\LhmDump.csproj]
+<spike>\LhmDump\Program.cs(108,13): Trim analysis warning IL2026: Program.Main(String[]): Using member 'System.Text.Json.Nodes.JsonArray.Add(!!0)' which has 'RequiresUnreferencedCodeAttribute' can break functionality when trimming application code. Creating JsonValue instances with non-primitive types is not compatible with trimming. It can result in non-primitive types being serialized, which may have their members trimmed. [<spike>\LhmDump\LhmDump.csproj]

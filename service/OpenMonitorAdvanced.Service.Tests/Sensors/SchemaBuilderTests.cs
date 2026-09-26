@@ -164,6 +164,36 @@ public sealed class SchemaBuilderTests
     }
 
     [Fact]
+    public void DimmTemperatureIsMatchedByNameNotByIndex()
+    {
+        // On this DIMM the constant limit ("High") happens to sit at LHM index 0 and the real
+        // reading ("DIMM #2") at index 3 — the reverse of the usual layout — to prove the match
+        // is on (hardware type, SensorType, LHM name), never on the sensor's index.
+        var ram = new HardwareNode("/ram", HardwareType.Memory, "Total Memory", [Sensor("/ram/load/0", SensorType.Load, "Memory", 0)], []);
+        var dimm2 = new HardwareNode(
+            "/memory/dimm/2",
+            HardwareType.Memory,
+            "Corsair - CMH32GX5M2B6400C36 (#2)",
+            [
+                Sensor("/memory/dimm/2/temperature/0", SensorType.Temperature, "High", 0),
+                Sensor("/memory/dimm/2/temperature/3", SensorType.Temperature, "DIMM #2", 3),
+            ],
+            []);
+
+        BuiltSchema schema = SchemaBuilder.Build([ram, dimm2], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Find(schema, device.Id, "temperature", "dimm-2");
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "temperature" && s.Name != "dimm-2");
+        Assert.Single(schema.Schema.Sensors, s => s.Kind == "temperature");
+
+        // Not just the wire name: the binding must point at the "DIMM #2" LHM sensor (index 3),
+        // never at the "High" limit constant that happens to sit at index 0.
+        int sensorIndex = schema.Schema.Sensors.ToList().FindIndex(s => s.Kind == "temperature");
+        Assert.Equal("/memory/dimm/2/temperature/3", schema.Bindings[sensorIndex].LhmIdentifier);
+    }
+
+    [Fact]
     public void StorageMapsDuplicatesHealthAndCounters()
     {
         var storage = new HardwareNode(

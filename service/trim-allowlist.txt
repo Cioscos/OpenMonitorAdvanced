@@ -1,0 +1,24 @@
+# Machine-readable, per-origin allowlist for oma-service's trim (ILLink) warnings.
+#
+# Enforced by scripts/check-trim-warnings.ps1, run after
+# `dotnet publish service/OpenMonitorAdvanced.Service -c Release -p:PublishProfile=Service`.
+# The pubxml's WarningsNotAsErrors only demotes these warnings from build errors back to
+# build warnings at the IL-code level (coarser, so MSBuild does not itself abort the publish);
+# this file is what actually gates on the exact origin, one CODE|origin per line. A warning
+# whose (code, origin) pair is not listed here fails the script even if its code is one of the
+# demoted ones. Lines starting with # and blank lines are ignored.
+#
+# Derived from docs/superpowers/references/m4/trim-warnings.md (spike S1's accepted library
+# warnings; do not edit that file from here — it stays the narrative source of truth with the
+# full per-line reasoning). Update this file only after re-validating a new/changed warning the
+# same way the spike did: identical hardware/sensor ids trimmed vs untrimmed.
+
+IL2026|LibreHardwareMonitor.Hardware.OpCode.Open()
+IL2026|LibreHardwareMonitor.Hardware.OpCode.Close()
+IL2075|LibreHardwareMonitor.Hardware.OpCode.Open()
+IL2075|LibreHardwareMonitor.Hardware.OpCode.Close()
+IL2067|System.Management.MTAHelper.CreateInMTA(Type)
+IL2077|System.Management.MTAHelper.WorkerThread()
+IL2075|HidSharp.Platform.Linux.NativeMethods.<>c__DisplayClass10_0.<uname>b__0(String)
+IL2091|LibreHardwareMonitor.Hardware.Controller.MSI.MsiCoreLiquidController.BytesToStruct<T>(Byte[])
+IL2091|LibreHardwareMonitor.Hardware.PowerMonitor.WireViewPro2.BytesToStructure<T>(Byte[])

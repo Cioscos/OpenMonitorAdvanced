@@ -62,6 +62,9 @@ public static partial class SchemaBuilder
     [GeneratedRegex(@"^Temperature #(\d+)$")]
     private static partial Regex StorageTemperatureSensorPattern();
 
+    [GeneratedRegex(@"^DIMM #\d+$")]
+    private static partial Regex DimmTemperaturePattern();
+
     public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable)
     {
         var devices = new List<WireDevice>();
@@ -271,10 +274,13 @@ public static partial class SchemaBuilder
                 uint i = ParseTrailingIndex(dimm.Identifier);
                 foreach (SensorNode s in dimm.Sensors)
                 {
-                    // Only the primary DIMM temperature (LHM index 0) is published; the other
-                    // fixed indices are constant limits (Resolution, Low/High, Critical Low/High)
-                    // and SPD timings, which the brief drops along with the capacity constant.
-                    if (s.Type == SensorType.Temperature && s.Index == 0)
+                    // Matched by (hardware type, SensorType, LHM name), never by index: the
+                    // primary reading is named "DIMM #<n>" (s1-lhm.md §9.1). The other LHM
+                    // temperature sensors on a DIMM are constant limits named "Resolution",
+                    // "Low"/"High", "Critical Low"/"Critical High limit" (plus SPD timings and
+                    // the capacity constant, dropped along with them) — their index happens to
+                    // be 1-5 on this machine, but that is incidental, not the matching rule.
+                    if (s.Type == SensorType.Temperature && DimmTemperaturePattern().IsMatch(s.Name))
                     {
                         AddSensor(s, Include("temperature", $"dimm-{i}", "memory.temperature.dimm", i.ToString(CultureInfo.InvariantCulture)));
                     }

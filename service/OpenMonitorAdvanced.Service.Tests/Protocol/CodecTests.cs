@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Text;
 using MessagePack;
 using OpenMonitorAdvanced.Service.Protocol;
 using Xunit;
@@ -207,6 +208,337 @@ public sealed class CodecTests
         var stream = new MemoryStream(truncated);
 
         await Assert.ThrowsAsync<ProtocolException>(async () => await FrameReader.ReadAsync(stream, CancellationToken.None));
+    }
+
+    // ---- Fix round 1 (review of ca7c4a7) ------------------------------
+
+    [Fact]
+    public void NestedMapHeadersDoNotPreallocateFromDeclaredCounts()
+    {
+        // 65 nested map32 headers, each declaring 100 000 entries, chained
+        // through the "key" position of the outer map: the scanner never
+        // gets past reading the 65th header (depth 65 > 64), so only 325
+        // bytes are ever read. Before the fix, ValidateMap allocated a
+        // HashSet<string> sized for the *declared* count (100 000) before
+        // any entry was confirmed to exist, so up to 65 such HashSets were
+        // simultaneously alive on the call stack — tens of MB, for a 325
+        // byte input.
+        var bytes = new byte[65 * 5];
+        for (var i = 0; i < 65; i++)
+        {
+            bytes[i * 5] = 0xdf; // map32
+            BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(i * 5 + 1), 100_000);
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var ex = Record.Exception(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.IsType<ProtocolException>(ex);
+        Assert.True(
+            allocated < 1_000_000,
+            $"expected well under 1 MB allocated while rejecting this 325-byte payload, allocated {allocated} bytes");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DuplicatePropertyKeyWithDifferentStringMarkersIsRejected(bool useStr16ForSecondEncoding)
+    {
+        var bytes = BuildSchemaWithDuplicatePropertyKey(useStr16ForSecondEncoding);
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void UnknownFieldWithOversizedArrayIsRejected()
+    {
+        var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(2);
+            w.Write("interval_ms");
+            w.Write(500u);
+            w.Write("extra");
+            w.WriteArrayHeader(100_001);
+        });
+
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void UnknownFieldWithExcessiveNestingIsRejected()
+    {
+        var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(2);
+            w.Write("interval_ms");
+            w.Write(500u);
+            w.Write("extra");
+            for (var i = 0; i < 65; i++)
+            {
+                w.WriteArrayHeader(1);
+            }
+
+            w.WriteNil();
+        });
+
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task TruncatedHeaderAtEofIsAnError(int headerBytesAvailable)
+    {
+        var stream = new MemoryStream(new byte[headerBytesAvailable]);
+        await Assert.ThrowsAsync<ProtocolException>(async () => await FrameReader.ReadAsync(stream, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ValidatorAcceptsAnArrayHeaderDeclaringExactlyMaxElements()
+    {
+        var bytes = new byte[5 + 100_000];
+        bytes[0] = 0xdd; // array32
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(1), 100_000);
+        // 100 000 nil elements: bytes[5..] are already 0x00, which is not
+        // nil (0xc0); fill them explicitly.
+        Array.Fill(bytes, (byte)0xc0, 5, 100_000);
+
+        var ex = Record.Exception(() => MessageStructureValidator.Validate(new ReadOnlySequence<byte>(bytes)));
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void ValidatorAcceptsAMapHeaderDeclaringExactlyMaxElements()
+    {
+        // No entries follow: the count check itself must accept exactly the
+        // limit, so the failure that does occur must come from running out
+        // of bytes while reading the first entry, not from the element
+        // count limit (mirrors crates/oma-ipc's
+        // map_with_exactly_100000_entries_header_passes_the_count_check).
+        var bytes = new byte[5];
+        bytes[0] = 0xdf; // map32
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(1), 100_000);
+
+        var ex = Assert.Throws<ProtocolException>(() => MessageStructureValidator.Validate(new ReadOnlySequence<byte>(bytes)));
+        Assert.DoesNotContain("exceeding", ex.Message);
+    }
+
+    [Fact]
+    public void ValidatorAcceptsNestingOfExactly64()
+    {
+        var bytes = new byte[65];
+        for (var i = 0; i < 64; i++)
+        {
+            bytes[i] = 0x91; // fixarray, 1 element
+        }
+
+        bytes[64] = 0xc0; // innermost nil
+
+        var ex = Record.Exception(() => MessageStructureValidator.Validate(new ReadOnlySequence<byte>(bytes)));
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void RawWireNaNAndPositiveInfinityDecodeAsNull()
+    {
+        var bytes = BuildEnvelope("snapshot", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(3);
+            w.Write("seq");
+            w.Write(1u);
+            w.Write("timestamp_ms");
+            w.Write(0u);
+            w.Write("values");
+            w.WriteArrayHeader(2);
+            w.WriteRaw(RawFloat64(double.NaN));
+            w.WriteRaw(RawFloat64(double.PositiveInfinity));
+        });
+
+        var decoded = Assert.IsType<SnapshotMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Equal(new double?[] { null, null }, decoded.Values);
+    }
+
+    [Fact]
+    public void InvalidUtf8InAStringFieldIsRejected()
+    {
+        var bytes = BuildEnvelope("error", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(2);
+            w.Write("code");
+            w.Write("bad_request");
+            w.Write("message");
+            // str8, 1 byte of content: 0xff is never a valid UTF-8 leading byte.
+            w.WriteRaw(new byte[] { 0xd9, 0x01, 0xff });
+        });
+
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void InvalidUtf8InAMapKeyIsRejected()
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        writer.WriteMapHeader(2);
+        writer.WriteRaw(new byte[] { 0xd9, 0x01, 0xff }); // invalid UTF-8 "type" key
+        writer.Write("subscribe");
+        writer.Write("body");
+        writer.WriteMapHeader(1);
+        writer.Write("interval_ms");
+        writer.Write(500u);
+        writer.Flush();
+
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(buffer.WrittenSpan.ToArray())));
+    }
+
+    [Fact]
+    public void MemoryHintValueMustBeAMap()
+    {
+        var nilValue = BuildDeviceWithMemoryHint((ref MessagePackWriter w) => w.WriteNil());
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(nilValue)));
+
+        var arrayValue = BuildDeviceWithMemoryHint((ref MessagePackWriter w) => w.WriteArrayHeader(0));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(arrayValue)));
+    }
+
+    [Fact]
+    public void PropertiesAreSortedByUtf8ByteOrderNotUtf16CodeUnits()
+    {
+        // "｡" (U+FF61) is EF BD A1 in UTF-8; "😀" (U+1F600) is F0 9F 98 80.
+        // Byte-lexicographic order puts "｡" first (0xEF < 0xF0). UTF-16
+        // ordinal order (comparing code units — the emoji is a surrogate
+        // pair starting with D83D) would put the emoji first instead, since
+        // 0xD83D < 0xFF61.
+        var device = new WireDevice(
+            "d", "cpu", "n", null,
+            new Dictionary<string, string> { ["😀"] = "emoji", ["｡"] = "halfwidth" },
+            null);
+        var schema = new SchemaMessage([device], []);
+        var payload = MessageCodec.EncodePayload(schema);
+
+        var halfwidthIndex = IndexOfSubsequence(payload, Encoding.UTF8.GetBytes("｡"));
+        var emojiIndex = IndexOfSubsequence(payload, Encoding.UTF8.GetBytes("😀"));
+
+        Assert.True(halfwidthIndex >= 0, "expected to find the halfwidth-period key's UTF-8 bytes in the payload");
+        Assert.True(emojiIndex >= 0, "expected to find the emoji key's UTF-8 bytes in the payload");
+        Assert.True(
+            halfwidthIndex < emojiIndex,
+            "expected \"｡\" (UTF-8 EF BD A1) to sort before \"😀\" (UTF-8 F0 9F 98 80)");
+    }
+
+    private static byte[] RawFloat64(double value)
+    {
+        var bytes = new byte[9];
+        bytes[0] = 0xcb;
+        BinaryPrimitives.WriteUInt64BigEndian(bytes.AsSpan(1), BitConverter.DoubleToUInt64Bits(value));
+        return bytes;
+    }
+
+    private static int IndexOfSubsequence(byte[] haystack, byte[] needle)
+    {
+        for (var i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            if (haystack.AsSpan(i, needle.Length).SequenceEqual(needle))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void WriteStr8(ref MessagePackWriter w, string s)
+    {
+        var utf8 = Encoding.UTF8.GetBytes(s);
+        w.WriteRaw(new byte[] { 0xd9, (byte)utf8.Length });
+        w.WriteRaw(utf8);
+    }
+
+    private static void WriteStr16(ref MessagePackWriter w, string s)
+    {
+        var utf8 = Encoding.UTF8.GetBytes(s);
+        var header = new byte[3];
+        header[0] = 0xda;
+        BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(1), (ushort)utf8.Length);
+        w.WriteRaw(header);
+        w.WriteRaw(utf8);
+    }
+
+    private static byte[] BuildSchemaWithDuplicatePropertyKey(bool useStr16ForSecondEncoding)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var w = new MessagePackWriter(buffer);
+        w.WriteMapHeader(2);
+        w.Write("type");
+        w.Write("schema");
+        w.Write("body");
+        w.WriteMapHeader(2);
+        w.Write("devices");
+        w.WriteArrayHeader(1);
+        w.WriteMapHeader(6);
+        w.Write("id");
+        w.Write("d");
+        w.Write("kind");
+        w.Write("cpu");
+        w.Write("name");
+        w.Write("n");
+        w.Write("vendor");
+        w.WriteNil();
+        w.Write("properties");
+        w.WriteMapHeader(2); // duplicate key, 2 entries
+        w.Write("firmware"); // fixstr
+        w.Write("A");
+        if (useStr16ForSecondEncoding)
+        {
+            WriteStr16(ref w, "firmware");
+        }
+        else
+        {
+            WriteStr8(ref w, "firmware");
+        }
+
+        w.Write("B");
+        w.Write("hint");
+        w.WriteNil();
+        w.Write("sensors");
+        w.WriteArrayHeader(0);
+        w.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    private static byte[] BuildDeviceWithMemoryHint(WriteBody writeHintValue)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var w = new MessagePackWriter(buffer);
+        w.WriteMapHeader(2);
+        w.Write("type");
+        w.Write("schema");
+        w.Write("body");
+        w.WriteMapHeader(2);
+        w.Write("devices");
+        w.WriteArrayHeader(1);
+        w.WriteMapHeader(6);
+        w.Write("id");
+        w.Write("d");
+        w.Write("kind");
+        w.Write("memory");
+        w.Write("name");
+        w.Write("n");
+        w.Write("vendor");
+        w.WriteNil();
+        w.Write("properties");
+        w.WriteMapHeader(0);
+        w.Write("hint");
+        w.WriteMapHeader(2);
+        w.Write("kind");
+        w.Write("memory");
+        w.Write("value");
+        writeHintValue(ref w);
+        w.Write("sensors");
+        w.WriteArrayHeader(0);
+        w.Flush();
+        return buffer.WrittenSpan.ToArray();
     }
 
     private static void AssertDeviceEqual(WireDevice expected, WireDevice actual)

@@ -57,9 +57,15 @@ public static class MessageCodec
     /// <exception cref="ProtocolException">The payload is malformed.</exception>
     public static IMessage DecodePayload(ReadOnlySequence<byte> payload)
     {
-        MessageStructureValidator.Validate(payload);
+        // Both the structural validation pass and the field-reading pass are
+        // wrapped in the same try/catch so that DecodePayload's contract
+        // ("throws only ProtocolException") holds regardless of which pass a
+        // given malformed input is caught by (e.g. invalid UTF-8 in a map
+        // key is caught during validation; invalid UTF-8 in a recognized
+        // string field is caught during field reading).
         try
         {
+            MessageStructureValidator.Validate(payload);
             var reader = new MessagePackReader(payload);
             return ReadEnvelope(ref reader);
         }
@@ -163,10 +169,48 @@ public static class MessageCodec
     private static void WriteProperties(ref MessagePackWriter w, IReadOnlyDictionary<string, string> properties)
     {
         w.WriteMapHeader(properties.Count);
-        foreach (var pair in properties.OrderBy(p => p.Key, StringComparer.Ordinal))
+        foreach (var pair in properties.OrderBy(p => p.Key, Utf8OrdinalComparer.Instance))
         {
             w.Write(pair.Key);
             w.Write(pair.Value);
+        }
+    }
+
+    /// <summary>
+    /// Sorts strings by their UTF-8 byte representation, lexicographically —
+    /// exactly what Rust's <c>BTreeMap&lt;String, _&gt;</c> does for free
+    /// (ruling R11), since a Rust <c>String</c>'s <c>Ord</c> impl compares
+    /// its underlying UTF-8 bytes directly. This is deliberately *not*
+    /// <see cref="StringComparer.Ordinal"/>, which compares UTF-16 code
+    /// units: for a character outside the Basic Multilingual Plane (encoded
+    /// as a surrogate pair in UTF-16, e.g. U+1F600 = <c>D83D DE00</c>) the
+    /// two orderings can disagree with a character inside it (e.g. U+FF61 =
+    /// <c>FF61</c>) — UTF-16 ordinal would sort U+1F600 first (0xD83D &lt;
+    /// 0xFF61), while UTF-8 byte order sorts U+FF61 first (its UTF-8 lead
+    /// byte 0xEF is less than U+1F600's lead byte 0xF0).
+    /// </summary>
+    private sealed class Utf8OrdinalComparer : IComparer<string>
+    {
+        public static readonly Utf8OrdinalComparer Instance = new();
+
+        public int Compare(string? x, string? y)
+        {
+            if (ReferenceEquals(x, y))
+            {
+                return 0;
+            }
+
+            if (x is null)
+            {
+                return -1;
+            }
+
+            if (y is null)
+            {
+                return 1;
+            }
+
+            return Encoding.UTF8.GetBytes(x).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(y));
         }
     }
 
@@ -437,7 +481,7 @@ public static class MessageCodec
                     // Option<String> in Rust: nil is a valid value here (unlike the
                     // required string fields above), so read directly instead of
                     // going through ReadRequiredString.
-                    vendor = reader.TryReadNil() ? null : reader.ReadString();
+                    vendor = ReadNullableString(ref reader);
                     break;
                 case "properties":
                     properties = ReadProperties(ref reader);
@@ -535,7 +579,7 @@ public static class MessageCodec
         {
             "cpu" => ReadCpuHint(ref valueReader),
             "storage" => ReadStorageHint(ref valueReader),
-            "memory" => new MemoryHint(),
+            "memory" => ReadMemoryHint(ref valueReader),
             _ => throw new ProtocolException($"unknown identity hint kind \"{kind}\""),
         };
     }
@@ -566,6 +610,27 @@ public static class MessageCodec
         return new CpuHint(index.Value);
     }
 
+    /// <summary>
+    /// Reads a <c>Memory {}</c> hint's <c>value</c>: it must itself be a map
+    /// (an empty one in practice, but unknown entries are tolerated and
+    /// skipped like everywhere else) — matching Rust's <c>Memory {}</c>
+    /// variant, whose <c>value</c> is a zero-length map, never <c>nil</c> or
+    /// an array. <see cref="MessagePackReader.ReadMapHeader"/> throws if the
+    /// next token isn't a map header, which <see cref="DecodePayload"/>'s
+    /// outer try/catch turns into a <see cref="ProtocolException"/>.
+    /// </summary>
+    private static MemoryHint ReadMemoryHint(ref MessagePackReader reader)
+    {
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            ReadRequiredString(ref reader, "memory hint key");
+            reader.Skip();
+        }
+
+        return new MemoryHint();
+    }
+
     private static StorageHint ReadStorageHint(ref MessagePackReader reader)
     {
         uint? physicalDrive = null;
@@ -582,10 +647,10 @@ public static class MessageCodec
                     physicalDrive = reader.ReadUInt32();
                     break;
                 case "model":
-                    model = reader.TryReadNil() ? null : reader.ReadString();
+                    model = ReadNullableString(ref reader);
                     break;
                 case "serial":
-                    serial = reader.TryReadNil() ? null : reader.ReadString();
+                    serial = ReadNullableString(ref reader);
                     break;
                 default:
                     reader.Skip();
@@ -633,7 +698,7 @@ public static class MessageCodec
                     labelKey = ReadRequiredString(ref reader, "\"label_key\"");
                     break;
                 case "label_arg":
-                    labelArg = reader.TryReadNil() ? null : reader.ReadString();
+                    labelArg = ReadNullableString(ref reader);
                     break;
                 case "category":
                     category = ReadRequiredString(ref reader, "\"category\"");
@@ -792,13 +857,70 @@ public static class MessageCodec
 
     private static string ReadRequiredString(ref MessagePackReader reader, string fieldName)
     {
-        var value = reader.ReadString();
+        var value = ReadNullableString(ref reader);
         if (value is null)
         {
             throw new ProtocolException($"{fieldName} must not be nil");
         }
 
         return value;
+    }
+
+    /// <summary>
+    /// Reads a string value (or <c>nil</c>, as <c>null</c>), decoding its
+    /// UTF-8 payload strictly (ruling R12): unlike
+    /// <see cref="MessagePackReader.ReadString"/>, which uses .NET's default
+    /// lossy UTF-8 decoding (invalid byte sequences silently become U+FFFD),
+    /// this throws a <see cref="ProtocolException"/> on invalid UTF-8 —
+    /// matching Rust's <c>rmp_serde</c>/<c>serde</c>, which reject invalid
+    /// UTF-8 in any string field via <c>std::str::from_utf8</c>.
+    /// </summary>
+    private static string? ReadNullableString(ref MessagePackReader reader)
+    {
+        var sequence = reader.ReadStringSequence();
+        return sequence is null ? null : StrictUtf8.Decode(sequence.Value);
+    }
+}
+
+/// <summary>
+/// Decodes raw bytes as UTF-8 strictly, throwing a
+/// <see cref="ProtocolException"/> on invalid byte sequences instead of
+/// .NET's default lossy behaviour (which replaces invalid sequences with
+/// U+FFFD). Used everywhere a string is read from the wire — both by
+/// <see cref="MessageCodec"/>'s field decoding and by
+/// <see cref="MessageStructureValidator"/>'s map-key duplicate check — so
+/// invalid UTF-8 is rejected the same way Rust's <c>rmp_serde</c>/
+/// <c>serde</c> would (ruling R12).
+/// </summary>
+internal static class StrictUtf8
+{
+    private static readonly UTF8Encoding Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    public static string Decode(ReadOnlySequence<byte> bytes)
+    {
+        try
+        {
+            if (bytes.IsSingleSegment)
+            {
+                return Encoding.GetString(bytes.FirstSpan);
+            }
+
+            var length = checked((int)bytes.Length);
+            var array = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                bytes.CopyTo(array);
+                return Encoding.GetString(array, 0, length);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(array);
+            }
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new ProtocolException("invalid UTF-8 in a MessagePack string", ex);
+        }
     }
 }
 
@@ -994,7 +1116,16 @@ internal static class MessageStructureValidator
             throw new ProtocolException($"map declares {count} entries, exceeding the {MaxElements} limit");
         }
 
-        var seenKeys = new HashSet<string>((int)count);
+        // No capacity is reserved from the declared count: at this point the
+        // count is only a header value, not yet backed by confirmed entries
+        // (a hostile message can chain many map headers through the "key"
+        // position of an outer map without ever providing real entries, so
+        // pre-sizing from `count` here would let a few hundred bytes of
+        // input pin down tens of MB of `HashSet` backing arrays before the
+        // depth limit even has a chance to reject the message). Grows
+        // organically instead, exactly like the Rust scanner's
+        // `HashSet::new()`.
+        var seenKeys = new HashSet<string>();
         for (uint i = 0; i < count; i++)
         {
             var keyStart = reader.Position;
@@ -1044,27 +1175,10 @@ internal static class MessageStructureValidator
         }
 
         var payload = keyBytes.Slice(keyReader.Position, length);
-        return DecodeUtf8(payload);
-    }
 
-    private static string DecodeUtf8(ReadOnlySequence<byte> bytes)
-    {
-        if (bytes.IsSingleSegment)
-        {
-            return Encoding.UTF8.GetString(bytes.FirstSpan);
-        }
-
-        var length = checked((int)bytes.Length);
-        var array = ArrayPool<byte>.Shared.Rent(length);
-        try
-        {
-            bytes.CopyTo(array);
-            return Encoding.UTF8.GetString(array, 0, length);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(array);
-        }
+        // Strict decoding (ruling R12): a key with invalid UTF-8 is
+        // rejected, matching Rust's serde-driven map-key deserialization.
+        return StrictUtf8.Decode(payload);
     }
 
     private static ProtocolException Eof()

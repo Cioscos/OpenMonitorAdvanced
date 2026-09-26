@@ -16,4 +16,12 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets OpenMonitorAdvanced.Service.Tests exercise MessageStructureValidator
+         (internal) directly, for boundary assertions ("exactly at the limit is
+         accepted") that would otherwise be indistinguishable from an unrelated
+         envelope-shape decode error if only MessageCodec's public API were used. -->
+    <InternalsVisibleTo Include="OpenMonitorAdvanced.Service.Tests" />
+  </ItemGroup>
+
 </Project>

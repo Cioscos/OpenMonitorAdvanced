@@ -1,9 +1,17 @@
-// Minimal, compilable entry point for this task. Replaced by the setup verbs
-// (install/uninstall/…) in Task 4 and by the sampling/named-pipe host in
-// Task 7.
+// Entry point for the `oma-service.exe install|uninstall` helper verbs (Task 4), used by the
+// NSIS installer. The service host itself (sampling/named-pipe) arrives in Task 7.
 
-using Microsoft.Extensions.Hosting;
+using OpenMonitorAdvanced.Service.Setup;
 
-var builder = Host.CreateApplicationBuilder(args);
-using var host = builder.Build();
-host.Run();
+return args switch
+{
+    ["install"] => ServiceInstaller.Install(Environment.ProcessPath!, Console.Out),
+    ["uninstall"] => ServiceInstaller.Uninstall(Console.Out),
+    _ => Usage(),
+};
+
+static int Usage()
+{
+    Console.Error.WriteLine("Usage: oma-service.exe install|uninstall");
+    return 2;
+}

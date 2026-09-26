@@ -1009,6 +1009,43 @@ public sealed class SensorHubTests
     }
 
     [Fact]
+    public void StorageRootsSharingAnIdentifierAreSkippedAndLoggedOnce()
+    {
+        // Two disks LHM enumerates under the same identifier (e.g. two "/hdd/-1"; here with
+        // drive numbers, so the hub would otherwise resolve both): neither is described, updated
+        // or published, and the rest of the schema is unaffected.
+        HardwareNode Clash(int drive) => new(
+            "/hdd/7",
+            HardwareType.Storage,
+            "Clashing disk",
+            [new SensorNode("/hdd/7/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(drive, null, null, null, Rotational: true));
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(Clash(3));
+        h.Tree.Storage.Add(Clash(4));
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        for (int round = 0; round < 3; round++)
+        {
+            h.Hub.StorageOnce();
+            h.Advance(1000);
+            h.Hub.TickOnce();
+            h.Advance(30_000);
+        }
+
+        SchemaMessage schema = LatestSchema(a);
+        SchemaBuilderTests.AssertWireInvariants(new BuiltSchema(schema, [.. schema.Sensors.Select(_ => new SensorBinding("x", 1))]));
+        WireDevice disk = Assert.Single(schema.Devices, d => d.Kind == "storage");
+        Assert.Equal(new StorageHint(0, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL"), disk.Hint);
+        Assert.Contains(schema.Devices, d => d.Kind == "cpu");
+        Assert.Equal(0, h.Tree.Updates("/hdd/7"));
+        Assert.Single(h.Log.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("/hdd/7", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AThrowingSubscriberIsLoggedAndKeptWithoutStarvingOthers()
     {
         using var h = new Harness();

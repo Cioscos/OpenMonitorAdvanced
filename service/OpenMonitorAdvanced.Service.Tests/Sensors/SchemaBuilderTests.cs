@@ -22,6 +22,206 @@ public sealed class SchemaBuilderTests
     private static WireSensor Find(BuiltSchema schema, string deviceId, string kind, string name) =>
         Assert.Single(schema.Schema.Sensors, s => s.DeviceId == deviceId && s.Kind == kind && s.Name == name);
 
+    /// <summary>
+    /// <see cref="SchemaBuilder.Build"/> plus the wire invariants checked on every test tree, so
+    /// no test can produce a schema the app would refuse.
+    /// </summary>
+    private static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null)
+    {
+        BuiltSchema built = SchemaBuilder.Build(roots, pawnIoAvailable, storageDeviceIds);
+        AssertWireInvariants(built);
+        return built;
+    }
+
+    /// <summary>
+    /// The invariants the app's <c>validate_schema</c> (crates/oma-win/src/svc/link.rs) enforces,
+    /// which reject the whole schema on the first violation: non-empty device ids without
+    /// <c>/</c>, unique; every sensor on a published device, with a non-empty kind and name
+    /// without <c>/</c>, and a unique <c>device_id/kind/name</c>. Also: every label key is one
+    /// the UI translates (<see cref="CanonicalNames.LabelKeys"/>), and the bindings stay aligned.
+    /// </summary>
+    internal static void AssertWireInvariants(BuiltSchema built)
+    {
+        var devices = new HashSet<string>(StringComparer.Ordinal);
+        foreach (WireDevice device in built.Schema.Devices)
+        {
+            Assert.False(string.IsNullOrEmpty(device.Id), "empty device id");
+            Assert.DoesNotContain('/', device.Id);
+            Assert.True(devices.Add(device.Id), $"duplicate device id {device.Id}");
+        }
+
+        var sensors = new HashSet<string>(StringComparer.Ordinal);
+        foreach (WireSensor sensor in built.Schema.Sensors)
+        {
+            Assert.True(devices.Contains(sensor.DeviceId), $"sensor {sensor.Name} refers to unknown device {sensor.DeviceId}");
+            Assert.False(string.IsNullOrEmpty(sensor.Kind), "empty sensor kind");
+            Assert.DoesNotContain('/', sensor.Kind);
+            Assert.False(string.IsNullOrEmpty(sensor.Name), "empty sensor name");
+            Assert.DoesNotContain('/', sensor.Name);
+            Assert.True(sensors.Add($"{sensor.DeviceId}/{sensor.Kind}/{sensor.Name}"), $"duplicate sensor id {sensor.DeviceId}/{sensor.Kind}/{sensor.Name}");
+            Assert.True(CanonicalNames.LabelKeys.Contains(sensor.LabelKey), $"label key {sensor.LabelKey} is not in CanonicalNames.LabelKeys");
+        }
+
+        Assert.Equal(built.Schema.Sensors.Count, built.Bindings.Count);
+        Assert.Equal(built.StorageDeviceIds.Count, built.StorageDeviceIds.Values.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void TwoStorageRootsWithTheSameIdentifierAreSkipped()
+    {
+        // DiskInfoToolkit reports "/hdd/-1" for every disk whose IOCTL_STORAGE_GET_DEVICE_NUMBER
+        // fails: two such disks without a serial would share the identifier, the device id and
+        // the sensor identifiers, so neither can be read unambiguously.
+        HardwareNode Unnumbered(string name) => new(
+            "/hdd/-1",
+            HardwareType.Storage,
+            name,
+            [Sensor("/hdd/-1/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(-1, null, null, null, Rotational: true));
+        var ram = new HardwareNode("/ram", HardwareType.Memory, "Total Memory", [Sensor("/ram/load/0", SensorType.Load, "Memory", 0)], []);
+
+        BuiltSchema schema = Build([ram, Unnumbered("Disk A"), Unnumbered("Disk B")], pawnIoAvailable: true);
+
+        Assert.DoesNotContain(schema.Schema.Devices, d => d.Kind == "storage");
+        Assert.Single(schema.Schema.Devices, d => d.Kind == "memory");
+        Assert.False(schema.StorageDeviceIds.ContainsKey("/hdd/-1"));
+        Assert.Equal(["/hdd/-1"], schema.SkippedRoots);
+    }
+
+    [Fact]
+    public void ADeviceIdAlreadyPublishedIsSkipped()
+    {
+        // A pin (the id published for /hdd/0 while it had a twin) equals the id /hdd/1 would get
+        // now: the second device is skipped instead of publishing a duplicate id.
+        HardwareNode Disk(int n) => new(
+            $"/hdd/{n}",
+            HardwareType.Storage,
+            "Drive",
+            [Sensor($"/hdd/{n}/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(n, "Drive", null, null, Rotational: true));
+        var pins = new Dictionary<string, string> { ["/hdd/0"] = "lhm-" + Sha256HexOf("/hdd/1") };
+
+        // The pinned device wins in either root order.
+        foreach (HardwareNode[] roots in new[] { new[] { Disk(0), Disk(1) }, new[] { Disk(1), Disk(0) } })
+        {
+            BuiltSchema schema = Build(roots, pawnIoAvailable: true, pins);
+
+            WireDevice device = Assert.Single(schema.Schema.Devices);
+            Assert.Equal("lhm-" + Sha256HexOf("/hdd/1"), device.Id);
+            Assert.Equal("/hdd/0/temperature/0", Assert.Single(schema.Bindings).LhmIdentifier);
+            Assert.False(schema.StorageDeviceIds.ContainsKey("/hdd/1"));
+            Assert.Equal(["/hdd/1"], schema.SkippedRoots);
+        }
+    }
+
+    [Fact]
+    public void TwoRootsWithTheSameIdentifierPublishOnlyTheFirst()
+    {
+        HardwareNode Cooler(string name) => new(
+            "/heatmaster/0",
+            HardwareType.Cooler,
+            name,
+            [Sensor("/heatmaster/0/fan/0", SensorType.Fan, "Fan #1", 0)],
+            []);
+
+        BuiltSchema schema = Build([Cooler("First"), Cooler("Second")], pawnIoAvailable: true);
+
+        Assert.Equal("First", Assert.Single(schema.Schema.Devices).Name);
+        Assert.Single(schema.Schema.Sensors);
+        Assert.Equal(["/heatmaster/0"], schema.SkippedRoots);
+    }
+
+    [Fact]
+    public void SecondOrderNameCollisionsGetUniqueNames()
+    {
+        // "drive" is taken by the first sensor, "drive-9" (the first fallback) by the second,
+        // so the third must not reuse "drive-9".
+        var storage = new HardwareNode(
+            "/hdd/0",
+            HardwareType.Storage,
+            "Drive",
+            [
+                Sensor("/hdd/0/temperature/0", SensorType.Temperature, "Temperature", 0),
+                Sensor("/hdd/0/temperature/9", SensorType.Temperature, "Composite Temperature", 9),
+                Sensor("/hdd/0/sub/temperature/9", SensorType.Temperature, "Temperature", 9),
+                Sensor("/hdd/0/other/temperature/9", SensorType.Temperature, "Temperature", 9),
+            ],
+            [],
+            new StorageInfo(0, "Drive", null, null, true));
+
+        BuiltSchema schema = Build([storage], pawnIoAvailable: true);
+
+        Assert.Equal(4, schema.Schema.Sensors.Count);
+        Assert.Equal(["drive", "drive-9", "drive-9-2", "drive-9-3"], schema.Schema.Sensors.Select(s => s.Name));
+        Assert.Equal(
+            ["/hdd/0/temperature/0", "/hdd/0/temperature/9", "/hdd/0/sub/temperature/9", "/hdd/0/other/temperature/9"],
+            schema.Bindings.Select(b => b.LhmIdentifier));
+    }
+
+    [Fact]
+    public void EveryCanonicalLabelKeyIsEmittedByAFullTree()
+    {
+        var cpu = new HardwareNode(
+            "/amdcpu/0",
+            HardwareType.Cpu,
+            "CPU",
+            [
+                Sensor("/amdcpu/0/load/0", SensorType.Load, "CPU Total", 0),
+                Sensor("/amdcpu/0/load/1", SensorType.Load, "CPU Core Max", 1),
+                Sensor("/amdcpu/0/temperature/2", SensorType.Temperature, "Core (Tctl/Tdie)", 2),
+                Sensor("/amdcpu/0/temperature/3", SensorType.Temperature, "CCD1 (Tdie)", 3),
+                Sensor("/amdcpu/0/temperature/4", SensorType.Temperature, "CPU Package", 4),
+                Sensor("/amdcpu/0/temperature/5", SensorType.Temperature, "Core #1", 5),
+                Sensor("/amdcpu/0/power/0", SensorType.Power, "Package", 0),
+                Sensor("/amdcpu/0/power/1", SensorType.Power, "Core #1 (SMU)", 1),
+                Sensor("/amdcpu/0/power/2", SensorType.Power, "SoC", 2),
+                Sensor("/amdcpu/0/voltage/0", SensorType.Voltage, "SoC", 0),
+                Sensor("/amdcpu/0/voltage/2", SensorType.Voltage, "Core #1 VID", 2),
+                Sensor("/amdcpu/0/voltage/3", SensorType.Voltage, "Unknown rail", 3),
+                Sensor("/amdcpu/0/clock/0", SensorType.Clock, "Bus Speed", 0),
+                Sensor("/amdcpu/0/clock/1", SensorType.Clock, "Cores (Average)", 1),
+                Sensor("/amdcpu/0/clock/2", SensorType.Clock, "Cores (Average Effective)", 2),
+                Sensor("/amdcpu/0/clock/3", SensorType.Clock, "Core #1", 3),
+                Sensor("/amdcpu/0/clock/4", SensorType.Clock, "Core #1 (Effective)", 4),
+            ],
+            []);
+        var ram = new HardwareNode(
+            "/ram",
+            HardwareType.Memory,
+            "Total Memory",
+            [Sensor("/ram/load/0", SensorType.Load, "Memory", 0), Sensor("/ram/data/0", SensorType.Data, "Memory Used", 0)],
+            []);
+        var dimm = new HardwareNode("/memory/dimm/1", HardwareType.Memory, "DIMM", [Sensor("/memory/dimm/1/temperature/0", SensorType.Temperature, "DIMM #1", 0)], []);
+        var disk = new HardwareNode(
+            "/nvme/2",
+            HardwareType.Storage,
+            "Drive",
+            [
+                Sensor("/nvme/2/temperature/0", SensorType.Temperature, "Composite Temperature", 0),
+                Sensor("/nvme/2/temperature/1", SensorType.Temperature, "Temperature #1", 1),
+                Sensor("/nvme/2/load/51", SensorType.Load, "Total Activity", 51),
+                Sensor("/nvme/2/throughput/54", SensorType.Throughput, "Read Rate", 54),
+                Sensor("/nvme/2/throughput/55", SensorType.Throughput, "Write Rate", 55),
+                Sensor("/nvme/2/level/20", SensorType.Level, "Life", 20),
+                Sensor("/nvme/2/level/100", SensorType.Level, "Available Spare", 100),
+                Sensor("/nvme/2/level/102", SensorType.Level, "Percentage Used", 102),
+                Sensor("/nvme/2/data/21", SensorType.Data, "Data Read", 21),
+                Sensor("/nvme/2/data/22", SensorType.Data, "Data Written", 22),
+                Sensor("/nvme/2/factor/23", SensorType.Factor, "Power On Hours", 23),
+                Sensor("/nvme/2/factor/24", SensorType.Factor, "Power On Count", 24),
+            ],
+            [],
+            new StorageInfo(2, "Drive", null, "S1", Rotational: false));
+
+        BuiltSchema schema = Build([cpu, ram, dimm, disk], pawnIoAvailable: true);
+
+        Assert.Equal(
+            CanonicalNames.LabelKeys.Order(StringComparer.Ordinal),
+            schema.Schema.Sensors.Select(s => s.LabelKey).Distinct().Order(StringComparer.Ordinal));
+    }
+
     [Fact]
     public void CpuSensorsGetCanonicalNamesAndTheCpuHint()
     {
@@ -43,7 +243,7 @@ public sealed class SchemaBuilderTests
             ],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([cpu], pawnIoAvailable: true);
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Equal("cpu", device.Kind);
@@ -102,7 +302,7 @@ public sealed class SchemaBuilderTests
             ],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([cpu], pawnIoAvailable: true);
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
 
         Assert.Equal(2, schema.Schema.Sensors.Count);
         Assert.Contains(schema.Schema.Sensors, s => s.Kind == "load" && s.Name == "total");
@@ -147,7 +347,7 @@ public sealed class SchemaBuilderTests
             [Sensor("/memory/dimm/3/temperature/0", SensorType.Temperature, "DIMM #3", 0)],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([ram, vram, dimm1, dimm3], pawnIoAvailable: true);
+        BuiltSchema schema = Build([ram, vram, dimm1, dimm3], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Equal("memory", device.Kind);
@@ -180,7 +380,7 @@ public sealed class SchemaBuilderTests
             ],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([ram, dimm2], pawnIoAvailable: true);
+        BuiltSchema schema = Build([ram, dimm2], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Find(schema, device.Id, "temperature", "dimm-2");
@@ -222,7 +422,7 @@ public sealed class SchemaBuilderTests
             [],
             new StorageInfo(2, "Fanxiang S880 2TB", "eui.abc.", "IDENTIFY-1", Rotational: false));
 
-        BuiltSchema schema = SchemaBuilder.Build([storage], pawnIoAvailable: true);
+        BuiltSchema schema = Build([storage], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Equal("storage", device.Kind);
@@ -266,8 +466,8 @@ public sealed class SchemaBuilderTests
         var node1 = asNvme2 with { Sensors = [dummy("/nvme/2/temperature/0")] };
         var node5 = asNvme5 with { Sensors = [dummy("/nvme/5/temperature/0")] };
 
-        BuiltSchema s1 = SchemaBuilder.Build([node1], pawnIoAvailable: true);
-        BuiltSchema s2 = SchemaBuilder.Build([node5], pawnIoAvailable: true);
+        BuiltSchema s1 = Build([node1], pawnIoAvailable: true);
+        BuiltSchema s2 = Build([node5], pawnIoAvailable: true);
 
         Assert.Equal(s1.Schema.Devices[0].Id, s2.Schema.Devices[0].Id);
     }
@@ -283,12 +483,12 @@ public sealed class SchemaBuilderTests
             [],
             new StorageInfo(n, "Same Model", null, "DUP", Rotational: true));
 
-        BuiltSchema alone = SchemaBuilder.Build([Twin(0)], pawnIoAvailable: true);
+        BuiltSchema alone = Build([Twin(0)], pawnIoAvailable: true);
         string published = Assert.Single(alone.Schema.Devices).Id;
         Assert.Equal(published, alone.StorageDeviceIds["/hdd/0"]);
 
         var pins = new Dictionary<string, string> { ["/hdd/0"] = published };
-        BuiltSchema both = SchemaBuilder.Build([Twin(0), Twin(1)], pawnIoAvailable: true, pins);
+        BuiltSchema both = Build([Twin(0), Twin(1)], pawnIoAvailable: true, pins);
 
         Assert.Equal(published, both.StorageDeviceIds["/hdd/0"]);
         Assert.Equal("lhm-" + Sha256HexOf("/hdd/1"), both.StorageDeviceIds["/hdd/1"]); // the twin never merges into it
@@ -308,7 +508,7 @@ public sealed class SchemaBuilderTests
             [],
             new StorageInfo(-1, null, null, "IDENTIFY", Rotational: true));
 
-        BuiltSchema schema = SchemaBuilder.Build([disk], pawnIoAvailable: true);
+        BuiltSchema schema = Build([disk], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Equal("storage", device.Kind);
@@ -323,13 +523,13 @@ public sealed class SchemaBuilderTests
         // Two identical disks, no serial at all.
         var noSerialA = new HardwareNode("/hdd/0", HardwareType.Storage, "Same Model", [dummy("/hdd/0/temperature/0")], [], new StorageInfo(0, "Same Model", null, null, true));
         var noSerialB = new HardwareNode("/hdd/1", HardwareType.Storage, "Same Model", [dummy("/hdd/1/temperature/0")], [], new StorageInfo(1, "Same Model", null, null, true));
-        BuiltSchema noSerial = SchemaBuilder.Build([noSerialA, noSerialB], pawnIoAvailable: true);
+        BuiltSchema noSerial = Build([noSerialA, noSerialB], pawnIoAvailable: true);
         Assert.Equal(2, noSerial.Schema.Devices.Select(d => d.Id).Distinct().Count());
 
         // Two identical disks with the *same* (bogus/duplicated) serial.
         var dupA = new HardwareNode("/hdd/0", HardwareType.Storage, "Same Model", [dummy("/hdd/0/temperature/0")], [], new StorageInfo(0, "Same Model", null, "DUP", true));
         var dupB = new HardwareNode("/hdd/1", HardwareType.Storage, "Same Model", [dummy("/hdd/1/temperature/0")], [], new StorageInfo(1, "Same Model", null, "DUP", true));
-        BuiltSchema dup = SchemaBuilder.Build([dupA, dupB], pawnIoAvailable: true);
+        BuiltSchema dup = Build([dupA, dupB], pawnIoAvailable: true);
         Assert.Equal(2, dup.Schema.Devices.Select(d => d.Id).Distinct().Count());
     }
 
@@ -348,7 +548,7 @@ public sealed class SchemaBuilderTests
             [],
             new StorageInfo(0, "Drive", null, null, true));
 
-        BuiltSchema schema = SchemaBuilder.Build([storage], pawnIoAvailable: true);
+        BuiltSchema schema = Build([storage], pawnIoAvailable: true);
 
         Assert.Equal(2, schema.Schema.Sensors.Count);
         Assert.All(schema.Schema.Sensors, s => Assert.False(s.Name.StartsWith(s.Kind + "/", StringComparison.Ordinal)));
@@ -372,7 +572,7 @@ public sealed class SchemaBuilderTests
             []);
         var motherboard = new HardwareNode("/motherboard", HardwareType.Motherboard, "Gigabyte B650 GAMING X AX", [], [superIo]);
 
-        BuiltSchema schema = SchemaBuilder.Build([motherboard], pawnIoAvailable: true);
+        BuiltSchema schema = Build([motherboard], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Equal("motherboard", device.Kind);
@@ -395,7 +595,7 @@ public sealed class SchemaBuilderTests
     {
         var motherboard = new HardwareNode("/motherboard", HardwareType.Motherboard, "Gigabyte B650 GAMING X AX", [], []);
 
-        BuiltSchema schema = SchemaBuilder.Build([motherboard], pawnIoAvailable: true);
+        BuiltSchema schema = Build([motherboard], pawnIoAvailable: true);
 
         Assert.Empty(schema.Schema.Devices);
     }
@@ -416,7 +616,7 @@ public sealed class SchemaBuilderTests
             [Sensor("/psu/corsair/0/power/0", SensorType.Power, "Total Power", 0)],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([cooler, psu], pawnIoAvailable: true);
+        BuiltSchema schema = Build([cooler, psu], pawnIoAvailable: true);
 
         Assert.Equal(2, schema.Schema.Devices.Count);
         WireDevice fanController = Assert.Single(schema.Schema.Devices, d => d.Kind == "fan_controller");
@@ -446,7 +646,7 @@ public sealed class SchemaBuilderTests
             ],
             []);
 
-        BuiltSchema schema = SchemaBuilder.Build([cooler], pawnIoAvailable: true);
+        BuiltSchema schema = Build([cooler], pawnIoAvailable: true);
 
         Assert.Empty(schema.Schema.Devices);
         Assert.Empty(schema.Schema.Sensors);
@@ -462,7 +662,7 @@ public sealed class SchemaBuilderTests
         var dimm = new HardwareNode("/memory/dimm/1", HardwareType.Memory, "DIMM #1", [Sensor("/memory/dimm/1/temperature/0", SensorType.Temperature, "DIMM #1", 0)], []);
         var disk = new HardwareNode("/hdd/0", HardwareType.Storage, "Drive", [Sensor("/hdd/0/temperature/0", SensorType.Temperature, "Temperature", 0)], [], new StorageInfo(0, "Drive", null, null, true));
 
-        BuiltSchema schema = SchemaBuilder.Build([cpu, motherboard, ram, dimm, disk], pawnIoAvailable: false);
+        BuiltSchema schema = Build([cpu, motherboard, ram, dimm, disk], pawnIoAvailable: false);
 
         Assert.DoesNotContain(schema.Schema.Devices, d => d.Kind == "cpu");
         Assert.DoesNotContain(schema.Schema.Devices, d => d.Kind == "motherboard");
@@ -480,7 +680,7 @@ public sealed class SchemaBuilderTests
         var superIo = new HardwareNode("/lpc/it8689e/0", HardwareType.SuperIO, "ITE IT8689E", [Sensor("/lpc/it8689e/0/temperature/0", SensorType.Temperature, "System", 0)], []);
         var motherboard = new HardwareNode("/motherboard", HardwareType.Motherboard, "Gigabyte B650 GAMING X AX", [], [superIo]);
 
-        BuiltSchema schema = SchemaBuilder.Build([motherboard], pawnIoAvailable: true);
+        BuiltSchema schema = Build([motherboard], pawnIoAvailable: true);
 
         WireDevice device = Assert.Single(schema.Schema.Devices);
         Assert.Matches("^lhm-[0-9a-f]{64}$", device.Id);

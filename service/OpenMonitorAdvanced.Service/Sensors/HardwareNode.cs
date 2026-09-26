@@ -61,4 +61,13 @@ public sealed record BuiltSchema(SchemaMessage Schema, IReadOnlyList<SensorBindi
     /// identical disk never changes an id a client already has.
     /// </summary>
     public IReadOnlyDictionary<string, string> StorageDeviceIds { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// LHM identifiers of the hardware left out because it was not unique: a storage root whose
+    /// identifier another storage root shares (its sensors cannot be told apart), or a device whose
+    /// id is already published by an earlier one. The app rejects a whole schema with a duplicate
+    /// id (<c>validate_schema</c>), so one such device must never cost every other sensor.
+    /// Distinct, in discovery order; the hub logs each once.
+    /// </summary>
+    public IReadOnlyList<string> SkippedRoots { get; init; } = [];
 }

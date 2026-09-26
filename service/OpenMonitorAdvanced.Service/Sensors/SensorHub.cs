@@ -93,6 +93,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private volatile bool _opened;
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _notUniqueLogged = new(StringComparer.Ordinal);
 
     // Workers.
     private readonly CancellationTokenSource _stop = new();
@@ -320,7 +321,17 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         IReadOnlyDictionary<string, DiskResolution> previous = _resolvedDisks;
         var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
-        foreach (HardwareNode root in _tree.Roots)
+        IReadOnlyList<HardwareNode> roots = _tree.Roots;
+        var identifierCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (HardwareNode root in roots)
+        {
+            if (root.Type == HardwareType.Storage)
+            {
+                identifierCounts[root.Identifier] = identifierCounts.GetValueOrDefault(root.Identifier) + 1;
+            }
+        }
+
+        foreach (HardwareNode root in roots)
         {
             if (root.Type != HardwareType.Storage)
             {
@@ -330,6 +341,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             if (_stop.IsCancellationRequested)
             {
                 return;
+            }
+
+            if (identifierCounts[root.Identifier] > 1)
+            {
+                // Its identifier (and so its sensor identifiers, and every identifier-keyed map
+                // here) is shared with another disk: never described, updated or published.
+                LogNotUnique(root.Identifier);
+                continue;
             }
 
             DiskResolution? resolution = Resolve(root, previous);
@@ -572,6 +591,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins);
+        foreach (string skipped in built.SkippedRoots)
+        {
+            LogNotUnique(skipped);
+        }
+
         _storagePins.Clear();
         foreach ((string rootId, DiskResolution resolution) in resolved)
         {
@@ -820,6 +844,15 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     private void OnHardwareChanged() => Interlocked.Exchange(ref _structureDirty, 1);
+
+    /// <summary>Once per identifier for the hub's lifetime (either worker may report it).</summary>
+    private void LogNotUnique(string identifier)
+    {
+        if (_notUniqueLogged.TryAdd(identifier, 0))
+        {
+            _log.LogWarning("{Root} is not published: its LHM identifier or device id is not unique, so its sensors cannot be told apart", identifier);
+        }
+    }
 
     private void LogRateLimited(string key, Exception e, string message, params object?[] args)
     {

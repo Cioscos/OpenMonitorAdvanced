@@ -67,13 +67,11 @@ public static partial class SchemaBuilder
 
     public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null)
     {
-        var devices = new List<WireDevice>();
-        var sensors = new List<WireSensor>();
-        var bindings = new List<SensorBinding>();
+        var output = new Output();
 
-        BuildMemoryDevice(roots, pawnIoAvailable, devices, sensors, bindings);
+        BuildMemoryDevice(roots, pawnIoAvailable, output);
         var storageIds = new Dictionary<string, string>(StringComparer.Ordinal);
-        BuildStorageDevices(roots, storageDeviceIds, storageIds, devices, sensors, bindings);
+        BuildStorageDevices(roots, storageDeviceIds, storageIds, output);
 
         foreach (HardwareNode root in roots)
         {
@@ -82,7 +80,7 @@ public static partial class SchemaBuilder
                 case HardwareType.Cpu:
                     if (pawnIoAvailable)
                     {
-                        BuildCpuDevice(root, devices, sensors, bindings);
+                        BuildCpuDevice(root, output);
                     }
 
                     break;
@@ -90,17 +88,17 @@ public static partial class SchemaBuilder
                 case HardwareType.Motherboard:
                     if (pawnIoAvailable)
                     {
-                        BuildSuperIoDevices(root, devices, sensors, bindings);
+                        BuildSuperIoDevices(root, output);
                     }
 
                     break;
 
                 case HardwareType.Cooler:
-                    ProcessDevice(root, DeviceId(root.Identifier), "fan_controller", root.Name, hint: null, GenericFallback, devices, sensors, bindings);
+                    ProcessDevice(root, DeviceId(root.Identifier), "fan_controller", root.Name, hint: null, GenericFallback, output);
                     break;
 
                 case HardwareType.Psu:
-                    ProcessDevice(root, DeviceId(root.Identifier), "psu", root.Name, hint: null, GenericFallback, devices, sensors, bindings);
+                    ProcessDevice(root, DeviceId(root.Identifier), "psu", root.Name, hint: null, GenericFallback, output);
                     break;
 
                 default:
@@ -114,13 +112,17 @@ public static partial class SchemaBuilder
             }
         }
 
-        return new BuiltSchema(new SchemaMessage(devices, sensors), bindings) { StorageDeviceIds = storageIds };
+        return new BuiltSchema(new SchemaMessage(output.Devices, output.Sensors), output.Bindings)
+        {
+            StorageDeviceIds = storageIds,
+            SkippedRoots = output.Skipped,
+        };
     }
 
-    private static void BuildCpuDevice(HardwareNode cpu, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    private static void BuildCpuDevice(HardwareNode cpu, Output output)
     {
         uint index = ParseTrailingIndex(cpu.Identifier);
-        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", cpu.Name, new CpuHint(index), s => Resolve(MatchCpuSensor, s), devices, sensors, bindings);
+        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", cpu.Name, new CpuHint(index), s => Resolve(MatchCpuSensor, s), output);
     }
 
     private static SensorMatch MatchCpuSensor(SensorNode s)
@@ -238,7 +240,7 @@ public static partial class SchemaBuilder
         }
     }
 
-    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, Output output)
     {
         HardwareNode? ram = roots.FirstOrDefault(r => r.Type == HardwareType.Memory && r.Identifier == "/ram");
         if (ram is null)
@@ -294,9 +296,7 @@ public static partial class SchemaBuilder
             return;
         }
 
-        devices.Add(new WireDevice(deviceId, "memory", ram.Name, Vendor: null, EmptyProperties, new MemoryHint()));
-        sensors.AddRange(localSensors);
-        bindings.AddRange(localBindings);
+        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", ram.Name, Vendor: null, EmptyProperties, new MemoryHint()), localSensors, localBindings);
     }
 
     private static SensorMatch MatchMemorySensor(SensorNode s) => s.Type switch
@@ -307,7 +307,7 @@ public static partial class SchemaBuilder
         _ => NoMatch(),
     };
 
-    private static void BuildSuperIoDevices(HardwareNode motherboard, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    private static void BuildSuperIoDevices(HardwareNode motherboard, Output output)
     {
         foreach (HardwareNode child in motherboard.Children)
         {
@@ -316,7 +316,7 @@ public static partial class SchemaBuilder
                 continue;
             }
 
-            ProcessDevice(child, DeviceId(child.Identifier), "motherboard", child.Name, hint: null, GenericFallback, devices, sensors, bindings);
+            ProcessDevice(child, DeviceId(child.Identifier), "motherboard", child.Name, hint: null, GenericFallback, output);
         }
     }
 
@@ -325,15 +325,26 @@ public static partial class SchemaBuilder
     /// towards the serial-key uniqueness below, so a later identical disk gets its
     /// identifier-based id and never merges into a pinned one.
     /// </param>
+    /// <remarks>
+    /// Every disk sharing its LHM identifier with another one is skipped (DiskInfoToolkit yields
+    /// <c>/hdd/-1</c> for each disk whose device number is unknown): its sensor identifiers are
+    /// shared too, so none of them could be read unambiguously. A disk whose id is already taken
+    /// (by a pin, or by an earlier device) is skipped as well, and never enters
+    /// <paramref name="computedIds"/>, so it cannot be pinned onto someone else's id.
+    /// </remarks>
     private static void BuildStorageDevices(
         IReadOnlyList<HardwareNode> roots,
         IReadOnlyDictionary<string, string>? pinned,
         Dictionary<string, string> computedIds,
-        List<WireDevice> devices,
-        List<WireSensor> sensors,
-        List<SensorBinding> bindings)
+        Output output)
     {
         List<HardwareNode> storageNodes = roots.Where(r => r.Type == HardwareType.Storage).ToList();
+
+        var identifierCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (HardwareNode node in storageNodes)
+        {
+            identifierCounts[node.Identifier] = identifierCounts.GetValueOrDefault(node.Identifier) + 1;
+        }
 
         // A serial key is only usable for identity when it is unique among the disks
         // this call enumerates: two disks that share (model, serial) must never merge.
@@ -350,21 +361,45 @@ public static partial class SchemaBuilder
             keyCounts[key] = keyCounts.GetValueOrDefault(key) + 1;
         }
 
+        // Pinned ids are already on the clients: they win over a computed id, whatever the order.
+        var pinnedIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (HardwareNode node in storageNodes)
         {
+            if (identifierCounts[node.Identifier] == 1 && pinned is not null && pinned.TryGetValue(node.Identifier, out string? pin))
+            {
+                pinnedIds.Add(pin);
+            }
+        }
+
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (HardwareNode node in storageNodes)
+        {
+            if (identifierCounts[node.Identifier] > 1)
+            {
+                output.Skip(node.Identifier);
+                continue;
+            }
+
             string? serial = node.Storage?.DriveSerial?.Trim();
-            string deviceId = pinned is not null && pinned.TryGetValue(node.Identifier, out string? kept)
-                ? kept
+            bool isPinned = pinned is not null && pinned.ContainsKey(node.Identifier);
+            string deviceId = isPinned
+                ? pinned![node.Identifier]
                 : !string.IsNullOrEmpty(serial) && keyCounts[StorageIdentityKey(node)] == 1
                     ? "lhm-" + Sha256HexOfModelSerial(StorageModel(node), serial)
                     : "lhm-" + Sha256HexOfIdentifier(node.Identifier);
+            if ((!isPinned && pinnedIds.Contains(deviceId)) || output.IsPublished(deviceId) || !claimed.Add(deviceId))
+            {
+                output.Skip(node.Identifier);
+                continue;
+            }
+
             computedIds[node.Identifier] = deviceId;
 
             StorageHint? hint = StorageDriveNumber(node) is uint driveNumber
                 ? new StorageHint(driveNumber, node.Storage?.DescriptorModel, node.Storage?.DescriptorSerial)
                 : null;
 
-            BuildStorageDevice(node, deviceId, hint, devices, sensors, bindings);
+            BuildStorageDevice(node, deviceId, hint, output);
         }
     }
 
@@ -387,7 +422,7 @@ public static partial class SchemaBuilder
 
     private static string StorageIdentityKey(HardwareNode node) => StorageModel(node) + "\0" + node.Storage?.DriveSerial?.Trim();
 
-    private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint? hint, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint? hint, Output output)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();
@@ -422,9 +457,7 @@ public static partial class SchemaBuilder
             return;
         }
 
-        devices.Add(new WireDevice(deviceId, "storage", node.Name, Vendor: null, properties, hint));
-        sensors.AddRange(local);
-        bindings.AddRange(localBindings);
+        output.TryAdd(node.Identifier, new WireDevice(deviceId, "storage", node.Name, Vendor: null, properties, hint), local, localBindings);
     }
 
     private static SensorMatch MatchStorageSensor(SensorNode s)
@@ -562,9 +595,7 @@ public static partial class SchemaBuilder
         string name,
         IdentityHint? hint,
         Func<SensorNode, SensorMatch> resolve,
-        List<WireDevice> devices,
-        List<WireSensor> sensors,
-        List<SensorBinding> bindings)
+        Output output)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();
@@ -588,29 +619,31 @@ public static partial class SchemaBuilder
             return;
         }
 
-        devices.Add(new WireDevice(deviceId, kind, name, Vendor: null, EmptyProperties, hint));
-        sensors.AddRange(local);
-        bindings.AddRange(localBindings);
+        output.TryAdd(node.Identifier, new WireDevice(deviceId, kind, name, Vendor: null, EmptyProperties, hint), local, localBindings);
     }
 
     /// <summary>
     /// Two LHM sensors on the same device can map to the same <c>kind/name</c> (e.g. two
-    /// different fallback tables converging); when that happens the second one gets a
-    /// suffix from the last segment of its own LHM identifier, so it never overwrites the
-    /// first and the caller's bindings list stays aligned with the sensor list.
+    /// different fallback tables converging); when that happens the later one gets a suffix
+    /// from the last segment of its own LHM identifier, then, while that is taken too, a
+    /// counter (<c>-2</c>, <c>-3</c>, ...), so it never reuses a name and the caller's bindings
+    /// list stays aligned with the sensor list.
     /// </summary>
     private static string DisambiguateName(HashSet<string> used, string kind, string name, string identifier)
     {
-        string key = $"{kind}/{name}";
-        if (used.Add(key))
+        if (used.Add($"{kind}/{name}"))
         {
             return name;
         }
 
-        string suffix = identifier.Split('/')[^1];
-        string alternate = $"{name}-{suffix}";
-        used.Add($"{kind}/{alternate}");
-        return alternate;
+        string alternate = $"{name}-{identifier.Split('/')[^1]}";
+        string candidate = alternate;
+        for (int n = 2; !used.Add($"{kind}/{candidate}"); n++)
+        {
+            candidate = string.Create(CultureInfo.InvariantCulture, $"{alternate}-{n}");
+        }
+
+        return candidate;
     }
 
     private static uint ParseTrailingIndex(string identifier) => uint.Parse(identifier.Split('/')[^1], CultureInfo.InvariantCulture);
@@ -636,6 +669,48 @@ public static partial class SchemaBuilder
     private static SensorMatch Discard() => new(MatchOutcome.Discard);
 
     private static SensorMatch NoMatch() => new(MatchOutcome.NoMatch);
+
+    /// <summary>
+    /// The schema being built. A device is published with its sensors and bindings together,
+    /// and only when its id is not published yet: a duplicate is reported in
+    /// <see cref="Skipped"/> instead (first wins), so the result always has unique device ids.
+    /// </summary>
+    private sealed class Output
+    {
+        private readonly HashSet<string> _deviceIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _skipped = new(StringComparer.Ordinal);
+
+        public List<WireDevice> Devices { get; } = [];
+
+        public List<WireSensor> Sensors { get; } = [];
+
+        public List<SensorBinding> Bindings { get; } = [];
+
+        public List<string> Skipped { get; } = [];
+
+        public bool IsPublished(string deviceId) => _deviceIds.Contains(deviceId);
+
+        public void Skip(string lhmIdentifier)
+        {
+            if (_skipped.Add(lhmIdentifier))
+            {
+                Skipped.Add(lhmIdentifier);
+            }
+        }
+
+        public void TryAdd(string lhmIdentifier, WireDevice device, List<WireSensor> sensors, List<SensorBinding> bindings)
+        {
+            if (!_deviceIds.Add(device.Id))
+            {
+                Skip(lhmIdentifier);
+                return;
+            }
+
+            Devices.Add(device);
+            Sensors.AddRange(sensors);
+            Bindings.AddRange(bindings);
+        }
+    }
 
     private enum MatchOutcome
     {

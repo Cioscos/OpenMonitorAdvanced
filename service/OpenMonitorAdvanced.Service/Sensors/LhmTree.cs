@@ -297,7 +297,7 @@ public sealed class LhmTree : IHardwareTree
         DiskInfoToolkit.Storage storage = device.Storage;
         if (storage.DriveNumber < 0)
         {
-            _log.LogWarning("{Identifier} has no PhysicalDrive number; its values stay absent", hardware.Identifier.ToString());
+            _log.LogWarning("{Identifier} has no PhysicalDrive number: it cannot be described or power-checked, so it stays out of the schema", hardware.Identifier.ToString());
         }
 
         return new StorageInfo(storage.DriveNumber, null, null, storage.SerialNumber, Rotational: true);

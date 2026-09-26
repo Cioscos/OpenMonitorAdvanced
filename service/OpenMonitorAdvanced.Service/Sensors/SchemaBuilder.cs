@@ -65,14 +65,15 @@ public static partial class SchemaBuilder
     [GeneratedRegex(@"^DIMM #\d+$")]
     private static partial Regex DimmTemperaturePattern();
 
-    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable)
+    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null)
     {
         var devices = new List<WireDevice>();
         var sensors = new List<WireSensor>();
         var bindings = new List<SensorBinding>();
 
         BuildMemoryDevice(roots, pawnIoAvailable, devices, sensors, bindings);
-        BuildStorageDevices(roots, devices, sensors, bindings);
+        var storageIds = new Dictionary<string, string>(StringComparer.Ordinal);
+        BuildStorageDevices(roots, storageDeviceIds, storageIds, devices, sensors, bindings);
 
         foreach (HardwareNode root in roots)
         {
@@ -113,7 +114,7 @@ public static partial class SchemaBuilder
             }
         }
 
-        return new BuiltSchema(new SchemaMessage(devices, sensors), bindings);
+        return new BuiltSchema(new SchemaMessage(devices, sensors), bindings) { StorageDeviceIds = storageIds };
     }
 
     private static void BuildCpuDevice(HardwareNode cpu, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
@@ -319,7 +320,18 @@ public static partial class SchemaBuilder
         }
     }
 
-    private static void BuildStorageDevices(IReadOnlyList<HardwareNode> roots, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    /// <param name="pinned">
+    /// Device ids already published, by LHM root identifier: kept as they are. They still count
+    /// towards the serial-key uniqueness below, so a later identical disk gets its
+    /// identifier-based id and never merges into a pinned one.
+    /// </param>
+    private static void BuildStorageDevices(
+        IReadOnlyList<HardwareNode> roots,
+        IReadOnlyDictionary<string, string>? pinned,
+        Dictionary<string, string> computedIds,
+        List<WireDevice> devices,
+        List<WireSensor> sensors,
+        List<SensorBinding> bindings)
     {
         List<HardwareNode> storageNodes = roots.Where(r => r.Type == HardwareType.Storage).ToList();
 
@@ -341,9 +353,12 @@ public static partial class SchemaBuilder
         foreach (HardwareNode node in storageNodes)
         {
             string? serial = node.Storage?.DriveSerial?.Trim();
-            string deviceId = !string.IsNullOrEmpty(serial) && keyCounts[StorageIdentityKey(node)] == 1
-                ? "lhm-" + Sha256HexOfModelSerial(StorageModel(node), serial)
-                : "lhm-" + Sha256HexOfIdentifier(node.Identifier);
+            string deviceId = pinned is not null && pinned.TryGetValue(node.Identifier, out string? kept)
+                ? kept
+                : !string.IsNullOrEmpty(serial) && keyCounts[StorageIdentityKey(node)] == 1
+                    ? "lhm-" + Sha256HexOfModelSerial(StorageModel(node), serial)
+                    : "lhm-" + Sha256HexOfIdentifier(node.Identifier);
+            computedIds[node.Identifier] = deviceId;
 
             StorageHint? hint = StorageDriveNumber(node) is uint driveNumber
                 ? new StorageHint(driveNumber, node.Storage?.DescriptorModel, node.Storage?.DescriptorSerial)

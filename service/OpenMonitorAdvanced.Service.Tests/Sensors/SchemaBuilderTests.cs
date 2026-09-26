@@ -273,6 +273,29 @@ public sealed class SchemaBuilderTests
     }
 
     [Fact]
+    public void APinnedStorageDeviceIdIsKeptAndNeverShared()
+    {
+        HardwareNode Twin(int n) => new(
+            $"/hdd/{n}",
+            HardwareType.Storage,
+            "Same Model",
+            [Sensor($"/hdd/{n}/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(n, "Same Model", null, "DUP", Rotational: true));
+
+        BuiltSchema alone = SchemaBuilder.Build([Twin(0)], pawnIoAvailable: true);
+        string published = Assert.Single(alone.Schema.Devices).Id;
+        Assert.Equal(published, alone.StorageDeviceIds["/hdd/0"]);
+
+        var pins = new Dictionary<string, string> { ["/hdd/0"] = published };
+        BuiltSchema both = SchemaBuilder.Build([Twin(0), Twin(1)], pawnIoAvailable: true, pins);
+
+        Assert.Equal(published, both.StorageDeviceIds["/hdd/0"]);
+        Assert.Equal("lhm-" + Sha256HexOf("/hdd/1"), both.StorageDeviceIds["/hdd/1"]); // the twin never merges into it
+        Assert.Equal(2, both.Schema.Devices.Select(d => d.Id).Distinct().Count());
+    }
+
+    [Fact]
     public void ANegativeDriveNumberGivesNoStorageHint()
     {
         // DiskInfoToolkit reports DriveNumber -1 when IOCTL_STORAGE_GET_DEVICE_NUMBER fails

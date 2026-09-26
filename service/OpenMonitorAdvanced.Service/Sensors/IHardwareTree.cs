@@ -87,18 +87,22 @@ public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability,
     /// <summary><c>STORAGE_BUS_TYPE.BusTypeFileBackedVirtual</c>.</summary>
     public const uint BusTypeFileBackedVirtual = 0x0F;
 
+    /// <summary><c>STORAGE_BUS_TYPE.BusTypeSpaces</c>: a Storage Spaces virtual disk (ruling R19).</summary>
+    public const uint BusTypeSpaces = 0x10;
+
     /// <summary><c>STORAGE_BUS_TYPE.BusTypeNvme</c>.</summary>
     public const uint BusTypeNvme = 0x11;
 
     /// <summary>
     /// Controller ruling R17: whether identifying or reading SMART from this drive could spin up
     /// a platter, so it must be known to be active first. Not for a drive without media, a
-    /// virtual disk, NVMe or a drive without seek penalty; for every other drive (seek penalty
-    /// true or unknown, or unreadable) yes.
+    /// virtual disk (including Storage Spaces, ruling R19), NVMe or a drive without seek penalty;
+    /// for every other drive (seek penalty true or unknown, or unreadable) yes. This only scopes
+    /// the gate: for a disk LHM has enumerated, the hub never treats "no media" as "active".
     /// </summary>
     public bool RequiresPowerCheck =>
         Availability != DriveAvailability.NoMedia
-        && BusType is not (BusTypeVirtual or BusTypeFileBackedVirtual or BusTypeNvme)
+        && BusType is not (BusTypeVirtual or BusTypeFileBackedVirtual or BusTypeSpaces or BusTypeNvme)
         && SeekPenalty != false;
 }
 

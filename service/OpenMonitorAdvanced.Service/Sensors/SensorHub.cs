@@ -76,6 +76,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly List<Subscriber> _dueScratch = [];
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
     private Plan? _plan;
+    private readonly Dictionary<string, (StorageInfo Info, string Id)> _storagePins = new(StringComparer.Ordinal);
     private bool _pawnIo;
     private ulong _seq;
 
@@ -83,11 +84,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private bool _storageEnabled;
     private bool _storageGateLogged;
     private readonly Dictionary<string, bool?> _diskStates = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _undescribedLogged = new(StringComparer.Ordinal);
 
     // Shared, published by reference swap.
     private volatile Published? _published;
     private volatile StorageCache _storageCache = StorageCache.Empty;
-    private volatile IReadOnlyDictionary<string, StorageInfo> _resolvedDisks = new Dictionary<string, StorageInfo>();
+    private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
     private volatile bool _opened;
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
@@ -148,6 +150,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             };
             _subscribers.Add(subscriber);
             RecomputeSamplingLocked();
+            if (_subscribers.Count == 1 && _opened)
+            {
+                // Idle -> active: a storage round right away, so a quick reconnect does not wait
+                // up to 30 s for disk values (the cache was dropped when the last client left).
+                _nextStorageDue = _time.GetTimestamp();
+            }
 
             // Started under the lock that Dispose takes first, so no thread can start after it.
             if (StartWorkers && _samplerThread is null)
@@ -309,8 +317,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         long roundStart = _time.GetTimestamp();
-        IReadOnlyDictionary<string, StorageInfo> previous = _resolvedDisks;
-        var resolved = new Dictionary<string, StorageInfo>(StringComparer.Ordinal);
+        IReadOnlyDictionary<string, DiskResolution> previous = _resolvedDisks;
+        var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
         foreach (HardwareNode root in _tree.Roots)
         {
@@ -324,13 +332,23 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return;
             }
 
-            StorageInfo? info = Resolve(root, previous);
-            if (info is null)
+            DiskResolution? resolution = Resolve(root, previous);
+            if (resolution is null)
             {
                 continue; // identity unknown: not published, not touched, retried next round
             }
 
-            resolved[root.Identifier] = info;
+            resolved[root.Identifier] = resolution;
+            StorageInfo info = resolution.Info;
+            if (resolution.Availability == DriveAvailability.NoMedia)
+            {
+                // LHM enumerated this disk, so "not ready / no media" cannot mean "no platter to
+                // wake" (a USB bridge may answer so while its disk sleeps): it cannot be
+                // confirmed active, so it is not updated.
+                LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown: null);
+                continue;
+            }
+
             if (info.Rotational)
             {
                 bool? spunDown;
@@ -528,7 +546,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     private Plan BuildPlan(IReadOnlyList<HardwareNode> roots, Plan? current)
     {
-        IReadOnlyDictionary<string, StorageInfo> resolved = _resolvedDisks;
+        IReadOnlyDictionary<string, DiskResolution> resolved = _resolvedDisks;
         var schemaRoots = new List<HardwareNode>(roots.Count);
         foreach (HardwareNode root in roots)
         {
@@ -536,13 +554,32 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             {
                 schemaRoots.Add(root);
             }
-            else if (resolved.TryGetValue(root.Identifier, out StorageInfo? info))
+            else if (resolved.TryGetValue(root.Identifier, out DiskResolution? resolution))
             {
-                schemaRoots.Add(root with { Storage = info });
+                schemaRoots.Add(root with { Storage = resolution.Info });
             }
         }
 
-        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo);
+        // A published id stays pinned while its disk keeps the same complete identity, so an
+        // identical disk resolved in a later round never changes it (it gets its own id instead).
+        var pins = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach ((string rootId, (StorageInfo info, string id)) in _storagePins)
+        {
+            if (resolved.TryGetValue(rootId, out DiskResolution? resolution) && resolution.Complete && resolution.Info == info)
+            {
+                pins[rootId] = id;
+            }
+        }
+
+        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins);
+        _storagePins.Clear();
+        foreach ((string rootId, DiskResolution resolution) in resolved)
+        {
+            if (resolution.Complete && built.StorageDeviceIds.TryGetValue(rootId, out string? id))
+            {
+                _storagePins[rootId] = (resolution.Info, id);
+            }
+        }
         if (current is null)
         {
             return new Plan(roots, built, revision: 1);
@@ -555,10 +592,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>
     /// The disk's identity with the descriptor model/serial and the rotational flag, from
-    /// <see cref="IDiskPowerProbe.Describe"/> the first time the storage worker meets it (or when
-    /// its drive number or serial changed); <see langword="null"/> when it cannot be described.
+    /// <see cref="IDiskPowerProbe.Describe"/>. Only a complete description (present, descriptor
+    /// read, seek penalty known) is reused on later rounds while the drive number and serial
+    /// stay the same; anything else is described again every round, so a transient answer never
+    /// sticks. <see langword="null"/> when it cannot be described (logged once per disk).
     /// </summary>
-    private StorageInfo? Resolve(HardwareNode root, IReadOnlyDictionary<string, StorageInfo> previous)
+    private DiskResolution? Resolve(HardwareNode root, IReadOnlyDictionary<string, DiskResolution> previous)
     {
         StorageInfo? fromTree = root.Storage;
         if (fromTree is null || fromTree.DriveNumber < 0)
@@ -566,9 +605,10 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return null;
         }
 
-        if (previous.TryGetValue(root.Identifier, out StorageInfo? known)
-            && known.DriveNumber == fromTree.DriveNumber
-            && known.DriveSerial == fromTree.DriveSerial)
+        if (previous.TryGetValue(root.Identifier, out DiskResolution? known)
+            && known.Complete
+            && known.Info.DriveNumber == fromTree.DriveNumber
+            && known.Info.DriveSerial == fromTree.DriveSerial)
         {
             return known;
         }
@@ -586,19 +626,30 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         if (facts is null)
         {
+            if (_undescribedLogged.Add(root.Identifier))
+            {
+                _log.LogWarning(
+                    "{Root} (PhysicalDrive{Drive}) cannot be described; it stays out of the schema and is retried every storage round",
+                    root.Identifier,
+                    fromTree.DriveNumber);
+            }
+
             return null;
         }
 
-        return fromTree with
+        _undescribedLogged.Remove(root.Identifier);
+        bool complete = facts.Availability == DriveAvailability.Present && facts.BusType is not null && facts.SeekPenalty is not null;
+        StorageInfo info = fromTree with
         {
             DescriptorModel = facts.Model,
             DescriptorSerial = facts.Serial,
-            Rotational = facts.RequiresPowerCheck,
+            Rotational = facts.Availability == DriveAvailability.NoMedia || facts.RequiresPowerCheck,
         };
+        return new DiskResolution(info, facts.Availability, complete);
     }
 
-    private static bool SameResolution(IReadOnlyDictionary<string, StorageInfo> a, IReadOnlyDictionary<string, StorageInfo> b) =>
-        a.Count == b.Count && a.All(pair => b.TryGetValue(pair.Key, out StorageInfo? other) && other == pair.Value);
+    private static bool SameResolution(IReadOnlyDictionary<string, DiskResolution> a, IReadOnlyDictionary<string, DiskResolution> b) =>
+        a.Count == b.Count && a.All(pair => b.TryGetValue(pair.Key, out DiskResolution? other) && other == pair.Value);
 
     private HardwareNode? FindRoot(string identifier)
     {
@@ -854,6 +905,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// sent with it; <paramref name="SampleAnchor"/> is the scheduled (monotonic) time of the sample.
     /// </summary>
     private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot, long SampleAnchor);
+
+    /// <summary>A disk's resolved identity; only a <paramref name="Complete"/> one is reused (and its device id pinned).</summary>
+    private sealed record DiskResolution(StorageInfo Info, DriveAvailability Availability, bool Complete);
 
     /// <summary>Raw storage values of one round, keyed by LHM sensor identifier, with the round's monotonic start.</summary>
     private sealed record StorageCache(long Timestamp, IReadOnlyDictionary<string, double?> Values)

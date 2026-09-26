@@ -201,7 +201,11 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             return new DriveFacts(drive, DriveAvailability.NoMedia, null, null, null, null);
         }
 
-        if (descriptor is null)
+        if (descriptor is null && descriptorError == 0)
+        {
+            _errors.EmptyReply(drive, QueryDescriptor);
+        }
+        else if (descriptor is null)
         {
             _errors.Failed(drive, QueryDescriptor, descriptorError);
         }
@@ -328,6 +332,8 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     /// </summary>
     internal sealed class Win32ErrorLog(ILogger log)
     {
+        private const int EmptyReplyMarker = int.MinValue;
+
         private readonly ConcurrentDictionary<(int Drive, string Operation), int> _last = new();
 
         public void Failed(int drive, string operation, int error)
@@ -342,6 +348,18 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         }
 
         public void Succeeded(int drive, string operation) => _last.TryRemove((drive, operation), out _);
+
+        /// <summary>A call that succeeded but returned no data (not a Win32 error); deduplicated like <see cref="Failed"/>.</summary>
+        public void EmptyReply(int drive, string operation)
+        {
+            if (_last.TryGetValue((drive, operation), out int last) && last == EmptyReplyMarker)
+            {
+                return;
+            }
+
+            _last[(drive, operation)] = EmptyReplyMarker;
+            log.LogWarning("PhysicalDrive{Drive}: {Operation} returned an empty reply", drive, operation);
+        }
     }
 
     internal static class NativeMethods

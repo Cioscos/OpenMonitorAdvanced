@@ -53,4 +53,12 @@ public sealed record StorageInfo(
 public sealed record SensorBinding(string LhmIdentifier, double Scale);
 
 /// <summary>The wire schema built from a hardware tree, plus its sensor bindings.</summary>
-public sealed record BuiltSchema(SchemaMessage Schema, IReadOnlyList<SensorBinding> Bindings);
+public sealed record BuiltSchema(SchemaMessage Schema, IReadOnlyList<SensorBinding> Bindings)
+{
+    /// <summary>
+    /// The device id computed for every storage root, keyed by LHM root identifier (also for a
+    /// disk not emitted for lack of sensors). The hub pins these once published, so a later
+    /// identical disk never changes an id a client already has.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> StorageDeviceIds { get; init; } = new Dictionary<string, string>();
+}

@@ -70,10 +70,11 @@ public sealed class DiskPowerProbeTests
     }
 
     [Fact]
-    public void VirtualDisksDoNotBlockTheGate()
+    public void VirtualAndStorageSpacesDisksDoNotBlockTheGate()
     {
-        // STORAGE_BUS_TYPE BusTypeVirtual (0xE) and BusTypeFileBackedVirtual (0xF): VHD/VHDX, ramdisks.
-        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(5, bus: 0x0E, seekPenalty: null), Drive(6, bus: 0x0F, seekPenalty: true));
+        // STORAGE_BUS_TYPE BusTypeVirtual (0xE), BusTypeFileBackedVirtual (0xF): VHD/VHDX, ramdisks;
+        // BusTypeSpaces (0x10): a Storage Spaces virtual disk (ruling R19).
+        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(5, bus: 0x0E, seekPenalty: null), Drive(6, bus: 0x0F, seekPenalty: true), Drive(8, bus: 0x10, seekPenalty: null));
         Assert.Empty(blockers);
         Assert.Empty(asked);
     }
@@ -168,6 +169,23 @@ public sealed class DiskPowerProbeTests
         errors.Failed(0, "open", 5); // same error again after a success: logged again
         Assert.Equal(3, log.Entries.Count);
         Assert.All(log.Entries, e => Assert.Equal(LogLevel.Warning, e.Level));
+    }
+
+    [Fact]
+    public void AnEmptyReplyIsNotLoggedAsWin32ErrorZero()
+    {
+        var log = new ListLogger<DiskPowerProbe>();
+        var errors = new DiskPowerProbe.Win32ErrorLog(log);
+
+        errors.EmptyReply(0, "ioctl");
+        errors.EmptyReply(0, "ioctl");
+        LogEntry entry = Assert.Single(log.Entries);
+        Assert.Contains("empty reply", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Win32 error", entry.Message, StringComparison.Ordinal);
+
+        errors.Succeeded(0, "ioctl");
+        errors.EmptyReply(0, "ioctl");
+        Assert.Equal(2, log.Entries.Count);
     }
 
     [Fact]

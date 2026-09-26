@@ -879,6 +879,136 @@ public sealed class SensorHubTests
     }
 
     [Fact]
+    public void ANoMediaAnswerIsRetriedAndNeverBypassesThePowerCheck()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        // A USB bridge answering NOT_READY while its disk sleeps.
+        h.Disks.Facts[0] = new DriveFacts(0, DriveAvailability.NoMedia, null, null, null, null);
+        h.Disks.SpunDown[0] = true;
+        h.Subscribe(1000);
+        h.Hub.TickOnce();
+
+        h.Hub.StorageOnce();
+        Assert.Equal(0, h.Tree.Updates("/hdd/0"));
+
+        h.Disks.Facts[0] = new DriveFacts(0, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true);
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        Assert.Equal(0, h.Tree.Updates("/hdd/0")); // re-described, and its standby is honoured
+        Assert.Equal(2, h.Disks.DescribeCalls);
+
+        h.Disks.SpunDown[0] = false;
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+        Assert.Equal(2, h.Disks.DescribeCalls); // a complete description is cached
+    }
+
+    [Fact]
+    public void AnIncompleteDescriptionIsRetriedAndThenUpdatesTheHint()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Disks.Facts[0] = new DriveFacts(0, DriveAvailability.Present, null, null, BusType: null, SeekPenalty: true); // descriptor query failed
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal(new StorageHint(0, null, null), Assert.Single(LatestSchema(a).Devices, d => d.Kind == "storage").Hint);
+
+        h.Disks.Facts.TryRemove(0, out _);
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+
+        Assert.NotNull(a[^1].Schema);
+        Assert.Equal(new StorageHint(0, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL"), Assert.Single(LatestSchema(a).Devices, d => d.Kind == "storage").Hint);
+
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        Assert.Equal(2, h.Disks.DescribeCalls);
+    }
+
+    [Fact]
+    public void AComeBackAfterIdleRunsAStorageRoundAtOnce()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Subscribe(1000, out IDisposable first);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+        first.Dispose();
+
+        h.Advance(5_000);
+        h.Subscribe(1000);
+        h.Hub.RunStorageDue();
+
+        Assert.Equal(2, h.Tree.Updates("/hdd/0"));
+    }
+
+    [Fact]
+    public void AnUndescribableDiskIsLoggedOnce()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Disks.Facts[0] = null;
+        h.Subscribe(1000);
+        h.Hub.TickOnce();
+
+        for (int i = 0; i < 3; i++)
+        {
+            h.Hub.StorageOnce();
+            h.Advance(30_000);
+        }
+
+        Assert.Single(h.Log.Entries, e => e.Message.Contains("PhysicalDrive0", StringComparison.Ordinal) && e.Message.Contains("cannot be described", StringComparison.Ordinal));
+        Assert.Equal(3, h.Disks.DescribeCalls);
+    }
+
+    [Fact]
+    public void IdenticalDisksResolvedInDifferentRoundsKeepTheirPublishedIds()
+    {
+        var twin = new HardwareNode(
+            "/hdd/1",
+            HardwareType.Storage,
+            "ST2000DM008-2FR102",
+            [new SensorNode("/hdd/1/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(1, null, null, "SERIAL", Rotational: true)); // same IDENTIFY serial as Hdd()
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(twin);
+        h.Disks.Facts[1] = null; // the twin cannot be described yet
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        string firstId = Assert.Single(LatestSchema(a).Devices, d => d.Kind == "storage").Id;
+
+        h.Disks.Facts.TryRemove(1, out _);
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+
+        List<WireDevice> disks = LatestSchema(a).Devices.Where(d => d.Kind == "storage").ToList();
+        Assert.Equal(2, disks.Count);
+        Assert.Equal(firstId, Assert.Single(disks, d => d.Hint is StorageHint { PhysicalDrive: 0 }).Id);
+        Assert.NotEqual(firstId, Assert.Single(disks, d => d.Hint is StorageHint { PhysicalDrive: 1 }).Id);
+    }
+
+    [Fact]
     public void AThrowingSubscriberIsLoggedAndKeptWithoutStarvingOthers()
     {
         using var h = new Harness();

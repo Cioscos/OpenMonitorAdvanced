@@ -303,9 +303,9 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
 
 - **Trasporto:** named pipe `\\.\pipe\OpenMonitorAdvanced.Sensors.v1`, creata dal servizio con `FILE_FLAG_FIRST_PIPE_INSTANCE` e un descrittore di sicurezza esplicito:
   - SYSTEM e Administrators: controllo completo;
-  - utenti interattivi: lettura e scrittura dei messaggi.
-  
-  Il client si connette con `SECURITY_IDENTIFICATION`. Il servizio accetta al massimo 8 client insieme.
+  - utenti interattivi: lettura e scrittura dei messaggi, **senza** il diritto di creare nuove istanze della pipe. `GRGW` non va bene, perché comprende `FILE_APPEND_DATA`, che su una pipe significa "crea un'istanza": un utente potrebbe affiancare un proprio server a quello del servizio. Il descrittore è `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019b;;;IU)`, cioè `ReadWrite | Synchronize` (verificato in M4).
+
+  La pipe si crea con `CreateNamedPipeW` (P/Invoke) e `PIPE_REJECT_REMOTE_CLIENTS`: la funzione .NET `NamedPipeServerStreamAcl.Create` non rifiuta i client remoti. Il servizio crea la successiva istanza in ascolto prima di passare quella connessa al suo gestore, così il nome della pipe non resta mai libero tra una connessione e l'altra. Il client si connette con `SECURITY_IDENTIFICATION` e legge con I/O overlapped, così il thread di lettura si ferma senza blocchi (`CancelIoEx` e poi `GetOverlappedResult`). Il servizio accetta al massimo 8 client insieme.
 - **Verifica del server (M4):** mentre il servizio è fermo un altro processo potrebbe creare una pipe con lo stesso nome. Dopo la connessione il client confronta il PID del server della pipe (`GetNamedPipeServerProcessId`) con il PID del servizio registrato (`QueryServiceStatusEx`); se non coincidono si scollega e lo registra nel log.
 - **Frame:** lunghezza `u32` little-endian seguita dal payload **MessagePack**. Dimensione massima di 4 MB; un frame più grande chiude la connessione.
 - **Codifica:** ogni messaggio è una mappa con chiavi stringa in un ordine fisso, interi nella forma più corta, numeri reali sempre `float64`, valori assenti `nil`. Così Rust (`rmp-serde`) e .NET (MessagePack-CSharp) producono gli stessi byte.

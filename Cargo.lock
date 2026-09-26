@@ -2397,6 +2397,7 @@ name = "oma-win"
 version = "0.1.0"
 dependencies = [
  "oma-core",
+ "oma-ipc",
  "serde",
  "serde_json",
  "sha2",

@@ -1,14 +1,18 @@
-//! Minimal tray icon (milestone 1): open the window or quit.
+//! Tray icon: open the window, the anti-cheat compatible mode toggle, or quit.
 
-use tauri::menu::{Menu, MenuItem};
+use std::sync::Arc;
+
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
+use crate::service::ServiceShell;
 use crate::window;
 
 pub struct TrayLabels {
     pub open: String,
     pub quit: String,
+    pub anti_cheat: String,
 }
 
 /// The webview may be destroyed, so tray labels are localized in Rust.
@@ -33,14 +37,28 @@ pub fn labels_for(locale: &str) -> TrayLabels {
     TrayLabels {
         open: text("tray.open"),
         quit: text("tray.quit"),
+        anti_cheat: text("tray.antiCheat"),
     }
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let labels = labels_for(&sys_locale::get_locale().unwrap_or_default());
     let open = MenuItem::with_id(app, "open", labels.open, true, None::<&str>)?;
+    let initial_anti_cheat = app.state::<ServiceShell>().anti_cheat_enabled();
+    let anti_cheat = CheckMenuItem::with_id(
+        app,
+        "anti_cheat",
+        labels.anti_cheat,
+        true,
+        initial_anti_cheat,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &anti_cheat, &quit])?;
+    // Shared with `set_anti_cheat` (see `ServiceShell::set_anti_cheat`): the
+    // command and this check item update the same checkbox the same way.
+    app.state::<ServiceShell>()
+        .set_tray_item(Arc::new(anti_cheat) as Arc<dyn crate::service::ToggleIndicator>);
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("bundle icon").clone())
         .tooltip("OpenMonitor Advanced")
@@ -48,6 +66,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => window::show_main(app),
+            "anti_cheat" => {
+                let shell = app.state::<ServiceShell>();
+                let enabled = !shell.anti_cheat_enabled();
+                let _ = shell.set_anti_cheat(enabled);
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -73,6 +96,10 @@ mod tests {
     fn italian_locales_get_italian_labels() {
         assert_eq!(labels_for("it-IT").open, "Apri");
         assert_eq!(labels_for("it").quit, "Esci");
+        assert_eq!(
+            labels_for("it-IT").anti_cheat,
+            "Modalità compatibile anti-cheat"
+        );
     }
 
     #[test]
@@ -80,5 +107,6 @@ mod tests {
         assert_eq!(labels_for("en-US").open, "Open");
         assert_eq!(labels_for("de-DE").quit, "Quit");
         assert_eq!(labels_for("").open, "Open");
+        assert_eq!(labels_for("en").anti_cheat, "Anti-cheat compatible mode");
     }
 }

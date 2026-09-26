@@ -13,6 +13,9 @@
     "allow-get-session",
     "allow-get-gpu-processes",
     "allow-get-startup-status",
-    "allow-enable-vendor-libraries"
+    "allow-enable-vendor-libraries",
+    "allow-get-service-status",
+    "allow-set-anti-cheat",
+    "allow-start-service"
   ]
 }

@@ -2,6 +2,7 @@
   "app.title": "OpenMonitor Advanced",
   "tray.open": "Apri",
   "tray.quit": "Esci",
+  "tray.antiCheat": "Modalità compatibile anti-cheat",
   "view.label": "Vista",
   "view.simple": "Semplice",
   "view.advanced": "Avanzata",

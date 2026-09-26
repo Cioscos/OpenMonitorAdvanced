@@ -2,6 +2,7 @@
   "app.title": "OpenMonitor Advanced",
   "tray.open": "Open",
   "tray.quit": "Quit",
+  "tray.antiCheat": "Anti-cheat compatible mode",
   "view.label": "View",
   "view.simple": "Simple",
   "view.advanced": "Advanced",

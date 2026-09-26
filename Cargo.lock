@@ -2361,6 +2361,7 @@ name = "oma-app"
 version = "0.1.0"
 dependencies = [
  "oma-core",
+ "oma-ipc",
  "oma-win",
  "serde",
  "serde_json",

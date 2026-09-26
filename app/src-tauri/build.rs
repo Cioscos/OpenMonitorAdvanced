@@ -9,6 +9,9 @@ fn main() {
             "get_gpu_processes",
             "get_startup_status",
             "enable_vendor_libraries",
+            "get_service_status",
+            "set_anti_cheat",
+            "start_service",
         ]),
     ))
     .expect("Tauri build")

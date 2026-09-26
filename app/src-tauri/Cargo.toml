@@ -10,6 +10,7 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 oma-core.workspace = true
+oma-ipc.workspace = true
 serde.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

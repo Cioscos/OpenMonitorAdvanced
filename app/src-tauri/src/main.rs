@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod service;
 mod tray;
 mod window;
 
@@ -15,6 +16,7 @@ use tauri::{Emitter, Manager, RunEvent};
 use crate::commands::{
     GpuProcessState, GpuProcessTable, StartupState, StartupStatus, VendorSwitch,
 };
+use crate::service::ServiceShell;
 
 /// Default sampling interval (spec §4.1).
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,18 +32,19 @@ pub struct AppState {
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
+#[cfg(windows)]
+fn providers(
+    vendor: VendorSwitch,
+    processes: GpuProcessTable,
+    service: oma_win::ServiceHandles,
+) -> Vec<Box<dyn Provider>> {
+    oma_win::default_providers(vendor, processes, service)
+}
+
+#[cfg(not(windows))]
 fn providers(vendor: VendorSwitch, processes: GpuProcessTable) -> Vec<Box<dyn Provider>> {
-    #[cfg(windows)]
-    {
-        // The real service link/drive table is wired in a later task; this
-        // keeps the app compiling against the new signature meanwhile.
-        oma_win::default_providers(vendor, processes, oma_win::ServiceHandles::default())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (vendor, processes);
-        Vec::new()
-    }
+    let _ = (vendor, processes);
+    Vec::new()
 }
 
 /// `%LOCALAPPDATA%\OpenMonitorAdvanced\crash.txt`; `None` without LOCALAPPDATA.
@@ -122,10 +125,41 @@ fn main() {
     }
     let switch = VendorSwitch::new(!status.safe_mode);
     let processes = GpuProcessTable::new();
+
+    #[cfg(windows)]
+    let (svc_feed, svc_drives, svc_status) = (
+        oma_win::svc::SvcFeed::default(),
+        oma_win::storage::DriveIdTable::default(),
+        oma_win::svc::ServiceStatusTable::default(),
+    );
+
+    #[cfg(windows)]
+    let engine = Arc::new(Mutex::new(Engine::new(
+        providers(
+            switch.clone(),
+            processes.clone(),
+            oma_win::ServiceHandles {
+                feed: svc_feed.clone(),
+                drives: svc_drives,
+            },
+        ),
+        history_capacity(SAMPLE_INTERVAL),
+    )));
+    #[cfg(not(windows))]
     let engine = Arc::new(Mutex::new(Engine::new(
         providers(switch.clone(), processes.clone()),
         history_capacity(SAMPLE_INTERVAL),
     )));
+
+    #[cfg(windows)]
+    let service_shell = ServiceShell::new(
+        service::anti_cheat_path(),
+        svc_status.clone(),
+        svc_feed,
+        SAMPLE_INTERVAL.as_millis() as u32,
+    );
+    #[cfg(not(windows))]
+    let service_shell = ServiceShell::new(service::anti_cheat_path());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -137,6 +171,7 @@ fn main() {
         })
         .manage(StartupState::new(switch, status))
         .manage(GpuProcessState(processes))
+        .manage(service_shell)
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
@@ -146,6 +181,9 @@ fn main() {
             commands::get_gpu_processes,
             commands::get_startup_status,
             commands::enable_vendor_libraries,
+            service::get_service_status,
+            service::set_anti_cheat,
+            service::start_service,
         ])
         .setup(move |app| {
             tray::build(app.handle())?;
@@ -156,6 +194,8 @@ fn main() {
             #[cfg(windows)]
             oma_win::crash::rearm_crash_marker();
             let handle = app.handle().clone();
+            #[cfg(windows)]
+            let mut last_service_version = 0u64;
             let sampler = Sampler::spawn(engine, SAMPLE_INTERVAL, move |out| {
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
@@ -165,6 +205,14 @@ fn main() {
                     let _ = handle.emit(EVENT_SCHEMA, schema);
                 }
                 let _ = handle.emit(EVENT_SNAPSHOT, &out.snapshot);
+                #[cfg(windows)]
+                {
+                    let (version, status) = svc_status.get();
+                    if version != last_service_version {
+                        last_service_version = version;
+                        let _ = handle.emit(service::EVENT_SERVICE, &status);
+                    }
+                }
             });
             app.manage(SamplerGuard(Mutex::new(Some(sampler))));
             Ok(())
@@ -187,6 +235,9 @@ fn main() {
                 {
                     sampler.stop();
                 }
+            }
+            if let Some(shell) = app.try_state::<ServiceShell>() {
+                shell.shutdown();
             }
         }
         _ => {}

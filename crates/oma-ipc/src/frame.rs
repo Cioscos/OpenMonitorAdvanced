@@ -194,13 +194,18 @@ fn validate_elements(
 /// declaring exactly [`MAX_ELEMENTS`] pairs passes the count check, even
 /// though `2 * MAX_ELEMENTS` individual values are then visited).
 ///
-/// Also rejects a map that repeats the same string key twice: a `HashSet`
-/// keyed by the raw encoded bytes of each string key (never allocated
-/// larger than `count`, which is itself bounded by `MAX_ELEMENTS`) is used
-/// instead of pairwise comparison, to stay well clear of `O(n^2)` behaviour
-/// even at the limit. Non-string keys are not deduplicated: the wire
-/// protocol only ever uses string keys for struct fields and for
-/// `WireDevice.properties`.
+/// Also rejects a map that repeats the same string key twice. Two keys are
+/// compared by their **decoded UTF-8 payload bytes**, not their raw encoded
+/// bytes: a hostile message could otherwise encode the same key string
+/// with two different marker families (e.g. `"type"` as a 5-byte fixstr and
+/// again as a 6-byte str8) and slip past a check that only compared the raw
+/// bytes, since those would differ even though the decoded key is
+/// identical. A `HashSet` keyed by each key's decoded payload slice (never
+/// allocated larger than `count`, which is itself bounded by
+/// `MAX_ELEMENTS`) is used instead of pairwise comparison, to stay well
+/// clear of `O(n^2)` behaviour even at the limit. Non-string keys are not
+/// deduplicated: the wire protocol only ever uses string keys for struct
+/// fields and for `WireDevice.properties`.
 fn validate_map(bytes: &[u8], pos: &mut usize, count: usize, depth: usize) -> Result<(), IpcError> {
     if count > MAX_ELEMENTS {
         return Err(IpcError::Decode(format!(
@@ -212,21 +217,40 @@ fn validate_map(bytes: &[u8], pos: &mut usize, count: usize, depth: usize) -> Re
         let key_start = *pos;
         validate_value(bytes, pos, depth + 1)?;
         let key_bytes = &bytes[key_start..*pos];
-        if is_string_key(key_bytes) && !seen_keys.insert(key_bytes) {
-            return Err(IpcError::Decode("map has a duplicate key".to_owned()));
+        if let Some(payload) = string_key_payload(key_bytes) {
+            if !seen_keys.insert(payload) {
+                return Err(IpcError::Decode("map has a duplicate key".to_owned()));
+            }
         }
         validate_value(bytes, pos, depth + 1)?;
     }
     Ok(())
 }
 
-/// True if `key_bytes` (a fully-scanned MessagePack value) starts with a
-/// string marker (fixstr, str8, str16 or str32).
-fn is_string_key(key_bytes: &[u8]) -> bool {
-    matches!(
-        key_bytes.first(),
-        Some(0xa0..=0xbf) | Some(0xd9) | Some(0xda) | Some(0xdb)
-    )
+/// If `key_bytes` (a fully-scanned MessagePack value) is a string (fixstr,
+/// str8, str16 or str32), returns its decoded payload bytes — the raw UTF-8
+/// content, with the marker and length header stripped off, so two keys
+/// encoding the same string with different marker families compare equal.
+fn string_key_payload(key_bytes: &[u8]) -> Option<&[u8]> {
+    match *key_bytes.first()? {
+        marker @ 0xa0..=0xbf => {
+            let len = (marker & 0x1f) as usize;
+            key_bytes.get(1..1 + len)
+        }
+        0xd9 => {
+            let len = *key_bytes.get(1)? as usize;
+            key_bytes.get(2..2 + len)
+        }
+        0xda => {
+            let len = u16::from_be_bytes(key_bytes.get(1..3)?.try_into().ok()?) as usize;
+            key_bytes.get(3..3 + len)
+        }
+        0xdb => {
+            let len = u32::from_be_bytes(key_bytes.get(1..5)?.try_into().ok()?) as usize;
+            key_bytes.get(5..5 + len)
+        }
+        _ => None,
+    }
 }
 
 /// Structurally validates `bytes` as exactly one MessagePack value, bounding
@@ -700,6 +724,64 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_key_with_different_str_markers_is_rejected() {
+        // A hostile message repeats the same decoded key inside a
+        // `WireDevice.properties` map (a plain `BTreeMap<String, String>`,
+        // not a fixed-shape struct) but switches MessagePack marker family
+        // between the two occurrences. `BTreeMap`'s own `Deserialize` does
+        // NOT reject a duplicate key by itself (the second value simply
+        // overwrites the first), so this is a case that is caught only by
+        // the raw scanner's duplicate-key check comparing *decoded* string
+        // content -- a check that compared raw encoded bytes would miss it,
+        // since a fixstr encoding and a str8 encoding of "firmware" differ
+        // byte-for-byte even though they decode to the same key.
+        assert!(matches!(
+            device_with_duplicate_property_key(&encode_str8).unwrap_err(),
+            IpcError::Decode(_)
+        ));
+        assert!(matches!(
+            device_with_duplicate_property_key(&encode_str16).unwrap_err(),
+            IpcError::Decode(_)
+        ));
+    }
+
+    /// Builds `{"type":"schema","body":{"devices":[{...,"properties":{"firmware"(fixstr):"A","firmware"(<second_encoding>):"B"}, ...}],"sensors":[]}}`
+    /// and decodes it, so the caller can assert on the duplicate-key
+    /// behaviour for a generic (non-struct) map.
+    fn device_with_duplicate_property_key(
+        second_encoding: &dyn Fn(&str) -> Vec<u8>,
+    ) -> Result<Message, IpcError> {
+        let mut bytes = vec![0x82];
+        bytes.extend_from_slice(&encode_fixstr("type"));
+        bytes.extend_from_slice(&encode_fixstr("schema"));
+        bytes.extend_from_slice(&encode_fixstr("body"));
+        bytes.push(0x82); // body: devices, sensors
+        bytes.extend_from_slice(&encode_fixstr("devices"));
+        bytes.push(0x91); // 1 device
+        bytes.push(0x86); // device map: 6 entries
+        bytes.extend_from_slice(&encode_fixstr("id"));
+        bytes.extend_from_slice(&encode_fixstr("d"));
+        bytes.extend_from_slice(&encode_fixstr("kind"));
+        bytes.extend_from_slice(&encode_fixstr("cpu"));
+        bytes.extend_from_slice(&encode_fixstr("name"));
+        bytes.extend_from_slice(&encode_fixstr("n"));
+        bytes.extend_from_slice(&encode_fixstr("vendor"));
+        bytes.push(0xc0); // nil
+        bytes.extend_from_slice(&encode_fixstr("properties"));
+        bytes.push(0x82); // properties map: 2 entries, duplicate key
+        bytes.extend_from_slice(&encode_fixstr("firmware")); // fixstr
+        bytes.extend_from_slice(&encode_fixstr("A"));
+        bytes.extend_from_slice(&second_encoding("firmware")); // str8 or str16
+        bytes.extend_from_slice(&encode_fixstr("B"));
+        bytes.extend_from_slice(&encode_fixstr("hint"));
+        bytes.push(0xc0); // nil
+        bytes.extend_from_slice(&encode_fixstr("sensors"));
+        bytes.push(0x90); // []
+
+        decode_payload(&bytes)
+    }
+
+    #[test]
     fn array32_declaring_u32_max_elements_is_rejected() {
         let bytes = [0xdd, 0xff, 0xff, 0xff, 0xff];
         let err = decode_payload(&bytes).unwrap_err();
@@ -804,6 +886,19 @@ mod tests {
 
     fn encode_fixstr(s: &str) -> Vec<u8> {
         let mut out = vec![0xa0 | s.len() as u8];
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    fn encode_str8(s: &str) -> Vec<u8> {
+        let mut out = vec![0xd9, s.len() as u8];
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    fn encode_str16(s: &str) -> Vec<u8> {
+        let mut out = vec![0xda];
+        out.extend_from_slice(&(s.len() as u16).to_be_bytes());
         out.extend_from_slice(s.as_bytes());
         out
     }

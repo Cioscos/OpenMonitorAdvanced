@@ -113,14 +113,38 @@ pub fn save_anti_cheat(path: &Path, enabled: bool) -> std::io::Result<()> {
 
 /// The tray's anti-cheat check item, abstracted so [`ToggleState`] is
 /// testable without a running Tauri app.
+///
+/// `refresh` is given a way to read the flag's *current* value rather than
+/// one fixed at the time it was scheduled: on Windows the real update must
+/// run on the main thread (see the impl below), and by the time it gets
+/// there a second, later toggle may already have changed the flag again —
+/// reading fresh then, instead of showing whatever value was captured
+/// earlier, converges on the right state regardless of scheduling order.
 pub trait ToggleIndicator: Send + Sync {
-    fn set_checked(&self, checked: bool);
+    fn refresh(&self, current: Arc<dyn Fn() -> bool + Send + Sync>);
 }
 
-#[cfg(windows)]
+// `CheckMenuItem<Wry>` and `AppHandle` are portable Tauri types (not Win32),
+// so this impl is not `#[cfg(windows)]`: off Windows the tray still shows a
+// (harmless, no-op-backed) checkbox, and `Arc::new(item) as Arc<dyn
+// ToggleIndicator>` in `tray.rs` — which is not cfg-gated either — compiles
+// on every platform (fix round 2, finding #3).
 impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
-    fn set_checked(&self, checked: bool) {
-        let _ = tauri::menu::CheckMenuItem::set_checked(self, checked);
+    /// `CheckMenuItem::set_checked` blocks the calling thread until the main
+    /// thread runs it (`tauri::menu::run_item_main_thread!`), and if that
+    /// call happened while this process held a lock the main thread's own
+    /// event handler also needs, the two threads deadlock (fix round 2,
+    /// finding #2 — reproduced by
+    /// `tests::a_stuck_indicator_update_never_blocks_a_concurrent_toggle`).
+    /// `run_on_main_thread` avoids that: it posts the closure and returns at
+    /// once — synchronously, if already on the main thread, since
+    /// `tauri-runtime-wry` runs same-thread posts in place — so this method
+    /// never blocks its caller waiting for the main thread.
+    fn refresh(&self, current: Arc<dyn Fn() -> bool + Send + Sync>) {
+        let item = self.clone();
+        let _ = self.app_handle().run_on_main_thread(move || {
+            let _ = item.set_checked(current());
+        });
     }
 }
 
@@ -130,15 +154,19 @@ impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
 /// tested directly (see the `tests` module below).
 struct ToggleState {
     path: Option<PathBuf>,
-    flag: AtomicBool,
+    /// `Arc` (not a plain `AtomicBool`) so `refresh_indicator` can hand a
+    /// `'static` reader of it to the indicator without needing `self` to
+    /// outlive that call (fix round 2: the reader runs later, on the main
+    /// thread, after every lock below has already been released).
+    flag: Arc<AtomicBool>,
     tray_item: Mutex<Option<Arc<dyn ToggleIndicator>>>,
-    /// Serializes the whole sequence below: the `set_anti_cheat` command runs
-    /// on a tokio task, the tray's click handler runs on the event-loop
-    /// thread, and both call [`Self::set`]. Held across the save, the
-    /// in-memory flag, `apply` and the tray checkbox — never across an
-    /// `await`, since nothing here is `async` — so the two can never
-    /// interleave their steps or write the same temp file at once (each
-    /// `save_anti_cheat` call also picks its own unique temp name regardless).
+    /// Serializes the whole mutation below (save, in-memory flag, `apply`):
+    /// the `set_anti_cheat` command runs on a tokio task, the tray's click
+    /// handler runs on the event-loop thread, and both call [`Self::set`].
+    /// Never held across the indicator update (see [`Self::refresh_indicator`]
+    /// and its doc comment) or across an `await` — nothing here is `async`.
+    /// Each `save_anti_cheat` call also picks its own unique temp file name
+    /// regardless, so the two can never write the same temp file at once.
     write: Mutex<()>,
 }
 
@@ -147,7 +175,7 @@ impl ToggleState {
         let flag = path.as_deref().map(load_anti_cheat).unwrap_or(false);
         Self {
             path,
-            flag: AtomicBool::new(flag),
+            flag: Arc::new(AtomicBool::new(flag)),
             tray_item: Mutex::new(None),
             write: Mutex::new(()),
         }
@@ -158,41 +186,48 @@ impl ToggleState {
     }
 
     fn set_tray_item(&self, item: Arc<dyn ToggleIndicator>) {
-        item.set_checked(self.enabled());
         *self
             .tray_item
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(item);
+        self.refresh_indicator();
     }
 
-    fn set_checked(&self, checked: bool) {
-        if let Some(item) = self
+    /// Hands the indicator a way to read the flag whenever it actually
+    /// updates the checkbox, and nothing more: this method never calls into
+    /// the indicator itself, and holds `tray_item` only long enough to clone
+    /// the `Arc` out of it (fix round 2, finding #1 — this is deliberately
+    /// called with no other lock of `self` held, in particular not `write`,
+    /// so a slow or main-thread-bound indicator update can never block a
+    /// concurrent [`Self::set`]).
+    fn refresh_indicator(&self) {
+        let item = self
             .tray_item
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
-            item.set_checked(checked);
+            .clone();
+        if let Some(item) = item {
+            let flag = Arc::clone(&self.flag);
+            item.refresh(Arc::new(move || flag.load(Ordering::SeqCst)));
         }
     }
 
     /// Saves `enabled`, then, in order: updates the in-memory flag, runs
-    /// `apply` (the caller's link command, only on success) and updates the
-    /// tray checkbox. On a save error nothing else runs, the previous
-    /// preference is kept and shown, and the error is returned — never a
-    /// silent success. The whole sequence runs under one lock (see `write`).
+    /// `apply` (the caller's link command, only on success), and only then —
+    /// with `write` already released — schedules the tray checkbox update.
+    /// On a save error nothing else runs, the previous preference is kept
+    /// and shown, and the error is returned — never a silent success.
     fn set(&self, enabled: bool, apply: impl FnOnce()) -> Result<(), String> {
-        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = self.save(enabled);
-        let shown = match result {
-            Ok(()) => {
+        let result = {
+            let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
+            let result = self.save(enabled);
+            if result.is_ok() {
                 self.flag.store(enabled, Ordering::SeqCst);
                 apply();
-                enabled
             }
-            Err(_) => self.enabled(),
+            result
         };
-        self.set_checked(shown);
+        self.refresh_indicator();
         result
     }
 
@@ -364,8 +399,8 @@ mod tests {
     }
 
     impl ToggleIndicator for FakeIndicator {
-        fn set_checked(&self, checked: bool) {
-            self.calls.lock().unwrap().push(checked);
+        fn refresh(&self, current: Arc<dyn Fn() -> bool + Send + Sync>) {
+            self.calls.lock().unwrap().push(current());
         }
     }
 
@@ -553,5 +588,81 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Fix round 2, finding #2: models a "busy main thread" — the first
+    /// `refresh` call blocks (as `CheckMenuItem::set_checked` would while
+    /// waiting for the real main thread) until released; every later call is
+    /// unaffected. Confirmed RED against the round-1 code (which called the
+    /// indicator while still holding `write`): this test then failed by
+    /// timeout instead of hanging forever, in ~2s, and now passes because
+    /// `refresh_indicator` runs only after `write` is released.
+    struct BlockOnce {
+        consumed: AtomicBool,
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl ToggleIndicator for BlockOnce {
+        fn refresh(&self, current: Arc<dyn Fn() -> bool + Send + Sync>) {
+            if !self.consumed.swap(true, Ordering::SeqCst) {
+                let (lock, cvar) = &*self.gate;
+                let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !*guard && std::time::Instant::now() < deadline {
+                    let (g, _) = cvar
+                        .wait_timeout(guard, std::time::Duration::from_millis(200))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard = g;
+                }
+            }
+            let _ = current();
+        }
+    }
+
+    #[test]
+    fn a_stuck_indicator_update_never_blocks_a_concurrent_toggle() {
+        let path = temp_path("no-deadlock");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let toggle = Arc::new(ToggleState::new(Some(path.clone())));
+        let gate = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+        let indicator = Arc::new(BlockOnce {
+            consumed: AtomicBool::new(true), // the attach call below must not block
+            gate: Arc::clone(&gate),
+        });
+        toggle.set_tray_item(indicator.clone());
+
+        indicator.consumed.store(false, Ordering::SeqCst); // arm blocking for the next call
+        *gate.0.lock().unwrap() = false; // close the gate: models a busy main thread
+
+        let toggle_a = Arc::clone(&toggle);
+        let a = std::thread::spawn(move || {
+            let _ = toggle_a.set(true, || {});
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // With round-1's code (the indicator called while `write` was still
+        // held) this second toggle could never even acquire `write`, so it
+        // would hang forever; a timeout turns that into a clean test failure.
+        let toggle_b = Arc::clone(&toggle);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b = std::thread::spawn(move || {
+            let _ = toggle_b.set(false, || {});
+            let _ = tx.send(());
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+
+        // Release A's stuck indicator update regardless, so both threads can
+        // be joined and the test process exits cleanly either way.
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        a.join().unwrap();
+        b.join().unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+        assert!(
+            completed,
+            "a concurrent toggle must not wait for a stuck indicator update"
+        );
     }
 }

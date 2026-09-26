@@ -68,6 +68,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "open" => window::show_main(app),
             "anti_cheat" => {
                 let shell = app.state::<ServiceShell>();
+                // Read outside `ToggleState`'s lock, so this can race a
+                // concurrent `set_anti_cheat` command: acceptable (last
+                // writer wins, ruling), since `ServiceShell::set_anti_cheat`
+                // itself serializes the save/flag/link-command sequence and
+                // always re-syncs the checkbox to the value it actually
+                // applied, never to a value merely requested here.
                 let enabled = !shell.anti_cheat_enabled();
                 let _ = shell.set_anti_cheat(enabled);
             }

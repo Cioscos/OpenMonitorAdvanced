@@ -6,7 +6,7 @@ namespace OpenMonitorAdvanced.Service.Logging;
 
 /// <summary>
 /// Writes log lines to a rolling daily file under <paramref name="directory"/>
-/// (<c>%ProgramData%\OpenMonitorAdvanced\logs</c> in production), keeping at most
+/// (<c>&lt;service folder&gt;\logs</c> in production, ruling R30), keeping at most
 /// <paramref name="maxFiles"/> files. The daily file name uses the local calendar date
 /// (<c>TimeProvider.GetLocalNow()</c>), because the service and the logs it writes are
 /// read by a person on this machine, not compared across time zones.

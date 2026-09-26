@@ -1,4 +1,4 @@
-import type { GpuProcess, HistorySeed, Schema, Session, Snapshot, StartupStatus, StatsReply } from '../types';
+import type { GpuProcess, HistorySeed, Schema, ServiceStatus, Session, Snapshot, StartupStatus, StatsReply } from '../types';
 
 export type Unsubscribe = () => void;
 
@@ -24,4 +24,11 @@ export interface Backend {
   getSession(): Promise<Session>;
   /** Processes using this GPU, busiest first, at most 20; empty for an unknown device. */
   getGpuProcesses(deviceId: string): Promise<GpuProcess[]>;
+  /** Current status of the OpenMonitor Advanced sensor service. */
+  getServiceStatus(): Promise<ServiceStatus>;
+  onServiceStatus(cb: (status: ServiceStatus) => void): Promise<Unsubscribe>;
+  /** Turns anti-cheat compatible mode on or off; the command's reply may precede the SCM outcome. */
+  setAntiCheat(enabled: boolean): Promise<ServiceStatus>;
+  /** Starts the service when it is unreachable; the command's reply may precede the SCM outcome. */
+  startService(): Promise<ServiceStatus>;
 }

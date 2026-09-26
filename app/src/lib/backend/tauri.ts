@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { GpuProcess, HistorySeed, Schema, Session, Snapshot, StartupStatus, StatsReply } from '../types';
+import type { GpuProcess, HistorySeed, Schema, ServiceStatus, Session, Snapshot, StartupStatus, StatsReply } from '../types';
 import type { Backend } from './backend';
 
 /** Command and event names are defined in app/src-tauri (commands.rs, main.rs). */
@@ -18,5 +18,9 @@ export function createTauriBackend(): Backend {
     resetStats: (ids) => invoke<void>('reset_stats', { ids }),
     getSession: () => invoke<Session>('get_session'),
     getGpuProcesses: (deviceId) => invoke<GpuProcess[]>('get_gpu_processes', { deviceId }),
+    getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
+    onServiceStatus: (cb) => listen<ServiceStatus>('oma:service', (e) => cb(e.payload)),
+    setAntiCheat: (enabled) => invoke<ServiceStatus>('set_anti_cheat', { enabled }),
+    startService: () => invoke<ServiceStatus>('start_service'),
   };
 }

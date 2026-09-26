@@ -1,13 +1,40 @@
 <script lang="ts">
   import { t } from '../lib/i18n/index.svelte';
+  import type { ServiceStatus } from '../lib/types';
   import type { View } from '../lib/view';
 
   let {
     view,
     onViewChange,
-    serviceAvailable,
+    service,
+    onLeaveAntiCheat,
+    onStartService,
     stale = false,
-  }: { view: View; onViewChange: (view: View) => void; serviceAvailable: boolean; stale?: boolean } = $props();
+  }: {
+    view: View;
+    onViewChange: (view: View) => void;
+    service: ServiceStatus | null;
+    onLeaveAntiCheat: () => Promise<unknown>;
+    onStartService: () => Promise<unknown>;
+    stale?: boolean;
+  } = $props();
+
+  let busy = $state(false);
+  let failed = $state(false);
+
+  const showBadge = $derived(service !== null && service.state !== 'connected');
+
+  async function run(action: () => Promise<unknown>) {
+    busy = true;
+    failed = false;
+    try {
+      await action();
+    } catch {
+      failed = true;
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <header class="topbar">
@@ -31,8 +58,20 @@
     {#if stale}
       <span class="stale" role="status">{t('status.stale')}</span>
     {/if}
-    {#if !serviceAvailable}
-      <details class="badge"><summary>{t('service.baseMode')}</summary><p>{t('service.baseModeHint')}</p></details>
+    {#if showBadge && service}
+      <div class="badge" role="status">
+        <span class="label">{t('service.baseMode')}</span>
+        <div class="panel">
+          <p>{t(`service.state.${service.state}`)}</p>
+          {#if service.detail}<p>{t(`service.detail.${service.detail}`)}</p>{/if}
+          {#if service.state === 'antiCheat'}
+            <button type="button" disabled={busy} onclick={() => run(onLeaveAntiCheat)}>{t('service.action.leaveAntiCheat')}</button>
+          {:else if service.state === 'unreachable'}
+            <button type="button" disabled={busy} onclick={() => run(onStartService)}>{t('service.action.start')}</button>
+          {/if}
+          {#if failed}<p class="error">{t('service.action.failed')}</p>{/if}
+        </div>
+      </div>
     {/if}
     <button class="icon" type="button" disabled title={t('settings.comingSoon')} aria-label={t('settings.title')}>⚙</button>
   </div>
@@ -92,10 +131,35 @@
   .badge {
     padding: 4px 10px;
     font-size: 12px;
-    border-radius: 999px;
+    border-radius: var(--radius);
     color: var(--warn);
     border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-    cursor: help;
+  }
+  .label {
+    font-weight: 600;
+  }
+  .panel {
+    max-width: 280px;
+  }
+  .panel p {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+  }
+  .panel .error {
+    color: var(--crit);
+  }
+  .panel button {
+    margin-top: 8px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .panel button:disabled {
+    opacity: 0.6;
+    cursor: progress;
   }
   .stale {
     padding: 4px 10px;

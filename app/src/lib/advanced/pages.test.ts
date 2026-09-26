@@ -92,7 +92,7 @@ const kpi = (kind: DeviceKind, deviceId: string, id: string, schema: Schema = MO
 const without = (...keys: string[]): Schema => ({ ...MOCK_SCHEMA, sensors: MOCK_SCHEMA.sensors.filter((s) => !keys.includes(s.label.key)) });
 const plus = (schema: Schema, extra: Sensor): Schema => ({ ...schema, sensors: [...schema.sensors, extra] });
 
-test('cpu kpis: load, clock, busiest thread and peak load', () => {
+test('cpu kpis without the service are unchanged: load, clock, busiest thread and peak load', () => {
   expect(ids('cpu', 'cpu/0')).toEqual(['load', 'clock', 'busiestThread', 'peakLoad']);
   expect(kpi('cpu', 'cpu/0', 'load').value(valueOf, noStats)).toBe(valueOf('cpu/0/load/total'));
   const threads = MOCK_SCHEMA.sensors.filter((s) => s.label.key === 'cpu.load.thread').map((s) => valueOf(s.id)!);
@@ -102,6 +102,46 @@ test('cpu kpis: load, clock, busiest thread and peak load', () => {
   const stats: StatsOf = (id) => (id === 'cpu/0/load/total' ? peak : null);
   expect(kpi('cpu', 'cpu/0', 'peakLoad').value(valueOf, stats)).toBe(97);
   expect(kpi('cpu', 'cpu/0', 'peakLoad').value(valueOf, noStats)).toBeNull();
+});
+
+test('cpu kpis put temperature and power before clock with the service', () => {
+  const temperature: Sensor = {
+    id: 'cpu/0/temperature/package',
+    deviceId: 'cpu/0',
+    kind: 'temperature',
+    unit: 'celsius',
+    label: { key: 'cpu.temperature.package' },
+    source: 'lhm',
+    category: 'temperature',
+  };
+  const power: Sensor = {
+    id: 'cpu/0/power/package',
+    deviceId: 'cpu/0',
+    kind: 'power',
+    unit: 'watt',
+    label: { key: 'cpu.power.package' },
+    source: 'lhm',
+    category: 'power',
+  };
+  const schema = plus(plus(MOCK_SCHEMA, temperature), power);
+  expect(ids('cpu', 'cpu/0', schema)).toEqual(['load', 'temperature', 'power', 'clock']);
+});
+
+test('motherboard, fan controller and psu kpis take the first temperature, fan, voltage and power', () => {
+  const DEVICE = 'motherboard/x';
+  const schema: Schema = {
+    revision: 1,
+    devices: [{ id: DEVICE, kind: 'motherboard', name: 'MB' }],
+    sensors: [
+      { id: `${DEVICE}/fan/1`, deviceId: DEVICE, kind: 'fan', unit: 'rpm', label: { key: 'lhm.raw', arg: 'Fan #1' }, source: 'lhm', category: 'fan' },
+      { id: `${DEVICE}/temperature/1`, deviceId: DEVICE, kind: 'temperature', unit: 'celsius', label: { key: 'lhm.raw', arg: 'System' }, source: 'lhm', category: 'temperature' },
+      { id: `${DEVICE}/voltage/1`, deviceId: DEVICE, kind: 'voltage', unit: 'volt', label: { key: 'lhm.raw', arg: 'VIN0' }, source: 'lhm', category: 'voltage' },
+      { id: `${DEVICE}/power/1`, deviceId: DEVICE, kind: 'power', unit: 'watt', label: { key: 'lhm.raw', arg: 'CPU' }, source: 'lhm', category: 'power' },
+    ],
+  };
+  for (const kind of ['motherboard', 'fan_controller', 'psu'] as const) {
+    expect(ids(kind, DEVICE, schema)).toEqual(['temperature', 'fan', 'voltage', 'power']);
+  }
 });
 
 test('gpu kpis: load, temperature, power and vram with its total', () => {

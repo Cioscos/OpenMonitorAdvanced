@@ -4,10 +4,11 @@
   import type { Backend } from '../../lib/backend';
   import { t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
+  import type { ServiceStatus } from '../../lib/types';
   import DevicePage from './DevicePage.svelte';
   import Sidebar from './Sidebar.svelte';
 
-  let { store, backend }: { store: LiveStore; backend: Backend } = $props();
+  let { store, backend, service = null }: { store: LiveStore; backend: Backend; service?: ServiceStatus | null } = $props();
 
   // The section the user asked for. It is kept (and stays saved) while its device is
   // missing, so the page comes back when the device does.
@@ -30,7 +31,7 @@
         {#if current.labelArg}<p class="device">{current.labelArg}</p>{/if}
       </header>
       {#key current.id}
-        <DevicePage entry={current} {store} {backend} />
+        <DevicePage entry={current} {store} {backend} {service} />
       {/key}
     </section>
   {/if}

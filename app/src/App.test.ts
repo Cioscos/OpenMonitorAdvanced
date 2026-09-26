@@ -34,7 +34,7 @@ test('simple view shows the banner and the CPU, RAM and network tiles', async ()
   flushSync();
 
   expect(screen.getByText('Monitoring active')).toBeTruthy();
-  expect(screen.getByText('Basic mode')).toBeTruthy();
+  expect(screen.queryByText('Basic mode')).toBeNull();
   expect(screen.getByText('CPU')).toBeTruthy();
   expect(screen.getByText('RAM')).toBeTruthy();
   expect(screen.getByText('Network · Disks')).toBeTruthy();
@@ -174,6 +174,63 @@ test('the stale badge appears after five silent seconds and goes away with new d
   } finally {
     vi.useRealTimers();
   }
+});
+
+test('the service badge shows the reason and reacts to the anti-cheat toggle', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.serviceStatus = { state: 'antiCheat', detail: null };
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(screen.getByText('Basic mode')).toBeTruthy());
+  expect(screen.getByText('Anti-cheat compatible mode is on: this app will not connect to or start the sensor service.')).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Turn off anti-cheat mode' }));
+  expect(backend.setAntiCheatCalls).toEqual([false]);
+});
+
+test('command failures are shown without a false success', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.serviceStatus = { state: 'unreachable', detail: null };
+  backend.startServiceError = 'persist_failed';
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(screen.getByText('Basic mode')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+
+  await vi.waitFor(() => expect(screen.getByText('Could not save or apply the change. Try again.')).toBeTruthy());
+  // Still unreachable: no false success, no raw error code shown.
+  expect(screen.getByText('The sensor service is not running or not responding.')).toBeTruthy();
+  expect(screen.queryByText('persist_failed')).toBeNull();
+});
+
+test('anti-cheat stop failure is visible', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.serviceStatus = { state: 'antiCheat', detail: null };
+  backend.setAntiCheatError = 'stop_failed';
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(screen.getByText('Basic mode')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Turn off anti-cheat mode' }));
+
+  await vi.waitFor(() => expect(screen.getByText('Could not save or apply the change. Try again.')).toBeTruthy());
+});
+
+test('late initial status cannot overwrite a newer event', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.serviceStatus = { state: 'starting', detail: null };
+  // Delay the initial read so it resolves after the event below, but with the value it saw
+  // (`starting`) at call time: a naive implementation would let this stale reply win.
+  backend.getServiceStatus = () => {
+    const snapshot = backend.serviceStatus;
+    return new Promise((resolve) => setTimeout(() => resolve(snapshot), 10));
+  };
+  render(App, { backend, store: new LiveStore() });
+
+  // The event arrives first and reports 'connected'; the stale 'starting' read must not win.
+  backend.emitServiceStatus({ state: 'connected', detail: null });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  expect(screen.queryByText('Basic mode')).toBeNull();
 });
 
 test('the stale badge also appears when no snapshot ever arrives', async () => {

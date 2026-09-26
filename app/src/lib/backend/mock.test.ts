@@ -1,8 +1,21 @@
 import { catalogs } from '../i18n/index.svelte';
-import { MOCK_HISTORY_SECONDS, MOCK_SCHEMA, createMockBackend, mockGpuProcesses, mockValues, sortGpuProcesses } from './mock';
+import {
+  MOCK_HISTORY_SECONDS,
+  MOCK_SCHEMA,
+  SERVICE_MOCK_SCHEMA,
+  createMockBackend,
+  mockGpuProcesses,
+  mockValues,
+  parseServiceState,
+  sortGpuProcesses,
+} from './mock';
 
 const GPU = 'gpu/pci-0000:01:00.0';
 const CPU_LOAD = 'cpu/0/load/total';
+
+afterEach(() => {
+  history.replaceState(null, '', '/');
+});
 
 test('mock values align with the mock schema', () => {
   for (const tick of [0, 1, 50, 1000]) {
@@ -123,6 +136,48 @@ test('mock gpu processes are sorted by load then dedicated memory', async () => 
   expect(list.at(-1)?.loadPercent).toBeNull();
   expect(list.filter((p) => p.loadPercent === 0).map((p) => p.name)).toEqual(['explorer.exe', 'System']);
   expect(await backend.getGpuProcesses('gpu/unknown')).toEqual([]);
+});
+
+test('the URL selects the initial service state, defaulting to connected', () => {
+  expect(parseServiceState('')).toBe('connected');
+  expect(parseServiceState('?service=antiCheat')).toBe('antiCheat');
+  expect(parseServiceState('?service=bogus')).toBe('connected');
+});
+
+test('the mock serves lhm sensors only when the service is connected', async () => {
+  history.replaceState(null, '', '?service=connected');
+  const connected = createMockBackend();
+  const schema = await connected.getSchema();
+  expect(schema).toBe(SERVICE_MOCK_SCHEMA);
+  expect(schema.devices.some((d) => d.id === 'motherboard/lhm-mock')).toBe(true);
+  expect(schema.sensors.some((s) => s.label.key === 'lhm.raw')).toBe(true);
+  expect(schema.sensors.some((s) => s.label.key === 'cpu.temperature.package')).toBe(true);
+  expect(await connected.getServiceStatus()).toEqual({ state: 'connected', detail: null });
+
+  for (const state of ['notInstalled', 'antiCheat', 'starting', 'unreachable', 'incompatible']) {
+    history.replaceState(null, '', `?service=${state}`);
+    const backend = createMockBackend();
+    const otherSchema = await backend.getSchema();
+    expect(otherSchema).toBe(MOCK_SCHEMA);
+    expect(otherSchema.devices.some((d) => d.id === 'motherboard/lhm-mock')).toBe(false);
+    expect(await backend.getServiceStatus()).toEqual({ state, detail: null });
+  }
+});
+
+test('setAntiCheat and startService change the status and notify listeners', async () => {
+  const backend = createMockBackend();
+  const seen: string[] = [];
+  await backend.onServiceStatus((s) => seen.push(s.state));
+
+  const afterAntiCheat = await backend.setAntiCheat(true);
+  expect(afterAntiCheat).toEqual({ state: 'antiCheat', detail: null });
+
+  const afterLeaving = await backend.setAntiCheat(false);
+  expect(afterLeaving.state).toBe('unreachable');
+
+  const afterStart = await backend.startService();
+  expect(afterStart).toEqual({ state: 'connected', detail: null });
+  expect(seen).toEqual(['antiCheat', 'unreachable', 'connected']);
 });
 
 test('gpu process lists are capped at 20 rows', () => {

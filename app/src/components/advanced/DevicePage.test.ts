@@ -5,7 +5,7 @@ import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { formatValue } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
-import type { GpuProcess, SensorStats } from '../../lib/types';
+import type { GpuProcess, SensorStats, ServiceStatus } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { FakeUplot } from '../../test/uplot-stub';
 import AdvancedView from './AdvancedView.svelte';
@@ -103,6 +103,36 @@ test('leaving the page stops the statistics polling and destroys the chart', asy
   } finally {
     vi.useRealTimers();
   }
+});
+
+test('the generic notice appears on CPU, memory and disk pages only without the service', async () => {
+  const { backend, store } = setup();
+  const NOTICE = t('service.pageNotice');
+  const DISK = 'storage/device-mock-ssd';
+  const NIC = 'network/mock-eth';
+  const DISK_ENTRY: SidebarEntry = { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
+  const NIC_ENTRY: SidebarEntry = { id: NIC, kind: 'network', deviceIds: [NIC], labelKey: 'advanced.section.network', labelArg: 'Ethernet' };
+  const notConnected: ServiceStatus = { state: 'unreachable', detail: null };
+  const connected: ServiceStatus = { state: 'connected', detail: null };
+
+  const { unmount: u1 } = render(DevicePage, { entry: CPU_ENTRY, store, backend, service: notConnected });
+  expect(screen.getByText(NOTICE)).toBeTruthy();
+  u1();
+
+  const { unmount: u2 } = render(DevicePage, { entry: DISK_ENTRY, store, backend, service: notConnected });
+  expect(screen.getByText(NOTICE)).toBeTruthy();
+  u2();
+
+  const { unmount: u3 } = render(DevicePage, { entry: GPU_ENTRY, store, backend, service: notConnected });
+  expect(screen.queryByText(NOTICE)).toBeNull();
+  u3();
+
+  const { unmount: u4 } = render(DevicePage, { entry: NIC_ENTRY, store, backend, service: notConnected });
+  expect(screen.queryByText(NOTICE)).toBeNull();
+  u4();
+
+  render(DevicePage, { entry: CPU_ENTRY, store, backend, service: connected });
+  expect(screen.queryByText(NOTICE)).toBeNull();
 });
 
 test('the advanced view mounts the full page under its heading', async () => {

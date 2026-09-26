@@ -137,6 +137,17 @@ export interface Session {
   intervalMs: number;
 }
 
+/** Sensor service status shown by the shell (spec §6); mirrors `oma-ipc::ServiceStatus`. */
+export type ServiceState = 'notInstalled' | 'antiCheat' | 'starting' | 'connected' | 'unreachable' | 'incompatible';
+
+/** Why the service is in its current state, when there is more to say. */
+export type ServiceDetail = 'accessDenied' | 'startFailed' | 'stopping' | 'stopFailed' | 'pidMismatch' | 'disconnected';
+
+export interface ServiceStatus {
+  state: ServiceState;
+  detail: ServiceDetail | null;
+}
+
 /** One process using a GPU (not a sensor: no id, no history). */
 export interface GpuProcess {
   pid: number;

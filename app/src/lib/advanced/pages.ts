@@ -81,6 +81,11 @@ function firstOf(schema: Schema, deviceIds: string[], ...keys: string[]): Sensor
   return undefined;
 }
 
+/** First sensor of the page in `category` (unlike `firstOf`, matched by category, not label key). */
+function firstByCategory(schema: Schema, deviceIds: string[], category: string): Sensor | undefined {
+  return schema.sensors.find((s) => deviceIds.includes(s.deviceId) && s.category === category);
+}
+
 const kpi = (id: string, unit: Unit, value: KpiDef['value'], secondary?: KpiDef['secondary']): KpiDef => ({
   id,
   labelKey: `advanced.kpi.${id}`,
@@ -109,11 +114,22 @@ function candidates(kind: DeviceKind, schema: Schema, ids: string[]): (KpiDef | 
       const threads = sensorsWith(schema, ids, 'cpu.load.thread');
       return [
         live('load', find('cpu.load.total')),
+        live('temperature', find('cpu.temperature.package', 'cpu.temperature.tctl')),
+        live('power', find('cpu.power.package')),
         live('clock', find('cpu.clock.effective')),
         threads.length ? kpi('busiestThread', threads[0].unit, (valueOf) => maxOf(valueOf, threads)) : null,
         peak('peakLoad', find('cpu.load.total')),
       ];
     }
+    case 'motherboard':
+    case 'fan_controller':
+    case 'psu':
+      return [
+        live('temperature', firstByCategory(schema, ids, 'temperature')),
+        live('fan', firstByCategory(schema, ids, 'fan')),
+        live('voltage', firstByCategory(schema, ids, 'voltage')),
+        live('power', firstByCategory(schema, ids, 'power')),
+      ];
     case 'gpu': {
       const used = find('gpu.memory.dedicatedUsed');
       const total = find('gpu.memory.dedicatedTotal');
@@ -190,11 +206,17 @@ const DEFAULT_SERIES: Partial<Record<DeviceKind, string[][]>> = {
   network: [['network.down'], ['network.up']],
 };
 
+/** Kinds whose default series are the first two temperature sensors (LHM-fed, no fixed label keys). */
+const TEMPERATURE_LED_KINDS: DeviceKind[] = ['motherboard', 'fan_controller', 'psu'];
+
 /** Series charted when the user has not chosen any; the first sensor for other kinds. */
 export function defaultSeries(kind: DeviceKind, schema: Schema, deviceIds: string[]): string[] {
-  const ids = (DEFAULT_SERIES[kind] ?? [])
-    .map((keys) => firstOf(schema, deviceIds, ...keys)?.id)
-    .filter((id): id is string => id !== undefined);
+  const ids = TEMPERATURE_LED_KINDS.includes(kind)
+    ? schema.sensors
+        .filter((s) => deviceIds.includes(s.deviceId) && s.category === 'temperature')
+        .slice(0, 2)
+        .map((s) => s.id)
+    : (DEFAULT_SERIES[kind] ?? []).map((keys) => firstOf(schema, deviceIds, ...keys)?.id).filter((id): id is string => id !== undefined);
   if (ids.length > 0) return ids;
   const first = schema.sensors.find((s) => deviceIds.includes(s.deviceId));
   return first ? [first.id] : [];

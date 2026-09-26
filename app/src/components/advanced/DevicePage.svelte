@@ -5,15 +5,29 @@
   import { StatsPoller } from '../../lib/advanced/statsPoller.svelte';
   import type { Backend } from '../../lib/backend';
   import type { LiveStore } from '../../lib/live.svelte';
+  import type { ServiceStatus } from '../../lib/types';
   import DeviceInfo from './DeviceInfo.svelte';
   import GpuProcesses from './GpuProcesses.svelte';
   import HistoryChart from './HistoryChart.svelte';
   import KpiRow from './KpiRow.svelte';
   import SensorTable from './SensorTable.svelte';
+  import ServiceNotice from './ServiceNotice.svelte';
+
+  // Pages whose extra sensors (temperatures, disk health…) come only from the sensor service.
+  const SERVICE_NOTICE_KINDS: SidebarEntry['kind'][] = ['cpu', 'memory', 'storage'];
 
   // One Advanced page (spec §7.3). AdvancedView renders the heading and re-keys this
   // component per section, so timers and polling start from scratch on every page.
-  let { entry, store, backend }: { entry: SidebarEntry; store: LiveStore; backend: Backend } = $props();
+  let {
+    entry,
+    store,
+    backend,
+    service = null,
+  }: { entry: SidebarEntry; store: LiveStore; backend: Backend; service?: ServiceStatus | null } = $props();
+
+  const showServiceNotice = $derived(
+    service !== null && service.state !== 'connected' && SERVICE_NOTICE_KINDS.includes(entry.kind),
+  );
 
   const schema = $derived(store.schema);
   const devices = $derived(schema?.devices.filter((d) => entry.deviceIds.includes(d.id)) ?? []);
@@ -34,6 +48,7 @@
 
 {#if schema}
   <div class="page">
+    {#if showServiceNotice}<ServiceNotice />{/if}
     <KpiRow {kpis} {valueOf} statsOf={stats.statsOf} {rate} />
     <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} />
     <SensorTable {sensors} {valueOf} {stats} {rate} />

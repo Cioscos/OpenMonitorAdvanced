@@ -1,4 +1,17 @@
-import type { GpuProcess, HistoryWindow, Label, Schema, Sensor, SensorKind, Snapshot, StartupStatus, Unit } from '../types';
+import type {
+  GpuProcess,
+  HistoryWindow,
+  Label,
+  Schema,
+  Sensor,
+  SensorKind,
+  ServiceState,
+  ServiceStatus,
+  Snapshot,
+  Source,
+  StartupStatus,
+  Unit,
+} from '../types';
 import type { Backend } from './backend';
 import { decimateWindow } from './decimate';
 import { StatsAccumulator } from './mockStats';
@@ -7,14 +20,15 @@ const THREADS = 8;
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 const GPU = 'gpu/pci-0000:01:00.0';
+const SERVICE_DEVICE = 'motherboard/lhm-mock';
 
-const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, label: Label): Sensor => ({
+const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, label: Label, source: Source = 'mock'): Sensor => ({
   id,
   deviceId,
   kind,
   unit,
   label,
-  source: 'mock',
+  source,
   category: kind,
 });
 
@@ -60,6 +74,32 @@ export const MOCK_SCHEMA: Schema = {
     sensor('network/mock-eth/throughput/link-speed', 'network/mock-eth', 'throughput', 'bits_per_second', { key: 'network.linkSpeed' }),
   ],
 };
+
+/**
+ * Sensors added only while the sensor service is connected (spec §6): CPU temperature and
+ * power straight from the driver, plus a motherboard device with LHM's raw fan and voltage
+ * readings (label key `lhm.raw`, the driver's own text as `arg`).
+ */
+const SERVICE_SENSORS: Sensor[] = [
+  sensor('cpu/0/temperature/package', 'cpu/0', 'temperature', 'celsius', { key: 'cpu.temperature.package' }, 'lhm'),
+  sensor('cpu/0/power/package', 'cpu/0', 'power', 'watt', { key: 'cpu.power.package' }, 'lhm'),
+  sensor(`${SERVICE_DEVICE}/fan/fan-1`, SERVICE_DEVICE, 'fan', 'rpm', { key: 'lhm.raw', arg: 'Fan #1' }, 'lhm'),
+  sensor(`${SERVICE_DEVICE}/fan/fan-2`, SERVICE_DEVICE, 'fan', 'rpm', { key: 'lhm.raw', arg: 'Fan #2' }, 'lhm'),
+  sensor(`${SERVICE_DEVICE}/voltage/vin3`, SERVICE_DEVICE, 'voltage', 'volt', { key: 'lhm.raw', arg: 'VIN3' }, 'lhm'),
+];
+
+/** `MOCK_SCHEMA` plus the sensor-service devices and sensors above. */
+export const SERVICE_MOCK_SCHEMA: Schema = {
+  revision: MOCK_SCHEMA.revision,
+  devices: [...MOCK_SCHEMA.devices, { id: SERVICE_DEVICE, kind: 'motherboard', name: 'Mock Motherboard' }],
+  sensors: [...MOCK_SCHEMA.sensors, ...SERVICE_SENSORS],
+};
+
+/** Deterministic plausible values for `SERVICE_SENSORS`, same tick as `mockValues`. */
+function serviceMockValues(t: number): number[] {
+  const wave = (period: number, phase = 0) => (Math.sin((t + phase) / period) + 1) / 2;
+  return [40 + 20 * wave(13), 30 + 40 * wave(9, 1), 800 + 200 * wave(15), 750 + 150 * wave(17, 2), 12 + 0.2 * wave(21)];
+}
 
 /** Deterministic plausible values for tick `t`, in MOCK_SCHEMA sensor order. */
 export function mockValues(t: number): (number | null)[] {
@@ -125,36 +165,59 @@ export function sortGpuProcesses(list: GpuProcess[]): GpuProcess[] {
 }
 
 const MOCK_IDS = MOCK_SCHEMA.sensors.map((s) => s.id);
+const SERVICE_IDS = SERVICE_MOCK_SCHEMA.sensors.map((s) => s.id);
+
+const VALID_SERVICE_STATES: ServiceState[] = ['notInstalled', 'antiCheat', 'starting', 'connected', 'unreachable', 'incompatible'];
+
+/** Initial service state from `?service=<state>` in the URL; defaults to `connected`. */
+export function parseServiceState(search: string): ServiceState {
+  const raw = new URLSearchParams(search).get('service');
+  return (VALID_SERVICE_STATES as string[]).includes(raw ?? '') ? (raw as ServiceState) : 'connected';
+}
+
+/** Values for `schema`'s sensors at tick `t`; adds the service sensors' values when present. */
+function valuesFor(schema: Schema, t: number): (number | null)[] {
+  return schema === SERVICE_MOCK_SCHEMA ? [...mockValues(t), ...serviceMockValues(t)] : mockValues(t);
+}
 
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
+  const initialState = parseServiceState(typeof location === 'undefined' ? '' : location.search);
+  const schema = initialState === 'connected' ? SERVICE_MOCK_SCHEMA : MOCK_SCHEMA;
+  const ids = schema === SERVICE_MOCK_SCHEMA ? SERVICE_IDS : MOCK_IDS;
   let seq = 0;
   let startup = MOCK_STARTUP;
   let startedAtMs: number | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let serviceStatus: ServiceStatus = { state: initialState, detail: null };
   const stats = new StatsAccumulator();
   const listeners = new Set<(s: Snapshot) => void>();
+  const serviceListeners = new Set<(s: ServiceStatus) => void>();
   const emit = () => {
     seq++;
-    const snapshot: Snapshot = { revision: MOCK_SCHEMA.revision, seq, timestampMs: Date.now(), values: mockValues(seq) };
+    const snapshot: Snapshot = { revision: schema.revision, seq, timestampMs: Date.now(), values: valuesFor(schema, seq) };
     startedAtMs ??= snapshot.timestampMs;
-    stats.push(MOCK_IDS, snapshot.values);
+    stats.push(ids, snapshot.values);
     listeners.forEach((cb) => cb(snapshot));
   };
+  const setServiceStatus = (status: ServiceStatus) => {
+    serviceStatus = status;
+    serviceListeners.forEach((cb) => cb(status));
+  };
   return {
-    getSchema: async () => MOCK_SCHEMA,
-    getHistory: async (ids, seconds, maxPoints) => {
+    getSchema: async () => schema,
+    getHistory: async (requestedIds, seconds, maxPoints) => {
       const n = Math.max(0, Math.min(Math.floor(seconds), MOCK_HISTORY_SECONDS));
       const now = Date.now();
-      const rows = Array.from({ length: n }, (_, i) => mockValues(seq - n + 1 + i));
-      const indices = ids.map((id) => MOCK_IDS.indexOf(id));
+      const rows = Array.from({ length: n }, (_, i) => valuesFor(schema, seq - n + 1 + i));
+      const indices = requestedIds.map((id) => ids.indexOf(id));
       const raw: HistoryWindow = {
         timestampsMs: rows.map((_, i) => now - (n - 1 - i) * intervalMs),
         series: indices.map((k) => rows.map((row) => (k < 0 ? null : row[k]))),
       };
       const window =
         maxPoints === undefined ? raw : decimateWindow(raw, Math.min(Math.max(Math.floor(maxPoints), 2), MOCK_HISTORY_SECONDS));
-      return { revision: MOCK_SCHEMA.revision, seq, ...window };
+      return { revision: schema.revision, seq, ...window };
     },
     onSchema: async () => () => {},
     getStartupStatus: async () => startup,
@@ -162,8 +225,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
       startup = { ...startup, safeMode: false };
       return startup;
     },
-    getStats: async (ids) => ({ revision: MOCK_SCHEMA.revision, stats: stats.get(ids) }),
-    resetStats: async (ids) => stats.reset(ids),
+    getStats: async (requestedIds) => ({ revision: schema.revision, stats: stats.get(requestedIds) }),
+    resetStats: async (requestedIds) => stats.reset(requestedIds),
     getSession: async () => ({ startedAtMs, intervalMs }),
     getGpuProcesses: async (deviceId) => (deviceId === GPU ? sortGpuProcesses(mockGpuProcesses(seq)) : []),
     onSnapshot: async (cb) => {
@@ -176,6 +239,19 @@ export function createMockBackend(intervalMs = 1000): Backend {
           timer = undefined;
         }
       };
+    },
+    getServiceStatus: async () => serviceStatus,
+    onServiceStatus: async (cb) => {
+      serviceListeners.add(cb);
+      return () => serviceListeners.delete(cb);
+    },
+    setAntiCheat: async (enabled) => {
+      setServiceStatus({ state: enabled ? 'antiCheat' : 'unreachable', detail: null });
+      return serviceStatus;
+    },
+    startService: async () => {
+      setServiceStatus({ state: 'connected', detail: null });
+      return serviceStatus;
     },
   };
 }

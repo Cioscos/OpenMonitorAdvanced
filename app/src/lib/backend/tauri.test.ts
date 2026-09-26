@@ -19,4 +19,18 @@ test('commands and argument names match the Rust shell', async () => {
   expect(invoke).toHaveBeenLastCalledWith('get_session');
   await backend.getGpuProcesses('gpu/pci-0000:01:00.0');
   expect(invoke).toHaveBeenLastCalledWith('get_gpu_processes', { deviceId: 'gpu/pci-0000:01:00.0' });
+  await backend.getServiceStatus();
+  expect(invoke).toHaveBeenLastCalledWith('get_service_status');
+  await backend.setAntiCheat(true);
+  expect(invoke).toHaveBeenLastCalledWith('set_anti_cheat', { enabled: true });
+  await backend.startService();
+  expect(invoke).toHaveBeenLastCalledWith('start_service');
+});
+
+test('oma:service events are forwarded to the listener', async () => {
+  const { listen } = await import('@tauri-apps/api/event');
+  const backend = createTauriBackend();
+  const cb = vi.fn();
+  await backend.onServiceStatus(cb);
+  expect(listen).toHaveBeenLastCalledWith('oma:service', expect.any(Function));
 });

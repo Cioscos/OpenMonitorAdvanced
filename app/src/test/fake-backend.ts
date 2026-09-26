@@ -5,6 +5,7 @@ import type {
   HistoryWindow,
   Schema,
   SensorStats,
+  ServiceStatus,
   Session,
   Snapshot,
   StartupStatus,
@@ -34,8 +35,16 @@ export class FakeBackend implements Backend {
   /** Returned (copied) for every device id; `gpuProcessCalls` records the ids asked for. */
   gpuProcesses: GpuProcess[] = [];
   gpuProcessCalls: string[] = [];
+  /** Current service status; `getServiceStatus` returns it, `emitServiceStatus` replaces it and notifies listeners. */
+  serviceStatus: ServiceStatus = { state: 'connected', detail: null };
+  /** Set to reject `setAntiCheat`/`startService` with this error instead of resolving. */
+  setAntiCheatError: string | null = null;
+  startServiceError: string | null = null;
+  setAntiCheatCalls: boolean[] = [];
+  startServiceCalls = 0;
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
+  #serviceListeners = new Set<(s: ServiceStatus) => void>();
 
   constructor(schema: Schema) {
     this.schema = schema;
@@ -97,6 +106,27 @@ export class FakeBackend implements Backend {
     return [...this.gpuProcesses];
   }
 
+  async getServiceStatus(): Promise<ServiceStatus> {
+    return this.serviceStatus;
+  }
+
+  async onServiceStatus(cb: (s: ServiceStatus) => void): Promise<Unsubscribe> {
+    this.#serviceListeners.add(cb);
+    return () => this.#serviceListeners.delete(cb);
+  }
+
+  async setAntiCheat(enabled: boolean): Promise<ServiceStatus> {
+    this.setAntiCheatCalls.push(enabled);
+    if (this.setAntiCheatError !== null) throw new Error(this.setAntiCheatError);
+    return this.serviceStatus;
+  }
+
+  async startService(): Promise<ServiceStatus> {
+    this.startServiceCalls++;
+    if (this.startServiceError !== null) throw new Error(this.startServiceError);
+    return this.serviceStatus;
+  }
+
   emitSchema(schema: Schema): void {
     this.schema = schema;
     this.#schemaListeners.forEach((cb) => cb(schema));
@@ -104,5 +134,10 @@ export class FakeBackend implements Backend {
 
   emitSnapshot(snapshot: Snapshot): void {
     this.#snapshotListeners.forEach((cb) => cb(snapshot));
+  }
+
+  emitServiceStatus(status: ServiceStatus): void {
+    this.serviceStatus = status;
+    this.#serviceListeners.forEach((cb) => cb(status));
   }
 }

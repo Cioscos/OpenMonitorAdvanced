@@ -273,6 +273,26 @@ public sealed class SchemaBuilderTests
     }
 
     [Fact]
+    public void ANegativeDriveNumberGivesNoStorageHint()
+    {
+        // DiskInfoToolkit reports DriveNumber -1 when IOCTL_STORAGE_GET_DEVICE_NUMBER fails
+        // (LHM identifier "/hdd/-1"): it must never become a u32 PhysicalDrive hint.
+        var disk = new HardwareNode(
+            "/hdd/-1",
+            HardwareType.Storage,
+            "Drive",
+            [Sensor("/hdd/-1/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(-1, null, null, "IDENTIFY", Rotational: true));
+
+        BuiltSchema schema = SchemaBuilder.Build([disk], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Equal("storage", device.Kind);
+        Assert.Null(device.Hint);
+    }
+
+    [Fact]
     public void MissingOrDuplicateStorageSerialsDoNotMergeDevices()
     {
         SensorNode dummy(string id) => Sensor(id, SensorType.Temperature, "Temperature", 0);

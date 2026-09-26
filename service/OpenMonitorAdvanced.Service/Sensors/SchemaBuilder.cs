@@ -345,20 +345,34 @@ public static partial class SchemaBuilder
                 ? "lhm-" + Sha256HexOfModelSerial(StorageModel(node), serial)
                 : "lhm-" + Sha256HexOfIdentifier(node.Identifier);
 
-            var hint = new StorageHint(
-                (uint)(node.Storage?.DriveNumber ?? (int)ParseTrailingIndex(node.Identifier)),
-                node.Storage?.DescriptorModel,
-                node.Storage?.DescriptorSerial);
+            StorageHint? hint = StorageDriveNumber(node) is uint driveNumber
+                ? new StorageHint(driveNumber, node.Storage?.DescriptorModel, node.Storage?.DescriptorSerial)
+                : null;
 
             BuildStorageDevice(node, deviceId, hint, devices, sensors, bindings);
         }
+    }
+
+    /// <summary>
+    /// The <c>PhysicalDriveN</c> index for the storage hint, or <see langword="null"/> when it is
+    /// unknown: DiskInfoToolkit reports -1 when <c>IOCTL_STORAGE_GET_DEVICE_NUMBER</c> fails
+    /// (LHM identifier <c>/hdd/-1</c>), and that must never become a u32 hint.
+    /// </summary>
+    private static uint? StorageDriveNumber(HardwareNode node)
+    {
+        if (node.Storage is { } storage)
+        {
+            return storage.DriveNumber >= 0 ? (uint)storage.DriveNumber : null;
+        }
+
+        return uint.TryParse(node.Identifier.Split('/')[^1], NumberStyles.None, CultureInfo.InvariantCulture, out uint parsed) ? parsed : null;
     }
 
     private static string StorageModel(HardwareNode node) => node.Storage?.DescriptorModel ?? node.Name;
 
     private static string StorageIdentityKey(HardwareNode node) => StorageModel(node) + "\0" + node.Storage?.DriveSerial?.Trim();
 
-    private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint hint, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
+    private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint? hint, List<WireDevice> devices, List<WireSensor> sensors, List<SensorBinding> bindings)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();

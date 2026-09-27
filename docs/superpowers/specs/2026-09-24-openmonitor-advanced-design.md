@@ -18,7 +18,7 @@ OpenMonitor Advanced è un software **open source** per il monitoraggio delle ri
 | Fuori dalla v1 | Overlay in-game (OSD), controllo delle ventole, overclock. Ognuno sarà un sotto-progetto con una propria spec. Anche il colore d'accento personalizzabile è rimandato. |
 | Organizzazione UI | Primo livello: **vista Semplificata e vista Avanzata**. Secondo livello: **sezioni per tipo di hardware** (CPU, GPU, RAM, dischi, rete, scheda madre, batteria). |
 | Lingue | **Inglese e italiano**, con tutte le stringhe in file di traduzione fin dall'inizio. |
-| Leggerezza | L'app non deve falsare le misure: consumo a riposo minimo, nessuna modifica della risoluzione del timer di sistema, nessuna animazione continua. |
+| Leggerezza | L'app non deve falsare le misure: consumo a riposo minimo, nessuna modifica della risoluzione del timer di sistema; lo scorrimento continuo dei soli grafici visibili rispetta il budget (§7.5). |
 
 ### 1.2 Criteri di successo
 
@@ -378,7 +378,7 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
     - **al massimo 8 serie e 2 unità di misura** insieme, con due assi verticali (sinistro e destro); oltre questi limiti il selettore non aggiunge serie. È il limite che tiene la finestra nel budget di memoria;
     - le finestre da 30 minuti e 1 ora usano lo storico decimato (§4.2), quelle da 1 e 5 minuti tutti i campioni;
     - le etichette dell'asse del tempo seguono la lingua dell'app (24 ore in italiano);
-    - il grafico si aggiorna al ritmo dei dati e si ferma quando la finestra non è visibile;
+    - i dati si aggiornano al ritmo dei sensori; lo scorrimento visivo dei grafici segue il design dell'intermezzo pre-M5 e si ferma quando la finestra non è visibile;
   - una **tabella dei sensori** raggruppata per categoria (temperature, carico, clock, potenza, tensioni, ventole…), con colonne attuale, min, max e media, e un pulsante "azzera min/max", che azzera le statistiche dei sensori della pagina (§4.2). I sensori sperimentali sono segnati come tali;
   - un **badge della fonte** su ogni sensore, visibile al passaggio del mouse o con il focus da tastiera (le righe della tabella sono raggiungibili da tastiera);
   - le **informazioni del device**: le proprietà statiche, per esempio indirizzo PCI, link PCIe massimo, limiti di potenza e soglie di temperatura;
@@ -418,11 +418,11 @@ Tutti i colori sono token CSS, così un tema chiaro o un accento personalizzabil
 - I colori di stato restano sempre distinti dall'accento.
 - **Animazioni:**
   - i numeri cambiano con un'interpolazione breve (`tweened`, ≤ 300 ms);
-  - nessuna animazione continua;
+  - i grafici scorrono continuamente fino a circa 60 FPS quando sono visibili; le altre animazioni non sono continue;
   - si rispetta `prefers-reduced-motion`.
 - **Grafici:**
   - un solo ciclo di rendering condiviso;
-  - aggiornamento al ritmo dei dati;
+  - i campioni restano al ritmo dei sensori; lo scorrimento visivo, la curvatura, il punto bianco finale e il glow leggero seguono `docs/superpowers/specs/2026-09-27-fluid-charts-design.md`;
   - rendering sospeso quando la finestra non è visibile;
   - buffer tipizzati (`Float64Array`) per le serie interne della vista Semplificata; per il grafico uPlot della vista Avanzata, array di `number | null`, perché `null` rappresenta i buchi. Il costo delle copie e della coda dal vivo rientra nella misura del budget con la finestra aperta per almeno un'ora.
 
@@ -534,6 +534,7 @@ Ogni milestone avrà un proprio piano di implementazione.
 2. **GPU:** enumerazione, livello base PDH/D3DKMT, NVML, NVAPI, ADL, IGCL, merge con priorità.
 3. **Vista Avanzata:** barra laterale, pagine per componente, grafici uPlot, storico, tabelle con min/max/media.
 4. **Servizio:** `oma-service` con LibreHardwareMonitorLib, protocollo IPC con le fixture, installer NSIS con PawnIO, modalità anti-cheat.
+4.5. **Intermezzo grafici fluidi:** scorrimento a circa 60 FPS delle due viste, curve morbide, punto finale bianco e glow leggero; design in `docs/superpowers/specs/2026-09-27-fluid-charts-design.md`.
 5. **Regole e integrazione:** motore regole, banner di stato, notifiche, tray completa, log CSV, impostazioni, traduzioni it/en.
 6. **Rifinitura e 1.0:** verifica del budget di prestazioni, "Esporta report sensori", documentazione, licenze di terze parti, release.
 

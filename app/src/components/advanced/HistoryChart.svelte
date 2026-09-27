@@ -59,6 +59,7 @@
   let plot: uPlot | undefined;
   let buffer: ChartBuffer | undefined;
   let viewport = createChartViewport(DEFAULT_WINDOW);
+  let reducedMotion = false;
   let generation = 0;
   let destroyed = false;
 
@@ -80,6 +81,7 @@
     // Never append values from a new schema to a plot of the previous source/unit.
     buffer = undefined;
     viewport = createChartViewport(seconds);
+    if (reducedMotion) viewport.suspend(performance.now());
     plot?.destroy();
     plot = undefined;
     let history: HistorySeed = { revision, seq: 0, timestampsMs: [], series: [] };
@@ -196,6 +198,15 @@
   });
 
   onMount(() => {
+    const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reducedMotion = motionQuery.matches;
+    if (reducedMotion) viewport.suspend(performance.now());
+    const onMotionChange = () => {
+      reducedMotion = motionQuery.matches;
+      if (reducedMotion) viewport.suspend(performance.now());
+      else viewport.resume(performance.now());
+    };
+    motionQuery.addEventListener('change', onMotionChange);
     const stopFrames = subscribeChartFrame(drawScale);
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
@@ -214,6 +225,7 @@
       generation++;
       document.removeEventListener('visibilitychange', onVisibility);
       observer?.disconnect();
+      motionQuery.removeEventListener('change', onMotionChange);
       stopFrames();
       plot?.destroy();
       plot = undefined;

@@ -334,3 +334,24 @@ test('reduced motion shows new snapshots without animation frames', async () => 
   expect(plots[0].data[0]).toEqual([1, 2, 3]);
   expect(plots[0].scales.at(-1)).toEqual({ key: 'x', range: { min: -297, max: 3 } });
 });
+
+test('reduced-motion pause keeps snapshots visible and resumes without replaying elapsed time', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(250);
+  reducedMotion = true;
+  for (const listener of motionListeners) listener();
+  expect(frames.size).toBe(0);
+
+  monotonicMs = 600_000;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(plots[0].scales.at(-1)?.range.max).toBe(3);
+
+  monotonicMs = 1_200_000;
+  reducedMotion = false;
+  for (const listener of motionListeners) listener();
+  frame(1_200_000);
+  expect(plots[0].scales.at(-1)?.range.max).toBe(3);
+});

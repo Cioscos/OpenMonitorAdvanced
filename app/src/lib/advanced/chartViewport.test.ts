@@ -24,3 +24,15 @@ test('reset allows a lower timestamp to start a new epoch', () => {
 test('has no range before its first sample', () => {
   expect(createChartViewport(60).range(1000)).toBeNull();
 });
+
+test('suspension freezes elapsed time while snapshots advance the visible edge', () => {
+  const viewport = createChartViewport(60);
+  viewport.sample(2000, 0);
+  viewport.suspend(250);
+  expect(viewport.range(600_000)?.max).toBe(2.25);
+  viewport.sample(3000, 600_000);
+  expect(viewport.range(1_200_000)?.max).toBe(3);
+  viewport.resume(1_200_000);
+  expect(viewport.range(1_200_000)?.max).toBe(3);
+  expect(viewport.range(1_200_250)?.max).toBe(3.25);
+});

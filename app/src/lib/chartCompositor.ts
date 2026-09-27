@@ -37,7 +37,7 @@ export function heldLengthPx(
 
   const elapsedMs = visibleRightMs - lastSampleMs;
   if (elapsedMs < 0 || elapsedMs > windowMs) return null;
-  return elapsedMs * plotWidthPx / windowMs;
+  return elapsedMs / windowMs * plotWidthPx;
 }
 
 /** Tick positions in Unix seconds, including one aligned tick beyond each edge. */
@@ -52,6 +52,12 @@ export function timeTicks(minSeconds: number, maxSeconds: number, incrementSecon
 
   const first = Math.ceil(minSeconds / incrementSeconds) - 1;
   const last = Math.floor(maxSeconds / incrementSeconds) + 1;
+  if (
+    !Number.isSafeInteger(first) ||
+    !Number.isSafeInteger(last) ||
+    last - first + 1 > 10_000
+  ) return [];
+
   const ticks: number[] = [];
   for (let index = first; index <= last; index += 1) {
     ticks.push(index * incrementSeconds);

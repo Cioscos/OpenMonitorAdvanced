@@ -394,3 +394,30 @@ test('a resize while scrolling re-measures the translation on the same time base
   expect(disconnect).toHaveBeenCalledOnce();
   expect(time.pending()).toBe(0);
 });
+
+test('samples reuse the tracked tile width instead of forcing a layout each time', async () => {
+  const time = clock();
+  let resize!: ResizeObserverCallback;
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    observe() {}
+    disconnect() {}
+  });
+  const rect = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 300 } as DOMRect);
+  const view = render(Sparkline, { values: [50], timestampsMs: [0], max: 100 });
+  await tick();
+  const measured = rect.mock.calls.length;
+  expect(measured).toBeLessThanOrEqual(1);
+  for (let i = 1; i <= 5; i++) {
+    time.at(i * 1000);
+    await view.rerender({ values: Array(i + 1).fill(50), timestampsMs: Array.from({ length: i + 1 }, (_, j) => j * 1000), max: 100 });
+    await tick();
+  }
+  expect(rect).toHaveBeenCalledTimes(measured);
+  // The observer reports new widths itself.
+  resize([{ contentRect: { width: 600 } } as ResizeObserverEntry], {} as ResizeObserver);
+  await time.frame(35_000);
+  expect(rect).toHaveBeenCalledTimes(measured);
+  // 30 s after the last sample's edge, across a 600 px tile.
+  expect(translateCssPx(view.container)).toBeCloseTo(-60, 6);
+});

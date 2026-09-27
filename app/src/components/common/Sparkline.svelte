@@ -31,6 +31,7 @@
   let heldShown: boolean | null = null;
   const geometry = $derived(sparklineGeometry(values, timestampsMs, baseRightMs, WINDOW_MS, WIDTH, HEIGHT, min, max));
 
+  /** Reads the tile's layout width: once at mount, and when an observer entry has none. */
   function measure() {
     plotWidthPx = root?.getBoundingClientRect().width || root?.clientWidth || WIDTH;
   }
@@ -66,7 +67,6 @@
     viewport.sample(latest, now);
     baseRightMs = (viewport.range(now)?.max ?? latest / 1000) * 1000;
     void tick().then(() => {
-      measure();
       // The held elements may have been re-rendered for the new sample.
       heldShown = null;
       updateVisual(performance.now());
@@ -74,8 +74,12 @@
   });
 
   onMount(() => {
-    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
-      measure();
+    measure();
+    // Samples reuse the width tracked here, so they never force a synchronous layout.
+    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver((entries) => {
+      const width = entries.at(-1)?.contentRect.width;
+      if (width === undefined) measure();
+      else plotWidthPx = width || WIDTH;
       updateVisual(performance.now());
     });
     if (root) resize?.observe(root);

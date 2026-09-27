@@ -242,9 +242,18 @@
     const segments: ChartHeldSegment[] = [];
     for (let i = 0; i < dots.length; i++) {
       const value = u.data[i + 1]?.at(-1);
-      const y = value == null ? NaN : u.valToPos(value, u.series[i + 1].scale!, true);
+      const scale = u.series[i + 1].scale!;
+      const drawnY = value == null ? NaN : u.valToPos(value, scale, true);
+      // While the scale moves towards a range that holds the value, the displayed range may
+      // not hold it yet: keep the dot and held segment, clamped to the plot, instead of
+      // blinking them out until the eased range catches up.
+      const move = yMoves.get(scale);
+      const inScale = move
+        ? value != null && value >= move.to.min && value <= move.to.max
+        : drawnY >= top && drawnY <= top + height;
+      const y = move ? Math.min(top + height, Math.max(top, drawnY)) : drawnY;
       const show = inWindow && lastX != null && u.series[i + 1].show !== false
-        && Number.isFinite(value) && Number.isFinite(y) && y >= top && y <= top + height;
+        && Number.isFinite(value) && Number.isFinite(y) && inScale;
       dots[i].hidden = !show;
       if (!show) continue;
       dots[i].style.top = `${(y - top) / ratio + DOT_RADIUS}px`;

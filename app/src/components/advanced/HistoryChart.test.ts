@@ -1188,9 +1188,12 @@ test('a changed Y range moves the uPlot scale, paths, held segments and dots tog
     expect(Number.parseFloat(dot.style.top)).toBeCloseTo(temperatureY(90, range) - plot.bbox.top + 3, 9);
   };
   expect(pathThrough21(from)).toBe(true);
-  // 90 °C lies above the displayed range: its held segment and dot wait for the scale to reach it.
-  expect(lastHeld()).toHaveLength(1);
-  expect(dot.hidden).toBe(true);
+  // 90 °C lies above the displayed range but inside the target: held segment and dot stay,
+  // clamped to the plot's top edge until the scale reaches them.
+  expect(lastHeld()).toHaveLength(2);
+  expect(lastHeld()[1].y).toBe(plot.bbox.top);
+  expect(dot.hidden).toBe(false);
+  expect(dot.style.top).toBe('3px');
 
   frame(1150);
   const mid = eased(from, to, 150 / 180);
@@ -1209,6 +1212,37 @@ test('a changed Y range moves the uPlot scale, paths, held segments and dots tog
   expect(yScaleCalls(plot, 'percent')).toEqual([]);
   expect(plot.yRanges.get('percent')).toEqual(percent);
   expect(plot.setDataCalls).toBe(1);
+});
+
+test('an expanding Y transition never hides the dot or held segment of the value that caused it', async () => {
+  const { store, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 190);
+  const dot = document.querySelectorAll<HTMLElement>('.chart-dot')[1];
+  const { top, height } = plot.bbox;
+  for (const at of [1000, 1016, 1033, 1050, 1100, 1180]) {
+    if (at > 1000) frame(at);
+    expect(dot.hidden).toBe(false);
+    expect(lastHeld()).toHaveLength(2);
+    const y = lastHeld()[1].y;
+    expect(y).toBeGreaterThanOrEqual(top);
+    expect(y).toBeLessThanOrEqual(top + height);
+    expect(Number.parseFloat(dot.style.top)).toBeCloseTo(y - top + 3, 9);
+  }
+  expect(lastHeld()[1].y).toBeCloseTo(plot.valToPos(190, 'celsius', true), 9);
+});
+
+test('a final value outside a Y scale that is not moving still hides its dot and held segment', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const values = mockValues(1);
+  // The stub keeps the percent scale at 0-100, so 150% is outside and no transition runs.
+  values[index(LOAD)] = 150;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values });
+  flushSync();
+  expect(lastHeld().map((h) => h.color)).toEqual([plots[0].opts.series[2].stroke]);
+  expect(document.querySelectorAll<HTMLElement>('.chart-dot')[0].hidden).toBe(true);
 });
 
 test('the Y transition repaints only for 180 ms, then frames are transform-only again', async () => {

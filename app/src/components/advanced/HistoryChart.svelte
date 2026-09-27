@@ -151,7 +151,7 @@
     ctx.translate(leftOverscan - left, -top);
     const seconds = buffer!.windowSeconds;
     const right = baseRightMs / 1000;
-    drawChartCanvas(ctx, u, paths.filter((_, i) => u.series[i + 1].show !== false), timeTicks(right - seconds * 2, right + seconds, tickIncrement), i18n.locale, width, theme);
+    drawChartCanvas(ctx, u, paths.filter((_, i) => u.series[i + 1].show !== false), timeTicks(right - seconds * 2, right + seconds, tickIncrement), tickIncrement, i18n.locale, width, theme);
     ctx.restore();
     autoscaleY = false;
     drawFrame(performance.now());

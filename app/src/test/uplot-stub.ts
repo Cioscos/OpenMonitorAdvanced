@@ -9,6 +9,8 @@ export class FakeUplot {
   static instances: FakeUplot[] = [];
   static paths: uPlot.Series.PathBuilderFactories;
   static pxRatio = 1;
+  /** X split increment in seconds that the stub reports to the component's `splits`. */
+  static xIncrement = 60;
   opts: uPlot.Options;
   data: uPlot.AlignedData;
   target: HTMLElement | undefined;
@@ -74,7 +76,7 @@ export class FakeUplot {
     this.yAutoDecisions.push(Object.entries(this.opts.scales ?? {}).filter(([key]) => key !== 'x').map(([, scale]) =>
       typeof scale.auto === 'function' ? scale.auto(plot, false) : scale.auto !== false));
     const splits = this.opts.axes?.[0].splits;
-    if (typeof splits === 'function') splits(plot, 0, this.range.min, this.range.max, 60, 100);
+    if (typeof splits === 'function') splits(plot, 0, this.range.min, this.range.max, FakeUplot.xIncrement, 100);
     if (typeof Path2D !== 'undefined') {
       for (let i = 1; i < this.opts.series.length; i++) {
         this.opts.series[i].paths?.(plot, i, 0, this.data[0].length - 1);

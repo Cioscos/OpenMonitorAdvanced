@@ -13,6 +13,7 @@ export function drawChartCanvas(
   plot: uPlot,
   paths: ReadonlyArray<ChartCanvasPath>,
   ticks: readonly number[],
+  tickIncrementSeconds: number,
   locale: string,
   overscanPx: number,
   theme: { gridColor: string; textColor: string },
@@ -89,7 +90,7 @@ export function drawChartCanvas(
         ctx.moveTo(x, bottom);
         ctx.lineTo(x, bottom + 4 * ratio);
         ctx.stroke();
-        ctx.fillText(formatTimeTick(tick, locale), x, bottom + 6 * ratio);
+        ctx.fillText(formatTimeTick(tick, locale, tickIncrementSeconds), x, bottom + 6 * ratio);
       }
     } finally {
       ctx.restore();

@@ -146,7 +146,13 @@ export function scaleOptions(unit: Unit): uPlot.Scale {
   return { range: { min: { soft: bounds[0], mode: 1, pad: 0 }, max: { soft: bounds[1], mode: 1, pad: 0 } } };
 }
 
-/** Locale time-of-day for an x-axis split (uPlot gives seconds), 24-hour in `it`, matching the legend. */
-export function formatTimeTick(seconds: number, locale: string): string {
-  return new Date(seconds * 1000).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+/**
+ * Locale time-of-day for an x-axis split (uPlot gives seconds), 24-hour in `it`, matching the
+ * legend. Splits closer than a minute show seconds, or every label of a minute would repeat.
+ */
+export function formatTimeTick(seconds: number, locale: string, incrementSeconds: number): string {
+  const options: Intl.DateTimeFormatOptions = incrementSeconds < 60
+    ? { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+    : { hour: '2-digit', minute: '2-digit' };
+  return new Date(seconds * 1000).toLocaleTimeString(locale, options);
 }

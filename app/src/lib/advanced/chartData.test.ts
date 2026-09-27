@@ -136,11 +136,26 @@ test('palette reads the eight tokens in order', () => {
   expect(PALETTE_TOKENS).toHaveLength(MAX_SERIES);
 });
 
-test('formatTimeTick renders the axis split in the app locale', () => {
+test('formatTimeTick renders minute splits in the app locale', () => {
   const seconds = Date.UTC(2026, 0, 1, 15, 45) / 1000;
-  expect(formatTimeTick(seconds, 'it')).toBe(new Date(seconds * 1000).toLocaleTimeString('it', { hour: '2-digit', minute: '2-digit' }));
-  expect(formatTimeTick(seconds, 'it')).toMatch(/^\d{2}:\d{2}$/); // 24-hour, e.g. "15:45" (UTC offset notwithstanding)
-  expect(formatTimeTick(seconds, 'en')).toBe(new Date(seconds * 1000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }));
+  const minutes = { hour: '2-digit', minute: '2-digit' } as const;
+  expect(formatTimeTick(seconds, 'it', 60)).toBe(new Date(seconds * 1000).toLocaleTimeString('it', minutes));
+  expect(formatTimeTick(seconds, 'it', 60)).toMatch(/^\d{2}:\d{2}$/); // 24-hour, e.g. "15:45" (UTC offset notwithstanding)
+  expect(formatTimeTick(seconds, 'en', 60)).toBe(new Date(seconds * 1000).toLocaleTimeString('en', minutes));
+  expect(formatTimeTick(seconds, 'it', 300)).toMatch(/^\d{2}:\d{2}$/);
+});
+
+test('formatTimeTick shows seconds for sub-minute splits in the app locale', () => {
+  const seconds = Date.UTC(2026, 0, 1, 15, 45, 35) / 1000;
+  const withSeconds = { hour: '2-digit', minute: '2-digit', second: '2-digit' } as const;
+  expect(formatTimeTick(seconds, 'it', 5)).toBe(new Date(seconds * 1000).toLocaleTimeString('it', withSeconds));
+  expect(formatTimeTick(seconds, 'it', 5)).toMatch(/^\d{2}:\d{2}:35$/);
+  expect(formatTimeTick(seconds, 'en', 30)).toBe(new Date(seconds * 1000).toLocaleTimeString('en', withSeconds));
+  expect(formatTimeTick(seconds, 'en', 30)).not.toBe(formatTimeTick(seconds, 'en', 60));
+  // One minute of 5 s splits no longer repeats one HH:MM label twelve times.
+  const start = Date.UTC(2026, 0, 1, 15, 45) / 1000;
+  const labels = Array.from({ length: 12 }, (_, i) => formatTimeTick(start + i * 5, 'it', 5));
+  expect(new Set(labels).size).toBe(12);
 });
 
 test('theme.css defines every palette token', () => {

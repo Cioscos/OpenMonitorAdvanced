@@ -447,6 +447,23 @@ test('replenishes X ticks after a full window of silence without per-frame redra
   expect(plot.setDataCalls).toBe(0);
 });
 
+test('paints seconds on the time axis when uPlot picks a sub-minute split', async () => {
+  const labels = () => {
+    const ctx = document.querySelector<HTMLCanvasElement>('.chart-canvas')!.getContext('2d')!;
+    return vi.mocked(ctx.fillText).mock.calls.map(([text]) => text);
+  };
+  FakeUplot.xIncrement = 5;
+  try {
+    localStorage.setItem(WINDOW_KEY, '60');
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    const withSeconds = { hour: '2-digit', minute: '2-digit', second: '2-digit' } as const;
+    expect(labels()).toContain(new Date(0).toLocaleTimeString('en', withSeconds));
+    expect(labels()).toContain(new Date(5000).toLocaleTimeString('en', withSeconds));
+    expect(new Set(labels()).size).toBe(labels().length);
+  } finally { FakeUplot.xIncrement = 60; }
+});
+
 test('selection and range reseeds keep the already displayed edge', async () => {
   renderChart(fakeBackend());
   await vi.waitFor(() => expect(plots).toHaveLength(1));

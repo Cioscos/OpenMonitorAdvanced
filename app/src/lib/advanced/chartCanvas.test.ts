@@ -14,7 +14,7 @@ test('paints eight real spline paths on two Y scales with one glow and one line 
     const result = uPlot.paths.spline!()(plot, i + 1, 0, 2)!;
     return { stroke: result.stroke as Path2D, gapsClip: result.clip ?? null, color: `#00000${i}` };
   });
-  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, paths, [], 'en', 40, theme);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, paths, [], 60, 'en', 40, theme);
   expect(strokes).toHaveLength(16);
   for (let i = 0; i < 8; i++) {
     expect(ctx.stroke.mock.calls[i * 2][0]).toBe(paths[i].stroke);
@@ -32,7 +32,7 @@ test('preserves each path gap clip and draws nothing for empty paths', () => {
   drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [
     { stroke: new Path2D(), gapsClip: gap, color: '#f0f' },
     { stroke: null, gapsClip: null, color: '#0ff' },
-  ], [], 'en', 0, theme);
+  ], [], 60, 'en', 0, theme);
   expect(ctx.clip.mock.calls).toEqual([[], [gap]]);
   expect(strokes).toHaveLength(2);
   expect(ctx.save).toHaveBeenCalledTimes(ctx.restore.mock.calls.length);
@@ -40,7 +40,7 @@ test('preserves each path gap clip and draws nothing for empty paths', () => {
 
 test('keeps grid, tick marks and labels crisp and draws a future tick in right overscan', () => {
   const { plot, ctx, strokes, fills } = canvasFixture([[0, 1], [20, 40]]);
-  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [0, 2, 4.2], 'it', 30, theme);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [0, 2, 4.2], 60, 'it', 30, theme);
   expect(ctx.moveTo).toHaveBeenCalledWith(430, 20);
   expect(ctx.fillText).toHaveBeenCalledWith(new Date(4200).toLocaleTimeString('it', { hour: '2-digit', minute: '2-digit' }), 430, expect.any(Number));
   expect(strokes.length).toBeGreaterThan(0);
@@ -50,11 +50,20 @@ test('keeps grid, tick marks and labels crisp and draws a future tick in right o
   expect(ctx.fillStyle).toBe('');
 });
 
+test('labels sub-minute ticks with seconds using the increment it paints', () => {
+  const { plot, ctx } = canvasFixture([[0, 1], [20, 40]]);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [0, 1, 2, 3], 1, 'it', 0, theme);
+  const withSeconds = { hour: '2-digit', minute: '2-digit', second: '2-digit' } as const;
+  expect(ctx.fillText.mock.calls.map(([text]) => text)).toEqual(
+    [0, 1, 2, 3].map((s) => new Date(s * 1000).toLocaleTimeString('it', withSeconds)),
+  );
+});
+
 test('scales widths and font with DPR while keeping canvas pixel positions', () => {
   uPlot.pxRatio = 2;
   const { plot, ctx, strokes, textDraws } = canvasFixture([[0, 1], [20, 40]]);
   const path = new Path2D();
-  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [{ stroke: path, gapsClip: null, color: '#f0f' }], [2], 'en', 40, theme);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [{ stroke: path, gapsClip: null, color: '#f0f' }], [2], 60, 'en', 40, theme);
   expect(ctx.rect).toHaveBeenCalledWith(-30, 20, 480, 200);
   expect(ctx.moveTo).toHaveBeenCalledWith(210, 20);
   expect(textDraws[0]).toEqual({ font: '24px sans-serif', color: theme.textColor, blur: 0 });

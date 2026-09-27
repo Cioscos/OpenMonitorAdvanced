@@ -2,9 +2,12 @@
 .SYNOPSIS
   Measures OpenMonitor Advanced against the performance budget (spec §1.2).
 .DESCRIPTION
-  Starts the release build, waits for warm-up, then reports the app's CPU
-  usage and the private working set (Task Manager "Memory" column) of the app
-  and of its WebView2 child processes. VendorModules lists the GPU vendor
+  Starts the release build, waits for warm-up, then reports host-only CPU as
+  CorePercentCpu (the legacy field) and host + WebView2 descendant CPU as
+  TotalAppPercentCpu. TotalAppCpuValid must be true before using the latter
+  for a budget decision; process turnover or missing counters invalidate it.
+  Private working set (Task Manager "Memory" column) includes the app and
+  its WebView2 child processes. VendorModules lists the GPU vendor
   libraries loaded in the app, so a measurement taken in safe mode (or on a
   machine without a vendor driver) is recognisable.
   With -FillHistoryMinutes the app first runs in the tray for that long, so
@@ -133,6 +136,84 @@ function Measure-ServiceSample {
     }
 }
 
+# Measure the host and all WebView2 descendants over one common sample action.
+# A changing process tree, missing counters or reused PID invalidates the result
+# instead of allowing an incomplete set to look like low CPU use.
+function Measure-AppCpuSample {
+    param(
+        [Parameter(Mandatory)][int]$RootProcessId,
+        [Parameter(Mandatory)][scriptblock]$ProcessProvider,
+        [Parameter(Mandatory)][scriptblock]$CounterProvider,
+        [Parameter(Mandatory)][scriptblock]$SampleAction,
+        [switch]$RequireWebView,
+        [int]$LogicalProcessors = [Environment]::ProcessorCount
+    )
+
+    $members = {
+        param($Processes)
+        $descendants = [Collections.Generic.HashSet[int]]::new()
+        [void]$descendants.Add($RootProcessId)
+        do {
+            $changed = $false
+            foreach ($process in $Processes) {
+                if ($descendants.Contains([int]$process.ParentProcessId) -and $descendants.Add([int]$process.ProcessId)) { $changed = $true }
+            }
+        } while ($changed)
+        @($Processes | Where-Object {
+            ([int]$_.ProcessId -eq $RootProcessId) -or
+            ($_.Name -eq 'msedgewebview2.exe' -and $descendants.Contains([int]$_.ProcessId))
+        } | Sort-Object ProcessId)
+    }
+
+    $startProcesses = @(& $ProcessProvider)
+    $startMembers = @(& $members $startProcesses)
+    $startCounters = @(& $CounterProvider)
+    $sampleResult = & $SampleAction
+    $endProcesses = @(& $ProcessProvider)
+    $endMembers = @(& $members $endProcesses)
+    $endCounters = @(& $CounterProvider)
+
+    $invalid = {
+        param([string]$Reason)
+        [pscustomobject]@{ Valid = $false; CpuPercent = $null; ProcessCount = $null; Reason = $Reason; SampleResult = $sampleResult }
+    }
+    if ($LogicalProcessors -le 0) { return & $invalid 'Logical processor count is invalid.' }
+    if (-not @($startMembers | Where-Object { [int]$_.ProcessId -eq $RootProcessId }).Count -or
+        -not @($endMembers | Where-Object { [int]$_.ProcessId -eq $RootProcessId }).Count) {
+        return & $invalid 'App host was missing from a process-tree snapshot.'
+    }
+    $startIdentity = @($startMembers | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate)" }) -join ','
+    $endIdentity = @($endMembers | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate)" }) -join ','
+    if ($startIdentity -ne $endIdentity) { return & $invalid 'App/WebView2 process tree changed during sampling.' }
+    if ($RequireWebView -and $startMembers.Count -le 1) {
+        return & $invalid 'No WebView2 descendant was found in a visible-window sample.'
+    }
+
+    $cpuPercent = 0.0
+    foreach ($member in $startMembers) {
+        $id = [int]$member.ProcessId
+        $first = @($startCounters | Where-Object { [int]$_.IDProcess -eq $id })
+        $last = @($endCounters | Where-Object { [int]$_.IDProcess -eq $id })
+        if ($first.Count -ne 1 -or $last.Count -ne 1) {
+            return & $invalid "Missing or ambiguous CPU counters for PID $id."
+        }
+        $cpuDelta = [double]$last[0].PercentProcessorTime - [double]$first[0].PercentProcessorTime
+        $timeDelta = [double]$last[0].Timestamp_Sys100NS - [double]$first[0].Timestamp_Sys100NS
+        if ($cpuDelta -lt 0 -or $timeDelta -le 0) {
+            return & $invalid "Invalid CPU counter delta for PID $id."
+        }
+        $cpuPercent += ($cpuDelta / $timeDelta) / $LogicalProcessors * 100
+    }
+    $decimals = if ($cpuPercent -lt 0.01) { 3 } else { 2 }
+    [pscustomobject]@{
+        Valid = $true
+        CpuPercent = [math]::Round($cpuPercent, $decimals)
+        ProcessCount = $startMembers.Count
+        Reason = $null
+        SampleResult = $sampleResult
+    }
+}
+
 function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$MeasureService) {
     Start-Sleep -Seconds $WarmupSeconds
     $Proc.Refresh()
@@ -140,15 +221,18 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
     $cpuStart = $Proc.TotalProcessorTime
 
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
-    $svcResult = $null
-    if ($MeasureService) {
-        # Same interval as the app: $SampleAction below is the only sleep,
-        # and the stopwatch wraps it exactly as it would without -Service.
-        $svcResult = Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } `
-            -SampleAction { Start-Sleep -Seconds $SampleSeconds } -ServiceLabel $ServiceName
-    } else {
-        Start-Sleep -Seconds $SampleSeconds
-    }
+    $appCpu = Measure-AppCpuSample -RootProcessId $Proc.Id -RequireWebView:($Mode -eq 'window') `
+        -ProcessProvider { Get-CimInstance Win32_Process } `
+        -CounterProvider { Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction SilentlyContinue } `
+        -SampleAction {
+            if ($MeasureService) {
+                Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } `
+                    -SampleAction { Start-Sleep -Seconds $SampleSeconds } -ServiceLabel $ServiceName
+            } else {
+                Start-Sleep -Seconds $SampleSeconds
+            }
+        }
+    $svcResult = $appCpu.SampleResult
     $Proc.Refresh()
     $cpuEnd = $Proc.TotalProcessorTime
     $cpuPercent = ($cpuEnd - $cpuStart).TotalMilliseconds / $elapsed.Elapsed.TotalMilliseconds / [Environment]::ProcessorCount * 100
@@ -181,7 +265,11 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
     $result = [ordered]@{
         Mode              = $Mode
         HistoryMinutes    = $FillHistoryMinutes
-        CorePercentCpu    = [math]::Round($cpuPercent, 2)
+        CorePercentCpu    = [math]::Round($cpuPercent, 2) # Legacy: oma-app.exe only.
+        TotalAppCpuValid  = $appCpu.Valid
+        TotalAppPercentCpu = $appCpu.CpuPercent
+        TotalAppCpuProcesses = $appCpu.ProcessCount
+        TotalAppCpuInvalidReason = $appCpu.Reason
         AppPrivateMB      = [math]::Round($appPrivate / 1MB, 1)
         WebView2Processes = $webviews.Count
         TotalPrivateMB    = [math]::Round($totalPrivate / 1MB, 1)

@@ -53,11 +53,17 @@ Se il codice cambia, ricompilare e registrare il nuovo commit e hash.
    FPS mediano = `1000 / mediana(intervalli_ms)` e p95 del tempo frame =
    95° percentile degli intervalli in ms; annotare anche callback, disegno e
    frame lunghi. Non confondere la cadenza dei campioni sensore con gli FPS.
-   Associare CPU e memoria di `measure-footprint.ps1` alla stessa finestra;
+   Associare CPU e memoria di `measure-footprint.ps1` alla stessa finestra.
+   Per il budget CPU usare **`TotalAppPercentCpu`**, somma di `oma-app.exe`
+   e dei discendenti WebView2 sullo stesso intervallo, soltanto quando
+   `TotalAppCpuValid` è `True`. Se la topologia dei processi cambia, un
+   contatore manca o la finestra non ha WebView2, la misura CPU è invalida:
+   ripeterla, senza interpretare `null` come zero. `CorePercentCpu` resta
+   il solo processo host per continuità con le misure precedenti.
    `TotalPrivateMB` comprende app e processi WebView2, mentre tray usa
    `AppPrivateMB`. Conservare trace, screenshot e output grezzo con la build.
 
-| Vista / stato | Data, hardware, refresh, build | FPS mediano | p95 frame ms | CPU app % | Memoria MB | Traccia / output | Esito |
+| Vista / stato | Data, hardware, refresh, build | FPS mediano | p95 frame ms | CPU app+WebView2 % | Memoria MB | Traccia / output | Esito |
 |---|---|---:|---:|---:|---:|---|---|
 | Semplificata, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
 | Avanzata, 1 h, 8 serie, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
@@ -74,6 +80,9 @@ una revisione del design approvato.
 
 Budget (spec §1.2), measured with `scripts/measure-footprint.ps1` on a release build.
 Memory = private working set (Task Manager "Memory" column); CPU = share of all logical processors.
+Le righe M1–M4 qui sotto riportano il vecchio `CorePercentCpu`, cioè solo
+`oma-app.exe`; non sono evidenza di CPU complessiva della WebView2. Le nuove
+misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 
 | Milestone | Machine | Mode | App CPU % | App private MB | WebView2 procs | Total private MB | Budget met |
 |---|---|---|---|---|---|---|---|

@@ -39,6 +39,7 @@
   const disk = $derived(store.schema ? storageSummary(store.schema, valueOf) : null);
   const net = $derived(store.schema ? networkSummary(store.schema, valueOf) : null);
   const netSeries = $derived(net ? sumSeries(net.downIds.map((id) => store.series(id))) : []);
+  const seriesTimestampsMs = $derived(store.seriesTimestampsMs());
   const health = $derived(monitoringHealth(startedAtMs ?? store.firstTimestampMs));
   const firstDevice = (kind: DeviceKind) => store.schema?.devices.find((d) => d.kind === kind)?.id;
   const netDiskSection = $derived(
@@ -55,7 +56,7 @@
         <div class="big"><AnimatedNumber value={cpu.load} format={(v) => formatPercent(v, locale)} /></div>
         <div class="sub">{cpu.name} · {formatClock(cpu.clockMhz, locale)}</div>
         {#if cpu.loadId}
-          <Sparkline values={store.series(cpu.loadId)} capacity={store.capacity} max={100} />
+          <Sparkline values={store.series(cpu.loadId)} timestampsMs={seriesTimestampsMs} max={100} />
         {/if}
       </Tile>
     {/if}
@@ -73,7 +74,7 @@
           </div>
         {/if}
         {#if gpu.loadId}
-          <Sparkline values={store.series(gpu.loadId)} capacity={store.capacity} max={100} />
+          <Sparkline values={store.series(gpu.loadId)} timestampsMs={seriesTimestampsMs} max={100} />
         {/if}
       </Tile>
     {/each}
@@ -87,7 +88,7 @@
           <i style:width="{mem.usedPct ?? 0}%"></i>
         </div>
         <div class="sub">{formatPercent(mem.usedPct, locale)}</div>
-        {#if mem.loadId}<Sparkline values={store.series(mem.loadId)} capacity={store.capacity} max={100} />{/if}
+        {#if mem.loadId}<Sparkline values={store.series(mem.loadId)} timestampsMs={seriesTimestampsMs} max={100} />{/if}
       </Tile>
     {/if}
 
@@ -98,10 +99,10 @@
             ↓ {formatRate(net.downBps, 'bits', locale)}
             <span class="unit">↑ {formatRate(net.upBps, 'bits', locale)}</span>
           </div>
-          <Sparkline values={netSeries} capacity={store.capacity} color="var(--accent-2)" />
+          <Sparkline values={netSeries} timestampsMs={seriesTimestampsMs} color="var(--accent-2)" />
         {/if}
         {#if disk}
-          {#if !net}<Sparkline values={sumSeries(disk.readIds.map((id) => store.series(id)))} capacity={store.capacity} />{/if}
+          {#if !net}<Sparkline values={sumSeries(disk.readIds.map((id) => store.series(id)))} timestampsMs={seriesTimestampsMs} />{/if}
           <div class="sub">
             {#if disk.volume}{disk.volume.letter} {formatPercent(disk.volume.usedPct, locale)}{' · '}{/if}{t('tile.diskIo', {
               read: formatRate(disk.readBps, 'bytes', locale),

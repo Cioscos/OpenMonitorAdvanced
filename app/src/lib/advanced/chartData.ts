@@ -1,4 +1,6 @@
 import type uPlot from 'uplot';
+import { formatValue } from '../format';
+import type { Translate } from '../i18n/index.svelte';
 import type { HistorySeed, Schema, Unit } from '../types';
 
 /** Chart windows in seconds: 1m, 5m, 30m, 1h (spec §7.3). Same values as persist.ts `StoredWindow`. */
@@ -155,6 +157,59 @@ export function formatTimeTick(seconds: number, locale: string, incrementSeconds
     ? { hour: '2-digit', minute: '2-digit', second: '2-digit' }
     : { hour: '2-digit', minute: '2-digit' };
   return new Date(seconds * 1000).toLocaleTimeString(locale, options);
+}
+
+/**
+ * uPlot's own default numeric split table (`numIncrs`, uPlot 1.6.32): 1, 2, 2.5, 5 times every
+ * power of ten from 1e-9 to 1e20, ascending. Not exported by the package, so mirrored here to
+ * filter it (see `labelSafeIncrs`).
+ */
+const NUMERIC_INCRS: number[] = (() => {
+  const mults = [1, 2, 2.5, 5];
+  const incrs: number[] = [];
+  for (let exp = -9; exp < 21; exp++) {
+    const mag = 10 ** exp;
+    for (const mult of mults) incrs.push(mult * mag);
+  }
+  return incrs;
+})();
+
+/** Bounds a probe of split labels so a huge range paired with a tiny increment cannot hang. */
+const MAX_PROBE_SPLITS = 200;
+
+/**
+ * True when every split uPlot would draw between `min` and `max` at this increment (uPlot's own
+ * `numAxisSplits`: `incrRoundUp(min, incr)`, then `+incr` up to `max`) gets a distinct label.
+ */
+function hasDistinctLabels(min: number, max: number, incr: number, label: (v: number) => string): boolean {
+  const seen = new Set<string>();
+  let count = 0;
+  for (let v = Math.ceil(min / incr) * incr; v <= max + incr * 1e-6; v += incr) {
+    if (count++ >= MAX_PROBE_SPLITS) break;
+    const text = label(v);
+    if (seen.has(text)) return false;
+    seen.add(text);
+  }
+  return true;
+}
+
+/**
+ * uPlot `axis.incrs` for a Y axis: the default numeric table, filtered to increments no finer
+ * than the precision `formatValue` actually displays for `unit`, so consecutive split labels
+ * never repeat (e.g. a 42.6-44.3 °C range must not offer a 0.2 or 0.5 step, which whole-degree
+ * rounding turns into duplicate labels). The step is derived by probing the formatter itself
+ * over the visible range, not hardcoded per unit, so it also protects units with more decimals
+ * (volt) or none (celsius, percent) alike.
+ */
+export function labelSafeIncrs(unit: Unit, locale: string, t: Translate): uPlot.Axis.Incrs {
+  return (_u, _axisIdx, min, max) => {
+    if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return NUMERIC_INCRS;
+    const label = (v: number) => formatValue(v, unit, locale, t);
+    for (const incr of NUMERIC_INCRS) {
+      if (hasDistinctLabels(min, max, incr, label)) return NUMERIC_INCRS.filter((candidate) => candidate >= incr);
+    }
+    return NUMERIC_INCRS;
+  };
 }
 
 /** uPlot's default minimum distance between X splits, in CSS px. */

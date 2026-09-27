@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { MOCK_SCHEMA } from '../backend/mock';
+import { formatValue } from '../format';
+import { translate } from '../i18n/index.svelte';
 import {
   ChartBuffer,
   MAX_SERIES,
@@ -9,6 +11,7 @@ import {
   fitSelection,
   formatTimeTick,
   initialSeries,
+  labelSafeIncrs,
   maxPointsFor,
   scaleLayout,
   scaleOptions,
@@ -19,6 +22,20 @@ import {
   unitsOf,
 } from './chartData';
 import { STORED_WINDOWS } from './persist';
+
+const tEn = (key: string, params?: Record<string, string | number>) => translate('en', key, params);
+/** Calls a `uPlot.Axis.Incrs` function form with the arguments the axis only needs for this table. */
+const incrsFor = (unit: Parameters<typeof labelSafeIncrs>[0], min: number, max: number) => {
+  const incrs = labelSafeIncrs(unit, 'en', tEn);
+  if (typeof incrs !== 'function') throw new Error('expected a function');
+  return incrs(undefined as never, 1, min, max, 200, 30);
+};
+/** uPlot's own split algorithm (numAxisSplits): incrRoundUp(min, incr), then +incr to max. */
+const splitsFor = (min: number, max: number, incr: number): number[] => {
+  const splits: number[] = [];
+  for (let v = Math.ceil(min / incr) * incr; v <= max + 1e-9; v += incr) splits.push(v);
+  return splits;
+};
 
 const GPU = 'gpu/pci-0000:01:00.0';
 const LOAD = `${GPU}/load/core`;
@@ -200,4 +217,35 @@ test('timeAxisSpace never goes below the uPlot default space and tolerates empty
 test('theme.css defines every palette token', () => {
   const theme = readFileSync('src/styles/theme.css', 'utf8'); // vitest runs from app/
   for (const token of PALETTE_TOKENS) expect(theme).toMatch(new RegExp(`${token}\\s*:`));
+});
+
+describe('labelSafeIncrs', () => {
+  test('drops celsius increments finer than a whole degree, for a narrow range', () => {
+    const incrs = incrsFor('celsius', 42.6, 44.3);
+    expect(Math.min(...incrs)).toBeGreaterThanOrEqual(1);
+    // uPlot's default table offers 0.2 and 0.5 here; both round to duplicate whole degrees.
+    expect(incrs).not.toContain(0.2);
+    expect(incrs).not.toContain(0.5);
+  });
+
+  test('every celsius increment left in the table yields distinct split labels on that range', () => {
+    const [min, max] = [42.6, 44.3];
+    for (const incr of incrsFor('celsius', min, max)) {
+      const labels = splitsFor(min, max, incr).map((v) => formatValue(v, 'celsius', 'en', tEn));
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+
+  test('a wide percent range still offers the usual small increments (digits already coarse enough)', () => {
+    const incrs = incrsFor('percent', 0, 100);
+    expect(incrs).toContain(1);
+    expect(incrs).toContain(2);
+    expect(incrs).toContain(2.5);
+    expect(incrs).toContain(5);
+  });
+
+  test('volt keeps its three decimals: a 0.001 step is safe, unlike a coarser unit', () => {
+    const incrs = incrsFor('volt', 1.198, 1.212);
+    expect(Math.min(...incrs)).toBeLessThanOrEqual(0.005);
+  });
 });

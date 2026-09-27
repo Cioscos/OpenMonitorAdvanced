@@ -117,6 +117,13 @@ test('seeds the default series and draws them on two unit scales', async () => {
   expect(plot.opts.axes?.[0].values).toEqual([]);
   expect(plot.opts.axes?.[0].grid?.show).toBe(false);
   expect(plot.opts.axes?.[0].ticks?.show).toBe(false);
+
+  // The primary axis (left, follows the grid) keeps its ticks; the secondary axis (right)
+  // does not draw its own, so no stray marks appear off the scrolling grid.
+  expect(plot.opts.axes?.[1].ticks?.show).not.toBe(false);
+  expect(plot.opts.axes?.[1].grid?.show).toBe(true);
+  expect(plot.opts.axes?.[2].ticks?.show).toBe(false);
+  expect(plot.opts.axes?.[2].grid?.show).toBe(false);
 });
 
 test('long windows ask for decimated history and the choice persists', async () => {
@@ -910,6 +917,53 @@ describe.each(['en', 'it'] as const)('X labels in %s', (locale) => {
       expect(new Set(labels).size).toBe(labels.length);
     }
   });
+});
+
+/**
+ * The Y axes of a real uPlot 1.6.32 built from the component's options at the chart's own
+ * height, with fixed scale ranges, so uPlot's own increment table and label filter choose the
+ * splits and render the labels via `axis.values`.
+ */
+async function realYAxes(configured: FakeUplot, ranges: { percent: [number, number]; celsius: [number, number] }) {
+  const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const ctx = new Proxy({
+    font: '12px sans-serif',
+    measureText(text: string) { return { width: arialWidth(text, Number.parseFloat(this.font)) }; },
+  }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => {} });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const target = document.createElement('div');
+  document.body.append(target);
+  const { draw: _draw, ...hooks } = configured.opts.hooks ?? {};
+  const actual = new RealUplot({ ...configured.opts, hooks }, configured.data, target);
+  actual.batch(() => {
+    actual.setScale('x', configured.scales.at(-1)!.range);
+    actual.setScale('percent', { min: ranges.percent[0], max: ranges.percent[1] });
+    actual.setScale('celsius', { min: ranges.celsius[0], max: ranges.celsius[1] });
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const percentAxis = actual.axes[1] as unknown as { _values: string[] };
+  const celsiusAxis = actual.axes[2] as unknown as { _values: string[] };
+  const result = {
+    percentTicks: actual.axes[1].ticks?.show,
+    celsiusTicks: actual.axes[2].ticks?.show,
+    percentLabels: [...percentAxis._values],
+    celsiusLabels: [...celsiusAxis._values],
+  };
+  actual.destroy();
+  target.remove();
+  return result;
+}
+
+test('the secondary axis never repeats a label on a narrow real temperature range, and draws no ticks', async () => {
+  const backend = fakeBackend();
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const axes = await realYAxes(plots[0], { percent: [0, 100], celsius: [42.6, 44.3] });
+  expect(axes.celsiusLabels.length).toBeGreaterThan(1);
+  expect(new Set(axes.celsiusLabels).size).toBe(axes.celsiusLabels.length);
+  expect(axes.celsiusTicks).toBe(false);
+  expect(axes.percentTicks).not.toBe(false);
 });
 
 test('a 1 min window at 651 px shows seconds on splits wide enough for them in en and it', async () => {

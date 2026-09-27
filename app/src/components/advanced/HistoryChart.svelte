@@ -13,6 +13,7 @@
     fitSelection,
     formatTimeTick,
     initialSeries,
+    labelSafeIncrs,
     maxPointsFor,
     scaleLayout,
     scaleOptions,
@@ -313,13 +314,18 @@
     // Known limit until the M5 unit settings: network sensors carry BytesPerSecond, so the
     // axis and legend below stay in byte/s even though the KPIs and table (formatRate) show
     // the same values converted to bit/s (see docs/follow-ups.md).
+    // The horizontal grid follows the primary axis (side 3): its ticks line up with the grid,
+    // so they stay on; the secondary axis (side 1) has no grid of its own, so a fixed tick mark
+    // there would sit off the scrolling grid, and is left off. Both axes restrict uPlot's split
+    // increments to ones coarse enough that their labels never repeat.
     const axis = (unit: (typeof scales)[number], side: 1 | 3): uPlot.Axis => ({
       scale: unit,
       side,
       size: 72,
       stroke: muted,
       grid: { show: side === 3, stroke: border, width: 1 },
-      ticks: { stroke: border, width: 1 },
+      ticks: { show: side === 3, stroke: border, width: 1 },
+      incrs: labelSafeIncrs(unit, i18n.locale, t),
       values: (_u, splits) => splits.map((v) => formatValue(v, unit, i18n.locale, t)),
     });
     const paths: ChartCanvasPath[] = ids.map((_, i) => ({ stroke: null, gapsClip: null, color: palette[i] }));

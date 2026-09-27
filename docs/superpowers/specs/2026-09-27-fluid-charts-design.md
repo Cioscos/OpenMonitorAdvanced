@@ -66,12 +66,18 @@ di nuovo questo design prima di migrarvi. Non si ripiega silenziosamente su
   alla zona del grafico impedisce di invadere gli assi Y. Al nuovo snapshot
   il canvas si ridisegna sulla nuova base temporale e la traslazione
   riparte dalla posizione equivalente, senza salto. Tra due campioni un
-  frame cambia solo la trasformazione dei livelli già disegnati (il canvas
-  statico e il livello fisso del punto): nessuna scrittura di geometria,
-  dimensione, attributo o proprietà CSS personalizzata; l'unica eccezione è
-  la compensazione dello scarto del cursore, scritta solo mentre il
-  puntatore è sopra il grafico (protocollo di misura in
-  `docs/perf-budget.md`). Il ritardo recuperato dopo una pausa resta
+  frame cambia solo la trasformazione del livello già disegnato che scorre
+  (il canvas statico della vista Avanzata, il wrapper SVG di ciascun
+  minigrafico); il livello fisso del punto non si trasla. Nessuna scrittura
+  di geometria, dimensione, attributo o proprietà CSS personalizzata, con
+  poche eccezioni circoscritte: la compensazione dello scarto del cursore,
+  scritta solo mentre il puntatore è sopra il grafico; il ridisegno del
+  canvas quando l'overscan si esaurisce (nuova base temporale), quando il
+  tratto mantenuto scade perché il suo campione esce dalla finestra e a
+  ogni frame della transizione Y di 180 ms; nel minigrafico, la visibilità
+  di tratto mantenuto e punto, commutata una sola volta quando il tratto
+  scade (protocollo di misura in `docs/perf-budget.md`). Il ritardo
+  recuperato dopo una pausa resta
   limitato: un ritorno dalla tray non produce un'animazione accelerata.
 - Il tratto a valore mantenuto di ciascuna serie Avanzata è disegnato nel
   canvas statico composito, insieme alle curve e all'asse X: parte dalla

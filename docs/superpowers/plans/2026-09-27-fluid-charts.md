@@ -1,5 +1,7 @@
 # Grafici fluidi — Implementation Plan
 
+> **Superato:** questo piano (ridisegno continuo con `setScale` a ogni frame) è stato sostituito da `docs/superpowers/plans/2026-09-27-fluid-charts-composited.md` dopo la prova release, che ne ha misurato costi oltre il budget. Resta come storico; non va eseguito.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Far scorrere i grafici delle viste Semplificata e Avanzata a circa 60 FPS, con curve senza overshoot, punto finale bianco e glow leggero.

@@ -2,14 +2,24 @@
 
 ## Grafici fluidi — protocollo release e verifica in corso
 
-Stato al 2026-09-27: prime misure dal vivo eseguite, criteri complessivi **non
-soddisfatti**. La release provata deriva dal commit `50f201124e2df68c30afacf6b6a4e0b00979bf39`:
-`target/release/oma-app.exe` SHA-256
-`5E62C5C9F521BC6A67FE70590348EBB89CF350BB76CD46A6027F8E860249217C`.
-Il successivo fix del bordo sinistro (`5287167`) non è ancora incluso in quella
-release. Dopo ulteriori correzioni, ricompilare e registrare il nuovo commit e hash.
+Stato al 2026-09-27: il gate anticipato del compositor (Task 5) è stato
+superato sulla release del commit `f5e54b5` (vedi "Gate anticipato del
+compositor" sotto). La verifica finale del Task 7 — storico pieno, tracce di
+almeno 60 s, almeno un'ora visibile e tray — resta da eseguire, perciò i
+criteri complessivi non sono ancora dichiarati **soddisfatti**. Le misure
+preliminari qui sotto si riferiscono al primo design, a ridisegno continuo,
+poi sostituito dall'architettura a compositor verificata nel gate anticipato:
+sono conservate come storico e non descrivono lo stato attuale. Dopo la
+verifica del Task 7, aggiornare questa sezione con l'esito completo sulla
+build finale.
 
 ### Misure diagnostiche preliminari
+
+*(Design superato: le misure di questa sottosezione riguardano il primo
+design a ridisegno continuo delle serie, prima della riscrittura a
+compositor del Task 5. Sono conservate come storico, non come stato
+attuale — vedi "Gate anticipato del compositor" più sotto per le misure
+sull'architettura corrente.)*
 
 Macchina: Windows 11 Pro 10.0.26200, AMD Ryzen 7 7800X3D (16 processori
 logici), 32 GB RAM, NVIDIA RTX 4080 (driver 32.0.16.1714), 2560×1440 a
@@ -46,6 +56,87 @@ Dimostra che evitare il ridisegno completo può ridurre la memoria, ma la CPU
 muoveva anche assi ed etichette. La prova continua di un'ora è stata interrotta
 quando l'utente ha cambiato la scala da 1 h a 1 min per esaminare la resa;
 nessun risultato di soak o storico pieno viene dichiarato.
+
+### Gate anticipato del compositor (Task 5)
+
+Stessa macchina delle misure preliminari sopra: Windows 11 Pro 10.0.26200,
+AMD Ryzen 7 7800X3D (16 processori logici), 32 GB RAM, NVIDIA RTX 4080,
+display 2560×1440 a **164 Hz** — esplicitamente **non** una prova a 60 Hz —
+e runtime WebView2 già indicato sopra. Servizio `oma-service` connesso e
+`TotalAppCpuValid=True` in ogni riga. Storico **breve** in entrambe le
+misure, non lo storico pieno del Task 7. Viste: Avanzata sulla pagina GPU
+`gpu/pci-0000:01:00.0`, finestra 1 min, 8 serie verificate; Semplificata.
+
+| Misura / vista | CPU app+WebView2 % | Memoria privata MB | Esito del budget |
+|---|---:|---:|---|
+| 037c040, Avanzata GPU, 1 min, 8 serie, storico breve | 1,20 | 163,5 | CPU oltre limite |
+| 037c040, Semplificata | 1,50 | 206,6 | CPU e memoria oltre limite |
+| f5e54b5, Avanzata GPU, 1 min, 8 serie, storico breve | 0,97 | 154,5 | entro i limiti (margine CPU minimo) |
+| f5e54b5, Semplificata | 0,81 | 121,4 | entro i limiti |
+
+**Prima misura del compositor**, 2026-09-27 21:10–21:19, release dal commit
+`037c040`, `oma-app.exe` SHA-256
+`CD237BC406DFC162E0C10517AE307C2B3609003C3B27B1B904FC02A216E4D7EA`. Le
+finestre non sono state osservate dall'utente in questa misura (esecuzioni
+automatiche, nessun puntatore sui grafici); le tracce mostrano comunque
+`requestAnimationFrame` a 164 Hz, quindi le finestre non erano nascoste.
+`TotalAppPercentCpu` valido, 7 processi app+WebView2 in entrambe le righe.
+Traccia WebView2 di 60 s: Avanzata 3722 eventi `DrawFrame` (62/s),
+intervallo mediano 18,058 ms (≈55,4 FPS), p95 18,445 ms; Semplificata 7241
+eventi `DrawFrame` (≈120/s), mediana 6,206 ms, p95 12,225 ms.
+
+Il profiling ha individuato le cause e le correzioni applicate: l'orologio
+dei frame dei grafici dava a ogni sottoscrittore una fase propria, così le
+quattro sparkline si ridisegnavano su vsync diversi (~120 frame/s in
+Semplificata) — corretto con un'unica fase condivisa per frequenza (commit
+`a2bc0cc`); i frame fra un campione e l'altro ridisegnavano comunque
+qualcosa (la larghezza del marcatore in Avanzata, la geometria SVG in
+Semplificata, la proprietà custom dell'offset del cursore scritta a ogni
+frame) — corretto limitando i frame intermedi a un solo cambio di
+`transform` su livelli già disegnati, con il segmento mantenuto disegnato
+nel livello traslato e l'offset del cursore aggiornato solo durante l'hover
+(`933c5c0`); le etichette dell'asse X con i secondi sotto 1 min e la
+spaziatura delle etichette misurata (`709bed8`, `f5e54b5`). Il thread
+principale del renderer costava solo circa 0,18–0,24 % della macchina: la
+maggior parte del costo è del compositor/GPU/browser e scala con i frame
+disegnati, non con il lavoro JavaScript.
+
+**Seconda misura**, 2026-09-27 22:29–22:37, release dal commit `f5e54b5`,
+SHA-256 `C194295C0F3E15B6431B1982EC2FDBC07297CE56BCAA4ECD607BFE980419D4AA`.
+Utente presente, finestre visibili, nessun puntatore sui grafici, viste
+confermate a vista. Carico in parallelo: OpenCode con un modello llama
+locale caricato in VRAM (15,6/16 GB) ma inattivo (nessuna inferenza in
+corso). Protocollo: 30 s di warm-up + 60 s di campionamento pulito per
+vista, poi una traccia WebView2 separata di 60 s (la corsa di tracing non è
+stata usata per CPU/memoria). Avanzata: 0,97 % (valido, 7 processi), 154,5
+MB → entro i limiti con margine CPU minimo; traccia 3637 `DrawFrame` in
+60,012 s (60,6/s), mediana 18,103 ms (≈55,2 FPS), p95 18,642 ms.
+Semplificata: 0,81 %, 121,4 MB → entro i limiti; traccia 3758 `DrawFrame` in
+59,982 s (62,7/s), mediana 18,092 ms (≈55,3 FPS), p95 18,531 ms.
+
+Verifica visiva dell'utente: scorrimento fluido in entrambe le viste; punto
+bianco intero al bordo destro; segmento mantenuto con lo stesso glow della
+sua linea; percorso della sparkline, segmento mantenuto e punto uniti senza
+discontinuità; etichette X in formato HH:MM:SS alla finestra di 1 min.
+L'utente ha segnalato le tacche dell'asse Y secondario (°C) non allineate
+alla griglia: difetto preesistente su `main`, corretto successivamente nei
+commit `3423f87` e `44893ce` (cambio dell'asse statico, non rimisurato qui;
+il Task 7 misurerà la build finale). Confronto con la baseline di `main`
+(grafici statici): 0,19 % / 127,7 MB in Avanzata e 0,23 % / 115,8 MB in
+Semplificata. Vale anche qui la nota sulla quantizzazione del refresh già
+riportata sopra: a 164 Hz l'intervallo mediano di circa 18 ms corrisponde a
+~55 FPS mentre la frequenza media dei `DrawFrame` è di circa 61/s — sono due
+aspetti diversi della stessa prova, non un errore.
+
+**Frequenza dei frame come compromesso di leggerezza.** Tutte le misure di
+questa sottosezione sono al limite di 60 FPS; l'orologio condiviso dei
+grafici è già progettato anche per 30 e 15 FPS. Quando sarà implementata la
+schermata delle impostazioni, l'utente potrà scegliere 60, 30 o 15 FPS per i
+grafici: frequenze più basse riducono la CPU perché il costo scala con i
+frame disegnati. Poiché la leggerezza è uno dei punti di forza principali
+dell'app, l'opzione 60 FPS nelle impostazioni dovrà indicare accanto a sé
+che aumenta leggermente l'uso di CPU dell'app (su questa macchina circa
++0,6–0,8 punti percentuali rispetto ai grafici statici, dai numeri sopra).
 
 ### Procedura riproducibile
 

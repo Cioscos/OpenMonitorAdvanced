@@ -10,7 +10,6 @@
     WINDOWS,
     canAdd,
     fitSelection,
-    formatTimeTick,
     initialSeries,
     maxPointsFor,
     scaleLayout,
@@ -18,7 +17,8 @@
     seriesPalette,
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
-  import { drawChartSeriesDecoration } from '../../lib/advanced/chartDecoration';
+  import { drawChartCanvas, type ChartCanvasPath } from '../../lib/advanced/chartCanvas';
+  import { heldLengthPx, scrollOffsetPx, timeTicks } from '../../lib/chartCompositor';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { loadSeries, loadWindow, saveSeries, saveWindow } from '../../lib/advanced/persist';
@@ -62,7 +62,114 @@
   let viewport = createChartViewport(DEFAULT_WINDOW);
   let reducedMotion = false;
   let generation = 0;
+  let viewportRevision: number | undefined;
   let destroyed = false;
+  let canvas: HTMLCanvasElement | undefined;
+  let canvasClip: HTMLDivElement | undefined;
+  let markerClip: HTMLDivElement | undefined;
+  let markers: HTMLDivElement[] = [];
+  let baseRightMs = 0;
+  let tickIncrement = 60;
+  let autoscaleY = true;
+
+  function clearLayers() {
+    canvasClip?.remove();
+    markerClip?.remove();
+    canvas = undefined;
+    canvasClip = undefined;
+    markerClip = undefined;
+    markers = [];
+  }
+
+  function createLayers(colors: string[]) {
+    if (!plot) return;
+    clearLayers();
+    canvasClip = document.createElement('div');
+    canvasClip.className = 'chart-canvas-clip';
+    canvas = document.createElement('canvas');
+    canvas.className = 'chart-canvas';
+    canvasClip.append(canvas);
+    markerClip = document.createElement('div');
+    markerClip.className = 'chart-marker-clip';
+    for (const color of colors) {
+      const marker = document.createElement('div');
+      marker.className = 'chart-marker';
+      marker.style.color = color;
+      marker.hidden = true;
+      marker.append(document.createElement('i'));
+      markers.push(marker);
+      markerClip.append(marker);
+    }
+    // The wrap shares uPlot's canvas origin; its sibling legend has its own layout.
+    plot.over.parentElement!.append(canvasClip, markerClip);
+  }
+
+  function paint(u: uPlot, paths: ChartCanvasPath[], theme: { gridColor: string; textColor: string }) {
+    if (!canvas || !canvasClip || !markerClip) return;
+    const ratio = uPlot.pxRatio;
+    const { left, top, width, height } = u.bbox;
+    const axisHeight = 40 * ratio;
+    const leftOverscan = 72 * ratio;
+    // One window of overscan keeps memory bounded, even if telemetry stops.
+    for (const layer of [canvasClip, markerClip]) {
+      layer.style.left = `${left / ratio}px`;
+      layer.style.top = `${top / ratio}px`;
+      layer.style.width = `${width / ratio}px`;
+    }
+    canvasClip.style.height = `${(height + axisHeight) / ratio}px`;
+    markerClip.style.height = `${height / ratio}px`;
+    // Only labels need space behind the left edge; future ticks need a full window.
+    canvas.width = Math.ceil(width * 2 + leftOverscan);
+    canvas.height = Math.ceil(height + axisHeight);
+    canvas.style.width = `${(width * 2 + leftOverscan) / ratio}px`;
+    canvas.style.height = `${(height + axisHeight) / ratio}px`;
+    canvas.style.left = `${-leftOverscan / ratio}px`;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.save();
+    ctx.translate(leftOverscan - left, -top);
+    const seconds = buffer!.windowSeconds;
+    const right = baseRightMs / 1000;
+    drawChartCanvas(ctx, u, paths.filter((_, i) => u.series[i + 1].show !== false), timeTicks(right - seconds * 2, right + seconds, tickIncrement), i18n.locale, width, theme);
+    ctx.restore();
+    autoscaleY = false;
+    drawFrame(performance.now());
+  }
+
+  function rebase(nowMonoMs: number, snapshot = true) {
+    const range = viewport.range(nowMonoMs);
+    if (paused || !plot || !range) return;
+    baseRightMs = range.max * 1000;
+    autoscaleY = snapshot;
+    plot.setScale('x', range);
+    drawFrame(nowMonoMs);
+  }
+
+  function drawFrame(nowMonoMs: number) {
+    const range = viewport.range(nowMonoMs);
+    if (paused || !plot || !canvas || !buffer || !range) return;
+    const width = plot.bbox.width / uPlot.pxRatio;
+    const offset = scrollOffsetPx(baseRightMs, range.max * 1000, buffer.windowSeconds * 1000, width);
+    if (offset > width) {
+      rebase(nowMonoMs, false);
+      return;
+    }
+    canvas.style.transform = `translateX(${-offset}px)`;
+    const length = heldLengthPx(buffer.lastTimestampMs, range.max * 1000, buffer.windowSeconds * 1000, width);
+    const data = plot.data;
+    for (let i = 0; i < markers.length; i++) {
+      const value = data[i + 1]?.at(-1);
+      const marker = markers[i];
+      const scale = plot.series[i + 1].scale!;
+      const y = value == null ? NaN : (plot.valToPos(value, scale, true) - plot.bbox.top) / uPlot.pxRatio;
+      marker.hidden = plot.series[i + 1].show === false || length === null || value == null || !Number.isFinite(value) || !Number.isFinite(y) || y < 0 || y > plot.bbox.height / uPlot.pxRatio;
+      if (!marker.hidden) {
+        marker.style.width = `${length}px`;
+        marker.style.top = `${y}px`;
+        marker.style.right = '0px';
+      }
+    }
+  }
 
   function chooseWindow(w: WindowSeconds) {
     windowSeconds = w;
@@ -79,10 +186,14 @@
   async function reseed(ids: string[], seconds: WindowSeconds) {
     const token = ++generation;
     const revision = schema.revision;
+    const previousEdge = viewportRevision === revision ? viewport.range(performance.now())?.max : undefined;
+    viewportRevision = revision;
     // Never append values from a new schema to a plot of the previous source/unit.
     buffer = undefined;
     viewport = createChartViewport(seconds);
+    if (previousEdge !== undefined) viewport.sample(previousEdge * 1000, performance.now());
     if (reducedMotion) viewport.suspend(performance.now());
+    clearLayers();
     plot?.destroy();
     plot = undefined;
     let history: HistorySeed = { revision, seq: 0, timestampsMs: [], series: [] };
@@ -106,6 +217,8 @@
   }
 
   function build(ids: string[]) {
+    autoscaleY = true;
+    clearLayers();
     plot?.destroy();
     plot = undefined;
     if (!buffer || ids.length === 0) return;
@@ -128,60 +241,56 @@
       ticks: { stroke: border, width: 1 },
       values: (_u, splits) => splits.map((v) => formatValue(v, unit, i18n.locale, t)),
     });
-    const decorations: Array<(u: uPlot, seriesIdx: number) => void> = [];
+    const paths: ChartCanvasPath[] = ids.map((_, i) => ({ stroke: null, gapsClip: null, color: palette[i] }));
     const opts: uPlot.Options = {
       width: Math.max(320, container.clientWidth || 800),
       height: HEIGHT,
       cursor: { drag: { x: false, y: false, setScale: false } },
-      scales: Object.fromEntries([['x', { time: true }], ...scales.map((unit) => [unit, scaleOptions(unit)])]),
+      scales: Object.fromEntries([['x', { time: true }], ...scales.map((unit) => [unit, { ...scaleOptions(unit), auto: () => autoscaleY }])]),
       series: [
         { label: '', value: (_u, v) => (v == null ? DASH : new Date(v * 1000).toLocaleTimeString(i18n.locale)) },
         ...ids.map((id, i) => {
           const sensor = byId.get(id);
           const unit = seriesScale[i];
           const spline = uPlot.paths.spline!();
-          let strokePath: Path2D | null = null;
-          let gapsClip: Path2D | null = null;
-          // Capture public path-builder results per series and per plot generation.
-          // uPlot may reuse these paths on redraws that do not change geometry.
-          const paths: uPlot.Series.PathBuilder = (u, seriesIdx, first, last) => {
+          const capture: uPlot.Series.PathBuilder = (u, seriesIdx, first, last) => {
             const result = spline(u, seriesIdx, first, last);
-            strokePath = result?.stroke instanceof Path2D ? result.stroke : null;
-            gapsClip = result?.clip ?? null;
-            return result;
+            paths[i] = { stroke: result?.stroke instanceof Path2D ? result.stroke : null, gapsClip: result?.clip ?? null, color: palette[i] };
+            // uPlot owns data and Y scales; only the composited canvas strokes the path.
+            return null;
           };
-          decorations.push((u, seriesIdx) => drawChartSeriesDecoration(u, seriesIdx, strokePath, gapsClip, palette[i]));
           return {
             label: sensor ? sensorLabel(sensor, t) : id,
             scale: unit,
             stroke: palette[i],
             width: 1.5,
-            paths,
+            paths: capture,
             spanGaps: false,
             points: { show: false },
             value: (_u: uPlot, v: number | null) => formatValue(v ?? null, unit, i18n.locale, t),
           };
         }),
       ],
-      hooks: { drawSeries: [(u, seriesIdx) => decorations[seriesIdx - 1]?.(u, seriesIdx)] },
+      hooks: { draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })] },
       axes: [
         {
           stroke: muted,
-          grid: { stroke: border, width: 1 },
-          ticks: { stroke: border, width: 1 },
-          values: (_u, splits) => splits.map((v) => formatTimeTick(v, i18n.locale)),
+          size: 40,
+          grid: { show: false },
+          ticks: { show: false },
+          values: [],
+          splits: (_u, _axis, min, max, increment) => {
+            if (Number.isFinite(increment) && increment > 0) tickIncrement = increment;
+            return timeTicks(min, max, tickIncrement);
+          },
         },
         axis(scales[0], 3),
         ...(scales[1] ? [axis(scales[1], 1)] : []),
       ],
     };
     plot = new uPlot(opts, buffer.data(), container);
-    drawScale(performance.now());
-  }
-
-  function drawScale(nowMonoMs: number) {
-    const range = viewport.range(nowMonoMs);
-    if (!paused && plot && range) plot.setScale('x', range);
+    createLayers(ids.map((_, i) => palette[i]));
+    rebase(performance.now());
   }
 
   function tail(timestampMs: number) {
@@ -195,8 +304,10 @@
     buffer.append(timestampMs, buffer.ids.map((id) => store.value(id)));
     buffer.trim(timestampMs);
     viewport.sample(timestampMs, performance.now());
-    plot.setData(buffer.data(), false);
-    drawScale(performance.now());
+    plot.batch(() => {
+      plot!.setData(buffer!.data(), false);
+      rebase(performance.now());
+    });
   }
 
   // Reseed on selection, window or schema change, and when the window becomes visible again.
@@ -214,6 +325,12 @@
     untrack(() => tail(timestampMs));
   });
 
+  // Locale affects both the cached time labels and uPlot's legend/Y labels.
+  $effect(() => {
+    void i18n.locale;
+    untrack(() => { if (!paused && buffer) build(buffer.ids); });
+  });
+
   onMount(() => {
     const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     reducedMotion = motionQuery.matches;
@@ -224,26 +341,44 @@
       else viewport.resume(performance.now());
     };
     motionQuery.addEventListener('change', onMotionChange);
-    const stopFrames = subscribeChartFrame(drawScale);
+    const stopFrames = subscribeChartFrame(drawFrame);
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
-      if (paused) generation++; // Invalidate history that is still in flight.
+      if (paused) {
+        generation++; // Invalidate history that is still in flight.
+        viewport.reset();
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
     const observer =
       typeof ResizeObserver === 'undefined'
         ? undefined
         : new ResizeObserver(() => {
-            if (!paused) plot?.setSize({ width: Math.max(320, container.clientWidth), height: HEIGHT });
+            if (!paused && buffer) build(buffer.ids);
           });
     observer?.observe(container);
+    const refresh = () => { if (!paused && buffer) build(buffer.ids); };
+    const themeObserver = new MutationObserver(refresh);
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    let densityQuery: MediaQueryList;
+    const onDensity = () => {
+      densityQuery?.removeEventListener('change', onDensity);
+      densityQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      densityQuery.addEventListener('change', onDensity);
+      refresh();
+    };
+    densityQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    densityQuery.addEventListener('change', onDensity);
     return () => {
       destroyed = true;
       generation++;
       document.removeEventListener('visibilitychange', onVisibility);
       observer?.disconnect();
+      themeObserver.disconnect();
+      densityQuery.removeEventListener('change', onDensity);
       motionQuery.removeEventListener('change', onMotionChange);
       stopFrames();
+      clearLayers();
       plot?.destroy();
       plot = undefined;
     };
@@ -367,6 +502,34 @@
   }
   .plot {
     min-height: 260px;
+  }
+  .plot :global(.chart-canvas-clip),
+  .plot :global(.chart-marker-clip) {
+    position: absolute;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .plot :global(.chart-canvas) {
+    position: absolute;
+    top: 0;
+    will-change: transform;
+  }
+  .plot :global(.chart-marker) {
+    position: absolute;
+    height: 1.5px;
+    background: currentColor;
+    box-shadow: 0 0 3px currentColor;
+    transform: translateY(-50%);
+  }
+  .plot :global(.chart-marker i) {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    background: white;
+    border-radius: 50%;
+    transform: translate(50%, -50%);
   }
   .empty {
     position: absolute;

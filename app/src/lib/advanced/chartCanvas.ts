@@ -18,18 +18,19 @@ export function drawChartCanvas(
   theme: { gridColor: string; textColor: string },
 ): void {
   const { left, top, width, height } = plot.bbox;
+  const start = left - Math.max(0, overscanPx);
   const right = left + width + Math.max(0, overscanPx);
   const bottom = top + height;
   const ratio = uPlot.pxRatio;
   const tickXs = ticks
     .map((tick) => ({ tick, x: plot.valToPos(tick, 'x', true) }))
-    .filter(({ x }) => Number.isFinite(x) && x >= left && x <= right);
+    .filter(({ x }) => Number.isFinite(x) && x >= start && x <= right);
 
   if (tickXs.length > 0) {
     ctx.save();
     try {
       ctx.beginPath();
-      ctx.rect(left, top, right - left, height);
+      ctx.rect(start, top, right - start, height);
       ctx.clip();
       ctx.beginPath();
       for (const { x } of tickXs) {
@@ -52,7 +53,7 @@ export function drawChartCanvas(
     ctx.save();
     try {
       ctx.beginPath();
-      ctx.rect(left, top, right - left, height);
+      ctx.rect(start, top, right - start, height);
       ctx.clip();
       if (gapsClip) ctx.clip(gapsClip);
       ctx.shadowBlur = 0;

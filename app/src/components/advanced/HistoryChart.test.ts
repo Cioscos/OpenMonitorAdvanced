@@ -7,6 +7,7 @@ import { LiveStore } from '../../lib/live.svelte';
 import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { FakeUplot } from '../../test/uplot-stub';
+import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import HistoryChart from './HistoryChart.svelte';
 
 const plots = FakeUplot.instances;
@@ -42,6 +43,14 @@ const setVisibility = (state: DocumentVisibilityState) => {
 };
 
 beforeEach(() => {
+  vi.stubGlobal('Path2D', RecordingPath);
+  const contexts = new WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>();
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    if (!contexts.has(this)) contexts.set(this, {
+      ...canvasFixture([[0], [1]]).ctx, clearRect: vi.fn(), translate: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    return contexts.get(this)!;
+  });
   plots.length = 0;
   localStorage.clear();
   i18n.locale = 'en';
@@ -61,7 +70,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', (query: string) => ({
     get matches() { return reducedMotion; },
     media: query,
-    addEventListener: (_type: string, listener: () => void) => motionListeners.add(listener),
+    addEventListener: (_type: string, listener: () => void) => { if (query.includes('reduced-motion')) motionListeners.add(listener); },
     removeEventListener: (_type: string, listener: () => void) => motionListeners.delete(listener),
   }));
 });
@@ -93,12 +102,9 @@ test('seeds the default series and draws them on two unit scales', async () => {
   expect(plot.data).toEqual([[1, 2], [10, 20], [11, 21]]);
   expect(screen.getByRole('button', { name: t('advanced.chart.window.300') }).getAttribute('aria-pressed')).toBe('true');
 
-  const xValues = plot.opts.axes?.[0].values;
-  expect(xValues).toBeTypeOf('function');
-  const seconds = Date.UTC(2026, 0, 1, 15, 45) / 1000;
-  expect((xValues as (u: unknown, splits: number[]) => string[])(plot, [seconds])).toEqual([
-    new Date(seconds * 1000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }),
-  ]);
+  expect(plot.opts.axes?.[0].values).toEqual([]);
+  expect(plot.opts.axes?.[0].grid?.show).toBe(false);
+  expect(plot.opts.axes?.[0].ticks?.show).toBe(false);
 });
 
 test('long windows ask for decimated history and the choice persists', async () => {
@@ -271,16 +277,22 @@ test('unmounting destroys the plot', async () => {
   expect(plots[0].destroyed).toBe(true);
 });
 
-test('frames scroll the x scale without replacing snapshot data', async () => {
+test('frames translate the shared series and X canvas without rebuilding uPlot or replacing data', async () => {
   const store = new LiveStore();
   renderChart(fakeBackend(), store);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
   const plot = plots[0];
+  const scaleCalls = plot.scales.length;
+  const paintCalls = vi.mocked(HTMLCanvasElement.prototype.getContext).mock.calls.length;
   expect(plot.setDataCalls).toBe(0);
   frame(0);
   frame(250);
   expect(plot.setDataCalls).toBe(0);
-  expect(plot.scales.at(-1)).toEqual({ key: 'x', range: { min: -297.75, max: 2.25 } });
+  expect(plot.scales).toHaveLength(scaleCalls);
+  expect(vi.mocked(HTMLCanvasElement.prototype.getContext)).toHaveBeenCalledTimes(paintCalls);
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  expect(canvas).not.toBeNull();
+  expect(canvas.style.transform).toBe(`translateX(${-0.25 * plot.bbox.width / 300}px)`);
 
   monotonicMs = 500;
   store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
@@ -288,7 +300,8 @@ test('frames scroll the x scale without replacing snapshot data', async () => {
   expect(plot.setDataCalls).toBe(1);
   frame(750);
   expect(plot.setDataCalls).toBe(1);
-  expect(plot.scales.at(-1)).toEqual({ key: 'x', range: { min: -296.75, max: 3.25 } });
+  expect(plot.scales.at(-1)).toEqual({ key: 'x', range: { min: -297, max: 3 } });
+  expect(canvas.style.transform).toBe(`translateX(${-0.25 * plot.bbox.width / 300}px)`);
 });
 
 test('hiding and unmounting stop scale changes', async () => {
@@ -356,54 +369,204 @@ test('reduced-motion pause keeps snapshots visible and resumes without replaying
   expect(plots[0].scales.at(-1)?.range.max).toBe(3);
 });
 
-test('uses the real spline and preserves null gap clipping on each unit scale', async () => {
-  const { canvasFixture, RecordingPath } = await import('../../test/uplot-canvas');
-  vi.stubGlobal('Path2D', RecordingPath);
+test('captures real spline gap clips for the composite and suppresses native strokes', async () => {
   const backend = fakeBackend();
   backend.history = { timestampsMs: [0, 1000, 2000, 3000, 4000], series: [[10, 20, null, 30, 40], [40, 80, null, 100, 120]] };
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
   const configured = plots[0];
-  const { plot, ctx } = canvasFixture(configured.data, configured.opts.series);
+  const fixture = canvasFixture(configured.data, configured.opts.series);
+  const contexts = vi.mocked(HTMLCanvasElement.prototype.getContext).mock.results.map((r) => r.value);
+  const ctx = contexts.at(-1)! as CanvasRenderingContext2D;
+  vi.mocked(ctx.stroke).mockClear();
+  vi.mocked(ctx.clip).mockClear();
   for (let i = 1; i <= 2; i++) {
-    const series = configured.opts.series[i];
-    expect(series.paths).toBeTypeOf('function');
-    expect(series.spanGaps).toBe(false);
-    const paths = series.paths!(plot, i, 0, 4)!;
-    expect((paths.stroke as unknown as InstanceType<typeof RecordingPath>).commands.some((c) => c.kind === 'cubic')).toBe(true);
-    expect(paths.clip).toBeTruthy();
-    configured.opts.hooks!.drawSeries![0]!(plot, i);
-    expect(ctx.stroke).toHaveBeenLastCalledWith(paths.stroke);
-    expect(ctx.clip).toHaveBeenLastCalledWith(paths.clip);
+    expect(configured.opts.series[i].paths!(fixture.plot, i, 0, 4)).toBeNull();
   }
-  expect(ctx.arc.mock.calls.map((args) => args.slice(0, 2))).toEqual([[410, 140], [410, 100]]);
+  configured.opts.hooks!.draw![0]!(fixture.plot);
+  const strokes = vi.mocked(ctx.stroke).mock.calls.map((c) => c[0]).filter(Boolean) as unknown as RecordingPath[];
+  expect(strokes).toHaveLength(4);
+  expect(strokes.every((p) => p.commands.some((c) => c.kind === 'cubic'))).toBe(true);
+  expect(vi.mocked(ctx.clip).mock.calls.filter((c) => c[0])).toHaveLength(2);
 });
 
-test('reseeded selection decorates the new sensor column and never reuses the previous path', async () => {
-  const { canvasFixture, RecordingPath } = await import('../../test/uplot-canvas');
-  vi.stubGlobal('Path2D', RecordingPath);
+test('keeps fixed held segments and white points for valid final values only', async () => {
+  const backend = fakeBackend();
+  backend.history = { timestampsMs: [1000, 2000], series: [[10, 20], [11, null]] };
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const markers = [...document.querySelectorAll<HTMLElement>('.chart-marker')];
+  expect(markers).toHaveLength(2);
+  expect(markers[0].hidden).toBe(false);
+  expect(markers[1].hidden).toBe(true);
+  frame(1000);
+  expect(markers[0].style.width).toBe('2px');
+  expect(markers[0].style.right).toBe('0px');
+  frame(301_000);
+  expect(markers.every((m) => m.hidden)).toBe(true);
+});
+
+test('rebases delayed snapshots at the displayed edge without adding synthetic samples', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(5000);
+  monotonicMs = 5000;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(plots[0].scales.at(-1)?.range.max).toBe(7);
+  expect(plots[0].data[0]).toEqual([1, 2, 3]);
+  expect(document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform).toBe('translateX(0px)');
+  expect(document.querySelector<HTMLElement>('.chart-marker')!.style.width).toBe('8px');
+});
+
+test('replenishes X ticks after a full window of silence without per-frame redraws', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  const count = plot.scales.length;
+  const ctx = document.querySelector<HTMLCanvasElement>('.chart-canvas')!.getContext('2d')!;
+  const label = new Date(300_000).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  const before = vi.mocked(ctx.fillText).mock.calls.find(([text]) => text === label)![1];
+  frame(299_000);
+  expect(plot.scales).toHaveLength(count);
+  vi.mocked(ctx.fillText).mockClear();
+  frame(301_000);
+  expect(plot.scales).toHaveLength(count + 1);
+  expect(plot.yAutoDecisions.at(-1)).toEqual([false, false]);
+  expect(plot.scales.at(-1)?.range.max).toBe(303);
+  const after = vi.mocked(ctx.fillText).mock.calls.find(([text]) => text === label)![1];
+  expect(after).toBeCloseTo(before - 301 * plot.bbox.width / 300);
+  expect(document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform).toBe('translateX(0px)');
+  frame(302_000);
+  expect(plot.scales).toHaveLength(count + 1);
+  expect(document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform).toBe('translateX(-2px)');
+  expect(plot.setDataCalls).toBe(0);
+});
+
+test('selection and range reseeds keep the already displayed edge', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(5000);
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect(plots[1].scales.at(-1)?.range.max).toBe(7);
+  await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.60') }));
+  await vi.waitFor(() => expect(plots).toHaveLength(3));
+  expect(plots[2].scales.at(-1)?.range).toEqual({ min: -53, max: 7 });
+});
+
+test.each([null, NaN, Infinity])('omits the marker for a nonfinite final value %s', async (value) => {
+  const backend = fakeBackend();
+  backend.history = { timestampsMs: [1000, 2000], series: [[10, value], [11, 21]] };
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(document.querySelector<HTMLElement>('.chart-marker')!.hidden).toBe(true);
+});
+
+test('locale and theme rebuild cached geometry without refetching or moving the visible edge', async () => {
   const backend = fakeBackend();
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
-  const initial = plots[0];
-  const first = canvasFixture(initial.data, initial.opts.series);
-  expect(initial.opts.series[1].paths).toBeTypeOf('function');
-  initial.opts.series[1].paths!(first.plot, 1, 0, 1);
-  initial.opts.hooks!.drawSeries![0]!(first.plot, 1);
-  backend.history = { timestampsMs: [1000, 2000], series: [[60, 120]] };
-  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  frame(5000);
+  i18n.locale = 'it';
+  flushSync();
+  expect(plots).toHaveLength(2);
+  expect(plots[1].scales.at(-1)?.range.max).toBe(7);
+  document.documentElement.style.setProperty('--accent', '#123456');
+  await vi.waitFor(() => expect(plots).toHaveLength(3));
+  expect(plots[2].opts.series[1].stroke).toBe('#123456');
+  expect(plots[2].scales.at(-1)?.range.max).toBe(7);
+  expect(backend.historyCalls).toHaveLength(1);
+});
+
+test('hides the composited path and marker when the legend hides a series', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const configured = plots[0];
+  configured.opts.series[1].show = false;
+  const fixture = canvasFixture(configured.data, configured.opts.series);
+  const ctx = document.querySelector<HTMLCanvasElement>('.chart-canvas')!.getContext('2d')!;
+  vi.mocked(ctx.stroke).mockClear();
+  configured.opts.hooks!.draw![0]!(fixture.plot);
+  expect(vi.mocked(ctx.stroke).mock.calls.filter((c) => c[0])).toHaveLength(2);
+  expect(document.querySelector<HTMLElement>('.chart-marker')!.hidden).toBe(true);
+});
+
+test('a singleton uses its real unit scale and DPR for the fixed endpoint', async () => {
+  FakeUplot.pxRatio = 2;
+  try {
+    const backend = fakeBackend();
+    backend.history = { timestampsMs: [2000], series: [[100]] };
+    renderChart(backend, new LiveStore(), gpuSensors, [TEMP]);
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    const marker = document.querySelector<HTMLElement>('.chart-marker')!;
+    expect(marker.hidden).toBe(false);
+    expect(marker.style.top).toBe('50px');
+    expect(marker.style.width).toBe('0px');
+    frame(1000);
+    expect(marker.style.width).toBe('1px');
+    expect(plots[0].data).toEqual([[2], [100]]);
+  } finally { FakeUplot.pxRatio = 1; }
+});
+
+test('resize rebuilds layers at the current edge and disconnects on teardown', async () => {
+  let resize!: ResizeObserverCallback;
+  const disconnect = vi.fn();
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    observe() {}
+    disconnect = disconnect;
+  });
+  const backend = fakeBackend();
+  const { unmount } = renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(5000);
+  resize([], {} as ResizeObserver);
+  expect(plots).toHaveLength(2);
+  expect(plots[0].destroyed).toBe(true);
+  expect(plots[1].scales.at(-1)?.range.max).toBe(7);
+  expect(document.querySelectorAll('.chart-canvas')).toHaveLength(1);
+  expect(backend.historyCalls).toHaveLength(1);
+  unmount();
+  expect(disconnect).toHaveBeenCalledOnce();
+});
+
+test('DPR change rebuilds at the current edge and keeps canvas coordinates in device pixels', async () => {
+  const listeners = new Set<() => void>();
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: false, media: query,
+    addEventListener: (_type: string, listener: () => void) => { if (query.includes('resolution')) listeners.add(listener); },
+    removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+  }) as unknown as MediaQueryList);
+  const backend = fakeBackend();
+  const { unmount } = renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(5000);
+  FakeUplot.pxRatio = 2;
+  try {
+    for (const listener of [...listeners]) listener();
+    expect(plots).toHaveLength(2);
+    expect(plots[1].scales.at(-1)?.range.max).toBe(7);
+    const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+    expect(canvas.width).toBe(1344);
+    expect(canvas.style.width).toBe('672px');
+    expect(backend.historyCalls).toHaveLength(1);
+    unmount();
+    expect(listeners.size).toBe(0);
+  } finally { FakeUplot.pxRatio = 1; }
+});
+
+test('a new schema reanchors to its own history instead of preserving the old edge', async () => {
+  const backend = fakeBackend();
+  const store = new LiveStore();
+  const { rerender } = renderChart(backend, store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(5000);
+  const schema = { ...MOCK_SCHEMA, revision: 2 };
+  store.applySchema(schema);
+  backend.getHistory = async () => ({ revision: 2, seq: 0, timestampsMs: [1000], series: [[10], [20]] });
+  await rerender({ sectionId: GPU, sensors: gpuSensors, defaults: [LOAD, TEMP], schema, store, backend });
   await vi.waitFor(() => expect(plots).toHaveLength(2));
-  const replacement = plots[1];
-  expect(replacement.opts.series[1].scale).toBe('celsius');
-  const next = canvasFixture(replacement.data, replacement.opts.series);
-  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
-  expect(next.ctx.stroke).not.toHaveBeenCalled();
-  expect(next.ctx.arc).toHaveBeenLastCalledWith(210, 100, 3, 0, Math.PI * 2);
-  const paths = replacement.opts.series[1].paths!(next.plot, 1, 0, 1)!;
-  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
-  expect(next.ctx.stroke).toHaveBeenLastCalledWith(paths.stroke);
-  next.plot.data[1][1] = null;
-  next.ctx.arc.mockClear();
-  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
-  expect(next.ctx.arc).not.toHaveBeenCalled();
+  expect(plots[1].scales.at(-1)?.range.max).toBe(1);
 });

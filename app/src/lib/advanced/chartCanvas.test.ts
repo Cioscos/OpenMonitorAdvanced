@@ -23,7 +23,7 @@ test('paints eight real spline paths on two Y scales with one glow and one line 
     expect(strokes[i * 2].alpha).toBeLessThan(1);
     expect(strokes[i * 2 + 1].alpha).toBe(1);
   }
-  expect(ctx.rect).toHaveBeenCalledWith(10, 20, 440, 200);
+  expect(ctx.rect).toHaveBeenCalledWith(-30, 20, 480, 200);
 });
 
 test('preserves each path gap clip and draws nothing for empty paths', () => {
@@ -55,9 +55,30 @@ test('scales widths and font with DPR while keeping canvas pixel positions', () 
   const { plot, ctx, strokes, textDraws } = canvasFixture([[0, 1], [20, 40]]);
   const path = new Path2D();
   drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [{ stroke: path, gapsClip: null, color: '#f0f' }], [2], 'en', 40, theme);
-  expect(ctx.rect).toHaveBeenCalledWith(10, 20, 440, 200);
+  expect(ctx.rect).toHaveBeenCalledWith(-30, 20, 480, 200);
   expect(ctx.moveTo).toHaveBeenCalledWith(210, 20);
   expect(textDraws[0]).toEqual({ font: '24px sans-serif', color: theme.textColor, blur: 0 });
   expect(strokes.slice(1, 3).map((s) => s.width)).toEqual([12, 3]);
   expect(ctx.save).toHaveBeenCalledTimes(ctx.restore.mock.calls.length);
+});
+
+// Characterizes the pinned uPlot 1.6.32 path factory, not a duplicate spline implementation.
+test.each([[0, 100, 0], [42, 42, 42], [0, 1, 100]])('uPlot spline remains within adjacent sample bounds for %j', (...ys) => {
+  const { plot } = canvasFixture([[0, 1, 4], ys]);
+  const paths = uPlot.paths.spline!()(plot, 1, 0, 2)!;
+  const commands = (paths.stroke as unknown as RecordingPath).commands;
+  expect(commands.filter((c) => c.kind === 'cubic')).toHaveLength(2);
+  let prev = commands[0].args;
+  for (const command of commands.slice(1)) {
+    const [x1, y1, x2, y2, x3, y3] = command.args;
+    const lo = Math.min(prev[1], y3), hi = Math.max(prev[1], y3);
+    for (let i = 0; i <= 100; i++) {
+      const t = i / 100, s = 1 - t;
+      const y = s ** 3 * prev[1] + 3 * s ** 2 * t * y1 + 3 * s * t ** 2 * y2 + t ** 3 * y3;
+      expect(y).toBeGreaterThanOrEqual(lo - 1e-9);
+      expect(y).toBeLessThanOrEqual(hi + 1e-9);
+    }
+    expect([x1, x2, x3].every(Number.isFinite)).toBe(true);
+    prev = [x3, y3];
+  }
 });

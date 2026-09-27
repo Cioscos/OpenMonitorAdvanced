@@ -14,6 +14,9 @@ if (!window.matchMedia) {
 }
 
 // jsdom has no canvas, so uPlot cannot draw: every test file gets the recording stub.
+// Renderer-specific tests install recording contexts; other component tests need
+// the browser's supported "context unavailable" result without jsdom diagnostics.
+HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;
 vi.mock('uplot', async () => {
   const { default: real } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
   const { FakeUplot } = await import('./test/uplot-stub');

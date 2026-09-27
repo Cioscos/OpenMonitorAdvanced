@@ -1,4 +1,5 @@
 import type uPlot from 'uplot';
+import { canvasFixture } from './uplot-canvas';
 
 /**
  * Stand-in for uPlot in jsdom, which has no canvas: test-setup.ts mocks 'uplot' with
@@ -12,14 +13,22 @@ export class FakeUplot {
   data: uPlot.AlignedData;
   target: HTMLElement | undefined;
   destroyed = false;
+  bbox = { left: 72, top: 10, width: 600, height: 200 };
+  over = document.createElement('div');
+  root = document.createElement('div');
+  private range = { min: 0, max: 4 };
+  get series() { return this.opts.series; }
   setDataCalls = 0;
   scales: Array<{ key: string; range: { min: number; max: number } }> = [];
   sizes: { width: number; height: number }[] = [];
+  yAutoDecisions: boolean[][] = [];
 
   constructor(opts: uPlot.Options, data: uPlot.AlignedData, target?: HTMLElement) {
     this.opts = opts;
     this.data = data;
     this.target = target;
+    this.root.append(this.over);
+    target?.append(this.root);
     FakeUplot.instances.push(this);
   }
 
@@ -30,13 +39,46 @@ export class FakeUplot {
 
   setSize(size: { width: number; height: number }): void {
     this.sizes.push(size);
+    this.draw();
   }
 
   setScale(key: string, range: { min: number; max: number }): void {
     this.scales.push({ key, range });
+    if (key === 'x') this.range = range;
+    this.draw();
+  }
+
+  batch(fn: () => void): void { fn(); }
+
+  valToPos(value: number, scale: string, canvasPixels = false): number {
+    const valuePx = scale === 'x'
+      ? this.bbox.left + (value - this.range.min) / (this.range.max - this.range.min) * this.bbox.width
+      : this.bbox.top + this.bbox.height * (1 - value / (scale === 'celsius' ? 200 : 100));
+    return canvasPixels ? valuePx : valuePx / FakeUplot.pxRatio;
+  }
+
+  private draw(): void {
+    const { plot } = canvasFixture(this.data, this.opts.series);
+    Object.assign(plot.bbox, this.bbox);
+    Object.assign(plot.scales.x, this.range);
+    for (const series of this.opts.series.slice(1)) {
+      if (!plot.scales[series.scale!]) plot.scales[series.scale!] = { ...plot.scales.percent };
+    }
+    plot.valToPos = this.valToPos.bind(this);
+    this.yAutoDecisions.push(Object.entries(this.opts.scales ?? {}).filter(([key]) => key !== 'x').map(([, scale]) =>
+      typeof scale.auto === 'function' ? scale.auto(plot, false) : scale.auto !== false));
+    const splits = this.opts.axes?.[0].splits;
+    if (typeof splits === 'function') splits(plot, 0, this.range.min, this.range.max, 60, 100);
+    if (typeof Path2D !== 'undefined') {
+      for (let i = 1; i < this.opts.series.length; i++) {
+        this.opts.series[i].paths?.(plot, i, 0, this.data[0].length - 1);
+      }
+    }
+    for (const hook of this.opts.hooks?.draw ?? []) hook?.(plot);
   }
 
   destroy(): void {
     this.destroyed = true;
+    this.root.remove();
   }
 }

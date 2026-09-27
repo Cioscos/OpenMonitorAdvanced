@@ -269,14 +269,19 @@
     dotClip.style.width = `${width / ratio + DOT_RADIUS * 2}px`;
     dotClip.style.height = `${height / ratio + DOT_RADIUS * 2}px`;
     // Only labels need space behind the left edge; future ticks need a full window.
-    canvas.width = Math.ceil(width * 2 + leftOverscan);
-    canvas.height = Math.ceil(height + axisHeight);
+    const canvasWidth = Math.ceil(width * 2 + leftOverscan);
+    const canvasHeight = Math.ceil(height + axisHeight);
+    // Assigning a size reallocates (and clears) the backing store: do it only when it changes.
+    if (canvas.width !== canvasWidth) canvas.width = canvasWidth;
+    if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
     canvas.style.width = `${(width * 2 + leftOverscan) / ratio}px`;
     canvas.style.height = `${(height + axisHeight) / ratio}px`;
     canvas.style.left = `${-leftOverscan / ratio}px`;
     heldPainted = false;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.translate(leftOverscan - left, -top);
     const seconds = buffer!.windowSeconds;

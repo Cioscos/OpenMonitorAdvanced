@@ -59,7 +59,7 @@ beforeEach(() => {
   const contexts = new WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
     if (!contexts.has(this)) contexts.set(this, {
-      ...canvasFixture([[0], [1]]).ctx, clearRect: vi.fn(), translate: vi.fn(),
+      ...canvasFixture([[0], [1]]).ctx, clearRect: vi.fn(), translate: vi.fn(), setTransform: vi.fn(),
     } as unknown as CanvasRenderingContext2D);
     return contexts.get(this)!;
   });
@@ -672,6 +672,31 @@ test('resize sizes the same plot in place on the current time base and disconnec
   expect(backend.historyCalls).toHaveLength(1);
   unmount();
   expect(disconnect).toHaveBeenCalledOnce();
+});
+
+test('repaints keep the canvas backing store while its size is unchanged, and clear it instead', async () => {
+  const { resize } = stubResizeObserver();
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  const ctx = canvas.getContext('2d')!;
+  expect([canvas.width, canvas.height]).toEqual([600 * 2 + 72, 200 + 40]);
+  const setWidth = vi.spyOn(HTMLCanvasElement.prototype, 'width', 'set');
+  const setHeight = vi.spyOn(HTMLCanvasElement.prototype, 'height', 'set');
+  vi.mocked(ctx.clearRect).mockClear();
+  const painted = paints().length;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(paints().length).toBeGreaterThan(painted);
+  expect(setWidth).not.toHaveBeenCalled();
+  expect(setHeight).not.toHaveBeenCalled();
+  expect(ctx.setTransform).toHaveBeenCalledWith(1, 0, 0, 1, 0, 0);
+  expect(ctx.clearRect).toHaveBeenCalledWith(0, 0, canvas.width, canvas.height);
+  // A new plot width does resize it.
+  resize(1000);
+  expect(setWidth).toHaveBeenCalledWith(800 * 2 + 72);
+  expect(setHeight).not.toHaveBeenCalled();
 });
 
 test('a series hidden in the legend stays hidden after a resize', async () => {

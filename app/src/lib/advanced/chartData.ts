@@ -63,11 +63,12 @@ export class ChartBuffer {
     this.#series.forEach((column, i) => column.push(clean(values[i])));
   }
 
-  /** Drops the samples older than the window, measured back from `nowMs`. */
+  /** Keeps one sample before the window so lines cross the left clip edge continuously. */
   trim(nowMs: number): void {
     const since = nowMs - this.windowSeconds * 1000;
     let drop = 0;
     while (drop < this.#timestampsMs.length && this.#timestampsMs[drop] < since) drop++;
+    if (drop > 0) drop--;
     if (drop === 0) return;
     this.#timestampsMs.splice(0, drop);
     for (const column of this.#series) column.splice(0, drop);

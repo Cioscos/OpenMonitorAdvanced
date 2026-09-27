@@ -64,13 +64,14 @@ test('append turns missing and non-finite values into gaps', () => {
   expect(buffer.data()).toEqual([[1, 2], [null, 5], [null, null]]);
 });
 
-test('trim keeps exactly the window measured back from now', () => {
+test('trim retains one point before the viewport so the left edge does not jump on sample removal', () => {
   const buffer = new ChartBuffer(['a'], 60);
   for (let t = 0; t <= 120; t += 10) buffer.append(t * 1000, [t]);
   buffer.trim(120_000);
-  expect(buffer.data()[1]).toEqual([60, 70, 80, 90, 100, 110, 120]);
-  buffer.trim(120_000);
-  expect(buffer.length).toBe(7);
+  expect(buffer.data()[1]).toEqual([50, 60, 70, 80, 90, 100, 110, 120]);
+  buffer.append(121_000, [121]);
+  buffer.trim(121_000);
+  expect(buffer.data()[1]).toEqual([60, 70, 80, 90, 100, 110, 120, 121]);
 });
 
 test('data returns copies, so uPlot never sees later appends', () => {

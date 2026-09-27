@@ -125,7 +125,7 @@ test('the saved window is used on mount', async () => {
   expect(backend.historyCalls).toEqual([{ ids: [LOAD, TEMP], seconds: 1800, maxPoints: 900 }]);
 });
 
-test('live snapshots extend the chart and old points leave the window', async () => {
+test('live snapshots extend the chart and retain one point outside the left edge', async () => {
   localStorage.setItem(WINDOW_KEY, '60');
   const store = new LiveStore();
   renderChart(fakeBackend(), store);
@@ -135,11 +135,11 @@ test('live snapshots extend the chart and old points leave the window', async ()
   flushSync();
   const plot = plots[0];
   expect(plot.setDataCalls).toBe(1);
-  // 1000 ms is older than 62 s - 60 s and leaves; 2000 ms is exactly on the edge and stays.
+  // 1000 ms precedes the visible edge; uPlot needs it to draw through that edge.
   expect(plot.data).toEqual([
-    [2, 62],
-    [20, mockValues(1)[index(LOAD)]],
-    [21, mockValues(1)[index(TEMP)]],
+    [1, 2, 62],
+    [10, 20, mockValues(1)[index(LOAD)]],
+    [11, 21, mockValues(1)[index(TEMP)]],
   ]);
 });
 

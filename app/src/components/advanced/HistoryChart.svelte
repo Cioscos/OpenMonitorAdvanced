@@ -18,6 +18,7 @@
     seriesPalette,
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
+  import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { loadSeries, loadWindow, saveSeries, saveWindow } from '../../lib/advanced/persist';
   import type { Backend } from '../../lib/backend/backend';
@@ -25,6 +26,7 @@
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
   import type { HistorySeed, Schema, Sensor } from '../../lib/types';
+  import { subscribeChartFrame } from '../../lib/chartFrameClock';
 
   let {
     sectionId,
@@ -56,6 +58,7 @@
   let container: HTMLDivElement;
   let plot: uPlot | undefined;
   let buffer: ChartBuffer | undefined;
+  let viewport = createChartViewport(DEFAULT_WINDOW);
   let generation = 0;
   let destroyed = false;
 
@@ -76,6 +79,7 @@
     const revision = schema.revision;
     // Never append values from a new schema to a plot of the previous source/unit.
     buffer = undefined;
+    viewport = createChartViewport(seconds);
     plot?.destroy();
     plot = undefined;
     let history: HistorySeed = { revision, seq: 0, timestampsMs: [], series: [] };
@@ -94,6 +98,7 @@
     if (store.timestampMs > (next.lastTimestampMs ?? 0)) next.append(store.timestampMs, ids.map((id) => store.value(id)));
     next.trim(next.lastTimestampMs ?? 0);
     buffer = next;
+    if (next.lastTimestampMs !== null) viewport.sample(next.lastTimestampMs, performance.now());
     build(ids);
   }
 
@@ -152,6 +157,12 @@
       ],
     };
     plot = new uPlot(opts, buffer.data(), container);
+    drawScale(performance.now());
+  }
+
+  function drawScale(nowMonoMs: number) {
+    const range = viewport.range(nowMonoMs);
+    if (!paused && plot && range) plot.setScale('x', range);
   }
 
   function tail(timestampMs: number) {
@@ -160,10 +171,13 @@
     // timestamp here is a wall-clock rollback, so begin a new chart segment.
     if (buffer.lastTimestampMs !== null && timestampMs < buffer.lastTimestampMs) {
       buffer = new ChartBuffer(buffer.ids, buffer.windowSeconds);
+      viewport.reset();
     }
     buffer.append(timestampMs, buffer.ids.map((id) => store.value(id)));
     buffer.trim(timestampMs);
-    plot.setData(buffer.data());
+    viewport.sample(timestampMs, performance.now());
+    plot.setData(buffer.data(), false);
+    drawScale(performance.now());
   }
 
   // Reseed on selection, window or schema change, and when the window becomes visible again.
@@ -182,6 +196,7 @@
   });
 
   onMount(() => {
+    const stopFrames = subscribeChartFrame(drawScale);
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
       if (paused) generation++; // Invalidate history that is still in flight.
@@ -199,6 +214,7 @@
       generation++;
       document.removeEventListener('visibilitychange', onVisibility);
       observer?.disconnect();
+      stopFrames();
       plot?.destroy();
       plot = undefined;
     };

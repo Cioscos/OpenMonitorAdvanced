@@ -23,6 +23,18 @@ const labelOf = (s: Sensor) => t(`sensor.${s.label.key}`, s.label.arg === undefi
 const checkbox = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
 
 let visibility: DocumentVisibilityState = 'visible';
+let monotonicMs = 0;
+let reducedMotion = false;
+let nextFrameId = 1;
+const frames = new Map<number, FrameRequestCallback>();
+const motionListeners = new Set<() => void>();
+function frame(at: number) {
+  monotonicMs = at;
+  const [id, callback] = [...frames][0] ?? [];
+  if (id === undefined || !callback) throw new Error('No animation frame pending');
+  frames.delete(id);
+  callback(at);
+}
 Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
 const setVisibility = (state: DocumentVisibilityState) => {
   visibility = state;
@@ -34,8 +46,27 @@ beforeEach(() => {
   localStorage.clear();
   i18n.locale = 'en';
   visibility = 'visible';
+  monotonicMs = 0;
+  reducedMotion = false;
+  nextFrameId = 1;
+  frames.clear();
+  motionListeners.clear();
+  vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    const id = nextFrameId++;
+    frames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() { return reducedMotion; },
+    media: query,
+    addEventListener: (_type: string, listener: () => void) => motionListeners.add(listener),
+    removeEventListener: (_type: string, listener: () => void) => motionListeners.delete(listener),
+  }));
 });
 afterEach(cleanup);
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 /** FakeBackend with two history samples (1 s and 2 s): column i holds [10 + i, 20 + i]. */
 function fakeBackend(): FakeBackend {
@@ -238,4 +269,68 @@ test('unmounting destroys the plot', async () => {
   await vi.waitFor(() => expect(plots).toHaveLength(1));
   unmount();
   expect(plots[0].destroyed).toBe(true);
+});
+
+test('frames scroll the x scale without replacing snapshot data', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  expect(plot.setDataCalls).toBe(0);
+  frame(0);
+  frame(250);
+  expect(plot.setDataCalls).toBe(0);
+  expect(plot.scales.at(-1)).toEqual({ key: 'x', range: { min: -297.75, max: 2.25 } });
+
+  monotonicMs = 500;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(plot.setDataCalls).toBe(1);
+  frame(750);
+  expect(plot.setDataCalls).toBe(1);
+  expect(plot.scales.at(-1)).toEqual({ key: 'x', range: { min: -296.75, max: 3.25 } });
+});
+
+test('hiding and unmounting stop scale changes', async () => {
+  const { unmount } = renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  frame(0);
+  const count = plot.scales.length;
+  setVisibility('hidden');
+  expect(frames.size).toBe(0);
+  expect(plot.scales).toHaveLength(count);
+  setVisibility('visible');
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  const resumed = plots[1];
+  const resumedCount = resumed.scales.length;
+  unmount();
+  expect(frames.size).toBe(0);
+  expect(resumed.scales).toHaveLength(resumedCount);
+});
+
+test('resuming visibility does not catch up hidden time in one frame', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(0);
+  setVisibility('hidden');
+  monotonicMs = 20_000;
+  setVisibility('visible');
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  const plot = plots[1];
+  frame(20_000);
+  expect(plot.scales.at(-1)?.range.max).toBeCloseTo(2, 3);
+});
+
+test('reduced motion shows new snapshots without animation frames', async () => {
+  reducedMotion = true;
+  for (const listener of motionListeners) listener();
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(frames.size).toBe(0);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(plots[0].data[0]).toEqual([1, 2, 3]);
+  expect(plots[0].scales.at(-1)).toEqual({ key: 'x', range: { min: -297, max: 3 } });
 });

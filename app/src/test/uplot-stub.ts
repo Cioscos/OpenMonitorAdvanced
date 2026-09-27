@@ -11,6 +11,7 @@ export class FakeUplot {
   target: HTMLElement | undefined;
   destroyed = false;
   setDataCalls = 0;
+  scales: Array<{ key: string; range: { min: number; max: number } }> = [];
   sizes: { width: number; height: number }[] = [];
 
   constructor(opts: uPlot.Options, data: uPlot.AlignedData, target?: HTMLElement) {
@@ -27,6 +28,10 @@ export class FakeUplot {
 
   setSize(size: { width: number; height: number }): void {
     this.sizes.push(size);
+  }
+
+  setScale(key: string, range: { min: number; max: number }): void {
+    this.scales.push({ key, range });
   }
 
   destroy(): void {

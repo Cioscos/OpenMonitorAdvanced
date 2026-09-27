@@ -82,6 +82,79 @@
   let autoscaleY = true;
   let labelContext: CanvasRenderingContext2D | null | undefined;
 
+  type YRange = { min: number; max: number };
+  /** Duration in ms of the move to a new automatic Y range. */
+  const Y_TRANSITION_MS = 180;
+  /** The Y range uPlot displays, by scale key: the last autoscale result or transition frame. */
+  const yShown = new Map<string, YRange>();
+  /** Running Y transitions, by scale key; empty between them, so frames stay transform-only. */
+  const yMoves = new Map<string, { from: YRange; to: YRange; startMs: number }>();
+  /** Set while the transition itself sets Y scales, which are then no autoscale target. */
+  let settingY = false;
+
+  /**
+   * uPlot `scale.range` of an automatic Y scale: the unit's own range (as uPlot would compute
+   * it from `scaleOptions`) is the target. A changed target is not shown at once: uPlot keeps
+   * the displayed range and the frames below move towards the target, restarting from wherever
+   * the scale is when the next snapshot changes it again.
+   */
+  function yRange(unit: Parameters<typeof scaleOptions>[0]): uPlot.Range.Function {
+    const config = scaleOptions(unit).range as uPlot.Range.Config | undefined;
+    return (_u, dataMin, dataMax, key) => {
+      if (settingY || dataMin == null || dataMax == null) return [dataMin, dataMax];
+      const [min, max] = config ? uPlot.rangeNum(dataMin, dataMax, config) : uPlot.rangeNum(dataMin, dataMax, 0.1, true);
+      if (min == null || max == null) return [min, max];
+      const shown = yShown.get(key);
+      const move = yMoves.get(key);
+      if (!shown || reducedMotion || paused || (shown.min === min && shown.max === max)) {
+        yMoves.delete(key);
+        yShown.set(key, { min, max });
+        return [min, max];
+      }
+      // A snapshot that keeps the running target keeps its pace.
+      if (!move || move.to.min !== min || move.to.max !== max) {
+        yMoves.set(key, { from: shown, to: { min, max }, startMs: performance.now() });
+      }
+      return [shown.min, shown.max];
+    };
+  }
+
+  /** Commit Y ranges to uPlot in one redraw: its Y labels, the paths and the canvas follow. */
+  function applyY(ranges: Array<[string, YRange]>) {
+    if (!plot || ranges.length === 0) return;
+    settingY = true;
+    try {
+      plot.batch(() => {
+        for (const [key, range] of ranges) {
+          yShown.set(key, range);
+          plot!.setScale(key, { ...range });
+        }
+      });
+    } finally {
+      settingY = false;
+    }
+  }
+
+  /** One transition frame: ease-out cubic from the range shown at the snapshot to its target. */
+  function stepY(nowMonoMs: number) {
+    if (yMoves.size === 0 || paused) return;
+    const ranges: Array<[string, YRange]> = [];
+    for (const [key, { from, to, startMs }] of yMoves) {
+      const progress = Math.min(1, Math.max(0, (nowMonoMs - startMs) / Y_TRANSITION_MS));
+      if (progress >= 1) yMoves.delete(key);
+      const k = 1 - (1 - progress) ** 3;
+      ranges.push([key, progress >= 1 ? to : { min: from.min + (to.min - from.min) * k, max: from.max + (to.max - from.max) * k }]);
+    }
+    applyY(ranges);
+  }
+
+  /** Jump every running transition to its target (reduced motion). */
+  function finishY() {
+    const ranges = [...yMoves].map(([key, { to }]): [string, YRange] => [key, to]);
+    yMoves.clear();
+    applyY(ranges);
+  }
+
   /** Width in CSS px of an X label, measured with the font the canvas paints it in. */
   function labelWidthPx(text: string): number {
     labelContext ??= document.createElement('canvas').getContext('2d');
@@ -300,6 +373,9 @@
 
   function build(ids: string[]) {
     autoscaleY = true;
+    // A rebuilt plot shows the current range at once, without catching up a transition.
+    yMoves.clear();
+    yShown.clear();
     clearLayers();
     plot?.destroy();
     plot = undefined;
@@ -339,7 +415,7 @@
         // only skips undefined values, which aligned ChartBuffer columns never contain.
         dataIdx: (u) => u.posToIdx(u.cursor.left! + canvasOffsetPx),
       },
-      scales: Object.fromEntries([['x', { time: true }], ...scales.map((unit) => [unit, { ...scaleOptions(unit), auto: () => autoscaleY }])]),
+      scales: Object.fromEntries([['x', { time: true }], ...scales.map((unit) => [unit, { auto: () => autoscaleY, range: yRange(unit) }])]),
       series: [
         { label: '', value: (_u, v) => (v == null ? DASH : new Date(v * 1000).toLocaleTimeString(i18n.locale)) },
         ...ids.map((id, i) => {
@@ -438,16 +514,25 @@
     if (reducedMotion) viewport.suspend(performance.now());
     const onMotionChange = () => {
       reducedMotion = motionQuery.matches;
-      if (reducedMotion) viewport.suspend(performance.now());
-      else viewport.resume(performance.now());
+      if (reducedMotion) {
+        viewport.suspend(performance.now());
+        // The shared clock stops too: show the target range now.
+        finishY();
+      } else viewport.resume(performance.now());
     };
     motionQuery.addEventListener('change', onMotionChange);
-    const stopFrames = subscribeChartFrame(drawFrame);
+    // The Y transition runs on the chart's frame subscription, before its X translation.
+    const stopFrames = subscribeChartFrame((now) => {
+      stepY(now);
+      drawFrame(now);
+    });
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
       if (paused) {
         generation++; // Invalidate history that is still in flight.
         viewport.reset();
+        // The visible rebuild shows the current range at once.
+        yMoves.clear();
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
@@ -479,6 +564,7 @@
       densityQuery.removeEventListener('change', onDensity);
       motionQuery.removeEventListener('change', onMotionChange);
       stopFrames();
+      yMoves.clear();
       clearLayers();
       plot?.destroy();
       plot = undefined;

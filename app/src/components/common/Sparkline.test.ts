@@ -338,3 +338,32 @@ test('sparklines mounted on different frames scroll on the same ~60 vsyncs per s
   expect(drawn.size).toBeGreaterThanOrEqual(59);
   expect(drawn.size).toBeLessThanOrEqual(61);
 });
+
+test('a resize while scrolling re-measures the translation on the same time base and disconnects on unmount', async () => {
+  const time = clock();
+  let resize!: ResizeObserverCallback;
+  const observe = vi.fn();
+  const disconnect = vi.fn();
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    observe = observe;
+    disconnect = disconnect;
+  });
+  const width = vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 150 } as DOMRect);
+  const view = render(Sparkline, { values: [20, 80], timestampsMs: [0, 1_000], max: 100 });
+  await tick();
+  await time.frame(30_000);
+  // 30 s of a 5 min window across a 150 px tile.
+  expect(translateCssPx(view.container)).toBeCloseTo(-15, 6);
+  const path = view.container.querySelector('path')!.getAttribute('d');
+  width.mockReturnValue({ width: 300 } as DOMRect);
+  resize([], {} as ResizeObserver);
+  expect(translateCssPx(view.container)).toBeCloseTo(-30, 6);
+  expect(view.container.querySelector('path')!.getAttribute('d')).toBe(path);
+  await time.frame(60_000);
+  expect(translateCssPx(view.container)).toBeCloseTo(-60, 6);
+  expect(observe).toHaveBeenCalledOnce();
+  view.unmount();
+  expect(disconnect).toHaveBeenCalledOnce();
+  expect(time.pending()).toBe(0);
+});

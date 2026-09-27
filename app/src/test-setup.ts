@@ -21,5 +21,6 @@ vi.mock('uplot', async () => {
   const { default: real } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
   const { FakeUplot } = await import('./test/uplot-stub');
   FakeUplot.paths = real.paths;
+  FakeUplot.rangeNum = real.rangeNum;
   return { default: FakeUplot };
 });

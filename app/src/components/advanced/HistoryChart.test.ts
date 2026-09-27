@@ -9,7 +9,8 @@ import { FakeBackend } from '../../test/fake-backend';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
-import { formatTimeTick, TIME_LABEL_GAP_PX } from '../../lib/advanced/chartData';
+import { formatTimeTick, scaleOptions, TIME_LABEL_GAP_PX } from '../../lib/advanced/chartData';
+import type uPlot from 'uplot';
 import HistoryChart from './HistoryChart.svelte';
 
 // Calls through to the real painter; tests read the held segments it was handed.
@@ -63,6 +64,7 @@ beforeEach(() => {
     return contexts.get(this)!;
   });
   plots.length = 0;
+  FakeUplot.autoRangeY = false;
   vi.mocked(drawChartCanvas).mockClear();
   localStorage.clear();
   i18n.locale = 'en';
@@ -980,4 +982,271 @@ test('a 1 min window at 651 px shows seconds on splits wide enough for them in e
     expect(axis.spacing).toBeGreaterThanOrEqual(arialWidth(sample) + TIME_LABEL_GAP_PX);
     expect(formatTimeTick(axis.splits[0], locale, axis.incr)).toMatch(/:\d{2}:\d{2}/);
   }
+});
+
+type YRange = { min: number; max: number };
+/** The range uPlot's default numeric autoscale gives the celsius scale for this data. */
+const celsiusRange = (min: number, max: number): YRange => {
+  const [lo, hi] = FakeUplot.rangeNum(min, max, 0.1, true);
+  return { min: lo!, max: hi! };
+};
+/** The transition's documented ease-out cubic between two displayed ranges. */
+const eased = (from: YRange, to: YRange, progress: number): YRange => {
+  const k = 1 - (1 - progress) ** 3;
+  return { min: from.min + (to.min - from.min) * k, max: from.max + (to.max - from.max) * k };
+};
+const expectRange = (actual: YRange | undefined, expected: YRange) => {
+  expect(actual?.min).toBeCloseTo(expected.min, 9);
+  expect(actual?.max).toBeCloseTo(expected.max, 9);
+};
+/** Applies a snapshot whose GPU temperature is `temperature`, at the current monotonic time. */
+function snapshotTemperature(store: LiveStore, seq: number, timestampMs: number, temperature: number) {
+  const values = mockValues(seq);
+  values[index(TEMP)] = temperature;
+  store.applySnapshot({ revision: 1, seq, timestampMs, values });
+  flushSync();
+}
+const yScaleCalls = (plot: FakeUplot, key: string) => plot.scales.filter((s) => s.key === key);
+
+/** A chart whose stub autoscales Y like uPlot; the history puts the celsius scale on 11-21. */
+async function transitionChart() {
+  FakeUplot.autoRangeY = true;
+  const store = new LiveStore();
+  const view = renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(0);
+  return { store, view, plot: plots[0], from: celsiusRange(11, 21) };
+}
+
+test('a changed Y range moves the uPlot scale, paths, held segments and dots together for 180 ms', async () => {
+  const { store, plot, from } = await transitionChart();
+  expectRange(plot.yRanges.get('celsius'), from);
+  const percent = plot.yRanges.get('percent');
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  const to = celsiusRange(11, 90);
+  // The new sample is first drawn on the displayed scale, not on the new target.
+  expectRange(plot.yRanges.get('celsius'), from);
+  const temperatureY = (value: number, range: YRange) => plot.bbox.top + plot.bbox.height * (1 - (value - range.min) / (range.max - range.min));
+  const dot = document.querySelectorAll<HTMLElement>('.chart-dot')[1];
+  /** The temperature path passes through the 21 °C history sample at this range's height. */
+  const pathThrough21 = (range: YRange) => {
+    const path = paints().at(-1)![2][1].stroke as unknown as RecordingPath;
+    return path.commands.some((c) => Math.abs(c.args.at(-1)! - temperatureY(21, range)) < 1e-9);
+  };
+  const expectDrawnOn = (range: YRange) => {
+    expect(pathThrough21(range)).toBe(true);
+    expect(lastHeld()[1].y).toBeCloseTo(temperatureY(90, range), 9);
+    expect(dot.hidden).toBe(false);
+    expect(Number.parseFloat(dot.style.top)).toBeCloseTo(temperatureY(90, range) - plot.bbox.top + 3, 9);
+  };
+  expect(pathThrough21(from)).toBe(true);
+  // 90 °C lies above the displayed range: its held segment and dot wait for the scale to reach it.
+  expect(lastHeld()).toHaveLength(1);
+  expect(dot.hidden).toBe(true);
+
+  frame(1150);
+  const mid = eased(from, to, 150 / 180);
+  // uPlot draws its Y ticks and labels from this scale, in the same commit as the canvas.
+  expectRange(yScaleCalls(plot, 'celsius').at(-1)?.range, mid);
+  expectRange(plot.yRanges.get('celsius'), mid);
+  expectDrawnOn(mid);
+  // The X translation keeps going on the same frames.
+  const transform = document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform;
+  expect(Number.parseFloat(/translateX\((.+)px\)/.exec(transform)![1])).toBeCloseTo(-0.15 * plot.bbox.width / 300, 9);
+
+  frame(1180);
+  expect(plot.yRanges.get('celsius')).toEqual(to);
+  expectDrawnOn(to);
+  // The unchanged percent scale is never set explicitly.
+  expect(yScaleCalls(plot, 'percent')).toEqual([]);
+  expect(plot.yRanges.get('percent')).toEqual(percent);
+  expect(plot.setDataCalls).toBe(1);
+});
+
+test('the Y transition repaints only for 180 ms, then frames are transform-only again', async () => {
+  const { store, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  const painted = paints().length;
+  for (const at of [1016, 1033, 1100, 1180]) frame(at);
+  expect(paints().length).toBeGreaterThanOrEqual(painted + 4);
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  const records: MutationRecord[] = [];
+  const observer = new MutationObserver((batch) => records.push(...batch));
+  observer.observe(plot.root, { attributes: true, subtree: true, childList: true, characterData: true });
+  const repainted = paints().length;
+  const scales = plot.scales.length;
+  for (const at of [1196, 1213, 1300, 2000]) frame(at);
+  await Promise.resolve();
+  records.push(...observer.takeRecords());
+  observer.disconnect();
+  expect(records.length).toBeGreaterThan(0);
+  for (const record of records) {
+    expect(record.target).toBe(canvas);
+    expect(record.attributeName).toBe('style');
+  }
+  expect(paints()).toHaveLength(repainted);
+  expect(plot.scales).toHaveLength(scales);
+});
+
+test('a snapshot that keeps the Y range starts no transition and no extra redraw', async () => {
+  const { store, plot, from } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 15);
+  expectRange(plot.yRanges.get('celsius'), from);
+  const painted = paints().length;
+  const scales = plot.scales.length;
+  for (const at of [1016, 1090, 1180, 1300]) frame(at);
+  expect(paints()).toHaveLength(painted);
+  expect(plot.scales).toHaveLength(scales);
+});
+
+test('a second snapshot during a transition restarts it from the displayed Y range', async () => {
+  const { store, plot, from } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  frame(1090);
+  const shown = eased(from, celsiusRange(11, 90), 0.5);
+  expectRange(plot.yRanges.get('celsius'), shown);
+  monotonicMs = 1090;
+  snapshotTemperature(store, 2, 4000, 190);
+  // The new autoscale starts where the scale is, not at the old target or at the new one.
+  expectRange(plot.yRanges.get('celsius'), shown);
+  const to = celsiusRange(11, 190);
+  frame(1180);
+  expectRange(plot.yRanges.get('celsius'), eased(shown, to, 0.5));
+  frame(1270);
+  expect(plot.yRanges.get('celsius')).toEqual(to);
+});
+
+test('reduced motion applies a changed Y range at once, without transition frames', async () => {
+  reducedMotion = true;
+  FakeUplot.autoRangeY = true;
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  snapshotTemperature(store, 1, 3000, 90);
+  expect(plots[0].yRanges.get('celsius')).toEqual(celsiusRange(11, 90));
+  expect(lastHeld()[1].y).toBeCloseTo(plots[0].valToPos(90, 'celsius', true), 9);
+  expect(frames.size).toBe(0);
+});
+
+test('switching to reduced motion during a transition jumps to the final Y range', async () => {
+  const { store, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  frame(1050);
+  reducedMotion = true;
+  for (const listener of motionListeners) listener();
+  expect(frames.size).toBe(0);
+  expect(plot.yRanges.get('celsius')).toEqual(celsiusRange(11, 90));
+  expect(lastHeld()[1].y).toBeCloseTo(plot.valToPos(90, 'celsius', true), 9);
+});
+
+test('hiding during a transition cancels it and the visible rebuild shows the final range at once', async () => {
+  const { store, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  frame(1090);
+  setVisibility('hidden');
+  expect(frames.size).toBe(0);
+  const scales = plot.scales.length;
+  monotonicMs = 5000;
+  setVisibility('visible');
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  const rebuilt = plots[1];
+  expect(rebuilt.yRanges.get('celsius')).toEqual(celsiusRange(11, 90));
+  for (const at of [5016, 5100, 5200]) frame(at);
+  expect(yScaleCalls(rebuilt, 'celsius')).toEqual([]);
+  expect(plot.scales).toHaveLength(scales);
+});
+
+test('unmounting during a transition cancels its frames', async () => {
+  const { store, view, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  frame(1090);
+  const scales = plot.scales.length;
+  view.unmount();
+  expect(frames.size).toBe(0);
+  expect(plot.scales).toHaveLength(scales);
+});
+
+test.each(['resize', 'density', 'locale', 'theme'] as const)('a %s rebuild during a transition shows the final range on fresh layers', async (kind) => {
+  let resize!: ResizeObserverCallback;
+  const disconnect = vi.fn();
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    observe() {}
+    disconnect = disconnect;
+  });
+  const density = new Set<() => void>();
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() { return reducedMotion; },
+    media: query,
+    addEventListener: (_type: string, listener: () => void) => {
+      if (query.includes('resolution')) density.add(listener);
+      else if (query.includes('reduced-motion')) motionListeners.add(listener);
+    },
+    removeEventListener: (_type: string, listener: () => void) => { density.delete(listener); motionListeners.delete(listener); },
+  }));
+  const { store, view, plot } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  frame(1090);
+  try {
+    if (kind === 'resize') resize([], {} as ResizeObserver);
+    else if (kind === 'density') for (const listener of [...density]) listener();
+    else if (kind === 'locale') { i18n.locale = 'it'; flushSync(); }
+    else document.documentElement.style.setProperty('--accent', '#123456');
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    const rebuilt = plots[1];
+    expect(rebuilt.yRanges.get('celsius')).toEqual(celsiusRange(11, 90));
+    expect(document.querySelectorAll('.chart-canvas')).toHaveLength(1);
+    expect(document.querySelectorAll('.chart-dot-clip')).toHaveLength(1);
+    const dot = document.querySelectorAll<HTMLElement>('.chart-dot')[1];
+    expect(Number.parseFloat(dot.style.top)).toBeCloseTo(rebuilt.valToPos(90, 'celsius', true) - rebuilt.bbox.top + 3, 9);
+    expect(density.size).toBe(1);
+    const scales = plot.scales.length;
+    for (const at of [1100, 1180, 1300]) frame(at);
+    expect(yScaleCalls(rebuilt, 'celsius')).toEqual([]);
+    expect(plot.scales).toHaveLength(scales);
+    view.unmount();
+    expect(density.size).toBe(0);
+    expect(disconnect).toHaveBeenCalledOnce();
+  } finally {
+    document.documentElement.removeAttribute('style');
+  }
+});
+
+test('real uPlot autoscales through the transition range exactly as through its own unit ranges', async () => {
+  const backend = fakeBackend();
+  backend.history = { timestampsMs: [1000, 2000], series: [[10, 120], [11, 21]] };
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const configured = plots[0];
+  const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const ctx = new Proxy({ measureText: (text: string) => ({ width: text.length * 7 }) }, {
+    get: (target, key) => key in target ? target[key as keyof typeof target] : () => {},
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const { draw: _draw, ...hooks } = configured.opts.hooks ?? {};
+  const own = { x: { time: true }, percent: scaleOptions('percent'), celsius: scaleOptions('celsius') };
+  const ranges = async (scales: uPlot.Options['scales']) => {
+    const target = document.createElement('div');
+    document.body.append(target);
+    const actual = new RealUplot({ ...configured.opts, scales, hooks }, configured.data, target);
+    await Promise.resolve();
+    await Promise.resolve();
+    const result = { percent: [actual.scales.percent.min, actual.scales.percent.max], celsius: [actual.scales.celsius.min, actual.scales.celsius.max] };
+    actual.destroy();
+    target.remove();
+    return result;
+  };
+  const expected = await ranges(own);
+  expect(expected.percent).toEqual([0, 120]);
+  // The component's autoscale gate is closed once it has painted; open it as a snapshot does.
+  const gateOpen = Object.fromEntries(Object.entries(configured.opts.scales!).map(([key, scale]) => [key, key === 'x' ? scale : { ...scale, auto: true }]));
+  expect(await ranges(gateOpen)).toEqual(expected);
 });

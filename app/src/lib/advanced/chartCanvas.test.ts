@@ -1,6 +1,6 @@
 import uPlot from 'uplot';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
-import { drawChartCanvas } from './chartCanvas';
+import { drawChartCanvas, timeTickFont } from './chartCanvas';
 
 const theme = { gridColor: '#334455', textColor: '#ccddee' };
 
@@ -66,7 +66,8 @@ test('scales widths and font with DPR while keeping canvas pixel positions', () 
   drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [{ stroke: path, gapsClip: null, color: '#f0f' }], [2], 60, 'en', 40, theme);
   expect(ctx.rect).toHaveBeenCalledWith(-30, 20, 480, 200);
   expect(ctx.moveTo).toHaveBeenCalledWith(210, 20);
-  expect(textDraws[0]).toEqual({ font: '24px sans-serif', color: theme.textColor, blur: 0 });
+  expect(textDraws[0]).toEqual({ font: timeTickFont(2), color: theme.textColor, blur: 0 });
+  expect(timeTickFont(2)).toMatch(/^24px /);
   expect(strokes.slice(1, 3).map((s) => s.width)).toEqual([12, 3]);
   expect(ctx.save).toHaveBeenCalledTimes(ctx.restore.mock.calls.length);
 });
@@ -117,4 +118,29 @@ test('draws no held segment by default', () => {
   const { plot, ctx, strokes } = canvasFixture([[0, 1], [20, 40]]);
   drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [], 60, 'en', 40, theme);
   expect(strokes).toHaveLength(0);
+});
+
+test('X labels use the font uPlot draws its Y axis labels in', async () => {
+  const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const ctx = new Proxy({ measureText: (text: string) => ({ width: text.length * 7 }) }, {
+    get: (target, key) => key in target ? target[key as keyof typeof target] : () => {},
+  });
+  const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const target = document.createElement('div');
+  document.body.append(target);
+  try {
+    // uPlot keeps an axis font as [font at its pixel ratio, px, CSS px]; jsdom's ratio is 1.
+    const plot = new RealUplot({ width: 400, height: 200, series: [{}, { points: { show: false } }] }, [[0, 1], [0, 1]], target);
+    const [font] = plot.axes[1].font as unknown as [string];
+    expect(timeTickFont(1)).toBe(font);
+    plot.destroy();
+  } finally {
+    target.remove();
+    getContext.mockRestore();
+  }
+});
+
+test('the X label font size rounds to whole device pixels like uPlot', () => {
+  expect(timeTickFont(1.1)).toMatch(/^13px /);
+  expect(timeTickFont(1.25)).toMatch(/^15px /);
 });

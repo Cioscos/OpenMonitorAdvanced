@@ -17,9 +17,15 @@ export type ChartHeldSegment = Readonly<{
   color: string;
 }>;
 
-/** Font of the X labels at a device pixel ratio; at ratio 1 it measures them in CSS px. */
+/** uPlot 1.6.32's default axis font family, in which it draws the Y axis labels. */
+const AXIS_FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"';
+
+/**
+ * Font of the X labels at a device pixel ratio: uPlot's 12 px axis font, rounded to whole
+ * device pixels as uPlot scales it, so X and Y labels match. At ratio 1 it measures them in CSS px.
+ */
 export function timeTickFont(ratio: number): string {
-  return `${12 * ratio}px sans-serif`;
+  return `${Math.round(12 * ratio)}px ${AXIS_FONT_FAMILY}`;
 }
 
 /** Draw a snapshot in uPlot's canvas pixel coordinate system. */

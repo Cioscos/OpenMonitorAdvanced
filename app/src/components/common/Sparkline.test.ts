@@ -1,6 +1,7 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Sparkline from './Sparkline.svelte';
+import source from './Sparkline.svelte?raw';
 
 let restoreClock: (() => void) | null = null;
 
@@ -203,6 +204,32 @@ test('hides the held segment and marker for a missing final sample or expired ta
   await time.frame(301_100);
   expect((view.container.querySelector('.held-line') as SVGLineElement).style.display).toBe('none');
   expect((view.container.querySelector('.endpoint') as HTMLElement).style.display).toBe('none');
+});
+
+test.each([[0, '34px'], [100, '0px'], [50, '17px']])('the endpoint at %i%% is whole at the right edge while path and held segment stay clipped', (value, top) => {
+  const { container } = render(Sparkline, { values: [value], timestampsMs: [1_000], max: 100 });
+  const root = container.querySelector('.sparkline') as HTMLElement;
+  const marker = container.querySelector('.endpoint') as HTMLElement;
+  // Centred on the right edge and on the value, even at 0% (bottom) and 100% (top).
+  expect(marker.style.left).toBe('100%');
+  expect(marker.style.top).toBe(top);
+  const clippers = (element: Element) => {
+    const found: Element[] = [];
+    for (let node = element.parentElement; node && node !== root.parentElement; node = node.parentElement) {
+      if (getComputedStyle(node).overflow === 'hidden') found.push(node);
+    }
+    return found;
+  };
+  // Nothing between the dot and the tile clips it, so its outer half shows past the edges.
+  // jsdom applies no component stylesheet: check the tile's own rule in the source too.
+  expect(clippers(marker)).toEqual([]);
+  expect(/\.sparkline \{[^}]*overflow:\s*hidden/.test(source)).toBe(false);
+  // The path and the held segment are clipped to the tile's box by an inner wrapper.
+  const clip = container.querySelector('.sparkline-clip') as HTMLElement;
+  expect(clip.parentElement).toBe(root);
+  expect(clip.style.inset).toBe('0px');
+  expect(clippers(scroller(container))).toEqual([clip]);
+  expect(clippers(container.querySelector('.held-line')!)).toContain(clip);
 });
 
 test('renders one white endpoint over a colored line and translucent glow', () => {

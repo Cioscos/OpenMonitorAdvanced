@@ -102,34 +102,38 @@
 </script>
 
 <div class="sparkline" bind:this={root} aria-hidden="true">
-  <!-- Its own compositor layer: frames translate it without repainting the SVG. -->
-  <div class="sparkline-scroll" bind:this={scroller} style:will-change="transform">
-    <svg viewBox="0 0 {SCROLL_WIDTH} {HEIGHT}" preserveAspectRatio="none">
-      <path
-        d={geometry.path}
-        fill="none"
-        stroke={color}
-        stroke-width="6"
-        opacity="0.18"
-        stroke-linejoin="round"
-        stroke-linecap="round"
-        vector-effect="non-scaling-stroke"
-      />
-      <path
-        d={geometry.path}
-        fill="none"
-        stroke={color}
-        stroke-width="2"
-        stroke-linejoin="round"
-        stroke-linecap="round"
-        vector-effect="non-scaling-stroke"
-      />
-      {#if geometry.endpoint}
-        <!-- Visual projection only: the last real value held out to the layer's right end. -->
-        <line bind:this={heldGlow} class="held-glow" x1={geometry.endpoint.x} x2={SCROLL_WIDTH} y1={geometry.endpoint.y} y2={geometry.endpoint.y} stroke={color} stroke-width="6" opacity="0.18" vector-effect="non-scaling-stroke" />
-        <line bind:this={heldLine} class="held-line" x1={geometry.endpoint.x} x2={SCROLL_WIDTH} y1={geometry.endpoint.y} y2={geometry.endpoint.y} stroke={color} stroke-width="2" vector-effect="non-scaling-stroke" />
-      {/if}
-    </svg>
+  <!-- Clips path and held segment to the tile; the endpoint sits outside it, so its outer
+       half still shows at the right edge and at the bottom (min) or top (max) of the scale. -->
+  <div class="sparkline-clip" style="position: absolute; inset: 0; overflow: hidden;">
+    <!-- Its own compositor layer: frames translate it without repainting the SVG. -->
+    <div class="sparkline-scroll" bind:this={scroller} style:will-change="transform">
+      <svg viewBox="0 0 {SCROLL_WIDTH} {HEIGHT}" preserveAspectRatio="none">
+        <path
+          d={geometry.path}
+          fill="none"
+          stroke={color}
+          stroke-width="6"
+          opacity="0.18"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          vector-effect="non-scaling-stroke"
+        />
+        <path
+          d={geometry.path}
+          fill="none"
+          stroke={color}
+          stroke-width="2"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          vector-effect="non-scaling-stroke"
+        />
+        {#if geometry.endpoint}
+          <!-- Visual projection only: the last real value held out to the layer's right end. -->
+          <line bind:this={heldGlow} class="held-glow" x1={geometry.endpoint.x} x2={SCROLL_WIDTH} y1={geometry.endpoint.y} y2={geometry.endpoint.y} stroke={color} stroke-width="6" opacity="0.18" vector-effect="non-scaling-stroke" />
+          <line bind:this={heldLine} class="held-line" x1={geometry.endpoint.x} x2={SCROLL_WIDTH} y1={geometry.endpoint.y} y2={geometry.endpoint.y} stroke={color} stroke-width="2" vector-effect="non-scaling-stroke" />
+        {/if}
+      </svg>
+    </div>
   </div>
   {#if geometry.endpoint}
     <span bind:this={endpoint}
@@ -147,7 +151,6 @@
     display: block;
     width: 100%;
     height: 34px;
-    overflow: hidden;
   }
   .sparkline-scroll {
     position: absolute;

@@ -30,7 +30,10 @@
   function updateVisual(now: number) {
     const visibleRightMs = (viewport.range(now)?.max ?? 0) * 1000;
     if (curves) {
-      curves.style.transform = `translateX(${-scrollOffsetPx(baseRightMs, visibleRightMs, WINDOW_MS, plotWidthPx)}px)`;
+      const offsetCssPx = scrollOffsetPx(baseRightMs, visibleRightMs, WINDOW_MS, plotWidthPx);
+      // CSS transforms on an SVG group use the viewBox coordinate scale.
+      const offsetSvgUnits = offsetCssPx * WIDTH / plotWidthPx;
+      curves.style.transform = `translateX(${-offsetSvgUnits}px)`;
     }
     if (!heldLine || !heldGlow || !endpoint) return;
     const length = geometry.endpoint && Number.isFinite(values.at(-1))

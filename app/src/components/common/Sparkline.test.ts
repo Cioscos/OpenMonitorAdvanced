@@ -71,6 +71,59 @@ function lineStart(container: HTMLElement): number {
   return Number(/^M([\d.]+)/.exec(path)?.[1]);
 }
 
+function connectionPositions(container: HTMLElement): { pathX: number; heldX: number } {
+  const svg = container.querySelector('svg') as SVGSVGElement;
+  const group = svg.querySelector('g') as SVGGElement;
+  const path = group.querySelector('path') as SVGPathElement;
+  const held = svg.querySelector('.held-line') as SVGLineElement;
+  const numbers = (path.getAttribute('d') ?? '').match(/-?\d+(?:\.\d+)?/g) ?? [];
+  const endpointX = Number(numbers.at(-2));
+  const translate = Number(/translateX\((-?\d+(?:\.\d+)?)px\)/.exec(group.style.transform)?.[1]);
+  const scale = 300 / 150;
+  return {
+    pathX: (endpointX + translate) * scale,
+    heldX: Number(held.getAttribute('x1')) * scale,
+  };
+}
+
+function renderAtDoubleWidth(values: number[], timestampsMs: number[]) {
+  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 300 } as DOMRect);
+  return render(Sparkline, { values, timestampsMs, max: 100 });
+}
+
+test('keeps the sampled path connected to the held line at double CSS width', async () => {
+  const time = clock();
+  const view = renderAtDoubleWidth([50], [1_000]);
+  await time.frame(1_000);
+  const { pathX, heldX } = connectionPositions(view.container);
+  expect(pathX).toBeCloseTo(299, 4);
+  expect(heldX).toBeCloseTo(299, 4);
+});
+
+test('keeps the connection at double width when a delayed snapshot rebases the path', async () => {
+  const time = clock();
+  const view = renderAtDoubleWidth([50], [10_000]);
+  await time.frame(1_500);
+  time.at(1_600);
+  await view.rerender({ values: [50, 75], timestampsMs: [10_000, 11_000], max: 100 });
+  await time.frame(2_600);
+  const { pathX, heldX } = connectionPositions(view.container);
+  expect(pathX).toBeCloseTo(heldX, 4);
+  expect((view.container.querySelector('.endpoint') as HTMLElement).style.left).toBe('100%');
+});
+
+test('keeps the connection at double width after timestamp rollback', async () => {
+  const time = clock();
+  const view = renderAtDoubleWidth([50], [10_000]);
+  await time.frame(1_500);
+  time.at(1_600);
+  await view.rerender({ values: [25], timestampsMs: [5_000], max: 100 });
+  await time.frame(2_600);
+  const { pathX, heldX } = connectionPositions(view.container);
+  expect(pathX).toBeCloseTo(heldX, 4);
+  expect((view.container.querySelector('.endpoint') as HTMLElement).style.left).toBe('100%');
+});
+
 test('keeps path bytes while translating the sampled curves between frames', async () => {
   const time = clock();
   const { container } = render(Sparkline, { values: [20, 80], timestampsMs: [0, 1_000], max: 100 });

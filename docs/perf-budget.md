@@ -14,8 +14,28 @@ Memory = private working set (Task Manager "Memory" column); CPU = share of all 
 | M3 | same machine, same drivers, build `21896f5` | window, after 61 min in the tray (full 1 h history; Advanced view as above) | 0.06 | 23.0 | 6 | 139.6 | yes |
 | M3 | same machine, same drivers, build `21896f5` | tray, after 61 min (full 1 h history) | 0.04 | 20.6 | 0 | 20.6 | yes |
 | M3 | same machine, same drivers, build `21896f5` | window, continuously visible for 61 min (Advanced GPU, 1 h, 8 series; raw live tail) | 0.06 | 23.9 | 6 | 149.9 | yes |
+| M4 | same machine, PawnIO 2.2.0, Windows 11 Pro 10.0.26200, service installed | window (`oma-service` connected, Task 15 live verification) | 0.03 | 19.5 | 6 | 141.2 | yes |
+| M4 | same machine, same conditions | tray | 0.07 | 17.3 | 0 | 17.3 | yes |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
+
+| Milestone | Machine | Mode | Service CPU % (of machine) | Service Private Bytes |
+|---|---|---|---|---|
+| M4 | AMD Ryzen 7 7800X3D, B650, 2× DDR5, 1 SATA HDD, 1 SATA SSD, 2 NVMe, RTX 4080 + AMD iGPU, Windows 11 Pro 10.0.26200, PawnIO 2.2.0 | window | 0.03 | 51.6 MB |
+| M4 | same machine, same conditions | tray | 0.04 | 52.7 MB |
+
+Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M4 measurement details
+
+Measured 2026-09-27 on the development machine (AMD Ryzen 7 7800X3D, B650,
+2× DDR5, 1 SATA HDD, 1 SATA SSD, 2 NVMe, RTX 4080 + AMD iGPU, Windows 11 Pro
+10.0.26200, PawnIO 2.2.0), with `scripts/measure-footprint.ps1 -Exe
+'C:\Program Files\OpenMonitor Advanced\oma-app.exe' -Service`, 15 s warm-up +
+30 s sample per run, `oma-service` connected to the app. The service CPU
+figure is computed from raw performance counters over the sample window
+(fix `2ecd011`), not the integer-formatted counter, which had earlier shown
+a spurious 0 % reading that was discarded.
 
 ## M2 measurement details
 

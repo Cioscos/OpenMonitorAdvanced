@@ -71,6 +71,45 @@ function lineStart(container: HTMLElement): number {
   return Number(/^M([\d.]+)/.exec(path)?.[1]);
 }
 
+test('keeps path bytes while translating the sampled curves between frames', async () => {
+  const time = clock();
+  const { container } = render(Sparkline, { values: [20, 80], timestampsMs: [0, 1_000], max: 100 });
+  const group = container.querySelector('svg g') as SVGGElement;
+  const path = group.querySelector('path') as SVGPathElement;
+  const initialPath = path.getAttribute('d');
+  await time.frame(1_000);
+  const firstTransform = group.style.transform;
+  await time.frame(2_000);
+  expect(path.getAttribute('d')).toBe(initialPath);
+  expect(group.style.transform).not.toBe(firstTransform);
+  expect(group.style.transform).toMatch(/translateX\(-/);
+});
+
+test('keeps a flat held segment connected to a fixed right endpoint', async () => {
+  const time = clock();
+  const { container } = render(Sparkline, { values: [50], timestampsMs: [1_000], max: 100 });
+  await time.frame(1_000);
+  const held = container.querySelector('.held-line') as SVGLineElement;
+  const marker = container.querySelector('.endpoint') as HTMLElement;
+  expect(held).toBeTruthy();
+  expect(Number(held.getAttribute('x1'))).toBeCloseTo(149.5, 1);
+  expect(held.getAttribute('x2')).toBe('150');
+  expect(held.getAttribute('y1')).toBe(held.getAttribute('y2'));
+  expect(marker.style.left).toBe('100%');
+});
+
+test('hides the held segment and marker for a missing final sample or expired tail', async () => {
+  const time = clock();
+  const view = render(Sparkline, { values: [50, NaN], timestampsMs: [0, 1_000], max: 100 });
+  expect(view.container.querySelector('.held-line')).toBeNull();
+  expect(view.container.querySelector('.endpoint')).toBeNull();
+  await view.rerender({ values: [50], timestampsMs: [1_000], max: 100 });
+  expect(view.container.querySelector('.endpoint')).toBeTruthy();
+  await time.frame(301_100);
+  expect((view.container.querySelector('.held-line') as SVGLineElement).style.display).toBe('none');
+  expect((view.container.querySelector('.endpoint') as HTMLElement).style.display).toBe('none');
+});
+
 test('renders one white endpoint over a colored line and translucent glow', () => {
   const { container } = render(Sparkline, {
     values: [0, 50], timestampsMs: [0, 1_000], color: '#2ab0ff', max: 100,

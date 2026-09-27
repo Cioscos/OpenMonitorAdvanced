@@ -19,9 +19,11 @@ export class LiveStore {
   #lastSeq = -1;
   #index = new Map<string, number>();
   #series = new Map<string, SeriesBuffer>();
+  #seriesTimestamps: SeriesBuffer;
 
   constructor(capacity = SPARKLINE_POINTS) {
     this.capacity = capacity;
+    this.#seriesTimestamps = new SeriesBuffer(capacity);
   }
 
   applySchema(schema: Schema): void {
@@ -52,12 +54,14 @@ export class LiveStore {
     if (snapshot.seq <= this.#lastSeq) return true; // Duplicate/out-of-order event.
     if (snapshot.timestampMs < this.timestampMs) {
       for (const buffer of this.#series.values()) buffer.clear();
+      this.#seriesTimestamps.clear();
       this.firstTimestampMs = snapshot.timestampMs;
     }
     this.#lastSeq = snapshot.seq;
     this.lastReceivedAtMs = Date.now();
     this.values = snapshot.values;
     schema.sensors.forEach((s, i) => this.#series.get(s.id)?.push(snapshot.values[i]));
+    this.#seriesTimestamps.push(snapshot.timestampMs);
     this.timestampMs = snapshot.timestampMs;
     if (this.firstTimestampMs === 0) this.firstTimestampMs = snapshot.timestampMs;
     this.#tick++;
@@ -68,12 +72,13 @@ export class LiveStore {
   seedHistory(ids: string[], history: HistorySeed): void {
     if (history.revision !== this.schema?.revision) return;
     this.#lastSeq = history.seq;
-    ids.forEach((id, k) => {
-      const buffer = this.#series.get(id);
-      if (!buffer) return;
+    this.#seriesTimestamps.clear();
+    for (const timestamp of history.timestampsMs) this.#seriesTimestamps.push(timestamp);
+    for (const [id, buffer] of this.#series) {
       buffer.clear();
-      for (const v of history.series[k] ?? []) buffer.push(v);
-    });
+      const source = history.series[ids.indexOf(id)] ?? [];
+      for (let i = 0; i < history.timestampsMs.length; i++) buffer.push(source[i] ?? null);
+    }
     const last = history.timestampsMs.at(-1);
     if (last !== undefined) {
       this.timestampMs = last;
@@ -89,6 +94,11 @@ export class LiveStore {
   value(id: string): number | null {
     const i = this.#index.get(id);
     return i === undefined ? null : (this.values[i] ?? null);
+  }
+
+  seriesTimestampsMs(): number[] {
+    void this.#tick;
+    return this.#seriesTimestamps.toArray();
   }
 
   series(id: string): number[] {

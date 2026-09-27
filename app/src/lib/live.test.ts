@@ -9,6 +9,69 @@ const snapshot = (seq: number, revision = 1) => ({
   values: mockValues(seq),
 });
 
+test('irregular snapshots retain their exact shared times', () => {
+  const store = new LiveStore(3);
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot({ ...snapshot(1), timestampMs: 1_025 });
+  store.applySnapshot({ ...snapshot(2), timestampMs: 3_700 });
+  expect(store.seriesTimestampsMs()).toEqual([1_025, 3_700]);
+  expect(store.series('cpu/0/load/total')).toHaveLength(2);
+});
+
+test('seedHistory aligns missing sensor readings with timestamps', () => {
+  const store = new LiveStore(5);
+  store.applySchema(MOCK_SCHEMA);
+  const ids = MOCK_SCHEMA.sensors.map((sensor) => sensor.id);
+  store.seedHistory(ids, {
+    revision: 1,
+    seq: 2,
+    timestampsMs: [120, 480, 2_400],
+    series: ids.map((_, i) => i === 0 ? [10, null, 30] : []),
+  });
+  expect(store.seriesTimestampsMs()).toEqual([120, 480, 2_400]);
+  const cpu = store.series('cpu/0/load/total');
+  expect(cpu[0]).toBe(10);
+  expect(Number.isNaN(cpu[1])).toBe(true);
+  expect(cpu[2]).toBe(30);
+  expect(store.series(ids[1])).toHaveLength(3);
+  expect(store.series(ids[1]).every(Number.isNaN)).toBe(true);
+});
+
+test('schema changes backfill new sensors to the shared timeline', () => {
+  const store = new LiveStore(4);
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(snapshot(2));
+  const added = { ...MOCK_SCHEMA.sensors[0], id: 'new/sensor' };
+  store.applySchema({ ...MOCK_SCHEMA, revision: 2, sensors: [...MOCK_SCHEMA.sensors, added] });
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000]);
+  expect(store.series(added.id)).toHaveLength(2);
+  expect(store.series(added.id).every(Number.isNaN)).toBe(true);
+  store.applySnapshot({ revision: 2, seq: 3, timestampMs: 2_700, values: [...mockValues(3), 99] });
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000, 2_700]);
+  expect(store.series(added.id).slice(2)).toEqual([99]);
+});
+
+test('timestamp rollback clears times and sensor samples together', () => {
+  const store = new LiveStore(3);
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(snapshot(2));
+  store.applySnapshot({ ...snapshot(3), timestampMs: 500 });
+  expect(store.seriesTimestampsMs()).toEqual([500]);
+  expect(store.series('cpu/0/load/total')).toEqual([mockValues(3)[0]]);
+});
+
+test('capacity evicts the same oldest timestamp and sensor sample', () => {
+  const store = new LiveStore(2);
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot({ ...snapshot(1), timestampMs: 1_025 });
+  store.applySnapshot({ ...snapshot(2), timestampMs: 1_800 });
+  store.applySnapshot({ ...snapshot(3), timestampMs: 4_100 });
+  expect(store.seriesTimestampsMs()).toEqual([1_800, 4_100]);
+  expect(store.series('cpu/0/load/total')).toEqual([mockValues(2)[0], mockValues(3)[0]]);
+});
+
 test('applySnapshot updates values, timestamps and series', () => {
   const store = new LiveStore(3);
   store.applySchema(MOCK_SCHEMA);

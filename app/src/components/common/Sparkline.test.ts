@@ -1,11 +1,75 @@
 import { cleanup, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import Sparkline from './Sparkline.svelte';
+
+let restoreClock: (() => void) | null = null;
 
 afterEach(() => {
   cleanup();
+  restoreClock?.();
+  restoreClock = null;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+function clock() {
+  let now = 0;
+  let visible = true;
+  let reduced = false;
+  let id = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const motionListeners = new Set<(event: MediaQueryListEvent) => void>();
+  const added = vi.spyOn(document, 'addEventListener');
+  const removed = vi.spyOn(document, 'removeEventListener');
+  const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visible ? 'visible' : 'hidden' });
+  restoreClock = () => {
+    if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility);
+  };
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++id, callback);
+    return id;
+  });
+  vi.stubGlobal('cancelAnimationFrame', (frameId: number) => frames.delete(frameId));
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() { return reduced; },
+    media: query,
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => motionListeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => motionListeners.delete(listener),
+  }));
+  return {
+    at(ms: number) { now = ms; },
+    async frame(ms: number) {
+      now = ms;
+      const [frameId, callback] = [...frames][0] ?? [];
+      if (frameId === undefined || !callback) throw new Error('No pending frame');
+      frames.delete(frameId);
+      callback(ms);
+      await tick();
+    },
+    visibility(next: boolean, ms: number) {
+      now = ms;
+      visible = next;
+      document.dispatchEvent(new Event('visibilitychange'));
+    },
+    motion(next: boolean, ms: number) {
+      now = ms;
+      reduced = next;
+      for (const listener of motionListeners) listener({ matches: next } as MediaQueryListEvent);
+    },
+    pending: () => frames.size,
+    motionListeners: () => motionListeners.size,
+    visibilityListeners: () =>
+      added.mock.calls.filter(([type]) => type === 'visibilitychange').length
+      - removed.mock.calls.filter(([type]) => type === 'visibilitychange').length,
+  };
+}
+
+function lineStart(container: HTMLElement): number {
+  const path = container.querySelectorAll('path')[1].getAttribute('d') ?? '';
+  return Number(/^M([\d.]+)/.exec(path)?.[1]);
+}
 
 test('renders one white endpoint over a colored line and translucent glow', () => {
   const { container } = render(Sparkline, {
@@ -64,3 +128,50 @@ test('reduced motion keeps the sparkline static without scheduling frames', () =
   expect(container.querySelector('.endpoint')).toBeTruthy();
   expect(raf).not.toHaveBeenCalled();
 });
+
+test('a delayed snapshot cannot move the already scrolling time edge backward', async () => {
+  const time = clock();
+  const view = render(Sparkline, { values: [50], timestampsMs: [10_000], max: 100 });
+  await time.frame(1_500);
+  const before = lineStart(view.container);
+  time.at(1_600);
+  await view.rerender({ values: [50, 75], timestampsMs: [10_000, 11_000], max: 100 });
+  expect(lineStart(view.container)).toBeLessThanOrEqual(before);
+  expect(view.container.querySelector('.endpoint')).toBeTruthy();
+});
+
+test('a lower timestamp after rollback starts a new time epoch', async () => {
+  const time = clock();
+  const view = render(Sparkline, { values: [50], timestampsMs: [10_000], max: 100 });
+  await time.frame(1_500);
+  time.at(1_600);
+  await view.rerender({ values: [25], timestampsMs: [5_000], max: 100 });
+  expect((view.container.querySelector('.endpoint') as HTMLElement).style.left).toBe('100%');
+});
+
+for (const mode of ['visibility', 'motion'] as const) {
+  for (const withSnapshot of [false, true]) {
+    test(`${mode} pause resumes without elapsed-time jump ${withSnapshot ? 'after a snapshot' : 'without snapshots'}`, async () => {
+      const time = clock();
+      const view = render(Sparkline, { values: [50], timestampsMs: [10_000], max: 100 });
+      await time.frame(500);
+      if (mode === 'visibility') time.visibility(false, 1_000);
+      else time.motion(true, 1_000);
+      expect(time.pending()).toBe(0);
+      if (withSnapshot) {
+        time.at(600_000);
+        await view.rerender({ values: [50, 75], timestampsMs: [10_000, 20_000], max: 100 });
+      }
+      if (mode === 'visibility') time.visibility(true, 1_200_000);
+      else time.motion(false, 1_200_000);
+      await time.frame(1_200_000);
+      const endpoint = view.container.querySelector('.endpoint') as HTMLElement;
+      expect(endpoint).toBeTruthy();
+      expect(Number.parseFloat(endpoint.style.left)).toBeGreaterThan(withSnapshot ? 99.9 : 99);
+      view.unmount();
+      expect(time.pending()).toBe(0);
+      expect(time.motionListeners()).toBe(0);
+      expect(time.visibilityListeners()).toBe(0);
+    });
+  }
+}

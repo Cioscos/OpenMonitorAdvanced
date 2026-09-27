@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
   import { sparklineGeometry } from '../../lib/sparkline';
 
@@ -14,22 +15,47 @@
   const WIDTH = 150;
   const HEIGHT = 34;
   const WINDOW_MS = 5 * 60_000;
+  const viewport = createChartViewport(WINDOW_MS / 1000);
   let rightEdgeMs = $state(0);
-  let sampleMonotonicMs = 0;
-  let sampleTimestampMs = 0;
+  let lastTimestampMs: number | null = null;
   const geometry = $derived(sparklineGeometry(values, timestampsMs, rightEdgeMs, WINDOW_MS, WIDTH, HEIGHT, min, max));
 
   $effect(() => {
     const latest = timestampsMs.at(-1);
-    if (latest === undefined) return;
-    sampleTimestampMs = latest;
-    sampleMonotonicMs = performance.now();
-    rightEdgeMs = latest;
+    if (latest === undefined) {
+      viewport.reset();
+      lastTimestampMs = null;
+      return;
+    }
+    if (lastTimestampMs !== null && latest < lastTimestampMs) viewport.reset();
+    lastTimestampMs = latest;
+    const now = performance.now();
+    viewport.sample(latest, now);
+    rightEdgeMs = (viewport.range(now)?.max ?? latest / 1000) * 1000;
   });
 
-  onMount(() => subscribeChartFrame((now) => {
-    if (timestampsMs.length > 0) rightEdgeMs = sampleTimestampMs + Math.max(0, now - sampleMonotonicMs);
-  }));
+  onMount(() => {
+    const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const syncPause = () => {
+      const now = performance.now();
+      if (document.visibilityState !== 'visible' || motionQuery.matches) viewport.suspend(now);
+      else viewport.resume(now);
+      const range = viewport.range(now);
+      if (range) rightEdgeMs = range.max * 1000;
+    };
+    document.addEventListener('visibilitychange', syncPause);
+    motionQuery.addEventListener('change', syncPause);
+    syncPause();
+    const stopFrames = subscribeChartFrame((now) => {
+      const range = viewport.range(now);
+      if (range) rightEdgeMs = range.max * 1000;
+    });
+    return () => {
+      stopFrames();
+      document.removeEventListener('visibilitychange', syncPause);
+      motionQuery.removeEventListener('change', syncPause);
+    };
+  });
 </script>
 
 <div class="sparkline" aria-hidden="true">

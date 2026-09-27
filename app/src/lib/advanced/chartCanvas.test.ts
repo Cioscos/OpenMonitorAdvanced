@@ -54,7 +54,7 @@ test('labels sub-minute ticks with seconds using the increment it paints', () =>
   const { plot, ctx } = canvasFixture([[0, 1], [20, 40]]);
   drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [0, 1, 2, 3], 1, 'it', 0, theme);
   const withSeconds = { hour: '2-digit', minute: '2-digit', second: '2-digit' } as const;
-  expect(ctx.fillText.mock.calls.map(([text]) => text)).toEqual(
+  expect((ctx.fillText.mock.calls as unknown as string[][]).map(([text]) => text)).toEqual(
     [0, 1, 2, 3].map((s) => new Date(s * 1000).toLocaleTimeString('it', withSeconds)),
   );
 });
@@ -90,4 +90,31 @@ test.each([[0, 100, 0], [42, 42, 42], [0, 1, 100]])('uPlot spline remains within
     expect([x1, x2, x3].every(Number.isFinite)).toBe(true);
     prev = [x3, y3];
   }
+});
+
+test('draws each held segment like its line, from the last sample to the right overscan end', () => {
+  uPlot.pxRatio = 2;
+  const { plot, ctx, strokes } = canvasFixture([[0, 1], [20, 40]]);
+  const path = new Path2D();
+  drawChartCanvas(
+    ctx as unknown as CanvasRenderingContext2D, plot, [{ stroke: path, gapsClip: new Path2D(), color: '#f0f' }], [2], 60, 'en', 40, theme,
+    [{ x: 210, y: 70, color: '#f0f' }, { x: 300, y: 120, color: '#0ff' }],
+  );
+  // Grid, the curve's glow and line, then each held segment's glow and line, then tick marks.
+  expect(strokes.map((s) => s.color)).toEqual([theme.gridColor, '#f0f', '#f0f', '#f0f', '#f0f', '#0ff', '#0ff', theme.gridColor]);
+  expect(strokes.slice(3, 7).map((s) => [s.alpha, s.width, s.blur])).toEqual([[0.18, 12, 0], [1, 3, 0], [0.18, 12, 0], [1, 3, 0]]);
+  // Held strokes use the current path, not a gap clip: the segment exists only after a real value.
+  expect(ctx.stroke.mock.calls.slice(3, 7).every(([p]) => p === undefined)).toBe(true);
+  expect(ctx.moveTo).toHaveBeenCalledWith(210, 70);
+  expect(ctx.lineTo).toHaveBeenCalledWith(450, 70);
+  expect(ctx.moveTo).toHaveBeenCalledWith(300, 120);
+  expect(ctx.lineTo).toHaveBeenCalledWith(450, 120);
+  expect(ctx.clip.mock.calls.filter(([p]) => p === undefined)).toHaveLength(4);
+  expect(ctx.save).toHaveBeenCalledTimes(ctx.restore.mock.calls.length);
+});
+
+test('draws no held segment by default', () => {
+  const { plot, ctx, strokes } = canvasFixture([[0, 1], [20, 40]]);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [], 60, 'en', 40, theme);
+  expect(strokes).toHaveLength(0);
 });

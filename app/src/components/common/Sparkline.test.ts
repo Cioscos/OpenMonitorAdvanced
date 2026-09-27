@@ -71,23 +71,35 @@ function lineStart(container: HTMLElement): number {
   return Number(/^M([\d.]+)/.exec(path)?.[1]);
 }
 
-function connectionPositions(container: HTMLElement): { pathX: number; heldX: number } {
+/** The HTML layer that the compositor translates between samples. */
+function scroller(container: HTMLElement): HTMLElement {
+  return container.querySelector('.sparkline-scroll') as HTMLElement;
+}
+
+function translateCssPx(container: HTMLElement): number {
+  return Number(/translateX\((-?\d+(?:\.\d+)?)px\)/.exec(scroller(container).style.transform)?.[1] ?? 0);
+}
+
+/** Rendered CSS x of the path end and of the held segment, for a sparkline `cssWidth` wide. */
+function connectionPositions(container: HTMLElement, cssWidth = 300): { pathX: number; heldX: number; heldEndX: number } {
   const svg = container.querySelector('svg') as SVGSVGElement;
-  const group = svg.querySelector('g') as SVGGElement;
-  const path = group.querySelector('path') as SVGPathElement;
+  const path = svg.querySelector('path') as SVGPathElement;
   const held = svg.querySelector('.held-line') as SVGLineElement;
   const numbers = (path.getAttribute('d') ?? '').match(/-?\d+(?:\.\d+)?/g) ?? [];
   const endpointX = Number(numbers.at(-2));
-  const translate = Number(/translateX\((-?\d+(?:\.\d+)?)px\)/.exec(group.style.transform)?.[1]);
-  const scale = 300 / 150;
+  const viewBoxWidth = Number(svg.getAttribute('viewBox')!.split(' ')[2]);
+  // The SVG spans twice the tile, so one user unit is (2 * cssWidth / viewBoxWidth) CSS px.
+  const scale = 2 * cssWidth / viewBoxWidth;
+  const translate = translateCssPx(container);
   return {
-    pathX: (endpointX + translate) * scale,
-    heldX: Number(held.getAttribute('x1')) * scale,
+    pathX: endpointX * scale + translate,
+    heldX: Number(held.getAttribute('x1')) * scale + translate,
+    heldEndX: Number(held.getAttribute('x2')) * scale + translate,
   };
 }
 
 function renderAtDoubleWidth(values: number[], timestampsMs: number[]) {
-  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 300 } as DOMRect);
+  vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 300 } as DOMRect);
   return render(Sparkline, { values, timestampsMs, max: 100 });
 }
 
@@ -95,9 +107,10 @@ test('keeps the sampled path connected to the held line at double CSS width', as
   const time = clock();
   const view = renderAtDoubleWidth([50], [1_000]);
   await time.frame(1_000);
-  const { pathX, heldX } = connectionPositions(view.container);
+  const { pathX, heldX, heldEndX } = connectionPositions(view.container);
   expect(pathX).toBeCloseTo(299, 4);
   expect(heldX).toBeCloseTo(299, 4);
+  expect(heldEndX).toBeGreaterThanOrEqual(300);
 });
 
 test('keeps the connection at double width when a delayed snapshot rebases the path', async () => {
@@ -107,8 +120,9 @@ test('keeps the connection at double width when a delayed snapshot rebases the p
   time.at(1_600);
   await view.rerender({ values: [50, 75], timestampsMs: [10_000, 11_000], max: 100 });
   await time.frame(2_600);
-  const { pathX, heldX } = connectionPositions(view.container);
+  const { pathX, heldX, heldEndX } = connectionPositions(view.container);
   expect(pathX).toBeCloseTo(heldX, 4);
+  expect(heldEndX).toBeGreaterThanOrEqual(300);
   expect((view.container.querySelector('.endpoint') as HTMLElement).style.left).toBe('100%');
 });
 
@@ -119,23 +133,46 @@ test('keeps the connection at double width after timestamp rollback', async () =
   time.at(1_600);
   await view.rerender({ values: [25], timestampsMs: [5_000], max: 100 });
   await time.frame(2_600);
-  const { pathX, heldX } = connectionPositions(view.container);
+  const { pathX, heldX, heldEndX } = connectionPositions(view.container);
   expect(pathX).toBeCloseTo(heldX, 4);
+  expect(heldEndX).toBeGreaterThanOrEqual(300);
   expect((view.container.querySelector('.endpoint') as HTMLElement).style.left).toBe('100%');
 });
 
 test('keeps path bytes while translating the sampled curves between frames', async () => {
   const time = clock();
   const { container } = render(Sparkline, { values: [20, 80], timestampsMs: [0, 1_000], max: 100 });
-  const group = container.querySelector('svg g') as SVGGElement;
-  const path = group.querySelector('path') as SVGPathElement;
+  const path = container.querySelector('path') as SVGPathElement;
   const initialPath = path.getAttribute('d');
   await time.frame(1_000);
-  const firstTransform = group.style.transform;
+  const firstTransform = scroller(container).style.transform;
   await time.frame(2_000);
   expect(path.getAttribute('d')).toBe(initialPath);
-  expect(group.style.transform).not.toBe(firstTransform);
-  expect(group.style.transform).toMatch(/translateX\(-/);
+  expect(scroller(container).style.transform).not.toBe(firstTransform);
+  expect(scroller(container).style.transform).toMatch(/translateX\(-/);
+});
+
+test('frames between samples only translate the HTML scroll layer', async () => {
+  const time = clock();
+  const { container } = render(Sparkline, { values: [20, 80], timestampsMs: [0, 1_000], max: 100 });
+  await time.frame(1_000);
+  const records: MutationRecord[] = [];
+  const observer = new MutationObserver((batch) => records.push(...batch));
+  observer.observe(container, { attributes: true, subtree: true, childList: true, characterData: true });
+  const before = scroller(container).style.cssText;
+  for (const at of [1_020, 1_040, 1_060, 2_000, 3_000]) await time.frame(at);
+  records.push(...observer.takeRecords());
+  observer.disconnect();
+  expect(records.length).toBeGreaterThan(0);
+  for (const record of records) {
+    expect(record.type).toBe('attributes');
+    expect(record.target).toBe(scroller(container));
+    expect(record.attributeName).toBe('style');
+  }
+  // Only the transform changed; everything else about the layer is as it was.
+  const strip = (css: string) => css.replace(/transform:[^;]*;?/, '').trim();
+  expect(strip(scroller(container).style.cssText)).toBe(strip(before));
+  expect(scroller(container).style.willChange).toBe('transform');
 });
 
 test('keeps a flat held segment connected to a fixed right endpoint', async () => {
@@ -145,9 +182,14 @@ test('keeps a flat held segment connected to a fixed right endpoint', async () =
   const held = container.querySelector('.held-line') as SVGLineElement;
   const marker = container.querySelector('.endpoint') as HTMLElement;
   expect(held).toBeTruthy();
-  expect(Number(held.getAttribute('x1'))).toBeCloseTo(149.5, 1);
-  expect(held.getAttribute('x2')).toBe('150');
+  // jsdom lays out nothing, so the tile falls back to the 150-unit default width.
+  const { heldX, heldEndX } = connectionPositions(container, 150);
+  expect(heldX).toBeCloseTo(149.5, 1);
+  expect(heldEndX).toBeGreaterThanOrEqual(150);
+  expect(held.getAttribute('x2')).toBe('300');
   expect(held.getAttribute('y1')).toBe(held.getAttribute('y2'));
+  expect(held.parentElement!.closest('.sparkline-scroll')).toBe(scroller(container));
+  expect(marker.closest('.sparkline-scroll')).toBeNull();
   expect(marker.style.left).toBe('100%');
 });
 
@@ -268,8 +310,8 @@ for (const mode of ['visibility', 'motion'] as const) {
   }
 }
 
-function scrolledLayer(container: HTMLElement): HTMLElement | SVGElement {
-  return container.querySelector('svg g') as SVGGElement;
+function scrolledLayer(container: HTMLElement): HTMLElement {
+  return scroller(container);
 }
 
 test('sparklines mounted on different frames scroll on the same ~60 vsyncs per second', async () => {

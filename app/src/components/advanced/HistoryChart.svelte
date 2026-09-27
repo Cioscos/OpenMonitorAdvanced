@@ -17,7 +17,7 @@
     seriesPalette,
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
-  import { drawChartCanvas, type ChartCanvasPath } from '../../lib/advanced/chartCanvas';
+  import { drawChartCanvas, type ChartCanvasPath, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
   import { heldLengthPx, scrollOffsetPx, timeTicks } from '../../lib/chartCompositor';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { sensorLabel } from '../../lib/advanced/labels';
@@ -68,26 +68,24 @@
   let destroyed = false;
   let canvas: HTMLCanvasElement | undefined;
   let canvasClip: HTMLDivElement | undefined;
-  let markerClip: HTMLDivElement | undefined;
   let dotClip: HTMLDivElement | undefined;
-  let markers: HTMLDivElement[] = [];
   let dots: HTMLDivElement[] = [];
   let baseRightMs = 0;
   let canvasOffsetPx = 0;
+  /** The canvas holds held segments that must vanish when their sample leaves the window. */
+  let heldPainted = false;
   let tickIncrement = 60;
   let autoscaleY = true;
 
   function clearLayers() {
     canvasClip?.remove();
-    markerClip?.remove();
     dotClip?.remove();
     canvas = undefined;
     canvasClip = undefined;
-    markerClip = undefined;
     dotClip = undefined;
-    markers = [];
     dots = [];
     canvasOffsetPx = 0;
+    heldPainted = false;
   }
 
   function createLayers(colors: string[]) {
@@ -98,19 +96,11 @@
     canvas = document.createElement('canvas');
     canvas.className = 'chart-canvas';
     canvasClip.append(canvas);
-    markerClip = document.createElement('div');
-    markerClip.className = 'chart-marker-clip';
-    // Held segments stop at the plot edge; the dots have their own padded layer so the
-    // right edge and the Y extrema never cut them in half.
+    // Held segments are canvas strokes clipped to the plot; the dots have their own padded
+    // layer so the right edge and the Y extrema never cut them in half.
     dotClip = document.createElement('div');
     dotClip.className = 'chart-dot-clip';
-    for (const color of colors) {
-      const marker = document.createElement('div');
-      marker.className = 'chart-marker';
-      marker.style.color = color;
-      marker.hidden = true;
-      markers.push(marker);
-      markerClip.append(marker);
+    for (let i = 0; i < colors.length; i++) {
       const dot = document.createElement('div');
       dot.className = 'chart-dot';
       dot.hidden = true;
@@ -118,23 +108,45 @@
       dotClip.append(dot);
     }
     // The wrap shares uPlot's canvas origin; its sibling legend has its own layout.
-    plot.over.parentElement!.append(canvasClip, markerClip, dotClip);
+    plot.over.parentElement!.append(canvasClip, dotClip);
+  }
+
+  /**
+   * Held segments of the series whose last real value is finite, inside its Y scale and whose
+   * sample is still in the window, in canvas px; the matching dots are shown and placed.
+   */
+  function heldSegments(u: uPlot, paths: ChartCanvasPath[]): ChartHeldSegment[] {
+    const ratio = uPlot.pxRatio;
+    const { top, height } = u.bbox;
+    const windowMs = buffer!.windowSeconds * 1000;
+    const visibleRightMs = (viewport.range(performance.now())?.max ?? baseRightMs / 1000) * 1000;
+    const inWindow = heldLengthPx(buffer!.lastTimestampMs, visibleRightMs, windowMs, u.bbox.width / ratio) !== null;
+    const lastX = u.data[0]?.at(-1);
+    const segments: ChartHeldSegment[] = [];
+    for (let i = 0; i < dots.length; i++) {
+      const value = u.data[i + 1]?.at(-1);
+      const y = value == null ? NaN : u.valToPos(value, u.series[i + 1].scale!, true);
+      const show = inWindow && lastX != null && u.series[i + 1].show !== false
+        && Number.isFinite(value) && Number.isFinite(y) && y >= top && y <= top + height;
+      dots[i].hidden = !show;
+      if (!show) continue;
+      dots[i].style.top = `${(y - top) / ratio + DOT_RADIUS}px`;
+      segments.push({ x: u.valToPos(lastX, 'x', true), y, color: paths[i].color });
+    }
+    return segments;
   }
 
   function paint(u: uPlot, paths: ChartCanvasPath[], theme: { gridColor: string; textColor: string }) {
-    if (!canvas || !canvasClip || !markerClip || !dotClip) return;
+    if (!canvas || !canvasClip || !dotClip) return;
     const ratio = uPlot.pxRatio;
     const { left, top, width, height } = u.bbox;
     const axisHeight = 40 * ratio;
     const leftOverscan = 72 * ratio;
     // One window of overscan keeps memory bounded, even if telemetry stops.
-    for (const layer of [canvasClip, markerClip]) {
-      layer.style.left = `${left / ratio}px`;
-      layer.style.top = `${top / ratio}px`;
-      layer.style.width = `${width / ratio}px`;
-    }
+    canvasClip.style.left = `${left / ratio}px`;
+    canvasClip.style.top = `${top / ratio}px`;
+    canvasClip.style.width = `${width / ratio}px`;
     canvasClip.style.height = `${(height + axisHeight) / ratio}px`;
-    markerClip.style.height = `${height / ratio}px`;
     dotClip.style.left = `${left / ratio - DOT_RADIUS}px`;
     dotClip.style.top = `${top / ratio - DOT_RADIUS}px`;
     dotClip.style.width = `${width / ratio + DOT_RADIUS * 2}px`;
@@ -145,13 +157,16 @@
     canvas.style.width = `${(width * 2 + leftOverscan) / ratio}px`;
     canvas.style.height = `${(height + axisHeight) / ratio}px`;
     canvas.style.left = `${-leftOverscan / ratio}px`;
+    heldPainted = false;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.save();
     ctx.translate(leftOverscan - left, -top);
     const seconds = buffer!.windowSeconds;
     const right = baseRightMs / 1000;
-    drawChartCanvas(ctx, u, paths.filter((_, i) => u.series[i + 1].show !== false), timeTicks(right - seconds * 2, right + seconds, tickIncrement), tickIncrement, i18n.locale, width, theme);
+    const held = heldSegments(u, paths);
+    heldPainted = held.length > 0;
+    drawChartCanvas(ctx, u, paths.filter((_, i) => u.series[i + 1].show !== false), timeTicks(right - seconds * 2, right + seconds, tickIncrement), tickIncrement, i18n.locale, width, theme, held);
     ctx.restore();
     autoscaleY = false;
     drawFrame(performance.now());
@@ -163,45 +178,50 @@
     baseRightMs = range.max * 1000;
     // The committed X scale makes uPlot re-run a visible cursor itself, at offset zero.
     canvasOffsetPx = 0;
+    // uPlot commits the scale, and repaints, in a microtask: until then no painted held
+    // segment may ask the frame below for another rebase.
+    heldPainted = false;
     autoscaleY = snapshot;
     plot.setScale('x', range);
     drawFrame(nowMonoMs);
   }
 
+  /**
+   * Cursor points sit on the cached X scale; while the pointer is over the plot a CSS offset
+   * moves them onto the scrolled curve. Without a pointer nothing is written, so scrolling
+   * frames do not restyle the overlay; leaving clears the offset once.
+   */
+  function syncCursorOffset(u: uPlot) {
+    const left = u.cursor.left;
+    const next = left !== undefined && left >= 0 ? `${-canvasOffsetPx}px` : '';
+    if (u.over.style.getPropertyValue('--chart-cursor-offset') === next) return;
+    if (next) u.over.style.setProperty('--chart-cursor-offset', next);
+    else u.over.style.removeProperty('--chart-cursor-offset');
+  }
+
+  // Between samples a frame only writes the canvas transform, which the compositor applies
+  // without restyling, relayout or repainting: held segments scroll inside the canvas and the
+  // fixed dots change only when the canvas is repainted.
   function drawFrame(nowMonoMs: number) {
     const range = viewport.range(nowMonoMs);
     if (paused || !plot || !canvas || !buffer || !range) return;
     const width = plot.bbox.width / uPlot.pxRatio;
-    const offset = scrollOffsetPx(baseRightMs, range.max * 1000, buffer.windowSeconds * 1000, width);
-    if (offset > width) {
+    const windowMs = buffer.windowSeconds * 1000;
+    const offset = scrollOffsetPx(baseRightMs, range.max * 1000, windowMs, width);
+    // Repaint when the overscan is exhausted, or when painted held segments must disappear
+    // because their sample left the window.
+    if (offset > width || (heldPainted && heldLengthPx(buffer.lastTimestampMs, range.max * 1000, windowMs, width) === null)) {
       rebase(nowMonoMs, false);
       return;
     }
     canvas.style.transform = `translateX(${-offset}px)`;
-    plot.over.style.setProperty('--chart-cursor-offset', `${-offset}px`);
     const moved = offset !== canvasOffsetPx;
     canvasOffsetPx = offset;
+    syncCursorOffset(plot);
     // A still pointer sees the curve scroll under it: hit-test it again, as the former
     // per-frame setScale did, without touching scales or canvases.
     const { left, top } = plot.cursor;
     if (moved && left !== undefined && left >= 0 && top !== undefined) plot.setCursor({ left, top });
-    const length = heldLengthPx(buffer.lastTimestampMs, range.max * 1000, buffer.windowSeconds * 1000, width);
-    const data = plot.data;
-    for (let i = 0; i < markers.length; i++) {
-      const value = data[i + 1]?.at(-1);
-      const marker = markers[i];
-      const dot = dots[i];
-      const scale = plot.series[i + 1].scale!;
-      const y = value == null ? NaN : (plot.valToPos(value, scale, true) - plot.bbox.top) / uPlot.pxRatio;
-      marker.hidden = plot.series[i + 1].show === false || length === null || value == null || !Number.isFinite(value) || !Number.isFinite(y) || y < 0 || y > plot.bbox.height / uPlot.pxRatio;
-      dot.hidden = marker.hidden;
-      if (!marker.hidden) {
-        marker.style.width = `${length}px`;
-        marker.style.top = `${y}px`;
-        marker.style.right = '0px';
-        dot.style.top = `${y + DOT_RADIUS}px`;
-      }
-    }
   }
 
   function chooseWindow(w: WindowSeconds) {
@@ -313,7 +333,10 @@
       hooks: {
         draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })],
         // Legend values follow dataIdx, but uPlot publishes its uncorrected index here.
-        setCursor: [(u) => { u.cursor.idx = u.legend.idx = u.cursor.idxs![0]; }],
+        setCursor: [(u) => {
+          u.cursor.idx = u.legend.idx = u.cursor.idxs![0];
+          syncCursorOffset(u);
+        }],
       },
       axes: [
         {
@@ -547,7 +570,6 @@
     min-height: 260px;
   }
   .plot :global(.chart-canvas-clip),
-  .plot :global(.chart-marker-clip),
   .plot :global(.chart-dot-clip) {
     position: absolute;
     overflow: hidden;
@@ -557,13 +579,6 @@
     position: absolute;
     top: 0;
     will-change: transform;
-  }
-  .plot :global(.chart-marker) {
-    position: absolute;
-    height: 1.5px;
-    background: currentColor;
-    box-shadow: 0 0 3px currentColor;
-    transform: translateY(-50%);
   }
   .plot :global(.chart-dot) {
     position: absolute;

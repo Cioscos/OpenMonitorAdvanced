@@ -7,6 +7,16 @@ export type ChartCanvasPath = Readonly<{
   color: string;
 }>;
 
+/**
+ * The last real value of a series held flat from its sample (canvas px) to the right end of the
+ * overscan. A visual projection only: it never enters uPlot data, legend, KPIs, stats or logs.
+ */
+export type ChartHeldSegment = Readonly<{
+  x: number;
+  y: number;
+  color: string;
+}>;
+
 /** Draw a snapshot in uPlot's canvas pixel coordinate system. */
 export function drawChartCanvas(
   ctx: CanvasRenderingContext2D,
@@ -17,6 +27,7 @@ export function drawChartCanvas(
   locale: string,
   overscanPx: number,
   theme: { gridColor: string; textColor: string },
+  held: ReadonlyArray<ChartHeldSegment> = [],
 ): void {
   const { left, top, width, height } = plot.bbox;
   const start = left - Math.max(0, overscanPx);
@@ -68,6 +79,33 @@ export function drawChartCanvas(
       ctx.lineWidth = 1.5 * ratio;
       ctx.globalAlpha = 1;
       ctx.stroke(stroke);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  // Drawn into the translated canvas, the held segments scroll with their curves, so frames
+  // between samples need no per-series layer writes.
+  for (const { x, y, color } of held) {
+    ctx.save();
+    try {
+      ctx.beginPath();
+      ctx.rect(start, top, right - start, height);
+      ctx.clip();
+      ctx.beginPath();
+      ctx.moveTo(Math.max(start, x), y);
+      ctx.lineTo(right, y);
+      ctx.shadowBlur = 0;
+      ctx.setLineDash([]);
+      ctx.strokeStyle = color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 6 * ratio;
+      ctx.globalAlpha = 0.18;
+      ctx.stroke();
+      ctx.lineWidth = 1.5 * ratio;
+      ctx.globalAlpha = 1;
+      ctx.stroke();
     } finally {
       ctx.restore();
     }

@@ -8,7 +8,17 @@ import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
+import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
 import HistoryChart from './HistoryChart.svelte';
+
+// Calls through to the real painter; tests read the held segments it was handed.
+vi.mock('../../lib/advanced/chartCanvas', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/advanced/chartCanvas')>();
+  return { ...actual, drawChartCanvas: vi.fn(actual.drawChartCanvas) };
+});
+const paints = () => vi.mocked(drawChartCanvas).mock.calls;
+/** Held segments of the latest canvas paint, in canvas pixels. */
+const lastHeld = (): ReadonlyArray<ChartHeldSegment> => paints().at(-1)?.[8] ?? [];
 
 const plots = FakeUplot.instances;
 const GPU = 'gpu/pci-0000:01:00.0';
@@ -52,6 +62,7 @@ beforeEach(() => {
     return contexts.get(this)!;
   });
   plots.length = 0;
+  vi.mocked(drawChartCanvas).mockClear();
   localStorage.clear();
   i18n.locale = 'en';
   visibility = 'visible';
@@ -395,18 +406,71 @@ test('keeps fixed held segments and white points for valid final values only', a
   backend.history = { timestampsMs: [1000, 2000], series: [[10, 20], [11, null]] };
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
-  const markers = [...document.querySelectorAll<HTMLElement>('.chart-marker')];
-  expect(markers).toHaveLength(2);
-  expect(markers[0].hidden).toBe(false);
-  expect(markers[1].hidden).toBe(true);
+  expect(document.querySelector('.chart-marker')).toBeNull();
+  const plot = plots[0];
+  // The held segment starts at the last real sample and is only handed to the painter.
+  expect(lastHeld()).toEqual([{ x: plot.bbox.left + plot.bbox.width, y: plot.valToPos(20, 'percent', true), color: plot.opts.series[1].stroke }]);
+  expect(plot.data).toEqual([[1, 2], [10, 20], [11, null]]);
   const dots = [...document.querySelectorAll<HTMLElement>('.chart-dot')];
   expect(dots.map((d) => d.hidden)).toEqual([false, true]);
+  const painted = paints().length;
   frame(1000);
-  expect(markers[0].style.width).toBe('2px');
-  expect(markers[0].style.right).toBe('0px');
+  expect(paints()).toHaveLength(painted);
+  expect(dots.map((d) => d.hidden)).toEqual([false, true]);
   frame(301_000);
-  expect(markers.every((m) => m.hidden)).toBe(true);
+  expect(lastHeld()).toEqual([]);
   expect(dots.every((d) => d.hidden)).toBe(true);
+});
+
+test('drops held segments and dots with a repaint once the last sample leaves the window', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  frame(5000);
+  monotonicMs = 5000;
+  // A delayed snapshot rebases at the displayed edge, 4 s after its own timestamp.
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(lastHeld()).toHaveLength(2);
+  const scales = plot.scales.length;
+  const dots = [...document.querySelectorAll<HTMLElement>('.chart-dot')];
+  frame(300_900);
+  // Still in the window, and short of overscan exhaustion: the canvas only translated.
+  expect(plot.scales).toHaveLength(scales);
+  expect(dots.map((d) => d.hidden)).toEqual([false, false]);
+  const scrolled = 295_900 * plot.bbox.width / 300_000;
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  expect(canvas.style.transform).toBe(`translateX(${-scrolled}px)`);
+  // The held segment ends at the right overscan edge, so it still covers the plot's right edge.
+  expect(plot.bbox.left + 2 * plot.bbox.width - scrolled).toBeGreaterThanOrEqual(plot.bbox.left + plot.bbox.width);
+  frame(301_100);
+  expect(plot.scales).toHaveLength(scales + 1);
+  expect(lastHeld()).toEqual([]);
+  expect(dots.every((d) => d.hidden)).toBe(true);
+  expect(plot.setDataCalls).toBe(1);
+});
+
+test('expiry under a deferred uPlot commit repaints once instead of rebasing again', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  frame(5000);
+  monotonicMs = 5000;
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(lastHeld()).toHaveLength(2);
+  const scales = plot.scales.length;
+  FakeUplot.deferDraw = true;
+  try {
+    frame(301_100);
+    expect(plot.scales).toHaveLength(scales + 1);
+    await Promise.resolve();
+    expect(lastHeld()).toEqual([]);
+    frame(301_120);
+    expect(plot.scales).toHaveLength(scales + 1);
+  } finally { FakeUplot.deferDraw = false; }
 });
 
 test('rebases delayed snapshots at the displayed edge without adding synthetic samples', async () => {
@@ -420,7 +484,9 @@ test('rebases delayed snapshots at the displayed edge without adding synthetic s
   expect(plots[0].scales.at(-1)?.range.max).toBe(7);
   expect(plots[0].data[0]).toEqual([1, 2, 3]);
   expect(document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform).toBe('translateX(0px)');
-  expect(document.querySelector<HTMLElement>('.chart-marker')!.style.width).toBe('8px');
+  // The sample sits 4 s (8 px) inside the displayed edge; its held segment starts there.
+  const right = plots[0].bbox.left + plots[0].bbox.width;
+  expect(lastHeld().map((h) => h.x)).toEqual([right - 8, right - 8]);
 });
 
 test('replenishes X ticks after a full window of silence without per-frame redraws', async () => {
@@ -481,7 +547,7 @@ test.each([null, NaN, Infinity])('omits the marker for a nonfinite final value %
   backend.history = { timestampsMs: [1000, 2000], series: [[10, value], [11, 21]] };
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
-  expect(document.querySelector<HTMLElement>('.chart-marker')!.hidden).toBe(true);
+  expect(lastHeld().map((h) => h.color)).toEqual([plots[0].opts.series[2].stroke]);
   expect(document.querySelector<HTMLElement>('.chart-dot')!.hidden).toBe(true);
 });
 
@@ -511,7 +577,7 @@ test('hides the composited path and marker when the legend hides a series', asyn
   vi.mocked(ctx.stroke).mockClear();
   configured.opts.hooks!.draw![0]!(fixture.plot);
   expect(vi.mocked(ctx.stroke).mock.calls.filter((c) => c[0])).toHaveLength(2);
-  expect(document.querySelector<HTMLElement>('.chart-marker')!.hidden).toBe(true);
+  expect(lastHeld().map((h) => h.color)).toEqual([configured.opts.series[2].stroke]);
   expect([...document.querySelectorAll<HTMLElement>('.chart-dot')].map((d) => d.hidden)).toEqual([true, false]);
 });
 
@@ -522,15 +588,15 @@ test('a singleton uses its real unit scale and DPR for the fixed endpoint', asyn
     backend.history = { timestampsMs: [2000], series: [[100]] };
     renderChart(backend, new LiveStore(), gpuSensors, [TEMP]);
     await vi.waitFor(() => expect(plots).toHaveLength(1));
-    const marker = document.querySelector<HTMLElement>('.chart-marker')!;
-    expect(marker.hidden).toBe(false);
-    expect(marker.style.top).toBe('50px');
-    expect(marker.style.width).toBe('0px');
+    // Canvas pixels at DPR 2: the plot's right edge, half-way up the 0-200 °C scale.
+    expect(lastHeld()).toEqual([{ x: 672, y: 110, color: plots[0].opts.series[1].stroke }]);
     const dot = document.querySelector<HTMLElement>('.chart-dot')!;
     expect(dot.hidden).toBe(false);
     expect(dot.style.top).toBe('53px');
+    const painted = paints().length;
     frame(1000);
-    expect(marker.style.width).toBe('1px');
+    expect(paints()).toHaveLength(painted);
+    expect(dot.style.top).toBe('53px');
     expect(plots[0].data).toEqual([[2], [100]]);
   } finally { FakeUplot.pxRatio = 1; }
 });
@@ -645,7 +711,10 @@ test('real uPlot cursor selects the visible sample after scrolling and keeps the
     // uPlot places the point at the cached X; the shared CSS offset moves it onto the drawn curve.
     const points = [...actual.over.querySelectorAll<HTMLElement>('.u-cursor-pt')];
     expect(points[0].style.transform.startsWith(`translate(${Math.ceil(actual.valToPos(2, 'x'))}px,`)).toBe(true);
-    expect(configured.over.style.getPropertyValue('--chart-cursor-offset')).toBe(`${-offset}px`);
+    // Written on the hovered plot's overlay, where the points live; the scrolling frames
+    // before the hover never wrote it.
+    expect(actual.over.style.getPropertyValue('--chart-cursor-offset')).toBe(`${-offset}px`);
+    expect(configured.over.style.getPropertyValue('--chart-cursor-offset')).toBe('');
     expect(configured.setDataCalls).toBe(0);
     expect(configured.scales).toHaveLength(1);
   } finally {
@@ -664,11 +733,12 @@ test('real uPlot cursor uses the plain X mapping at offset zero after a snapshot
   flushSync();
   const configured = plots[0];
   expect(document.querySelector<HTMLCanvasElement>('.chart-canvas')!.style.transform).toBe('translateX(0px)');
-  expect(configured.over.style.getPropertyValue('--chart-cursor-offset')).toBe('0px');
+  expect(configured.over.style.getPropertyValue('--chart-cursor-offset')).toBe('');
   const { actual, dispose } = await realCursorPlot(configured);
   try {
     const pointerX = actual.valToPos(3, 'x');
     actual.setCursor({ left: pointerX, top: 30 });
+    expect(actual.over.style.getPropertyValue('--chart-cursor-offset')).toBe('0px');
     expect(actual.legend.idx).toBe(2);
     expect(actual.legend.values?.[1]).toEqual({ _: '30%' });
     expect(actual.over.querySelector<HTMLElement>('.u-cursor-x')!.style.transform).toBe(`translate(${Math.round(pointerX)}px,0px)`);
@@ -707,15 +777,17 @@ test('fixed dots have their full radius at the right edge and both Y extrema whi
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
   frame(1000);
-  const lineClip = document.querySelector<HTMLElement>('.chart-marker-clip')!;
+  expect(document.querySelector('.chart-marker-clip')).toBeNull();
+  const lineClip = document.querySelector<HTMLElement>('.chart-canvas-clip')!;
   const dotClip = document.querySelector<HTMLElement>('.chart-dot-clip');
   expect(dotClip).not.toBeNull();
   const px = (v: string) => Number.parseFloat(v);
   const plot = plots[0].bbox;
+  // Held lines are canvas strokes, clipped to the plot area by the canvas layer and painter.
   expect(px(lineClip.style.left)).toBe(plot.left);
   expect(px(lineClip.style.top)).toBe(plot.top);
   expect(px(lineClip.style.width)).toBe(plot.width);
-  expect(px(lineClip.style.height)).toBe(plot.height);
+  expect(lastHeld().map((h) => h.y)).toEqual([plot.top, plot.top + plot.height]);
   expect(px(dotClip!.style.left)).toBe(plot.left - 3);
   expect(px(dotClip!.style.top)).toBe(plot.top - 3);
   expect(px(dotClip!.style.width)).toBe(plot.width + 6);
@@ -730,4 +802,58 @@ test('fixed dots have their full radius at the right edge and both Y extrema whi
     expect(centerY - 3).toBeGreaterThanOrEqual(0);
     expect(centerY + 3).toBeLessThanOrEqual(px(dotClip!.style.height));
   }
+});
+
+test('frames between samples only change the canvas transform', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  frame(0);
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  const records: MutationRecord[] = [];
+  const observer = new MutationObserver((batch) => records.push(...batch));
+  observer.observe(plots[0].root, { attributes: true, subtree: true, childList: true, characterData: true });
+  const before = canvas.style.cssText;
+  const painted = paints().length;
+  for (const at of [16, 33, 50, 1000, 2000]) frame(at);
+  await Promise.resolve();
+  records.push(...observer.takeRecords());
+  observer.disconnect();
+  expect(records.length).toBeGreaterThan(0);
+  for (const record of records) {
+    expect(record.type).toBe('attributes');
+    expect(record.target).toBe(canvas);
+    expect(record.attributeName).toBe('style');
+  }
+  const strip = (css: string) => css.replace(/transform:[^;]*;?/, '').trim();
+  expect(strip(canvas.style.cssText)).toBe(strip(before));
+  expect(paints()).toHaveLength(painted);
+});
+
+test('the cursor offset is written only while hovering and reset once on leave', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  const set = vi.spyOn(plot.over.style, 'setProperty');
+  const remove = vi.spyOn(plot.over.style, 'removeProperty');
+  const offsetVar = () => plot.over.style.getPropertyValue('--chart-cursor-offset');
+  for (const at of [0, 16, 33, 500]) frame(at);
+  expect(set).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
+  expect(offsetVar()).toBe('');
+  plot.cursor.left = 100;
+  plot.cursor.top = 30;
+  frame(1000);
+  expect(offsetVar()).toBe('-2px');
+  frame(1000);
+  expect(set).toHaveBeenCalledTimes(1);
+  frame(1500);
+  expect(offsetVar()).toBe('-3px');
+  expect(set).toHaveBeenCalledTimes(2);
+  plot.cursor.left = -10;
+  frame(2000);
+  expect(offsetVar()).toBe('');
+  frame(2500);
+  frame(3000);
+  expect(set).toHaveBeenCalledTimes(2);
+  expect(remove).toHaveBeenCalledTimes(1);
 });

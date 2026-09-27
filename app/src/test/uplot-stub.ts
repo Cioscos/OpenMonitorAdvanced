@@ -11,6 +11,8 @@ export class FakeUplot {
   static pxRatio = 1;
   /** X split increment in seconds that the stub reports to the component's `splits`. */
   static xIncrement = 60;
+  /** Like the real uPlot, commit scale changes (and the draw hooks) in a microtask. */
+  static deferDraw = false;
   opts: uPlot.Options;
   data: uPlot.AlignedData;
   target: HTMLElement | undefined;
@@ -49,7 +51,8 @@ export class FakeUplot {
   setScale(key: string, range: { min: number; max: number }): void {
     this.scales.push({ key, range });
     if (key === 'x') this.range = range;
-    this.draw();
+    if (FakeUplot.deferDraw) queueMicrotask(() => { if (!this.destroyed) this.draw(); });
+    else this.draw();
   }
 
   batch(fn: () => void): void { fn(); }

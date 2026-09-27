@@ -9,6 +9,7 @@ import { FakeBackend } from '../../test/fake-backend';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
+import { formatTimeTick, TIME_LABEL_GAP_PX } from '../../lib/advanced/chartData';
 import HistoryChart from './HistoryChart.svelte';
 
 // Calls through to the real painter; tests read the held segments it was handed.
@@ -856,4 +857,73 @@ test('the cursor offset is written only while hovering and reset once on leave',
   frame(3000);
   expect(set).toHaveBeenCalledTimes(2);
   expect(remove).toHaveBeenCalledTimes(1);
+});
+
+/** Arial advance widths in em (digits 0.556), so a label measures as it would on Windows at 12px. */
+const ARIAL_EM: Record<string, number> = { ':': 0.278, ' ': 0.278, '\u202f': 0.278, A: 0.667, P: 0.667, M: 0.833 };
+const arialWidth = (text: string, px = 12) => [...text].reduce((sum, c) => sum + (ARIAL_EM[c] ?? 0.556), 0) * px;
+
+/**
+ * The X axis of a real uPlot 1.6.32 built from the component's options at a given plot width,
+ * so uPlot's own increment table and findIncr choose the split. Labels measure as Arial.
+ */
+async function realTimeAxis(configured: FakeUplot, plotWidthPx: number, windowSeconds: number) {
+  const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const ctx = new Proxy({
+    font: '12px sans-serif',
+    measureText(text: string) { return { width: arialWidth(text, Number.parseFloat(this.font)) }; },
+  }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => {} });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const target = document.createElement('div');
+  document.body.append(target);
+  const { draw: _draw, ...hooks } = configured.opts.hooks ?? {};
+  // Both Y axes are 72 px wide; the rest of the width is the plot.
+  const actual = new RealUplot({ ...configured.opts, width: plotWidthPx + 144, hooks }, configured.data, target);
+  const end = Date.UTC(2026, 8, 27, 21, 9, 3) / 1000;
+  actual.batch(() => {
+    actual.setScale('x', { min: end - windowSeconds, max: end });
+    actual.setScale('percent', { min: 0, max: 100 });
+    actual.setScale('celsius', { min: 0, max: 200 });
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const axis = actual.axes[0] as unknown as { _found: [number, number]; _splits: number[] };
+  const [incr, spacing] = axis._found;
+  const result = { plotWidth: actual.bbox.width, incr, spacing, splits: [...axis._splits] };
+  actual.destroy();
+  target.remove();
+  return result;
+}
+
+describe.each(['en', 'it'] as const)('X labels in %s', (locale) => {
+  test.each([60, 300, 1800, 3600])('never overlap in a %i s window at 320, 651 and 1200 px', async (seconds) => {
+    i18n.locale = locale;
+    localStorage.setItem(WINDOW_KEY, String(seconds));
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    for (const width of [320, 651, 1200]) {
+      const axis = await realTimeAxis(plots[0], width, seconds);
+      expect(axis.plotWidth).toBe(width);
+      expect(axis.incr).toBeGreaterThan(0);
+      const labels = axis.splits.map((split) => formatTimeTick(split, locale, axis.incr));
+      expect(axis.spacing).toBeGreaterThanOrEqual(Math.max(...labels.map((label) => arialWidth(label))) + TIME_LABEL_GAP_PX);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+});
+
+test('a 1 min window at 651 px shows seconds on splits wide enough for them in en and it', async () => {
+  for (const [locale, sample] of [['en', '12:58:05 AM'], ['it', '21:09:05']] as const) {
+    cleanup();
+    plots.length = 0;
+    i18n.locale = locale;
+    localStorage.setItem(WINDOW_KEY, '60');
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    const axis = await realTimeAxis(plots[0], 651, 60);
+    // uPlot's default 50 px would pick 5 s splits, about 54 px apart.
+    expect(axis.incr).toBeLessThan(60);
+    expect(axis.spacing).toBeGreaterThanOrEqual(arialWidth(sample) + TIME_LABEL_GAP_PX);
+    expect(formatTimeTick(axis.splits[0], locale, axis.incr)).toMatch(/:\d{2}:\d{2}/);
+  }
 });

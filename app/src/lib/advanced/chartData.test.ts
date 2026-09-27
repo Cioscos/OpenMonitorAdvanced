@@ -13,6 +13,9 @@ import {
   scaleLayout,
   scaleOptions,
   seriesPalette,
+  timeAxisSpace,
+  TIME_AXIS_MIN_SPACE,
+  TIME_LABEL_GAP_PX,
   unitsOf,
 } from './chartData';
 import { STORED_WINDOWS } from './persist';
@@ -156,6 +159,42 @@ test('formatTimeTick shows seconds for sub-minute splits in the app locale', () 
   const start = Date.UTC(2026, 0, 1, 15, 45) / 1000;
   const labels = Array.from({ length: 12 }, (_, i) => formatTimeTick(start + i * 5, 'it', 5));
   expect(new Set(labels).size).toBe(12);
+});
+
+const TIME_INCRS = [1, 5, 10, 15, 30, 60, 300, 600, 900, 1800, 3600];
+/** uPlot 1.6.32 findIncr: the smallest increment whose split spacing reaches the minimum space. */
+const uplotPick = (min: number, max: number, dim: number, space: number) =>
+  TIME_INCRS.find((incr) => dim * incr / (max - min) >= space);
+
+test('timeAxisSpace keeps uPlot on an increment whose labels fit, at the width boundary', () => {
+  // Seconds labels 68 px wide ("12:58:05 AM" in Arial 12px), minute labels 40 px.
+  const width = (incr: number) => (incr < 60 ? 68 : 40);
+  const need = 68 + TIME_LABEL_GAP_PX;
+  // 5 s splits exactly as wide as a label and its gap: uPlot may keep them.
+  const exact = need * 60 / 5;
+  expect(timeAxisSpace(0, 60, exact, TIME_INCRS, width)).toBe(need);
+  expect(uplotPick(0, 60, exact, timeAxisSpace(0, 60, exact, TIME_INCRS, width))).toBe(5);
+  // One pixel less and uPlot must move to 10 s splits.
+  const space = timeAxisSpace(0, 60, exact - 1, TIME_INCRS, width);
+  expect(uplotPick(0, 60, exact - 1, space)).toBe(10);
+  expect((exact - 1) * 10 / 60).toBeGreaterThanOrEqual(need);
+});
+
+test('timeAxisSpace skips sub-minute splits that fit the default space but not their labels', () => {
+  const width = (incr: number) => (incr < 60 ? 68 : 40);
+  // 30 s splits are 60 px apart: enough for uPlot's 50 px default, too tight for 68 px labels.
+  const dim = 120;
+  const space = timeAxisSpace(0, 60, dim, TIME_INCRS, width);
+  expect(space).toBeGreaterThan(dim * 30 / 60);
+  expect(uplotPick(0, 60, dim, space)).toBe(60);
+});
+
+test('timeAxisSpace never goes below the uPlot default space and tolerates empty geometry', () => {
+  const narrow = () => 10;
+  expect(timeAxisSpace(0, 300, 651, TIME_INCRS, narrow)).toBe(TIME_AXIS_MIN_SPACE);
+  expect(timeAxisSpace(0, 0, 651, TIME_INCRS, narrow)).toBe(TIME_AXIS_MIN_SPACE);
+  expect(timeAxisSpace(0, 60, 0, TIME_INCRS, narrow)).toBe(TIME_AXIS_MIN_SPACE);
+  expect(timeAxisSpace(0, 60, 651, [], narrow)).toBe(TIME_AXIS_MIN_SPACE);
 });
 
 test('theme.css defines every palette token', () => {

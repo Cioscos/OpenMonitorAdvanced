@@ -156,3 +156,39 @@ export function formatTimeTick(seconds: number, locale: string, incrementSeconds
     : { hour: '2-digit', minute: '2-digit' };
   return new Date(seconds * 1000).toLocaleTimeString(locale, options);
 }
+
+/** uPlot's default minimum distance between X splits, in CSS px. */
+export const TIME_AXIS_MIN_SPACE = 50;
+/** Clear space kept between two neighbouring X labels, in CSS px. */
+export const TIME_LABEL_GAP_PX = 12;
+
+/**
+ * Minimum split spacing to hand uPlot's time axis (`axis.space`) so the increment it then
+ * picks from `incrs` (ascending, uPlot's own table) leaves room for that increment's labels:
+ * sub-minute splits carry seconds and are wider than HH:MM. uPlot still chooses the split;
+ * this only raises the spacing it requires. `labelWidthPx` is the widest label for an
+ * increment, in CSS px.
+ */
+export function timeAxisSpace(
+  minSeconds: number,
+  maxSeconds: number,
+  plotWidthPx: number,
+  incrs: readonly number[],
+  labelWidthPx: (incrementSeconds: number) => number,
+): number {
+  const span = maxSeconds - minSeconds;
+  if (!(span > 0) || !(plotWidthPx > 0) || !Number.isFinite(span) || !Number.isFinite(plotWidthPx)) {
+    return TIME_AXIS_MIN_SPACE;
+  }
+  let previous = 0;
+  for (const incr of incrs) {
+    // The same spacing uPlot's findIncr compares with the minimum space.
+    const spacing = plotWidthPx * incr / span;
+    const required = Math.max(TIME_AXIS_MIN_SPACE, labelWidthPx(incr) + TIME_LABEL_GAP_PX);
+    // Also exceed every smaller increment's spacing, so uPlot cannot stop at one whose
+    // (wider) labels did not fit.
+    if (spacing >= required) return Math.max(required, previous + 1e-6);
+    previous = spacing;
+  }
+  return TIME_AXIS_MIN_SPACE;
+}

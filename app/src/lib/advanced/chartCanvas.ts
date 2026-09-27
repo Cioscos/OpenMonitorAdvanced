@@ -17,6 +17,11 @@ export type ChartHeldSegment = Readonly<{
   color: string;
 }>;
 
+/** Font of the X labels at a device pixel ratio; at ratio 1 it measures them in CSS px. */
+export function timeTickFont(ratio: number): string {
+  return `${12 * ratio}px sans-serif`;
+}
+
 /** Draw a snapshot in uPlot's canvas pixel coordinate system. */
 export function drawChartCanvas(
   ctx: CanvasRenderingContext2D,
@@ -120,7 +125,7 @@ export function drawChartCanvas(
       ctx.strokeStyle = theme.gridColor;
       ctx.fillStyle = theme.textColor;
       ctx.lineWidth = ratio;
-      ctx.font = `${12 * ratio}px sans-serif`;
+      ctx.font = timeTickFont(ratio);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       for (const { tick, x } of tickXs) {

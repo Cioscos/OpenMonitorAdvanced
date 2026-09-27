@@ -6,18 +6,21 @@
     ChartBuffer,
     DEFAULT_WINDOW,
     MAX_SERIES,
+    TIME_AXIS_MIN_SPACE,
     PALETTE_TOKENS,
     WINDOWS,
     canAdd,
     fitSelection,
+    formatTimeTick,
     initialSeries,
     maxPointsFor,
     scaleLayout,
     scaleOptions,
     seriesPalette,
+    timeAxisSpace,
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
-  import { drawChartCanvas, type ChartCanvasPath, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
+  import { drawChartCanvas, timeTickFont, type ChartCanvasPath, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
   import { heldLengthPx, scrollOffsetPx, timeTicks } from '../../lib/chartCompositor';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { sensorLabel } from '../../lib/advanced/labels';
@@ -76,6 +79,31 @@
   let heldPainted = false;
   let tickIncrement = 60;
   let autoscaleY = true;
+  let labelContext: CanvasRenderingContext2D | null | undefined;
+
+  /** Width in CSS px of an X label, measured with the font the canvas paints it in. */
+  function labelWidthPx(text: string): number {
+    labelContext ??= document.createElement('canvas').getContext('2d');
+    // Without a 2D context, assume a generous average glyph width.
+    if (!labelContext) return text.length * 8;
+    labelContext.font = timeTickFont(1);
+    return labelContext.measureText(text).width;
+  }
+
+  /**
+   * uPlot `axis.space` for the time axis: labels differ in width with the increment (seconds
+   * below a minute) and the locale, so require enough spacing for the labels of the increment
+   * uPlot will pick. Each resize, DPR or locale rebuild asks again.
+   */
+  function timeSpace(u: uPlot, axisIdx: number, min: number, max: number, plotWidth: number): number {
+    const incrs = u.axes[axisIdx].incrs;
+    const table = typeof incrs === 'function' ? incrs(u, axisIdx, min, max, plotWidth, TIME_AXIS_MIN_SPACE) : incrs ?? [];
+    const widths = new Map<string, number>();
+    const measure = (text: string) => widths.get(text) ?? widths.set(text, labelWidthPx(text)).get(text)!;
+    // Both ends and the other half of the day cover the widest digits and AM/PM forms.
+    return timeAxisSpace(min, max, plotWidth, table, (incr) =>
+      Math.max(...[min, max, min + 43_200].map((time) => measure(formatTimeTick(time, i18n.locale, incr)))));
+  }
 
   function clearLayers() {
     canvasClip?.remove();
@@ -345,6 +373,7 @@
           grid: { show: false },
           ticks: { show: false },
           values: [],
+          space: timeSpace,
           splits: (_u, _axis, min, max, increment) => {
             if (Number.isFinite(increment) && increment > 0) tickIncrement = increment;
             return timeTicks(min, max, tickIncrement);

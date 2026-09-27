@@ -160,32 +160,44 @@ export function formatTimeTick(seconds: number, locale: string, incrementSeconds
 }
 
 /**
- * uPlot's own default numeric split table (`numIncrs`, uPlot 1.6.32): 1, 2, 2.5, 5 times every
- * power of ten from 1e-9 to 1e20, ascending. Not exported by the package, so mirrored here to
- * filter it (see `labelSafeIncrs`).
+ * uPlot's own default numeric split table (`numIncrs`, uPlot 1.6.32: `decIncrs.concat(oneIncrs)`,
+ * i.e. `genIncrs(10, -32, 32, [1, 2, 2.5, 5])`), reconstructed bit-for-bit: uPlot builds each
+ * entry as `+`${mult}e${exp}`` (exact decimal-string parsing), not `mult * 10 ** exp`, which
+ * differs by float epsilon on some entries (e.g. `2.5e-6` vs `2.5 * 10 ** -6`). Not exported by
+ * the package, so mirrored here to filter it (see `labelSafeIncrs`); matched against a real
+ * uPlot instance's default axis in chartData.test.ts.
  */
-const NUMERIC_INCRS: number[] = (() => {
+export const NUMERIC_INCRS: number[] = (() => {
   const mults = [1, 2, 2.5, 5];
   const incrs: number[] = [];
-  for (let exp = -9; exp < 21; exp++) {
-    const mag = 10 ** exp;
-    for (const mult of mults) incrs.push(mult * mag);
+  for (let exp = -32; exp < 32; exp++) {
+    for (const mult of mults) incrs.push(Number(`${mult}e${exp}`));
   }
   return incrs;
 })();
 
-/** Bounds a probe of split labels so a huge range paired with a tiny increment cannot hang. */
+/**
+ * Bounds a probe of split labels: an increment that would need more splits than this to cover
+ * the visible range is rejected outright (see `hasDistinctLabels`), both to keep the probe cheap
+ * and because uPlot's own `findIncr` would never pick an increment giving this many ticks on a
+ * real axis anyway.
+ */
 const MAX_PROBE_SPLITS = 200;
 
 /**
  * True when every split uPlot would draw between `min` and `max` at this increment (uPlot's own
  * `numAxisSplits`: `incrRoundUp(min, incr)`, then `+incr` up to `max`) gets a distinct label.
+ * Rejects the increment outright when that would take more than `MAX_PROBE_SPLITS` splits,
+ * rather than sampling only the first ones and assuming the rest are fine.
  */
 function hasDistinctLabels(min: number, max: number, incr: number, label: (v: number) => string): boolean {
+  const first = Math.ceil(min / incr) * incr;
+  const count = Math.floor((max - first) / incr + 1e-9) + 1;
+  if (count <= 0) return true;
+  if (count > MAX_PROBE_SPLITS) return false;
   const seen = new Set<string>();
-  let count = 0;
-  for (let v = Math.ceil(min / incr) * incr; v <= max + incr * 1e-6; v += incr) {
-    if (count++ >= MAX_PROBE_SPLITS) break;
+  let v = first;
+  for (let i = 0; i < count; i++, v += incr) {
     const text = label(v);
     if (seen.has(text)) return false;
     seen.add(text);

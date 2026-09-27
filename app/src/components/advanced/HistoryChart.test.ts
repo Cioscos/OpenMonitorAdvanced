@@ -120,7 +120,7 @@ test('seeds the default series and draws them on two unit scales', async () => {
 
   // The primary axis (left, follows the grid) keeps its ticks; the secondary axis (right)
   // does not draw its own, so no stray marks appear off the scrolling grid.
-  expect(plot.opts.axes?.[1].ticks?.show).not.toBe(false);
+  expect(plot.opts.axes?.[1].ticks?.show).toBe(true);
   expect(plot.opts.axes?.[1].grid?.show).toBe(true);
   expect(plot.opts.axes?.[2].ticks?.show).toBe(false);
   expect(plot.opts.axes?.[2].grid?.show).toBe(false);
@@ -963,7 +963,7 @@ test('the secondary axis never repeats a label on a narrow real temperature rang
   expect(axes.celsiusLabels.length).toBeGreaterThan(1);
   expect(new Set(axes.celsiusLabels).size).toBe(axes.celsiusLabels.length);
   expect(axes.celsiusTicks).toBe(false);
-  expect(axes.percentTicks).not.toBe(false);
+  expect(axes.percentTicks).toBe(true);
 });
 
 test('a 1 min window at 651 px shows seconds on splits wide enough for them in en and it', async () => {

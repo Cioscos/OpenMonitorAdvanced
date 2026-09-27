@@ -13,6 +13,7 @@ import {
   initialSeries,
   labelSafeIncrs,
   maxPointsFor,
+  NUMERIC_INCRS,
   scaleLayout,
   scaleOptions,
   seriesPalette,
@@ -247,5 +248,44 @@ describe('labelSafeIncrs', () => {
   test('volt keeps its three decimals: a 0.001 step is safe, unlike a coarser unit', () => {
     const incrs = incrsFor('volt', 1.198, 1.212);
     expect(Math.min(...incrs)).toBeLessThanOrEqual(0.005);
+  });
+
+  test('NUMERIC_INCRS matches a real uPlot instance default numeric axis table bit-for-bit', async () => {
+    const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+    const ctx = new Proxy({ measureText: (text: string) => ({ width: text.length * 7 }) }, {
+      get: (target, key) => (key in target ? target[key as keyof typeof target] : () => {}),
+    });
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = (() => ctx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    const target = document.createElement('div');
+    document.body.append(target);
+    try {
+      // A y axis bound to a scale with no data series: uPlot assigns its own default numeric
+      // incrs table to it (no custom `incrs`), and nothing needs to draw a path (no Path2D).
+      const actual = new RealUplot(
+        { width: 400, height: 300, scales: { x: { time: false }, y: {} }, series: [{}], axes: [{}, { scale: 'y' }] },
+        [[0, 1]],
+        target,
+      );
+      const defaultIncrs = actual.axes[1].incrs as unknown as (...args: unknown[]) => number[];
+      const real = defaultIncrs(actual, 1, 0, 100, 300, 30);
+      expect(NUMERIC_INCRS).toEqual(real);
+      actual.destroy();
+    } finally {
+      HTMLCanvasElement.prototype.getContext = originalGetContext;
+      target.remove();
+    }
+  });
+
+  test('rejects an increment outright once its splits would exceed the probe cap, on a wide bytes_per_second range', () => {
+    const [min, max] = [900, 1_500_000];
+    const incrs = incrsFor('bytes_per_second', min, max);
+    const smallest = Math.min(...incrs);
+    // Every remaining increment must fit within the probe cap over the whole range...
+    const splitCount = splitsFor(min, max, smallest).length;
+    expect(splitCount).toBeLessThanOrEqual(200);
+    // ...and genuinely have distinct labels end-to-end, not merely for an early sample of them.
+    const labels = splitsFor(min, max, smallest).map((v) => formatValue(v, 'bytes_per_second', 'en', tEn));
+    expect(new Set(labels).size).toBe(labels.length);
   });
 });

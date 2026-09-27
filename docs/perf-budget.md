@@ -1,14 +1,51 @@
 # Performance budget
 
-## Grafici fluidi — protocollo release e risultati in attesa
+## Grafici fluidi — protocollo release e verifica in corso
 
-Stato al 2026-09-27: la build release WebView2 è stata compilata, ma la verifica
-visiva e le misure dal vivo non sono ancora state eseguite. Nessun valore FPS,
-CPU o memoria di questa build è dichiarato come risultato o come criterio
-soddisfatto. Build da verificare: commit `aee6305ce273bf04a425f4bf8e355360f18489d9`,
+Stato al 2026-09-27: prime misure dal vivo eseguite, criteri complessivi **non
+soddisfatti**. La release provata deriva dal commit `50f201124e2df68c30afacf6b6a4e0b00979bf39`:
 `target/release/oma-app.exe` SHA-256
-`B169955CD41FD4BF46774D0D55578688AFCEF0A15C22EF8C39DBEFE3E4EBB9B0`.
-Se il codice cambia, ricompilare e registrare il nuovo commit e hash.
+`5E62C5C9F521BC6A67FE70590348EBB89CF350BB76CD46A6027F8E860249217C`.
+Il successivo fix del bordo sinistro (`5287167`) non è ancora incluso in quella
+release. Dopo ulteriori correzioni, ricompilare e registrare il nuovo commit e hash.
+
+### Misure diagnostiche preliminari
+
+Macchina: Windows 11 Pro 10.0.26200, AMD Ryzen 7 7800X3D (16 processori
+logici), 32 GB RAM, NVIDIA RTX 4080 (driver 32.0.16.1714), 2560×1440 a
+**164 Hz**; runtime Microsoft Edge WebView2 154.0.4258.37, servizio `oma-service`
+connesso e moduli `atiadlxx.dll`, `nvapi64.dll`, `nvml.dll` presenti. L'utente
+ha scelto di mantenere il display a 164 Hz. Le righe CPU/memoria sotto usano
+30 s di warm-up e 60 s di campionamento della release visibile, senza DevTools
+né tracing; `TotalAppCpuValid=True` e 7 processi app+WebView2 in ogni riga.
+Sono prove con storico breve, non la verifica finale con storico pieno e dopo
+un'ora visibile. La baseline è il precedente eseguibile di `main`, SHA-256
+`AE3FB06899E7F8232E6550D206662C8E00B5D2F1C2E56A84BB81F73A05FF9778`.
+
+| Build / vista | CPU app+WebView2 % | Memoria privata MB | Esito del budget |
+|---|---:|---:|---|
+| Baseline, Avanzata GPU, 1 min, 8 serie verificate | 0,19 | 127,7 | entro i limiti |
+| Grafici fluidi, stessa vista | 1,22 | 249,9 | CPU e memoria oltre limite |
+| Grafici fluidi, Avanzata GPU, 1 h, 8 serie, storico breve | 1,26 | 251,9 | CPU e memoria oltre limite |
+| Baseline, Semplificata | 0,23 | 115,8 | entro i limiti |
+| Grafici fluidi, Semplificata | 1,33 | 193,9 | CPU oltre limite |
+
+Una traccia WebView2 separata di 10 s della vista Avanzata con storico breve
+ha registrato 618 eventi `DrawFrame` in 9,999 s: circa 61,8/s in media,
+intervallo mediano 17,974 ms (circa 55,6 FPS dalla mediana) e p95 19,592 ms,
+senza perdita di eventi. Il monitor a 164 Hz quantizza gli intervalli; la
+media e la mediana descrivono aspetti diversi della stessa prova. L'utente
+ha osservato scorrimento fluido e glow corretto, ma anche un salto del bordo
+sinistro al taglio dello storico; il fix `5287167` conserva un campione fuori
+vista ed è coperto dai test, ancora da verificare nella release.
+
+Una prova **non rappresentativa della resa finale** con movimento ridotto e
+traslazione CSS del canvas uPlot già disegnato ha dato 0,98% CPU e 150,5 MB.
+Dimostra che evitare il ridisegno completo può ridurre la memoria, ma la CPU
+è troppo vicina all'1% per dichiarare il budget raggiunto. Inoltre la prova
+muoveva anche assi ed etichette. La prova continua di un'ora è stata interrotta
+quando l'utente ha cambiato la scala da 1 h a 1 min per esaminare la resa;
+nessun risultato di soak o storico pieno viene dichiarato.
 
 ### Procedura riproducibile
 

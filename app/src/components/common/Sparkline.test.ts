@@ -267,3 +267,32 @@ for (const mode of ['visibility', 'motion'] as const) {
     });
   }
 }
+
+function scrolledLayer(container: HTMLElement): HTMLElement | SVGElement {
+  return container.querySelector('svg g') as SVGGElement;
+}
+
+test('sparklines mounted on different frames scroll on the same ~60 vsyncs per second', async () => {
+  const time = clock();
+  const views: ReturnType<typeof render>[] = [];
+  let at = 0;
+  for (let i = 0; i < 4; i++) {
+    views.push(render(Sparkline, { values: [50], timestampsMs: [1_000], max: 100 }));
+    await time.frame(at);
+    at += 1000 / 164;
+  }
+  const drawn = new Set<number>();
+  let previous = views.map((view) => scrolledLayer(view.container).style.transform);
+  for (let i = 0; i < 164; i++, at += 1000 / 164) {
+    await time.frame(at);
+    const current = views.map((view) => scrolledLayer(view.container).style.transform);
+    const changed = current.map((transform, j) => transform !== previous[j]);
+    if (changed.some(Boolean)) {
+      drawn.add(i);
+      expect(changed.every(Boolean)).toBe(true);
+    }
+    previous = current;
+  }
+  expect(drawn.size).toBeGreaterThanOrEqual(59);
+  expect(drawn.size).toBeLessThanOrEqual(61);
+});

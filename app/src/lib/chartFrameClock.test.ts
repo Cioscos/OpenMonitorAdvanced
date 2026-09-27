@@ -183,3 +183,89 @@ test('visibility and reduced motion stop and resume the frame loop without repla
   frame(4_000);
   expect(calls.mock.calls.map(([ms]) => ms)).toEqual([0, 2_000, 4_000]);
 });
+
+const REFRESH_164_MS = 1000 / 164;
+
+test('same-rate subscribers share one phase at 164 Hz whenever they subscribe', () => {
+  const first = vi.fn();
+  const second = vi.fn();
+  const third = vi.fn();
+  subscribe(first, 60);
+  frame(0);
+  // Subscribing right after a drawn frame used to fire on the next, skipped vsync.
+  subscribe(second, 60);
+  for (let i = 1; i <= 82; i++) frame(i * REFRESH_164_MS);
+  subscribe(third, 60);
+  for (let i = 83; i <= 164; i++) frame(i * REFRESH_164_MS);
+
+  const firstAt = first.mock.calls.map(([ms]) => ms);
+  const secondAt = second.mock.calls.map(([ms]) => ms);
+  const thirdAt = third.mock.calls.map(([ms]) => ms);
+  expect(firstAt.length).toBeGreaterThanOrEqual(59);
+  expect(firstAt.length).toBeLessThanOrEqual(61);
+  expect(secondAt).toEqual(firstAt.filter((ms) => ms > 0));
+  expect(thirdAt).toEqual(firstAt.filter((ms) => ms >= thirdAt[0]));
+  expect(thirdAt[0]).toBeLessThanOrEqual(83 * REFRESH_164_MS + 1000 / 60);
+  // Together they draw on ~60 vsyncs per second, not one phase each.
+  expect(new Set([...firstAt, ...secondAt, ...thirdAt]).size).toBe(firstAt.length);
+});
+
+test('unsubscribing and resubscribing mid-stream neither shifts nor doubles the shared phase', () => {
+  const anchor = vi.fn();
+  const leaving = vi.fn();
+  subscribe(anchor, 60);
+  const stopLeaving = subscribe(leaving, 60);
+  for (let i = 0; i <= 40; i++) frame(i * REFRESH_164_MS);
+  stopLeaving();
+  const returning = vi.fn();
+  frame(41 * REFRESH_164_MS);
+  subscribe(returning, 60);
+  for (let i = 42; i <= 164; i++) frame(i * REFRESH_164_MS);
+
+  const anchorAt = anchor.mock.calls.map(([ms]) => ms);
+  const leavingAt = leaving.mock.calls.map(([ms]) => ms);
+  const returningAt = returning.mock.calls.map(([ms]) => ms);
+  expect(leavingAt).toEqual(anchorAt.filter((ms) => ms <= 40 * REFRESH_164_MS));
+  expect(returningAt).toEqual(anchorAt.filter((ms) => ms > 41 * REFRESH_164_MS));
+  expect(new Set(anchorAt).size).toBe(anchorAt.length);
+  expect(anchorAt.length).toBeGreaterThanOrEqual(59);
+  expect(anchorAt.length).toBeLessThanOrEqual(61);
+});
+
+test('subscription changes inside a callback do not double-fire or run removed subscribers', () => {
+  const late = vi.fn();
+  const removed = vi.fn();
+  let stopRemoved = () => {};
+  let added = false;
+  subscribe(() => {
+    stopRemoved();
+    if (!added) {
+      added = true;
+      subscribe(late, 60);
+    }
+  }, 60);
+  stopRemoved = subscribe(removed, 60);
+  frame(0);
+  expect(removed).not.toHaveBeenCalled();
+  expect(late).not.toHaveBeenCalled();
+  for (let i = 1; i <= 6; i++) frame(i * REFRESH_164_MS);
+  const lateAt = late.mock.calls.map(([ms]) => ms);
+  expect(new Set(lateAt).size).toBe(lateAt.length);
+  expect(lateAt.length).toBeGreaterThan(0);
+});
+
+test('resume realigns every subscriber of a rate to one new phase', () => {
+  const first = vi.fn();
+  const second = vi.fn();
+  subscribe(first, 60);
+  frame(0);
+  subscribe(second, 60);
+  frame(REFRESH_164_MS);
+  setVisibility('hidden');
+  now = 5_000;
+  setVisibility('visible');
+  for (let i = 0; i <= 20; i++) frame(5_000 + i * REFRESH_164_MS);
+  const after = (fn: typeof first) => fn.mock.calls.map(([ms]) => ms).filter((ms) => ms >= 5_000);
+  expect(after(first)[0]).toBe(5_000);
+  expect(after(second)).toEqual(after(first));
+});

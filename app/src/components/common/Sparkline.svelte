@@ -32,35 +32,49 @@
   }));
 </script>
 
-<svg class="sparkline" viewBox="0 0 {WIDTH} {HEIGHT}" preserveAspectRatio="none" aria-hidden="true">
-  <path
-    d={geometry.path}
-    fill="none"
-    stroke={color}
-    stroke-width="6"
-    opacity="0.18"
-    stroke-linejoin="round"
-    stroke-linecap="round"
-    vector-effect="non-scaling-stroke"
-  />
-  <path
-    d={geometry.path}
-    fill="none"
-    stroke={color}
-    stroke-width="2"
-    stroke-linejoin="round"
-    stroke-linecap="round"
-    vector-effect="non-scaling-stroke"
-  />
+<div class="sparkline" aria-hidden="true">
+  <svg viewBox="0 0 {WIDTH} {HEIGHT}" preserveAspectRatio="none">
+    <path
+      d={geometry.path}
+      fill="none"
+      stroke={color}
+      stroke-width="6"
+      opacity="0.18"
+      stroke-linejoin="round"
+      stroke-linecap="round"
+      vector-effect="non-scaling-stroke"
+    />
+    <path
+      d={geometry.path}
+      fill="none"
+      stroke={color}
+      stroke-width="2"
+      stroke-linejoin="round"
+      stroke-linecap="round"
+      vector-effect="non-scaling-stroke"
+    />
+  </svg>
   {#if geometry.endpoint}
-    <circle cx={geometry.endpoint.x} cy={geometry.endpoint.y} r="2.5" fill="white" />
+    <span
+      class="endpoint"
+      style="position: absolute; width: 5px; height: 5px; border-radius: 50%; background: white; transform: translate(-50%, -50%); pointer-events: none;"
+      style:left="{(geometry.endpoint.x / WIDTH) * 100}%"
+      style:top="{geometry.endpoint.y}px"
+    ></span>
   {/if}
-</svg>
+</div>
 
 <style>
   .sparkline {
+    position: relative;
     display: block;
     width: 100%;
     height: 34px;
+    overflow: hidden;
+  }
+  svg {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
 </style>

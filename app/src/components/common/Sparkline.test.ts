@@ -16,10 +16,24 @@ test('renders one white endpoint over a colored line and translucent glow', () =
   expect(paths[0].getAttribute('stroke')).toBe('#2ab0ff');
   expect(Number(paths[0].getAttribute('opacity'))).toBeLessThan(1);
   expect(paths[1].getAttribute('stroke')).toBe('#2ab0ff');
-  const points = container.querySelectorAll('circle');
+  const points = container.querySelectorAll('.endpoint');
   expect(points).toHaveLength(1);
-  expect(points[0].getAttribute('fill')).toBe('white');
-  expect(Number(points[0].getAttribute('r'))).toBeGreaterThan(0);
+  expect(getComputedStyle(points[0]).backgroundColor).toBe('rgb(255, 255, 255)');
+});
+
+test('endpoint stays circular and five pixels wide as the tile width changes', () => {
+  const { container } = render(Sparkline, { values: [50], timestampsMs: [1_000], max: 100 });
+  const chart = container.querySelector('.sparkline') as HTMLElement;
+  const marker = container.querySelector('.endpoint') as HTMLElement;
+  expect(marker).toBeTruthy();
+  const dimensions: string[] = [];
+  for (const width of ['150px', '450px']) {
+    chart.style.width = width;
+    const style = getComputedStyle(marker);
+    dimensions.push(`${style.width}x${style.height}`);
+    expect(style.borderRadius).toBe('50%');
+  }
+  expect(dimensions).toEqual(['5pxx5px', '5pxx5px']);
 });
 
 test('unmount cancels the shared animation frame', () => {
@@ -47,6 +61,6 @@ test('reduced motion keeps the sparkline static without scheduling frames', () =
     removeEventListener: () => {},
   }));
   const { container } = render(Sparkline, { values: [1], timestampsMs: [1_000] });
-  expect(container.querySelector('circle')).toBeTruthy();
+  expect(container.querySelector('.endpoint')).toBeTruthy();
   expect(raf).not.toHaveBeenCalled();
 });

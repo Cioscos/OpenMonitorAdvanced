@@ -56,9 +56,13 @@ Se il codice cambia, ricompilare e registrare il nuovo commit e hash.
    Associare CPU e memoria di `measure-footprint.ps1` alla stessa finestra.
    Per il budget CPU usare **`TotalAppPercentCpu`**, somma di `oma-app.exe`
    e dei discendenti WebView2 sullo stesso intervallo, soltanto quando
-   `TotalAppCpuValid` è `True`. Se la topologia dei processi cambia, un
-   contatore manca o la finestra non ha WebView2, la misura CPU è invalida:
-   ripeterla, senza interpretare `null` come zero. `CorePercentCpu` resta
+   `TotalAppCpuValid` è `True`. Se la topologia cambia tra i due rilievi, un
+   contatore è nullo/mancante o la finestra non ha WebView2, la misura CPU è
+   invalida: ripeterla, senza interpretare `null` come zero. Lo script vede
+   la topologia solo all’inizio e alla fine: un processo nato e terminato
+   durante l’intervallo può sfuggire alla somma. Annotare questo limite;
+   se un tracciamento dei processi rivela ricambi nell’intervallo, invalidare
+   la misura e ripeterla su un intervallo stabile. `CorePercentCpu` resta
    il solo processo host per continuità con le misure precedenti.
    `TotalPrivateMB` comprende app e processi WebView2, mentre tray usa
    `AppPrivateMB`. Conservare trace, screenshot e output grezzo con la build.

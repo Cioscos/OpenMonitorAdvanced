@@ -137,8 +137,8 @@ function Measure-ServiceSample {
 }
 
 # Measure the host and all WebView2 descendants over one common sample action.
-# A changing process tree, missing counters or reused PID invalidates the result
-# instead of allowing an incomplete set to look like low CPU use.
+# Changed endpoint membership, missing counters or reused PIDs invalidate the result.
+# A child born and exited between the endpoint snapshots cannot be observed here.
 function Measure-AppCpuSample {
     param(
         [Parameter(Mandatory)][int]$RootProcessId,
@@ -196,6 +196,19 @@ function Measure-AppCpuSample {
         $last = @($endCounters | Where-Object { [int]$_.IDProcess -eq $id })
         if ($first.Count -ne 1 -or $last.Count -ne 1) {
             return & $invalid "Missing or ambiguous CPU counters for PID $id."
+        }
+        foreach ($record in @($first[0], $last[0])) {
+            foreach ($field in @('PercentProcessorTime', 'Timestamp_Sys100NS')) {
+                $property = $record.PSObject.Properties[$field]
+                if ($null -eq $property -or $null -eq $property.Value -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                    return & $invalid "Missing $field CPU counter value for PID $id."
+                }
+                try { $value = [double]$property.Value }
+                catch { return & $invalid "Unreadable $field CPU counter value for PID $id." }
+                if (-not [double]::IsFinite($value)) {
+                    return & $invalid "Non-finite $field CPU counter value for PID $id."
+                }
+            }
         }
         $cpuDelta = [double]$last[0].PercentProcessorTime - [double]$first[0].PercentProcessorTime
         $timeDelta = [double]$last[0].Timestamp_Sys100NS - [double]$first[0].Timestamp_Sys100NS

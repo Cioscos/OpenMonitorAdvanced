@@ -63,4 +63,25 @@ $noRenderer = Measure-AppCpuSample -RootProcessId 10 -LogicalProcessors 16 -Requ
 Assert-Equal $noRenderer.Valid $false 'window without discovered WebView2 validity'
 Assert-Equal $null $noRenderer.CpuPercent 'window without discovered WebView2 result'
 
-Write-Output 'measure-app-cpu: 4 cases passed'
+foreach ($field in @('PercentProcessorTime', 'Timestamp_Sys100NS')) {
+    foreach ($phase in @('start', 'end')) {
+        foreach ($mode in @('null', 'missing')) {
+            $rendererStart = [pscustomobject]@{ IDProcess = 20; PercentProcessorTime = 10000000; Timestamp_Sys100NS = 1000000000 }
+            $rendererEnd = [pscustomobject]@{ IDProcess = 20; PercentProcessorTime = 18000000; Timestamp_Sys100NS = 1100000000 }
+            $target = if ($phase -eq 'start') { $rendererStart } else { $rendererEnd }
+            if ($mode -eq 'null') { $target.$field = $null }
+            else { [void]$target.PSObject.Properties.Remove($field) }
+            $badStart = @($startCounters[0], $rendererStart)
+            $badEnd = @($endCounters[0], $rendererEnd)
+            $script:counterReads = 0
+            $invalidField = Measure-AppCpuSample -RootProcessId 10 -LogicalProcessors 16 `
+                -ProcessProvider { $tree } `
+                -CounterProvider { $script:counterReads++; if ($script:counterReads -eq 1) { $badStart } else { $badEnd } } `
+                -SampleAction { }
+            Assert-Equal $invalidField.Valid $false "$mode $field at $phase validity"
+            Assert-Equal $null $invalidField.CpuPercent "$mode $field at $phase CPU"
+        }
+    }
+}
+
+Write-Output 'measure-app-cpu: 12 cases passed'

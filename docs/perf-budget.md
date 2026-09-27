@@ -4,9 +4,12 @@
 
 Stato al 2026-09-27: il gate anticipato del compositor (Task 5) è stato
 superato sulla release del commit `f5e54b5` (vedi "Gate anticipato del
-compositor" sotto). La verifica finale del Task 7 — storico pieno, tracce di
-almeno 60 s, almeno un'ora visibile e tray — resta da eseguire, perciò i
-criteri complessivi non sono ancora dichiarati **soddisfatti**. Le misure
+compositor" sotto) e la verifica visiva del Task 7 è stata completata
+dall'utente sulla release `474da9f` (vedi "Verifica visiva del Task 7"
+sotto). Le misure lunghe del Task 7 — storico pieno, tracce di almeno 60 s,
+almeno un'ora visibile e tray — non sono state eseguite in questo giro per
+decisione dell'utente, perciò i criteri complessivi non sono dichiarati
+**soddisfatti**. Le misure
 preliminari qui sotto si riferiscono al primo design, a ridisegno continuo,
 poi sostituito dall'architettura a compositor verificata nel gate anticipato:
 sono conservate come storico e non descrivono lo stato attuale. Dopo la
@@ -138,6 +141,30 @@ dell'app, l'opzione 60 FPS nelle impostazioni dovrà indicare accanto a sé
 che aumenta leggermente l'uso di CPU dell'app (su questa macchina circa
 +0,6–0,8 punti percentuali rispetto ai grafici statici, dai numeri sopra).
 
+### Verifica visiva del Task 7 (release `474da9f`)
+
+Il 2026-09-27 l'utente ha verificato a vista la release del commit
+`474da9f`, `oma-app.exe` SHA-256
+`8E5377EF4AF4DA5199C3708D21B8F09E16FAE29B8AAFEF1143F9BFD6F7D90669`, con
+esito positivo su tutti i punti: in Avanzata l'asse X alle finestre di 1, 5,
+30 e 60 min; punti bianchi, tratti mantenuti e asse °C senza tacche; la
+transizione Y; cursore, legenda e serie nascoste. In Semplificata le
+sparkline, il ridimensionamento della finestra e il ritorno dalla tray senza
+recupero accelerato del tempo trascorso. Il movimento ridotto non è stato
+provato dal vivo ed è coperto dai test unitari.
+
+Per decisione dell'utente, in questo giro **non** sono state eseguite le
+misure lunghe: riempimento dello storico di 61 min, almeno un'ora visibile
+per ciascuna vista, tracce di almeno 60 s con storico pieno e tray. Le righe
+della tabella di accettazione qui sotto restano quindi senza esito e i
+criteri complessivi non sono dichiarati soddisfatti.
+
+Le correzioni della revisione finale del branch (ridimensionamento senza
+ricostruzione e serie nascoste conservate, punto intero delle sparkline,
+backing store del canvas riusato, font delle etichette X, punti durante la
+transizione Y, niente frame a vuoto, misura della larghezza delle sparkline)
+sono successive a questa verifica visiva e non sono state rimisurate.
+
 ### Procedura riproducibile
 
 1. Registrare data e ora, Windows e build WebView2, CPU, GPU e driver, RAM,
@@ -197,11 +224,11 @@ che aumenta leggermente l'uso di CPU dell'app (su questa macchina circa
 
 | Vista / stato | Data, hardware, refresh, build | FPS mediano | p95 frame ms | CPU app+WebView2 % | Memoria MB | Traccia / output | Esito |
 |---|---|---:|---:|---:|---:|---|---|
-| Semplificata, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
-| Avanzata, 1 h, 8 serie, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
-| Semplificata, dopo ≥1 h visibile | in attesa | — | — | — | — | in attesa | non valutato |
-| Avanzata, 1 h, 8 serie, dopo ≥1 h visibile | in attesa | — | — | — | — | in attesa | non valutato |
-| Tray | in attesa | n/a | n/a | — | — | in attesa | non valutato |
+| Semplificata, storico pieno, ≥60 s | non eseguito in questo giro | — | — | — | — | in attesa | non valutato |
+| Avanzata, 1 h, 8 serie, storico pieno, ≥60 s | non eseguito in questo giro | — | — | — | — | in attesa | non valutato |
+| Semplificata, dopo ≥1 h visibile | non eseguito in questo giro | — | — | — | — | in attesa | non valutato |
+| Avanzata, 1 h, 8 serie, dopo ≥1 h visibile | non eseguito in questo giro | — | — | — | — | in attesa | non valutato |
+| Tray | non eseguito in questo giro | n/a | n/a | — | — | in attesa | non valutato |
 
 Criteri su display a 60 Hz e finestra visibile con movimento normale:
 FPS mediano ≥55, p95 frame ≤20 ms, CPU app a riposo <1% della macchina,

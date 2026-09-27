@@ -611,26 +611,127 @@ test('a singleton uses its real unit scale and DPR for the fixed endpoint', asyn
   } finally { FakeUplot.pxRatio = 1; }
 });
 
-test('resize rebuilds layers at the current edge and disconnects on teardown', async () => {
-  let resize!: ResizeObserverCallback;
+/** Replaces ResizeObserver; the returned function reports a new content width for `.plot`. */
+function stubResizeObserver() {
+  let callback!: ResizeObserverCallback;
   const disconnect = vi.fn();
   vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    constructor(cb: ResizeObserverCallback) { callback = cb; }
     observe() {}
     disconnect = disconnect;
   });
+  const resize = (width: number) => callback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver);
+  return { resize, disconnect };
+}
+
+test('resize sizes the same plot in place on the current time base and disconnects on teardown', async () => {
+  const { resize, disconnect } = stubResizeObserver();
   const backend = fakeBackend();
   const { unmount } = renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
   frame(5000);
-  resize([], {} as ResizeObserver);
-  expect(plots).toHaveLength(2);
-  expect(plots[0].destroyed).toBe(true);
-  expect(plots[1].scales.at(-1)?.range.max).toBe(7);
+  const scales = plot.scales.length;
+  const painted = paints().length;
+  resize(1000);
+  expect(plots).toHaveLength(1);
+  expect(plot.destroyed).toBe(false);
+  expect(plot.sizes).toEqual([{ width: 1000, height: 260 }]);
+  // The draw hook repainted the layers at the new width, without committing a new X scale.
+  expect(paints().length).toBeGreaterThan(painted);
+  expect(plot.scales).toHaveLength(scales);
+  expect(plot.bbox.width).toBe(800);
+  const canvas = document.querySelector<HTMLCanvasElement>('.chart-canvas')!;
+  expect(canvas.style.width).toBe(`${800 * 2 + 72}px`);
+  // 5 s after the painted edge, now at 800 px per 300 s: no jump in time.
+  expect(canvas.style.transform).toBe(`translateX(${-5 * 800 / 300}px)`);
+  frame(6000);
+  expect(canvas.style.transform).toBe(`translateX(${-6 * 800 / 300}px)`);
   expect(document.querySelectorAll('.chart-canvas')).toHaveLength(1);
   expect(backend.historyCalls).toHaveLength(1);
   unmount();
   expect(disconnect).toHaveBeenCalledOnce();
+});
+
+test('a series hidden in the legend stays hidden after a resize', async () => {
+  const { resize } = stubResizeObserver();
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const plot = plots[0];
+  plot.setSeries(1, { show: false });
+  resize(1000);
+  expect(plots).toHaveLength(1);
+  expect(plot.series[1].show).toBe(false);
+  expect(lastHeld().map((h) => h.color)).toEqual([plot.opts.series[2].stroke]);
+  expect([...document.querySelectorAll<HTMLElement>('.chart-dot')].map((d) => d.hidden)).toEqual([true, false]);
+});
+
+test('a height-only change of the plot box, as the legend wraps or a reseed refills it, neither resizes nor rebuilds', async () => {
+  const { resize } = stubResizeObserver();
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  // jsdom lays nothing out, so the plot was built 800 px wide.
+  const painted = paints().length;
+  resize(800);
+  expect(plots).toHaveLength(1);
+  expect(plots[0].sizes).toEqual([]);
+  expect(paints()).toHaveLength(painted);
+  await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.60') }));
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  resize(800);
+  expect(plots).toHaveLength(2);
+  expect(plots[1].sizes).toEqual([]);
+});
+
+test('series hidden in the legend stay hidden through density, locale, theme and window rebuilds', async () => {
+  const density = new Set<() => void>();
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: false, media: query,
+    addEventListener: (_type: string, listener: () => void) => { if (query.includes('resolution')) density.add(listener); },
+    removeEventListener: (_type: string, listener: () => void) => density.delete(listener),
+  }) as unknown as MediaQueryList);
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  plots[0].setSeries(1, { show: false });
+  const expectHidden = (plot: FakeUplot) => {
+    expect(plot.series.slice(1).map((s) => s.show !== false)).toEqual([false, true]);
+    expect(lastHeld().map((h) => h.color)).toEqual([plot.opts.series[2].stroke]);
+    expect([...document.querySelectorAll<HTMLElement>('.chart-dot')].map((d) => d.hidden)).toEqual([true, false]);
+  };
+  try {
+    for (const listener of [...density]) listener();
+    expect(plots).toHaveLength(2);
+    expectHidden(plots[1]);
+    i18n.locale = 'it';
+    flushSync();
+    expect(plots).toHaveLength(3);
+    expectHidden(plots[2]);
+    // A value no earlier test left on the root, so the style attribute really changes.
+    document.documentElement.style.setProperty('--accent', '#654321');
+    await vi.waitFor(() => expect(plots).toHaveLength(4));
+    expectHidden(plots[3]);
+    await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.60') }));
+    await vi.waitFor(() => expect(plots).toHaveLength(5));
+    expectHidden(plots[4]);
+    // Showing it again in the legend is remembered too.
+    plots[4].setSeries(1, { show: true });
+    i18n.locale = 'en';
+    flushSync();
+    expect(plots[5].series.slice(1).map((s) => s.show !== false)).toEqual([true, true]);
+  } finally {
+    document.documentElement.removeAttribute('style');
+  }
+});
+
+test('a series removed from the selection forgets that it was hidden', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  plots[0].setSeries(1, { show: false });
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(plots).toHaveLength(3));
+  expect(plots[2].opts.series.slice(1).map((s) => s.show !== false)).toEqual([true, true]);
 });
 
 test('DPR change rebuilds at the current edge and keeps canvas coordinates in device pixels', async () => {
@@ -1173,14 +1274,23 @@ test('unmounting during a transition cancels its frames', async () => {
   expect(plot.scales).toHaveLength(scales);
 });
 
-test.each(['resize', 'density', 'locale', 'theme'] as const)('a %s rebuild during a transition shows the final range on fresh layers', async (kind) => {
-  let resize!: ResizeObserverCallback;
-  const disconnect = vi.fn();
-  vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: ResizeObserverCallback) { resize = callback; }
-    observe() {}
-    disconnect = disconnect;
-  });
+test('a resize during a transition keeps it running on the same plot', async () => {
+  const { resize } = stubResizeObserver();
+  const { store, plot, from } = await transitionChart();
+  monotonicMs = 1000;
+  snapshotTemperature(store, 1, 3000, 90);
+  const to = celsiusRange(11, 90);
+  frame(1090);
+  resize(1000);
+  expect(plots).toHaveLength(1);
+  expectRange(plot.yRanges.get('celsius'), eased(from, to, 0.5));
+  frame(1180);
+  expect(plot.yRanges.get('celsius')).toEqual(to);
+  expect(lastHeld()[1].y).toBeCloseTo(plot.valToPos(90, 'celsius', true), 9);
+});
+
+test.each(['density', 'locale', 'theme'] as const)('a %s rebuild during a transition shows the final range on fresh layers', async (kind) => {
+  const { disconnect } = stubResizeObserver();
   const density = new Set<() => void>();
   vi.stubGlobal('matchMedia', (query: string) => ({
     get matches() { return reducedMotion; },
@@ -1196,8 +1306,7 @@ test.each(['resize', 'density', 'locale', 'theme'] as const)('a %s rebuild durin
   snapshotTemperature(store, 1, 3000, 90);
   frame(1090);
   try {
-    if (kind === 'resize') resize([], {} as ResizeObserver);
-    else if (kind === 'density') for (const listener of [...density]) listener();
+    if (kind === 'density') for (const listener of [...density]) listener();
     else if (kind === 'locale') { i18n.locale = 'it'; flushSync(); }
     else document.documentElement.style.setProperty('--accent', '#123456');
     await vi.waitFor(() => expect(plots).toHaveLength(2));

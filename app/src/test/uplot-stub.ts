@@ -25,6 +25,9 @@ export class FakeUplot {
   target: HTMLElement | undefined;
   destroyed = false;
   bbox = { left: 72, top: 10, width: 600, height: 200 };
+  /** CSS size of the whole chart, as uPlot keeps it in `width`/`height`. */
+  width: number;
+  height: number;
   over = document.createElement('div');
   root = document.createElement('div');
   cursor = { left: -10, top: -10 };
@@ -42,6 +45,8 @@ export class FakeUplot {
     this.opts = opts;
     this.data = data;
     this.target = target;
+    this.width = opts.width;
+    this.height = opts.height;
     this.root.append(this.over);
     target?.append(this.root);
     FakeUplot.instances.push(this);
@@ -52,8 +57,19 @@ export class FakeUplot {
     this.setDataCalls++;
   }
 
+  /** Like uPlot, a new size keeps scales and series and redraws; the plot box follows the width. */
   setSize(size: { width: number; height: number }): void {
     this.sizes.push(size);
+    this.bbox = { ...this.bbox, width: this.bbox.width + (size.width - this.width) * FakeUplot.pxRatio };
+    this.width = size.width;
+    this.height = size.height;
+    this.draw();
+  }
+
+  /** A legend click: uPlot toggles the series, fires `setSeries` hooks and redraws. */
+  setSeries(index: number, opts: { show: boolean }): void {
+    this.opts.series[index].show = opts.show;
+    for (const hook of this.opts.hooks?.setSeries ?? []) hook?.(this as unknown as uPlot, index, opts);
     this.draw();
   }
 

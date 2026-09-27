@@ -81,6 +81,10 @@
   let tickIncrement = 60;
   let autoscaleY = true;
   let labelContext: CanvasRenderingContext2D | null | undefined;
+  /** CSS width the plot was built or last sized at; only a new width resizes it. */
+  let plotCssWidth = 0;
+  /** Series the user hid in the legend, by id: every rebuild shows them hidden again. */
+  let hiddenIds = new Set<string>();
 
   type YRange = { min: number; max: number };
   /** Duration in ms of the move to a new automatic Y range. */
@@ -405,8 +409,11 @@
       values: (_u, splits) => splits.map((v) => formatValue(v, unit, i18n.locale, t)),
     });
     const paths: ChartCanvasPath[] = ids.map((_, i) => ({ stroke: null, gapsClip: null, color: palette[i] }));
+    // A series that left the selection comes back visible.
+    hiddenIds = new Set(ids.filter((id) => hiddenIds.has(id)));
+    plotCssWidth = Math.max(320, container.clientWidth || 800);
     const opts: uPlot.Options = {
-      width: Math.max(320, container.clientWidth || 800),
+      width: plotCssWidth,
       height: HEIGHT,
       cursor: {
         drag: { x: false, y: false, setScale: false },
@@ -434,6 +441,7 @@
             stroke: palette[i],
             width: 1.5,
             paths: capture,
+            show: !hiddenIds.has(id),
             spanGaps: false,
             points: { show: false },
             value: (_u: uPlot, v: number | null) => formatValue(v ?? null, unit, i18n.locale, t),
@@ -442,6 +450,10 @@
       ],
       hooks: {
         draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })],
+        // The legend toggles series on this plot; remember them for the next rebuild.
+        setSeries: [(u) => {
+          hiddenIds = new Set(ids.filter((_, i) => u.series[i + 1]?.show === false));
+        }],
         // Legend values follow dataIdx, but uPlot publishes its uncorrected index here.
         setCursor: [(u) => {
           u.cursor.idx = u.legend.idx = u.cursor.idxs![0];
@@ -539,8 +551,14 @@
     const observer =
       typeof ResizeObserver === 'undefined'
         ? undefined
-        : new ResizeObserver(() => {
-            if (!paused && buffer) build(buffer.ids);
+        : new ResizeObserver((entries) => {
+            // The box's height follows the legend, which wraps and refills on reseeds: only a
+            // new width sizes the plot. uPlot keeps scales, series and the time base, and its
+            // draw hook repaints the layers at the new size.
+            const width = Math.max(320, (entries.at(-1)?.contentRect.width ?? container.clientWidth) || 800);
+            if (paused || !plot || width === plotCssWidth) return;
+            plotCssWidth = width;
+            plot.setSize({ width, height: HEIGHT });
           });
     observer?.observe(container);
     const refresh = () => { if (!paused && buffer) build(buffer.ids); };

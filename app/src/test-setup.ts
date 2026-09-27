@@ -14,4 +14,9 @@ if (!window.matchMedia) {
 }
 
 // jsdom has no canvas, so uPlot cannot draw: every test file gets the recording stub.
-vi.mock('uplot', async () => ({ default: (await import('./test/uplot-stub')).FakeUplot }));
+vi.mock('uplot', async () => {
+  const { default: real } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const { FakeUplot } = await import('./test/uplot-stub');
+  FakeUplot.paths = real.paths;
+  return { default: FakeUplot };
+});

@@ -355,3 +355,55 @@ test('reduced-motion pause keeps snapshots visible and resumes without replaying
   frame(1_200_000);
   expect(plots[0].scales.at(-1)?.range.max).toBe(3);
 });
+
+test('uses the real spline and preserves null gap clipping on each unit scale', async () => {
+  const { canvasFixture, RecordingPath } = await import('../../test/uplot-canvas');
+  vi.stubGlobal('Path2D', RecordingPath);
+  const backend = fakeBackend();
+  backend.history = { timestampsMs: [0, 1000, 2000, 3000, 4000], series: [[10, 20, null, 30, 40], [40, 80, null, 100, 120]] };
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const configured = plots[0];
+  const { plot, ctx } = canvasFixture(configured.data, configured.opts.series);
+  for (let i = 1; i <= 2; i++) {
+    const series = configured.opts.series[i];
+    expect(series.paths).toBeTypeOf('function');
+    expect(series.spanGaps).toBe(false);
+    const paths = series.paths!(plot, i, 0, 4)!;
+    expect((paths.stroke as unknown as InstanceType<typeof RecordingPath>).commands.some((c) => c.kind === 'cubic')).toBe(true);
+    expect(paths.clip).toBeTruthy();
+    configured.opts.hooks!.drawSeries![0]!(plot, i);
+    expect(ctx.stroke).toHaveBeenLastCalledWith(paths.stroke);
+    expect(ctx.clip).toHaveBeenLastCalledWith(paths.clip);
+  }
+  expect(ctx.arc.mock.calls.map((args) => args.slice(0, 2))).toEqual([[410, 140], [410, 100]]);
+});
+
+test('reseeded selection decorates the new sensor column and never reuses the previous path', async () => {
+  const { canvasFixture, RecordingPath } = await import('../../test/uplot-canvas');
+  vi.stubGlobal('Path2D', RecordingPath);
+  const backend = fakeBackend();
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const initial = plots[0];
+  const first = canvasFixture(initial.data, initial.opts.series);
+  expect(initial.opts.series[1].paths).toBeTypeOf('function');
+  initial.opts.series[1].paths!(first.plot, 1, 0, 1);
+  initial.opts.hooks!.drawSeries![0]!(first.plot, 1);
+  backend.history = { timestampsMs: [1000, 2000], series: [[60, 120]] };
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  const replacement = plots[1];
+  expect(replacement.opts.series[1].scale).toBe('celsius');
+  const next = canvasFixture(replacement.data, replacement.opts.series);
+  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
+  expect(next.ctx.stroke).not.toHaveBeenCalled();
+  expect(next.ctx.arc).toHaveBeenLastCalledWith(210, 100, 3, 0, Math.PI * 2);
+  const paths = replacement.opts.series[1].paths!(next.plot, 1, 0, 1)!;
+  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
+  expect(next.ctx.stroke).toHaveBeenLastCalledWith(paths.stroke);
+  next.plot.data[1][1] = null;
+  next.ctx.arc.mockClear();
+  replacement.opts.hooks!.drawSeries![0]!(next.plot, 1);
+  expect(next.ctx.arc).not.toHaveBeenCalled();
+});

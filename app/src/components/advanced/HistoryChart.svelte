@@ -18,6 +18,7 @@
     seriesPalette,
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
+  import { drawChartSeriesDecoration } from '../../lib/advanced/chartDecoration';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { loadSeries, loadWindow, saveSeries, saveWindow } from '../../lib/advanced/persist';
@@ -127,6 +128,7 @@
       ticks: { stroke: border, width: 1 },
       values: (_u, splits) => splits.map((v) => formatValue(v, unit, i18n.locale, t)),
     });
+    const decorations: Array<(u: uPlot, seriesIdx: number) => void> = [];
     const opts: uPlot.Options = {
       width: Math.max(320, container.clientWidth || 800),
       height: HEIGHT,
@@ -137,16 +139,31 @@
         ...ids.map((id, i) => {
           const sensor = byId.get(id);
           const unit = seriesScale[i];
+          const spline = uPlot.paths.spline!();
+          let strokePath: Path2D | null = null;
+          let gapsClip: Path2D | null = null;
+          // Capture public path-builder results per series and per plot generation.
+          // uPlot may reuse these paths on redraws that do not change geometry.
+          const paths: uPlot.Series.PathBuilder = (u, seriesIdx, first, last) => {
+            const result = spline(u, seriesIdx, first, last);
+            strokePath = result?.stroke instanceof Path2D ? result.stroke : null;
+            gapsClip = result?.clip ?? null;
+            return result;
+          };
+          decorations.push((u, seriesIdx) => drawChartSeriesDecoration(u, seriesIdx, strokePath, gapsClip, palette[i]));
           return {
             label: sensor ? sensorLabel(sensor, t) : id,
             scale: unit,
             stroke: palette[i],
             width: 1.5,
+            paths,
+            spanGaps: false,
             points: { show: false },
             value: (_u: uPlot, v: number | null) => formatValue(v ?? null, unit, i18n.locale, t),
           };
         }),
       ],
+      hooks: { drawSeries: [(u, seriesIdx) => decorations[seriesIdx - 1]?.(u, seriesIdx)] },
       axes: [
         {
           stroke: muted,

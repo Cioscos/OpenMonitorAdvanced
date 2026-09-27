@@ -6,6 +6,8 @@ import type uPlot from 'uplot';
  */
 export class FakeUplot {
   static instances: FakeUplot[] = [];
+  static paths: uPlot.Series.PathBuilderFactories;
+  static pxRatio = 1;
   opts: uPlot.Options;
   data: uPlot.AlignedData;
   target: HTMLElement | undefined;

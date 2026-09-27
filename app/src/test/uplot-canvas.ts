@@ -10,18 +10,20 @@ export class RecordingPath {
 }
 
 export function canvasFixture(data: uPlot.AlignedData, series: uPlot.Series[] = [{ scale: 'x' }, { scale: 'percent', width: 1.5 }]) {
-  const state = { globalAlpha: 1, shadowBlur: 0, shadowColor: 'transparent', strokeStyle: '', fillStyle: '', lineWidth: 1 };
+  const state = { globalAlpha: 1, shadowBlur: 0, shadowColor: 'transparent', strokeStyle: '', fillStyle: '', lineWidth: 1, font: '', textAlign: 'start', textBaseline: 'alphabetic', lineCap: 'butt', lineJoin: 'miter' };
   const stack: typeof state[] = [];
   const ctx = {
     ...state,
     save: vi.fn(() => { stack.push(Object.fromEntries(Object.keys(state).map((key) => [key, ctx[key as keyof typeof state]])) as typeof state); }),
     restore: vi.fn(() => Object.assign(ctx, stack.pop())),
     beginPath: vi.fn(), rect: vi.fn(), clip: vi.fn(), arc: vi.fn(), setLineDash: vi.fn(),
-    stroke: vi.fn((_path?: Path2D) => { strokes.push({ alpha: ctx.globalAlpha, color: ctx.strokeStyle, blur: ctx.shadowBlur }); }),
+    moveTo: vi.fn(), lineTo: vi.fn(), fillText: vi.fn(() => { textDraws.push({ font: ctx.font, color: ctx.fillStyle, blur: ctx.shadowBlur }); }),
+    stroke: vi.fn((_path?: Path2D) => { strokes.push({ alpha: ctx.globalAlpha, color: ctx.strokeStyle, blur: ctx.shadowBlur, width: ctx.lineWidth }); }),
     fill: vi.fn(() => { fills.push({ alpha: ctx.globalAlpha, color: ctx.fillStyle, blur: ctx.shadowBlur }); }),
   };
-  const strokes: Array<{ alpha: number; color: string; blur: number }> = [];
-  const fills: typeof strokes = [];
+  const strokes: Array<{ alpha: number; color: string; blur: number; width: number }> = [];
+  const fills: Array<{ alpha: number; color: string; blur: number }> = [];
+  const textDraws: Array<{ font: string; color: string; blur: number }> = [];
   const scales = { x: { ori: 0, dir: 1, min: 0, max: 4 }, percent: { ori: 1, dir: 1, min: 0, max: 100 }, celsius: { ori: 1, dir: 1, min: 0, max: 200 } };
   const normalized = series.map((s, i) => ({ ...s, scale: s.scale ?? (i === 0 ? 'x' : 'percent'), pxRound: (v: number) => v, gaps: (_u: unknown, _s: number, _a: number, _b: number, gaps: unknown) => gaps }));
   const horizontal = (v: number, s: { min: number; max: number }, dim: number, off: number) => off + (v - s.min) / (s.max - s.min) * dim;
@@ -36,5 +38,5 @@ export function canvasFixture(data: uPlot.AlignedData, series: uPlot.Series[] = 
       return key === 'x' ? horizontal(v, scales[key], 400, 10) : vertical(v, scales[key], 200, 20);
     }),
   };
-  return { plot: plot as unknown as uPlot, ctx, strokes, fills };
+  return { plot: plot as unknown as uPlot, ctx, strokes, fills, textDraws };
 }

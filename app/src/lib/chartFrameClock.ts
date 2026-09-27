@@ -29,7 +29,10 @@ function onFrame(): void {
   for (const subscriber of subscribers) {
     // rAF timestamps can arrive a fraction of a millisecond before the nominal refresh interval.
     if (now - subscriber.lastMs >= subscriber.intervalMs - 0.1) {
-      subscriber.lastMs = now;
+      // Preserve the target phase on high-refresh displays; discard missed periods after a stall.
+      subscriber.lastMs = now - subscriber.lastMs >= 2 * subscriber.intervalMs
+        ? now
+        : subscriber.lastMs + subscriber.intervalMs;
       subscriber.callback(now);
     }
   }

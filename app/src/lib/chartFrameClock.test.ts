@@ -94,7 +94,7 @@ test('60, 30, and 15 FPS subscribers use elapsed monotonic time', () => {
   subscribe(calls[1], 30);
   subscribe(calls[2], 15);
   for (const at of [0, 16, 17, 32, 34, 50, 68, 85]) frame(at);
-  expect(calls[0].mock.calls.map(([ms]) => ms)).toEqual([0, 17, 34, 68, 85]);
+  expect(calls[0].mock.calls.map(([ms]) => ms)).toEqual([0, 17, 34, 50, 68, 85]);
   expect(calls[1].mock.calls.map(([ms]) => ms)).toEqual([0, 34, 68]);
   expect(calls[2].mock.calls.map(([ms]) => ms)).toEqual([0, 68]);
 });
@@ -104,6 +104,38 @@ test('60 Hz display timing stays smooth despite sub-millisecond jitter', () => {
   subscribe(calls, 60);
   for (const at of [0, 16.66, 33.32, 49.98]) frame(at);
   expect(calls.mock.calls.map(([ms]) => ms)).toEqual([0, 16.66, 33.32, 49.98]);
+});
+
+test('164 Hz rAF keeps 60, 30, and 15 FPS near their target rates over one second', () => {
+  const calls = [vi.fn(), vi.fn(), vi.fn()];
+  subscribe(calls[0], 60);
+  subscribe(calls[1], 30);
+  subscribe(calls[2], 15);
+  for (let i = 0; i <= 164; i++) frame(i * 1000 / 164);
+  expect(calls[0].mock.calls.length).toBeGreaterThanOrEqual(59);
+  expect(calls[0].mock.calls.length).toBeLessThanOrEqual(61);
+  expect(calls[1].mock.calls.length).toBeGreaterThanOrEqual(29);
+  expect(calls[1].mock.calls.length).toBeLessThanOrEqual(31);
+  expect(calls[2].mock.calls.length).toBeGreaterThanOrEqual(14);
+  expect(calls[2].mock.calls.length).toBeLessThanOrEqual(16);
+  expect(requested).toBe(166);
+});
+
+test('a long rAF stall delivers one current frame and resets cadence', () => {
+  const calls = vi.fn();
+  subscribe(calls, 60);
+  for (const at of [0, 17, 1_000, 1_006, 1_012, 1_018]) frame(at);
+  expect(calls.mock.calls.map(([ms]) => ms)).toEqual([0, 17, 1_000, 1_018]);
+});
+
+test('resume delivers one current frame without burst on subsequent rAF ticks', () => {
+  const calls = vi.fn();
+  subscribe(calls, 60);
+  frame(0);
+  setVisibility('hidden');
+  setVisibility('visible');
+  for (const at of [1_000, 1_006, 1_012, 1_018]) frame(at);
+  expect(calls.mock.calls.map(([ms]) => ms)).toEqual([0, 1_000, 1_018]);
 });
 
 test('an unchanged visibility event does not bypass the FPS cap', () => {

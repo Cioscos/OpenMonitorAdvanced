@@ -16,6 +16,8 @@ export class FakeUplot {
   bbox = { left: 72, top: 10, width: 600, height: 200 };
   over = document.createElement('div');
   root = document.createElement('div');
+  cursor = { left: -10, top: -10 };
+  setCursorCalls: Array<{ left: number; top: number }> = [];
   private range = { min: 0, max: 4 };
   get series() { return this.opts.series; }
   setDataCalls = 0;
@@ -49,6 +51,10 @@ export class FakeUplot {
   }
 
   batch(fn: () => void): void { fn(); }
+
+  setCursor(opts: { left: number; top: number }): void {
+    this.setCursorCalls.push(opts);
+  }
 
   valToPos(value: number, scale: string, canvasPixels = false): number {
     const valuePx = scale === 'x'

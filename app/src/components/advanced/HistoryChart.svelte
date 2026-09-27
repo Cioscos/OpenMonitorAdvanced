@@ -48,6 +48,8 @@
   } = $props();
 
   const HEIGHT = 260;
+  /** Radius of the white endpoint dot in CSS px; its layer is padded by it on every side. */
+  const DOT_RADIUS = 3;
 
   const candidateIds = $derived(sensors.map((s) => s.id));
   let windowSeconds = $state<WindowSeconds>(loadWindow() ?? DEFAULT_WINDOW);
@@ -67,18 +69,25 @@
   let canvas: HTMLCanvasElement | undefined;
   let canvasClip: HTMLDivElement | undefined;
   let markerClip: HTMLDivElement | undefined;
+  let dotClip: HTMLDivElement | undefined;
   let markers: HTMLDivElement[] = [];
+  let dots: HTMLDivElement[] = [];
   let baseRightMs = 0;
+  let canvasOffsetPx = 0;
   let tickIncrement = 60;
   let autoscaleY = true;
 
   function clearLayers() {
     canvasClip?.remove();
     markerClip?.remove();
+    dotClip?.remove();
     canvas = undefined;
     canvasClip = undefined;
     markerClip = undefined;
+    dotClip = undefined;
     markers = [];
+    dots = [];
+    canvasOffsetPx = 0;
   }
 
   function createLayers(colors: string[]) {
@@ -91,21 +100,29 @@
     canvasClip.append(canvas);
     markerClip = document.createElement('div');
     markerClip.className = 'chart-marker-clip';
+    // Held segments stop at the plot edge; the dots have their own padded layer so the
+    // right edge and the Y extrema never cut them in half.
+    dotClip = document.createElement('div');
+    dotClip.className = 'chart-dot-clip';
     for (const color of colors) {
       const marker = document.createElement('div');
       marker.className = 'chart-marker';
       marker.style.color = color;
       marker.hidden = true;
-      marker.append(document.createElement('i'));
       markers.push(marker);
       markerClip.append(marker);
+      const dot = document.createElement('div');
+      dot.className = 'chart-dot';
+      dot.hidden = true;
+      dots.push(dot);
+      dotClip.append(dot);
     }
     // The wrap shares uPlot's canvas origin; its sibling legend has its own layout.
-    plot.over.parentElement!.append(canvasClip, markerClip);
+    plot.over.parentElement!.append(canvasClip, markerClip, dotClip);
   }
 
   function paint(u: uPlot, paths: ChartCanvasPath[], theme: { gridColor: string; textColor: string }) {
-    if (!canvas || !canvasClip || !markerClip) return;
+    if (!canvas || !canvasClip || !markerClip || !dotClip) return;
     const ratio = uPlot.pxRatio;
     const { left, top, width, height } = u.bbox;
     const axisHeight = 40 * ratio;
@@ -118,6 +135,10 @@
     }
     canvasClip.style.height = `${(height + axisHeight) / ratio}px`;
     markerClip.style.height = `${height / ratio}px`;
+    dotClip.style.left = `${left / ratio - DOT_RADIUS}px`;
+    dotClip.style.top = `${top / ratio - DOT_RADIUS}px`;
+    dotClip.style.width = `${width / ratio + DOT_RADIUS * 2}px`;
+    dotClip.style.height = `${height / ratio + DOT_RADIUS * 2}px`;
     // Only labels need space behind the left edge; future ticks need a full window.
     canvas.width = Math.ceil(width * 2 + leftOverscan);
     canvas.height = Math.ceil(height + axisHeight);
@@ -140,6 +161,8 @@
     const range = viewport.range(nowMonoMs);
     if (paused || !plot || !range) return;
     baseRightMs = range.max * 1000;
+    // The committed X scale makes uPlot re-run a visible cursor itself, at offset zero.
+    canvasOffsetPx = 0;
     autoscaleY = snapshot;
     plot.setScale('x', range);
     drawFrame(nowMonoMs);
@@ -155,18 +178,28 @@
       return;
     }
     canvas.style.transform = `translateX(${-offset}px)`;
+    plot.over.style.setProperty('--chart-cursor-offset', `${-offset}px`);
+    const moved = offset !== canvasOffsetPx;
+    canvasOffsetPx = offset;
+    // A still pointer sees the curve scroll under it: hit-test it again, as the former
+    // per-frame setScale did, without touching scales or canvases.
+    const { left, top } = plot.cursor;
+    if (moved && left !== undefined && left >= 0 && top !== undefined) plot.setCursor({ left, top });
     const length = heldLengthPx(buffer.lastTimestampMs, range.max * 1000, buffer.windowSeconds * 1000, width);
     const data = plot.data;
     for (let i = 0; i < markers.length; i++) {
       const value = data[i + 1]?.at(-1);
       const marker = markers[i];
+      const dot = dots[i];
       const scale = plot.series[i + 1].scale!;
       const y = value == null ? NaN : (plot.valToPos(value, scale, true) - plot.bbox.top) / uPlot.pxRatio;
       marker.hidden = plot.series[i + 1].show === false || length === null || value == null || !Number.isFinite(value) || !Number.isFinite(y) || y < 0 || y > plot.bbox.height / uPlot.pxRatio;
+      dot.hidden = marker.hidden;
       if (!marker.hidden) {
         marker.style.width = `${length}px`;
         marker.style.top = `${y}px`;
         marker.style.right = '0px';
+        dot.style.top = `${y + DOT_RADIUS}px`;
       }
     }
   }
@@ -245,7 +278,13 @@
     const opts: uPlot.Options = {
       width: Math.max(320, container.clientWidth || 800),
       height: HEIGHT,
-      cursor: { drag: { x: false, y: false, setScale: false } },
+      cursor: {
+        drag: { x: false, y: false, setScale: false },
+        // uPlot's X mapping is the cached scale, drawn canvasOffsetPx to the left: hit-test
+        // the drawn sample while the crosshair stays at the pointer. The default dataIdx
+        // only skips undefined values, which aligned ChartBuffer columns never contain.
+        dataIdx: (u) => u.posToIdx(u.cursor.left! + canvasOffsetPx),
+      },
       scales: Object.fromEntries([['x', { time: true }], ...scales.map((unit) => [unit, { ...scaleOptions(unit), auto: () => autoscaleY }])]),
       series: [
         { label: '', value: (_u, v) => (v == null ? DASH : new Date(v * 1000).toLocaleTimeString(i18n.locale)) },
@@ -271,7 +310,11 @@
           };
         }),
       ],
-      hooks: { draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })] },
+      hooks: {
+        draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })],
+        // Legend values follow dataIdx, but uPlot publishes its uncorrected index here.
+        setCursor: [(u) => { u.cursor.idx = u.legend.idx = u.cursor.idxs![0]; }],
+      },
       axes: [
         {
           stroke: muted,
@@ -504,7 +547,8 @@
     min-height: 260px;
   }
   .plot :global(.chart-canvas-clip),
-  .plot :global(.chart-marker-clip) {
+  .plot :global(.chart-marker-clip),
+  .plot :global(.chart-dot-clip) {
     position: absolute;
     overflow: hidden;
     pointer-events: none;
@@ -521,10 +565,10 @@
     box-shadow: 0 0 3px currentColor;
     transform: translateY(-50%);
   }
-  .plot :global(.chart-marker i) {
+  .plot :global(.chart-dot) {
     position: absolute;
-    right: 0;
-    top: 50%;
+    /* Centred on the plot's right edge, one radius inside the padded layer. */
+    right: 3px;
     width: 6px;
     height: 6px;
     background: white;
@@ -547,6 +591,11 @@
   .plot :global(.u-cursor-x),
   .plot :global(.u-cursor-y) {
     border-color: var(--text-muted);
+  }
+  .plot :global(.u-cursor-pt) {
+    /* uPlot places points on the cached X scale; follow the scrolled canvas. The
+       translate property composes with the transform uPlot writes inline. */
+    translate: var(--chart-cursor-offset, 0px) 0;
   }
   .plot :global(.u-select) {
     background: color-mix(in srgb, var(--text-muted) 12%, transparent);

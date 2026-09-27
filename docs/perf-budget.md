@@ -5,9 +5,9 @@
 Stato al 2026-09-27: la build release WebView2 è stata compilata, ma la verifica
 visiva e le misure dal vivo non sono ancora state eseguite. Nessun valore FPS,
 CPU o memoria di questa build è dichiarato come risultato o come criterio
-soddisfatto. Build da verificare: commit `ec1fcec4eb155967002e2fdb3c405c57150c11f9`,
+soddisfatto. Build da verificare: commit `aee6305ce273bf04a425f4bf8e355360f18489d9`,
 `target/release/oma-app.exe` SHA-256
-`C8D7636C647C9D131BBE0608FE1A48F9637F7D93EED380D5DB1F179061A83277`.
+`B169955CD41FD4BF46774D0D55578688AFCEF0A15C22EF8C39DBEFE3E4EBB9B0`.
 Se il codice cambia, ricompilare e registrare il nuovo commit e hash.
 
 ### Procedura riproducibile

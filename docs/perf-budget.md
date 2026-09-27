@@ -1,5 +1,77 @@
 # Performance budget
 
+## Grafici fluidi — protocollo release e risultati in attesa
+
+Stato al 2026-09-27: la build release WebView2 è stata compilata, ma la verifica
+visiva e le misure dal vivo non sono ancora state eseguite. Nessun valore FPS,
+CPU o memoria di questa build è dichiarato come risultato o come criterio
+soddisfatto. Build da verificare: commit `ec1fcec4eb155967002e2fdb3c405c57150c11f9`,
+`target/release/oma-app.exe` SHA-256
+`C8D7636C647C9D131BBE0608FE1A48F9637F7D93EED380D5DB1F179061A83277`.
+Se il codice cambia, ricompilare e registrare il nuovo commit e hash.
+
+### Procedura riproducibile
+
+1. Registrare data e ora, Windows e build WebView2, CPU, GPU e driver, RAM,
+   display e frequenza di aggiornamento, alimentazione, eventuale carico in
+   parallelo, servizio connesso, modalità sicura e moduli vendor. Chiudere le
+   altre istanze di `oma-app.exe`; verificare che non vi siano crash marker.
+   Eseguire la release, non `pnpm dev`. L'utente deve gestire la finestra e
+   confermare che resti visibile; non usare clic sintetici o UI Automation.
+2. Con l'app chiusa, predisporre Avanzata con
+   `scripts/seed-advanced-view.ps1 -Section 'gpu/pci-0000:01:00.0' -Window 3600 -Series $series`,
+   dove `$series` contiene gli otto ID della misura M3 riportati sotto:
+   `load/core`, `load/3d`, `load/copy`, `load/video-decode`,
+   `load/video-encode`, `fan/percent`, `percent/power-limit`,
+   `temperature/core`, ciascuno prefissato da `gpu/pci-0000:01:00.0/`.
+   Verificare poi con `-CheckOnly`. Lo script apre e chiude l'app: usarlo soltanto nella
+   sessione concordata con l'utente. In Semplificata selezionare la vista con
+   l'utente; registrare il riquadro osservato. Verificare a vista curve,
+   punto bianco e glow rispetto allo screenshot, dati assenti, nascondi/riprendi,
+   movimento ridotto e finestre Avanzata 1/5/30/60 min con 8 serie.
+3. Per ciascuna vista, riempire lo storico con
+   `scripts/measure-footprint.ps1 -FillHistoryMinutes 61 -SampleSeconds 60 -Service`
+   (omettere `-Service` se il servizio non è installato, annotandolo). Lo
+   script misura prima la tray e poi apre la finestra per almeno 15 s di
+   warm-up e 60 s di campionamento; chiude il processo alla fine. Confermare
+   a vista la pagina effettivamente aperta. Per la vista Semplificata, i 61
+   minuti superano la sua finestra di 5 minuti; per Avanzata riempiono 1 h.
+4. In una nuova esecuzione per ciascuna vista, lasciare la finestra
+   continuamente visibile per almeno un'ora:
+   `scripts/measure-footprint.ps1 -WarmupSeconds 3660 -SampleSeconds 60 -Service`.
+   L'utente conferma che non è stata ridotta a icona o chiusa. Fare una
+   misura tray separata con `-Minimized -SampleSeconds 60` se la coppia del
+   punto 3 non è valida. Registrare output grezzo e durata effettiva.
+5. Nella shell che avvia la misura impostare
+   `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9223'`,
+   collegare DevTools alla WebView2 e rimuovere la variabile dopo la misura.
+   Durante ogni finestra di 60 s, raccogliere ed esportare una traccia
+   Performance della WebView2 con callback `requestAnimationFrame`, disegno
+   e frame presentati. Annotare percorso della traccia e conteggio frame.
+   Escludere warm-up, intervalli nascosti e movimento ridotto dal calcolo FPS.
+   Dai timestamp dei frame presentati calcolare gli intervalli consecutivi:
+   FPS mediano = `1000 / mediana(intervalli_ms)` e p95 del tempo frame =
+   95° percentile degli intervalli in ms; annotare anche callback, disegno e
+   frame lunghi. Non confondere la cadenza dei campioni sensore con gli FPS.
+   Associare CPU e memoria di `measure-footprint.ps1` alla stessa finestra;
+   `TotalPrivateMB` comprende app e processi WebView2, mentre tray usa
+   `AppPrivateMB`. Conservare trace, screenshot e output grezzo con la build.
+
+| Vista / stato | Data, hardware, refresh, build | FPS mediano | p95 frame ms | CPU app % | Memoria MB | Traccia / output | Esito |
+|---|---|---:|---:|---:|---:|---|---|
+| Semplificata, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
+| Avanzata, 1 h, 8 serie, storico pieno, ≥60 s | in attesa | — | — | — | — | in attesa | non valutato |
+| Semplificata, dopo ≥1 h visibile | in attesa | — | — | — | — | in attesa | non valutato |
+| Avanzata, 1 h, 8 serie, dopo ≥1 h visibile | in attesa | — | — | — | — | in attesa | non valutato |
+| Tray | in attesa | n/a | n/a | — | — | in attesa | non valutato |
+
+Criteri su display a 60 Hz e finestra visibile con movimento normale:
+FPS mediano ≥55, p95 frame ≤20 ms, CPU app a riposo <1% della macchina,
+finestra <200 MB complessivi e tray <30 MB. Riportare esplicitamente il
+refresh reale se diverso da 60 Hz. Se una misura fallisce, profilare,
+correggere e ripetere quella misura; un cambio di renderer richiede prima
+una revisione del design approvato.
+
 Budget (spec §1.2), measured with `scripts/measure-footprint.ps1` on a release build.
 Memory = private working set (Task Manager "Memory" column); CPU = share of all logical processors.
 

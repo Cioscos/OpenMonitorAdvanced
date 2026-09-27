@@ -183,7 +183,12 @@
       Math.max(...[min, max, min + 43_200].map((time) => measure(formatTimeTick(time, i18n.locale, incr)))));
   }
 
+  /** Frame subscription, live only while a plot and its layers exist. */
+  let stopFrames: (() => void) | undefined;
+
   function clearLayers() {
+    stopFrames?.();
+    stopFrames = undefined;
     canvasClip?.remove();
     dotClip?.remove();
     canvas = undefined;
@@ -215,6 +220,12 @@
     }
     // The wrap shares uPlot's canvas origin; its sibling legend has its own layout.
     plot.over.parentElement!.append(canvasClip, dotClip);
+    // The Y transition runs on the chart's frame subscription, before its X translation.
+    // Without a plot (empty selection, history loading) nothing asks for frames.
+    stopFrames = subscribeChartFrame((now) => {
+      stepY(now);
+      drawFrame(now);
+    });
   }
 
   /**
@@ -533,11 +544,6 @@
       } else viewport.resume(performance.now());
     };
     motionQuery.addEventListener('change', onMotionChange);
-    // The Y transition runs on the chart's frame subscription, before its X translation.
-    const stopFrames = subscribeChartFrame((now) => {
-      stepY(now);
-      drawFrame(now);
-    });
     const onVisibility = () => {
       paused = document.visibilityState === 'hidden';
       if (paused) {
@@ -581,7 +587,6 @@
       themeObserver.disconnect();
       densityQuery.removeEventListener('change', onDensity);
       motionQuery.removeEventListener('change', onMotionChange);
-      stopFrames();
       yMoves.clear();
       clearLayers();
       plot?.destroy();

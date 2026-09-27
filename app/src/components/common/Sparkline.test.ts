@@ -421,3 +421,23 @@ test('samples reuse the tracked tile width instead of forcing a layout each time
   // 30 s after the last sample's edge, across a 600 px tile.
   expect(translateCssPx(view.container)).toBeCloseTo(-60, 6);
 });
+
+test('asks for frames only while it has a curve to scroll', async () => {
+  const time = clock();
+  const view = render(Sparkline, { values: [], timestampsMs: [], max: 100 });
+  await tick();
+  expect(time.pending()).toBe(0);
+  await view.rerender({ values: [NaN], timestampsMs: [1_000], max: 100 });
+  await tick();
+  expect(time.pending()).toBe(0);
+  await view.rerender({ values: [NaN, 50], timestampsMs: [1_000, 2_000], max: 100 });
+  await tick();
+  expect(time.pending()).toBe(1);
+  await time.frame(2_500);
+  expect(time.pending()).toBe(1);
+  await view.rerender({ values: [], timestampsMs: [], max: 100 });
+  await tick();
+  expect(time.pending()).toBe(0);
+  view.unmount();
+  expect(time.pending()).toBe(0);
+});

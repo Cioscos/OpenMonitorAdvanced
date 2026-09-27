@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
   import { heldLengthPx, scrollOffsetPx } from '../../lib/chartCompositor';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
@@ -31,6 +31,19 @@
   let heldShown: boolean | null = null;
   const geometry = $derived(sparklineGeometry(values, timestampsMs, baseRightMs, WINDOW_MS, WIDTH, HEIGHT, min, max));
 
+  let mounted = false;
+  let stopFrames: (() => void) | null = null;
+
+  /** Frames are asked for only while a mounted tile has a curve to scroll. */
+  function syncFrames() {
+    const wanted = mounted && geometry.path !== '';
+    if (wanted && !stopFrames) stopFrames = subscribeChartFrame(updateVisual);
+    else if (!wanted && stopFrames) {
+      stopFrames();
+      stopFrames = null;
+    }
+  }
+
   /** Reads the tile's layout width: once at mount, and when an observer entry has none. */
   function measure() {
     plotWidthPx = root?.getBoundingClientRect().width || root?.clientWidth || WIDTH;
@@ -59,6 +72,7 @@
       viewport.reset();
       lastTimestampMs = null;
       baseRightMs = 0;
+      untrack(syncFrames);
       return;
     }
     if (lastTimestampMs !== null && latest < lastTimestampMs) viewport.reset();
@@ -69,6 +83,7 @@
     void tick().then(() => {
       // The held elements may have been re-rendered for the new sample.
       heldShown = null;
+      syncFrames();
       updateVisual(performance.now());
     });
   });
@@ -93,11 +108,11 @@
     document.addEventListener('visibilitychange', syncPause);
     motionQuery.addEventListener('change', syncPause);
     syncPause();
-    const stopFrames = subscribeChartFrame((now) => {
-      updateVisual(now);
-    });
+    mounted = true;
+    syncFrames();
     return () => {
-      stopFrames();
+      mounted = false;
+      syncFrames();
       resize?.disconnect();
       document.removeEventListener('visibilitychange', syncPause);
       motionQuery.removeEventListener('change', syncPause);

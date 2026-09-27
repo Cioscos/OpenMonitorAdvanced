@@ -228,6 +228,27 @@ test('an empty selection shows a hint and fetches nothing', async () => {
   expect(plots).toHaveLength(0);
 });
 
+test('asks for no frames without a plot: empty selection or history still loading', async () => {
+  localStorage.setItem(seriesKey(GPU), '[]');
+  const backend = fakeBackend();
+  let resolve!: (h: HistorySeed) => void;
+  backend.getHistory = () => new Promise((done) => (resolve = done));
+  renderChart(backend);
+  await vi.waitFor(() => expect(screen.getByText(t('advanced.chart.empty'))).toBeTruthy());
+  expect(frames.size).toBe(0);
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(resolve).toBeDefined());
+  expect(frames.size).toBe(0);
+  resolve({ revision: 1, seq: 0, timestampsMs: [1000, 2000], series: [[10, 20]] });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(frames.size).toBe(1);
+  frame(1000);
+  expect(frames.size).toBe(1);
+  await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+  await vi.waitFor(() => expect(plots[0].destroyed).toBe(true));
+  expect(frames.size).toBe(0);
+});
+
 test('rendering pauses while hidden and history is reloaded when visible', async () => {
   const backend = fakeBackend();
   const store = new LiveStore();

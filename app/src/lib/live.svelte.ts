@@ -36,8 +36,7 @@ export class LiveStore {
     for (const s of schema.sensors) {
       if (!this.#series.has(s.id)) {
         const buffer = new SeriesBuffer(this.capacity);
-        const previousLength = Math.max(0, ...[...this.#series.values()].map((b) => b.length));
-        for (let i = 0; i < previousLength; i++) buffer.push(null);
+        for (let i = 0; i < this.#seriesTimestamps.length; i++) buffer.push(null);
         this.#series.set(s.id, buffer);
       }
     }

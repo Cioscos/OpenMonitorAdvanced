@@ -52,6 +52,18 @@ test('schema changes backfill new sensors to the shared timeline', () => {
   expect(store.series(added.id).slice(2)).toEqual([99]);
 });
 
+test('schema replacement backfills sensors when none of the old ids remain', () => {
+  const store = new LiveStore(4);
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(snapshot(2));
+  const replacement = { ...MOCK_SCHEMA.sensors[0], id: 'replacement/sensor' };
+  store.applySchema({ ...MOCK_SCHEMA, revision: 2, sensors: [replacement] });
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000]);
+  expect(store.series(replacement.id)).toHaveLength(2);
+  expect(store.series(replacement.id).every(Number.isNaN)).toBe(true);
+});
+
 test('timestamp rollback clears times and sensor samples together', () => {
   const store = new LiveStore(3);
   store.applySchema(MOCK_SCHEMA);

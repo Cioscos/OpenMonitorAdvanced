@@ -32,7 +32,9 @@ le limitazioni delle prove brevi sono in `docs/perf-budget.md`.
 La revisione mantiene SVG per i minigrafici e uPlot 1.6.32 per dati, scala Y,
 legenda e selezione della vista Avanzata. Aggiunge un canvas trasparente
 ritagliato alla zona del grafico e dell'asse temporale. Su quel canvas si
-disegnano le curve, il glow, la griglia verticale, le tacche e le etichette X.
+disegnano le curve, il glow, la griglia verticale, le tacche, le etichette X
+e il tratto a valore mantenuto di ciascuna serie, con lo stesso colore,
+spessore e bagliore della sua linea.
 Il canvas si trasla tra due campioni tramite il compositor, senza ricostruire
 otto spline e rasterizzare l'intero grafico a ogni frame. uPlot non disegna
 più le serie né gli elementi X duplicati; i suoi assi Y e la legenda restano
@@ -56,25 +58,43 @@ di nuovo questo design prima di migrarvi. Non si ripiega silenziosamente su
 - Il grafico Avanzata aggiorna i dati uPlot solo ai nuovi snapshot. La scala
   Y cambia solo quando nuovi campioni modificano il suo intervallo. Tra gli
   snapshot l'orologio monotono produce uno spostamento X comune al canvas
-  delle serie e della scala temporale: linee, griglia,
-  tacche ed etichette X avanzano insieme. Il canvas include il campione
-  precedente al bordo sinistro e le tacche necessarie prima e dopo la
-  finestra; una clip impedisce di invadere gli assi Y. Al nuovo snapshot il
-  canvas si ridisegna sulla nuova base temporale e la traslazione riparte
-  dalla posizione equivalente, senza salto. Il ritardo recuperato dopo una
-  pausa resta limitato: un ritorno dalla tray non produce un'animazione
-  accelerata.
-- Il puntino di ciascuna serie Avanzata e il suo breve tratto a valore
-  mantenuto stanno in un piccolo livello fisso sopra le linee. Il tratto
-  parte dalla posizione visibile dell'ultimo campione e arriva al bordo
-  destro; il punto resta su quel bordo. Non viene aggiunta una colonna a
-  `uPlot.data`. Serie sovrapposte conservano un punto per serie.
+  delle serie e della scala temporale: linee, griglia, tacche, etichette X
+  e tratto a valore mantenuto avanzano insieme. Il canvas include il
+  campione precedente al bordo sinistro, l'overscan necessario perché il
+  tratto mantenuto raggiunga sempre il bordo destro del grafico durante la
+  traslazione, e le tacche necessarie prima e dopo la finestra; una clip
+  alla zona del grafico impedisce di invadere gli assi Y. Al nuovo snapshot
+  il canvas si ridisegna sulla nuova base temporale e la traslazione
+  riparte dalla posizione equivalente, senza salto. Tra due campioni un
+  frame cambia solo la trasformazione dei livelli già disegnati (il canvas
+  statico e il livello fisso del punto): nessuna scrittura di geometria,
+  dimensione, attributo o proprietà CSS personalizzata; l'unica eccezione è
+  la compensazione dello scarto del cursore, scritta solo mentre il
+  puntatore è sopra il grafico (protocollo di misura in
+  `docs/perf-budget.md`). Il ritardo recuperato dopo una pausa resta
+  limitato: un ritorno dalla tray non produce un'animazione accelerata.
+- Il tratto a valore mantenuto di ciascuna serie Avanzata è disegnato nel
+  canvas statico composito, insieme alle curve e all'asse X: parte dalla
+  posizione X dell'ultimo campione reale e arriva al bordo destro
+  dell'overscan del canvas, con lo stesso colore, spessore e bagliore della
+  sua linea. Mentre il canvas trasla verso sinistra il tratto raggiunge
+  comunque il bordo destro del grafico, ritagliato dall'area del grafico.
+  Solo il puntino bianco terminale resta in un piccolo livello fisso sopra
+  le linee, con un margine di 3 px perché l'intero punto resti visibile al
+  bordo destro e agli estremi della scala Y. Il livello fisso e il punto
+  cambiano solo ai campioni, alle ricostruzioni della geometria e durante
+  la transizione Y di 180 ms; tra un campione e l'altro cambia solo la
+  trasformazione del canvas. Non viene aggiunta una colonna a `uPlot.data`.
+  Serie sovrapposte conservano un punto per serie.
 - I minigrafici mantengono il loro storico di cinque minuti. `LiveStore`
   affianca ai buffer dei valori un buffer circolare condiviso dei timestamp.
-  Geometria e glow SVG si aggiornano ai campioni; una traslazione CSS della
-  geometria segue il medesimo orologio monotono. Tratto mantenuto e punto
-  restano ancorati al bordo destro. Valori e timestamp restano limitati alla
-  capacità attuale.
+  Geometria e glow SVG si aggiornano ai campioni. L'SVG sta in un wrapper
+  HTML traslato tramite trasformazione CSS (livello promosso dal
+  compositor); il tracciato e il tratto a valore mantenuto, con il relativo
+  overscan, stanno nel contenuto traslato e seguono il medesimo orologio
+  monotono. Il puntino terminale resta fisso al bordo destro, fuori dal
+  contenuto traslato, e si aggiorna solo ai campioni. Valori e timestamp
+  restano limitati alla capacità attuale.
 - La scala Y dipende solo dai campioni reali. Se l'intervallo automatico
   cambia, uPlot e il mapping verticale del canvas interpolano insieme per
   180 ms, interrompendo e riancorando la transizione a un nuovo snapshot.

@@ -31,7 +31,10 @@ pub fn get_settings(store: State<'_, Arc<SettingsStore>>) -> SettingsState {
     store.state()
 }
 
-#[tauri::command]
+// Async (off the main thread): the store's listeners run on the committing
+// thread, and the interval listener waits for the engine lock, which a tick
+// holds for up to ~200 ms (see the note on `get_schema` in commands.rs).
+#[tauri::command(async)]
 pub fn update_settings(
     store: State<'_, Arc<SettingsStore>>,
     patch: Value,
@@ -42,7 +45,7 @@ pub fn update_settings(
 /// Imports the web view's `localStorage` state once (spec §2.4). `Ok` means
 /// the values and the marker are on disk, so the UI may delete its keys; the
 /// errors are `persist_failed` (retry at the next start) and `read_only`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_webview_state(
     store: State<'_, Arc<SettingsStore>>,
     legacy: LegacyWebviewState,

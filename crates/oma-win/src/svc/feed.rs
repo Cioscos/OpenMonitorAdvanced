@@ -54,9 +54,16 @@ impl SvcFeed {
     }
 
     /// Replaces the schema and drops the snapshot in the same step;
-    /// the generation bumps.
+    /// the generation bumps. A schema equal to the current one changes
+    /// nothing: the service describes itself again after every accepted
+    /// `Subscribe` (an interval change), and the provider must not rediscover
+    /// (and lose a sample of every series) for a description that did not
+    /// change. Any difference at all counts as a new schema.
     pub fn set_schema(&self, schema: WireSchema) {
         let mut inner = self.lock();
+        if inner.schema.as_deref() == Some(&schema) {
+            return;
+        }
         inner.schema = Some(Arc::new(schema));
         inner.snapshot = None;
         inner.generation += 1;
@@ -172,6 +179,24 @@ mod tests {
         assert_eq!(view.generation, generation);
         assert_eq!(view.interval, Duration::from_millis(500));
         assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
+    }
+
+    #[test]
+    fn the_same_schema_again_changes_nothing() {
+        let feed = SvcFeed::default();
+        feed.set_schema(schema(2));
+        feed.set_snapshot(snapshot(1, 2), Instant::now());
+        let generation = feed.view().generation;
+        // A resubscribe makes the service describe itself again.
+        feed.set_schema(schema(2));
+        let view = feed.view();
+        assert_eq!(view.generation, generation);
+        assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
+        // Any difference still counts as a new schema.
+        feed.set_schema(schema(3));
+        let view = feed.view();
+        assert!(view.generation > generation);
+        assert!(view.snapshot.is_none());
     }
 
     #[test]

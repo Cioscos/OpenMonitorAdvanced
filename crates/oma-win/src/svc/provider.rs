@@ -686,7 +686,13 @@ mod tests {
         p.discover().expect("discover");
         p.poll().expect("first poll after discover is fine");
 
+        // The same schema again is no news: a resubscribe must not rediscover.
         feed.set_schema(wire_schema());
+        p.poll().expect("an identical schema does not invalidate");
+
+        let mut changed = wire_schema();
+        changed.devices[0].name.push_str(" (renamed)");
+        feed.set_schema(changed);
         assert_eq!(p.poll(), Err(ProviderError::Rediscover));
     }
 

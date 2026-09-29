@@ -1753,6 +1753,31 @@ mod tests {
     }
 
     #[test]
+    fn a_resubscribe_does_not_make_the_provider_rediscover() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        let generation = h.feed.view().generation;
+
+        h.send(LinkCommand::SetInterval(2000));
+        wait_for_sent(&ctl, 2);
+        // The service answers with its schema again, then a snapshot.
+        ctl.push(schema(2));
+        ctl.push(snapshot(2, 2));
+        let end = Instant::now() + WAIT;
+        while h.feed.view().snapshot.map(|(_, s)| s.seq) != Some(2) {
+            assert!(Instant::now() < end, "the second snapshot never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            h.feed.view().generation,
+            generation,
+            "the same schema must not invalidate what the provider bound"
+        );
+    }
+
+    #[test]
     fn set_interval_while_disconnected_is_used_on_connect() {
         let control = FakeControl::new(running());
         let h = Harness::spawn(control, Script::with(vec![]), false);

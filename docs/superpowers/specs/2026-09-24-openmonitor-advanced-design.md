@@ -126,7 +126,7 @@ I provider implementano un trait `Provider`. Su Linux si aggiungerà un provider
 
 ### 4.3 Motore regole (banner di stato e notifiche)
 
-Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia le notifiche, così i due non si contraddicono mai.
+Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia le notifiche, così i due non si contraddicono mai. Modello, valutazione, uscite e regole predefinite definitive sono nella spec di dettaglio della M5 (`docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`, §3), che ha la precedenza su questa sezione.
 
 - **Regola:**
   - `sensor` oppure un selettore, per esempio "temperatura core di ogni GPU";
@@ -154,11 +154,13 @@ Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia
 | RAM usata | ≥ 90% | ≥ 97% | 60 s / 30 s | |
 | Batteria in scarica | ≤ 15% | ≤ 5% | — | Solo portatili. |
 
+**Precisazioni M5:** la CPU ha due regole (temperatura, e throttling termico come critico); TjMax dei Ryzen viene da una tabella per famiglia nel servizio; la temperatura vale per ogni disco con il sensore, non solo per gli NVMe; lo spazio libero si esprime come percentuale usata (≥ 90% / ≥ 97%). Le notifiche di default partono solo per il livello critico.
+
 **Nessuna regola predefinita sulle ventole ferme.** Molte GPU e alcuni case spengono le ventole di proposito a basso carico. L'utente può creare regole sulle ventole a mano.
 
 ### 4.4 Logger CSV
 
-- Si avvia e si ferma dall'interfaccia o dalla tray.
+- Si avvia e si ferma dall'interfaccia (un registratore in stile nastro nella barra superiore, con REC, pausa e stop), dalla tray o da una scorciatoia globale (di default Ctrl+Alt+Shift+R). Dettagli nella spec della M5 (`docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`, §4).
 - Si sceglie quali sensori registrare (di default tutti) e con quale intervallo (di default quello dello scheduler).
 - **Formato:**
   - un file per sessione in `Documenti\OpenMonitor Advanced\logs\` (cartella configurabile);
@@ -173,7 +175,7 @@ Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia
   - mostra il valore di un sensore scelto dall'utente, di default la temperatura core della GPU principale, oppure della CPU se non c'è una GPU dedicata;
   - il colore segue lo stato del motore regole.
 - **Tooltip:** i valori chiave (CPU, GPU, RAM).
-- **Menu:** Apri, vista Semplificata/Avanzata, Avvia/Ferma log, Modalità compatibile anti-cheat, Esci. La voce anti-cheat (una casella) arriva in M4; il resto del menu completo in M5.
+- **Menu:** Apri, vista Semplificata/Avanzata, Avvia/Ferma log, Modalità compatibile anti-cheat, Esci. La voce anti-cheat (una casella) arriva in M4; il resto del menu completo in M5 (menu, icona e tooltip definitivi: `docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`, §2.6).
 - **Comportamento:**
   - chiudere la finestra la riduce nella tray (disattivabile);
   - avvio automatico con Windows opzionale;
@@ -181,13 +183,13 @@ Un **unico motore** alimenta sia il banner di stato della vista Semplificata sia
 
 ### 4.6 Impostazioni
 
-File `%APPDATA%\OpenMonitorAdvanced\settings.json`, con versione dello schema e migrazioni. Contiene:
+File `%APPDATA%\OpenMonitorAdvanced\settings.json`, con versione dello schema e migrazioni (formato definitivo: `docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`, §2). Contiene:
 - vista predefinita, lingua, unità (°C/°F, bit/s o byte/s), intervallo di aggiornamento;
 - regole;
 - sensori selezionati per il log e per la tray;
 - interruttori per ogni provider;
 - comportamento della tray e avvio automatico;
-- controllo opzionale degli aggiornamenti.
+- controllo opzionale degli aggiornamenti (dalla M6).
 
 ## 5. Acquisizione dati (Windows)
 
@@ -394,7 +396,7 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
 - Regole e avvisi (tabella delle regole con modifica e creazione).
 - Log CSV.
 - Fonti dati (interruttori per provider, stato del servizio, modalità anti-cheat).
-- Informazioni (versione, licenze di terze parti, **"Esporta report sensori"**: un JSON anonimo con dispositivi, sensori, fonti e valori correnti da allegare alle segnalazioni).
+- Informazioni (versione, licenze di terze parti; dalla M6 il controllo degli aggiornamenti e **"Esporta report sensori"**: un JSON anonimo con dispositivi, sensori, fonti e valori correnti da allegare alle segnalazioni).
 
 ### 7.5 Stile visivo — palette "Synthwave" (solo tema scuro nella v1)
 
@@ -418,7 +420,7 @@ Tutti i colori sono token CSS, così un tema chiaro o un accento personalizzabil
 - I colori di stato restano sempre distinti dall'accento.
 - **Animazioni:**
   - i numeri cambiano con un'interpolazione breve (`tweened`, ≤ 300 ms);
-  - i grafici scorrono continuamente fino a circa 60 FPS quando sono visibili; le altre animazioni non sono continue;
+  - i grafici scorrono continuamente fino a circa 60 FPS quando sono visibili (60, 30 o 15 FPS dalle impostazioni della M5); le altre animazioni non sono continue, con una sola deroga: il pallino del registratore CSV lampeggia a 1 Hz a passi discreti durante la registrazione (spec della M5, §4.4);
   - si rispetta `prefers-reduced-motion`.
 - **Grafici:**
   - un solo ciclo di rendering condiviso;
@@ -463,7 +465,7 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - versione minima 2.2.0 (§10);
   - nessun modulo proprio nella v1;
   - niente WinRing0 né inpoutx64.
-- **Aggiornamenti nella v1:** solo un controllo opzionale delle nuove release su GitHub, con link al download, senza installazione automatica.
+- **Aggiornamenti nella v1 (dalla M6):** solo un controllo opzionale delle nuove release su GitHub, con link al download, senza installazione automatica.
 - **Firma dei binari:** da valutare con SignPath.io (firma gratuita per progetti open source), per ridurre gli avvisi di SmartScreen. È un punto aperto (§13).
 
 ## 10. Installazione e distribuzione
@@ -535,8 +537,8 @@ Ogni milestone avrà un proprio piano di implementazione.
 3. **Vista Avanzata:** barra laterale, pagine per componente, grafici uPlot, storico, tabelle con min/max/media.
 4. **Servizio:** `oma-service` con LibreHardwareMonitorLib, protocollo IPC con le fixture, installer NSIS con PawnIO, modalità anti-cheat.
 4.5. **Intermezzo grafici fluidi:** scorrimento a circa 60 FPS delle due viste, curve morbide, punto finale bianco e glow leggero; design in `docs/superpowers/specs/2026-09-27-fluid-charts-design.md`.
-5. **Regole e integrazione:** motore regole, banner di stato, notifiche, tray completa, log CSV, impostazioni, traduzioni it/en.
-6. **Rifinitura e 1.0:** verifica del budget di prestazioni, "Esporta report sensori", documentazione, licenze di terze parti, release.
+5. **Regole e integrazione:** motore regole, banner di stato, notifiche, tray completa, log CSV, impostazioni, traduzioni it/en. Design di dettaglio in `docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`; si esegue in tre piani: M5a impostazioni e tray, M5b regole, M5c log CSV.
+6. **Rifinitura e 1.0:** verifica del budget di prestazioni, controllo degli aggiornamenti, "Esporta report sensori", documentazione, licenze di terze parti, release.
 
 ## Appendice A — Riferimenti principali della ricerca (settembre 2026)
 

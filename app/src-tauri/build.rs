@@ -12,6 +12,8 @@ fn main() {
             "get_service_status",
             "set_anti_cheat",
             "start_service",
+            "get_settings",
+            "update_settings",
         ]),
     ))
     .expect("Tauri build")

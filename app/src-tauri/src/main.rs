@@ -2,6 +2,10 @@
 
 mod commands;
 mod service;
+// The store API is consumed step by step: tray, sampler, autostart and the
+// service link subscribe in the following M5a tasks.
+#[allow(dead_code)]
+mod settings;
 mod tray;
 mod window;
 
@@ -17,6 +21,7 @@ use crate::commands::{
     GpuProcessState, GpuProcessTable, StartupState, StartupStatus, VendorSwitch,
 };
 use crate::service::ServiceShell;
+use crate::settings::{RealFs, SettingsStore, EVENT_SETTINGS};
 
 /// Default sampling interval (spec §4.1).
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -157,6 +162,10 @@ fn main() {
     #[cfg(not(windows))]
     let service_shell = ServiceShell::new(service::anti_cheat_path());
 
+    // Created before the Builder so the tray, the sampler and the UI commands
+    // all read the same settings from the first moment.
+    let settings_store = SettingsStore::open(settings::settings_path(), Arc::new(RealFs));
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             window::show_main(app)
@@ -168,6 +177,7 @@ fn main() {
         .manage(StartupState::new(switch, status))
         .manage(GpuProcessState(processes))
         .manage(service_shell)
+        .manage(settings_store)
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
@@ -180,6 +190,8 @@ fn main() {
             service::get_service_status,
             service::set_anti_cheat,
             service::start_service,
+            settings::commands::get_settings,
+            settings::commands::update_settings,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -189,6 +201,14 @@ fn main() {
             #[cfg(windows)]
             app.state::<ServiceShell>()
                 .spawn_link(svc_feed, SAMPLE_INTERVAL.as_millis() as u32);
+            // Keeps an open window aligned after every settings change, whatever its origin.
+            let settings_handle = app.handle().clone();
+            app.state::<SettingsStore>()
+                .subscribe(Box::new(move |_, state| {
+                    if settings_handle.get_webview_window(window::MAIN).is_some() {
+                        let _ = settings_handle.emit(EVENT_SETTINGS, state);
+                    }
+                }));
             tray::build(app.handle())?;
             if !start_minimized {
                 window::show_main(app.handle());
@@ -237,6 +257,12 @@ fn main() {
                     .take()
                 {
                     sampler.stop();
+                }
+            }
+            // Final save (bounded) before the service link goes away.
+            if let Some(store) = app.try_state::<SettingsStore>() {
+                if let Err(reason) = store.shutdown(Duration::from_secs(2)) {
+                    tracing::error!(%reason, "the settings could not be saved on exit");
                 }
             }
             if let Some(shell) = app.try_state::<ServiceShell>() {

@@ -398,7 +398,7 @@ Condizioni che la spec implica e che i test di funzionalità da soli non coprire
   ```
 - **Regole:**
   - chiavi nuove: `tray.open` (esistente), `tray.viewSimple`, `tray.viewAdvanced`, `tray.antiCheat` (esistente), `tray.quit` (esistente), `tray.tooltip.cpu` ("CPU"), `tray.tooltip.gpu` ("GPU"), `tray.tooltip.ram` ("RAM"); en: "Simple view", "Advanced view"; it: "Vista Semplificata", "Vista Avanzata";
-  - `icon_text`: `None` o non finito → "—"; temperatura convertita in °F se richiesto (`c * 9/5 + 32`); arrotondamento all'intero; limitato a −99…999; nessun simbolo di unità;
+  - `icon_text`: `None` o non finito → "—"; temperatura convertita in °F se richiesto (`c * 9/5 + 32`); arrotondamento all'intero; limitato a −99…999; nessuna lettera di unità nel testo; l'unità è un piccolo segno a parte in alto a destra (`unit_mark`: `°` per `Unit::Celsius`, sia °C sia °F, `%` per `Unit::Percent`, nessuno per le altre unità e per "—"; `render(text, mark, style)`), deciso con l'utente dopo la verifica dal vivo della tray;
   - `render`: quadrato arrotondato (raggio 6 px, angoli trasparenti) nel colore di sfondo, testo centrato nel colore del primo piano con un font bitmap scritto a mano nel sorgente per `0–9`, `-` e `—` (niente dipendenze); fino a 2 caratteri le cifre sono alte almeno 16 px, con 3 caratteri il testo sta tutto entro i 30 px centrali;
   - `tooltip`: `"CPU 45 °C · GPU 62 °C · RAM 48 %"`, con i numeri formattati come nella UI (temperatura intera, percentuale intera), voci senza valore omesse, `" · "` come separatore; se supera 127 unità UTF-16 si tronca all'ultima voce intera e si aggiunge `…`.
 

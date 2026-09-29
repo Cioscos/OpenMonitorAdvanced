@@ -133,7 +133,7 @@ Le preferenze si applicano a caldo entro i limiti delle fonti. Lo scaricamento d
   "Vista Semplificata" e "Vista Avanzata" aprono la finestra (creandola se serve) sulla vista scelta.
 - **Icona dinamica:**
   - un'icona RGBA 32×32 disegnata in Rust con un font bitmap delle cifre, del segno meno e del trattino, scritto a mano nel sorgente: niente dipendenze di font né rasterizzatori;
-  - mostra il valore arrotondato del sensore di `iconSensor`, nelle unità di visualizzazione e senza il simbolo dell'unità (due cifre, tre se servono, per esempio `100` o `-5`); "—" se il valore è assente;
+  - mostra il valore arrotondato del sensore di `iconSensor`, nelle unità di visualizzazione, senza le lettere dell'unità (due cifre, tre se servono, per esempio `100` o `-5`); "—" se il valore è assente. Un piccolo segno nell'angolo in alto a destra dice che cosa è il numero: `°` per le temperature (sia °C sia °F: C o F stanno nel tooltip), `%` per i carichi, nessun segno per le altre unità e per "—". Deciso con l'utente dopo la verifica dal vivo della tray, perché il solo numero non faceva capire se fosse una temperatura o una percentuale;
   - lo sfondo è un quadrato arrotondato: nella M5a sempre neutro (`--surface-2`), dalla M5b il colore del livello (§3.5), dalla M5c con un pallino rosso nell'angolo durante la registrazione;
   - si ridisegna e si invia a Windows solo quando cambiano numero, colore o pallino. Il rendering è una funzione pura, testata sui pixel.
 - **Tooltip:** `CPU 45 °C · GPU 62 °C · RAM 48 %`, con le unità scelte; le voci senza valore si omettono. Si tronca entro i 127 caratteri di `NOTIFYICONDATA` e si aggiorna solo quando il testo cambia. Dalla M5b, se il livello non è `ok`, il verdetto precede i valori.

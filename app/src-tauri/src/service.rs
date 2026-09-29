@@ -97,15 +97,14 @@ pub trait ToggleIndicator: Send + Sync {
 // the flag drives no real behaviour, but worth knowing before wiring this
 // checkbox to anything else off Windows.
 impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
-    /// `CheckMenuItem::set_checked` blocks the calling thread until the main
-    /// thread runs it (`tauri::menu::run_item_main_thread!`), and if that
-    /// call happened while this process held a lock the main thread's own
-    /// event handler also needs, the two threads deadlock (reproduced by
-    /// `tests::a_stuck_indicator_update_never_blocks_a_concurrent_toggle`).
-    /// `run_on_main_thread` avoids that: it posts the closure and returns at
-    /// once — synchronously, if already on the main thread, since
-    /// `tauri-runtime-wry` runs same-thread posts in place — so this method
-    /// never blocks its caller waiting for the main thread.
+    /// The checkbox follows the settings-store listener (as the link
+    /// command does), which may run on any thread that changes the store, so
+    /// `refresh` must never block. `CheckMenuItem::set_checked` would: it
+    /// waits until the main thread runs it (`tauri::menu::run_item_main_thread!`),
+    /// and a caller that holds a lock the main thread's own event handler
+    /// needs would deadlock with it. `run_on_main_thread` posts the closure
+    /// and returns at once — synchronously, if already on the main thread,
+    /// since `tauri-runtime-wry` runs same-thread posts in place.
     fn refresh(&self, current: Arc<dyn Fn() -> bool + Send + Sync>) {
         let item = self.clone();
         let _ = self.app_handle().run_on_main_thread(move || {
@@ -394,6 +393,19 @@ fn send_to_link(
     }
 }
 
+/// Takes the value out of `slot` and hands it to `finish` with the lock
+/// released: [`ServiceShell::shutdown`] joins the link thread in `finish`, and
+/// that thread may be in a store listener that sends to the link (and so
+/// takes this lock) until it stops. Holding the lock there would stall the
+/// exit for the whole join wait.
+#[cfg(any(windows, test))]
+fn take_then<T>(slot: &Mutex<Option<T>>, finish: impl FnOnce(T)) {
+    let value = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(value) = value {
+        finish(value);
+    }
+}
+
 #[cfg(windows)]
 impl ServiceShell {
     fn status(&self) -> ServiceStatus {
@@ -428,14 +440,7 @@ impl ServiceShell {
     /// Stops the link within its own join wait, or detaches it (see
     /// [`oma_win::svc::ServiceLink::shutdown`]).
     pub fn shutdown(&self) {
-        if let Some(link) = self
-            .link
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            link.shutdown();
-        }
+        take_then(&self.link, oma_win::svc::ServiceLink::shutdown);
     }
 }
 
@@ -813,6 +818,24 @@ mod tests {
                 reason: "reconfigurationFailed".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn take_then_releases_the_slot_before_finishing() {
+        // The link thread may still send (the store listeners take this lock)
+        // while shutdown joins it: the join must not hold the lock.
+        let slot = Mutex::new(Some(1));
+        let mut finished = None;
+        take_then(&slot, |value| {
+            assert!(slot.try_lock().is_ok(), "the slot is still locked");
+            finished = Some(value);
+        });
+        assert_eq!(finished, Some(1));
+        assert!(slot.lock().unwrap().is_none());
+
+        take_then(&slot, |_: i32| {
+            panic!("an empty slot has nothing to finish")
+        });
     }
 
     type Requests = Arc<Mutex<Vec<SourceRequest>>>;

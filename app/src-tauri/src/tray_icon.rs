@@ -7,6 +7,9 @@ use crate::i18n::{t, Lang};
 
 pub const ICON_SIZE: u32 = 32;
 
+/// The tray tooltip before any reading has a value (and at start-up).
+pub const PRODUCT_NAME: &str = "OpenMonitor Advanced";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IconStyle {
     pub background: [u8; 4],
@@ -153,9 +156,10 @@ pub struct TooltipItem {
     pub unit: Unit,
 }
 
-/// `"CPU 45 °C · GPU 62 °C · RAM 48 %"`: items without a value are left out; a
-/// result over 127 UTF-16 units (the tray tooltip limit) is cut after the last
-/// whole item that fits, plus `…`.
+/// `"CPU 45 °C · GPU 62 °C · RAM 48 %"`: items without a value are left out,
+/// and with none left the tooltip is [`PRODUCT_NAME`]; a result over 127
+/// UTF-16 units (the tray tooltip limit) is cut after the last whole item that
+/// fits, plus `…`.
 pub fn tooltip(lang: Lang, items: &[TooltipItem], temperature: TemperatureUnit) -> String {
     let parts: Vec<String> = items
         .iter()
@@ -168,6 +172,9 @@ pub fn tooltip(lang: Lang, items: &[TooltipItem], temperature: TemperatureUnit) 
             ))
         })
         .collect();
+    if parts.is_empty() {
+        return PRODUCT_NAME.to_owned();
+    }
     let full = parts.join(SEPARATOR);
     if utf16_len(&full) <= MAX_TOOLTIP_UNITS {
         return full;
@@ -338,7 +345,14 @@ mod tests {
             item("tray.tooltip.ram", Some(48.0), Unit::Percent),
         ];
         assert_eq!(tooltip(Lang::En, &missing, C), "CPU 45 °C · RAM 48 %");
-        assert_eq!(tooltip(Lang::En, &[], C), "");
+
+        // Nothing to show yet (the first tick): the product name, never an empty tooltip.
+        assert_eq!(tooltip(Lang::En, &[], C), "OpenMonitor Advanced");
+        let none = [
+            item("tray.tooltip.cpu", None, Unit::Celsius),
+            item("tray.tooltip.gpu", Some(f64::NAN), Unit::Celsius),
+        ];
+        assert_eq!(tooltip(Lang::It, &none, C), "OpenMonitor Advanced");
 
         // Unknown keys are shown as they are, which makes long labels easy to test.
         const LONG: &str = "a-very-long-label-that-eats-the-tooltip-budget-of-the-tray";

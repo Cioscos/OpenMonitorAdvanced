@@ -98,8 +98,9 @@ fn interpolate(template: &str, params: &[(&str, &str)]) -> String {
 }
 
 /// The text of a sensor label: catalog key `sensor.<key>` with `{arg}`.
-// No caller yet: the tray shows no sensor names (values only); kept for the
-// settings view's icon-sensor label in Rust, if needed.
+// No caller yet: the tray shows values only. The M5 spec (§5, strings used by
+// Rust) has the rule toasts (M5b) and the CSV headers (M5c) name sensors
+// through it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn sensor_label(lang: Lang, label: &Label) -> String {
     let key = format!("sensor.{}", label.key);

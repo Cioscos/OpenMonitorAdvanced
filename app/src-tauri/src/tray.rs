@@ -13,7 +13,9 @@ use tauri::{AppHandle, Manager, Wry};
 use crate::i18n::{resolve, t, Lang};
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
-use crate::tray_icon::{icon_text, render, tooltip, IconStyle, TooltipItem, ICON_SIZE, NEUTRAL};
+use crate::tray_icon::{
+    icon_text, render, tooltip, IconStyle, TooltipItem, ICON_SIZE, NEUTRAL, PRODUCT_NAME,
+};
 use crate::window;
 
 const CPU_TEMPERATURES: [&str; 2] = ["cpu/0/temperature/package", "cpu/0/temperature/tctl"];
@@ -309,7 +311,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         .set_tray_item(Arc::new(anti_cheat.clone()) as Arc<dyn crate::service::ToggleIndicator>);
     let tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("bundle icon").clone())
-        .tooltip("OpenMonitor Advanced")
+        .tooltip(PRODUCT_NAME)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

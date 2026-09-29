@@ -116,8 +116,6 @@ pub enum Persistence {
 }
 
 /// State of an effect outside the settings file.
-// Reported by the autostart, service and vendor-library effects of the next M5a tasks.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum EffectStatus {
@@ -139,8 +137,6 @@ pub struct ApplyStatus {
 }
 
 /// An external effect tracked in [`ApplyStatus`].
-// Used by the effects of the next M5a tasks.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     Service,

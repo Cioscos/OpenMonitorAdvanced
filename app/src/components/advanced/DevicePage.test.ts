@@ -1,12 +1,13 @@
 import { cleanup, render, screen } from '@testing-library/svelte';
 import type { SidebarEntry } from '../../lib/advanced/nav';
-import { SECTION_KEY } from '../../lib/advanced/persist';
 import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { formatValue } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
+import { settings } from '../../lib/settings.svelte';
 import type { GpuProcess, SensorStats, ServiceStatus } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
+import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeUplot } from '../../test/uplot-stub';
 import AdvancedView from './AdvancedView.svelte';
 import DevicePage from './DevicePage.svelte';
@@ -19,12 +20,15 @@ const GAME: GpuProcess = { pid: 4242, name: 'game.exe', loadPercent: 87, engine:
 const STATS: SensorStats = { min: 1, max: 2, avg: 1.5, count: 2 };
 const idsOf = (deviceId: string) => MOCK_SCHEMA.sensors.filter((s) => s.deviceId === deviceId).map((s) => s.id);
 
-beforeEach(() => {
+beforeEach(async () => {
   plots.length = 0;
-  localStorage.clear();
+  await connectSettings();
   i18n.locale = 'en';
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  disconnectSettings();
+});
 
 function setup() {
   const backend = new FakeBackend(MOCK_SCHEMA);
@@ -142,7 +146,7 @@ test('the generic notice appears on CPU, memory and disk pages only without the 
 });
 
 test('the advanced view mounts the full page under its heading', async () => {
-  localStorage.setItem(SECTION_KEY, GPU);
+  await settings.update({ advanced: { section: GPU } });
   const { backend, store } = setup();
   render(AdvancedView, { store, backend });
 

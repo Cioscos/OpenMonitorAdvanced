@@ -16,6 +16,7 @@ import type {
 } from '../types';
 import type { Backend } from './backend';
 import { decimateWindow } from './decimate';
+import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
 
 const THREADS = 8;
@@ -216,6 +217,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
       : { state, detail: null, pawnIo: null, sources: null };
   let serviceStatus: ServiceStatus = statusFor(initialState);
   const stats = new StatsAccumulator();
+  const settings = new MockSettings(parsePersistence(typeof location === 'undefined' ? '' : location.search));
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
   const emit = () => {
@@ -278,5 +280,13 @@ export function createMockBackend(intervalMs = 1000): Backend {
       setServiceStatus(statusFor('connected'));
       return serviceStatus;
     },
+    getSettings: async () => settings.state(),
+    // Rejects with a plain `{ field, key }` object, like the Tauri command.
+    updateSettings: async (patch) => settings.update(patch),
+    onSettings: async (cb) => settings.subscribe(cb),
+    importWebviewState: async (legacy) => settings.import(legacy),
+    takePendingView: async () => null,
+    onNavigate: async () => () => {},
+    refreshAutostart: async () => ({ configured: false, effective: 'notConfigured', error: null }),
   };
 }

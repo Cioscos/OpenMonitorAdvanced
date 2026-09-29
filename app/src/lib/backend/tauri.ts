@@ -1,6 +1,18 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { GpuProcess, HistorySeed, Schema, ServiceStatus, Session, Snapshot, StartupStatus, StatsReply } from '../types';
+import type {
+  AutostartStatus,
+  GpuProcess,
+  HistorySeed,
+  Schema,
+  ServiceStatus,
+  Session,
+  SettingsState,
+  Snapshot,
+  StartupStatus,
+  StatsReply,
+  ViewKind,
+} from '../types';
 import type { Backend } from './backend';
 
 /** Command and event names are defined in app/src-tauri (commands.rs, main.rs). */
@@ -22,5 +34,13 @@ export function createTauriBackend(): Backend {
     onServiceStatus: (cb) => listen<ServiceStatus>('oma:service', (e) => cb(e.payload)),
     setAntiCheat: (enabled) => invoke<ServiceStatus>('set_anti_cheat', { enabled }),
     startService: () => invoke<ServiceStatus>('start_service'),
+    getSettings: () => invoke<SettingsState>('get_settings'),
+    // A rejected patch arrives as the serialized `{ field, key }` object.
+    updateSettings: (patch) => invoke<SettingsState>('update_settings', { patch }),
+    onSettings: (cb) => listen<SettingsState>('oma:settings', (e) => cb(e.payload)),
+    importWebviewState: (legacy) => invoke<SettingsState>('import_webview_state', { legacy }),
+    takePendingView: () => invoke<ViewKind | null>('take_pending_view'),
+    onNavigate: (cb) => listen<ViewKind>('oma:navigate', (e) => cb(e.payload)),
+    refreshAutostart: () => invoke<AutostartStatus>('refresh_autostart'),
   };
 }

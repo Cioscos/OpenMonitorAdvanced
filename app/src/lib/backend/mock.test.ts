@@ -221,3 +221,81 @@ test('gpu process lists are capped at 20 rows', () => {
   expect(sorted).toHaveLength(20);
   expect(sorted[0].pid).toBe(29);
 });
+
+test('mock backend rejects an off-step interval', async () => {
+  const backend = createMockBackend();
+  await expect(backend.updateSettings({ general: { intervalMs: 700 } })).rejects.toEqual({
+    field: 'general.intervalMs',
+    key: 'settings.error.range',
+  });
+  expect((await backend.getSettings()).settings.general.intervalMs).toBe(1000);
+});
+
+test('mock backend rejects an unknown field and null on a plain field', async () => {
+  const backend = createMockBackend();
+  await expect(backend.updateSettings({ general: { nope: 1 } } as never)).rejects.toEqual({
+    field: 'general.nope',
+    key: 'settings.error.unknownField',
+  });
+  await expect(backend.updateSettings({ general: { language: null } } as never)).rejects.toEqual({
+    field: 'general.language',
+    key: 'settings.error.null',
+  });
+  await expect(backend.updateSettings({ general: { language: 'fr' } } as never)).rejects.toEqual({
+    field: 'general.language',
+    key: 'settings.error.type',
+  });
+  await expect(backend.updateSettings({ migrations: {} } as never)).rejects.toEqual({
+    field: 'migrations',
+    key: 'settings.error.readOnlyField',
+  });
+});
+
+test('mock settings keep revisions and a growing seq, and events follow updates', async () => {
+  const backend = createMockBackend();
+  const seen: number[] = [];
+  await backend.onSettings((state) => seen.push(state.seq));
+  const before = await backend.getSettings();
+
+  const after = await backend.updateSettings({ general: { intervalMs: 2000 }, advanced: { series: { cpu: ['a'] } } });
+
+  expect(after.settings.general.intervalMs).toBe(2000);
+  expect(after.settings.advanced.series).toEqual({ cpu: ['a'] });
+  expect(after.revision).toBe(before.revision + 1);
+  expect(after.seq).toBeGreaterThan(before.seq);
+  expect(seen).toEqual([after.seq]);
+  // Unset stays absent, like the Rust encoding.
+  expect('section' in after.settings.advanced).toBe(false);
+  expect(after.settings.tray.iconSensor).toBeNull();
+});
+
+test('?settings= simulates the persistence states', async () => {
+  const kinds: Record<string, string> = { recovered: 'recovered', readOnly: 'readOnly', error: 'error' };
+  for (const [param, kind] of Object.entries(kinds)) {
+    history.replaceState(null, '', `/?settings=${param}`);
+    const state = await createMockBackend().getSettings();
+    expect(state.persistence.kind).toBe(kind);
+  }
+  history.replaceState(null, '', '/');
+  expect((await createMockBackend().getSettings()).persistence).toEqual({ kind: 'ok' });
+});
+
+test('mock navigation and autostart answers', async () => {
+  const backend = createMockBackend();
+  expect(await backend.takePendingView()).toBeNull();
+  await expect(backend.onNavigate(() => {})).resolves.toBeTypeOf('function');
+  expect(await backend.refreshAutostart()).toEqual({ configured: false, effective: 'notConfigured', error: null });
+});
+
+test('mock webview import fills only unset fields and sets the marker once', async () => {
+  const backend = createMockBackend();
+  await backend.updateSettings({ advanced: { window: 60 } });
+  const state = await backend.importWebviewState({ section: 'gpu/x', window: 3600, series: { 'gpu/x': ['a'] }, view: 'advanced' });
+  expect(state.settings.advanced.window).toBe(60);
+  expect(state.settings.advanced.section).toBe('gpu/x');
+  expect(state.settings.view.last).toBe('advanced');
+  expect(state.settings.migrations.webviewV1).toBe(true);
+  const again = await backend.importWebviewState({ section: 'other', series: {} });
+  expect(again.settings.advanced.section).toBe('gpu/x');
+  expect(again.seq).toBe(state.seq);
+});

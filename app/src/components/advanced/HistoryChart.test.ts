@@ -1,11 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
-import { WINDOW_KEY, seriesKey } from '../../lib/advanced/persist';
 import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
+import { settings } from '../../lib/settings.svelte';
 import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
+import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
@@ -54,7 +55,7 @@ const setVisibility = (state: DocumentVisibilityState) => {
   document.dispatchEvent(new Event('visibilitychange'));
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.stubGlobal('Path2D', RecordingPath);
   const contexts = new WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
@@ -66,7 +67,7 @@ beforeEach(() => {
   plots.length = 0;
   FakeUplot.autoRangeY = false;
   vi.mocked(drawChartCanvas).mockClear();
-  localStorage.clear();
+  await connectSettings();
   i18n.locale = 'en';
   visibility = 'visible';
   monotonicMs = 0;
@@ -89,7 +90,7 @@ beforeEach(() => {
   }));
 });
 afterEach(cleanup);
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); disconnectSettings(); });
 
 /** FakeBackend with two history samples (1 s and 2 s): column i holds [10 + i, 20 + i]. */
 function fakeBackend(): FakeBackend {
@@ -136,7 +137,7 @@ test('long windows ask for decimated history and the choice persists', async () 
   await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.3600') }));
   await vi.waitFor(() => expect(plots).toHaveLength(2));
   expect(backend.historyCalls.at(-1)).toEqual({ ids: [LOAD, TEMP], seconds: 3600, maxPoints: 900 });
-  expect(localStorage.getItem(WINDOW_KEY)).toBe('3600');
+  await vi.waitFor(() => expect(settings.state?.settings.advanced.window).toBe(3600));
   expect(plots[0].destroyed).toBe(true);
 
   await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.60') }));
@@ -145,7 +146,7 @@ test('long windows ask for decimated history and the choice persists', async () 
 });
 
 test('the saved window is used on mount', async () => {
-  localStorage.setItem(WINDOW_KEY, '1800');
+  await settings.update({ advanced: { window: 1800 } });
   const backend = fakeBackend();
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
@@ -153,7 +154,7 @@ test('the saved window is used on mount', async () => {
 });
 
 test('live snapshots extend the chart and retain one point outside the left edge', async () => {
-  localStorage.setItem(WINDOW_KEY, '60');
+  await settings.update({ advanced: { window: 60 } });
   const store = new LiveStore();
   renderChart(fakeBackend(), store);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
@@ -195,7 +196,7 @@ test('the picker allows at most 8 series and saves the choice per section', asyn
   expect(thread(6).disabled).toBe(true);
   expect(screen.getByText(`${t('advanced.chart.series')} · 8/8`)).toBeTruthy();
   await vi.waitFor(() => expect(backend.historyCalls.at(-1)?.ids).toHaveLength(8));
-  expect(JSON.parse(localStorage.getItem(seriesKey('cpu/0'))!)).toHaveLength(8);
+  await vi.waitFor(() => expect(settings.state?.settings.advanced.series['cpu/0']).toHaveLength(8));
 
   await fireEvent.click(thread(0));
   expect(thread(6).disabled).toBe(false);
@@ -212,7 +213,7 @@ test('the picker refuses a third unit', async () => {
 });
 
 test('the saved selection of the section wins over the defaults', async () => {
-  localStorage.setItem(seriesKey(GPU), JSON.stringify([VRAM, 'gone']));
+  await settings.update({ advanced: { series: { [GPU]: [VRAM, 'gone'] } } });
   const backend = fakeBackend();
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
@@ -220,7 +221,7 @@ test('the saved selection of the section wins over the defaults', async () => {
 });
 
 test('an empty selection shows a hint and fetches nothing', async () => {
-  localStorage.setItem(seriesKey(GPU), '[]');
+  await settings.update({ advanced: { series: { [GPU]: [] } } });
   const backend = fakeBackend();
   renderChart(backend);
   await vi.waitFor(() => expect(screen.getByText(t('advanced.chart.empty'))).toBeTruthy());
@@ -229,7 +230,7 @@ test('an empty selection shows a hint and fetches nothing', async () => {
 });
 
 test('asks for no frames without a plot: empty selection or history still loading', async () => {
-  localStorage.setItem(seriesKey(GPU), '[]');
+  await settings.update({ advanced: { series: { [GPU]: [] } } });
   const backend = fakeBackend();
   let resolve!: (h: HistorySeed) => void;
   backend.getHistory = () => new Promise((done) => (resolve = done));
@@ -551,7 +552,7 @@ test('paints seconds on the time axis when uPlot picks a sub-minute split', asyn
   };
   FakeUplot.xIncrement = 5;
   try {
-    localStorage.setItem(WINDOW_KEY, '60');
+    await settings.update({ advanced: { window: 60 } });
     renderChart(fakeBackend());
     await vi.waitFor(() => expect(plots).toHaveLength(1));
     const withSeconds = { hour: '2-digit', minute: '2-digit', second: '2-digit' } as const;
@@ -748,7 +749,8 @@ test('series hidden in the legend stay hidden through density, locale, theme and
     for (const listener of [...density]) listener();
     expect(plots).toHaveLength(2);
     expectHidden(plots[1]);
-    i18n.locale = 'it';
+    // The language comes from the settings, which re-apply it with every state they receive.
+    await settings.update({ general: { language: 'it' } });
     flushSync();
     expect(plots).toHaveLength(3);
     expectHidden(plots[2]);
@@ -761,7 +763,7 @@ test('series hidden in the legend stay hidden through density, locale, theme and
     expectHidden(plots[4]);
     // Showing it again in the legend is remembered too.
     plots[4].setSeries(1, { show: true });
-    i18n.locale = 'en';
+    await settings.update({ general: { language: 'en' } });
     flushSync();
     expect(plots[5].series.slice(1).map((s) => s.show !== false)).toEqual([true, true]);
   } finally {
@@ -1054,7 +1056,7 @@ async function realTimeAxis(configured: FakeUplot, plotWidthPx: number, windowSe
 describe.each(['en', 'it'] as const)('X labels in %s', (locale) => {
   test.each([60, 300, 1800, 3600])('never overlap in a %i s window at 320, 651 and 1200 px', async (seconds) => {
     i18n.locale = locale;
-    localStorage.setItem(WINDOW_KEY, String(seconds));
+    await settings.update({ advanced: { window: seconds } });
     renderChart(fakeBackend());
     await vi.waitFor(() => expect(plots).toHaveLength(1));
     for (const width of [320, 651, 1200]) {
@@ -1120,7 +1122,7 @@ test('a 1 min window at 651 px shows seconds on splits wide enough for them in e
     cleanup();
     plots.length = 0;
     i18n.locale = locale;
-    localStorage.setItem(WINDOW_KEY, '60');
+    await settings.update({ advanced: { window: 60 } });
     renderChart(fakeBackend());
     await vi.waitFor(() => expect(plots).toHaveLength(1));
     const axis = await realTimeAxis(plots[0], 651, 60);

@@ -1,18 +1,24 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
-import { SECTION_KEY } from '../../lib/advanced/persist';
 import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { i18n } from '../../lib/i18n/index.svelte';
+import { settings } from '../../lib/settings.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import type { Schema } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
+import { connectSettings, disconnectSettings } from '../../test/settings';
 import AdvancedView from './AdvancedView.svelte';
 
-beforeEach(() => {
-  localStorage.clear();
+beforeEach(async () => {
+  await connectSettings();
   i18n.locale = 'en';
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  disconnectSettings();
+});
+
+const savedSection = () => settings.state?.settings.advanced.section;
 
 const GPU = 'gpu/pci-0000:01:00.0';
 
@@ -42,18 +48,18 @@ test('selecting an entry opens its page and remembers it', async () => {
   await fireEvent.click(within(sidebar()).getByRole('button', { name: /^GPU/ }));
   expect(title()).toBe('GPU');
   expect(current().textContent).toContain('Mock GeForce RTX 4080');
-  expect(localStorage.getItem(SECTION_KEY)).toBe(GPU);
+  await vi.waitFor(() => expect(savedSection()).toBe(GPU));
 });
 
-test('the last visited section is restored', () => {
-  localStorage.setItem(SECTION_KEY, 'network/mock-eth');
+test('the last visited section is restored', async () => {
+  await settings.update({ advanced: { section: 'network/mock-eth' } });
   renderView();
   expect(title()).toBe('Network');
   expect(current().textContent).toContain('Ethernet');
 });
 
-test('a missing section falls back to the CPU without forgetting the choice', () => {
-  localStorage.setItem(SECTION_KEY, GPU);
+test('a missing section falls back to the CPU without forgetting the choice', async () => {
+  await settings.update({ advanced: { section: GPU } });
   const noGpu: Schema = {
     ...MOCK_SCHEMA,
     devices: MOCK_SCHEMA.devices.filter((d) => d.kind !== 'gpu'),
@@ -61,7 +67,7 @@ test('a missing section falls back to the CPU without forgetting the choice', ()
   };
   const store = renderView(noGpu);
   expect(title()).toBe('CPU');
-  expect(localStorage.getItem(SECTION_KEY)).toBe(GPU);
+  expect(savedSection()).toBe(GPU);
 
   // The GPU comes back (e.g. after a driver reload): so does its page.
   store.applySchema({ ...MOCK_SCHEMA, revision: 2 });

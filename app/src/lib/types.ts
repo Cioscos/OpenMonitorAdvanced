@@ -187,3 +187,111 @@ export interface GpuProcess {
   dedicatedBytes: number | null;
   sharedBytes: number | null;
 }
+
+// --- Settings (mirrors app/src-tauri/src/settings and crates/oma-core/src/settings; spec M5 §2) ---
+
+export type Language = 'system' | 'en' | 'it';
+export type TemperatureUnit = 'c' | 'f';
+export type ThroughputUnit = 'bits' | 'bytes';
+export type ChartFps = 60 | 30 | 15;
+/** The view opened at startup; `last` reopens the view shown when the app was closed. */
+export type DefaultView = 'simple' | 'advanced' | 'last';
+/** A view that can be remembered or requested from the tray. */
+export type ViewKind = 'simple' | 'advanced';
+
+export interface ServiceModules {
+  cpu: boolean;
+  motherboard: boolean;
+  memory: boolean;
+  storage: boolean;
+  controller: boolean;
+  psu: boolean;
+}
+
+/**
+ * The settings file as the core encodes it (camelCase). `advanced.section`, `advanced.window` and
+ * `view.last` are absent (not null) while never set; `advanced.series` holds only the sections set.
+ */
+export interface Settings {
+  version: number;
+  general: {
+    language: Language;
+    temperatureUnit: TemperatureUnit;
+    throughputUnit: ThroughputUnit;
+    intervalMs: number;
+    chartFps: ChartFps;
+    defaultView: DefaultView;
+  };
+  tray: {
+    closeToTray: boolean;
+    autostart: boolean;
+    /** Sensor id, or null for automatic. */
+    iconSensor: string | null;
+  };
+  sources: {
+    vendorLibraries: { nvml: boolean; nvapi: boolean; adl: boolean; igcl: boolean };
+    antiCheat: boolean;
+    serviceModules: ServiceModules;
+    smartDisabledDrives: string[];
+  };
+  advanced: {
+    section?: string;
+    window?: number;
+    series: Record<string, string[]>;
+  };
+  view: { last?: ViewKind };
+  /** Opaque until the rules milestone. */
+  rules: Record<string, unknown>;
+  /** Opaque until the log milestone. */
+  log: Record<string, unknown>;
+  migrations: { serviceV1: boolean; webviewV1: boolean };
+}
+
+/** Where the settings stand on disk. `recovered` carries the path the corrupt file was kept at. */
+export type Persistence =
+  | { kind: 'ok' }
+  | { kind: 'pending' }
+  | { kind: 'recovered'; path: string }
+  | { kind: 'readOnly'; reason: string }
+  | { kind: 'error'; reason: string };
+
+/** State of an effect outside the settings file (service, autostart, vendor libraries). */
+export type EffectStatus = { kind: 'idle' | 'pending' | 'applied' } | { kind: 'failed'; reason: string };
+
+/** What `get_settings`, `update_settings` and the `oma:settings` event carry; `seq` only ever grows. */
+export interface SettingsState {
+  settings: Settings;
+  revision: number;
+  persistedRevision: number;
+  seq: number;
+  persistence: Persistence;
+  applyStatus: { service: EffectStatus; autostart: EffectStatus; vendorLibraries: EffectStatus };
+}
+
+/** A rejected patch: the camelCase path of the failing field and an i18n key. */
+export interface PatchError {
+  field: string;
+  key: string;
+}
+
+export type DeepPartial<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
+
+/** Objects merge, arrays and scalars replace; `null` only on the nullable fields. */
+export type SettingsPatch = DeepPartial<Omit<Settings, 'version' | 'migrations' | 'rules' | 'log'>>;
+
+/** What the web view kept in `localStorage` before the settings file existed. */
+export interface LegacyWebviewState {
+  section?: string;
+  window?: number;
+  series: Record<string, string[]>;
+  view?: ViewKind;
+}
+
+/** Whether Windows will start the app's start-up entry. */
+export type AutostartEffective = 'notConfigured' | 'enabled' | 'disabledByWindows' | 'unknown';
+
+export interface AutostartStatus {
+  configured: boolean;
+  effective: AutostartEffective;
+  error: string | null;
+}

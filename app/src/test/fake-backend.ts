@@ -1,15 +1,21 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
+import { MockSettings } from '../lib/backend/mockSettings';
 import type {
+  AutostartStatus,
   GpuProcess,
   HistorySeed,
   HistoryWindow,
+  LegacyWebviewState,
   Schema,
   SensorStats,
   ServiceStatus,
   Session,
+  SettingsPatch,
+  SettingsState,
   Snapshot,
   StartupStatus,
   StatsReply,
+  ViewKind,
 } from '../lib/types';
 
 export interface HistoryCall {
@@ -42,9 +48,26 @@ export class FakeBackend implements Backend {
   startServiceError: string | null = null;
   setAntiCheatCalls: boolean[] = [];
   startServiceCalls = 0;
+  /** In-memory settings with the core's rules; seed them with `settings.update(patch)` before rendering. */
+  settings = new MockSettings();
+  /** Order of the settings reads/subscriptions, to check that the UI subscribes first. */
+  settingsCalls: string[] = [];
+  /** Legacy states received by `importWebviewState`. */
+  importCalls: LegacyWebviewState[] = [];
+  /** Set to reject `importWebviewState` with this error instead of importing. */
+  importError: string | null = null;
+  /** What `takePendingView` returns (once). */
+  pendingView: ViewKind | null = null;
+  takePendingViewCalls = 0;
+  /** Runs at the start of `takePendingView`, e.g. to emit an `oma:navigate` in the gap. */
+  beforeTakePendingView: (() => void) | null = null;
+  navigateSubscribedBeforePendingRead = false;
+  autostart: AutostartStatus = { configured: false, effective: 'notConfigured', error: null };
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
+  #settingsListeners = new Set<(s: SettingsState) => void>();
+  #navigateListeners = new Set<(v: ViewKind) => void>();
 
   constructor(schema: Schema) {
     this.schema = schema;
@@ -125,6 +148,58 @@ export class FakeBackend implements Backend {
     this.startServiceCalls++;
     if (this.startServiceError !== null) throw new Error(this.startServiceError);
     return this.serviceStatus;
+  }
+
+  async getSettings(): Promise<SettingsState> {
+    this.settingsCalls.push('getSettings');
+    return this.settings.state();
+  }
+
+  async updateSettings(patch: SettingsPatch): Promise<SettingsState> {
+    return this.settings.update(patch);
+  }
+
+  async onSettings(cb: (s: SettingsState) => void): Promise<Unsubscribe> {
+    this.settingsCalls.push('onSettings');
+    this.#settingsListeners.add(cb);
+    const off = this.settings.subscribe(cb);
+    return () => {
+      this.#settingsListeners.delete(cb);
+      off();
+    };
+  }
+
+  async importWebviewState(legacy: LegacyWebviewState): Promise<SettingsState> {
+    this.importCalls.push(legacy);
+    if (this.importError !== null) throw this.importError;
+    return this.settings.import(legacy);
+  }
+
+  async takePendingView(): Promise<ViewKind | null> {
+    this.takePendingViewCalls++;
+    this.navigateSubscribedBeforePendingRead = this.#navigateListeners.size > 0;
+    this.beforeTakePendingView?.();
+    const view = this.pendingView;
+    this.pendingView = null;
+    return view;
+  }
+
+  async onNavigate(cb: (v: ViewKind) => void): Promise<Unsubscribe> {
+    this.#navigateListeners.add(cb);
+    return () => this.#navigateListeners.delete(cb);
+  }
+
+  async refreshAutostart(): Promise<AutostartStatus> {
+    return this.autostart;
+  }
+
+  /** Delivers an arbitrary state to the `onSettings` listeners (e.g. a stale one). */
+  emitSettings(state: SettingsState): void {
+    this.#settingsListeners.forEach((cb) => cb(state));
+  }
+
+  emitNavigate(view: ViewKind): void {
+    this.#navigateListeners.forEach((cb) => cb(view));
   }
 
   emitSchema(schema: Schema): void {

@@ -1,4 +1,18 @@
-import type { GpuProcess, HistorySeed, Schema, ServiceStatus, Session, Snapshot, StartupStatus, StatsReply } from '../types';
+import type {
+  AutostartStatus,
+  GpuProcess,
+  HistorySeed,
+  LegacyWebviewState,
+  Schema,
+  ServiceStatus,
+  Session,
+  SettingsPatch,
+  SettingsState,
+  Snapshot,
+  StartupStatus,
+  StatsReply,
+  ViewKind,
+} from '../types';
 
 export type Unsubscribe = () => void;
 
@@ -31,4 +45,21 @@ export interface Backend {
   setAntiCheat(enabled: boolean): Promise<ServiceStatus>;
   /** Starts the service when it is unreachable; the command's reply may precede the SCM outcome. */
   startService(): Promise<ServiceStatus>;
+  /** The settings with their revision and persistence state. */
+  getSettings(): Promise<SettingsState>;
+  /** Applies a patch; rejects with a `PatchError` (`{ field, key }`) and changes nothing when it is invalid. */
+  updateSettings(patch: SettingsPatch): Promise<SettingsState>;
+  /** Every applied change, also those made from the tray. Listeners must drop states with an old `seq`. */
+  onSettings(cb: (state: SettingsState) => void): Promise<Unsubscribe>;
+  /**
+   * Imports the old `localStorage` state once. Resolves only after the values and the marker are on
+   * disk; rejects with `persist_failed` (try again at the next start) or `read_only`.
+   */
+  importWebviewState(legacy: LegacyWebviewState): Promise<SettingsState>;
+  /** The view a tray item asked for before the window existed; returned once. */
+  takePendingView(): Promise<ViewKind | null>;
+  /** A tray item asked for a view while the window was already open. */
+  onNavigate(cb: (view: ViewKind) => void): Promise<Unsubscribe>;
+  /** Re-reads the start-up entry as Windows sees it. */
+  refreshAutostart(): Promise<AutostartStatus>;
 }

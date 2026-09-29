@@ -1,12 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { i18n } from './lib/i18n/index.svelte';
 beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
-afterEach(cleanup);
+afterEach(() => { cleanup(); settings.state = null; settings.errors = {}; });
 import { flushSync } from 'svelte';
 import App from './App.svelte';
-import { SECTION_KEY } from './lib/advanced/persist';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
+import { settings } from './lib/settings.svelte';
 import type { Schema } from './lib/types';
 import { FakeBackend } from './test/fake-backend';
 
@@ -86,8 +86,8 @@ test('safe mode notice reenables vendor libraries', async () => {
 });
 
 test('safe mode notice explains the --safe flag in Italian', async () => {
-  i18n.locale = 'it';
   const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { language: 'it' } });
   backend.startup = { safeMode: true, reason: 'flag', crashModule: null };
   render(App, { backend, store: new LiveStore() });
 
@@ -107,8 +107,8 @@ test('clicking the GPU tile opens its Advanced page, the toggle goes back', asyn
 
   await fireEvent.click(screen.getByText('Mock GeForce RTX 4080').closest('button')!);
   expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('GPU');
-  expect(localStorage.getItem(SECTION_KEY)).toBe('gpu/pci-0000:01:00.0');
-  expect(localStorage.getItem('oma.view')).toBe('advanced');
+  await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('gpu/pci-0000:01:00.0'));
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
 
   await fireEvent.click(screen.getByRole('tab', { name: 'Simple' }));
   expect(screen.getByText('Monitoring active')).toBeTruthy();
@@ -123,7 +123,7 @@ test('the network tile opens the network page', async () => {
 
   await fireEvent.click(screen.getByText('Network · Disks').closest('button')!);
   expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('Network');
-  expect(localStorage.getItem(SECTION_KEY)).toBe('network/mock-eth');
+  await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('network/mock-eth'));
 });
 
 test('the health banner counts from the start of the core session', async () => {
@@ -241,6 +241,124 @@ test('the stale badge also appears when no snapshot ever arrives', async () => {
     const store = new LiveStore();
     render(App, { backend, store });
     await vi.waitFor(() => expect(store.schema).not.toBeNull());
+
+    vi.advanceTimersByTime(6000);
+    flushSync();
+    expect(screen.getByText('Data not updating')).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+const pageTitle = () => screen.getByRole('heading', { level: 2 }).textContent;
+
+/** Simple is on screen once the app is ready: its tab is selected and the Advanced page is absent. */
+async function simpleShown() {
+  await vi.waitFor(() => expect(settings.state).not.toBeNull());
+  await vi.waitFor(() => expect(screen.getByText('CPU')).toBeTruthy());
+  expect(screen.getByRole('tab', { name: 'Simple' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
+}
+
+test('the last view is restored', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ view: { last: 'advanced' } });
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+});
+
+test('the default view beats the last one', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' }, view: { last: 'advanced' } });
+  render(App, { backend, store: new LiveStore() });
+
+  await simpleShown();
+});
+
+test('a view requested from the tray at start beats the default', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  backend.pendingView = 'advanced';
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  expect(backend.takePendingViewCalls).toBe(1);
+  // The requested view is now the last one shown.
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
+});
+
+test('a navigate event that arrives before the initial view is chosen wins', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  // The shell emitted `oma:navigate` and cleared its pending view before the page was listening.
+  backend.beforeTakePendingView = () => backend.emitNavigate('advanced');
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  expect(backend.navigateSubscribedBeforePendingRead).toBe(true);
+});
+
+test('a navigate event while the window is open switches the view and remembers it', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  backend.emitNavigate('advanced');
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
+
+  backend.emitNavigate('simple');
+  await simpleShown();
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('simple'));
+});
+
+test('switching view saves the last one', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
+  await fireEvent.click(screen.getByRole('tab', { name: 'Simple' }));
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('simple'));
+});
+
+test('starting without a request does not write the view', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  expect(settings.state?.settings.view.last).toBeUndefined();
+});
+
+test('the legacy view key is imported once and removed', async () => {
+  localStorage.setItem('oma.view', 'advanced');
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  expect(backend.importCalls).toHaveLength(1);
+  expect(localStorage.getItem('oma.view')).toBeNull();
+});
+
+test('the stale threshold follows the sampling interval of the settings', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  try {
+    vi.setSystemTime(1_000_000);
+    const backend = new FakeBackend(MOCK_SCHEMA);
+    // The session still reports 1 s; the setting (5 s, so 25 s of silence) is what counts.
+    await backend.settings.update({ general: { intervalMs: 5000 } });
+    const store = new LiveStore();
+    render(App, { backend, store });
+    await vi.waitFor(() => expect(store.schema).not.toBeNull());
+    await vi.waitFor(() => expect(settings.state).not.toBeNull());
+
+    vi.advanceTimersByTime(20_000);
+    flushSync();
+    expect(screen.queryByText('Data not updating')).toBeNull();
 
     vi.advanceTimersByTime(6000);
     flushSync();

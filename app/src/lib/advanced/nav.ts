@@ -2,7 +2,7 @@ import type { DeviceKind, Schema } from '../types';
 
 /** One sidebar entry of the Advanced view: a page over one or more devices. */
 export interface SidebarEntry {
-  /** Section id: the device id (the CPU entry is always 'cpu/0'). Persisted in localStorage. */
+  /** Section id: the device id (the CPU entry is always 'cpu/0'). Persisted in the settings (`advanced.section`). */
   id: string;
   kind: DeviceKind;
   deviceIds: string[];

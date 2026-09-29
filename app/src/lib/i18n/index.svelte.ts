@@ -25,6 +25,11 @@ export function detectLocale(languages: readonly string[]): Locale {
   return 'en';
 }
 
+/** The language the UI shows: the chosen one, or the browser's when the setting is `system`. */
+export function resolveLocale(language: 'system' | Locale, languages: readonly string[]): Locale {
+  return language === 'system' ? detectLocale(languages) : language;
+}
+
 export function translate(locale: Locale, key: string, params: Params = {}): string {
   const template = catalogs[locale][key] ?? catalogs.en[key] ?? key;
   return template.replace(/\{(\w+)\}/g, (whole, name: string) => (name in params ? String(params[name]) : whole));

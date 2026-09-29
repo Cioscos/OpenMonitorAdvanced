@@ -186,7 +186,7 @@ fn main() {
             processes.clone(),
             oma_win::ServiceHandles {
                 feed: svc_feed.clone(),
-                drives: svc_drives,
+                drives: svc_drives.clone(),
             },
         ),
         history_capacity(initial_interval),
@@ -242,7 +242,7 @@ fn main() {
             // being built, so it never probes, starts or connects to the
             // service (final review M2).
             #[cfg(windows)]
-            app.state::<ServiceShell>().spawn_link(svc_feed);
+            app.state::<ServiceShell>().spawn_link(svc_feed, svc_drives);
             // From here on, `general.intervalMs` drives history size, sampler and link.
             interval::follow_interval(
                 app.state::<Arc<SettingsStore>>().inner(),
@@ -307,8 +307,9 @@ fn main() {
                 let _ = handle.emit(EVENT_SNAPSHOT, &out.snapshot);
                 #[cfg(windows)]
                 {
-                    let (version, status) = svc_status.get();
-                    if version != last_service_version {
+                    // The status is copied only when it changed.
+                    if svc_status.version() != last_service_version {
+                        let (version, status) = svc_status.get();
                         last_service_version = version;
                         let _ = handle.emit(service::EVENT_SERVICE, &status);
                     }

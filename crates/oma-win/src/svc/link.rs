@@ -49,12 +49,16 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use oma_ipc::{Message, Subscribe, WireError, WireSchema, WireSnapshot, PROTOCOL_VERSION};
+use oma_ipc::{
+    Message, PawnIoStatus, Reconfiguration, ServiceSources, Subscribe, WireError, WireSchema,
+    WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, PROTOCOL_VERSION,
+};
 
-use super::feed::SvcFeed;
+use super::feed::{SourceRequest, SvcFeed};
 use super::pipe::{CloseReason, ConnectError, PipeClient, PipeEvent, PipeReader};
 use super::scm::{RunState, ServiceControl, ServiceQuery};
 use super::status::{ServiceDetail, ServiceState, ServiceStatus, ServiceStatusTable};
+use crate::storage::{core_id_for_key, drive_keys_for, DriveIdTable, DriveIds};
 
 /// Longest [`ServiceLink::shutdown`] waits for the thread before detaching it.
 pub const JOIN_WAIT: Duration = Duration::from_millis(500);
@@ -157,7 +161,7 @@ impl Drop for PipeConnection {
 }
 
 /// What the shell asks of the link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkCommand {
     /// Turns the anti-cheat compatible mode on (stop the service and keep
     /// away) or off (start it once and connect).
@@ -168,6 +172,9 @@ pub enum LinkCommand {
     /// subscribes again at once, any other link uses it on its next
     /// connection.
     SetInterval(u32),
+    /// The sources the user turned off changed: a connected link subscribes
+    /// again at once, any other link uses them on its next connection.
+    SetSources(SourceRequest),
 }
 
 /// Timing and target of the link.
@@ -190,6 +197,12 @@ pub struct LinkSettings {
     pub stop_timeout: Duration,
     /// Anti-cheat mode: pause between the queries that verify the stop.
     pub stop_poll: Duration,
+    /// What the user turned off when the link starts (later changes arrive
+    /// as [`LinkCommand::SetSources`]).
+    pub sources: SourceRequest,
+    /// The disks the storage provider knows: where core ids become the keys
+    /// the service knows, and back.
+    pub drives: DriveIdTable,
 }
 
 impl LinkSettings {
@@ -204,6 +217,8 @@ impl LinkSettings {
             first_sample_timeout: Duration::from_secs(30),
             stop_timeout: Duration::from_secs(30),
             stop_poll: Duration::from_millis(250),
+            sources: SourceRequest::default(),
+            drives: DriveIdTable::default(),
         }
     }
 
@@ -283,6 +298,8 @@ enum Effect {
     Close,
     ClearFeed,
     SetInterval(Duration),
+    /// The request the provider filters by.
+    SetRequest(SourceRequest),
     SetSchema(WireSchema),
     SetSnapshot(WireSnapshot),
 }
@@ -368,16 +385,6 @@ impl Phase {
     }
 }
 
-/// The `Subscribe` this client sends. Until the settings wire them in, it asks for every
-/// module and every disk's SMART.
-fn subscribe_request(interval_ms: u32) -> Subscribe {
-    Subscribe {
-        interval_ms,
-        disabled_modules: Vec::new(),
-        smart_disabled_drives: Vec::new(),
-    }
-}
-
 fn status(state: ServiceState, detail: Option<ServiceDetail>) -> ServiceStatus {
     ServiceStatus::new(state, detail)
 }
@@ -399,10 +406,23 @@ struct Machine {
     /// The service PID confirmed by the last accepted connection: what the
     /// SCM showed when the service turned out to be incompatible.
     verified_pid: Option<u32>,
+    /// What the user turned off: the last request, sent with every `Subscribe`.
+    request: SourceRequest,
+    /// The service's block of the last schema of this connection.
+    service: Option<WireServiceState>,
+    /// A `Subscribe` that may change the service's sources went out and no
+    /// schema has answered it yet: the sources read as pending meanwhile.
+    awaiting: bool,
+    /// The generation of the drive table the last `Subscribe` and the
+    /// published sources were built from.
+    drive_generation: u64,
+    /// The drive keys of the last `Subscribe`.
+    sent_keys: Vec<String>,
 }
 
 impl Machine {
     fn new(settings: LinkSettings, anti_cheat: bool) -> Self {
+        let request = settings.sources.clone();
         let status = if anti_cheat {
             status(ServiceState::AntiCheat, Some(ServiceDetail::Stopping))
         } else {
@@ -416,6 +436,11 @@ impl Machine {
             deadline: None,
             grace_until: None,
             verified_pid: None,
+            request,
+            service: None,
+            awaiting: false,
+            drive_generation: 0,
+            sent_keys: Vec::new(),
         }
     }
 
@@ -522,6 +547,7 @@ impl Machine {
                 self.start()
             }
             LinkCommand::SetInterval(ms) => self.set_interval(ms, now),
+            LinkCommand::SetSources(request) => self.set_sources(request),
             // Same preference again, or Start while anti-cheat, connected or
             // already due after a pending stop.
             _ => Vec::new(),
@@ -547,10 +573,98 @@ impl Machine {
             // Not subscribed: `on_hello` sends the stored value.
             _ => return Vec::new(),
         }
+        let drives = self.settings.drives.get();
         vec![
             Effect::SetInterval(self.settings.interval()),
-            Effect::Send(Message::Subscribe(subscribe_request(ms))),
+            Effect::Send(self.subscribe_message(&drives)),
         ]
+    }
+
+    /// Remembers what the user turned off. While a subscription is active it
+    /// is renewed at once, and the sources read as pending until the service
+    /// answers with a schema; otherwise the next connection sends it.
+    fn set_sources(&mut self, request: SourceRequest) -> Vec<Effect> {
+        if request == self.request {
+            return Vec::new();
+        }
+        self.request = request.clone();
+        let mut effects = vec![Effect::SetRequest(request)];
+        if matches!(
+            self.phase,
+            Phase::FirstSample { .. } | Phase::Streaming { .. }
+        ) {
+            let drives = self.settings.drives.get();
+            effects.push(Effect::Send(self.subscribe_message(&drives)));
+            self.awaiting = true;
+            self.refresh_sources(&drives);
+        }
+        effects
+    }
+
+    /// The `Subscribe` for the current interval and request, with `drives`
+    /// turning core ids into keys; remembers what it was built from.
+    fn subscribe_message(&mut self, drives: &DriveIds) -> Message {
+        let mut keys = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
+        keys.truncate(MAX_DRIVE_KEYS);
+        self.drive_generation = drives.generation;
+        self.sent_keys = keys.clone();
+        Message::Subscribe(Subscribe {
+            interval_ms: self.settings.interval_ms,
+            disabled_modules: self.request.disabled_modules.clone(),
+            smart_disabled_drives: keys,
+        })
+    }
+
+    /// Rebuilds the published sources from the service's last block, this
+    /// client's pending request and `drives`.
+    fn refresh_sources(&mut self, drives: &DriveIds) {
+        self.drive_generation = drives.generation;
+        let Some(block) = &self.service else {
+            self.status.sources = None;
+            return;
+        };
+        let wire = Reconfiguration::from_wire(&block.reconfiguration);
+        let reconfiguration = if self.awaiting && wire != Reconfiguration::Failed {
+            Reconfiguration::Pending
+        } else {
+            wire
+        };
+        self.status.sources = Some(ServiceSources {
+            active_modules: block.active_modules.clone(),
+            smart_disabled_drives: block
+                .smart_disabled_drives
+                .iter()
+                .filter_map(|key| core_id_for_key(key, &drives.drives))
+                .map(str::to_owned)
+                .collect(),
+            reconfiguration,
+            smart_blocked_by: block
+                .smart_blocked_by
+                .iter()
+                .map(|key| {
+                    core_id_for_key(key, &drives.drives)
+                        .unwrap_or(key)
+                        .to_owned()
+                })
+                .collect(),
+        });
+    }
+
+    /// The storage provider published another disk list: the keys of the
+    /// request and the names in the sources may have changed with it.
+    fn on_drives_changed(&mut self) -> Vec<Effect> {
+        let drives = self.settings.drives.get();
+        let mut effects = Vec::new();
+        if !self.request.smart_disabled_drives.is_empty() {
+            let mut keys = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
+            keys.truncate(MAX_DRIVE_KEYS);
+            if keys != self.sent_keys {
+                effects.push(Effect::Send(self.subscribe_message(&drives)));
+                self.awaiting = true;
+            }
+        }
+        self.refresh_sources(&drives);
+        effects
     }
 
     fn start(&mut self) -> Vec<Effect> {
@@ -851,6 +965,7 @@ impl Machine {
                     return self.close(disconnected(), now);
                 }
                 let len = schema.sensors.len();
+                self.on_service_block(&schema.service);
                 self.phase = match self.phase {
                     Phase::Streaming { .. } => Phase::Streaming { schema_len: len },
                     _ => Phase::FirstSample {
@@ -860,11 +975,17 @@ impl Machine {
                 vec![Effect::SetSchema(schema)]
             }
             Message::Snapshot(snapshot) if schema_len == Some(snapshot.values.len()) => {
-                self.status = status(ServiceState::Connected, None);
+                // Only the state changes: PawnIO and the sources stay.
+                self.status.state = ServiceState::Connected;
+                self.status.detail = None;
                 let len = snapshot.values.len();
                 let silence = self.settings.interval() * 3;
                 self.go(Phase::Streaming { schema_len: len }, Some(now + silence));
-                vec![Effect::SetSnapshot(snapshot)]
+                let mut effects = vec![Effect::SetSnapshot(snapshot)];
+                if self.settings.drives.generation() != self.drive_generation {
+                    effects.extend(self.on_drives_changed());
+                }
+                effects
             }
             Message::Snapshot(snapshot) => {
                 tracing::warn!(
@@ -881,15 +1002,28 @@ impl Machine {
         }
     }
 
+    /// Takes the service's block from a schema: an answer to a request in
+    /// flight ends the wait unless the service reports it is still working.
+    fn on_service_block(&mut self, block: &WireServiceState) {
+        if Reconfiguration::from_wire(&block.reconfiguration) != Reconfiguration::Pending {
+            self.awaiting = false;
+        }
+        self.service = Some(block.clone());
+        let drives = self.settings.drives.get();
+        self.refresh_sources(&drives);
+    }
+
     fn on_hello(&mut self, msg: Message, now: Instant) -> Vec<Effect> {
         match msg {
             Message::Hello(hello) if hello.protocol_version == PROTOCOL_VERSION => {
+                self.status.pawn_io = Some(PawnIoStatus::from_wire(&hello.pawn_io));
+                self.service = None;
+                self.awaiting = true;
                 self.go(Phase::Subscribing, None);
+                let drives = self.settings.drives.get();
                 vec![
                     Effect::SetInterval(self.settings.interval()),
-                    Effect::Send(Message::Subscribe(subscribe_request(
-                        self.settings.interval_ms,
-                    ))),
+                    Effect::Send(self.subscribe_message(&drives)),
                 ]
             }
             Message::Hello(hello) => {
@@ -1196,14 +1330,13 @@ impl Driver {
                 }
                 Effect::ClearFeed => self.feed.clear(),
                 Effect::SetInterval(interval) => self.feed.set_interval(interval),
+                Effect::SetRequest(request) => self.feed.set_request(request),
                 Effect::SetSchema(schema) => self.feed.set_schema(schema),
                 Effect::SetSnapshot(snapshot) => self.feed.set_snapshot(snapshot, Instant::now()),
             }
         }
-        let status = self.machine.status;
-        if self.status.get().1 != status {
-            tracing::info!("sensor service status: {status:?}");
-            self.status.set(status);
+        if self.status.set(&self.machine.status) {
+            tracing::info!("sensor service status: {:?}", self.machine.status);
         }
     }
 }
@@ -1228,8 +1361,9 @@ impl ServiceLink {
         status: ServiceStatusTable,
         feed: SvcFeed,
     ) -> Self {
+        feed.set_request(settings.sources.clone());
         let machine = Machine::new(settings, anti_cheat);
-        status.set(machine.status);
+        status.set(&machine.status);
         let (commands, inbox) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
@@ -1324,6 +1458,7 @@ mod tests {
     use oma_ipc::{Hello, WireDevice, WireSensor};
 
     use super::*;
+    use crate::storage::DriveEntry;
     use crate::svc::fake_server::FakeServer;
 
     const PID: u32 = 4242;
@@ -1331,6 +1466,15 @@ mod tests {
 
     fn st(state: ServiceState, detail: Option<ServiceDetail>) -> ServiceStatus {
         ServiceStatus::new(state, detail)
+    }
+
+    /// The `Subscribe` of a client that asks for every source.
+    fn subscribe_request(interval_ms: u32) -> Subscribe {
+        Subscribe {
+            interval_ms,
+            disabled_modules: Vec::new(),
+            smart_disabled_drives: Vec::new(),
+        }
     }
 
     fn running() -> ServiceQuery {
@@ -1701,7 +1845,7 @@ mod tests {
             self.link.as_ref().unwrap().send(command);
         }
 
-        fn wait_for(&self, what: impl Fn(ServiceStatus) -> bool) -> ServiceStatus {
+        fn wait_for(&self, what: impl Fn(&ServiceStatus) -> bool) -> ServiceStatus {
             wait_for(&self.status, what, WAIT)
         }
 
@@ -1721,13 +1865,13 @@ mod tests {
     /// Polls `table` until `what` holds, or panics with the last status.
     fn wait_for(
         table: &ServiceStatusTable,
-        what: impl Fn(ServiceStatus) -> bool,
+        what: impl Fn(&ServiceStatus) -> bool,
         timeout: Duration,
     ) -> ServiceStatus {
         let end = Instant::now() + timeout;
         loop {
             let status = table.get().1;
-            if what(status) {
+            if what(&status) {
                 return status;
             }
             if Instant::now() >= end {
@@ -1737,8 +1881,16 @@ mod tests {
         }
     }
 
-    fn is(expected: ServiceStatus) -> impl Fn(ServiceStatus) -> bool {
-        move |s| s == expected
+    /// The state and detail of a status: while connected it also carries
+    /// PawnIO and the sources, which most tests do not care about.
+    fn shows(status: &ServiceStatus) -> (ServiceState, Option<ServiceDetail>) {
+        (status.state, status.detail)
+    }
+
+    /// Matches on the state and its detail: while connected the status also
+    /// carries PawnIO and the sources, which most tests do not care about.
+    fn is(expected: ServiceStatus) -> impl Fn(&ServiceStatus) -> bool {
+        move |s| s.state == expected.state && s.detail == expected.detail
     }
 
     fn connected() -> ServiceStatus {
@@ -1765,7 +1917,7 @@ mod tests {
         cycles(5);
         assert_eq!(h.control.starts(), 1);
         assert!(h.script.connects() >= 3, "the link keeps reconnecting");
-        assert_eq!(h.status(), disconnected());
+        assert_eq!(shows(&h.status()), shows(&disconnected()));
     }
 
     #[test]
@@ -1776,7 +1928,10 @@ mod tests {
         cycles(5);
         assert_eq!(h.control.starts(), 0);
         assert!(h.control.queries() >= 3, "the query repeats at every retry");
-        assert_eq!(h.status(), st(ServiceState::NotInstalled, None));
+        assert_eq!(
+            shows(&h.status()),
+            shows(&st(ServiceState::NotInstalled, None))
+        );
     }
 
     #[test]
@@ -1785,10 +1940,14 @@ mod tests {
         control.with(|s| s.start_result = Err(ERROR_ACCESS_DENIED));
         let h = Harness::spawn(control, Script::with(vec![]), false);
         let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
-        h.wait_for(is(denied));
+        h.wait_for(is(denied.clone()));
         cycles(5);
         assert_eq!(h.control.starts(), 1);
-        assert_eq!(h.status(), denied, "a missing pipe keeps the reason");
+        assert_eq!(
+            shows(&h.status()),
+            shows(&denied),
+            "a missing pipe keeps the reason"
+        );
     }
 
     #[test]
@@ -1873,7 +2032,7 @@ mod tests {
         ctl.push(hello(PROTOCOL_VERSION + 1));
         let h = Harness::spawn(control, Script::with(vec![conn]), false);
         let incompatible = st(ServiceState::Incompatible, None);
-        h.wait_for(is(incompatible));
+        h.wait_for(is(incompatible.clone()));
         assert!(ctl.sent().is_empty(), "no Subscribe after a foreign Hello");
         // The SCM is asked at every retry, but the service is not connected
         // again (each connection would reset its idle timer).
@@ -1881,7 +2040,7 @@ mod tests {
         cycles(5);
         assert!(h.control.queries() >= queries + 3, "the SCM is still asked");
         assert_eq!(h.script.connects(), 1, "no reconnection by itself");
-        assert_eq!(h.status(), incompatible);
+        assert_eq!(shows(&h.status()), shows(&incompatible));
 
         // "Avvia" tries again.
         h.send(LinkCommand::Start);
@@ -2142,7 +2301,11 @@ mod tests {
             assert!(Instant::now() < end, "the feed interval never changed");
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(h.status(), connected(), "the connection is kept");
+        assert_eq!(
+            shows(&h.status()),
+            shows(&connected()),
+            "the connection is kept"
+        );
         assert_eq!(h.script.connects(), 1);
 
         // The same interval again is not sent twice.
@@ -2299,7 +2462,7 @@ mod tests {
             assert!(Instant::now() < end, "the new schema never arrived");
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(h.status(), connected());
+        assert_eq!(shows(&h.status()), shows(&connected()));
     }
 
     #[test]
@@ -2425,7 +2588,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
         let idle = h.link.as_ref().unwrap().waits() - waits;
         assert!(idle <= 3, "the thread woke {idle} times in 1 s");
-        assert_eq!(h.status(), connected());
+        assert_eq!(shows(&h.status()), shows(&connected()));
 
         // And it is still listening.
         ctl.push(snapshot(2, 2));
@@ -2499,7 +2662,11 @@ mod tests {
         ctl1.push(snapshot(9, 5));
         ctl1.close();
         cycles(3);
-        assert_eq!(h.status(), connected(), "the new connection is untouched");
+        assert_eq!(
+            shows(&h.status()),
+            shows(&connected()),
+            "the new connection is untouched"
+        );
         let view = h.feed.view();
         assert_eq!(view.generation, generation);
         assert_eq!(view.schema.map(|s| s.sensors.len()), Some(2));
@@ -2590,7 +2757,10 @@ mod tests {
         assert_eq!(h.control.stops(), 1);
         assert_eq!(h.control.starts(), 0);
         assert_eq!(h.script.connects(), connects, "no connection attempts");
-        assert_eq!(h.status(), st(ServiceState::AntiCheat, None));
+        assert_eq!(
+            shows(&h.status()),
+            shows(&st(ServiceState::AntiCheat, None))
+        );
     }
 
     #[test]
@@ -2602,7 +2772,10 @@ mod tests {
         control.set_query(running());
         cycles(10);
         assert_eq!(control.stops(), 1);
-        assert_eq!(h.status(), st(ServiceState::AntiCheat, None));
+        assert_eq!(
+            shows(&h.status()),
+            shows(&st(ServiceState::AntiCheat, None))
+        );
     }
 
     #[test]
@@ -2612,9 +2785,13 @@ mod tests {
         control.with(|s| s.after_stop = Some(in_state(RunState::StopPending)));
         let h = Harness::spawn(Arc::clone(&control), Script::with(vec![]), true);
         let stopping = st(ServiceState::AntiCheat, Some(ServiceDetail::Stopping));
-        assert_eq!(h.status(), stopping, "set before the thread runs");
+        assert_eq!(
+            shows(&h.status()),
+            shows(&stopping),
+            "set before the thread runs"
+        );
         cycles(2);
-        assert_eq!(h.status(), stopping);
+        assert_eq!(shows(&h.status()), shows(&stopping));
         control.set_query(in_state(RunState::Stopped));
         h.wait_for(is(st(ServiceState::AntiCheat, None)));
         assert_eq!(control.stops(), 1);
@@ -2636,7 +2813,7 @@ mod tests {
         h.send(LinkCommand::SetAntiCheat(false));
         cycles(3);
         assert_eq!(h.control.starts(), 1);
-        assert_eq!(h.status(), connected());
+        assert_eq!(shows(&h.status()), shows(&connected()));
     }
 
     #[test]
@@ -2648,7 +2825,10 @@ mod tests {
         cycles(3);
         assert_eq!(h.control.starts(), 0);
         assert_eq!(h.script.connects(), 0);
-        assert_eq!(h.status(), st(ServiceState::AntiCheat, None));
+        assert_eq!(
+            shows(&h.status()),
+            shows(&st(ServiceState::AntiCheat, None))
+        );
     }
 
     #[test]
@@ -2724,7 +2904,7 @@ mod tests {
         };
         let h = Harness::spawn_with(Arc::clone(&control), Script::with(vec![]), true, settings);
         let failed = st(ServiceState::AntiCheat, Some(ServiceDetail::StopFailed));
-        h.wait_for(is(failed));
+        h.wait_for(is(failed.clone()));
         assert_eq!(control.stops(), 1, "one STOP, not a loop");
 
         h.send(LinkCommand::Start);
@@ -2732,7 +2912,7 @@ mod tests {
         assert_eq!(control.starts(), 0);
         assert_eq!(h.script.connects(), 0);
         assert_eq!(control.stops(), 1);
-        assert_eq!(h.status(), failed);
+        assert_eq!(shows(&h.status()), shows(&failed));
     }
 
     #[test]
@@ -2776,10 +2956,10 @@ mod tests {
     /// The service turns up stopped; the link reports it and never starts it.
     fn assert_never_started(h: &Harness, expected: ServiceStatus) {
         h.control.set_query(in_state(RunState::Stopped));
-        h.wait_for(is(expected));
+        h.wait_for(is(expected.clone()));
         cycles(5);
         assert_eq!(h.control.starts(), 0);
-        assert_eq!(h.status(), expected);
+        assert_eq!(shows(&h.status()), shows(&expected));
     }
 
     #[test]
@@ -2811,8 +2991,8 @@ mod tests {
         let control = FakeControl::new(ServiceQuery::AccessDenied);
         let h = Harness::spawn(control, Script::with(vec![]), false);
         let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
-        h.wait_for(is(denied));
-        assert_never_started(&h, denied);
+        h.wait_for(is(denied.clone()));
+        assert_never_started(&h, denied.clone());
     }
 
     #[test]
@@ -2985,6 +3165,288 @@ mod tests {
         }
     }
 
+    // ---- source requests, effective sources and PawnIO ----
+
+    const DISK_ID: &str = "storage/device-a";
+
+    fn disk_key() -> String {
+        oma_ipc::drive_key("Model A", "SN-A").unwrap()
+    }
+
+    /// A drive table that knows one disk.
+    fn one_disk_table() -> DriveIdTable {
+        let drives = DriveIdTable::default();
+        drives.publish(vec![DriveEntry::new(
+            0,
+            DISK_ID.to_owned(),
+            Some("Model A".to_owned()),
+            Some("SN-A".to_owned()),
+        )]);
+        drives
+    }
+
+    fn request(modules: &[&str], drives: &[&str]) -> SourceRequest {
+        SourceRequest {
+            disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            smart_disabled_drives: drives.iter().map(|d| (*d).to_owned()).collect(),
+        }
+    }
+
+    fn subscribe_with(modules: &[&str], keys: &[String]) -> Message {
+        Message::Subscribe(Subscribe {
+            interval_ms: 1000,
+            disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            smart_disabled_drives: keys.to_vec(),
+        })
+    }
+
+    /// A `Schema` whose `service` block is `block`.
+    fn schema_with_block(block: WireServiceState) -> Message {
+        let mut schema = wire_schema(2);
+        schema.service = block;
+        Message::Schema(schema)
+    }
+
+    fn block(reconfiguration: &str) -> WireServiceState {
+        WireServiceState {
+            reconfiguration: reconfiguration.to_owned(),
+            ..WireServiceState::default()
+        }
+    }
+
+    fn reconfiguration_of(m: &Machine) -> Option<Reconfiguration> {
+        m.status.sources.as_ref().map(|s| s.reconfiguration)
+    }
+
+    /// A subscribed machine that has its schema (with `block`) and a snapshot.
+    fn streaming_machine(settings: LinkSettings, block: WireServiceState, now: Instant) -> Machine {
+        let mut m = subscribed_with(settings, now, subscribe_with(&[], &[]));
+        m.decide(Event::Message(schema_with_block(block)), now);
+        m.decide(Event::Message(snapshot(1, 2)), now);
+        assert_eq!(m.status.state, ServiceState::Connected);
+        m
+    }
+
+    #[test]
+    fn set_sources_resubscribes_with_drive_keys() {
+        let now = Instant::now();
+        let settings = LinkSettings {
+            drives: one_disk_table(),
+            ..test_settings()
+        };
+        let mut m = subscribed_with(settings, now, subscribe_with(&[], &[]));
+        m.decide(Event::Message(schema(2)), now);
+
+        let wanted = request(&["psu", "cpu"], &[DISK_ID, "storage/unplugged"]);
+        let effects = m.decide(Event::Command(LinkCommand::SetSources(wanted.clone())), now);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetRequest(wanted.clone()),
+                Effect::Send(subscribe_with(&["psu", "cpu"], &[disk_key()])),
+            ],
+            "core ids became keys, the unknown disk was dropped"
+        );
+
+        // The same request again is not sent twice.
+        assert!(m
+            .decide(Event::Command(LinkCommand::SetSources(wanted)), now)
+            .is_empty());
+
+        // While the link is not subscribed the request is only remembered.
+        let mut idle = Machine::new(test_settings(), false);
+        idle.phase = Phase::ConnectWait;
+        let effects = idle.decide(
+            Event::Command(LinkCommand::SetSources(request(&["psu"], &[]))),
+            now,
+        );
+        assert_eq!(effects, vec![Effect::SetRequest(request(&["psu"], &[]))]);
+    }
+
+    #[test]
+    fn last_request_is_sent_on_connect() {
+        let now = Instant::now();
+        let settings = LinkSettings {
+            sources: request(&["motherboard"], &[DISK_ID]),
+            drives: one_disk_table(),
+            ..test_settings()
+        };
+        // The first `Subscribe` of a connection already carries the request.
+        subscribed_with(
+            settings,
+            now,
+            subscribe_with(&["motherboard"], &[disk_key()]),
+        );
+
+        // A request that arrived while disconnected is used by the next connection.
+        let mut m = Machine::new(test_settings(), false);
+        m.phase = Phase::ConnectWait;
+        m.decide(
+            Event::Command(LinkCommand::SetSources(request(&["psu"], &[]))),
+            now,
+        );
+        m.phase = Phase::Hello;
+        let effects = m.decide(Event::Message(hello(PROTOCOL_VERSION)), now);
+        assert!(effects.contains(&Effect::Send(subscribe_with(&["psu"], &[]))));
+    }
+
+    #[test]
+    fn a_disk_that_appears_later_is_sent_with_a_new_subscribe() {
+        let now = Instant::now();
+        let drives = DriveIdTable::default();
+        let settings = LinkSettings {
+            sources: request(&[], &[DISK_ID]),
+            drives: drives.clone(),
+            ..test_settings()
+        };
+        // The disk is not in the table yet: nothing to send for it.
+        let mut m = subscribed_with(settings, now, subscribe_with(&[], &[]));
+        m.decide(Event::Message(schema(2)), now);
+        assert_eq!(
+            m.decide(Event::Message(snapshot(1, 2)), now),
+            vec![Effect::SetSnapshot(wire_snapshot(1, 2))]
+        );
+
+        // The storage provider publishes it: the next snapshot brings the key.
+        drives.publish(one_disk_table().get().drives);
+        let effects = m.decide(Event::Message(snapshot(2, 2)), now);
+        assert!(effects.contains(&Effect::Send(subscribe_with(&[], &[disk_key()]))));
+        // Then it is settled.
+        assert_eq!(
+            m.decide(Event::Message(snapshot(3, 2)), now),
+            vec![Effect::SetSnapshot(wire_snapshot(3, 2))]
+        );
+    }
+
+    #[test]
+    fn sources_are_pending_until_the_service_reflects_the_request() {
+        let now = Instant::now();
+        let mut m = streaming_machine(test_settings(), block("applied"), now);
+        assert_eq!(reconfiguration_of(&m), Some(Reconfiguration::Applied));
+
+        m.decide(
+            Event::Command(LinkCommand::SetSources(request(&["psu"], &[]))),
+            now,
+        );
+        assert_eq!(reconfiguration_of(&m), Some(Reconfiguration::Pending));
+
+        // The service is still working on it.
+        m.decide(Event::Message(schema_with_block(block("pending"))), now);
+        assert_eq!(reconfiguration_of(&m), Some(Reconfiguration::Pending));
+
+        // The forced schema of the request arrives, applied.
+        let mut done = block("applied");
+        done.active_modules.retain(|name| name != "psu");
+        m.decide(Event::Message(schema_with_block(done)), now);
+        let sources = m.status.sources.clone().expect("sources");
+        assert_eq!(sources.reconfiguration, Reconfiguration::Applied);
+        assert!(!sources.active_modules.contains(&"psu".to_owned()));
+    }
+
+    #[test]
+    fn another_client_keeping_a_module_on_still_reads_as_applied() {
+        let now = Instant::now();
+        let mut m = streaming_machine(test_settings(), block("applied"), now);
+        m.decide(
+            Event::Command(LinkCommand::SetSources(request(&["psu"], &[]))),
+            now,
+        );
+        // The block still lists psu as active: someone else wants it.
+        m.decide(Event::Message(schema_with_block(block("applied"))), now);
+        let sources = m.status.sources.clone().expect("sources");
+        assert_eq!(sources.reconfiguration, Reconfiguration::Applied);
+        assert!(sources.active_modules.contains(&"psu".to_owned()));
+    }
+
+    #[test]
+    fn failed_reconfiguration_is_reported() {
+        let now = Instant::now();
+        let mut m = streaming_machine(test_settings(), block("applied"), now);
+        m.decide(
+            Event::Command(LinkCommand::SetSources(request(&["cpu"], &[]))),
+            now,
+        );
+        m.decide(Event::Message(schema_with_block(block("failed"))), now);
+        assert_eq!(reconfiguration_of(&m), Some(Reconfiguration::Failed));
+    }
+
+    #[test]
+    fn service_keys_come_back_as_core_ids() {
+        let now = Instant::now();
+        let settings = LinkSettings {
+            drives: one_disk_table(),
+            ..test_settings()
+        };
+        let mut wire = block("applied");
+        wire.smart_disabled_drives = vec![disk_key(), "unknown-disk".to_owned()];
+        wire.smart_blocked_by = vec![disk_key(), "unknown-disk".to_owned()];
+        let m = streaming_machine(settings, wire, now);
+        let sources = m.status.sources.expect("sources");
+        assert_eq!(sources.smart_disabled_drives, vec![DISK_ID.to_owned()]);
+        assert_eq!(
+            sources.smart_blocked_by,
+            vec![DISK_ID.to_owned(), "unknown-disk".to_owned()],
+            "an unknown key is kept raw for the UI to show as an unknown disk"
+        );
+    }
+
+    #[test]
+    fn sources_and_pawn_io_vanish_with_the_connection() {
+        let now = Instant::now();
+        let mut m = streaming_machine(test_settings(), block("applied"), now);
+        assert_eq!(m.status.pawn_io, Some(PawnIoStatus::Ok));
+        assert!(m.status.sources.is_some());
+        m.decide(Event::Closed(CloseReason::Disconnected), now);
+        assert_eq!(m.status, disconnected());
+    }
+
+    #[test]
+    fn pawn_io_status_reaches_the_service_status() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = fake_conn(Some(PID));
+        ctl.push(Message::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            service_version: "test".to_owned(),
+            pawn_io: "rebootPending".to_owned(),
+        }));
+        ctl.push(schema(2));
+        ctl.push(snapshot(1, 2));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        let status = h.wait_for(|s| s.state == ServiceState::Connected);
+        assert_eq!(status.pawn_io, Some(PawnIoStatus::RebootPending));
+        let sources = status.sources.expect("the block of the first schema");
+        assert_eq!(sources.reconfiguration, Reconfiguration::Applied);
+        assert_eq!(sources.active_modules.len(), oma_ipc::MODULES.len());
+
+        // Gone with the connection.
+        ctl.close();
+        let status = h.wait_for(|s| s.state != ServiceState::Connected);
+        assert_eq!((status.pawn_io, status.sources), (None, None));
+    }
+
+    #[test]
+    fn set_sources_reaches_the_service_and_the_feed() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+
+        let wanted = request(&["storage"], &[]);
+        h.send(LinkCommand::SetSources(wanted.clone()));
+        let sent = wait_for_sent(&ctl, 2);
+        assert_eq!(sent[1], subscribe_with(&["storage"], &[]));
+        let end = Instant::now() + WAIT;
+        while *h.feed.view().request != wanted {
+            assert!(Instant::now() < end, "the feed never got the request");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.wait_for(|s| {
+            s.sources
+                .as_ref()
+                .is_some_and(|x| x.reconfiguration == Reconfiguration::Pending)
+        });
+    }
+
     // ---- the decision function ----
 
     fn machine(anti_cheat: bool) -> (Machine, Instant) {
@@ -2997,7 +3459,18 @@ mod tests {
 
     /// A machine that has just verified the connection and got `Hello`.
     fn subscribed(now: Instant) -> Machine {
-        let (mut m, _) = machine(false);
+        subscribed_with(
+            test_settings(),
+            now,
+            Message::Subscribe(subscribe_request(1000)),
+        )
+    }
+
+    /// Like [`subscribed`], for a machine with these `settings`, whose
+    /// `Subscribe` must be `expected`.
+    fn subscribed_with(settings: LinkSettings, now: Instant, expected: Message) -> Machine {
+        let mut m = Machine::new(settings, false);
+        assert_eq!(m.launch(now), vec![Effect::Query]);
         assert_eq!(
             m.decide(Event::Queried(running()), now),
             vec![Effect::Connect]
@@ -3012,7 +3485,7 @@ mod tests {
             m.decide(Event::Message(hello(PROTOCOL_VERSION)), now),
             vec![
                 Effect::SetInterval(Duration::from_millis(1000)),
-                Effect::Send(Message::Subscribe(subscribe_request(1000))),
+                Effect::Send(expected),
             ]
         );
         assert!(!m.reads_connection());
@@ -3123,7 +3596,7 @@ mod tests {
             m.decide(Event::Message(snapshot(1, 2)), t0),
             vec![Effect::SetSnapshot(wire_snapshot(1, 2))]
         );
-        assert_eq!(m.status, connected());
+        assert_eq!(shows(&m.status), shows(&connected()));
         assert_eq!(m.deadline, Some(t0 + Duration::from_millis(3000)));
 
         m.decide(Event::Message(schema(3)), t0);
@@ -3305,7 +3778,7 @@ mod tests {
                 st(ServiceState::NotInstalled, None),
                 disconnected(),
             ),
-            (ServiceQuery::AccessDenied, denied, denied),
+            (ServiceQuery::AccessDenied, denied.clone(), denied.clone()),
             (
                 in_state(RunState::StopPending),
                 disconnected(),
@@ -3412,9 +3885,9 @@ mod tests {
                 ServiceQuery::NotInstalled,
                 st(ServiceState::NotInstalled, None),
             ),
-            (ServiceQuery::AccessDenied, denied),
+            (ServiceQuery::AccessDenied, denied.clone()),
             // A transient error says nothing new.
-            (ServiceQuery::Error(1115), denied),
+            (ServiceQuery::Error(1115), denied.clone()),
             (running(), disconnected()),
             (in_state(RunState::StopPending), disconnected()),
             (

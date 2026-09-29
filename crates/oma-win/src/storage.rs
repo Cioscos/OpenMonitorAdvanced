@@ -139,6 +139,59 @@ pub struct DriveEntry {
     pub device_id: String,
     pub model: Option<String>,
     pub serial: Option<String>,
+    /// The wire key of the disk ([`oma_ipc::drive_key`]): what the service
+    /// and this app call the disk when they talk about its SMART. `None` when
+    /// the descriptor has no model or no serial.
+    pub key: Option<String>,
+}
+
+impl DriveEntry {
+    /// An entry whose `key` follows from `model` and `serial`.
+    pub fn new(
+        index: u32,
+        device_id: String,
+        model: Option<String>,
+        serial: Option<String>,
+    ) -> Self {
+        let key = match (model.as_deref(), serial.as_deref()) {
+            (Some(model), Some(serial)) => oma_ipc::drive_key(model, serial),
+            _ => None,
+        };
+        Self {
+            index,
+            device_id,
+            model,
+            serial,
+            key,
+        }
+    }
+}
+
+/// The wire keys of the disks named by core id in `request`, in request
+/// order and without repeats. A disk that is not in `drives` (unplugged, not
+/// identified yet) or has no key is dropped.
+pub fn drive_keys_for(request: &[String], drives: &[DriveEntry]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for id in request {
+        let key = drives
+            .iter()
+            .find(|d| &d.device_id == id)
+            .and_then(|d| d.key.as_ref());
+        if let Some(key) = key {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+    }
+    keys
+}
+
+/// The core id of the disk with this wire `key`.
+pub fn core_id_for_key<'a>(key: &str, drives: &'a [DriveEntry]) -> Option<&'a str> {
+    drives
+        .iter()
+        .find(|d| d.key.as_deref() == Some(key))
+        .map(|d| d.device_id.as_str())
 }
 
 /// Snapshot of every identified disk; `generation` bumps only when the set
@@ -153,6 +206,14 @@ pub struct DriveIds {
 /// provider on its own tick. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct DriveIdTable(Arc<Mutex<DriveIds>>);
+
+impl std::fmt::Debug for DriveIdTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DriveIdTable")
+            .field("generation", &self.generation())
+            .finish()
+    }
+}
 
 impl DriveIdTable {
     fn lock(&self) -> std::sync::MutexGuard<'_, DriveIds> {
@@ -172,6 +233,11 @@ impl DriveIdTable {
 
     pub fn get(&self) -> DriveIds {
         self.lock().clone()
+    }
+
+    /// The generation alone, without copying the list.
+    pub fn generation(&self) -> u64 {
+        self.lock().generation
     }
 }
 
@@ -254,12 +320,7 @@ impl Provider for StorageProvider {
                 continue;
             };
             let (model, serial) = descriptor_texts(disk.index);
-            drive_entries.push(DriveEntry {
-                index: disk.index,
-                device_id: id.clone(),
-                model,
-                serial,
-            });
+            drive_entries.push(DriveEntry::new(disk.index, id.clone(), model, serial));
             // Unknown/asleep disks remain scheduled; a later successful probe
             // requests rediscovery when it reveals undeclared sensor indices.
             let report = read_temperatures(disk.index);
@@ -523,12 +584,66 @@ mod tests {
     }
 
     fn entry(index: u32) -> DriveEntry {
-        DriveEntry {
+        DriveEntry::new(
             index,
-            device_id: format!("storage/device-{index}"),
-            model: Some("Model".to_owned()),
-            serial: Some(format!("SN{index}")),
-        }
+            format!("storage/device-{index}"),
+            Some("Model".to_owned()),
+            Some(format!("SN{index}")),
+        )
+    }
+
+    #[test]
+    fn a_drive_entry_carries_the_descriptor_key() {
+        let disk = entry(3);
+        assert_eq!(disk.key, oma_ipc::drive_key("Model", "SN3"));
+        assert!(disk.key.is_some());
+        // Either text missing (or blank) leaves the disk without a key.
+        let no_serial = DriveEntry::new(0, "storage/a".into(), Some("M".into()), None);
+        assert_eq!(no_serial.key, None);
+        let blank = DriveEntry::new(0, "storage/a".into(), Some("M".into()), Some("  ".into()));
+        assert_eq!(blank.key, None);
+    }
+
+    #[test]
+    fn drive_keys_for_translates_and_drops_unknown() {
+        let drives = vec![
+            entry(0),
+            entry(1),
+            DriveEntry::new(2, "storage/no-key".into(), None, None),
+        ];
+        let request = vec![
+            "storage/device-1".to_owned(),
+            "storage/gone".to_owned(),
+            "storage/no-key".to_owned(),
+            "storage/device-0".to_owned(),
+            "storage/device-1".to_owned(),
+        ];
+        assert_eq!(
+            drive_keys_for(&request, &drives),
+            vec![
+                oma_ipc::drive_key("Model", "SN1").unwrap(),
+                oma_ipc::drive_key("Model", "SN0").unwrap(),
+            ],
+            "request order, unknown and key-less disks dropped, no duplicates"
+        );
+        assert!(drive_keys_for(&[], &drives).is_empty());
+        assert!(drive_keys_for(&request, &[]).is_empty());
+    }
+
+    #[test]
+    fn core_id_for_key_finds_the_disk() {
+        let drives = vec![entry(0), entry(1)];
+        let key = oma_ipc::drive_key("Model", "SN1").unwrap();
+        assert_eq!(core_id_for_key(&key, &drives), Some("storage/device-1"));
+        assert_eq!(core_id_for_key("nope", &drives), None);
+    }
+
+    #[test]
+    fn generation_is_readable_without_a_copy() {
+        let table = DriveIdTable::default();
+        assert_eq!(table.generation(), 0);
+        table.publish(vec![entry(0)]);
+        assert_eq!(table.generation(), 1);
     }
 
     #[test]

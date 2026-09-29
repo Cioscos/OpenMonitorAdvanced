@@ -8,6 +8,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+pub use oma_ipc::SourceRequest;
 use oma_ipc::{WireSchema, WireSnapshot};
 
 /// Interval assumed until the connection subscribes.
@@ -24,10 +25,13 @@ pub struct FeedView {
     pub snapshot: Option<(Instant, WireSnapshot)>,
     /// The subscribed sampling interval.
     pub interval: Duration,
+    /// The sources the user turned off; a change bumps `generation`.
+    pub request: Arc<SourceRequest>,
 }
 
 struct Inner {
     generation: u64,
+    request: Arc<SourceRequest>,
     schema: Option<Arc<WireSchema>>,
     snapshot: Option<(Instant, WireSnapshot)>,
     interval: Duration,
@@ -37,6 +41,7 @@ impl Default for Inner {
     fn default() -> Self {
         Self {
             generation: 0,
+            request: Arc::default(),
             schema: None,
             snapshot: None,
             interval: DEFAULT_INTERVAL,
@@ -59,10 +64,20 @@ impl SvcFeed {
     /// `Subscribe` (an interval change), and the provider must not rediscover
     /// (and lose a sample of every series) for a description that did not
     /// change. Any difference at all counts as a new schema.
+    ///
+    /// The `service` block is not part of that comparison: it describes the
+    /// service's configuration, not the sensors, and it changes when a
+    /// reconfiguration finishes. A schema that differs only there replaces
+    /// the stored one and leaves the snapshot and the generation alone.
     pub fn set_schema(&self, schema: WireSchema) {
         let mut inner = self.lock();
-        if inner.schema.as_deref() == Some(&schema) {
-            return;
+        if let Some(current) = inner.schema.as_deref() {
+            if current.devices == schema.devices && current.sensors == schema.sensors {
+                if current.service != schema.service {
+                    inner.schema = Some(Arc::new(schema));
+                }
+                return;
+            }
         }
         inner.schema = Some(Arc::new(schema));
         inner.snapshot = None;
@@ -76,6 +91,17 @@ impl SvcFeed {
 
     pub fn set_interval(&self, interval: Duration) {
         self.lock().interval = interval;
+    }
+
+    /// Stores what the user turned off. The generation bumps when it
+    /// changes, so the provider rediscovers with the new filter; the request
+    /// survives [`clear`](Self::clear).
+    pub fn set_request(&self, request: SourceRequest) {
+        let mut inner = self.lock();
+        if *inner.request != request {
+            inner.request = Arc::new(request);
+            inner.generation += 1;
+        }
     }
 
     /// Drops the schema and the snapshot; the generation bumps when there
@@ -98,6 +124,7 @@ impl SvcFeed {
             schema: inner.schema.clone(),
             snapshot: inner.snapshot.clone(),
             interval: inner.interval,
+            request: Arc::clone(&inner.request),
         }
     }
 }
@@ -216,5 +243,57 @@ mod tests {
         // Nothing left to drop: no rediscovery for the provider.
         feed.clear();
         assert_eq!(feed.view().generation, view.generation);
+    }
+
+    #[test]
+    fn only_a_changed_service_block_keeps_snapshot_and_generation() {
+        let feed = SvcFeed::default();
+        feed.set_schema(schema(2));
+        feed.set_snapshot(snapshot(1, 2), Instant::now());
+        let generation = feed.view().generation;
+
+        // Same devices and sensors, another `service` block (the
+        // reconfiguration went from pending to applied): the provider must
+        // not rediscover and the snapshot still matches.
+        let mut same_shape = schema(2);
+        same_shape.service.reconfiguration = "pending".to_owned();
+        feed.set_schema(same_shape.clone());
+        let view = feed.view();
+        assert_eq!(view.generation, generation);
+        assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
+        assert_eq!(view.schema.as_deref(), Some(&same_shape));
+    }
+
+    #[test]
+    fn a_changed_request_bumps_the_generation_once() {
+        let feed = SvcFeed::default();
+        assert_eq!(*feed.view().request, SourceRequest::default());
+        let generation = feed.view().generation;
+
+        let request = SourceRequest {
+            disabled_modules: vec!["psu".to_owned()],
+            smart_disabled_drives: vec!["storage/device-a".to_owned()],
+        };
+        feed.set_request(request.clone());
+        let view = feed.view();
+        assert_eq!(*view.request, request);
+        assert!(view.generation > generation);
+
+        // The same request again changes nothing.
+        feed.set_request(request);
+        assert_eq!(feed.view().generation, view.generation);
+    }
+
+    #[test]
+    fn clear_keeps_the_request() {
+        let feed = SvcFeed::default();
+        let request = SourceRequest {
+            disabled_modules: vec!["cpu".to_owned()],
+            smart_disabled_drives: Vec::new(),
+        };
+        feed.set_request(request.clone());
+        feed.set_schema(schema(1));
+        feed.clear();
+        assert_eq!(*feed.view().request, request);
     }
 }

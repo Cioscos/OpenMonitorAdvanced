@@ -13,7 +13,7 @@ use serde::de::value::{Error as DeError, StrDeserializer};
 use serde::Deserialize;
 
 use crate::storage::{DriveEntry, DriveIdTable, DriveIds};
-use crate::svc::feed::SvcFeed;
+use crate::svc::feed::{SourceRequest, SvcFeed};
 
 /// Parses a wire string (already snake_case, matching `oma_core::model`'s
 /// `Serialize`) into `T`, using `T`'s own `Deserialize` impl. `None` for an
@@ -60,6 +60,20 @@ fn storage_binding<'a>(
     unique.then_some(entry)
 }
 
+/// The module of `oma_ipc::MODULES` whose devices have this wire kind, as
+/// `SchemaBuilder.cs` names them: `fan_controller` is the `controller` module.
+fn module_of(wire_kind: &str) -> Option<&'static str> {
+    match wire_kind {
+        "cpu" => Some("cpu"),
+        "motherboard" => Some("motherboard"),
+        "memory" => Some("memory"),
+        "storage" => Some("storage"),
+        "fan_controller" => Some("controller"),
+        "psu" => Some("psu"),
+        _ => None,
+    }
+}
+
 /// A schema device once its final core id and kind are known.
 struct Bound {
     final_id: String,
@@ -91,6 +105,12 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
 /// the whole schema. Returns the kept sensors' wire indices, in the same
 /// order as `Inventory::sensors`, for `poll` to read the matching values.
 ///
+/// `request` is the user's own choice, applied here whatever the service
+/// sends (another client may keep a source on that this app turned off): a
+/// device of a module in `disabled_modules` is left out with its sensors, and
+/// so is a service disk bound onto a core disk in `smart_disabled_drives`
+/// (the core's own I/O for that disk is not touched).
+///
 /// Fails without publishing a partial inventory if binding produces two
 /// devices with the same final id (e.g. two service devices bound onto the
 /// same core disk): the link already rejects duplicate/invalid ids and
@@ -99,6 +119,7 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
 pub(crate) fn bind(
     schema: &WireSchema,
     drives: &DriveIds,
+    request: &SourceRequest,
 ) -> Result<(Inventory, Vec<usize>), ProviderError> {
     let mut unknown = false;
     let mut bound: HashMap<&str, Bound> = HashMap::with_capacity(schema.devices.len());
@@ -107,6 +128,11 @@ pub(crate) fn bind(
             unknown = true;
             continue;
         };
+        let turned_off = module_of(&device.kind)
+            .is_some_and(|module| request.disabled_modules.iter().any(|m| m == module));
+        if turned_off {
+            continue;
+        }
         let mut bound_to_disk = false;
         let final_id = match &device.hint {
             Some(IdentityHint::Cpu { index }) => format!("cpu/{index}"),
@@ -124,6 +150,9 @@ pub(crate) fn bind(
             },
             None => format!("{}/{}", device.kind, device.id),
         };
+        if bound_to_disk && request.smart_disabled_drives.contains(&final_id) {
+            continue;
+        }
         let unbound_storage = kind == DeviceKind::Storage && !bound_to_disk;
         bound.insert(
             device.id.as_str(),
@@ -251,7 +280,7 @@ impl Provider for SvcProvider {
             self.kept = Vec::new();
             return Ok(Inventory::default());
         };
-        let (inventory, kept) = bind(&schema, &drives)?;
+        let (inventory, kept) = bind(&schema, &drives, &view.request)?;
         self.kept = kept;
         Ok(inventory)
     }
@@ -318,12 +347,12 @@ mod tests {
     }
 
     fn drive(index: u32, id: &str, model: Option<&str>, serial: Option<&str>) -> DriveEntry {
-        DriveEntry {
+        DriveEntry::new(
             index,
-            device_id: id.to_owned(),
-            model: model.map(str::to_owned),
-            serial: serial.map(str::to_owned),
-        }
+            id.to_owned(),
+            model.map(str::to_owned),
+            serial.map(str::to_owned),
+        )
     }
 
     #[test]
@@ -336,7 +365,8 @@ mod tests {
             ],
             sensors: vec![],
         };
-        let (inventory, _) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, _) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["cpu/0", "memory/0"]);
     }
@@ -366,6 +396,7 @@ mod tests {
                 sensors: vec![],
             },
             &drives,
+            &SourceRequest::default(),
         )
         .expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/device-aaa");
@@ -412,7 +443,7 @@ mod tests {
                 )],
                 sensors: vec![smart(&format!("svc-disk-{i}"))],
             };
-            let (inventory, _) = bind(&schema, &drives).expect("bind");
+            let (inventory, _) = bind(&schema, &drives, &SourceRequest::default()).expect("bind");
             assert_eq!(
                 inventory.devices[0].id,
                 format!("storage/svc-disk-{i}"),
@@ -435,7 +466,8 @@ mod tests {
             )],
             sensors: vec![smart("svc-disk-none")],
         };
-        let (inventory, _) = bind(&schema, &no_identity_drives).expect("bind");
+        let (inventory, _) =
+            bind(&schema, &no_identity_drives, &SourceRequest::default()).expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/svc-disk-none");
 
         // Duplicated pair on the drive side is ambiguous: no binding.
@@ -456,7 +488,7 @@ mod tests {
             )],
             sensors: vec![smart("svc-disk-amb")],
         };
-        let (inventory, _) = bind(&schema, &ambiguous).expect("bind");
+        let (inventory, _) = bind(&schema, &ambiguous, &SourceRequest::default()).expect("bind");
         assert_eq!(inventory.devices[0].id, "storage/svc-disk-amb");
     }
 
@@ -500,7 +532,7 @@ mod tests {
             .concat(),
         };
 
-        let (inventory, kept) = bind(&schema, &drives).expect("bind");
+        let (inventory, kept) = bind(&schema, &drives, &SourceRequest::default()).expect("bind");
 
         let ids: Vec<&str> = inventory.sensors.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
@@ -545,7 +577,8 @@ mod tests {
             sensors: [io_only("svc-usb"), io_only("svc-prop")].concat(),
         };
 
-        let (inventory, kept) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, kept) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
 
         let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["storage/svc-prop", "motherboard/mb-1"]);
@@ -564,7 +597,8 @@ mod tests {
             devices: vec![device("mb-1", "motherboard", None)],
             sensors: vec![],
         };
-        let (inventory, _) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, _) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         assert_eq!(inventory.devices[0].id, "motherboard/mb-1");
     }
 
@@ -587,7 +621,8 @@ mod tests {
                 category: "temperature".to_owned(),
             }],
         };
-        let (inventory, kept) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, kept) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         let s = &inventory.sensors[0];
         assert_eq!(s.id, "cpu/0/temperature/package");
         assert_eq!(s.label, Label::new("cpu.temperature.package"));
@@ -607,7 +642,8 @@ mod tests {
                 category: "fan".to_owned(),
             }],
         };
-        let (inventory, _) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, _) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         assert_eq!(
             inventory.sensors[0].label,
             Label::with_arg("lhm.raw", "Fan #1")
@@ -626,7 +662,8 @@ mod tests {
                 sensor("mb-1", "temperature", "d", "celsius", "temperature"),
             ],
         };
-        let (inventory, kept) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, kept) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         assert_eq!(inventory.sensors.len(), 2);
         assert_eq!(kept, vec![0, 3]);
         assert_eq!(inventory.sensors[0].id, "motherboard/mb-1/temperature/a");
@@ -646,7 +683,8 @@ mod tests {
                 "not-a-known-category",
             )],
         };
-        let (inventory, _) = bind(&schema, &DriveIds::default()).expect("bind");
+        let (inventory, _) =
+            bind(&schema, &DriveIds::default(), &SourceRequest::default()).expect("bind");
         assert_eq!(inventory.sensors[0].category, "temperature");
     }
 
@@ -666,7 +704,7 @@ mod tests {
             ],
             sensors: vec![],
         };
-        assert!(bind(&schema, &drives).is_err());
+        assert!(bind(&schema, &drives, &SourceRequest::default()).is_err());
     }
 
     // ---- SvcProvider ----
@@ -755,5 +793,127 @@ mod tests {
         let inventory = p.discover().expect("discover after clear");
         assert!(inventory.devices.is_empty());
         assert!(inventory.sensors.is_empty());
+    }
+
+    // ---- the local filter ----
+
+    fn all_devices_schema() -> WireSchema {
+        let kinds = [
+            ("cpu-hw", "cpu"),
+            ("mb-1", "motherboard"),
+            ("ram-hw", "memory"),
+            ("fc-1", "fan_controller"),
+            ("psu-1", "psu"),
+            ("disk-1", "storage"),
+        ];
+        WireSchema {
+            service: Default::default(),
+            devices: kinds
+                .iter()
+                .map(|(id, kind)| device(id, kind, None))
+                .collect(),
+            sensors: kinds
+                .iter()
+                .map(|(id, _)| sensor(id, "temperature", "t", "celsius", "temperature"))
+                .collect(),
+        }
+    }
+
+    fn request(modules: &[&str], drives: &[&str]) -> SourceRequest {
+        SourceRequest {
+            disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            smart_disabled_drives: drives.iter().map(|d| (*d).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn excluded_module_devices_are_filtered_locally() {
+        let schema = all_devices_schema();
+        let (all, _) = bind(&schema, &DriveIds::default(), &SourceRequest::default()).unwrap();
+        assert_eq!(all.devices.len(), 6);
+
+        // Each module name switches off exactly the wire kind it stands for,
+        // and takes the device's sensors with it.
+        for (module, wire_id) in [
+            ("cpu", "cpu-hw"),
+            ("motherboard", "mb-1"),
+            ("memory", "ram-hw"),
+            ("storage", "disk-1"),
+            ("controller", "fc-1"),
+            ("psu", "psu-1"),
+        ] {
+            let (inventory, kept) =
+                bind(&schema, &DriveIds::default(), &request(&[module], &[])).unwrap();
+            assert_eq!(inventory.devices.len(), 5, "{module}");
+            assert!(
+                inventory.devices.iter().all(|d| !d.id.ends_with(wire_id)),
+                "{module} still shows {wire_id}"
+            );
+            assert_eq!(inventory.sensors.len(), 5, "{module}");
+            assert_eq!(kept.len(), 5, "{module}");
+        }
+
+        let (none, kept) = bind(
+            &schema,
+            &DriveIds::default(),
+            &request(&oma_ipc::MODULES, &[]),
+        )
+        .unwrap();
+        assert!(none.devices.is_empty() && none.sensors.is_empty() && kept.is_empty());
+    }
+
+    #[test]
+    fn smart_disabled_drive_is_filtered_locally() {
+        let drives = drive_table(vec![
+            drive(0, "storage/device-aaa", Some("M0"), Some("S0")),
+            drive(1, "storage/device-bbb", Some("M1"), Some("S1")),
+        ]);
+        let hint = |index: u32, model: &str, serial: &str| {
+            Some(IdentityHint::Storage {
+                physical_drive: index,
+                model: Some(model.to_owned()),
+                serial: Some(serial.to_owned()),
+            })
+        };
+        let schema = WireSchema {
+            service: Default::default(),
+            devices: vec![
+                device("svc-a", "storage", hint(0, "M0", "S0")),
+                device("svc-b", "storage", hint(1, "M1", "S1")),
+            ],
+            sensors: vec![
+                sensor("svc-a", "temperature", "drive", "celsius", "temperature"),
+                sensor("svc-b", "temperature", "drive", "celsius", "temperature"),
+            ],
+        };
+
+        // Another client keeps disk A's SMART on: the service still sends it,
+        // and this app hides it.
+        let (inventory, kept) =
+            bind(&schema, &drives, &request(&[], &["storage/device-aaa"])).unwrap();
+        let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["storage/device-bbb"]);
+        let sensor_ids: Vec<&str> = inventory.sensors.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(sensor_ids, vec!["storage/device-bbb/temperature/drive"]);
+        assert_eq!(kept, vec![1]);
+
+        // A disk that is not in the request stays.
+        let (inventory, _) = bind(&schema, &drives, &request(&[], &["storage/other"])).unwrap();
+        assert_eq!(inventory.devices.len(), 2);
+    }
+
+    #[test]
+    fn a_new_request_triggers_rediscovery() {
+        let feed = SvcFeed::default();
+        feed.set_schema(wire_schema());
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        p.poll().expect("first poll after discover is fine");
+
+        feed.set_request(request(&["cpu"], &[]));
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        let inventory = p.discover().expect("discover with the filter");
+        assert!(inventory.devices.is_empty(), "the cpu module is off");
+        p.poll().expect("settled");
     }
 }

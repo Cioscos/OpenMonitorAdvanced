@@ -5,6 +5,8 @@ import type {
   Schema,
   Sensor,
   SensorKind,
+  PawnIoStatus,
+  ServiceSources,
   ServiceState,
   ServiceStatus,
   Snapshot,
@@ -175,6 +177,24 @@ export function parseServiceState(search: string): ServiceState {
   return (VALID_SERVICE_STATES as string[]).includes(raw ?? '') ? (raw as ServiceState) : 'connected';
 }
 
+const VALID_PAWN_IO: PawnIoStatus[] = ['ok', 'missing', 'unavailable', 'unknown', 'rebootPending'];
+
+/** PawnIO status from `?pawnio=<status>` in the URL; defaults to `ok`. Only shown while connected. */
+export function parsePawnIoStatus(search: string): PawnIoStatus {
+  const raw = new URLSearchParams(search).get('pawnio');
+  return (VALID_PAWN_IO as string[]).includes(raw ?? '') ? (raw as PawnIoStatus) : 'ok';
+}
+
+/** Every module on, nothing pending: the service as the mock finds it. */
+function mockSources(): ServiceSources {
+  return {
+    activeModules: ['cpu', 'motherboard', 'memory', 'storage', 'controller', 'psu'],
+    smartDisabledDrives: [],
+    reconfiguration: 'applied',
+    smartBlockedBy: [],
+  };
+}
+
 /** Values for `schema`'s sensors at tick `t`; adds the service sensors' values when present. */
 function valuesFor(schema: Schema, t: number): (number | null)[] {
   return schema === SERVICE_MOCK_SCHEMA ? [...mockValues(t), ...serviceMockValues(t)] : mockValues(t);
@@ -189,7 +209,12 @@ export function createMockBackend(intervalMs = 1000): Backend {
   let startup = MOCK_STARTUP;
   let startedAtMs: number | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
-  let serviceStatus: ServiceStatus = { state: initialState, detail: null };
+  const pawnIo = parsePawnIoStatus(typeof location === 'undefined' ? '' : location.search);
+  const statusFor = (state: ServiceState): ServiceStatus =>
+    state === 'connected'
+      ? { state, detail: null, pawnIo, sources: mockSources() }
+      : { state, detail: null, pawnIo: null, sources: null };
+  let serviceStatus: ServiceStatus = statusFor(initialState);
   const stats = new StatsAccumulator();
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
@@ -246,11 +271,11 @@ export function createMockBackend(intervalMs = 1000): Backend {
       return () => serviceListeners.delete(cb);
     },
     setAntiCheat: async (enabled) => {
-      setServiceStatus({ state: enabled ? 'antiCheat' : 'unreachable', detail: null });
+      setServiceStatus(statusFor(enabled ? 'antiCheat' : 'unreachable'));
       return serviceStatus;
     },
     startService: async () => {
-      setServiceStatus({ state: 'connected', detail: null });
+      setServiceStatus(statusFor('connected'));
       return serviceStatus;
     },
   };

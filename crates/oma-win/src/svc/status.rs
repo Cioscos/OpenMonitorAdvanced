@@ -6,32 +6,85 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 pub use oma_ipc::{ServiceDetail, ServiceState, ServiceStatus};
 
+/// Called with each new status, on the thread that set it and outside the
+/// table's lock.
+pub type StatusObserver = Box<dyn Fn(&ServiceStatus) + Send + Sync>;
+
 /// Status before the connection thread has said anything.
-const INITIAL: ServiceStatus = ServiceStatus::new(ServiceState::Starting, None);
+fn initial() -> ServiceStatus {
+    ServiceStatus::new(ServiceState::Starting, None)
+}
+
+struct Inner {
+    state: Mutex<(u64, ServiceStatus)>,
+    observers: Mutex<Vec<Arc<StatusObserver>>>,
+}
 
 /// Latest service status with a version that changes only when the status
 /// does; cheap to clone (shared state).
 #[derive(Clone)]
-pub struct ServiceStatusTable(Arc<Mutex<(u64, ServiceStatus)>>);
+pub struct ServiceStatusTable(Arc<Inner>);
 
 impl Default for ServiceStatusTable {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new((0, INITIAL))))
+        Self(Arc::new(Inner {
+            state: Mutex::new((0, initial())),
+            observers: Mutex::new(Vec::new()),
+        }))
     }
 }
 
 impl ServiceStatusTable {
     /// The version and the status.
     pub fn get(&self) -> (u64, ServiceStatus) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
-    /// Replaces the status; the version bumps only when it differs.
-    pub fn set(&self, status: ServiceStatus) {
-        let mut entry = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if entry.1 != status {
-            *entry = (entry.0 + 1, status);
+    /// The version alone: what a caller that polls compares before it pays
+    /// for a [`get`](Self::get).
+    pub fn version(&self) -> u64 {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+    }
+
+    /// Replaces the status; the version bumps, and the observers hear it,
+    /// only when it differs (`true`). The status is copied only in that case.
+    pub fn set(&self, status: &ServiceStatus) -> bool {
+        {
+            let mut entry = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if entry.1 == *status {
+                return false;
+            }
+            *entry = (entry.0 + 1, status.clone());
         }
+        let observers = self
+            .0
+            .observers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for observer in observers {
+            observer(status);
+        }
+        true
+    }
+
+    /// Registers an observer for every later change. It runs on the thread
+    /// that changes the status (the link thread), so it must be quick and
+    /// never wait for the link.
+    pub fn subscribe(&self, observer: StatusObserver) {
+        self.0
+            .observers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::new(observer));
     }
 }
 
@@ -43,25 +96,79 @@ mod tests {
     fn status_version_bumps_only_on_change() {
         let table = ServiceStatusTable::default();
         let (v0, initial) = table.get();
-        assert_eq!(initial, INITIAL);
+        assert_eq!(initial, super::initial());
 
         let connected = ServiceStatus::new(ServiceState::Connected, None);
-        table.set(connected);
+        table.set(&connected);
         let (v1, status) = table.get();
         assert_eq!(status, connected);
         assert!(v1 > v0);
 
-        table.set(connected);
-        table.set(connected);
-        assert_eq!(table.get(), (v1, connected));
+        table.set(&connected);
+        table.set(&connected);
+        assert_eq!(table.get(), (v1, connected.clone()));
 
         let clone = table.clone();
-        clone.set(ServiceStatus::new(
+        clone.set(&ServiceStatus::new(
             ServiceState::Unreachable,
             Some(ServiceDetail::Disconnected),
         ));
         let (v2, status) = table.get();
         assert!(v2 > v1);
         assert_eq!(status.detail, Some(ServiceDetail::Disconnected));
+    }
+
+    #[test]
+    fn version_is_readable_without_a_copy() {
+        let table = ServiceStatusTable::default();
+        assert_eq!(table.version(), 0);
+        table.set(&ServiceStatus::new(ServiceState::Connected, None));
+        assert_eq!(table.version(), table.get().0);
+        assert_eq!(table.version(), 1);
+    }
+
+    #[test]
+    fn extras_count_as_a_change() {
+        let table = ServiceStatusTable::default();
+        let mut connected = ServiceStatus::new(ServiceState::Connected, None);
+        table.set(&connected);
+        let (v1, _) = table.get();
+
+        connected.pawn_io = Some(oma_ipc::PawnIoStatus::Missing);
+        table.set(&connected);
+        let (v2, status) = table.get();
+        assert!(v2 > v1, "PawnIO alone bumps the version");
+        assert_eq!(status.pawn_io, Some(oma_ipc::PawnIoStatus::Missing));
+
+        connected.sources = Some(oma_ipc::ServiceSources {
+            active_modules: vec!["cpu".to_owned()],
+            smart_disabled_drives: Vec::new(),
+            reconfiguration: oma_ipc::Reconfiguration::Pending,
+            smart_blocked_by: Vec::new(),
+        });
+        table.set(&connected);
+        assert!(table.get().0 > v2, "sources alone bump the version");
+    }
+
+    #[test]
+    fn observers_hear_each_change_once_outside_the_lock() {
+        let table = ServiceStatusTable::default();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&heard);
+        let reader = table.clone();
+        table.subscribe(Box::new(move |status| {
+            // Reading the table from an observer must not deadlock.
+            let _ = reader.get();
+            sink.lock().unwrap().push(status.state);
+        }));
+
+        let connected = ServiceStatus::new(ServiceState::Connected, None);
+        table.set(&connected);
+        table.set(&connected);
+        table.set(&ServiceStatus::new(ServiceState::Unreachable, None));
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![ServiceState::Connected, ServiceState::Unreachable]
+        );
     }
 }

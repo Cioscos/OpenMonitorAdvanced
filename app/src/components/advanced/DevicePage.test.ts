@@ -114,8 +114,8 @@ test('the generic notice appears on CPU, memory and disk pages only without the 
   const MEMORY_ENTRY: SidebarEntry = { id: MEMORY, kind: 'memory', deviceIds: [MEMORY], labelKey: 'advanced.section.memory' };
   const DISK_ENTRY: SidebarEntry = { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
   const NIC_ENTRY: SidebarEntry = { id: NIC, kind: 'network', deviceIds: [NIC], labelKey: 'advanced.section.network', labelArg: 'Ethernet' };
-  const notConnected: ServiceStatus = { state: 'unreachable', detail: null };
-  const connected: ServiceStatus = { state: 'connected', detail: null };
+  const notConnected: ServiceStatus = { state: 'unreachable', detail: null, pawnIo: null, sources: null };
+  const connected: ServiceStatus = { state: 'connected', detail: null, pawnIo: null, sources: null };
 
   const { unmount: u1 } = render(DevicePage, { entry: CPU_ENTRY, store, backend, service: notConnected });
   expect(screen.getByText(NOTICE)).toBeTruthy();

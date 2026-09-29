@@ -36,7 +36,7 @@ export class FakeBackend implements Backend {
   gpuProcesses: GpuProcess[] = [];
   gpuProcessCalls: string[] = [];
   /** Current service status; `getServiceStatus` returns it, `emitServiceStatus` replaces it and notifies listeners. */
-  serviceStatus: ServiceStatus = { state: 'connected', detail: null };
+  serviceStatus: ServiceStatus = { state: 'connected', detail: null, pawnIo: null, sources: null };
   /** Set to reject `setAntiCheat`/`startService` with this error instead of resolving. */
   setAntiCheatError: string | null = null;
   startServiceError: string | null = null;

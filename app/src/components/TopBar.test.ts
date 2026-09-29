@@ -18,7 +18,7 @@ function setup(service: ServiceStatus | null, overrides: Partial<{ onLeaveAntiCh
 }
 
 test('the badge is hidden while connected', () => {
-  setup({ state: 'connected', detail: null });
+  setup({ state: 'connected', detail: null, pawnIo: null, sources: null });
   expect(screen.queryByText(t('service.baseMode'))).toBeNull();
 });
 
@@ -29,7 +29,7 @@ test('the badge is hidden when there is no service status yet', () => {
 
 test('the badge explains each state', () => {
   for (const state of NOT_CONNECTED) {
-    setup({ state, detail: null });
+    setup({ state, detail: null, pawnIo: null, sources: null });
     expect(screen.getByText(t('service.baseMode'))).toBeTruthy();
     expect(screen.getByText(t(`service.state.${state}`))).toBeTruthy();
     cleanup();
@@ -37,26 +37,26 @@ test('the badge explains each state', () => {
 });
 
 test('the badge explains the detail when there is one', () => {
-  setup({ state: 'unreachable', detail: 'disconnected' });
+  setup({ state: 'unreachable', detail: 'disconnected', pawnIo: null, sources: null });
   expect(screen.getByText(t('service.state.unreachable'))).toBeTruthy();
   expect(screen.getByText(t('service.detail.disconnected'))).toBeTruthy();
 });
 
 test('the badge offers to leave anti-cheat mode', async () => {
-  const { onLeaveAntiCheat } = setup({ state: 'antiCheat', detail: null });
+  const { onLeaveAntiCheat } = setup({ state: 'antiCheat', detail: null, pawnIo: null, sources: null });
   await fireEvent.click(screen.getByRole('button', { name: t('service.action.leaveAntiCheat') }));
   expect(onLeaveAntiCheat).toHaveBeenCalledTimes(1);
 });
 
 test('the badge offers to start an unreachable service', async () => {
-  const { onStartService } = setup({ state: 'unreachable', detail: null });
+  const { onStartService } = setup({ state: 'unreachable', detail: null, pawnIo: null, sources: null });
   await fireEvent.click(screen.getByRole('button', { name: t('service.action.start') }));
   expect(onStartService).toHaveBeenCalledTimes(1);
 });
 
 test('no action while starting, not installed or incompatible', () => {
   for (const state of ['starting', 'notInstalled', 'incompatible'] as ServiceState[]) {
-    setup({ state, detail: null });
+    setup({ state, detail: null, pawnIo: null, sources: null });
     expect(screen.queryByRole('button', { name: t('service.action.leaveAntiCheat') })).toBeNull();
     expect(screen.queryByRole('button', { name: t('service.action.start') })).toBeNull();
     cleanup();
@@ -65,7 +65,7 @@ test('no action while starting, not installed or incompatible', () => {
 
 test('command failures are shown without a false success', async () => {
   const onLeaveAntiCheat = vi.fn().mockRejectedValue(new Error('persist_failed'));
-  setup({ state: 'antiCheat', detail: null }, { onLeaveAntiCheat });
+  setup({ state: 'antiCheat', detail: null, pawnIo: null, sources: null }, { onLeaveAntiCheat });
   await fireEvent.click(screen.getByRole('button', { name: t('service.action.leaveAntiCheat') }));
   await vi.waitFor(() => expect(screen.getByText(t('service.action.failed'))).toBeTruthy());
   expect(screen.queryByText('persist_failed')).toBeNull();
@@ -73,7 +73,7 @@ test('command failures are shown without a false success', async () => {
 
 test('anti-cheat stop failure is visible', async () => {
   const onLeaveAntiCheat = vi.fn().mockRejectedValue(new Error('stop_failed'));
-  setup({ state: 'antiCheat', detail: null }, { onLeaveAntiCheat });
+  setup({ state: 'antiCheat', detail: null, pawnIo: null, sources: null }, { onLeaveAntiCheat });
   expect(screen.queryByText(t('service.action.failed'))).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: t('service.action.leaveAntiCheat') }));
   await vi.waitFor(() => expect(screen.getByText(t('service.action.failed'))).toBeTruthy());
@@ -81,7 +81,7 @@ test('anti-cheat stop failure is visible', async () => {
 
 test('the badge is a closed disclosure by default and opens on a command failure (R23)', async () => {
   const onLeaveAntiCheat = vi.fn().mockRejectedValue(new Error('persist_failed'));
-  setup({ state: 'antiCheat', detail: null }, { onLeaveAntiCheat });
+  setup({ state: 'antiCheat', detail: null, pawnIo: null, sources: null }, { onLeaveAntiCheat });
   const details = document.querySelector('details.badge') as HTMLDetailsElement;
   expect(details).toBeTruthy();
   expect(details.open).toBe(false);
@@ -91,7 +91,7 @@ test('the badge is a closed disclosure by default and opens on a command failure
 });
 
 test('the live status region does not wrap the action button', () => {
-  setup({ state: 'antiCheat', detail: null });
+  setup({ state: 'antiCheat', detail: null, pawnIo: null, sources: null });
   const status = screen.getByRole('status');
   expect(status.querySelector('button')).toBeNull();
   expect(status.textContent).toContain(t('service.state.antiCheat'));

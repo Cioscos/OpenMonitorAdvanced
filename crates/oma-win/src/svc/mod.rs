@@ -12,7 +12,7 @@ pub mod provider;
 pub mod scm;
 pub mod status;
 
-pub use feed::{FeedView, SvcFeed};
+pub use feed::{FeedView, SourceRequest, SvcFeed};
 pub use link::{
     pipe_connector, validate_schema, Connection, Connector, LinkCommand, LinkSettings, ServiceLink,
 };

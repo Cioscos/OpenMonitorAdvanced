@@ -143,9 +143,37 @@ export type ServiceState = 'notInstalled' | 'antiCheat' | 'starting' | 'connecte
 /** Why the service is in its current state, when there is more to say. */
 export type ServiceDetail = 'accessDenied' | 'startFailed' | 'stopping' | 'stopFailed' | 'pidMismatch' | 'disconnected';
 
+/** State of the PawnIO driver as the service reports it (spec M5 §2.8); only known while connected. */
+export type PawnIoStatus = 'ok' | 'missing' | 'unavailable' | 'unknown' | 'rebootPending';
+
+/** Whether the service has taken the sources this app asked for. */
+export type Reconfiguration = 'applied' | 'pending' | 'failed';
+
+/**
+ * The service's effective sources, shared by all its clients: what runs may differ from what this
+ * app asked. Mirrors `oma-ipc::ServiceSources`; disks are core device ids.
+ */
+export interface ServiceSources {
+  /** Modules that are on (`cpu`, `motherboard`, `memory`, `storage`, `controller`, `psu`). */
+  activeModules: string[];
+  /** Core ids of the disks whose SMART is off. */
+  smartDisabledDrives: string[];
+  reconfiguration: Reconfiguration;
+  /**
+   * Core ids of the disks that keep SMART closed for all disks. An entry that is not a device of
+   * the schema is a disk the app cannot identify ("unknown disk"); the list can be empty while the
+   * gate is closed.
+   */
+  smartBlockedBy: string[];
+}
+
 export interface ServiceStatus {
   state: ServiceState;
   detail: ServiceDetail | null;
+  /** null unless connected. */
+  pawnIo: PawnIoStatus | null;
+  /** null unless connected (and until the service has described itself). */
+  sources: ServiceSources | null;
 }
 
 /** One process using a GPU (not a sensor: no id, no history). */

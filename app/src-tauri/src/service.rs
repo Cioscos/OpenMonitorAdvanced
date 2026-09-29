@@ -14,10 +14,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[cfg(any(windows, test))]
 use std::time::Duration;
 
-use oma_ipc::{ServiceState, ServiceStatus};
+use oma_core::settings::Settings;
+#[cfg(any(windows, test))]
+use oma_ipc::Reconfiguration;
+use oma_ipc::{ServiceState, ServiceStatus, SourceRequest};
 use tauri::State;
 
 use crate::settings::SettingsStore;
+#[cfg(any(windows, test))]
+use crate::settings::{Effect, EffectStatus};
 
 /// How long a toggle waits for the store to save the preference.
 #[cfg(any(windows, test))]
@@ -202,6 +207,73 @@ impl ToggleState {
     }
 }
 
+/// What the user turned off, as the link and the provider take it: the names
+/// of the service modules switched off and the core ids of the disks whose
+/// SMART is off.
+pub(crate) fn request_of(settings: &Settings) -> SourceRequest {
+    SourceRequest {
+        disabled_modules: settings
+            .sources
+            .service_modules
+            .disabled()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        smart_disabled_drives: settings.sources.smart_disabled_drives.clone(),
+    }
+}
+
+/// What follows a change of the source request: the command to the service
+/// link. Must never block.
+type SourcesSink = Box<dyn Fn(SourceRequest) + Send + Sync>;
+
+/// Sends the request to `sink` whenever `sources.serviceModules` or
+/// `sources.smartDisabledDrives` change. It keeps the last request it saw and
+/// acts only when the new one differs; the listener gets only the new state,
+/// may run on any thread that changes the store (the settings writer
+/// included) and always in store order, so `sink` must be quick: it takes the
+/// link lock and pushes on a channel.
+///
+/// A change made before a link exists reaches nobody here: the link is
+/// spawned with the request read from the store under the same lock the sink
+/// takes, so it is either read there or sent to the new link, never lost.
+fn follow_sources(store: &Arc<SettingsStore>, sink: SourcesSink) {
+    let last = Mutex::new(request_of(&store.settings()));
+    store.subscribe(Box::new(move |settings, _| {
+        let now = request_of(settings);
+        let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+        if *last != now {
+            last.clone_from(&now);
+            sink(now);
+        }
+    }));
+}
+
+/// What the settings view shows for the service: nothing while there is no
+/// service to ask, otherwise how the service stands with our request.
+#[cfg(any(windows, test))]
+fn service_effect(status: &ServiceStatus) -> EffectStatus {
+    match status.sources.as_ref().map(|s| s.reconfiguration) {
+        None => EffectStatus::Idle,
+        Some(Reconfiguration::Applied) => EffectStatus::Applied,
+        Some(Reconfiguration::Pending) => EffectStatus::Pending,
+        Some(Reconfiguration::Failed) => EffectStatus::Failed {
+            reason: "reconfigurationFailed".to_owned(),
+        },
+    }
+}
+
+/// Keeps `applyStatus.service` in step with the service status, on every
+/// change and whether or not a window is open. The observer runs on the link
+/// thread; `set_effect` only takes the store lock for a moment.
+#[cfg(windows)]
+fn follow_service_effect(store: &Arc<SettingsStore>, table: &oma_win::svc::ServiceStatusTable) {
+    let store = Arc::clone(store);
+    table.subscribe(Box::new(move |status| {
+        store.set_effect(Effect::Service, service_effect(status));
+    }));
+}
+
 /// Shared state the three commands and the tray read: the toggle above, and
 /// on Windows the running link and the status table it writes.
 pub struct ServiceShell {
@@ -221,6 +293,17 @@ impl ServiceShell {
     pub fn new(store: Arc<SettingsStore>, status_table: oma_win::svc::ServiceStatusTable) -> Self {
         let link: Arc<Mutex<Option<oma_win::svc::ServiceLink>>> = Arc::default();
         let sink = Arc::clone(&link);
+        let sources_sink = Arc::clone(&link);
+        follow_sources(
+            &store,
+            Box::new(move |request| {
+                send_to_link(
+                    &sources_sink,
+                    oma_win::svc::LinkCommand::SetSources(request),
+                );
+            }),
+        );
+        follow_service_effect(&store, &status_table);
         Self {
             toggle: ToggleState::new(
                 store,
@@ -238,12 +321,13 @@ impl ServiceShell {
     /// reaches: `tauri_plugin_single_instance` ends a second launch while the
     /// app is being built, so that process never probes or starts the
     /// service, nor connects to its pipe (final review M2). Holds the
-    /// `link` lock while it reads the preferences (anti-cheat mode and sampling
-    /// interval), and the store listeners send under that same lock: a change
-    /// is either read here or sent to the new link (at worst both, with the
-    /// same value), never lost in between.
+    /// `link` lock while it reads the preferences (anti-cheat mode, sampling
+    /// interval and the sources turned off), and the store listeners send
+    /// under that same lock: a change is either read here or sent to the new
+    /// link (at worst both, with the same value), never lost in between.
+    /// `drives` is the table the link translates disk ids with.
     #[cfg(windows)]
-    pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed) {
+    pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed, drives: oma_win::storage::DriveIdTable) {
         use oma_win::svc::{pipe_connector, LinkSettings, ServiceLink, WindowsScm, SERVICE_NAME};
 
         let mut link = self.link.lock().unwrap_or_else(PoisonError::into_inner);
@@ -253,10 +337,14 @@ impl ServiceShell {
         *link = Some(ServiceLink::spawn(
             Arc::new(WindowsScm::new(SERVICE_NAME)),
             pipe_connector(),
-            LinkSettings::new(
-                oma_ipc::PIPE_NAME,
-                self.toggle.store.settings().general.interval_ms,
-            ),
+            {
+                let settings = self.toggle.store.settings();
+                LinkSettings {
+                    sources: request_of(&settings),
+                    drives,
+                    ..LinkSettings::new(oma_ipc::PIPE_NAME, settings.general.interval_ms)
+                }
+            },
             self.toggle.enabled(),
             self.status_table.clone(),
             feed,
@@ -635,5 +723,176 @@ mod tests {
             snapshot(&sent).last().copied() == Some(final_flag)
                 && indicator.calls().last().copied() == Some(final_flag)
         });
+    }
+
+    // ---- source requests and the service effect ----
+
+    fn sources_status(reconfiguration: Reconfiguration) -> ServiceStatus {
+        ServiceStatus {
+            state: ServiceState::Connected,
+            detail: None,
+            pawn_io: Some(oma_ipc::PawnIoStatus::Ok),
+            sources: Some(oma_ipc::ServiceSources {
+                active_modules: vec!["cpu".to_owned()],
+                smart_disabled_drives: Vec::new(),
+                reconfiguration,
+                smart_blocked_by: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn service_effect_follows_the_reconfiguration() {
+        assert_eq!(
+            service_effect(&ServiceStatus::new(ServiceState::Unreachable, None)),
+            EffectStatus::Idle,
+            "no service, nothing to apply"
+        );
+        assert_eq!(
+            service_effect(&sources_status(Reconfiguration::Pending)),
+            EffectStatus::Pending
+        );
+        assert_eq!(
+            service_effect(&sources_status(Reconfiguration::Applied)),
+            EffectStatus::Applied
+        );
+        assert_eq!(
+            service_effect(&sources_status(Reconfiguration::Failed)),
+            EffectStatus::Failed {
+                reason: "reconfigurationFailed".to_owned()
+            }
+        );
+    }
+
+    #[cfg(windows)]
+    fn apply_status_of(store: &SettingsStore) -> EffectStatus {
+        store.state().apply_status.service
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn apply_status_goes_pending_then_applied() {
+        let store = new_store(&FakeFs::new());
+        let table = oma_win::svc::ServiceStatusTable::default();
+        follow_service_effect(&store, &table);
+        assert_eq!(apply_status_of(&store), EffectStatus::Idle);
+
+        table.set(&sources_status(Reconfiguration::Applied));
+        assert_eq!(apply_status_of(&store), EffectStatus::Applied);
+        table.set(&sources_status(Reconfiguration::Pending));
+        assert_eq!(apply_status_of(&store), EffectStatus::Pending);
+        table.set(&sources_status(Reconfiguration::Applied));
+        assert_eq!(apply_status_of(&store), EffectStatus::Applied);
+
+        // The service goes away: nothing is pending or applied any more.
+        table.set(&ServiceStatus::new(ServiceState::Unreachable, None));
+        assert_eq!(apply_status_of(&store), EffectStatus::Idle);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_reconfiguration_shows_in_the_apply_status() {
+        let store = new_store(&FakeFs::new());
+        let table = oma_win::svc::ServiceStatusTable::default();
+        follow_service_effect(&store, &table);
+        table.set(&sources_status(Reconfiguration::Failed));
+        assert_eq!(
+            apply_status_of(&store),
+            EffectStatus::Failed {
+                reason: "reconfigurationFailed".to_owned()
+            }
+        );
+    }
+
+    type Requests = Arc<Mutex<Vec<SourceRequest>>>;
+
+    fn follow_into(store: &Arc<SettingsStore>) -> Requests {
+        let requests = Requests::default();
+        let sink = Arc::clone(&requests);
+        follow_sources(
+            store,
+            Box::new(move |request| sink.lock().unwrap().push(request)),
+        );
+        requests
+    }
+
+    #[test]
+    fn service_modules_changes_are_sent_as_a_request() {
+        let store = new_store(&FakeFs::new());
+        let requests = follow_into(&store);
+        store
+            .update(
+                &serde_json::json!({"sources": {"serviceModules": {"psu": false, "cpu": false}}}),
+            )
+            .unwrap();
+        store
+            .update(&serde_json::json!({"sources": {"serviceModules": {"psu": true}}}))
+            .unwrap();
+        assert_eq!(
+            snapshot(&requests),
+            vec![
+                SourceRequest {
+                    disabled_modules: vec!["cpu".to_owned(), "psu".to_owned()],
+                    smart_disabled_drives: Vec::new(),
+                },
+                SourceRequest {
+                    disabled_modules: vec!["cpu".to_owned()],
+                    smart_disabled_drives: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn smart_disabled_drives_changes_are_sent_as_a_request() {
+        let store = new_store(&FakeFs::new());
+        let requests = follow_into(&store);
+        store
+            .update(&serde_json::json!({"sources": {"smartDisabledDrives": ["storage/device-a"]}}))
+            .unwrap();
+        assert_eq!(
+            snapshot(&requests),
+            vec![SourceRequest {
+                disabled_modules: Vec::new(),
+                smart_disabled_drives: vec!["storage/device-a".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn unrelated_and_repeated_changes_send_no_request() {
+        let store = new_store(&FakeFs::new());
+        let requests = follow_into(&store);
+        store
+            .update(&serde_json::json!({"general": {"intervalMs": 2000}}))
+            .unwrap();
+        set_anti_cheat_in_store(&store, true);
+        // The same value again is no change.
+        store
+            .update(&serde_json::json!({"sources": {"serviceModules": {"psu": true}}}))
+            .unwrap();
+        assert!(snapshot(&requests).is_empty());
+    }
+
+    #[test]
+    fn the_request_starts_from_the_stored_settings() {
+        let fs = FakeFs::new().with_file(
+            &test_path(),
+            br#"{"version":1,"sources":{"serviceModules":{"memory":false},"smartDisabledDrives":["storage/x"]}}"#,
+        );
+        let store = new_store(&fs);
+        assert_eq!(
+            request_of(&store.settings()),
+            SourceRequest {
+                disabled_modules: vec!["memory".to_owned()],
+                smart_disabled_drives: vec!["storage/x".to_owned()],
+            }
+        );
+        // Nothing changed since the listener started: nothing is sent.
+        let requests = follow_into(&store);
+        store
+            .update(&serde_json::json!({"sources": {"serviceModules": {"memory": false}}}))
+            .unwrap();
+        assert!(snapshot(&requests).is_empty());
     }
 }

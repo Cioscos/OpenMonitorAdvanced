@@ -15,7 +15,10 @@ pub use message::{
     Hello, IdentityHint, Message, Subscribe, WireDevice, WireError, WireSchema, WireSensor,
     WireServiceState, WireSnapshot,
 };
-pub use status::{ServiceDetail, ServiceState, ServiceStatus};
+pub use status::{
+    PawnIoStatus, Reconfiguration, ServiceDetail, ServiceSources, ServiceState, ServiceStatus,
+    SourceRequest,
+};
 
 /// Current sensor IPC protocol version, sent in [`Hello::protocol_version`].
 pub const PROTOCOL_VERSION: u32 = 2;

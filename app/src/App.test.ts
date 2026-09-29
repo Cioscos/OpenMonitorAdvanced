@@ -178,7 +178,7 @@ test('the stale badge appears after five silent seconds and goes away with new d
 
 test('the service badge shows the reason and reacts to the anti-cheat toggle', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
-  backend.serviceStatus = { state: 'antiCheat', detail: null };
+  backend.serviceStatus = { state: 'antiCheat', detail: null, pawnIo: null, sources: null };
   render(App, { backend, store: new LiveStore() });
 
   await vi.waitFor(() => expect(screen.getByText('Basic mode')).toBeTruthy());
@@ -190,7 +190,7 @@ test('the service badge shows the reason and reacts to the anti-cheat toggle', a
 
 test('command failures are shown without a false success', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
-  backend.serviceStatus = { state: 'unreachable', detail: null };
+  backend.serviceStatus = { state: 'unreachable', detail: null, pawnIo: null, sources: null };
   backend.startServiceError = 'persist_failed';
   render(App, { backend, store: new LiveStore() });
 
@@ -205,7 +205,7 @@ test('command failures are shown without a false success', async () => {
 
 test('anti-cheat stop failure is visible', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
-  backend.serviceStatus = { state: 'antiCheat', detail: null };
+  backend.serviceStatus = { state: 'antiCheat', detail: null, pawnIo: null, sources: null };
   backend.setAntiCheatError = 'stop_failed';
   render(App, { backend, store: new LiveStore() });
 
@@ -217,7 +217,7 @@ test('anti-cheat stop failure is visible', async () => {
 
 test('late initial status cannot overwrite a newer event', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
-  backend.serviceStatus = { state: 'starting', detail: null };
+  backend.serviceStatus = { state: 'starting', detail: null, pawnIo: null, sources: null };
   // Delay the initial read so it resolves after the event below, but with the value it saw
   // (`starting`) at call time: a naive implementation would let this stale reply win.
   backend.getServiceStatus = () => {
@@ -227,7 +227,7 @@ test('late initial status cannot overwrite a newer event', async () => {
   render(App, { backend, store: new LiveStore() });
 
   // The event arrives first and reports 'connected'; the stale 'starting' read must not win.
-  backend.emitServiceStatus({ state: 'connected', detail: null });
+  backend.emitServiceStatus({ state: 'connected', detail: null, pawnIo: null, sources: null });
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   expect(screen.queryByText('Basic mode')).toBeNull();

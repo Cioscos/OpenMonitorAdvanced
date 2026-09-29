@@ -6,6 +6,7 @@ import {
   createMockBackend,
   mockGpuProcesses,
   mockValues,
+  parsePawnIoStatus,
   parseServiceState,
   sortGpuProcesses,
 } from './mock';
@@ -144,6 +145,21 @@ test('the URL selects the initial service state, defaulting to connected', () =>
   expect(parseServiceState('?service=bogus')).toBe('connected');
 });
 
+test('the URL selects the PawnIO status, defaulting to ok', async () => {
+  expect(parsePawnIoStatus('')).toBe('ok');
+  expect(parsePawnIoStatus('?pawnio=rebootPending')).toBe('rebootPending');
+  expect(parsePawnIoStatus('?pawnio=missing&service=connected')).toBe('missing');
+  expect(parsePawnIoStatus('?pawnio=bogus')).toBe('ok');
+
+  history.replaceState(null, '', '?service=connected&pawnio=rebootPending');
+  const status = await createMockBackend().getServiceStatus();
+  expect(status.pawnIo).toBe('rebootPending');
+  // PawnIO is only known while connected.
+  history.replaceState(null, '', '?service=unreachable&pawnio=rebootPending');
+  expect((await createMockBackend().getServiceStatus()).pawnIo).toBeNull();
+  history.replaceState(null, '', '');
+});
+
 test('the mock serves lhm sensors only when the service is connected', async () => {
   history.replaceState(null, '', '?service=connected');
   const connected = createMockBackend();
@@ -152,7 +168,17 @@ test('the mock serves lhm sensors only when the service is connected', async () 
   expect(schema.devices.some((d) => d.id === 'motherboard/lhm-mock')).toBe(true);
   expect(schema.sensors.some((s) => s.label.key === 'lhm.raw')).toBe(true);
   expect(schema.sensors.some((s) => s.label.key === 'cpu.temperature.package')).toBe(true);
-  expect(await connected.getServiceStatus()).toEqual({ state: 'connected', detail: null });
+  expect(await connected.getServiceStatus()).toEqual({
+    state: 'connected',
+    detail: null,
+    pawnIo: 'ok',
+    sources: {
+      activeModules: ['cpu', 'motherboard', 'memory', 'storage', 'controller', 'psu'],
+      smartDisabledDrives: [],
+      reconfiguration: 'applied',
+      smartBlockedBy: [],
+    },
+  });
 
   for (const state of ['notInstalled', 'antiCheat', 'starting', 'unreachable', 'incompatible']) {
     history.replaceState(null, '', `?service=${state}`);
@@ -160,7 +186,7 @@ test('the mock serves lhm sensors only when the service is connected', async () 
     const otherSchema = await backend.getSchema();
     expect(otherSchema).toBe(MOCK_SCHEMA);
     expect(otherSchema.devices.some((d) => d.id === 'motherboard/lhm-mock')).toBe(false);
-    expect(await backend.getServiceStatus()).toEqual({ state, detail: null });
+    expect(await backend.getServiceStatus()).toEqual({ state, detail: null, pawnIo: null, sources: null });
   }
 });
 
@@ -170,13 +196,15 @@ test('setAntiCheat and startService change the status and notify listeners', asy
   await backend.onServiceStatus((s) => seen.push(s.state));
 
   const afterAntiCheat = await backend.setAntiCheat(true);
-  expect(afterAntiCheat).toEqual({ state: 'antiCheat', detail: null });
+  expect(afterAntiCheat).toEqual({ state: 'antiCheat', detail: null, pawnIo: null, sources: null });
 
   const afterLeaving = await backend.setAntiCheat(false);
   expect(afterLeaving.state).toBe('unreachable');
 
   const afterStart = await backend.startService();
-  expect(afterStart).toEqual({ state: 'connected', detail: null });
+  expect(afterStart.state).toBe('connected');
+  expect(afterStart.pawnIo).toBe('ok');
+  expect(afterStart.sources?.reconfiguration).toBe('applied');
   expect(seen).toEqual(['antiCheat', 'unreachable', 'connected']);
 });
 

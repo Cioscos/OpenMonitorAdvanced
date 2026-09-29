@@ -15,6 +15,7 @@ fn main() {
             "get_settings",
             "update_settings",
             "import_webview_state",
+            "take_pending_view",
         ]),
     ))
     .expect("Tauri build")

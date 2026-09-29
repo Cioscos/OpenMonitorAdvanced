@@ -14,8 +14,9 @@ pub enum Lang {
     It,
 }
 
-/// Every catalog key the Rust code looks up by name (sensor labels are dynamic).
-#[allow(dead_code)] // consumed by the tray wiring in the next task
+/// Every catalog key the Rust code looks up by name (sensor labels are dynamic);
+/// the test below checks each one exists in both catalogs.
+#[cfg(test)]
 pub const RUST_KEYS: &[&str] = &[
     "tray.open",
     "tray.viewSimple",
@@ -97,7 +98,9 @@ fn interpolate(template: &str, params: &[(&str, &str)]) -> String {
 }
 
 /// The text of a sensor label: catalog key `sensor.<key>` with `{arg}`.
-#[allow(dead_code)] // consumed by the tray wiring in the next task
+// No caller yet: the tray shows no sensor names (values only); kept for the
+// settings view's icon-sensor label in Rust, if needed.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sensor_label(lang: Lang, label: &Label) -> String {
     let key = format!("sensor.{}", label.key);
     match label.arg.as_deref() {

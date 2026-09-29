@@ -19,6 +19,7 @@
     "allow-start-service",
     "allow-get-settings",
     "allow-update-settings",
-    "allow-import-webview-state"
+    "allow-import-webview-state",
+    "allow-take-pending-view"
   ]
 }

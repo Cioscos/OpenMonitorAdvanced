@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::settings::{Effect, EffectStatus, SettingsStore};
+use crate::window::NavState;
 use crate::AppState;
 
 #[cfg(not(windows))]
@@ -216,6 +217,13 @@ impl StartupState {
         self.switch.enable();
         self.current()
     }
+}
+
+/// The view a tray item asked for before the window existed: `"simple"`,
+/// `"advanced"` or `null`. Returned once (the request is consumed).
+#[tauri::command(async)]
+pub fn take_pending_view(nav: State<'_, NavState>) -> Option<&'static str> {
+    nav.take().map(oma_core::settings::ViewKind::as_str)
 }
 
 #[tauri::command(async)]

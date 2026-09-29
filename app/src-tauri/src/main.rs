@@ -6,7 +6,6 @@ mod interval;
 mod service;
 mod settings;
 mod tray;
-#[allow(dead_code)] // wired into the tray in the next task
 mod tray_icon;
 mod window;
 
@@ -14,6 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use oma_core::engine::Engine;
+use oma_core::model::Schema;
 use oma_core::provider::Provider;
 use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
@@ -36,6 +36,18 @@ pub struct AppState {
 
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
+
+/// Whether a launch with these arguments should show the window. A second
+/// `--minimized` launch (autostart racing a running instance) stays quiet; one
+/// without it, like `measure-footprint.ps1`'s, opens the window.
+fn opens_window(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg == "--minimized")
+}
+
+/// Whether closing the last window keeps the app running in the tray.
+fn keep_running_on_last_close(close_to_tray: bool) -> bool {
+    close_to_tray
+}
 
 #[cfg(windows)]
 fn providers(
@@ -116,7 +128,7 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 fn main() {
     // Held for the program's lifetime when present, so buffered log lines are
     // flushed on drop; the app still runs (without a file log) if this is None.
-    let _log_guard = init_logging();
+    let log_guard = init_logging();
 
     let start_minimized = std::env::args().any(|arg| arg == "--minimized");
     let safe_flag = std::env::args().any(|arg| arg == "--safe");
@@ -191,9 +203,12 @@ fn main() {
     let service_shell = ServiceShell::new(settings_store.clone());
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            window::show_main(app)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if opens_window(&args) {
+                window::show_main(app);
+            }
         }))
+        .manage(window::NavState::default())
         .manage(AppState {
             engine: engine.clone(),
             interval: interval.clone(),
@@ -210,6 +225,7 @@ fn main() {
             commands::get_session,
             commands::get_gpu_processes,
             commands::get_startup_status,
+            commands::take_pending_view,
             commands::enable_vendor_libraries,
             service::get_service_status,
             service::set_anti_cheat,
@@ -240,7 +256,21 @@ fn main() {
                         let _ = settings_handle.emit(EVENT_SETTINGS, state);
                     }
                 }));
-            tray::build(app.handle())?;
+            let store = app.state::<Arc<SettingsStore>>().inner().clone();
+            let tray = tray::build(app.handle())?;
+            // Menu labels follow `general.language`. Listeners get only the new
+            // state, so the last language seen is kept here and acted on when it
+            // changes; relabelling is posted to the main thread and never blocks.
+            let relabel_tray = tray.clone();
+            let last_language = Mutex::new(store.settings().general.language);
+            store.subscribe(Box::new(move |settings, _| {
+                let language = settings.general.language;
+                let mut last = last_language.lock().unwrap_or_else(PoisonError::into_inner);
+                if *last != language {
+                    *last = language;
+                    relabel_tray.relabel(tray::language_for(language));
+                }
+            }));
             if !start_minimized {
                 window::show_main(app.handle());
             }
@@ -250,7 +280,16 @@ fn main() {
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
+            // The tray follows every tick, window or not; the schema arrives only
+            // when it changes, so the latest one is kept for the tray.
+            let mut tray_schema: Option<Schema> = None;
             let sampler = Sampler::spawn(engine.clone(), interval.clone(), move |out| {
+                if let Some(schema) = &out.schema {
+                    tray_schema = Some(schema.clone());
+                }
+                if let Some(schema) = &tray_schema {
+                    tray.update(schema, &out.snapshot, &store.settings());
+                }
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
                     return;
@@ -274,11 +313,21 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri application");
 
-    app.run(|app, event| match event {
-        // Last window closed: keep sampling in the tray. Explicit exits carry a code.
+    // `run_return` (not `run`, which ends the process itself) so the log guard
+    // below is dropped, and the last buffered log lines written, before exit.
+    let exit_code = app.run_return(|app, event| match event {
+        // Last window closed: keep sampling in the tray unless the user turned
+        // close-to-tray off. Explicit exits carry a code and are not stopped.
         RunEvent::ExitRequested {
             code: None, api, ..
-        } => api.prevent_exit(),
+        } => {
+            let close_to_tray = app
+                .try_state::<Arc<SettingsStore>>()
+                .is_none_or(|store| store.settings().tray.close_to_tray);
+            if keep_running_on_last_close(close_to_tray) {
+                api.prevent_exit();
+            }
+        }
         RunEvent::Exit => {
             if let Some(guard) = app.try_state::<SamplerGuard>() {
                 if let Some(sampler) = guard
@@ -302,4 +351,28 @@ fn main() {
         }
         _ => {}
     });
+    drop(log_guard);
+    std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn opens_window_ignores_minimized_launches() {
+        assert!(!opens_window(&args(&["oma-app.exe", "--minimized"])));
+        assert!(opens_window(&args(&["oma-app.exe"])));
+        assert!(opens_window(&args(&["oma-app.exe", "--safe"])));
+    }
+
+    #[test]
+    fn last_close_exits_when_close_to_tray_is_off() {
+        assert!(keep_running_on_last_close(true));
+        assert!(!keep_running_on_last_close(false));
+    }
 }

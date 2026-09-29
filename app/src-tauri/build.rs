@@ -17,6 +17,8 @@ fn main() {
             "import_webview_state",
             "take_pending_view",
             "refresh_autostart",
+            "get_app_info",
+            "open_known_path",
         ]),
     ))
     .expect("Tauri build")

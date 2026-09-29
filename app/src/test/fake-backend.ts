@@ -1,10 +1,12 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
+  AppInfo,
   AutostartStatus,
   GpuProcess,
   HistorySeed,
   HistoryWindow,
+  KnownPath,
   LegacyWebviewState,
   Schema,
   SensorStats,
@@ -63,6 +65,17 @@ export class FakeBackend implements Backend {
   beforeTakePendingView: (() => void) | null = null;
   navigateSubscribedBeforePendingRead = false;
   autostart: AutostartStatus = { configured: false, effective: 'notConfigured', error: null };
+  refreshAutostartCalls = 0;
+  appInfo: AppInfo = {
+    version: '0.1.0',
+    serviceVersion: null,
+    protocolVersion: 2,
+    settingsPath: 'C:\\Users\\test\\AppData\\Roaming\\OpenMonitorAdvanced',
+    logsPath: 'C:\\Users\\test\\AppData\\Local\\OpenMonitorAdvanced\\logs',
+  };
+  openKnownPathCalls: KnownPath[] = [];
+  /** Set to reject `openKnownPath` with this text instead of resolving. */
+  openKnownPathError: string | null = null;
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
@@ -190,7 +203,17 @@ export class FakeBackend implements Backend {
   }
 
   async refreshAutostart(): Promise<AutostartStatus> {
+    this.refreshAutostartCalls++;
     return this.autostart;
+  }
+
+  async getAppInfo(): Promise<AppInfo> {
+    return this.appInfo;
+  }
+
+  async openKnownPath(target: KnownPath): Promise<void> {
+    this.openKnownPathCalls.push(target);
+    if (this.openKnownPathError !== null) throw this.openKnownPathError;
   }
 
   /** Delivers an arbitrary state to the `onSettings` listeners (e.g. a stale one). */

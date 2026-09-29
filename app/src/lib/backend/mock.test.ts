@@ -285,6 +285,33 @@ test('mock navigation and autostart answers', async () => {
   expect(await backend.takePendingView()).toBeNull();
   await expect(backend.onNavigate(() => {})).resolves.toBeTypeOf('function');
   expect(await backend.refreshAutostart()).toEqual({ configured: false, effective: 'notConfigured', error: null });
+  await backend.updateSettings({ tray: { autostart: true } });
+  expect(await backend.refreshAutostart()).toEqual({ configured: true, effective: 'enabled', error: null });
+});
+
+test('mock autostart state from the URL', async () => {
+  history.replaceState(null, '', '/?autostart=disabledByWindows');
+  const backend = createMockBackend();
+  await backend.updateSettings({ tray: { autostart: true } });
+  expect((await backend.refreshAutostart()).effective).toBe('disabledByWindows');
+  history.replaceState(null, '', '/?autostart=unknown');
+  expect((await createMockBackend().refreshAutostart()).effective).toBe('unknown');
+});
+
+test('mock anti-cheat mode is kept in the settings, like the shell does', async () => {
+  const backend = createMockBackend();
+  await backend.setAntiCheat(true);
+  expect((await backend.getSettings()).settings.sources.antiCheat).toBe(true);
+  await backend.setAntiCheat(false);
+  expect((await backend.getSettings()).settings.sources.antiCheat).toBe(false);
+});
+
+test('mock app info and known paths', async () => {
+  const backend = createMockBackend();
+  const info = await backend.getAppInfo();
+  expect(info.protocolVersion).toBe(2);
+  expect(info.serviceVersion).not.toBeNull();
+  await expect(backend.openKnownPath('logsFolder')).resolves.toBeUndefined();
 });
 
 test('mock webview import fills only unset fields and sets the marker once', async () => {

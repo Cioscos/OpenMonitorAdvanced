@@ -131,6 +131,19 @@ fn storage_provider_reports_disks_and_volumes() {
         .filter(|s| s.kind == SensorKind::Temperature)
         .count();
     println!("{temperatures} disk temperature sensors");
+    // Every disk says whether its SMART can be switched off on its own (Settings › Data sources).
+    for device in &inventory.devices {
+        let selectable = device
+            .properties
+            .get(oma_win::storage::SMART_SELECTABLE)
+            .map(String::as_str);
+        assert!(
+            matches!(selectable, Some("true" | "false")),
+            "{}: {selectable:?}",
+            device.id
+        );
+        println!("{}: smartSelectable = {}", device.name, selectable.unwrap());
+    }
     assert!(temperatures > 0, "at least one disk reports a temperature");
     for device in &inventory.devices {
         for key in ["tempWarningC", "tempCriticalC"] {

@@ -400,6 +400,11 @@ impl ServiceShell {
         self.status_table.get().1
     }
 
+    /// The version the last service that said `Hello` reported.
+    pub(crate) fn service_version(&self) -> Option<String> {
+        self.status_table.service_version()
+    }
+
     /// The one toggle path: the `set_anti_cheat` command and the tray's
     /// check item both call this and nothing else. It changes the store and
     /// waits for the save; the tray checkbox and the link command follow the
@@ -438,6 +443,11 @@ impl ServiceShell {
 impl ServiceShell {
     fn status(&self) -> ServiceStatus {
         not_installed_status()
+    }
+
+    /// There is no service off Windows.
+    pub(crate) fn service_version(&self) -> Option<String> {
+        None
     }
 
     /// Off Windows there is no service and no link: `enabled` is ignored,

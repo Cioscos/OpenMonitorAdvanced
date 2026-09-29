@@ -266,6 +266,12 @@ test('device properties are translated, formatted and ordered', () => {
   expect(propertyRows({ id: 'x', kind: 'cpu', name: 'x' }, 'en', tEn)).toEqual([]);
 });
 
+test('the SMART switch property is for the settings, not the device page', () => {
+  const disk = { id: 'storage/a', kind: 'storage' as const, name: 'Disk', properties: { smartSelectable: 'true', tempWarningC: '70' } };
+  expect(propertyRows(disk, 'en', tEn).map((r) => r.key)).toEqual(['tempWarningC']);
+  expect(propertyRows({ ...disk, properties: { smartSelectable: 'false' } }, 'en', tEn)).toEqual([]);
+});
+
 test('temperature limits follow the temperature unit and their labels carry no unit', async () => {
   const device = { id: GPU, kind: 'gpu' as const, name: 'GPU', properties: { tempSlowdownC: '94', tempCriticalC: '100' } };
   expect(propertyRows(device, 'en', tEn).map((r) => r.value)).toEqual(['94 °C', '100 °C']);

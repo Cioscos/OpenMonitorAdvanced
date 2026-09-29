@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import type { SidebarEntry } from '../../lib/advanced/nav';
-  import { defaultSeries, kpisFor } from '../../lib/advanced/pages';
+  import { defaultSeries, kpisFor, propertyRows } from '../../lib/advanced/pages';
   import { StatsPoller } from '../../lib/advanced/statsPoller.svelte';
   import type { Backend } from '../../lib/backend';
+  import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
   import type { ServiceStatus } from '../../lib/types';
   import { display } from '../../lib/units.svelte';
@@ -35,7 +36,7 @@
   const sensors = $derived(schema?.sensors.filter((s) => entry.deviceIds.includes(s.deviceId)) ?? []);
   const kpis = $derived(schema ? kpisFor(entry.kind, schema, entry.deviceIds) : []);
   const defaults = $derived(schema ? defaultSeries(entry.kind, schema, entry.deviceIds) : []);
-  const hasProperties = $derived(devices.some((d) => Object.keys(d.properties ?? {}).length > 0));
+  const hasProperties = $derived(devices.some((d) => propertyRows(d, i18n.locale, t).length > 0));
   // Network traffic follows the throughput setting, like the Simple view's network tile; disks
   // and everything else stay in bytes. The KPIs, the table and the chart all take `rate`.
   const rate = $derived(entry.kind === 'network' ? display.throughput : 'bytes');

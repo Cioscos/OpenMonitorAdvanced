@@ -1,7 +1,9 @@
 import type {
+  AppInfo,
   AutostartStatus,
   GpuProcess,
   HistorySeed,
+  KnownPath,
   LegacyWebviewState,
   Schema,
   ServiceStatus,
@@ -62,4 +64,8 @@ export interface Backend {
   onNavigate(cb: (view: ViewKind) => void): Promise<Unsubscribe>;
   /** Re-reads the start-up entry as Windows sees it. */
   refreshAutostart(): Promise<AutostartStatus>;
+  /** Versions and folders for the About page. */
+  getAppInfo(): Promise<AppInfo>;
+  /** Opens one of the fixed places with the shell; rejects with the system's text. */
+  openKnownPath(target: KnownPath): Promise<void>;
 }

@@ -99,15 +99,22 @@ fn previous_crash() -> Option<String> {
     }
 }
 
-/// Sets up file logging under `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`. In a
+/// `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`; `None` without LOCALAPPDATA.
+pub(crate) fn logs_dir() -> Option<std::path::PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(local_app_data)
+            .join("OpenMonitorAdvanced")
+            .join("logs"),
+    )
+}
+
+/// Sets up file logging under [`logs_dir`]. In a
 /// release build the app has no console (windows subsystem), so a panic here
 /// would fail silently; missing `LOCALAPPDATA` or a rolling appender that
 /// cannot be built just leaves the app without a file log instead.
 fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
-    let logs = std::path::PathBuf::from(local_app_data)
-        .join("OpenMonitorAdvanced")
-        .join("logs");
+    let logs = logs_dir()?;
     let file = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("oma-app")
@@ -228,6 +235,8 @@ fn main() {
             commands::get_startup_status,
             commands::take_pending_view,
             commands::enable_vendor_libraries,
+            commands::get_app_info,
+            commands::open_known_path,
             autostart::refresh_autostart,
             service::get_service_status,
             service::set_anti_cheat,

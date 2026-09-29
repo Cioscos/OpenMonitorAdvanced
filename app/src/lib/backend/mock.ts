@@ -1,4 +1,5 @@
 import type {
+  AutostartEffective,
   GpuProcess,
   HistoryWindow,
   Label,
@@ -48,7 +49,7 @@ export const MOCK_SCHEMA: Schema = {
       properties: { pciAddress: '0000:01:00.0', integrated: 'false' },
     },
     { id: 'memory/0', kind: 'memory', name: 'RAM' },
-    { id: 'storage/device-mock-ssd', kind: 'storage', name: 'Disk 0 (C:)' },
+    { id: 'storage/device-mock-ssd', kind: 'storage', name: 'Disk 0 (C:)', properties: { smartSelectable: 'true' } },
     { id: 'network/mock-eth', kind: 'network', name: 'Ethernet' },
   ],
   sensors: [
@@ -94,7 +95,12 @@ const SERVICE_SENSORS: Sensor[] = [
 /** `MOCK_SCHEMA` plus the sensor-service devices and sensors above. */
 export const SERVICE_MOCK_SCHEMA: Schema = {
   revision: MOCK_SCHEMA.revision,
-  devices: [...MOCK_SCHEMA.devices, { id: SERVICE_DEVICE, kind: 'motherboard', name: 'Mock Motherboard' }],
+  devices: [
+    ...MOCK_SCHEMA.devices,
+    { id: SERVICE_DEVICE, kind: 'motherboard', name: 'Mock Motherboard' },
+    // A USB disk whose bridge hides the serial: its SMART cannot be switched off on its own.
+    { id: 'storage/device-mock-usb', kind: 'storage', name: 'Disk 1 (USB)', properties: { smartSelectable: 'false' } },
+  ],
   sensors: [...MOCK_SCHEMA.sensors, ...SERVICE_SENSORS],
 };
 
@@ -186,6 +192,12 @@ export function parsePawnIoStatus(search: string): PawnIoStatus {
   return (VALID_PAWN_IO as string[]).includes(raw ?? '') ? (raw as PawnIoStatus) : 'ok';
 }
 
+/** What Windows makes of a configured start-up entry, from `?autostart=disabledByWindows|unknown`. */
+function parseAutostart(search: string): AutostartEffective | null {
+  const raw = new URLSearchParams(search).get('autostart');
+  return raw === 'disabledByWindows' || raw === 'unknown' ? raw : null;
+}
+
 /** Every module on, nothing pending: the service as the mock finds it. */
 function mockSources(): ServiceSources {
   return {
@@ -211,6 +223,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   let startedAtMs: number | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
   const pawnIo = parsePawnIoStatus(typeof location === 'undefined' ? '' : location.search);
+  const autostart = parseAutostart(typeof location === 'undefined' ? '' : location.search);
   const statusFor = (state: ServiceState): ServiceStatus =>
     state === 'connected'
       ? { state, detail: null, pawnIo, sources: mockSources() }
@@ -273,6 +286,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
       return () => serviceListeners.delete(cb);
     },
     setAntiCheat: async (enabled) => {
+      // The shell stores the mode in the settings (`sources.antiCheat`) and emits `oma:settings`.
+      if (settings.state().settings.sources.antiCheat !== enabled) settings.update({ sources: { antiCheat: enabled } });
       setServiceStatus(statusFor(enabled ? 'antiCheat' : 'unreachable'));
       return serviceStatus;
     },
@@ -287,6 +302,18 @@ export function createMockBackend(intervalMs = 1000): Backend {
     importWebviewState: async (legacy) => settings.import(legacy),
     takePendingView: async () => null,
     onNavigate: async () => () => {},
-    refreshAutostart: async () => ({ configured: false, effective: 'notConfigured', error: null }),
+    refreshAutostart: async () => {
+      const configured = settings.state().settings.tray.autostart;
+      return { configured, effective: autostart ?? (configured ? 'enabled' : 'notConfigured'), error: null };
+    },
+    getAppInfo: async () => ({
+      version: '0.1.0',
+      serviceVersion: serviceStatus.state === 'connected' ? '0.1.0' : null,
+      protocolVersion: 2,
+      settingsPath: 'C:\\Users\\mock\\AppData\\Roaming\\OpenMonitorAdvanced',
+      logsPath: 'C:\\Users\\mock\\AppData\\Local\\OpenMonitorAdvanced\\logs',
+    }),
+    // Nothing to open in the browser: the request is only logged.
+    openKnownPath: async (target) => console.info('mock: open', target),
   };
 }

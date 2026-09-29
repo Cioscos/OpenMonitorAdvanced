@@ -18,6 +18,9 @@ fn initial() -> ServiceStatus {
 struct Inner {
     state: Mutex<(u64, ServiceStatus)>,
     observers: Mutex<Vec<Arc<StatusObserver>>>,
+    /// `Hello.service_version` of the last service that answered; outside the
+    /// status, so it never causes an `oma:service` event.
+    service_version: Mutex<Option<String>>,
 }
 
 /// Latest service status with a version that changes only when the status
@@ -30,6 +33,7 @@ impl Default for ServiceStatusTable {
         Self(Arc::new(Inner {
             state: Mutex::new((0, initial())),
             observers: Mutex::new(Vec::new()),
+            service_version: Mutex::new(None),
         }))
     }
 }
@@ -76,6 +80,27 @@ impl ServiceStatusTable {
         true
     }
 
+    /// The version the last service that said `Hello` reported, if any.
+    pub fn service_version(&self) -> Option<String> {
+        self.0
+            .service_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the service version (copied only when it differs).
+    pub fn set_service_version(&self, version: Option<&str>) {
+        let mut current = self
+            .0
+            .service_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if current.as_deref() != version {
+            *current = version.map(str::to_owned);
+        }
+    }
+
     /// Registers an observer for every later change. It runs on the thread
     /// that changes the status (the link thread), so it must be quick and
     /// never wait for the link.
@@ -91,6 +116,18 @@ impl ServiceStatusTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_service_version_is_kept_apart_from_the_status() {
+        let table = ServiceStatusTable::default();
+        assert_eq!(table.service_version(), None);
+        let (v0, _) = table.get();
+        table.set_service_version(Some("1.2.3"));
+        assert_eq!(table.service_version().as_deref(), Some("1.2.3"));
+        assert_eq!(table.get().0, v0, "no status change, no event");
+        table.set_service_version(None);
+        assert_eq!(table.service_version(), None);
+    }
 
     #[test]
     fn status_version_bumps_only_on_change() {

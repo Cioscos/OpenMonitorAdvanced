@@ -256,6 +256,9 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   tempCriticalC: 'celsius',
 };
 
+/** Properties meant for other screens: `smartSelectable` feeds the Settings' SMART switches. */
+const HIDDEN_PROPERTIES = new Set(['smartSelectable']);
+
 export interface PropertyRow {
   key: string;
   label: string;
@@ -269,6 +272,7 @@ export function propertyRows(device: Device, locale: string, t: Translate): Prop
     return i < 0 ? PROPERTY_ORDER.length : i;
   };
   return Object.entries(device.properties ?? {})
+    .filter(([key]) => !HIDDEN_PROPERTIES.has(key))
     .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
     .map(([key, raw]) => {
       const labelKey = `property.${key}`;

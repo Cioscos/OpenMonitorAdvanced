@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
+  AppInfo,
   AutostartStatus,
   GpuProcess,
   HistorySeed,
@@ -42,5 +43,8 @@ export function createTauriBackend(): Backend {
     takePendingView: () => invoke<ViewKind | null>('take_pending_view'),
     onNavigate: (cb) => listen<ViewKind>('oma:navigate', (e) => cb(e.payload)),
     refreshAutostart: () => invoke<AutostartStatus>('refresh_autostart'),
+    getAppInfo: () => invoke<AppInfo>('get_app_info'),
+    // A unit variant of `KnownPath`: the camelCase string is the whole value.
+    openKnownPath: (target) => invoke<void>('open_known_path', { target }),
   };
 }

@@ -295,3 +295,16 @@ export interface AutostartStatus {
   effective: AutostartEffective;
   error: string | null;
 }
+
+/** What the About page shows; mirrors `commands::AppInfo`. The paths are folders. */
+export interface AppInfo {
+  version: string;
+  /** From the last service `Hello`; null until a service has answered. */
+  serviceVersion: string | null;
+  protocolVersion: number;
+  settingsPath: string | null;
+  logsPath: string | null;
+}
+
+/** The only places `openKnownPath` opens (never a path the UI chooses). */
+export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'startupAppsSettings';

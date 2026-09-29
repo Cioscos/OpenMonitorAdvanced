@@ -1,5 +1,6 @@
 //! Tauri commands called by the UI (see app/src/lib/backend/tauri.ts).
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use oma_core::engine::Engine;
@@ -8,9 +9,10 @@ use oma_core::model::Schema;
 use oma_core::sampler::{unix_ms, IntervalHandle};
 use oma_core::settings::VendorLibraries;
 use oma_core::stats::SensorStats;
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
 
+use crate::service::ServiceShell;
 use crate::settings::{Effect, EffectStatus, SettingsStore};
 use crate::window::NavState;
 use crate::AppState;
@@ -291,6 +293,122 @@ pub(crate) fn follow_vendor_libraries(
         listener(&settings.sources.vendor_libraries)
     }));
     apply(&store.settings().sources.vendor_libraries);
+}
+
+/// What the About page shows (`AppInfo` in app/src/lib/types.ts).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    /// From the last service `Hello`; `None` until a service has answered.
+    pub service_version: Option<String>,
+    pub protocol_version: u32,
+    /// The folder that holds `settings.json`.
+    pub settings_path: Option<String>,
+    /// The folder of the diagnostic logs.
+    pub logs_path: Option<String>,
+}
+
+/// The only places `open_known_path` opens: never a path the UI chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KnownPath {
+    SettingsFolder,
+    LogsFolder,
+    ThirdPartyNotices,
+    /// Windows Settings › Apps › Startup, where Windows keeps the real state
+    /// of the start-up entry.
+    StartupAppsSettings,
+}
+
+/// `THIRD_PARTY_NOTICES.md` as the bundle ships it (`bundle.resources` in
+/// tauri.conf.json): renamed to `.txt`, which Windows always knows how to open.
+const THIRD_PARTY_NOTICES: &str = "THIRD_PARTY_NOTICES.txt";
+const STARTUP_APPS_SETTINGS: &str = "ms-settings:startupapps";
+
+/// Where the known paths are on this machine.
+pub(crate) struct KnownDirs {
+    pub settings_file: Option<PathBuf>,
+    pub logs: Option<PathBuf>,
+    /// The folder of the bundled resources.
+    pub resources: Option<PathBuf>,
+}
+
+impl KnownDirs {
+    pub(crate) fn current(app: &AppHandle) -> Self {
+        Self {
+            settings_file: crate::settings::settings_path(),
+            logs: crate::logs_dir(),
+            resources: app.path().resource_dir().ok(),
+        }
+    }
+
+    fn settings_folder(&self) -> Option<PathBuf> {
+        self.settings_file
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    }
+
+    /// What `target` opens; `None` when this machine has no such place.
+    pub(crate) fn target(&self, target: KnownPath) -> Option<PathBuf> {
+        match target {
+            KnownPath::SettingsFolder => self.settings_folder(),
+            KnownPath::LogsFolder => self.logs.clone(),
+            KnownPath::ThirdPartyNotices => self
+                .resources
+                .as_ref()
+                .map(|dir| dir.join(THIRD_PARTY_NOTICES)),
+            KnownPath::StartupAppsSettings => Some(PathBuf::from(STARTUP_APPS_SETTINGS)),
+        }
+    }
+}
+
+pub(crate) fn app_info(
+    version: String,
+    service_version: Option<String>,
+    dirs: &KnownDirs,
+) -> AppInfo {
+    let text = |path: Option<PathBuf>| path.map(|p| p.display().to_string());
+    AppInfo {
+        version,
+        service_version,
+        protocol_version: oma_ipc::PROTOCOL_VERSION,
+        settings_path: text(dirs.settings_folder()),
+        logs_path: text(dirs.logs.clone()),
+    }
+}
+
+#[tauri::command(async)]
+pub fn get_app_info(app: AppHandle, service: State<'_, ServiceShell>) -> AppInfo {
+    app_info(
+        app.package_info().version.to_string(),
+        service.service_version(),
+        &KnownDirs::current(&app),
+    )
+}
+
+/// Opens one of the fixed [`KnownPath`] targets with the shell. The error is
+/// the system's text, shown next to the button.
+#[tauri::command(async)]
+pub fn open_known_path(app: AppHandle, target: KnownPath) -> Result<(), String> {
+    let path = KnownDirs::current(&app)
+        .target(target)
+        .ok_or_else(|| "not available on this system".to_owned())?;
+    shell_open(&path).map_err(|err| {
+        tracing::warn!(?target, %err, "cannot open a known path");
+        err.to_string()
+    })
+}
+
+#[cfg(windows)]
+fn shell_open(path: &Path) -> std::io::Result<()> {
+    oma_win::shell_open::open(path)
+}
+
+#[cfg(not(windows))]
+fn shell_open(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("not supported on this system"))
 }
 
 /// Per-process GPU usage, published by the GPU provider every tick (decision D5).
@@ -700,5 +818,100 @@ mod tests {
             switch.effective(),
             only(&[Vendor::Nvapi, Vendor::Adl, Vendor::Igcl])
         );
+    }
+
+    #[test]
+    fn open_known_path_rejects_anything_but_the_four_targets() {
+        for (json, target) in [
+            ("\"settingsFolder\"", KnownPath::SettingsFolder),
+            ("\"logsFolder\"", KnownPath::LogsFolder),
+            ("\"thirdPartyNotices\"", KnownPath::ThirdPartyNotices),
+            ("\"startupAppsSettings\"", KnownPath::StartupAppsSettings),
+        ] {
+            assert_eq!(serde_json::from_str::<KnownPath>(json).unwrap(), target);
+        }
+        for json in [
+            r#""C:\\Windows\\System32\\cmd.exe""#,
+            r#""ms-settings:startupapps""#,
+            r#""SettingsFolder""#,
+            r#""""#,
+            r#"{"path":"C:\\"}"#,
+            r#"{"settingsFolder":"C:\\"}"#,
+            "0",
+            "null",
+        ] {
+            assert!(
+                serde_json::from_str::<KnownPath>(json).is_err(),
+                "{json} must be rejected"
+            );
+        }
+    }
+
+    fn dirs() -> KnownDirs {
+        KnownDirs {
+            settings_file: Some(PathBuf::from(r"C:\Roaming\OMA\settings.json")),
+            logs: Some(PathBuf::from(r"C:\Local\OMA\logs")),
+            resources: Some(PathBuf::from(r"C:\Program Files\OMA")),
+        }
+    }
+
+    #[test]
+    fn known_paths_resolve_to_fixed_places() {
+        let dirs = dirs();
+        assert_eq!(
+            dirs.target(KnownPath::SettingsFolder),
+            Some(PathBuf::from(r"C:\Roaming\OMA"))
+        );
+        assert_eq!(
+            dirs.target(KnownPath::LogsFolder),
+            Some(PathBuf::from(r"C:\Local\OMA\logs"))
+        );
+        assert_eq!(
+            dirs.target(KnownPath::ThirdPartyNotices),
+            Some(PathBuf::from(
+                r"C:\Program Files\OMA\THIRD_PARTY_NOTICES.txt"
+            ))
+        );
+        assert_eq!(
+            dirs.target(KnownPath::StartupAppsSettings),
+            Some(PathBuf::from("ms-settings:startupapps"))
+        );
+        let none = KnownDirs {
+            settings_file: None,
+            logs: None,
+            resources: None,
+        };
+        assert_eq!(none.target(KnownPath::SettingsFolder), None);
+        assert_eq!(none.target(KnownPath::LogsFolder), None);
+        assert_eq!(none.target(KnownPath::ThirdPartyNotices), None);
+        assert!(none.target(KnownPath::StartupAppsSettings).is_some());
+    }
+
+    #[test]
+    fn app_info_serializes_versions_and_folders() {
+        let info = app_info("0.1.0".into(), Some("0.1.0-svc".into()), &dirs());
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            serde_json::json!({
+                "version": "0.1.0",
+                "serviceVersion": "0.1.0-svc",
+                "protocolVersion": oma_ipc::PROTOCOL_VERSION,
+                "settingsPath": r"C:\Roaming\OMA",
+                "logsPath": r"C:\Local\OMA\logs",
+            })
+        );
+        let bare = app_info(
+            "0.1.0".into(),
+            None,
+            &KnownDirs {
+                settings_file: None,
+                logs: None,
+                resources: None,
+            },
+        );
+        let value = serde_json::to_value(&bare).unwrap();
+        assert_eq!(value["serviceVersion"], serde_json::Value::Null);
+        assert_eq!(value["settingsPath"], serde_json::Value::Null);
+        assert_eq!(value["logsPath"], serde_json::Value::Null);
     }
 }

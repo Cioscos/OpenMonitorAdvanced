@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import AdvancedView from './components/advanced/AdvancedView.svelte';
   import SafeModeNotice from './components/SafeModeNotice.svelte';
+  import SettingsView from './components/settings/SettingsView.svelte';
   import SimpleView from './components/simple/SimpleView.svelte';
   import TopBar from './components/TopBar.svelte';
   import { saveSection } from './lib/advanced/persist';
@@ -26,8 +27,13 @@
   const intervalMs = $derived(settings.state?.settings.general.intervalMs ?? session?.intervalMs ?? 1000);
   const stale = $derived(isStale(store.lastReceivedAtMs ?? openedAtMs, nowMs, intervalMs));
 
+  /** The view the settings screen goes back to. */
+  let previous = $state<ViewKind>('simple');
+  let gear = $state<HTMLButtonElement | undefined>();
+
   /** Shows a view and remembers Simple/Advanced as the last one (the settings screen is never saved). */
   function showView(next: View) {
+    if (next === 'settings' && view !== 'settings') previous = view;
     view = next;
     if (next !== 'settings' && settings.state?.settings.view.last !== next) {
       settings.update({ view: { last: next } });
@@ -130,15 +136,38 @@
     }
   }
 
+  /** Esc and "Back" return to the view shown before, with the focus back on the gear. */
+  async function closeSettings() {
+    showView(previous);
+    await tick();
+    gear?.focus();
+  }
+
+  function toggleSettings() {
+    if (view === 'settings') void closeSettings();
+    else showView('settings');
+  }
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && view === 'settings' && !event.defaultPrevented) {
+      event.preventDefault();
+      void closeSettings();
+    }
+  }
+
   function openAdvanced(section: string | null) {
     if (section !== null) saveSection(section);
     showView('advanced');
   }
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <TopBar
   {view}
   onViewChange={showView}
+  onSettings={toggleSettings}
+  bind:gear
   {service}
   onLeaveAntiCheat={() => backend.setAntiCheat(false)}
   onStartService={() => backend.startService()}
@@ -153,6 +182,8 @@
       <SimpleView {store} startedAtMs={session?.startedAtMs ?? null} onOpenAdvanced={openAdvanced} />
     {:else if view === 'advanced'}
       <AdvancedView {store} {backend} {service} />
+    {:else}
+      <SettingsView {store} {backend} {service} onBack={closeSettings} />
     {/if}
   {/if}
 </main>

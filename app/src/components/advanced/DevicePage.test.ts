@@ -76,6 +76,18 @@ test('cpu page: peak load from the core statistics, no process list, no empty in
   expect(screen.queryByText(t('advanced.info.title'))).toBeNull();
 });
 
+test('a disk whose only property is the SMART switch has no info box', async () => {
+  const { backend, store } = setup();
+  const disk = MOCK_SCHEMA.devices.find((d) => d.kind === 'storage')!;
+  store.applySchema({
+    ...MOCK_SCHEMA,
+    revision: MOCK_SCHEMA.revision + 1,
+    devices: MOCK_SCHEMA.devices.map((d) => (d.id === disk.id ? { ...d, properties: { smartSelectable: 'true' } } : d)),
+  });
+  render(DevicePage, { entry: { id: disk.id, kind: 'storage', labelKey: 'advanced.section.storage', deviceIds: [disk.id], labelArg: disk.name }, store, backend });
+  expect(screen.queryByText(t('advanced.info.title'))).toBeNull();
+});
+
 test('network page: traffic in bits per second, like the Simple view', async () => {
   const { backend, store } = setup();
   const NIC = 'network/mock-eth';

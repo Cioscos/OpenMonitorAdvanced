@@ -167,6 +167,21 @@ impl DriveEntry {
     }
 }
 
+/// Device property telling the UI whether this disk's SMART can be switched
+/// off on its own (`"true"`/`"false"`): only a disk whose descriptor has a
+/// model and a serial has a drive key (spec M5 §2.8).
+pub const SMART_SELECTABLE: &str = "smartSelectable";
+
+/// Properties of a disk device: its temperature limits and [`SMART_SELECTABLE`].
+pub(crate) fn disk_properties(
+    report: Option<&TemperatureReport>,
+    entry: &DriveEntry,
+) -> BTreeMap<String, String> {
+    let mut properties = temperature_properties(report);
+    properties.insert(SMART_SELECTABLE.to_owned(), entry.key.is_some().to_string());
+    properties
+}
+
 /// The wire keys of the disks named by core id in `request`, in request
 /// order and without repeats. A disk that is not in `drives` (unplugged, not
 /// identified yet) or has no key is dropped.
@@ -320,7 +335,7 @@ impl Provider for StorageProvider {
                 continue;
             };
             let (model, serial) = descriptor_texts(disk.index);
-            drive_entries.push(DriveEntry::new(disk.index, id.clone(), model, serial));
+            let entry = DriveEntry::new(disk.index, id.clone(), model, serial);
             // Unknown/asleep disks remain scheduled; a later successful probe
             // requests rediscovery when it reveals undeclared sensor indices.
             let report = read_temperatures(disk.index);
@@ -329,8 +344,9 @@ impl Provider for StorageProvider {
                 kind: DeviceKind::Storage,
                 name: disk_name(disk),
                 vendor: None,
-                properties: temperature_properties(report.as_ref()),
+                properties: disk_properties(report.as_ref(), &entry),
             });
+            drive_entries.push(entry);
             sensors.push(Sensor::new(
                 &id,
                 SensorKind::Throughput,
@@ -602,6 +618,28 @@ mod tests {
         assert_eq!(no_serial.key, None);
         let blank = DriveEntry::new(0, "storage/a".into(), Some("M".into()), Some("  ".into()));
         assert_eq!(blank.key, None);
+    }
+
+    #[test]
+    fn disk_properties_say_whether_smart_is_selectable() {
+        let report = TemperatureReport {
+            sensors: BTreeMap::new(),
+            warning_c: Some(70),
+            critical_c: None,
+        };
+        let with_key = disk_properties(Some(&report), &entry(1));
+        assert_eq!(
+            with_key.get(SMART_SELECTABLE).map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(with_key.get("tempWarningC").map(String::as_str), Some("70"));
+        let no_key = DriveEntry::new(2, "storage/no-key".into(), Some("M".into()), None);
+        let without = disk_properties(None, &no_key);
+        assert_eq!(
+            without.get(SMART_SELECTABLE).map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(without.len(), 1);
     }
 
     #[test]

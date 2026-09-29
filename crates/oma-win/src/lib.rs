@@ -10,6 +10,7 @@ pub mod gpu;
 pub mod memory;
 pub mod network;
 mod pdh;
+pub mod shell_open;
 pub mod storage;
 mod storage_identity;
 mod storage_ioctl;

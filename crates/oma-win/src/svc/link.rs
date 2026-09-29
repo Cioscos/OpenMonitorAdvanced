@@ -406,6 +406,9 @@ struct Machine {
     /// The service PID confirmed by the last accepted connection: what the
     /// SCM showed when the service turned out to be incompatible.
     verified_pid: Option<u32>,
+    /// `Hello.service_version` of the last service that answered, kept after
+    /// it disconnects (the About page shows it).
+    service_version: Option<String>,
     /// What the user turned off: the last request, sent with every `Subscribe`.
     request: SourceRequest,
     /// The service's block of the last schema of this connection.
@@ -443,6 +446,7 @@ impl Machine {
             deadline: None,
             grace_until: None,
             verified_pid: None,
+            service_version: None,
             request,
             service: None,
             awaiting: false,
@@ -1021,6 +1025,9 @@ impl Machine {
     }
 
     fn on_hello(&mut self, msg: Message, now: Instant) -> Vec<Effect> {
+        if let Message::Hello(hello) = &msg {
+            self.service_version = Some(hello.service_version.clone());
+        }
         match msg {
             Message::Hello(hello) if hello.protocol_version == PROTOCOL_VERSION => {
                 self.status.pawn_io = Some(PawnIoStatus::from_wire(&hello.pawn_io));
@@ -1342,6 +1349,9 @@ impl Driver {
                 Effect::SetSnapshot(snapshot) => self.feed.set_snapshot(snapshot, Instant::now()),
             }
         }
+        // Before the status, so a reader woken by the status sees the version.
+        self.status
+            .set_service_version(self.machine.service_version.as_deref());
         if self.status.set(&self.machine.status) {
             tracing::info!("sensor service status: {:?}", self.machine.status);
         }
@@ -3457,6 +3467,27 @@ mod tests {
         ctl.close();
         let status = h.wait_for(|s| s.state != ServiceState::Connected);
         assert_eq!((status.pawn_io, status.sources), (None, None));
+    }
+
+    #[test]
+    fn the_last_hello_gives_the_service_version() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = fake_conn(Some(PID));
+        ctl.push(Message::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            service_version: "9.8.7".to_owned(),
+            pawn_io: "ok".to_owned(),
+        }));
+        ctl.push(schema(2));
+        ctl.push(snapshot(1, 2));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(|s| s.state == ServiceState::Connected);
+        assert_eq!(h.status.service_version().as_deref(), Some("9.8.7"));
+
+        // Kept once the connection is gone: the last service that answered.
+        ctl.close();
+        h.wait_for(|s| s.state != ServiceState::Connected);
+        assert_eq!(h.status.service_version().as_deref(), Some("9.8.7"));
     }
 
     #[test]

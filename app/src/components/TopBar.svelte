@@ -2,43 +2,35 @@
   import { t } from '../lib/i18n/index.svelte';
   import type { ServiceStatus } from '../lib/types';
   import type { View } from '../lib/view';
+  import ServiceExplainer from './ServiceExplainer.svelte';
 
   let {
     view,
     onViewChange,
+    onSettings,
     service,
     onLeaveAntiCheat,
     onStartService,
     stale = false,
+    gear = $bindable(),
   }: {
     view: View;
     onViewChange: (view: View) => void;
+    /** The gear: opens the settings, or leaves them when they are open. */
+    onSettings: () => void;
     service: ServiceStatus | null;
     onLeaveAntiCheat: () => Promise<unknown>;
     onStartService: () => Promise<unknown>;
     stale?: boolean;
+    /** The gear button, so focus can return to it when the settings close. */
+    gear?: HTMLButtonElement;
   } = $props();
 
-  let busy = $state(false);
-  let failed = $state(false);
   // Collapsed by default (R23): the badge must not occupy permanent space for users without
   // the service. A command failure opens it so the error is visible.
   let open = $state(false);
 
   const showBadge = $derived(service !== null && service.state !== 'connected');
-
-  async function run(action: () => Promise<unknown>) {
-    busy = true;
-    failed = false;
-    try {
-      await action();
-    } catch {
-      failed = true;
-      open = true;
-    } finally {
-      busy = false;
-    }
-  }
 </script>
 
 <header class="topbar">
@@ -66,20 +58,26 @@
       <details class="badge" bind:open>
         <summary>{t('service.baseMode')}</summary>
         <div class="panel">
-          <div class="status" role="status">
-            <p>{t(`service.state.${service.state}`)}</p>
-            {#if service.detail}<p>{t(`service.detail.${service.detail}`)}</p>{/if}
-            {#if failed}<p class="error">{t('service.action.failed')}</p>{/if}
-          </div>
-          {#if service.state === 'antiCheat'}
-            <button type="button" disabled={busy} onclick={() => run(onLeaveAntiCheat)}>{t('service.action.leaveAntiCheat')}</button>
-          {:else if service.state === 'unreachable'}
-            <button type="button" disabled={busy} onclick={() => run(onStartService)}>{t('service.action.start')}</button>
-          {/if}
+          <ServiceExplainer {service} {onLeaveAntiCheat} {onStartService} onFailed={() => (open = true)} />
         </div>
       </details>
     {/if}
-    <button class="icon" type="button" disabled title={t('settings.comingSoon')} aria-label={t('settings.title')}>⚙</button>
+    <button
+      class="icon"
+      class:on={view === 'settings'}
+      type="button"
+      title={t('settings.title')}
+      aria-label={t('settings.title')}
+      aria-pressed={view === 'settings'}
+      bind:this={gear}
+      onclick={onSettings}
+    >
+      <!-- A gear: eight teeth drawn as a dashed ring around the body ring. -->
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="9" stroke-width="3" stroke-dasharray="3.53 3.54" />
+        <circle cx="12" cy="12" r="6.6" stroke-width="2.4" />
+      </svg>
+    </button>
   </div>
 </header>
 
@@ -147,26 +145,7 @@
   }
   .panel {
     max-width: 280px;
-  }
-  .panel p {
-    margin: 6px 0 0;
-    color: var(--text-muted);
-  }
-  .panel .error {
-    color: var(--crit);
-  }
-  .panel button {
-    margin-top: 8px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .panel button:disabled {
-    opacity: 0.6;
-    cursor: progress;
+    margin-top: 6px;
   }
   .stale {
     padding: 4px 10px;
@@ -176,13 +155,27 @@
     border: 1px solid color-mix(in srgb, var(--crit) 45%, transparent);
   }
   .icon {
+    display: grid;
+    place-items: center;
     width: 32px;
     height: 32px;
+    padding: 0;
+    color: var(--text-muted);
+    cursor: pointer;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
   }
-  .icon:disabled {
-    opacity: 0.5;
+  .icon:hover {
+    color: var(--text);
+  }
+  .icon.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  }
+  .icon:focus-visible,
+  .seg button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 </style>

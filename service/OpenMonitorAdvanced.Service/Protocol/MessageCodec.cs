@@ -85,20 +85,26 @@ public static class MessageCodec
     {
         switch (message)
         {
-            case Hello hello:
-                WriteEnvelopeHeader(ref w, "hello", 2);
+            case HelloMessage hello:
+                WriteEnvelopeHeader(ref w, "hello", 3);
                 w.Write("protocol_version");
                 w.Write(hello.ProtocolVersion);
                 w.Write("service_version");
                 w.Write(hello.ServiceVersion);
+                w.Write("pawn_io");
+                w.Write(hello.PawnIo);
                 break;
-            case Subscribe subscribe:
-                WriteEnvelopeHeader(ref w, "subscribe", 1);
+            case SubscribeMessage subscribe:
+                WriteEnvelopeHeader(ref w, "subscribe", 3);
                 w.Write("interval_ms");
                 w.Write(subscribe.IntervalMs);
+                w.Write("disabled_modules");
+                WriteStrings(ref w, subscribe.DisabledModules);
+                w.Write("smart_disabled_drives");
+                WriteStrings(ref w, subscribe.SmartDisabledDrives);
                 break;
             case SchemaMessage schema:
-                WriteEnvelopeHeader(ref w, "schema", 2);
+                WriteEnvelopeHeader(ref w, "schema", 3);
                 w.Write("devices");
                 w.WriteArrayHeader(schema.Devices.Count);
                 foreach (var device in schema.Devices)
@@ -113,6 +119,16 @@ public static class MessageCodec
                     WriteSensor(ref w, sensor);
                 }
 
+                w.Write("service");
+                w.WriteMapHeader(4);
+                w.Write("active_modules");
+                WriteStrings(ref w, schema.Service.ActiveModules);
+                w.Write("smart_disabled_drives");
+                WriteStrings(ref w, schema.Service.SmartDisabledDrives);
+                w.Write("reconfiguration");
+                w.Write(schema.Service.Reconfiguration);
+                w.Write("smart_blocked_by");
+                WriteStrings(ref w, schema.Service.SmartBlockedBy);
                 break;
             case SnapshotMessage snapshot:
                 WriteEnvelopeHeader(ref w, "snapshot", 3);
@@ -274,6 +290,15 @@ public static class MessageCodec
         w.Write(sensor.Category);
     }
 
+    private static void WriteStrings(ref MessagePackWriter w, IReadOnlyList<string> values)
+    {
+        w.WriteArrayHeader(values.Count);
+        foreach (var value in values)
+        {
+            w.Write(value);
+        }
+    }
+
     private static void WriteNullableString(ref MessagePackWriter w, string? value)
     {
         if (value is null)
@@ -355,10 +380,11 @@ public static class MessageCodec
         };
     }
 
-    private static Hello ReadHello(ref MessagePackReader reader)
+    private static HelloMessage ReadHello(ref MessagePackReader reader)
     {
         uint? protocolVersion = null;
         string? serviceVersion = null;
+        string? pawnIo = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
@@ -371,6 +397,9 @@ public static class MessageCodec
                     break;
                 case "service_version":
                     serviceVersion = ReadRequiredString(ref reader, "\"service_version\"");
+                    break;
+                case "pawn_io":
+                    pawnIo = ReadRequiredString(ref reader, "\"pawn_io\"");
                     break;
                 default:
                     reader.Skip();
@@ -388,24 +417,38 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"service_version\"");
         }
 
-        return new Hello(protocolVersion.Value, serviceVersion);
+        if (pawnIo is null)
+        {
+            throw new ProtocolException("missing required field \"pawn_io\"");
+        }
+
+        return new HelloMessage(protocolVersion.Value, serviceVersion, pawnIo);
     }
 
-    private static Subscribe ReadSubscribe(ref MessagePackReader reader)
+    private static SubscribeMessage ReadSubscribe(ref MessagePackReader reader)
     {
         uint? intervalMs = null;
+        List<string>? disabledModules = null;
+        List<string>? smartDisabledDrives = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
         {
             var key = ReadRequiredString(ref reader, "subscribe body key");
-            if (key == "interval_ms")
+            switch (key)
             {
-                intervalMs = reader.ReadUInt32();
-            }
-            else
-            {
-                reader.Skip();
+                case "interval_ms":
+                    intervalMs = reader.ReadUInt32();
+                    break;
+                case "disabled_modules":
+                    disabledModules = ReadArray(ref reader, ReadModuleName);
+                    break;
+                case "smart_disabled_drives":
+                    smartDisabledDrives = ReadDriveKeys(ref reader);
+                    break;
+                default:
+                    reader.Skip();
+                    break;
             }
         }
 
@@ -414,13 +457,78 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"interval_ms\"");
         }
 
-        return new Subscribe(intervalMs.Value);
+        if (disabledModules is null)
+        {
+            throw new ProtocolException("missing required field \"disabled_modules\"");
+        }
+
+        if (smartDisabledDrives is null)
+        {
+            throw new ProtocolException("missing required field \"smart_disabled_drives\"");
+        }
+
+        return new SubscribeMessage(intervalMs.Value, disabledModules, smartDisabledDrives);
+    }
+
+    /// <summary>A module name from <see cref="ProtocolConstants.Modules"/>; anything else is a bad request.</summary>
+    private static string ReadModuleName(ref MessagePackReader reader)
+    {
+        var name = ReadRequiredString(ref reader, "module name");
+        if (!ProtocolConstants.Modules.Contains(name))
+        {
+            throw new ProtocolException($"unknown module \"{name}\"");
+        }
+
+        return name;
+    }
+
+    /// <summary>At most <see cref="ProtocolConstants.MaxDriveKeys"/> keys, each 64 lowercase hexadecimal characters.</summary>
+    private static List<string> ReadDriveKeys(ref MessagePackReader reader)
+    {
+        var count = reader.ReadArrayHeader();
+        if (count > ProtocolConstants.MaxDriveKeys)
+        {
+            throw new ProtocolException($"{count} drive keys exceed the maximum of {ProtocolConstants.MaxDriveKeys}");
+        }
+
+        var keys = new List<string>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "drive key");
+            if (!IsDriveKey(key))
+            {
+                throw new ProtocolException("a drive key must be 64 lowercase hexadecimal characters");
+            }
+
+            keys.Add(key);
+        }
+
+        return keys;
+    }
+
+    private static bool IsDriveKey(string value)
+    {
+        if (value.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var c in value)
+        {
+            if (c is not ((>= '0' and <= '9') or (>= 'a' and <= 'f')))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static SchemaMessage ReadSchema(ref MessagePackReader reader)
     {
         List<WireDevice>? devices = null;
         List<WireSensor>? sensors = null;
+        ServiceStateBlock? service = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
@@ -433,6 +541,9 @@ public static class MessageCodec
                     break;
                 case "sensors":
                     sensors = ReadArray(ref reader, ReadSensor);
+                    break;
+                case "service":
+                    service = ReadServiceState(ref reader);
                     break;
                 default:
                     reader.Skip();
@@ -450,7 +561,66 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"sensors\"");
         }
 
-        return new SchemaMessage(devices, sensors);
+        if (service is null)
+        {
+            throw new ProtocolException("missing required field \"service\"");
+        }
+
+        return new SchemaMessage(devices, sensors, service);
+    }
+
+    private static ServiceStateBlock ReadServiceState(ref MessagePackReader reader)
+    {
+        List<string>? activeModules = null;
+        List<string>? smartDisabledDrives = null;
+        string? reconfiguration = null;
+        List<string>? smartBlockedBy = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "service map key");
+            switch (key)
+            {
+                case "active_modules":
+                    activeModules = ReadArray(ref reader, ReadModuleName);
+                    break;
+                case "smart_disabled_drives":
+                    smartDisabledDrives = ReadDriveKeys(ref reader);
+                    break;
+                case "reconfiguration":
+                    reconfiguration = ReadRequiredString(ref reader, "\"reconfiguration\"");
+                    break;
+                case "smart_blocked_by":
+                    smartBlockedBy = ReadDriveKeys(ref reader);
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        if (activeModules is null)
+        {
+            throw new ProtocolException("missing required field \"active_modules\"");
+        }
+
+        if (smartDisabledDrives is null)
+        {
+            throw new ProtocolException("missing required field \"smart_disabled_drives\"");
+        }
+
+        if (reconfiguration is null)
+        {
+            throw new ProtocolException("missing required field \"reconfiguration\"");
+        }
+
+        if (smartBlockedBy is null)
+        {
+            throw new ProtocolException("missing required field \"smart_blocked_by\"");
+        }
+
+        return new ServiceStateBlock(activeModules, smartDisabledDrives, reconfiguration, smartBlockedBy);
     }
 
     private static WireDevice ReadDevice(ref MessagePackReader reader)

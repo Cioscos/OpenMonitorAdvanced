@@ -368,6 +368,16 @@ impl Phase {
     }
 }
 
+/// The `Subscribe` this client sends. Until the settings wire them in, it asks for every
+/// module and every disk's SMART.
+fn subscribe_request(interval_ms: u32) -> Subscribe {
+    Subscribe {
+        interval_ms,
+        disabled_modules: Vec::new(),
+        smart_disabled_drives: Vec::new(),
+    }
+}
+
 fn status(state: ServiceState, detail: Option<ServiceDetail>) -> ServiceStatus {
     ServiceStatus::new(state, detail)
 }
@@ -539,7 +549,7 @@ impl Machine {
         }
         vec![
             Effect::SetInterval(self.settings.interval()),
-            Effect::Send(Message::Subscribe(Subscribe { interval_ms: ms })),
+            Effect::Send(Message::Subscribe(subscribe_request(ms))),
         ]
     }
 
@@ -877,9 +887,9 @@ impl Machine {
                 self.go(Phase::Subscribing, None);
                 vec![
                     Effect::SetInterval(self.settings.interval()),
-                    Effect::Send(Message::Subscribe(Subscribe {
-                        interval_ms: self.settings.interval_ms,
-                    })),
+                    Effect::Send(Message::Subscribe(subscribe_request(
+                        self.settings.interval_ms,
+                    ))),
                 ]
             }
             Message::Hello(hello) => {
@@ -1340,11 +1350,13 @@ mod tests {
         Message::Hello(Hello {
             protocol_version: version,
             service_version: "test".to_owned(),
+            pawn_io: "ok".to_owned(),
         })
     }
 
     fn wire_schema(sensors: usize) -> WireSchema {
         WireSchema {
+            service: Default::default(),
             devices: vec![WireDevice {
                 id: "cpu-0".to_owned(),
                 kind: "cpu".to_owned(),
@@ -2064,7 +2076,7 @@ mod tests {
         assert_eq!(view.interval, Duration::from_millis(1000));
         assert_eq!(
             ctl.sent(),
-            vec![Message::Subscribe(Subscribe { interval_ms: 1000 })]
+            vec![Message::Subscribe(subscribe_request(1000))]
         );
         assert_eq!(h.control.starts(), 0, "a running service is not started");
 
@@ -2101,8 +2113,8 @@ mod tests {
         assert_eq!(
             sent,
             vec![
-                Message::Subscribe(Subscribe { interval_ms: 1000 }),
-                Message::Subscribe(Subscribe { interval_ms: 2000 }),
+                Message::Subscribe(subscribe_request(1000)),
+                Message::Subscribe(subscribe_request(2000)),
             ]
         );
         let end = Instant::now() + WAIT;
@@ -2157,7 +2169,7 @@ mod tests {
         h.wait_for(is(connected()));
         assert_eq!(
             ctl.sent(),
-            vec![Message::Subscribe(Subscribe { interval_ms: 2000 })]
+            vec![Message::Subscribe(subscribe_request(2000))]
         );
         assert_eq!(h.feed.view().interval, Duration::from_millis(2000));
     }
@@ -2186,7 +2198,7 @@ mod tests {
             effects,
             vec![
                 Effect::SetInterval(Duration::from_millis(5000)),
-                Effect::Send(Message::Subscribe(Subscribe { interval_ms: 5000 })),
+                Effect::Send(Message::Subscribe(subscribe_request(5000))),
             ]
         );
         assert_eq!(machine.deadline, Some(now + Duration::from_secs(15)));
@@ -2210,7 +2222,7 @@ mod tests {
             effects,
             vec![
                 Effect::SetInterval(Duration::from_millis(500)),
-                Effect::Send(Message::Subscribe(Subscribe { interval_ms: 500 })),
+                Effect::Send(Message::Subscribe(subscribe_request(500))),
             ]
         );
         assert_eq!(machine.deadline, Some(deadline));
@@ -2980,7 +2992,7 @@ mod tests {
             m.decide(Event::Message(hello(PROTOCOL_VERSION)), now),
             vec![
                 Effect::SetInterval(Duration::from_millis(1000)),
-                Effect::Send(Message::Subscribe(Subscribe { interval_ms: 1000 })),
+                Effect::Send(Message::Subscribe(subscribe_request(1000))),
             ]
         );
         assert!(!m.reads_connection());
@@ -3564,7 +3576,7 @@ mod tests {
         }
         assert!(inbox.recv_timeout(Duration::from_millis(10)).is_err());
 
-        let subscribe = Message::Subscribe(Subscribe { interval_ms: 1000 });
+        let subscribe = Message::Subscribe(subscribe_request(1000));
         conn.send(&subscribe).expect("send");
         assert_eq!(server.recv(), subscribe);
 

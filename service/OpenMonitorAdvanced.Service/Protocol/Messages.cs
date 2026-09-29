@@ -9,11 +9,40 @@ namespace OpenMonitorAdvanced.Service.Protocol;
 /// </summary>
 public interface IMessage;
 
-public sealed record Hello(uint ProtocolVersion, string ServiceVersion) : IMessage;
+/// <summary>
+/// The service's greeting. <paramref name="PawnIo"/> is the state of the PawnIO driver
+/// (<c>ok</c>, <c>missing</c>, <c>unavailable</c>, <c>unknown</c> or <c>rebootPending</c>).
+/// </summary>
+public sealed record HelloMessage(uint ProtocolVersion, string ServiceVersion, string PawnIo) : IMessage;
 
-public sealed record Subscribe(uint IntervalMs) : IMessage;
+/// <summary>
+/// A client's request: the interval, the modules it does not want (names from
+/// <see cref="ProtocolConstants.Modules"/>) and the drive keys (<see cref="Sensors.DriveKey"/>)
+/// whose SMART it does not want. The decoder validates the lists.
+/// </summary>
+public sealed record SubscribeMessage(
+    uint IntervalMs,
+    IReadOnlyList<string> DisabledModules,
+    IReadOnlyList<string> SmartDisabledDrives) : IMessage;
 
-public sealed record SchemaMessage(IReadOnlyList<WireDevice> Devices, IReadOnlyList<WireSensor> Sensors) : IMessage;
+public sealed record SchemaMessage(
+    IReadOnlyList<WireDevice> Devices,
+    IReadOnlyList<WireSensor> Sensors,
+    ServiceStateBlock Service) : IMessage;
+
+/// <summary>
+/// The service's effective configuration, global to all its clients. <c>Reconfiguration</c> is
+/// <c>applied</c>, <c>pending</c> or <c>failed</c>.
+/// </summary>
+public sealed record ServiceStateBlock(
+    IReadOnlyList<string> ActiveModules,
+    IReadOnlyList<string> SmartDisabledDrives,
+    string Reconfiguration,
+    IReadOnlyList<string> SmartBlockedBy)
+{
+    /// <summary>Every module on, nothing disabled, nothing in progress.</summary>
+    public static ServiceStateBlock AllActive { get; } = new(ProtocolConstants.Modules, [], "applied", []);
+}
 
 public sealed record SnapshotMessage(ulong Seq, ulong TimestampMs, IReadOnlyList<double?> Values) : IMessage;
 

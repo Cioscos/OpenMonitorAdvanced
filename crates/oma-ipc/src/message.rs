@@ -30,17 +30,50 @@ pub enum Message {
 pub struct Hello {
     pub protocol_version: u32,
     pub service_version: String,
+    /// State of the PawnIO driver: `"ok"`, `"missing"`, `"unavailable"`, `"unknown"` or
+    /// `"rebootPending"`.
+    pub pawn_io: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subscribe {
     pub interval_ms: u32,
+    /// Service modules this client does not want (names from [`crate::MODULES`]).
+    pub disabled_modules: Vec<String>,
+    /// [`crate::drive_key`]s of the disks whose SMART this client does not want.
+    pub smart_disabled_drives: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireSchema {
     pub devices: Vec<WireDevice>,
     pub sensors: Vec<WireSensor>,
+    pub service: WireServiceState,
+}
+
+/// The service's effective configuration, global to all its clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireServiceState {
+    /// Modules that are on ([`crate::MODULES`] names).
+    pub active_modules: Vec<String>,
+    /// [`crate::drive_key`]s of the disks whose SMART is off.
+    pub smart_disabled_drives: Vec<String>,
+    /// `"applied"`, `"pending"` or `"failed"`.
+    pub reconfiguration: String,
+    /// [`crate::drive_key`]s of the disks that keep SMART closed for all disks.
+    pub smart_blocked_by: Vec<String>,
+}
+
+impl Default for WireServiceState {
+    /// Nothing switched off and nothing in progress: every module on, `"applied"`.
+    fn default() -> Self {
+        Self {
+            active_modules: crate::MODULES.map(str::to_owned).to_vec(),
+            smart_disabled_drives: Vec::new(),
+            reconfiguration: "applied".to_owned(),
+            smart_blocked_by: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

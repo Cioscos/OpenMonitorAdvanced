@@ -184,11 +184,11 @@ internal sealed class TestClient(PipeStream stream) : IDisposable
 /// </summary>
 internal sealed class ListenerHarness : IAsyncDisposable
 {
-    private ListenerHarness(PipeListenerOptions options)
+    private ListenerHarness(PipeListenerOptions options, PawnIoStatus pawnIo)
     {
         Options = options;
         Idle = new IdleShutdown(Lifetime, Time, TimeSpan.FromMinutes(2));
-        Listener = new PipeListener(Feed, options, Idle, Log);
+        Listener = new PipeListener(Feed, options, Idle, new PawnIoState(() => pawnIo), Log);
     }
 
     public PipeListenerOptions Options { get; }
@@ -213,7 +213,8 @@ internal sealed class ListenerHarness : IAsyncDisposable
         CancellationToken ct,
         TimeSpan? subscribeTimeout = null,
         TimeSpan? writeTimeout = null,
-        string? sddl = null)
+        string? sddl = null,
+        PawnIoStatus pawnIo = PawnIoStatus.Ok)
     {
         var defaults = new PipeListenerOptions();
         var harness = new ListenerHarness(new PipeListenerOptions
@@ -222,20 +223,20 @@ internal sealed class ListenerHarness : IAsyncDisposable
             SecurityDescriptorSddl = sddl,
             SubscribeTimeout = subscribeTimeout ?? defaults.SubscribeTimeout,
             WriteTimeout = writeTimeout ?? defaults.WriteTimeout,
-        });
+        }, pawnIo);
         await harness.Listener.StartAsync(ct);
         return harness;
     }
 
-    /// <summary>Connects, reads <see cref="Hello"/>, subscribes and waits until the feed saw the subscription.</summary>
+    /// <summary>Connects, reads <see cref="HelloMessage"/>, subscribes and waits until the feed saw the subscription.</summary>
     public async Task<TestClient> SubscribedClientAsync(uint intervalMs, CancellationToken ct)
     {
         int before = Feed.All.Count;
         TestClient client = await TestClient.ConnectAsync(PipeName, ct);
         try
         {
-            await client.ReadAsync<Hello>(ct);
-            await client.SendAsync(new Subscribe(intervalMs), ct);
+            await client.ReadAsync<HelloMessage>(ct);
+            await client.SendAsync(new SubscribeMessage(intervalMs, [], []), ct);
             await PipeAssert.EventuallyAsync(() => Feed.All.Count > before, "the subscription", ct);
             return client;
         }

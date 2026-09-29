@@ -33,8 +33,8 @@ public sealed class ServiceHostTests
         Task<int> run = RunInBackground(host);
 
         using var client = await TestClient.ConnectAsync(pipeName, Ct);
-        await client.ReadAsync<Hello>(Ct);
-        await client.SendAsync(new Subscribe(1000), Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
+        await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
         await PipeAssert.EventuallyAsync(() => _feed.All.Count == 1, "the subscription", Ct);
 
         host.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
@@ -68,7 +68,7 @@ public sealed class ServiceHostTests
         await using var owner = await ListenerHarness.StartAsync(Ct);
         using (var client = await TestClient.ConnectAsync(owner.PipeName, Ct))
         {
-            await client.ReadAsync<Hello>(Ct); // the other listener owns the name
+            await client.ReadAsync<HelloMessage>(Ct); // the other listener owns the name
         }
 
         using IHost host = Build(owner.PipeName, TimeSpan.FromMinutes(2));

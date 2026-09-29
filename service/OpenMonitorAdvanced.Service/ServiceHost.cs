@@ -77,6 +77,12 @@ internal static class ServiceHost
             });
         }
 
+        // Computed once per process, on first use, and shared by the hub and every client's Hello.
+        builder.Services.AddSingleton(sp =>
+        {
+            ILogger<PawnIoProbe> probeLog = sp.GetRequiredService<ILoggerFactory>().CreateLogger<PawnIoProbe>();
+            return new PawnIoState(() => ProbePawnIo(new PawnIoProbe(probeLog), probeLog));
+        });
         builder.Services.AddSingleton(feed);
         builder.Services.AddSingleton(pipeOptions);
         builder.Services.AddSingleton(sp => new IdleShutdown(
@@ -95,16 +101,29 @@ internal static class ServiceHost
         return builder.Build();
     }
 
+    private static PawnIoStatus ProbePawnIo(PawnIoProbe probe, ILogger log)
+    {
+        try
+        {
+            return probe.Probe();
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Probing PawnIO failed; its status is unknown");
+            return PawnIoStatus.Unknown;
+        }
+    }
+
     /// <summary>The production feed: <see cref="SensorHub"/> over LibreHardwareMonitor (Task 6).</summary>
     internal static ISensorFeed CreateSensorHub(IServiceProvider services)
     {
         ILoggerFactory logs = services.GetRequiredService<ILoggerFactory>();
         var disks = new DiskPowerProbe(logs.CreateLogger<DiskPowerProbe>());
-        var pawnIo = new PawnIoProbe(logs.CreateLogger<PawnIoProbe>());
+        PawnIoState pawnIo = services.GetRequiredService<PawnIoState>();
 
         // Owned by the hub, never registered in DI: the hub decides whether it may be closed.
         var tree = new LhmTree(logs.CreateLogger<LhmTree>());
-        return new SensorHub(tree, disks, pawnIo.IsAvailable, TimeProvider.System, logs.CreateLogger<SensorHub>());
+        return new SensorHub(tree, disks, () => pawnIo.Status == PawnIoStatus.Ok, TimeProvider.System, logs.CreateLogger<SensorHub>());
     }
 
     /// <summary>

@@ -16,6 +16,9 @@ namespace OpenMonitorAdvanced.Service.Tests.Protocol;
 /// </summary>
 public sealed class CodecTests
 {
+    private const string KeyA = "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83";
+    private const string KeyB = "3ed905bde72420026a8d0268d0faa314158c7f6d24c853abd4cc97cf55904ea6";
+
     public static readonly TheoryData<string> FixtureNames =
     [
         "hello", "subscribe", "schema", "snapshot", "snapshot_empty", "error",
@@ -50,9 +53,15 @@ public sealed class CodecTests
         switch (name)
         {
             case "hello":
-            case "subscribe":
             case "error":
                 Assert.Equal(Reference(name), decoded);
+                break;
+            case "subscribe":
+                var expectedSubscribe = (SubscribeMessage)Reference(name);
+                var actualSubscribe = Assert.IsType<SubscribeMessage>(decoded);
+                Assert.Equal(expectedSubscribe.IntervalMs, actualSubscribe.IntervalMs);
+                Assert.Equal(expectedSubscribe.DisabledModules, actualSubscribe.DisabledModules);
+                Assert.Equal(expectedSubscribe.SmartDisabledDrives, actualSubscribe.SmartDisabledDrives);
                 break;
             case "snapshot":
             case "snapshot_empty":
@@ -77,6 +86,10 @@ public sealed class CodecTests
                     AssertSensorEqual(expectedSchema.Sensors[i], actualSchema.Sensors[i]);
                 }
 
+                Assert.Equal(expectedSchema.Service.ActiveModules, actualSchema.Service.ActiveModules);
+                Assert.Equal(expectedSchema.Service.SmartDisabledDrives, actualSchema.Service.SmartDisabledDrives);
+                Assert.Equal(expectedSchema.Service.Reconfiguration, actualSchema.Service.Reconfiguration);
+                Assert.Equal(expectedSchema.Service.SmartBlockedBy, actualSchema.Service.SmartBlockedBy);
                 break;
         }
     }
@@ -110,18 +123,99 @@ public sealed class CodecTests
     }
 
     [Fact]
+    public void UnknownModuleIsABadRequest()
+    {
+        var bytes = SubscribeBody(["memory", "gpu"], []);
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Contains("gpu", e.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryKnownModuleIsAccepted()
+    {
+        var bytes = SubscribeBody(["cpu", "motherboard", "memory", "storage", "controller", "psu"], []);
+        var decoded = Assert.IsType<SubscribeMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Equal(6, decoded.DisabledModules.Count);
+    }
+
+    [Fact]
+    public void TooManyDriveKeysIsABadRequest()
+    {
+        var atLimit = Enumerable.Range(0, ProtocolConstants.MaxDriveKeys).Select(KeyFor).ToArray();
+        var accepted = Assert.IsType<SubscribeMessage>(
+            MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SubscribeBody([], atLimit))));
+        Assert.Equal(ProtocolConstants.MaxDriveKeys, accepted.SmartDisabledDrives.Count);
+
+        var tooMany = Enumerable.Range(0, ProtocolConstants.MaxDriveKeys + 1).Select(KeyFor).ToArray();
+        Assert.Throws<ProtocolException>(
+            () => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SubscribeBody([], tooMany))));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("abc")]
+    [InlineData("589488FB5895D8B81B82760DC67568E8C99B40A81FAFE4240BD45DD1EE614D83")] // uppercase
+    [InlineData("589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d8")] // 63 characters
+    [InlineData("589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d833")] // 65 characters
+    [InlineData("g89488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83")] // not hex
+    public void MalformedDriveKeyIsABadRequest(string key)
+    {
+        var bytes = SubscribeBody([], [key]);
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void SubscribeWithoutTheV2ListsIsRejected()
+    {
+        var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(1);
+            w.Write("interval_ms");
+            w.Write(500u);
+        });
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    private static string KeyFor(int i) => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static byte[] SubscribeBody(string[] modules, string[] drives) =>
+        BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(3);
+            w.Write("interval_ms");
+            w.Write(1000u);
+            w.Write("disabled_modules");
+            w.WriteArrayHeader(modules.Length);
+            foreach (var m in modules)
+            {
+                w.Write(m);
+            }
+
+            w.Write("smart_disabled_drives");
+            w.WriteArrayHeader(drives.Length);
+            foreach (var d in drives)
+            {
+                w.Write(d);
+            }
+        });
+
+    [Fact]
     public void ExtraFieldsAreSkipped()
     {
         var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
         {
-            w.WriteMapHeader(2);
+            w.WriteMapHeader(4);
             w.Write("interval_ms");
             w.Write(500u);
+            w.Write("disabled_modules");
+            w.WriteArrayHeader(0);
+            w.Write("smart_disabled_drives");
+            w.WriteArrayHeader(0);
             w.Write("extra");
             w.Write(1);
         });
 
-        var decoded = Assert.IsType<Subscribe>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        var decoded = Assert.IsType<SubscribeMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
         Assert.Equal(500u, decoded.IntervalMs);
     }
 
@@ -142,7 +236,7 @@ public sealed class CodecTests
     [Fact]
     public void TrailingBytesAreRejected()
     {
-        var payload = MessageCodec.EncodePayload(new Subscribe(500));
+        var payload = MessageCodec.EncodePayload(new SubscribeMessage(500, [], []));
         var bytes = new byte[payload.Length + 1];
         payload.CopyTo(bytes, 0);
         bytes[^1] = 0xc0; // an extra nil byte tacked on after a valid message
@@ -203,7 +297,7 @@ public sealed class CodecTests
     [Fact]
     public async Task PartialFrameAtEofIsAnError()
     {
-        var frame = MessageCodec.EncodeFrame(new Subscribe(500));
+        var frame = MessageCodec.EncodeFrame(new SubscribeMessage(500, [], []));
         var truncated = frame[..^2];
         var stream = new MemoryStream(truncated);
 
@@ -414,7 +508,7 @@ public sealed class CodecTests
             "d", "cpu", "n", null,
             new Dictionary<string, string> { ["😀"] = "emoji", ["｡"] = "halfwidth" },
             null);
-        var schema = new SchemaMessage([device], []);
+        var schema = new SchemaMessage([device], [], ServiceStateBlock.AllActive);
         var payload = MessageCodec.EncodePayload(schema);
 
         var halfwidthIndex = IndexOfSubsequence(payload, Encoding.UTF8.GetBytes("｡"));
@@ -598,8 +692,8 @@ public sealed class CodecTests
     /// <summary>The logical message each fixture holds, per <c>protocol/fixtures/README.md</c>.</summary>
     private static IMessage Reference(string name) => name switch
     {
-        "hello" => new Hello(1, "0.1.0"),
-        "subscribe" => new Subscribe(1000),
+        "hello" => new HelloMessage(2, "0.1.0", "rebootPending"),
+        "subscribe" => new SubscribeMessage(1000, ["memory", "psu"], [KeyA, KeyB]),
         "schema" => new SchemaMessage(
             [
                 new WireDevice(
@@ -631,7 +725,12 @@ public sealed class CodecTests
                 new WireSensor(
                     "lhm-nvme0", "percent", "wear", "percent",
                     "storage.percentUsed", null, "percent"),
-            ]),
+            ],
+            new ServiceStateBlock(
+                ["cpu", "motherboard", "storage", "controller"],
+                [KeyA],
+                "pending",
+                [KeyB])),
         "snapshot" => new SnapshotMessage(
             4_294_967_301UL, 1_790_000_000_000UL,
             new double?[] { 45.0, null, -12.5, 0.0 }),

@@ -487,6 +487,7 @@ mod tests {
         Message::Hello(Hello {
             protocol_version: 1,
             service_version: "test".to_owned(),
+            pawn_io: "ok".to_owned(),
         })
     }
 
@@ -542,7 +543,11 @@ mod tests {
             other => panic!("expected Hello, got {other:?}"),
         }
 
-        let subscribe = Message::Subscribe(Subscribe { interval_ms: 1000 });
+        let subscribe = Message::Subscribe(Subscribe {
+            interval_ms: 1000,
+            disabled_modules: Vec::new(),
+            smart_disabled_drives: Vec::new(),
+        });
         client.send(&subscribe).expect("send Subscribe");
         assert_eq!(server.recv(), subscribe);
 
@@ -655,7 +660,11 @@ mod tests {
         }
         assert_channel_closed(&rx);
         let err = client
-            .send(&Message::Subscribe(Subscribe { interval_ms: 1000 }))
+            .send(&Message::Subscribe(Subscribe {
+                interval_ms: 1000,
+                disabled_modules: Vec::new(),
+                smart_disabled_drives: Vec::new(),
+            }))
             .expect_err("a closed connection refuses to send");
         assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
         reader.stop();

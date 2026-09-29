@@ -6,8 +6,8 @@ using OpenMonitorAdvanced.Service.Sensors;
 namespace OpenMonitorAdvanced.Service.Pipe;
 
 /// <summary>
-/// One connected pipe client (spec §6): sends <see cref="Hello"/>, waits for a
-/// <see cref="Subscribe"/>, then forwards every <see cref="FeedUpdate"/> as an optional
+/// One connected pipe client (spec §6): sends <see cref="HelloMessage"/>, waits for a
+/// <see cref="SubscribeMessage"/>, then forwards every <see cref="FeedUpdate"/> as an optional
 /// <see cref="SchemaMessage"/> followed by its <see cref="SnapshotMessage"/>.
 /// </summary>
 /// <remarks>
@@ -39,6 +39,7 @@ internal sealed class ClientSession
 
     private readonly Stream _pipe;
     private readonly ISensorFeed _feed;
+    private readonly PawnIoState _pawnIo;
     private readonly PipeListenerOptions _options;
     private readonly ILogger _log;
     private readonly int _id;
@@ -62,10 +63,11 @@ internal sealed class ClientSession
     private int _queuedUpdates;
     private int _overflowed;
 
-    public ClientSession(Stream pipe, ISensorFeed feed, PipeListenerOptions options, ILogger log, int id)
+    public ClientSession(Stream pipe, ISensorFeed feed, PawnIoState pawnIo, PipeListenerOptions options, ILogger log, int id)
     {
         _pipe = pipe;
         _feed = feed;
+        _pawnIo = pawnIo;
         _options = options;
         _log = log;
         _id = id;
@@ -77,7 +79,7 @@ internal sealed class ClientSession
         using var session = CancellationTokenSource.CreateLinkedTokenSource(stopping, _abort.Token);
         try
         {
-            _outbox.Writer.TryWrite(new Outgoing(new Hello(ProtocolConstants.Version, ServiceVersion), null, Final: false));
+            _outbox.Writer.TryWrite(new Outgoing(new HelloMessage(ProtocolConstants.Version, ServiceVersion, PawnIoClassifier.ToWire(_pawnIo.Status)), null, Final: false));
 
             Task writer = WriteLoopAsync(session.Token);
             Task<bool> reader = ReadLoopAsync(session.Token);
@@ -147,7 +149,7 @@ internal sealed class ClientSession
                     case null:
                         _log.LogDebug("Pipe client {Client} disconnected", _id);
                         return false;
-                    case Subscribe subscribe:
+                    case SubscribeMessage subscribe:
                         if (!TrySubscribe(subscribe.IntervalMs))
                         {
                             return false;

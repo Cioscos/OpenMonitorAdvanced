@@ -598,6 +598,10 @@ Section "$(omaSensorsSection)" SecSensors
       !insertmacro OMA_FAIL "$(omaSensorsFailed)" "PawnIO setup could not be started"
     ${ElseIf} $3 == "3010"
       SetRebootFlag true
+      ; Evidence for the service that the driver waits for a restart: the time of this
+      ; request as a decimal FILETIME. The service compares it with the boot time.
+      System::Call 'kernel32::GetSystemTimeAsFileTime(*l .r0)'
+      WriteRegStr HKLM "Software\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc" "$0"
     ${ElseIf} $3 != "0"
       !insertmacro OMA_FAIL "$(omaSensorsFailed)" "PawnIO setup exited with $3"
     ${EndIf}
@@ -724,6 +728,7 @@ FunctionEnd
   ${If} $UpdateMode <> 1
     SetRegView 64
     DeleteRegValue HKLM "${OMA_REGKEY}" "${OMA_REGVALUE}"
+    DeleteRegValue HKLM "Software\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc"
     DeleteRegKey /ifempty HKLM "${OMA_REGKEY}"
     DeleteRegKey /ifempty HKLM "Software\OpenMonitorAdvanced"
   ${EndIf}

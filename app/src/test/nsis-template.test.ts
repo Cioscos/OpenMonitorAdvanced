@@ -192,6 +192,7 @@ function block(stmts: string[], start: RegExp, end: RegExp): string[] {
 /** Index of the first statement matching `re` at or after `from`, or -1. */
 const indexOf = (stmts: string[], re: RegExp, from = 0) => stmts.findIndex((s, i) => i >= from && re.test(s));
 
+const MARKER_WRITE = /^WriteRegStr HKLM "Software\\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc" /;
 const STOP = /^Call (un\.)?OmaStopService$/;
 const STOP_CHECK = /^\$\{If\} \$OmaResult != "0"$/;
 const HELPER = /^!insertmacro OMA_HELPER "(install|uninstall)"$/;
@@ -255,7 +256,24 @@ describe('oma.nsh failure paths', () => {
     expect(section[copy + 1]).toBe('${If} ${Errors}');
     expect(section[copy + 2]).toMatch(FAIL);
     expect(indexOf(section, HELPER)).toBeGreaterThan(copy);
-    expect(section.some((s) => /^WriteReg/.test(s))).toBe(false);
+    // The only registry write of the component is the PawnIO reboot marker (see below).
+    expect(section.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s))).toEqual([]);
+  });
+
+  it('3010 writes the PawnIO reboot marker', () => {
+    const section = block(all, /^Section "\$\(omaSensorsSection\)" SecSensors$/, /^SectionEnd$/);
+    const branch = indexOf(section, /^\$\{ElseIf\} \$3 == "3010"$/);
+    expect(branch).toBeGreaterThan(0);
+    const end = indexOf(section, /^\$\{ElseIf\} \$3 != "0"$/, branch);
+    const body = section.slice(branch + 1, end);
+    // The current time as a decimal FILETIME string, in the 64-bit view, in the 3010 branch only.
+    expect(body).toEqual([
+      'SetRebootFlag true',
+      "System::Call 'kernel32::GetSystemTimeAsFileTime(*l .r0)'",
+      'WriteRegStr HKLM "Software\\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc" "$0"',
+    ]);
+    expect(section.filter((s) => MARKER_WRITE.test(s))).toHaveLength(1);
+    expect(section.slice(0, branch)).toContain('SetRegView 64');
   });
 
   it('PawnIO runs from the install dir, is deleted, and a bad exit code fails the install', () => {
@@ -283,7 +301,7 @@ describe('oma.nsh failure paths', () => {
 
   it('records the choice only in the bookkeeping section, after the component or its removal', () => {
     const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
-    const writes = all.filter((s) => /^WriteReg/.test(s));
+    const writes = all.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s));
     expect(writes).toHaveLength(2);
     for (const w of writes) expect(book).toContain(w);
     // Deselected: stop, helper uninstall, then delete; the 0 is written after all of that.
@@ -305,7 +323,9 @@ describe('oma.nsh failure paths', () => {
     expect(stop).toBeGreaterThanOrEqual(0);
     expect(helper).toBeGreaterThan(stop);
     expect(del).toBeGreaterThan(helper + 2);
-    expect(hook.join('\n')).not.toMatch(/pawnio/i);
+    // The driver stays; only our own reboot marker (a value of our key) goes.
+    const withoutMarker = hook.filter((s) => !/PawnIoRebootRequestedUtc/.test(s));
+    expect(withoutMarker.join('\n')).not.toMatch(/pawnio/i);
   });
 
   it('locks $INSTDIR\\service down with icacls, by SID, before anything is written into it', () => {
@@ -560,6 +580,19 @@ describe('oma.nsh failure paths', () => {
     expect(del).toBeGreaterThan(0);
     expect(hook[del - 1]).toBe('${If} $UpdateMode <> 1');
     expect(hook[del + 1]).toBe('${EndIf}');
+  });
+
+  it('uninstall removes the marker outside update mode', () => {
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    const del = indexOf(hook, /^DeleteRegValue HKLM "Software\\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc"$/);
+    expect(del).toBeGreaterThan(0);
+    // Inside the same not-update-mode block, in the 64-bit view, before the empty parent key goes.
+    const open = hook.lastIndexOf('${If} $UpdateMode <> 1', del);
+    expect(hook.slice(open + 1, del).some((s) => s === '${EndIf}')).toBe(false);
+    expect(hook.slice(open + 1, del)).toContain('SetRegView 64');
+    expect(hook.slice(del + 1, indexOf(hook, /^\$\{EndIf\}$/, del))).toContain(
+      'DeleteRegKey /ifempty HKLM "Software\\OpenMonitorAdvanced"',
+    );
   });
 
   it('turns the reboot flag into exit code 3010 only on success', () => {

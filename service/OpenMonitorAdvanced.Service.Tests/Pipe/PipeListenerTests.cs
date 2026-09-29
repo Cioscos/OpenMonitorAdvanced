@@ -25,11 +25,12 @@ public sealed class PipeListenerTests
         await using var h = await ListenerHarness.StartAsync(Ct);
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
 
-        var hello = await client.ReadAsync<Hello>(Ct);
-        Assert.Equal(1u, hello.ProtocolVersion);
+        var hello = await client.ReadAsync<HelloMessage>(Ct);
+        Assert.Equal(2u, hello.ProtocolVersion);
+        Assert.Equal("ok", hello.PawnIo);
         Assert.False(string.IsNullOrWhiteSpace(hello.ServiceVersion));
 
-        await client.SendAsync(new Subscribe(1000), Ct);
+        await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
         await PipeAssert.EventuallyAsync(() => h.Feed.Active.Count == 1, "the subscription", Ct);
         Assert.Equal([1000u], h.Feed.Intervals);
 
@@ -41,6 +42,49 @@ public sealed class PipeListenerTests
         FeedUpdate second = MakeUpdate(3, seq: 2, withSchema: false);
         h.Feed.Push(second);
         PipeAssert.SameMessage(second.Snapshot, await client.ReadAsync<SnapshotMessage>(Ct));
+    }
+
+    [Theory]
+    [InlineData(PawnIoStatus.Ok, "ok")]
+    [InlineData(PawnIoStatus.Missing, "missing")]
+    [InlineData(PawnIoStatus.Unavailable, "unavailable")]
+    [InlineData(PawnIoStatus.Unknown, "unknown")]
+    [InlineData(PawnIoStatus.RebootPending, "rebootPending")]
+    public async Task HelloCarriesThePawnIoStatus(PawnIoStatus status, string wire)
+    {
+        await using var h = await ListenerHarness.StartAsync(Ct, pawnIo: status);
+        using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
+
+        var hello = await client.ReadAsync<HelloMessage>(Ct);
+
+        Assert.Equal(wire, hello.PawnIo);
+    }
+
+    [Theory]
+    [InlineData("unknown module")]
+    [InlineData("too many keys")]
+    [InlineData("malformed key")]
+    public async Task ABadSubscribeGetsAnErrorAndThePipeCloses(string problem)
+    {
+        await using var h = await ListenerHarness.StartAsync(Ct);
+        using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
+
+        SubscribeMessage subscribe = problem switch
+        {
+            "unknown module" => new SubscribeMessage(1000, ["gpu"], []),
+            "too many keys" => new SubscribeMessage(
+                1000,
+                [],
+                Enumerable.Range(0, ProtocolConstants.MaxDriveKeys + 1).Select(i => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture)).ToArray()),
+            _ => new SubscribeMessage(1000, [], ["NOT-A-KEY"]),
+        };
+        await client.SendAsync(subscribe, Ct);
+
+        var error = await client.ReadAsync<ErrorMessage>(Ct);
+        Assert.Equal("bad_request", error.Code);
+        Assert.Null(await client.ReadAsync(Ct));
+        Assert.Empty(h.Feed.All);
     }
 
     [Theory]
@@ -66,7 +110,7 @@ public sealed class PipeListenerTests
         await using var h = await ListenerHarness.StartAsync(Ct);
         using var client = await h.SubscribedClientAsync(1000, Ct);
 
-        await client.SendAsync(new Subscribe(2000), Ct);
+        await client.SendAsync(new SubscribeMessage(2000, [], []), Ct);
         await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 2, "the second subscription", Ct);
 
         Assert.Equal([1000u, 2000u], h.Feed.Intervals);
@@ -93,12 +137,12 @@ public sealed class PipeListenerTests
     {
         await using var h = await ListenerHarness.StartAsync(Ct);
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await client.ReadAsync<Hello>(Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
 
         byte[] frame = kind switch
         {
             "snapshot" => MessageCodec.EncodeFrame(new SnapshotMessage(1, 2, [1.0])),
-            "hello" => MessageCodec.EncodeFrame(new Hello(1, "client")),
+            "hello" => MessageCodec.EncodeFrame(new HelloMessage(2, "client", "ok")),
             "error" => MessageCodec.EncodeFrame(new ErrorMessage("bad_request", "client")),
             "schema" => MessageCodec.EncodeFrame(MakeSchema(1)),
             "garbage" => [3, 0, 0, 0, 0xc1, 0xc1, 0xc1],
@@ -118,7 +162,7 @@ public sealed class PipeListenerTests
     {
         await using var h = await ListenerHarness.StartAsync(Ct, subscribeTimeout: TimeSpan.FromMilliseconds(200));
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await client.ReadAsync<Hello>(Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
 
         var elapsed = Stopwatch.StartNew();
         var error = await client.ReadAsync<ErrorMessage>(Ct);
@@ -158,7 +202,7 @@ public sealed class PipeListenerTests
             clients[0].Dispose();
             clients.RemoveAt(0);
             using var next = await TestClient.ConnectAsync(h.PipeName, Ct);
-            await next.ReadAsync<Hello>(Ct);
+            await next.ReadAsync<HelloMessage>(Ct);
         }
         finally
         {
@@ -179,12 +223,12 @@ public sealed class PipeListenerTests
             }
 
             // The server ends one session; that client reads the EOF but keeps its handle open.
-            await clients[0].SendAsync(new Hello(1, "client"), Ct);
+            await clients[0].SendAsync(new HelloMessage(2, "client", "ok"), Ct);
             Assert.Equal("bad_request", (await clients[0].ReadAsync<ErrorMessage>(Ct)).Code);
             Assert.Null(await clients[0].ReadAsync(Ct));
 
             using var next = await TestClient.ConnectAsync(h.PipeName, Ct, timeoutMs: 5000);
-            await next.ReadAsync<Hello>(Ct);
+            await next.ReadAsync<HelloMessage>(Ct);
         }
         finally
         {
@@ -203,7 +247,7 @@ public sealed class PipeListenerTests
             {
                 TestClient client = await TestClient.ConnectAsync(h.PipeName, Ct, timeoutMs: 2000);
                 clients.Add(client);
-                await client.ReadAsync<Hello>(Ct, TimeSpan.FromSeconds(2));
+                await client.ReadAsync<HelloMessage>(Ct, TimeSpan.FromSeconds(2));
             }
 
             Assert.Equal(8, h.Idle.ClientCount);
@@ -305,9 +349,9 @@ public sealed class PipeListenerTests
 
         using (var client = await TestClient.ConnectAsync(h.PipeName, Ct))
         {
-            await client.ReadAsync<Hello>(Ct);
+            await client.ReadAsync<HelloMessage>(Ct);
             await PipeAssert.EventuallyAsync(() => h.Idle.ClientCount == 1, "the client to be counted", Ct);
-            await client.SendAsync(new Subscribe(1000), Ct);
+            await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
 
             switch (failure)
             {
@@ -319,7 +363,7 @@ public sealed class PipeListenerTests
                     break;
                 case "bad-request":
                     await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 1, "the subscription", Ct);
-                    await client.SendAsync(new Hello(1, "client"), Ct);
+                    await client.SendAsync(new HelloMessage(2, "client", "ok"), Ct);
                     Assert.Equal("bad_request", (await client.ReadAsync<ErrorMessage>(Ct)).Code);
                     break;
                 case "queue-overflow":
@@ -344,7 +388,7 @@ public sealed class PipeListenerTests
         h.Time.Advance(TimeSpan.FromMinutes(2));
         Assert.Equal(1, h.Lifetime.StopCount);
         using var next = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await next.ReadAsync<Hello>(Ct);
+        await next.ReadAsync<HelloMessage>(Ct);
     }
 
     [Fact]
@@ -373,7 +417,7 @@ public sealed class PipeListenerTests
         {
             // Raw CreateFileW: fails the test on ERROR_FILE_NOT_FOUND instead of retrying.
             using var client = TestClient.RawConnect(pipeName);
-            await client.ReadAsync<Hello>(Ct);
+            await client.ReadAsync<HelloMessage>(Ct);
         }
     }
 
@@ -383,12 +427,12 @@ public sealed class PipeListenerTests
         await using var h = await ListenerHarness.StartAsync(Ct);
         using (var owner = await TestClient.ConnectAsync(h.PipeName, Ct))
         {
-            await owner.ReadAsync<Hello>(Ct); // the first listener owns the name
+            await owner.ReadAsync<HelloMessage>(Ct); // the first listener owns the name
         }
 
         var log = new ListLogger<PipeListener>();
         var idle = new IdleShutdown(new FakeLifetime(), new FakeTimeProvider(), TimeSpan.FromMinutes(2));
-        using var second = new PipeListener(new FakeFeed(), h.Options, idle, log);
+        using var second = new PipeListener(new FakeFeed(), h.Options, idle, new PawnIoState(() => PawnIoStatus.Ok), log);
         await second.StartAsync(Ct);
         try
         {
@@ -404,7 +448,7 @@ public sealed class PipeListenerTests
         }
 
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await client.ReadAsync<Hello>(Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
     }
 
     [Fact]
@@ -413,7 +457,7 @@ public sealed class PipeListenerTests
         var h = await ListenerHarness.StartAsync(Ct);
         using var subscribed = await h.SubscribedClientAsync(1000, Ct);
         using var greeted = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await greeted.ReadAsync<Hello>(Ct);
+        await greeted.ReadAsync<HelloMessage>(Ct);
 
         await h.DisposeAsync();
 
@@ -430,7 +474,7 @@ public sealed class PipeListenerTests
         // only the second one fails, which the listener logs and retries.
         await using var h = await ListenerHarness.StartAsync(Ct, sddl: new PipeListenerOptions().SecurityDescriptorSddl);
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
-        await client.ReadAsync<Hello>(Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
 
         string dacl = client.Stream.GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access);
 
@@ -446,7 +490,7 @@ public sealed class PipeListenerTests
         await using var h = await ListenerHarness.StartAsync(Ct);
         using (var local = await TestClient.ConnectAsync(h.PipeName, Ct))
         {
-            await local.ReadAsync<Hello>(Ct);
+            await local.ReadAsync<HelloMessage>(Ct);
         }
 
         // \\localhost\pipe\... goes through the SMB redirector: a remote client for the pipe.
@@ -465,7 +509,8 @@ public sealed class PipeListenerTests
         [new WireDevice("cpu/test", "cpu", "Test CPU", null, new Dictionary<string, string>(), new CpuHint(0))],
         Enumerable.Range(0, sensors)
             .Select(i => new WireSensor("cpu/test", "load", $"s{i}", "percent", "lhm.raw", $"sensor {i}", "load"))
-            .ToList());
+            .ToList(),
+        ServiceStateBlock.AllActive);
 
     private static FeedUpdate MakeUpdate(int sensors, ulong seq, bool withSchema) => new(
         withSchema ? MakeSchema(sensors) : null,

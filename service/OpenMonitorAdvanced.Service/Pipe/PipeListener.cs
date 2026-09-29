@@ -49,7 +49,7 @@ public sealed class PipeListenerOptions
 /// <see cref="IdleShutdown.ClientDisconnected"/> and frees the slot, each exactly once.
 /// </para>
 /// </remarks>
-public sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, IdleShutdown idle, ILogger<PipeListener> log) : BackgroundService
+public sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, IdleShutdown idle, PawnIoState pawnIo, ILogger<PipeListener> log) : BackgroundService
 {
     private static readonly TimeSpan CreateRetryDelay = TimeSpan.FromSeconds(1);
 
@@ -143,7 +143,7 @@ public sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, 
     {
         int id = Interlocked.Increment(ref _nextClientId);
         log.LogDebug("Pipe client {Client} connected", id);
-        var session = new ClientSession(pipe, feed, options, log, id);
+        var session = new ClientSession(pipe, feed, pawnIo, options, log, id);
 
         // Registered before the session runs, so a session that ends at once is still removed.
         var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

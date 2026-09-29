@@ -110,6 +110,7 @@ mod tests {
 
     fn schema(sensors: usize) -> WireSchema {
         WireSchema {
+            service: Default::default(),
             devices: vec![WireDevice {
                 id: "cpu".to_owned(),
                 kind: "cpu".to_owned(),

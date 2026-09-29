@@ -9,11 +9,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use oma_ipc::Hello;
 use oma_ipc::{
-    decode_payload, encode_payload, IdentityHint, Message, Subscribe, WireDevice, WireError,
-    WireSchema, WireSensor, WireSnapshot,
+    decode_payload, drive_key, encode_payload, Hello, IdentityHint, Message, Subscribe, WireDevice,
+    WireError, WireSchema, WireSensor, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, MODULES,
+    PROTOCOL_VERSION,
 };
+
+/// `drive_key("Samsung SSD 990 PRO 2TB", "0025_38B1_4150_2A6C.")`, from `drive_key.json`.
+const KEY_A: &str = "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83";
+/// `drive_key("ST2000DM008-2UB102", "WFL4ABCD")`, from `drive_key.json`.
+const KEY_B: &str = "3ed905bde72420026a8d0268d0faa314158c7f6d24c853abd4cc97cf55904ea6";
 
 const NAMES: &[&str] = &[
     "hello",
@@ -31,10 +36,15 @@ fn fixtures_dir() -> PathBuf {
 fn reference(name: &str) -> Message {
     match name {
         "hello" => Message::Hello(Hello {
-            protocol_version: 1,
+            protocol_version: 2,
             service_version: "0.1.0".to_owned(),
+            pawn_io: "rebootPending".to_owned(),
         }),
-        "subscribe" => Message::Subscribe(Subscribe { interval_ms: 1000 }),
+        "subscribe" => Message::Subscribe(Subscribe {
+            interval_ms: 1000,
+            disabled_modules: vec!["memory".to_owned(), "psu".to_owned()],
+            smart_disabled_drives: vec![KEY_A.to_owned(), KEY_B.to_owned()],
+        }),
         "schema" => {
             let mut nvme_props = BTreeMap::new();
             nvme_props.insert("firmware".to_owned(), "4B2QJXD7".to_owned());
@@ -124,7 +134,20 @@ fn reference(name: &str) -> Message {
                 },
             ];
 
-            Message::Schema(WireSchema { devices, sensors })
+            let service = WireServiceState {
+                active_modules: ["cpu", "motherboard", "storage", "controller"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                smart_disabled_drives: vec![KEY_A.to_owned()],
+                reconfiguration: "pending".to_owned(),
+                smart_blocked_by: vec![KEY_B.to_owned()],
+            };
+
+            Message::Schema(WireSchema {
+                devices,
+                sensors,
+                service,
+            })
         }
         "snapshot" => Message::Snapshot(WireSnapshot {
             seq: 4_294_967_301,
@@ -176,4 +199,72 @@ fn fixtures_decode_to_the_reference_messages() {
         let decoded = decode_payload(&bytes).unwrap_or_else(|e| panic!("decode {name}: {e}"));
         assert_eq!(decoded, reference(name), "{name}: decoded message mismatch");
     }
+}
+
+#[test]
+fn drive_key_matches_the_shared_vector() {
+    let path = fixtures_dir().join("drive_key.json");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text).expect("parse drive_key.json");
+    assert!(
+        cases.len() >= 10,
+        "the vector should stay a meaningful size"
+    );
+
+    let mut with_key = 0;
+    for case in &cases {
+        let model = case["model"].as_str().expect("model");
+        let serial = case["serial"].as_str().expect("serial");
+        let expected = case["key"].as_str().map(str::to_owned);
+        assert_eq!(
+            drive_key(model, serial),
+            expected,
+            "drive_key({model:?}, {serial:?})"
+        );
+        if expected.is_some() {
+            with_key += 1;
+        }
+    }
+    assert!(
+        with_key > 0 && with_key < cases.len(),
+        "keys and no-key cases"
+    );
+}
+
+#[test]
+fn subscribe_v2_keeps_every_key() {
+    let msg = Message::Subscribe(Subscribe {
+        interval_ms: 1000,
+        disabled_modules: vec![],
+        smart_disabled_drives: vec![],
+    });
+    let bytes = encode_payload(&msg).expect("encode");
+    let value: serde_json::Value = rmp_serde::from_slice(&bytes).expect("decode as a value");
+    let body = value["body"].as_object().expect("body is a map");
+    let keys: Vec<&str> = body.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        ["disabled_modules", "interval_ms", "smart_disabled_drives"],
+        "keys are sorted by serde_json only; the point is that none is missing"
+    );
+    assert_eq!(body["disabled_modules"], serde_json::json!([]));
+    assert_eq!(body["smart_disabled_drives"], serde_json::json!([]));
+    assert_eq!(decode_payload(&bytes).expect("round trip"), msg);
+}
+
+#[test]
+fn protocol_constants_are_v2() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+    assert_eq!(
+        MODULES,
+        [
+            "cpu",
+            "motherboard",
+            "memory",
+            "storage",
+            "controller",
+            "psu"
+        ]
+    );
+    assert_eq!(MAX_DRIVE_KEYS, 64);
 }

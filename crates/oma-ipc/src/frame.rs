@@ -414,7 +414,11 @@ mod tests {
     use crate::message::{Subscribe, WireSnapshot};
 
     fn subscribe(interval_ms: u32) -> Message {
-        Message::Subscribe(Subscribe { interval_ms })
+        Message::Subscribe(Subscribe {
+            interval_ms,
+            disabled_modules: vec![],
+            smart_disabled_drives: vec![],
+        })
     }
 
     #[test]
@@ -582,15 +586,20 @@ mod tests {
 
     #[test]
     fn extra_fields_are_ignored() {
-        // {"type": "subscribe", "body": {"interval_ms": 500, "extra": 1}}
+        // {"type": "subscribe", "body": {"interval_ms": 500, "disabled_modules": [],
+        //  "smart_disabled_drives": [], "extra": 1}}
         let mut bytes = vec![0x82];
         bytes.extend_from_slice(&encode_fixstr("type"));
         bytes.extend_from_slice(&encode_fixstr("subscribe"));
         bytes.extend_from_slice(&encode_fixstr("body"));
-        bytes.push(0x82); // body fixmap, 2 entries
+        bytes.push(0x84); // body fixmap, 4 entries
         bytes.extend_from_slice(&encode_fixstr("interval_ms"));
         bytes.push(0xcd); // uint16
         bytes.extend_from_slice(&500u16.to_be_bytes());
+        bytes.extend_from_slice(&encode_fixstr("disabled_modules"));
+        bytes.push(0x90); // []
+        bytes.extend_from_slice(&encode_fixstr("smart_disabled_drives"));
+        bytes.push(0x90); // []
         bytes.extend_from_slice(&encode_fixstr("extra"));
         bytes.push(0x01); // fixint 1
 
@@ -755,7 +764,7 @@ mod tests {
         bytes.extend_from_slice(&encode_fixstr("type"));
         bytes.extend_from_slice(&encode_fixstr("schema"));
         bytes.extend_from_slice(&encode_fixstr("body"));
-        bytes.push(0x82); // body: devices, sensors
+        bytes.push(0x83); // body: devices, sensors, service
         bytes.extend_from_slice(&encode_fixstr("devices"));
         bytes.push(0x91); // 1 device
         bytes.push(0x86); // device map: 6 entries
@@ -842,15 +851,15 @@ mod tests {
     fn omitted_optional_key_decodes_as_none() {
         // WireDevice with `vendor` entirely absent (not `nil`) -- ruling R10:
         // the decoder tolerates this even though an encoder must never do it.
-        use crate::message::{WireDevice, WireSchema};
+        use crate::message::{WireDevice, WireSchema, WireServiceState};
         use std::collections::BTreeMap;
 
-        // {"type": "schema", "body": {"devices": [{"id":"d","kind":"cpu","name":"n","properties":{},"hint":nil}], "sensors": []}}
+        // {"type": "schema", "body": {"devices": [{"id":"d","kind":"cpu","name":"n","properties":{},"hint":nil}], "sensors": [], "service": {...}}}
         let mut bytes = vec![0x82];
         bytes.extend_from_slice(&encode_fixstr("type"));
         bytes.extend_from_slice(&encode_fixstr("schema"));
         bytes.extend_from_slice(&encode_fixstr("body"));
-        bytes.push(0x82); // body: devices, sensors
+        bytes.push(0x83); // body: devices, sensors, service
         bytes.extend_from_slice(&encode_fixstr("devices"));
         bytes.push(0x91); // 1 device
         bytes.push(0x85); // device map: 5 entries (vendor omitted on purpose)
@@ -866,6 +875,16 @@ mod tests {
         bytes.push(0xc0); // nil
         bytes.extend_from_slice(&encode_fixstr("sensors"));
         bytes.push(0x90); // []
+        bytes.extend_from_slice(&encode_fixstr("service"));
+        bytes.push(0x84); // service: 4 entries
+        bytes.extend_from_slice(&encode_fixstr("active_modules"));
+        bytes.push(0x90); // []
+        bytes.extend_from_slice(&encode_fixstr("smart_disabled_drives"));
+        bytes.push(0x90); // []
+        bytes.extend_from_slice(&encode_fixstr("reconfiguration"));
+        bytes.extend_from_slice(&encode_fixstr("applied"));
+        bytes.extend_from_slice(&encode_fixstr("smart_blocked_by"));
+        bytes.push(0x90); // []
 
         let decoded = decode_payload(&bytes).unwrap();
         assert_eq!(
@@ -880,6 +899,12 @@ mod tests {
                     hint: None,
                 }],
                 sensors: vec![],
+                service: WireServiceState {
+                    active_modules: vec![],
+                    smart_disabled_drives: vec![],
+                    reconfiguration: "applied".to_owned(),
+                    smart_blocked_by: vec![],
+                },
             })
         );
     }

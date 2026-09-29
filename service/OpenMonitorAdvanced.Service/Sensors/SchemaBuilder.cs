@@ -112,7 +112,7 @@ public static partial class SchemaBuilder
             }
         }
 
-        return new BuiltSchema(new SchemaMessage(output.Devices, output.Sensors), output.Bindings)
+        return new BuiltSchema(new SchemaMessage(output.Devices, output.Sensors, ServiceStateBlock.AllActive), output.Bindings)
         {
             StorageDeviceIds = storageIds,
             SkippedRoots = output.Skipped,

@@ -1,0 +1,67 @@
+[
+  {
+    "model": "Samsung SSD 990 PRO 2TB",
+    "serial": "0025_38B1_4150_2A6C.",
+    "key": "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83"
+  },
+  {
+    "model": "  Samsung SSD 990 PRO 2TB  ",
+    "serial": "  0025_38B1_4150_2A6C.  ",
+    "key": "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83"
+  },
+  {
+    "model": "ST2000DM008-2UB102",
+    "serial": "WFL4ABCD",
+    "key": "3ed905bde72420026a8d0268d0faa314158c7f6d24c853abd4cc97cf55904ea6"
+  },
+  {
+    "model": "\tWDC WD40EZRZ-00GXCB0\r\n",
+    "serial": "WD-WCC7K1234567 ",
+    "key": "f745f1b9f3a2ab4e4b8789feeffb1ba21d28d5066d1aa49e32b4ea0831b2f5f7"
+  },
+  {
+    "model": "Crucial CT1000P3PSSD8",
+    "serial": "2\u00a0",
+    "key": "fb69a39c2f815a5e95f8812ec9089aa7d94d245c36e739c3c770f8290424901e"
+  },
+  {
+    "model": "\u3000Toshiba MQ01ABD100\u3000",
+    "serial": "Y\u00e8 \u65e5\u672c",
+    "key": "df5583356e52857a3999678a777bda3be41134495dd7a2575c39153b83daea9b"
+  },
+  {
+    "model": "Disco \u00e8\u00e0 \u2014 \u00b0C",
+    "serial": "S/N \u20ac123",
+    "key": "257100b2eaded101147bc20cc6563b0eeb8cb8774c9a6b88e19d759b838b79b1"
+  },
+  {
+    "model": "Model \u001f",
+    "serial": "\u001fSerial",
+    "key": "daa80bcd780111710f07bba8602b932a93fb1bccb83fbaa6ca592ab9d4bf10df"
+  },
+  {
+    "model": "Kingston SA400S37",
+    "serial": "   ",
+    "key": null
+  },
+  {
+    "model": "   ",
+    "serial": "ABC123",
+    "key": null
+  },
+  {
+    "model": "Msft Virtual Disk",
+    "serial": "",
+    "key": null
+  },
+  {
+    "model": "",
+    "serial": "SERIAL",
+    "key": null
+  },
+  {
+    "model": "A",
+    "serial": "B",
+    "key": "76fe3925c7167317f2df68454339f5ec3650e4062178b4f2be219b105a507907"
+  }
+]

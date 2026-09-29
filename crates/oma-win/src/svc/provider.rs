@@ -329,6 +329,7 @@ mod tests {
     #[test]
     fn cpu_and_memory_hints_bind_to_core_ids() {
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![
                 device("cpu-hw", "cpu", Some(IdentityHint::Cpu { index: 0 })),
                 device("mem-hw", "memory", Some(IdentityHint::Memory {})),
@@ -360,6 +361,7 @@ mod tests {
         );
         let (inventory, _) = bind(
             &WireSchema {
+                service: Default::default(),
                 devices: vec![matching],
                 sensors: vec![],
             },
@@ -402,6 +404,7 @@ mod tests {
         ];
         for (i, hint) in cases.into_iter().enumerate() {
             let schema = WireSchema {
+                service: Default::default(),
                 devices: vec![device(
                     &format!("svc-disk-{i}"),
                     "storage",
@@ -420,6 +423,7 @@ mod tests {
         // Both sides missing (None == None) is never identity.
         let no_identity_drives = drives_with_no_identity();
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device(
                 "svc-disk-none",
                 "storage",
@@ -440,6 +444,7 @@ mod tests {
             drive(1, "storage/device-b", Some("Same"), Some("Same-SN")),
         ]);
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device(
                 "svc-disk-amb",
                 "storage",
@@ -481,6 +486,7 @@ mod tests {
             ]
         };
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![
                 device("svc-bound", "storage", Some(bound_hint)),
                 device("svc-unbound", "storage", Some(unbound_hint)),
@@ -530,6 +536,7 @@ mod tests {
             .properties
             .insert("availableSpareThresholdPct".to_owned(), "10".to_owned());
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![
                 device("svc-usb", "storage", None),
                 with_property,
@@ -553,6 +560,7 @@ mod tests {
     #[test]
     fn unbound_devices_get_kind_slash_id() {
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device("mb-1", "motherboard", None)],
             sensors: vec![],
         };
@@ -563,6 +571,7 @@ mod tests {
     #[test]
     fn sensor_ids_labels_and_source() {
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device(
                 "cpu-hw",
                 "cpu",
@@ -586,6 +595,7 @@ mod tests {
         assert_eq!(kept, vec![0]);
 
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device("mb-1", "motherboard", None)],
             sensors: vec![WireSensor {
                 device_id: "mb-1".to_owned(),
@@ -607,6 +617,7 @@ mod tests {
     #[test]
     fn unknown_kind_or_unit_is_skipped() {
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device("mb-1", "motherboard", None)],
             sensors: vec![
                 sensor("mb-1", "temperature", "a", "celsius", "temperature"),
@@ -625,6 +636,7 @@ mod tests {
     #[test]
     fn unknown_category_falls_back_to_the_sensor_kind() {
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![device("mb-1", "motherboard", None)],
             sensors: vec![sensor(
                 "mb-1",
@@ -647,6 +659,7 @@ mod tests {
             serial: Some("S".to_owned()),
         });
         let schema = WireSchema {
+            service: Default::default(),
             devices: vec![
                 device("svc-disk-a", "storage", hint.clone()),
                 device("svc-disk-b", "storage", hint),
@@ -660,6 +673,7 @@ mod tests {
 
     fn wire_schema() -> WireSchema {
         WireSchema {
+            service: Default::default(),
             devices: vec![device(
                 "cpu-hw",
                 "cpu",

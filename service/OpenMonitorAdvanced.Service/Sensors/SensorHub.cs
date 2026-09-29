@@ -69,7 +69,8 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// with the requested ones only, later switched with <see cref="IHardwareTree.SetModules"/> once
 /// the storage worker has parked at the boundary of its loop (<see cref="StoragePark"/>), without
 /// the sampler ever waiting for it; after <see cref="ReconfigureTimeout"/> the request is
-/// <c>failed</c> and retried on every tick, never forced;</item>
+/// <c>failed</c> and its park asked again on every tick, never forced; setters that throw are
+/// <c>failed</c> too and tried again only after <see cref="FailureRetryDelay"/>;</item>
 /// <item>storage, "softly" on the storage worker: switched off, its values and resolved disks are
 /// dropped and no gate, description, power check or update runs, but the LHM group stays open;
 /// a disk with SMART off is still described (access 0) and then neither power-checked nor
@@ -85,7 +86,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 {
     internal static readonly TimeSpan StorageInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ErrorLogInterval = TimeSpan.FromMinutes(1);
-    private static readonly TimeSpan FailureRetryDelay = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan FailureRetryDelay = TimeSpan.FromSeconds(30);
 
     private readonly IHardwareTree _tree;
     private readonly IDiskPowerProbe _disks;

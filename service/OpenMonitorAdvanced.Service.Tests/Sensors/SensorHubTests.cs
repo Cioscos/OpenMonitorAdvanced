@@ -1499,7 +1499,7 @@ public sealed class SensorHubTests
     }
 
     [Fact]
-    public void AFailingSetterIsFailedOnceAndRetriedWithANewPark()
+    public void AThrowingSetterIsRetriedOnlyAfterTheFailureDelay()
     {
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
@@ -1508,25 +1508,68 @@ public sealed class SensorHubTests
         List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
         h.Hub.TickOnce();
         h.Hub.RunStorageDue();
-        h.Tree.FailNextSetModules(2);
+        h.Tree.FailNextSetModules(1);
 
         sub.Update(Requests.Of(1000, ServiceModules.Memory));
-        for (int attempt = 0; attempt < 2; attempt++)
+        h.Hub.RunDue(); // asks for the park
+        h.Hub.RunStorageDue(); // parks
+        h.Hub.RunDue(); // the setter throws: the worker is released anyway
+        Assert.Equal(1, h.Tree.SetModulesCalls);
+        Assert.False(h.Hub.IsStorageParked);
+
+        // For 30 s no new park and no setter (a throwing setter can cost seconds per call), while
+        // the subscriber keeps getting its samples with the request marked failed.
+        int updates = a.Count;
+        for (int second = 1; second < 30; second++)
         {
-            h.Hub.RunDue(); // asks for the park
-            h.Hub.RunStorageDue(); // parks
-            h.Hub.RunDue(); // the setter throws: the worker is released anyway
+            h.Advance(1000);
+            h.Hub.RunDue();
+            h.Hub.RunStorageDue();
             Assert.False(h.Hub.IsStorageParked);
+            Assert.Equal(1, h.Tree.SetModulesCalls);
+            Assert.Equal("failed", LatestSchema(a).Service.Reconfiguration);
         }
 
-        h.Advance(1000);
-        h.Hub.RunDue();
-        Assert.Equal("failed", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(updates + 29, a.Count);
         Assert.Equal(1, ReconfigurationWarnings(h));
 
-        h.Hub.RunStorageDue();
+        // Then it is retried with a new park, and this time it works.
+        h.Advance(1000);
+        h.Hub.RunDue(); // asks for the park
+        h.Hub.RunStorageDue(); // parks
         h.Hub.RunDue();
-        Assert.Equal(3, h.Tree.SetModulesCalls);
+        Assert.Equal(2, h.Tree.SetModulesCalls);
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(1, ReconfigurationWarnings(h));
+    }
+
+    [Fact]
+    public void ANewRequestIsTriedAtOnceDespiteAThrowingSetterBefore()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Tree.FailNextSetModules(1);
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Hub.RunDue(); // throws
+        Assert.Equal(1, h.Tree.SetModulesCalls);
+
+        // The delay belongs to the request that failed: another one is not held back by it.
+        h.Advance(1000);
+        sub.Update(Requests.Of(1000, ServiceModules.Memory | ServiceModules.Psu));
+        h.Hub.RunDue(); // asks for the park
+        h.Hub.RunStorageDue(); // parks
+        h.Hub.RunDue();
+        Assert.Equal(2, h.Tree.SetModulesCalls);
         h.Advance(1000);
         h.Hub.RunDue();
         Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);

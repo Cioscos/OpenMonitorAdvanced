@@ -86,13 +86,18 @@ internal sealed class StoragePark
 /// acknowledged flips the setters (<see cref="IHardwareTree.SetModules"/>) and releases the worker.
 /// A request that is not done within <see cref="Timeout"/> (the storage worker stuck in a driver
 /// call) or whose setters throw is <see cref="ReconfigurationStatus.Failed"/>, with one warning per
-/// request; it is retried on every step, never forced. Sampler-owned: every member runs on
-/// <c>oma-sampler</c>.
+/// request, and never forced. A park that is not acknowledged is asked again on every step (it is
+/// cheap); setters that threw are tried again, with a new park, only after
+/// <see cref="SensorHub.FailureRetryDelay"/> for the same request, since a throwing setter can cost
+/// seconds of sampler time per call. A new request is tried at once. Sampler-owned: every member
+/// runs on <c>oma-sampler</c>.
 /// </summary>
 internal sealed class ModuleApplier(IHardwareTree tree, StoragePark park, TimeProvider time, ILogger log, Action wakeStorage)
 {
     private long _failedVersion; // the request already reported failed (and warned about)
     private long _appliedVersion;
+    private long _threwVersion; // the request whose setters threw last, at _threwAt
+    private long _threwAt;
 
     /// <summary>How long a request may stay pending before it is <see cref="ReconfigurationStatus.Failed"/>.</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(15);
@@ -158,6 +163,11 @@ internal sealed class ModuleApplier(IHardwareTree tree, StoragePark park, TimePr
             return true;
         }
 
+        if (_threwVersion == desired.Version && time.GetElapsedTime(_threwAt) < SensorHub.FailureRetryDelay)
+        {
+            return false; // stays failed until the delay is over
+        }
+
         if (!park.Acknowledged)
         {
             if (park.Request())
@@ -175,7 +185,9 @@ internal sealed class ModuleApplier(IHardwareTree tree, StoragePark park, TimePr
         }
         catch (Exception e)
         {
-            // Retried with a new park on the next step; the setters that did run are kept by LHM.
+            // Retried with a new park after the delay; the setters that did run are kept by LHM.
+            _threwVersion = desired.Version;
+            _threwAt = time.GetTimestamp();
             Fail(desired, e);
         }
         finally
@@ -204,7 +216,11 @@ internal sealed class ModuleApplier(IHardwareTree tree, StoragePark park, TimePr
         }
         else
         {
-            log.LogWarning(e, "Service reconfiguration {Version} failed while switching LibreHardwareMonitor groups; it is retried on every tick", desired.Version);
+            log.LogWarning(
+                e,
+                "Service reconfiguration {Version} failed while switching LibreHardwareMonitor groups; it stays failed and is retried every {Seconds} s",
+                desired.Version,
+                SensorHub.FailureRetryDelay.TotalSeconds);
         }
     }
 }

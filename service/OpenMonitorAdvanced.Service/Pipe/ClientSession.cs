@@ -12,6 +12,12 @@ namespace OpenMonitorAdvanced.Service.Pipe;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <b>Resubscribing.</b> The first <see cref="SubscribeMessage"/> subscribes to the feed; every
+/// later one replaces the request of that same subscription (<see cref="IFeedSubscription.Update"/>),
+/// never disposing it, so the feed never passes through "no subscribers" (spec M5 §2.8). The feed
+/// sends the schema with the next update after each accepted request.
+/// </para>
+/// <para>
 /// <b>Two loops, one writer.</b> The reader loop only reads client frames and reacts to them; the
 /// writer loop is the only code that writes to the pipe, in the order things were queued (Hello,
 /// updates, a final Error). A Schema and its Snapshot go out as one write, so nothing can land
@@ -54,10 +60,10 @@ internal sealed class ClientSession
     private readonly CancellationTokenSource _abort = new();
 
     private readonly Lock _subscriptionGate = new();
-    private IDisposable? _subscription;
+    private IFeedSubscription? _subscription;
     private bool _closed;
 
-    /// <summary>Current subscription generation; callbacks of a replaced subscription are ignored.</summary>
+    /// <summary>Current subscription generation; callbacks that arrive after the session closed are ignored.</summary>
     private int _generation;
 
     private int _queuedUpdates;
@@ -150,7 +156,7 @@ internal sealed class ClientSession
                         _log.LogDebug("Pipe client {Client} disconnected", _id);
                         return false;
                     case SubscribeMessage subscribe:
-                        if (!TrySubscribe(subscribe.IntervalMs))
+                        if (!TrySubscribe(subscribe))
                         {
                             return false;
                         }
@@ -185,12 +191,16 @@ internal sealed class ClientSession
         return true;
     }
 
-    /// <summary>Subscribes (or resubscribes) at the clamped interval; false if the feed failed.</summary>
-    private bool TrySubscribe(uint requestedMs)
+    /// <summary>
+    /// Subscribes with the request at the clamped interval, or replaces the request of the current
+    /// subscription in place; false if the session closed or the feed failed.
+    /// </summary>
+    private bool TrySubscribe(SubscribeMessage message)
     {
-        uint intervalMs = Math.Clamp(requestedMs, ProtocolConstants.MinIntervalMs, ProtocolConstants.MaxIntervalMs);
+        uint intervalMs = Math.Clamp(message.IntervalMs, ProtocolConstants.MinIntervalMs, ProtocolConstants.MaxIntervalMs);
+        FeedRequest request = FeedRequest.From(message, intervalMs);
         int generation;
-        IDisposable? previous;
+        IFeedSubscription? current;
         lock (_subscriptionGate)
         {
             if (_closed)
@@ -198,17 +208,32 @@ internal sealed class ClientSession
                 return false;
             }
 
-            previous = _subscription;
-            _subscription = null;
-            generation = ++_generation;
+            current = _subscription;
+            generation = current is null ? ++_generation : _generation;
         }
 
-        previous?.Dispose();
+        if (current is not null)
+        {
+            // Replaced in place (no Dispose): the feed keeps counting this client. If cleanup
+            // disposed it meanwhile, the update is a no-op and the session is ending anyway.
+            try
+            {
+                current.Update(request);
+            }
+            catch (Exception e)
+            {
+                _log.LogError(e, "Pipe client {Client}: replacing the feed request failed; closing", _id);
+                return false;
+            }
 
-        IDisposable subscription;
+            _log.LogDebug("Pipe client {Client} resubscribed at {Interval} ms, disabled: {Disabled}", _id, intervalMs, request.Disabled);
+            return true;
+        }
+
+        IFeedSubscription subscription;
         try
         {
-            subscription = _feed.Subscribe(intervalMs, update => OnUpdate(generation, update));
+            subscription = _feed.Subscribe(request, update => OnUpdate(generation, update));
         }
         catch (Exception e)
         {
@@ -233,7 +258,7 @@ internal sealed class ClientSession
             return false;
         }
 
-        _log.LogDebug("Pipe client {Client} subscribed at {Interval} ms", _id, intervalMs);
+        _log.LogDebug("Pipe client {Client} subscribed at {Interval} ms, disabled: {Disabled}", _id, intervalMs, request.Disabled);
         return true;
     }
 
@@ -333,7 +358,7 @@ internal sealed class ClientSession
 
     private void CloseSubscription()
     {
-        IDisposable? subscription;
+        IFeedSubscription? subscription;
         lock (_subscriptionGate)
         {
             _closed = true;

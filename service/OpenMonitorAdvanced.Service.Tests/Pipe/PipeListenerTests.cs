@@ -105,25 +105,48 @@ public sealed class PipeListenerTests
     }
 
     [Fact]
-    public async Task ResubscribeChangesTheInterval()
+    public async Task ResubscribeUpdatesTheRequestWithoutUnsubscribing()
     {
+        const string Drive = "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83";
         await using var h = await ListenerHarness.StartAsync(Ct);
         using var client = await h.SubscribedClientAsync(1000, Ct);
+        FakeFeed.Subscription subscription = Assert.Single(h.Feed.All);
 
-        await client.SendAsync(new SubscribeMessage(2000, [], []), Ct);
-        await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 2, "the second subscription", Ct);
+        await client.SendAsync(new SubscribeMessage(60000, ["storage", "psu"], [Drive]), Ct);
+        await PipeAssert.EventuallyAsync(() => subscription.Requests.Count == 2, "the replaced request", Ct);
 
-        Assert.Equal([1000u, 2000u], h.Feed.Intervals);
-        FakeFeed.Subscription replaced = h.Feed.All[0];
-        Assert.Equal(1, replaced.DisposeCount);
-        Assert.Single(h.Feed.Active);
+        // Replaced in place: no second subscription, and the first one is never disposed.
+        Assert.Same(subscription, Assert.Single(h.Feed.All));
+        Assert.Equal(0, subscription.DisposeCount);
+        FeedRequest replaced = subscription.Requests[1];
+        Assert.Equal(ProtocolConstants.MaxIntervalMs, replaced.IntervalMs);
+        Assert.Equal(ServiceModules.Storage | ServiceModules.Psu, replaced.Disabled);
+        Assert.Equal([Drive], replaced.SmartDisabledDrives);
+        Assert.Equal([1000u, 5000u], subscription.Requests.Select(r => r.IntervalMs));
 
-        // A late delivery from the replaced subscription is ignored; the current one goes through.
-        replaced.OnUpdate(MakeUpdate(1, seq: 111, withSchema: true));
+        // The same subscription keeps streaming to the client.
         FeedUpdate current = MakeUpdate(2, seq: 222, withSchema: true);
         h.Feed.Push(current);
         PipeAssert.SameMessage(current.Schema!, await client.ReadAsync<SchemaMessage>(Ct));
         PipeAssert.SameMessage(current.Snapshot, await client.ReadAsync<SnapshotMessage>(Ct));
+
+        client.Dispose();
+        await PipeAssert.EventuallyAsync(() => subscription.DisposeCount == 1, "the session to release its subscription", Ct);
+    }
+
+    [Fact]
+    public async Task TheFirstSubscribeCarriesTheSourceRequest()
+    {
+        await using var h = await ListenerHarness.StartAsync(Ct);
+        using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
+
+        await client.SendAsync(new SubscribeMessage(1000, ["cpu"], []), Ct);
+        await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 1, "the subscription", Ct);
+
+        FeedRequest request = Assert.Single(h.Feed.All[0].Requests);
+        Assert.Equal(ServiceModules.Cpu, request.Disabled);
+        Assert.Empty(request.SmartDisabledDrives);
     }
 
     [Theory]

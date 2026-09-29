@@ -45,6 +45,17 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// be inside LHM, and closing it under that worker is worse than leaving it to process exit).
 /// A subscription after <see cref="Dispose"/> is a no-op.
 /// </para>
+/// <para>
+/// <b>Requests (spec M5 §2.8).</b> Every subscriber holds a <see cref="FeedRequest"/>.
+/// <see cref="Subscribe"/>, <see cref="IFeedSubscription.Update"/> and unsubscribing recompute the
+/// sampling interval and the <see cref="EffectiveConfig"/> in one <c>_subLock</c> section, so a
+/// client replacing its request never passes through "no subscribers". A changed aggregate is
+/// published as an immutable <see cref="DesiredConfig"/> with a growing version; without
+/// subscribers the last one stays. These calls come from pipe sessions and never touch the tree:
+/// the sampler folds the desired configuration into the schema's <c>service</c> block, which
+/// says <c>pending</c> while it differs from the applied one. Nothing applies it yet (Task 12):
+/// the tree keeps every module on.
+/// </para>
 /// </remarks>
 public sealed class SensorHub : ISensorFeed, IDisposable
 {
@@ -73,7 +84,10 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private bool _disposed;
 
     // Sampler-owned state.
-    private readonly List<Subscriber> _dueScratch = [];
+    private readonly List<(Subscriber Subscriber, bool ForcedSchema)> _dueScratch = [];
+    private readonly EffectiveConfig _applied = EffectiveConfig.AllOn;
+    private DesiredConfig? _servedDesired;
+    private ServiceStateBlock _serviceState = ServiceStateBlock.AllActive;
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
     private Plan? _plan;
     private readonly Dictionary<string, (StorageInfo Info, string Id)> _storagePins = new(StringComparer.Ordinal);
@@ -87,6 +101,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly HashSet<string> _undescribedLogged = new(StringComparer.Ordinal);
 
     // Shared, published by reference swap.
+    private volatile DesiredConfig? _desired; // written under _subLock
     private volatile Published? _published;
     private volatile StorageCache _storageCache = StorageCache.Empty;
     private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
@@ -131,9 +146,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     internal int Revision => _published?.Revision ?? 0;
 
     /// <inheritdoc />
-    public IDisposable Subscribe(uint intervalMs, Action<FeedUpdate> onUpdate)
+    /// <summary>The configuration the subscribers' requests add up to; <see langword="null"/> before the first subscription.</summary>
+    internal DesiredConfig? Desired => _desired;
+
+    /// <inheritdoc />
+    public IFeedSubscription Subscribe(FeedRequest request, Action<FeedUpdate> onUpdate)
     {
-        ArgumentOutOfRangeException.ThrowIfZero(intervalMs);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentOutOfRangeException.ThrowIfZero(request.IntervalMs);
         ArgumentNullException.ThrowIfNull(onUpdate);
 
         Subscriber subscriber;
@@ -145,12 +165,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return NoSubscription.Instance;
             }
 
-            subscriber = new Subscriber(this, ++_nextSubscriberId, MsToTicks(intervalMs), onUpdate)
+            subscriber = new Subscriber(this, ++_nextSubscriberId, onUpdate)
             {
+                Request = request,
+                IntervalTicks = MsToTicks(request.IntervalMs),
                 NextDue = _time.GetTimestamp(), // the first delivery is due at once (with the schema)
             };
             _subscribers.Add(subscriber);
-            RecomputeSamplingLocked();
+            RecomputeLocked();
             if (_subscribers.Count == 1 && _opened)
             {
                 // Idle -> active: a storage round right away, so a quick reconnect does not wait
@@ -183,6 +205,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         long tickStart = _time.GetTimestamp();
         ulong tickUnixMs = (ulong)_time.GetUtcNow().ToUnixTimeMilliseconds();
+        SyncServiceState();
         Plan plan = _plan ?? OpenTree();
 
         _failedRoots.Clear();
@@ -272,7 +295,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return Timeout.InfiniteTimeSpan;
             }
 
-            sample = _plan is null || now >= _nextSampleDue;
+            // A new desired configuration changes the schema's service block: sampled at once, so
+            // the schema a resubscribing client gets next already reflects its request.
+            sample = _plan is null || now >= _nextSampleDue || !ReferenceEquals(_desired, _servedDesired);
         }
 
         if (sample)
@@ -591,6 +616,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins);
+        built = built with { Schema = built.Schema with { Service = _serviceState } };
         foreach (string skipped in built.SkippedRoots)
         {
             LogNotUnique(skipped);
@@ -786,13 +812,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 long next = s.Scheduled ? s.NextDue + s.IntervalTicks : published.SampleAnchor + s.IntervalTicks;
                 s.NextDue = next <= now ? now + s.IntervalTicks : next;
                 s.Scheduled = true;
-                _dueScratch.Add(s);
+                _dueScratch.Add((s, s.ForceSchema));
+                s.ForceSchema = false;
             }
         }
 
-        foreach (Subscriber s in _dueScratch)
+        foreach ((Subscriber s, bool forced) in _dueScratch)
         {
-            bool withSchema = s.DeliveredRevision != published.Revision;
+            bool withSchema = forced || s.DeliveredRevision != published.Revision;
             try
             {
                 s.OnUpdate(new FeedUpdate(withSchema ? published.Schema : null, published.Snapshot));
@@ -800,6 +827,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
             catch (Exception e)
             {
+                if (forced)
+                {
+                    s.DeliveredRevision = 0; // the forced schema did not arrive: send it next time
+                }
+
                 LogRateLimited("subscriber:" + s.Id, e, "Subscriber {Subscriber} threw while receiving an update; it stays subscribed", s.Id);
             }
         }
@@ -807,9 +839,44 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         _dueScratch.Clear();
     }
 
+    /// <summary>
+    /// Replaces <paramref name="subscriber"/>'s request in place (<see cref="IFeedSubscription.Update"/>).
+    /// Like a new subscription, the next delivery is due at once, carries the schema and sets the
+    /// phase of the new interval; unlike one, the subscriber count never drops, so the storage
+    /// cache and the storage schedule survive and the configuration does not oscillate.
+    /// </summary>
+    private void Update(Subscriber subscriber, FeedRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentOutOfRangeException.ThrowIfZero(request.IntervalMs);
+
+        bool configChanged;
+        lock (_subLock)
+        {
+            if (_disposed || !_subscribers.Contains(subscriber))
+            {
+                return; // unsubscribed (or shutting down): nothing to replace
+            }
+
+            subscriber.Request = request;
+            subscriber.IntervalTicks = MsToTicks(request.IntervalMs);
+            subscriber.NextDue = _time.GetTimestamp();
+            subscriber.Scheduled = false;
+            subscriber.ForceSchema = true;
+            configChanged = RecomputeLocked();
+        }
+
+        SetQuietly(_samplerWake);
+        if (configChanged)
+        {
+            SetQuietly(_storageWake);
+        }
+    }
+
     private void Unsubscribe(Subscriber subscriber)
     {
         bool idle;
+        bool configChanged;
         lock (_subLock)
         {
             if (!_subscribers.Remove(subscriber))
@@ -817,7 +884,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return;
             }
 
-            RecomputeSamplingLocked();
+            configChanged = RecomputeLocked();
             idle = _subscribers.Count == 0;
         }
 
@@ -829,6 +896,63 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         SetQuietly(_samplerWake); // recompute the next wake (or sleep until a new subscriber)
+        if (configChanged)
+        {
+            SetQuietly(_storageWake);
+        }
+    }
+
+    /// <summary>
+    /// Recomputes the sampling interval and the effective configuration together; publishes a new
+    /// <see cref="DesiredConfig"/> when the configuration changed (never without subscribers).
+    /// Returns whether it did. Caller holds <c>_subLock</c>.
+    /// </summary>
+    private bool RecomputeLocked()
+    {
+        RecomputeSamplingLocked();
+
+        var requests = new FeedRequest[_subscribers.Count];
+        for (int i = 0; i < requests.Length; i++)
+        {
+            requests[i] = _subscribers[i].Request;
+        }
+
+        EffectiveConfig? config = EffectiveConfig.Compute(requests);
+        DesiredConfig? current = _desired;
+        if (config is null || (current is not null && current.Config.Equals(config)))
+        {
+            return false;
+        }
+
+        _desired = new DesiredConfig((current?.Version ?? 0) + 1, config, _time.GetTimestamp());
+        return true;
+    }
+
+    /// <summary>
+    /// Sampler: folds a new <c>_desired</c> into the schema's service block. A changed block is a
+    /// structural change (a new revision, rebuilt in this tick). Until the applier lands (Task 12)
+    /// <c>_applied</c> stays <see cref="EffectiveConfig.AllOn"/>, so a request that switches
+    /// anything off stays <c>pending</c>.
+    /// </summary>
+    private void SyncServiceState()
+    {
+        DesiredConfig? desired = _desired;
+        if (ReferenceEquals(desired, _servedDesired))
+        {
+            return;
+        }
+
+        _servedDesired = desired;
+        var state = new ServiceStateBlock(
+            ServiceModuleNames.ToWire(_applied.Enabled),
+            _applied.SmartDisabledDrives.Order(StringComparer.Ordinal).ToArray(),
+            desired is null || desired.Config.Equals(_applied) ? "applied" : "pending",
+            []);
+        if (!SchemaComparer.SameServiceState(state, _serviceState))
+        {
+            _serviceState = state;
+            Interlocked.Exchange(ref _structureDirty, 1);
+        }
     }
 
     private void RecomputeSamplingLocked()
@@ -939,6 +1063,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot, long SampleAnchor);
 
+    /// <summary>
+    /// The configuration the subscribers ask for, replaced as a whole: <paramref name="Version"/>
+    /// grows by one per change, <paramref name="RequestedAt"/> is the monotonic time of the change.
+    /// </summary>
+    internal sealed record DesiredConfig(long Version, EffectiveConfig Config, long RequestedAt);
+
     /// <summary>A disk's resolved identity; only a <paramref name="Complete"/> one is reused (and its device id pinned).</summary>
     private sealed record DiskResolution(StorageInfo Info, DriveAvailability Availability, bool Complete);
 
@@ -1013,11 +1143,18 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
     }
 
-    private sealed class Subscriber(SensorHub hub, int id, long intervalTicks, Action<FeedUpdate> onUpdate) : IDisposable
+    private sealed class Subscriber(SensorHub hub, int id, Action<FeedUpdate> onUpdate) : IFeedSubscription
     {
         public int Id { get; } = id;
 
-        public long IntervalTicks { get; } = intervalTicks;
+        /// <summary>This subscriber's current request; guarded by <c>_subLock</c>.</summary>
+        public required FeedRequest Request { get; set; }
+
+        /// <summary>Guarded by <c>_subLock</c>.</summary>
+        public long IntervalTicks { get; set; }
+
+        /// <summary>The next delivery carries the schema whatever the revision (set by <see cref="Update"/>); guarded by <c>_subLock</c>.</summary>
+        public bool ForceSchema { get; set; }
 
         public Action<FeedUpdate> OnUpdate { get; } = onUpdate;
 
@@ -1030,12 +1167,18 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         /// <summary>Schema revision last delivered (0 = none yet); sampler-owned.</summary>
         public int DeliveredRevision { get; set; }
 
+        public void Update(FeedRequest request) => hub.Update(this, request);
+
         public void Dispose() => hub.Unsubscribe(this);
     }
 
-    private sealed class NoSubscription : IDisposable
+    private sealed class NoSubscription : IFeedSubscription
     {
         public static NoSubscription Instance { get; } = new();
+
+        public void Update(FeedRequest request)
+        {
+        }
 
         public void Dispose()
         {
@@ -1045,7 +1188,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
 /// <summary>
 /// Structural comparison of two built schemas: devices and sensors in order with every field,
-/// device properties as an unordered (key-sorted) set, and the bindings. Record equality alone
+/// device properties as an unordered (key-sorted) set, the bindings and the service block. Record equality alone
 /// would compare the <see cref="IReadOnlyList{T}"/>/<see cref="IReadOnlyDictionary{TKey,TValue}"/>
 /// members by reference.
 /// </summary>
@@ -1053,7 +1196,10 @@ internal static class SchemaComparer
 {
     public static bool SameStructure(BuiltSchema a, BuiltSchema b)
     {
-        if (a.Schema.Devices.Count != b.Schema.Devices.Count || !a.Schema.Sensors.SequenceEqual(b.Schema.Sensors) || !a.Bindings.SequenceEqual(b.Bindings))
+        if (a.Schema.Devices.Count != b.Schema.Devices.Count
+            || !a.Schema.Sensors.SequenceEqual(b.Schema.Sensors)
+            || !a.Bindings.SequenceEqual(b.Bindings)
+            || !SameServiceState(a.Schema.Service, b.Schema.Service))
         {
             return false;
         }
@@ -1070,6 +1216,13 @@ internal static class SchemaComparer
 
         return true;
     }
+
+    /// <summary>The service block counts as structure (spec M5 §2.8): a change is a new revision.</summary>
+    public static bool SameServiceState(ServiceStateBlock x, ServiceStateBlock y) =>
+        x.Reconfiguration == y.Reconfiguration
+        && x.ActiveModules.SequenceEqual(y.ActiveModules)
+        && x.SmartDisabledDrives.SequenceEqual(y.SmartDisabledDrives)
+        && x.SmartBlockedBy.SequenceEqual(y.SmartBlockedBy);
 
     private static bool SameProperties(IReadOnlyDictionary<string, string> x, IReadOnlyDictionary<string, string> y) =>
         x.Count == y.Count

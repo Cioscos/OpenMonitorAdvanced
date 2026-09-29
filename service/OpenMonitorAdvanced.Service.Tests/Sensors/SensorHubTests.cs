@@ -63,12 +63,14 @@ public sealed class SensorHubTests
 
         public SensorHub Hub { get; }
 
-        public List<FeedUpdate> Subscribe(uint intervalMs) => Subscribe(intervalMs, out _);
+        public List<FeedUpdate> Subscribe(uint intervalMs) => Subscribe(Requests.Of(intervalMs), out _);
 
-        public List<FeedUpdate> Subscribe(uint intervalMs, out IDisposable subscription)
+        public List<FeedUpdate> Subscribe(uint intervalMs, out IFeedSubscription subscription) => Subscribe(Requests.Of(intervalMs), out subscription);
+
+        public List<FeedUpdate> Subscribe(FeedRequest request, out IFeedSubscription subscription)
         {
             var received = new List<FeedUpdate>();
-            subscription = Hub.Subscribe(intervalMs, u =>
+            subscription = Hub.Subscribe(request, u =>
             {
                 lock (received)
                 {
@@ -185,8 +187,8 @@ public sealed class SensorHubTests
     {
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
-        List<FeedUpdate> a = h.Subscribe(1000, out IDisposable subA);
-        List<FeedUpdate> b = h.Subscribe(1000, out IDisposable subB);
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription subA);
+        List<FeedUpdate> b = h.Subscribe(1000, out IFeedSubscription subB);
 
         h.Hub.TickOnce();
         subA.Dispose();
@@ -210,7 +212,7 @@ public sealed class SensorHubTests
     {
         var h = new Harness();
         h.Tree.Initial.Add(Cpu());
-        h.Subscribe(1000, out IDisposable sub);
+        h.Subscribe(1000, out IFeedSubscription sub);
         h.Hub.TickOnce();
         sub.Dispose();
         h.Advance(5000);
@@ -372,7 +374,7 @@ public sealed class SensorHubTests
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
         h.Tree.Storage.Add(Hdd());
-        h.Subscribe(1000, out IDisposable sub);
+        h.Subscribe(1000, out IFeedSubscription sub);
         h.Hub.TickOnce();
         h.Hub.RunStorageDue();
         Assert.Equal(1, h.Tree.Updates("/hdd/0"));
@@ -847,7 +849,7 @@ public sealed class SensorHubTests
         h.Tree.Initial.Add(Cpu());
         h.Tree.Storage.Add(Hdd());
         h.Tree.Values[HddTemp] = 40;
-        h.Subscribe(1000, out IDisposable first);
+        h.Subscribe(1000, out IFeedSubscription first);
         h.Hub.TickOnce();
         h.Hub.StorageOnce();
         first.Dispose();
@@ -941,7 +943,7 @@ public sealed class SensorHubTests
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
         h.Tree.Storage.Add(Hdd());
-        h.Subscribe(1000, out IDisposable first);
+        h.Subscribe(1000, out IFeedSubscription first);
         h.Hub.TickOnce();
         h.Hub.RunStorageDue();
         Assert.Equal(1, h.Tree.Updates("/hdd/0"));
@@ -1065,5 +1067,195 @@ public sealed class SensorHubTests
         Assert.Equal(2, calls);
         Assert.Equal(2, b.Count);
         Assert.Contains(h.Log.Entries, e => e.Exception is InvalidOperationException { Message: "broken client" });
+    }
+
+    [Fact]
+    public void PipeCallbacksNeverTouchTheTree()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Subscribe(1000, out IFeedSubscription first);
+        Assert.Equal(0, h.Tree.OpenCount);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        (int, int, int, int, int, int, int, int) Touches() => (
+            h.Tree.OpenCount,
+            h.Tree.EnableStorageCount,
+            h.Tree.Updates("/amdcpu/0"),
+            h.Tree.Updates("/hdd/0"),
+            h.Tree.Reads(CpuTotal),
+            h.Disks.DescribeCalls,
+            h.Disks.AllActiveQueries,
+            h.Disks.SpunDownQueries);
+        var before = Touches();
+
+        // Everything a pipe session does: subscribe, replace a request, unsubscribe.
+        first.Update(Requests.Of(500, ServiceModules.Storage | ServiceModules.Cpu, "0000000000000000000000000000000000000000000000000000000000000001"));
+        h.Subscribe(Requests.Of(2000, ServiceModules.Memory), out IFeedSubscription second);
+        second.Update(Requests.Of(2000));
+        second.Dispose();
+        first.Update(Requests.Of(1000));
+
+        Assert.Equal(before, Touches());
+    }
+
+    [Fact]
+    public void ResubscribeDoesNotDropTheStorageCache()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+
+        sub.Update(Requests.Of(2000)); // the only client changes its interval
+        h.Hub.TickOnce(); // before the next storage round
+
+        Assert.Equal(40, ValueOf(a, a.Count - 1, "temperature", "drive"));
+        Assert.NotEqual(TimeSpan.Zero, h.Hub.RunStorageDue()); // not an idle -> active comeback
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+    }
+
+    [Fact]
+    public void ResubscribeChangesTheSubscribersInterval()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        long start = h.Time.GetUtcNow().ToUnixTimeMilliseconds();
+        var times = new List<long>();
+        IFeedSubscription sub = h.Hub.Subscribe(Requests.Of(1000), _ => times.Add(h.Time.GetUtcNow().ToUnixTimeMilliseconds() - start));
+        h.Hub.RunDue();
+        h.Advance(500);
+
+        sub.Update(Requests.Of(2000));
+        for (int guard = 0; h.Time.GetUtcNow().ToUnixTimeMilliseconds() - start <= 6500; guard++)
+        {
+            Assert.True(guard < 100, "the sampler loop did not make progress");
+            TimeSpan delay = h.Hub.RunDue();
+            Assert.True(delay > TimeSpan.Zero && delay != Timeout.InfiniteTimeSpan, $"unexpected delay {delay}");
+            h.Time.Advance(delay);
+        }
+
+        // Delivered at once on the replaced request, then every 2 s from the sample it carried.
+        Assert.Equal([0L, 500, 2000, 4000, 6000], times);
+    }
+
+    [Fact]
+    public void EveryAcceptedSubscribeIsFollowedByASchema()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.NotNull(a[0].Schema);
+        Assert.Null(a[1].Schema);
+        int revision = h.Hub.Revision;
+
+        sub.Update(Requests.Of(1000)); // the very same request again
+        h.Hub.RunDue();
+        Assert.Equal(3, a.Count);
+        Assert.NotNull(a[2].Schema);
+        Assert.Equal(a[2].Schema!.Sensors.Count, a[2].Snapshot.Values.Count);
+
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Null(a[^1].Schema);
+
+        sub.Update(Requests.Of(250));
+        h.Hub.RunDue();
+        Assert.NotNull(a[^1].Schema);
+        Assert.Equal(revision, h.Hub.Revision); // forced for this client, not a new revision
+    }
+
+    [Fact]
+    public void ReplacingARequestIsAtomic()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Subscribe(Requests.Of(1000, ServiceModules.Storage), out _);
+        h.Subscribe(Requests.Of(1000), out IFeedSubscription b);
+        SensorHub.DesiredConfig? desired = h.Hub.Desired;
+        Assert.NotNull(desired);
+        Assert.Equal(ServiceModules.All, desired.Config.Enabled);
+
+        // Dropping B's request first would leave only A's (storage off) for an instant.
+        b.Update(Requests.Of(2000));
+        Assert.Same(desired, h.Hub.Desired);
+
+        h.Advance(1234);
+        b.Update(Requests.Of(2000, ServiceModules.Storage));
+        SensorHub.DesiredConfig? replaced = h.Hub.Desired;
+        Assert.NotNull(replaced);
+        Assert.Equal(desired.Version + 1, replaced.Version);
+        Assert.Equal(ServiceModules.All & ~ServiceModules.Storage, replaced.Config.Enabled);
+        Assert.Equal(h.Time.GetTimestamp(), replaced.RequestedAt);
+    }
+
+    [Fact]
+    public void LastSubscriberLeavingKeepsTheEffectiveConfiguration()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        Assert.Null(h.Hub.Desired);
+        h.Subscribe(Requests.Of(1000, ServiceModules.Memory), out IFeedSubscription sub);
+        SensorHub.DesiredConfig? desired = h.Hub.Desired;
+        Assert.NotNull(desired);
+        Assert.Equal(1, desired.Version);
+        Assert.Equal(ServiceModules.All & ~ServiceModules.Memory, desired.Config.Enabled);
+
+        sub.Dispose();
+        Assert.Same(desired, h.Hub.Desired);
+
+        // The same request on reconnection publishes nothing new.
+        h.Subscribe(Requests.Of(1000, ServiceModules.Memory), out _);
+        Assert.Same(desired, h.Hub.Desired);
+    }
+
+    [Fact]
+    public void ARequestThatDiffersFromTheAppliedConfigurationIsPending()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(ProtocolConstants.Modules, LatestSchema(a).Service.ActiveModules);
+        int revision = h.Hub.Revision;
+
+        sub.Update(Requests.Of(1000, ServiceModules.Psu));
+        h.Hub.RunDue();
+
+        // Nothing applies requests yet (Task 12): every module stays active, the request waits.
+        ServiceStateBlock pending = LatestSchema(a).Service;
+        Assert.Equal("pending", pending.Reconfiguration);
+        Assert.Equal(ProtocolConstants.Modules, pending.ActiveModules);
+        Assert.Empty(pending.SmartDisabledDrives);
+        Assert.Empty(pending.SmartBlockedBy);
+        Assert.Equal(revision + 1, h.Hub.Revision);
+
+        sub.Update(Requests.Of(1000));
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(revision + 2, h.Hub.Revision);
+    }
+
+    [Fact]
+    public void AFirstRequestWithADisabledModuleIsPending()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        List<FeedUpdate> a = h.Subscribe(Requests.Of(1000, ServiceModules.Controller), out _);
+
+        h.Hub.TickOnce();
+
+        Assert.Equal("pending", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(1, h.Hub.Revision);
     }
 }

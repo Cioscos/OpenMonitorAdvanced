@@ -173,6 +173,17 @@ internal sealed class FakeDisks : IDiskPowerProbe
     }
 }
 
+/// <summary>Builds <see cref="FeedRequest"/>s for tests.</summary>
+internal static class Requests
+{
+    public static FeedRequest Of(uint intervalMs, ServiceModules disabled = ServiceModules.None, params string[] smartDisabledDrives) =>
+        new(intervalMs, disabled, new HashSet<string>(smartDisabledDrives, StringComparer.Ordinal));
+
+    /// <summary>A subscription with every source on, as the M4 tests made it.</summary>
+    public static IFeedSubscription Subscribe(this ISensorFeed feed, uint intervalMs, Action<FeedUpdate> onUpdate) =>
+        feed.Subscribe(Of(intervalMs), onUpdate);
+}
+
 internal sealed record LogEntry(LogLevel Level, string Message, Exception? Exception);
 
 internal sealed class ListLogger<T> : ILogger<T>

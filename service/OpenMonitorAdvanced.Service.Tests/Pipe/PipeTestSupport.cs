@@ -12,7 +12,7 @@ using Xunit;
 namespace OpenMonitorAdvanced.Service.Tests.Pipe;
 
 /// <summary>
-/// Scripted <see cref="ISensorFeed"/>: records every subscription (interval, dispose count) and
+/// Scripted <see cref="ISensorFeed"/>: records every subscription (its requests, dispose count) and
 /// lets a test push updates synchronously to the active ones, the way the hub's sampler thread does.
 /// Disposable like the real hub, recording how many subscriptions were still active at that point.
 /// </summary>
@@ -51,16 +51,17 @@ internal sealed class FakeFeed : ISensorFeed, IDisposable
 
     public IReadOnlyList<Subscription> Active => All.Where(s => s.DisposeCount == 0).ToArray();
 
+    /// <summary>The current interval of every subscription, in subscription order.</summary>
     public IReadOnlyList<uint> Intervals => All.Select(s => s.IntervalMs).ToArray();
 
-    public IDisposable Subscribe(uint intervalMs, Action<FeedUpdate> onUpdate)
+    public IFeedSubscription Subscribe(FeedRequest request, Action<FeedUpdate> onUpdate)
     {
         if (FailSubscribe is { } fail)
         {
-            throw fail(intervalMs);
+            throw fail(request.IntervalMs);
         }
 
-        var subscription = new Subscription(intervalMs, onUpdate);
+        var subscription = new Subscription(request, onUpdate);
         lock (_gate)
         {
             _all.Add(subscription);
@@ -78,15 +79,37 @@ internal sealed class FakeFeed : ISensorFeed, IDisposable
         }
     }
 
-    internal sealed class Subscription(uint intervalMs, Action<FeedUpdate> onUpdate) : IDisposable
+    /// <summary>One subscription with every request it received (the first from Subscribe, then each Update).</summary>
+    internal sealed class Subscription(FeedRequest request, Action<FeedUpdate> onUpdate) : IFeedSubscription
     {
+        private readonly object _gate = new();
+        private readonly List<FeedRequest> _requests = [request];
         private int _disposeCount;
 
-        public uint IntervalMs => intervalMs;
+        public IReadOnlyList<FeedRequest> Requests
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _requests.ToArray();
+                }
+            }
+        }
+
+        public uint IntervalMs => Requests[^1].IntervalMs;
 
         public Action<FeedUpdate> OnUpdate => onUpdate;
 
         public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        public void Update(FeedRequest replacement)
+        {
+            lock (_gate)
+            {
+                _requests.Add(replacement);
+            }
+        }
 
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
     }

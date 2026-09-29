@@ -11,9 +11,21 @@ public interface ISensorFeed
 {
     /// <summary>
     /// Starts delivering <see cref="FeedUpdate"/>s no more often than every
-    /// <paramref name="intervalMs"/> ms. Disposing the result unsubscribes.
+    /// <see cref="FeedRequest.IntervalMs"/> ms, and counts <paramref name="request"/> in the
+    /// service's effective configuration. Disposing the result unsubscribes.
     /// </summary>
-    IDisposable Subscribe(uint intervalMs, Action<FeedUpdate> onUpdate);
+    IFeedSubscription Subscribe(FeedRequest request, Action<FeedUpdate> onUpdate);
+}
+
+/// <summary>A live subscription; disposing it unsubscribes.</summary>
+public interface IFeedSubscription : IDisposable
+{
+    /// <summary>
+    /// Replaces this subscriber's request atomically: the feed never sees it without one (no
+    /// passage through "no subscribers"), and the next update to it carries the schema. A no-op
+    /// once disposed.
+    /// </summary>
+    void Update(FeedRequest request);
 }
 
 /// <summary>

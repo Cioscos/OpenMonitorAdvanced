@@ -551,6 +551,17 @@ describe('oma.nsh failure paths', () => {
     for (const at of calls) expect(book[at + 1]).toBe('RMDir "$INSTDIR\\service"');
   });
 
+  it('uninstall removes the autostart value outside update mode', () => {
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    const del = indexOf(
+      hook,
+      /^DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "OpenMonitor Advanced"$/,
+    );
+    expect(del).toBeGreaterThan(0);
+    expect(hook[del - 1]).toBe('${If} $UpdateMode <> 1');
+    expect(hook[del + 1]).toBe('${EndIf}');
+  });
+
   it('turns the reboot flag into exit code 3010 only on success', () => {
     const lines = all.filter((s) => /SetErrorLevel 3010/.test(s));
     expect(lines).toHaveLength(1);

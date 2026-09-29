@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod commands;
 mod i18n;
 mod interval;
@@ -227,6 +228,7 @@ fn main() {
             commands::get_startup_status,
             commands::take_pending_view,
             commands::enable_vendor_libraries,
+            autostart::refresh_autostart,
             service::get_service_status,
             service::set_anti_cheat,
             service::start_service,
@@ -257,6 +259,11 @@ fn main() {
                     }
                 }));
             let store = app.state::<Arc<SettingsStore>>().inner().clone();
+            // `tray.autostart` drives the user's Run entry from here on.
+            app.manage(autostart::Autostart::follow(
+                &store,
+                autostart::system_entry()?,
+            ));
             let tray = tray::build(app.handle())?;
             // Menu labels follow `general.language`. Listeners get only the new
             // state, so the last language seen is kept here and acted on when it

@@ -1,6 +1,7 @@
 //! Unprivileged Windows data providers for OpenMonitor Advanced.
 #![cfg(windows)]
 
+pub mod autostart;
 pub mod cpu;
 pub mod crash;
 pub(crate) mod dynlib;

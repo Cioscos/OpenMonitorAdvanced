@@ -727,4 +727,9 @@ FunctionEnd
     DeleteRegKey /ifempty HKLM "${OMA_REGKEY}"
     DeleteRegKey /ifempty HKLM "Software\OpenMonitorAdvanced"
   ${EndIf}
+  ; The app's start-with-Windows entry of the user who uninstalls. Other users'
+  ; entries stay: they point at an exe that is gone and Windows skips them.
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OpenMonitor Advanced"
+  ${EndIf}
 !macroend

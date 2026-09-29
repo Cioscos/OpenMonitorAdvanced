@@ -14,7 +14,7 @@ use crate::i18n::{resolve, t, Lang};
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
 use crate::tray_icon::{
-    icon_text, render, tooltip, unit_mark, IconStyle, TooltipItem, UnitMark, ICON_SIZE, NEUTRAL,
+    icon_content, render, tooltip, IconContent, IconStyle, TooltipItem, ICON_SIZE, NEUTRAL,
     PRODUCT_NAME,
 };
 use crate::window;
@@ -102,8 +102,8 @@ impl Resolved {
 struct State {
     lang: Lang,
     resolved: Option<Resolved>,
-    /// Text, unit mark and style of the icon last sent.
-    icon: Option<(String, UnitMark, IconStyle)>,
+    /// What the icon last sent shows, and its style.
+    icon: Option<(IconContent, IconStyle)>,
     tooltip: Option<String>,
 }
 
@@ -155,18 +155,15 @@ impl<B: TrayBackend> TrayController<B> {
         };
 
         let (value, unit) = reading(icon);
-        let text = icon_text(value, unit, temperature);
-        let mark = unit_mark(value, unit);
+        let content = icon_content(value, unit, temperature);
         let style = NEUTRAL;
         if !state
             .icon
             .as_ref()
-            .is_some_and(|(sent, sent_mark, sent_style)| {
-                *sent == text && *sent_mark == mark && *sent_style == style
-            })
+            .is_some_and(|(sent, sent_style)| *sent == content && *sent_style == style)
         {
-            self.backend.set_icon(render(&text, mark, style));
-            state.icon = Some((text, mark, style));
+            self.backend.set_icon(render(&content, style));
+            state.icon = Some((content, style));
         }
 
         let item = |label_key, index| {
@@ -540,7 +537,10 @@ mod tests {
                 calls.tooltips,
                 ["CPU 45 \u{b0}C \u{b7} GPU 62 \u{b0}C \u{b7} RAM 48 %"]
             );
-            assert_eq!(calls.icons[0], render("62", UnitMark::Degree, NEUTRAL));
+            assert_eq!(
+                calls.icons[0],
+                render(&IconContent::Text("62".to_owned()), NEUTRAL)
+            );
         }
 
         // Only the CPU changes: the icon (GPU) stays, the tooltip follows.
@@ -574,8 +574,8 @@ mod tests {
         assert_eq!(
             calls.icons,
             [
-                render("62", UnitMark::Degree, NEUTRAL),
-                render("48", UnitMark::Percent, NEUTRAL)
+                render(&IconContent::Text("62".to_owned()), NEUTRAL),
+                render(&IconContent::Bar(48), NEUTRAL)
             ]
         );
         assert_eq!(
@@ -585,31 +585,38 @@ mod tests {
     }
 
     #[test]
-    fn update_resends_the_icon_when_only_the_unit_mark_changes() {
+    fn update_redraws_the_icon_when_what_is_drawn_changes() {
         let schema = full_schema();
         let backend = FakeBackend::default();
         let tray = TrayController::new(backend.clone(), Lang::En);
-        // Same number on the icon: the GPU at 48 degrees, then the RAM at 48 %.
-        let snap = snapshot(
-            &schema,
-            &[(CPU_TEMP, 45.0), (DGPU_TEMP, 48.0), (RAM_LOAD, 48.0)],
-        );
-
         let mut settings = Settings::default();
-        tray.update(&schema, &snap, &settings);
-        tray.update(&schema, &snap, &settings);
+        let values = |gpu: f64, ram: f64| {
+            snapshot(
+                &schema,
+                &[(CPU_TEMP, 45.0), (DGPU_TEMP, gpu), (RAM_LOAD, ram)],
+            )
+        };
+        let count = || backend.0.lock().unwrap().icons.len();
+
+        // The same number 48, first as a temperature, then as a load: a re-send.
+        let temperature = values(48.0, 48.0);
+        tray.update(&schema, &temperature, &settings);
+        tray.update(&schema, &temperature, &settings);
+        assert_eq!(count(), 1);
         settings.tray.icon_sensor = Some(RAM_LOAD.to_owned());
-        tray.update(&schema, &snap, &settings);
-        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &temperature, &settings);
+        assert_eq!(count(), 2);
+
+        // A bar re-sends when its level changes, not when the reading does not.
+        tray.update(&schema, &temperature, &settings);
+        assert_eq!(count(), 2);
+        tray.update(&schema, &values(48.0, 49.0), &settings);
+        assert_eq!(count(), 3);
+        tray.update(&schema, &values(90.0, 49.4), &settings);
+        assert_eq!(count(), 3, "49.4 still rounds to 49");
 
         let calls = backend.0.lock().unwrap();
-        assert_eq!(
-            calls.icons,
-            [
-                render("48", UnitMark::Degree, NEUTRAL),
-                render("48", UnitMark::Percent, NEUTRAL)
-            ]
-        );
+        assert_eq!(calls.icons[2], render(&IconContent::Bar(49), NEUTRAL));
     }
 
     #[test]

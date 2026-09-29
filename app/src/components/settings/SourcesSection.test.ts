@@ -23,6 +23,7 @@ const SCHEMA: Schema = {
 
 const sources = (over: Partial<ServiceSources> = {}): ServiceSources => ({
   activeModules: MODULES,
+  requestedDisabledModules: [],
   smartDisabledDrives: [],
   reconfiguration: 'applied',
   smartBlockedBy: [],
@@ -116,13 +117,17 @@ test('the service status reuses the badge explanation and action', async () => {
 });
 
 test('module switches patch serviceModules and explain a module kept on by another user', async () => {
-  const { patches, view } = await setup(connected(), { sources: { serviceModules: { psu: false } } });
+  const { patches, view } = await setup(connected({ sources: sources({ requestedDisabledModules: ['psu'] }) }), {
+    sources: { serviceModules: { psu: false } },
+  });
   // psu is off here but the service still runs it for someone else.
   const psu = toggle(t('settings.sources.module.psu'));
   expect(psu.getAttribute('aria-checked')).toBe('false');
   expect(psu.closest('.field')?.textContent).toContain(t('settings.sources.module.keptOn'));
   expect(screen.getAllByText(t('settings.sources.module.keptOn'))).toHaveLength(1);
-  await view.rerender({ service: connected({ sources: sources({ activeModules: MODULES.filter((m) => m !== 'psu') }) }) });
+  await view.rerender({
+    service: connected({ sources: sources({ activeModules: MODULES.filter((m) => m !== 'psu'), requestedDisabledModules: ['psu'] }) }),
+  });
   expect(screen.queryByText(t('settings.sources.module.keptOn'))).toBeNull();
 
   const motherboard = toggle(t('settings.sources.module.motherboard'));
@@ -141,6 +146,22 @@ test('a module the service has not dropped yet is not blamed on another user', a
   const state = backend.settings.state();
   backend.emitSettings({ ...state, seq: settings.state!.seq + 1, applyStatus: { ...state.applyStatus, service: { kind: 'pending' } } });
   expect(await screen.findByText(t('settings.sources.applying'))).toBeTruthy();
+  expect(screen.queryByText(t('settings.sources.module.keptOn'))).toBeNull();
+});
+
+test('sources from before the request was taken do not blame another user', async () => {
+  // The settings already say "applied" (oma:settings arrives at once) while the service status is
+  // still the one from before this app asked psu off (oma:service follows on the next tick).
+  await setup(connected(), { sources: { serviceModules: { psu: false } } });
+  expect(settings.state?.applyStatus.service.kind).not.toBe('pending');
+  expect(toggle(t('settings.sources.module.psu')).getAttribute('aria-checked')).toBe('false');
+  expect(screen.queryByText(t('settings.sources.module.keptOn'))).toBeNull();
+});
+
+test('a failed reconfiguration does not blame another user', async () => {
+  await setup(connected({ sources: sources({ reconfiguration: 'failed', requestedDisabledModules: ['psu'] }) }), {
+    sources: { serviceModules: { psu: false } },
+  });
   expect(screen.queryByText(t('settings.sources.module.keptOn'))).toBeNull();
 });
 

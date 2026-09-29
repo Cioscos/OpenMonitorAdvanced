@@ -744,6 +744,7 @@ mod tests {
             pawn_io: Some(oma_ipc::PawnIoStatus::Ok),
             sources: Some(oma_ipc::ServiceSources {
                 active_modules: vec!["cpu".to_owned()],
+                requested_disabled_modules: Vec::new(),
                 smart_disabled_drives: Vec::new(),
                 reconfiguration,
                 smart_blocked_by: Vec::new(),

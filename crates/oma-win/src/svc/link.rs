@@ -641,6 +641,7 @@ impl Machine {
         };
         self.status.sources = Some(ServiceSources {
             active_modules: block.active_modules.clone(),
+            requested_disabled_modules: self.request.disabled_modules.clone(),
             smart_disabled_drives: block
                 .smart_disabled_drives
                 .iter()
@@ -3386,6 +3387,28 @@ mod tests {
         let sources = m.status.sources.clone().expect("sources");
         assert_eq!(sources.reconfiguration, Reconfiguration::Applied);
         assert!(!sources.active_modules.contains(&"psu".to_owned()));
+    }
+
+    #[test]
+    fn sources_name_the_request_they_refer_to() {
+        let now = Instant::now();
+        let mut m = streaming_machine(test_settings(), block("applied"), now);
+        let requested = |m: &Machine| {
+            m.status
+                .sources
+                .as_ref()
+                .map(|s| s.requested_disabled_modules.clone())
+        };
+        // Before any request the service reflects nothing this app turned off.
+        assert_eq!(requested(&m), Some(Vec::new()));
+
+        m.decide(
+            Event::Command(LinkCommand::SetSources(request(&["psu"], &[]))),
+            now,
+        );
+        assert_eq!(requested(&m), Some(vec!["psu".to_owned()]));
+        m.decide(Event::Message(schema_with_block(block("applied"))), now);
+        assert_eq!(requested(&m), Some(vec!["psu".to_owned()]));
     }
 
     #[test]

@@ -21,7 +21,6 @@
   const sources = $derived(connected ? (service?.sources ?? null) : null);
   const disks = $derived(store.schema?.devices.filter((d) => d.kind === 'storage') ?? []);
   const storageOn = $derived(current?.sources.serviceModules.storage ?? true);
-  const applying = $derived(applyStatus?.service.kind === 'pending');
   const blockedBy = $derived(sources ? blockingDiskNames(sources.smartBlockedBy, store.schema, t) : []);
 
   let antiCheatFailed = $state(false);
@@ -106,8 +105,13 @@
     {/if}
     {#each MODULES as module (module)}
       {@const on = current.sources.serviceModules[module]}
-      <!-- While the service has not taken this app's request, "on" there is not someone else's doing. -->
-      {@const keptOn = !on && !applying && (sources?.activeModules.includes(module) ?? false)}
+      <!-- Only a status that has taken this app's request blames another user: the service status
+           arrives on the next tick, after the settings, and may still be from before the request. -->
+      {@const keptOn =
+        !on &&
+        sources?.reconfiguration === 'applied' &&
+        sources.requestedDisabledModules.includes(module) &&
+        sources.activeModules.includes(module)}
       <Toggle
         id="module-{module}"
         label={t(`settings.sources.module.${module}`)}

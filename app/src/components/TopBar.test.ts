@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { i18n, t } from '../lib/i18n/index.svelte';
 import type { ServiceState, ServiceStatus } from '../lib/types';
 import TopBar from './TopBar.svelte';
@@ -110,4 +110,35 @@ test('the live status region does not wrap the action button', () => {
   const status = screen.getByRole('status');
   expect(status.querySelector('button')).toBeNull();
   expect(status.textContent).toContain(t('service.state.antiCheat'));
+});
+
+test('the badge stays hidden while connected with PawnIO working', () => {
+  setup({ state: 'connected', detail: null, pawnIo: 'ok', sources: null });
+  expect(document.querySelector('details.badge')).toBeNull();
+});
+
+test('a PawnIO problem stays visible in the badge while connected (spec §2.8)', () => {
+  for (const pawnIo of ['missing', 'unavailable', 'rebootPending', 'unknown'] as const) {
+    setup({ state: 'connected', detail: null, pawnIo, sources: null });
+    const details = document.querySelector('details.badge') as HTMLDetailsElement;
+    expect(details).toBeTruthy();
+    // Connected is not basic mode: the badge names the driver instead.
+    expect(details.querySelector('summary')?.textContent).toBe(t('settings.sources.pawnIo'));
+    expect(within(details).getByText(t(`settings.sources.pawnIo.${pawnIo}`))).toBeTruthy();
+    expect(within(details).queryByRole('button')).toBeNull();
+    cleanup();
+  }
+});
+
+test('a pending PawnIO install asks for a restart, not a shutdown', () => {
+  setup({ state: 'connected', detail: null, pawnIo: 'rebootPending', sources: null });
+  const text = screen.getByText(t('settings.sources.pawnIo.rebootPending')).textContent ?? '';
+  expect(text).toMatch(/restart/i);
+  expect(text).toMatch(/not a shutdown/i);
+});
+
+test('the badge of a non-connected state keeps its basic-mode text without a PawnIO line', () => {
+  setup({ state: 'unreachable', detail: null, pawnIo: 'missing', sources: null });
+  expect(screen.getByText(t('service.baseMode'))).toBeTruthy();
+  expect(screen.queryByText(t('settings.sources.pawnIo.missing'))).toBeNull();
 });

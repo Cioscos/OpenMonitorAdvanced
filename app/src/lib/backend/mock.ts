@@ -202,6 +202,7 @@ function parseAutostart(search: string): AutostartEffective | null {
 function mockSources(): ServiceSources {
   return {
     activeModules: ['cpu', 'motherboard', 'memory', 'storage', 'controller', 'psu'],
+    requestedDisabledModules: [],
     smartDisabledDrives: [],
     reconfiguration: 'applied',
     smartBlockedBy: [],

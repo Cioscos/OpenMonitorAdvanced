@@ -106,6 +106,11 @@ impl Reconfiguration {
 pub struct ServiceSources {
     /// Modules that are on ([`crate::MODULES`] names).
     pub active_modules: Vec<String>,
+    /// The modules this app asked off in the request that `reconfiguration`
+    /// refers to. A module among them that is still active is kept on by
+    /// another client; the UI tells it apart only from this one status, since
+    /// the settings (with `applyStatus`) reach it before the next status.
+    pub requested_disabled_modules: Vec<String>,
     /// Core ids of the disks whose SMART is off.
     pub smart_disabled_drives: Vec<String>,
     pub reconfiguration: Reconfiguration,
@@ -188,6 +193,7 @@ mod tests {
             pawn_io: Some(PawnIoStatus::RebootPending),
             sources: Some(ServiceSources {
                 active_modules: vec!["cpu".to_owned(), "storage".to_owned()],
+                requested_disabled_modules: vec!["psu".to_owned()],
                 smart_disabled_drives: vec!["storage/device-a".to_owned()],
                 reconfiguration: Reconfiguration::Pending,
                 smart_blocked_by: vec!["storage/device-b".to_owned()],
@@ -202,6 +208,7 @@ mod tests {
                 "pawnIo": "rebootPending",
                 "sources": {
                     "activeModules": ["cpu", "storage"],
+                    "requestedDisabledModules": ["psu"],
                     "smartDisabledDrives": ["storage/device-a"],
                     "reconfiguration": "pending",
                     "smartBlockedBy": ["storage/device-b"],

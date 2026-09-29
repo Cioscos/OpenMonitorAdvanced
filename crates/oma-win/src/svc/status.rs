@@ -179,6 +179,7 @@ mod tests {
 
         connected.sources = Some(oma_ipc::ServiceSources {
             active_modules: vec!["cpu".to_owned()],
+            requested_disabled_modules: Vec::new(),
             smart_disabled_drives: Vec::new(),
             reconfiguration: oma_ipc::Reconfiguration::Pending,
             smart_blocked_by: Vec::new(),

@@ -9,13 +9,23 @@
     onLeaveAntiCheat,
     onStartService,
     onFailed = () => {},
+    showPawnIo = false,
   }: {
     service: ServiceStatus;
     onLeaveAntiCheat: () => Promise<unknown>;
     onStartService: () => Promise<unknown>;
     /** Called when the action fails, e.g. to open the badge so the error is visible. */
     onFailed?: () => void;
+    /**
+     * Also explain a PawnIO state other than `ok` while connected (the badge popup; Data sources
+     * shows the driver on its own row).
+     */
+    showPawnIo?: boolean;
   } = $props();
+
+  const pawnIo = $derived(
+    showPawnIo && service.state === 'connected' && service.pawnIo !== null && service.pawnIo !== 'ok' ? service.pawnIo : null,
+  );
 
   let busy = $state(false);
   let failed = $state(false);
@@ -38,6 +48,7 @@
   <div class="status" role="status">
     <p>{t(`service.state.${service.state}`)}</p>
     {#if service.detail}<p>{t(`service.detail.${service.detail}`)}</p>{/if}
+    {#if pawnIo}<p class="warn">{t(`settings.sources.pawnIo.${pawnIo}`)}</p>{/if}
     {#if failed}<p class="error">{t('service.action.failed')}</p>{/if}
   </div>
   {#if service.state === 'antiCheat'}
@@ -60,6 +71,9 @@
   }
   p + p {
     margin-top: 6px;
+  }
+  .warn {
+    color: var(--warn);
   }
   .error {
     color: var(--crit);

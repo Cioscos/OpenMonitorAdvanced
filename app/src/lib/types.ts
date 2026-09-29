@@ -156,6 +156,11 @@ export type Reconfiguration = 'applied' | 'pending' | 'failed';
 export interface ServiceSources {
   /** Modules that are on (`cpu`, `motherboard`, `memory`, `storage`, `controller`, `psu`). */
   activeModules: string[];
+  /**
+   * The modules this app asked off in the request `reconfiguration` refers to: a module that is
+   * among them and still active is kept on by another client.
+   */
+  requestedDisabledModules: string[];
   /** Core ids of the disks whose SMART is off. */
   smartDisabledDrives: string[];
   reconfiguration: Reconfiguration;

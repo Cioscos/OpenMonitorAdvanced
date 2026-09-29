@@ -174,6 +174,7 @@ test('the mock serves lhm sensors only when the service is connected', async () 
     pawnIo: 'ok',
     sources: {
       activeModules: ['cpu', 'motherboard', 'memory', 'storage', 'controller', 'psu'],
+      requestedDisabledModules: [],
       smartDisabledDrives: [],
       reconfiguration: 'applied',
       smartBlockedBy: [],

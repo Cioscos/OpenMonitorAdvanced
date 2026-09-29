@@ -30,7 +30,9 @@
   // the service. A command failure opens it so the error is visible.
   let open = $state(false);
 
-  const showBadge = $derived(service !== null && service.state !== 'connected');
+  // Spec §2.8: a PawnIO state other than `ok` stays visible while the service is connected.
+  const pawnIoProblem = $derived(service?.state === 'connected' && service.pawnIo !== null && service.pawnIo !== 'ok');
+  const showBadge = $derived(service !== null && (service.state !== 'connected' || pawnIoProblem));
 </script>
 
 <header class="topbar">
@@ -56,9 +58,9 @@
     {/if}
     {#if showBadge && service}
       <details class="badge" bind:open>
-        <summary>{t('service.baseMode')}</summary>
+        <summary>{pawnIoProblem ? t('settings.sources.pawnIo') : t('service.baseMode')}</summary>
         <div class="panel">
-          <ServiceExplainer {service} {onLeaveAntiCheat} {onStartService} onFailed={() => (open = true)} />
+          <ServiceExplainer {service} {onLeaveAntiCheat} {onStartService} onFailed={() => (open = true)} showPawnIo />
         </div>
       </details>
     {/if}

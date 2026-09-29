@@ -1891,6 +1891,26 @@ mod tests {
     }
 
     #[test]
+    fn a_v1_service_hello_on_the_wire_is_incompatible_not_disconnected() {
+        // The bytes a protocol v1 service sends (no `pawn_io`), decoded the way the pipe
+        // reader does, must reach the version check.
+        const V1_HELLO: [u8; 58] = [
+            0x82, 0xa4, 0x74, 0x79, 0x70, 0x65, 0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xa4, 0x62,
+            0x6f, 0x64, 0x79, 0x82, 0xb0, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, 0x5f,
+            0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x1, 0xaf, 0x73, 0x65, 0x72, 0x76, 0x69,
+            0x63, 0x65, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0xa5, 0x30, 0x2e, 0x31,
+            0x2e, 0x30,
+        ];
+        let old_hello = oma_ipc::decode_payload(&V1_HELLO).expect("a v1 hello decodes");
+        let control = FakeControl::new(running());
+        let (conn, ctl) = fake_conn(Some(PID));
+        ctl.push(old_hello);
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(st(ServiceState::Incompatible, None)));
+        assert!(ctl.sent().is_empty(), "no Subscribe to a v1 service");
+    }
+
+    #[test]
     fn incompatible_is_not_retried_until_start() {
         // Fake time: the rules alone, no clock.
         let t0 = Instant::now();

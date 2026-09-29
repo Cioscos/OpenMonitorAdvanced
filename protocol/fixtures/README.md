@@ -50,6 +50,8 @@ on the wire; the .NET decoder requires them, like the Rust one.
 
 - **`hello.msgpack`**: `Hello { protocol_version: 2, service_version: "0.1.0", pawn_io: "rebootPending" }`.
   *v2*: `pawn_io` is `"ok"`, `"missing"`, `"unavailable"`, `"unknown"` or `"rebootPending"`.
+  The Rust decoder alone defaults an absent `pawn_io` to `"unknown"`: a protocol v1 service's `Hello` must
+  still decode, so the app reports `Incompatible` instead of retrying a failed decode forever.
 - **`subscribe.msgpack`**: `Subscribe { interval_ms: 1000, disabled_modules: ["memory", "psu"], smart_disabled_drives: [KEY_A, KEY_B] }`
   with `KEY_A = 589488fb…4d83` (the key of `Samsung SSD 990 PRO 2TB` / `0025_38B1_4150_2A6C.`) and
   `KEY_B = 3ed905bd…4ea6` (`ST2000DM008-2UB102` / `WFL4ABCD`). *v2*: `disabled_modules` (names from

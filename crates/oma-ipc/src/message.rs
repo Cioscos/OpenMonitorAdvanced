@@ -31,8 +31,15 @@ pub struct Hello {
     pub protocol_version: u32,
     pub service_version: String,
     /// State of the PawnIO driver: `"ok"`, `"missing"`, `"unavailable"`, `"unknown"` or
-    /// `"rebootPending"`.
+    /// `"rebootPending"`. The decoder alone is lenient: a protocol v1 service sends no such
+    /// key, and its `Hello` must still decode so the version check can report it as
+    /// incompatible. Encoders always write the key.
+    #[serde(default = "unknown_pawn_io")]
     pub pawn_io: String,
+}
+
+fn unknown_pawn_io() -> String {
+    "unknown".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

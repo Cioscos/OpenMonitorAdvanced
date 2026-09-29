@@ -3,6 +3,7 @@
   import { sectionForTile } from '../../lib/advanced/nav';
   import { monitoringHealth } from '../../lib/health';
   import { i18n, t } from '../../lib/i18n/index.svelte';
+  import { display } from '../../lib/units.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
   import type { DeviceKind } from '../../lib/types';
   import {
@@ -96,8 +97,8 @@
       <Tile label={t('tile.netDisk')} onclick={() => onOpenAdvanced(netDiskSection)}>
         {#if net}
           <div class="big rate">
-            ↓ {formatRate(net.downBps, 'bits', locale)}
-            <span class="unit">↑ {formatRate(net.upBps, 'bits', locale)}</span>
+            ↓ {formatRate(net.downBps, display.throughput, locale)}
+            <span class="unit">↑ {formatRate(net.upBps, display.throughput, locale)}</span>
           </div>
           <Sparkline values={netSeries} timestampsMs={seriesTimestampsMs} color="var(--accent-2)" />
         {/if}

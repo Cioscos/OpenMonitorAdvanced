@@ -1,7 +1,8 @@
 import type uPlot from 'uplot';
-import { formatValue } from '../format';
+import { formatTemperatureIn, formatValue } from '../format';
 import type { Translate } from '../i18n/index.svelte';
-import type { HistorySeed, Schema, Unit } from '../types';
+import type { HistorySeed, Schema, TemperatureUnit, ThroughputUnit, Unit } from '../types';
+import { toDisplayTemperature } from '../units.svelte';
 
 /** Chart windows in seconds: 1m, 5m, 30m, 1h (spec §7.3). Same values as persist.ts `StoredWindow`. */
 export const WINDOWS = [60, 300, 1800, 3600] as const;
@@ -76,9 +77,18 @@ export class ChartBuffer {
     for (const column of this.#series) column.splice(0, drop);
   }
 
-  /** uPlot layout, copied: x in seconds, then one column per id. */
-  data(): uPlot.AlignedData {
-    return [this.#timestampsMs.map((ms) => ms / 1000), ...this.#series.map((column) => [...column])];
+  /**
+   * uPlot layout, copied: x in seconds, then one column per id. `convert[i]`, when set, turns
+   * the stored values of series `i` into the units drawn; the buffer itself keeps the base ones.
+   */
+  data(convert: ReadonlyArray<((value: number) => number) | undefined> = []): uPlot.AlignedData {
+    return [
+      this.#timestampsMs.map((ms) => ms / 1000),
+      ...this.#series.map((column, i) => {
+        const fn = convert[i];
+        return fn ? column.map((v) => (v === null ? null : fn(v))) : [...column];
+      }),
+    ];
   }
 }
 
@@ -129,6 +139,40 @@ export const PALETTE_TOKENS = ['--accent', '--accent-2', '--ok', '--warn', '--se
 /** Resolves the palette through `read`, e.g. `getComputedStyle(root).getPropertyValue`. */
 export function seriesPalette(read: (token: string) => string): string[] {
   return PALETTE_TOKENS.map((token) => read(token).trim());
+}
+
+/** Display units that change how a chart draws its data. */
+export interface ChartUnits {
+  temperature: TemperatureUnit;
+  /** How `bytes_per_second` series are drawn: bytes, or bits (network pages). */
+  rate: ThroughputUnit;
+}
+
+/**
+ * How a scale of `unit` is drawn: `convert` maps the stored values (°C, byte/s) to the plotted
+ * ones, and `format` writes a plotted value for the axis and legend. Both are null-safe for
+ * gaps; `convert` is undefined when the plotted values are the stored ones.
+ */
+export interface DisplayScale {
+  convert: ((value: number) => number) | undefined;
+  format: (value: number | null, locale: string, t: Translate) => string;
+}
+
+export function displayScale(unit: Unit, units: ChartUnits): DisplayScale {
+  if (unit === 'celsius' && units.temperature === 'f') {
+    return {
+      convert: (celsius) => toDisplayTemperature(celsius, 'f'),
+      format: (degrees, locale) => formatTemperatureIn(degrees, 'f', locale),
+    };
+  }
+  if (unit === 'bytes_per_second' && units.rate === 'bits') {
+    // Bits are plotted, so the axis splits fall on round bit values; ×8 and ÷8 are exact.
+    return {
+      convert: (bytes) => bytes * 8,
+      format: (bits, locale, t) => formatValue(bits === null ? null : bits / 8, unit, locale, t, { rate: 'bits' }),
+    };
+  }
+  return { convert: undefined, format: (value, locale, t) => formatValue(value, unit, locale, t) };
 }
 
 /** Scale key per series (its unit): the first unit is drawn on the left axis, the second on the right. */
@@ -213,10 +257,15 @@ function hasDistinctLabels(min: number, max: number, incr: number, label: (v: nu
  * over the visible range, not hardcoded per unit, so it also protects units with more decimals
  * (volt) or none (celsius, percent) alike.
  */
-export function labelSafeIncrs(unit: Unit, locale: string, t: Translate): uPlot.Axis.Incrs {
+export function labelSafeIncrs(
+  unit: Unit,
+  locale: string,
+  t: Translate,
+  format: DisplayScale['format'] = (v, l, tr) => formatValue(v, unit, l, tr),
+): uPlot.Axis.Incrs {
   return (_u, _axisIdx, min, max) => {
     if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return NUMERIC_INCRS;
-    const label = (v: number) => formatValue(v, unit, locale, t);
+    const label = (v: number) => format(v, locale, t);
     for (const incr of NUMERIC_INCRS) {
       if (hasDistinctLabels(min, max, incr, label)) return NUMERIC_INCRS.filter((candidate) => candidate >= incr);
     }

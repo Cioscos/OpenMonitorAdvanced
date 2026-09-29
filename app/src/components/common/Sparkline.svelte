@@ -4,6 +4,7 @@
   import { heldLengthPx, scrollOffsetPx } from '../../lib/chartCompositor';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
   import { sparklineGeometry } from '../../lib/sparkline';
+  import { display } from '../../lib/units.svelte';
 
   let {
     values,
@@ -33,14 +34,24 @@
 
   let mounted = false;
   let stopFrames: (() => void) | null = null;
+  /** Rate of the running subscription. */
+  let framesFps: number | null = null;
 
-  /** Frames are asked for only while a mounted tile has a curve to scroll. */
+  /**
+   * Frames are asked for only while a mounted tile has a curve to scroll, at the chart frame
+   * rate of the settings: a new rate replaces the subscription.
+   */
   function syncFrames() {
     const wanted = mounted && geometry.path !== '';
-    if (wanted && !stopFrames) stopFrames = subscribeChartFrame(updateVisual);
-    else if (!wanted && stopFrames) {
+    const fps = display.chartFps;
+    if (stopFrames && (!wanted || framesFps !== fps)) {
       stopFrames();
       stopFrames = null;
+      framesFps = null;
+    }
+    if (wanted && !stopFrames) {
+      stopFrames = subscribeChartFrame(updateVisual, fps);
+      framesFps = fps;
     }
   }
 
@@ -86,6 +97,11 @@
       syncFrames();
       updateVisual(performance.now());
     });
+  });
+
+  $effect(() => {
+    void display.chartFps;
+    untrack(syncFrames);
   });
 
   onMount(() => {

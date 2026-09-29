@@ -92,6 +92,53 @@ test('network page: traffic in bits per second, like the Simple view', async () 
   await vi.waitFor(() => expect(cells().every((c) => c.endsWith('bit/s'))).toBe(true));
 });
 
+test('network pages follow the throughput setting and disks stay in bytes', async () => {
+  await connectSettings({ general: { throughputUnit: 'bytes' } });
+  const { backend, store } = setup();
+  const NIC = 'network/mock-eth';
+  const DISK = 'storage/device-mock-ssd';
+  const NIC_ENTRY: SidebarEntry = { id: NIC, kind: 'network', deviceIds: [NIC], labelKey: 'advanced.section.network', labelArg: 'Ethernet' };
+  const DISK_ENTRY: SidebarEntry = { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
+  const tableCells = (label: string) => {
+    const name = [...document.querySelectorAll('.sensors th .name')].find((n) => n.textContent === label)!;
+    return [...name.closest('tr')!.querySelectorAll('td')].map((td) => td.textContent!);
+  };
+
+  const nic = render(DevicePage, { entry: NIC_ENTRY, store, backend });
+  await vi.waitFor(() => expect(kpiValues()[3]).toBe(formatValue(STATS.max, 'bytes_per_second', 'en', t, { rate: 'bytes' })));
+  expect(kpiValues()[0]).not.toMatch(/bit\/s$/);
+  expect(tableCells(t('sensor.network.down')).every((c) => /[A-Z]B\/s$|^\d+ B\/s$/.test(c))).toBe(true);
+  // The setting changes the open page at once.
+  await settings.update({ general: { throughputUnit: 'bits' } });
+  await vi.waitFor(() => expect(kpiValues()[0]).toMatch(/bit\/s$/));
+  nic.unmount();
+
+  const disk = render(DevicePage, { entry: DISK_ENTRY, store, backend });
+  const readRow = () => tableCells(t('sensor.storage.read'));
+  // Value, min, max and average: wait for the statistics too.
+  await vi.waitFor(() => expect(readRow().every((c) => c !== '—')).toBe(true));
+  expect(readRow().every((c) => !c.includes('bit/s') && c.endsWith('/s'))).toBe(true);
+  disk.unmount();
+});
+
+test('a network page hands the chart the throughput setting, a disk page always bytes', async () => {
+  const { backend, store } = setup();
+  const NIC = 'network/mock-eth';
+  const DISK = 'storage/device-mock-ssd';
+  const nic = render(DevicePage, { entry: { id: NIC, kind: 'network', deviceIds: [NIC], labelKey: 'advanced.section.network' }, store, backend });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const axis = plots[0].opts.axes!.find((a) => a.scale === 'bytes_per_second')!;
+  const label = (axis.values as (u: unknown, splits: number[]) => string[])(plots[0], [8e6])[0];
+  expect(label).toBe('8.0 Mbit/s');
+  nic.unmount();
+
+  plots.length = 0;
+  render(DevicePage, { entry: { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage' }, store, backend });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const diskAxis = plots[0].opts.axes!.find((a) => a.scale === 'bytes_per_second')!;
+  expect((diskAxis.values as (u: unknown, splits: number[]) => string[])(plots[0], [8 * 1024 ** 2])[0]).toBe('8.0 MB/s');
+});
+
 test('leaving the page stops the statistics polling and destroys the chart', async () => {
   vi.useFakeTimers();
   try {

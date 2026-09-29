@@ -1,5 +1,6 @@
 import type { Translate } from './i18n/index.svelte';
-import type { Unit } from './types';
+import type { TemperatureUnit, ThroughputUnit, Unit } from './types';
+import { display, temperatureSymbol, toDisplayTemperature } from './units.svelte';
 
 export const DASH = '—';
 
@@ -43,7 +44,7 @@ export function formatBytes(bytes: number | null, locale: string): string {
 }
 
 /** Network-style rates: bits with decimal steps, or bytes with binary steps. */
-export function formatRate(bytesPerSecond: number | null, mode: 'bits' | 'bytes', locale: string): string {
+export function formatRate(bytesPerSecond: number | null, mode: ThroughputUnit, locale: string): string {
   if (missing(bytesPerSecond)) return DASH;
   if (mode === 'bytes') return `${formatBytes(bytesPerSecond, locale)}/s`;
   let value = bytesPerSecond * 8;
@@ -60,8 +61,14 @@ export function formatClock(mhz: number | null, locale: string): string {
   return mhz >= 1000 ? `${num(mhz / 1000, 2, locale)} GHz` : `${num(mhz, 0, locale)} MHz`;
 }
 
-export function formatTemperature(celsius: number | null, locale: string): string {
-  return missing(celsius) ? DASH : `${num(celsius, 0, locale)} °C`;
+/** A temperature in °C, shown in `unit` (the temperature setting by default). */
+export function formatTemperature(celsius: number | null, locale: string, unit: TemperatureUnit = display.temperature): string {
+  return missing(celsius) ? DASH : formatTemperatureIn(toDisplayTemperature(celsius, unit), unit, locale);
+}
+
+/** A number of degrees already in `unit`, for chart axes and legends that plot converted data. */
+export function formatTemperatureIn(degrees: number | null, unit: TemperatureUnit, locale: string): string {
+  return missing(degrees) ? DASH : `${num(degrees, 0, locale)} ${temperatureSymbol(unit)}`;
 }
 
 export function formatPower(watt: number | null, locale: string): string {

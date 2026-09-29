@@ -1,5 +1,8 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { settings } from '../../lib/settings.svelte';
+import { spyChartFrames } from '../../test/chart-frames';
+import { connectSettings, disconnectSettings } from '../../test/settings';
 import Sparkline from './Sparkline.svelte';
 import source from './Sparkline.svelte?raw';
 
@@ -7,6 +10,7 @@ let restoreClock: (() => void) | null = null;
 
 afterEach(() => {
   cleanup();
+  disconnectSettings();
   restoreClock?.();
   restoreClock = null;
   vi.unstubAllGlobals();
@@ -440,4 +444,21 @@ test('asks for frames only while it has a curve to scroll', async () => {
   expect(time.pending()).toBe(0);
   view.unmount();
   expect(time.pending()).toBe(0);
+});
+
+test('chart and sparkline resubscribe when fps changes: sparkline', async () => {
+  await connectSettings({ general: { chartFps: 60 } });
+  clock();
+  const subscriptions = spyChartFrames();
+  const view = render(Sparkline, { values: [10, 20], timestampsMs: [1_000, 2_000], max: 100 });
+  await tick();
+  const live = () => subscriptions.filter((s) => !s.stopped).map((s) => s.fps);
+  expect(live()).toEqual([60]);
+
+  await settings.update({ general: { chartFps: 30 } });
+  await vi.waitFor(() => expect(live()).toEqual([30]));
+  expect(subscriptions.map((s) => [s.fps, s.stopped])).toEqual([[60, true], [30, false]]);
+
+  view.unmount();
+  expect(live()).toEqual([]);
 });

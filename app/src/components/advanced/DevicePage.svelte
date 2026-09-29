@@ -6,6 +6,7 @@
   import type { Backend } from '../../lib/backend';
   import type { LiveStore } from '../../lib/live.svelte';
   import type { ServiceStatus } from '../../lib/types';
+  import { display } from '../../lib/units.svelte';
   import DeviceInfo from './DeviceInfo.svelte';
   import GpuProcesses from './GpuProcesses.svelte';
   import HistoryChart from './HistoryChart.svelte';
@@ -35,10 +36,9 @@
   const kpis = $derived(schema ? kpisFor(entry.kind, schema, entry.deviceIds) : []);
   const defaults = $derived(schema ? defaultSeries(entry.kind, schema, entry.deviceIds) : []);
   const hasProperties = $derived(devices.some((d) => Object.keys(d.properties ?? {}).length > 0));
-  // Network traffic in bit/s, the unit of the Simple view's network tile. `rate` only reaches
-  // KpiRow and SensorTable below: HistoryChart keeps plotting the sensor's stored BytesPerSecond,
-  // so the chart's axis/legend stay in byte/s until the M5 unit settings (docs/follow-ups.md).
-  const rate = $derived(entry.kind === 'network' ? 'bits' : 'bytes');
+  // Network traffic follows the throughput setting, like the Simple view's network tile; disks
+  // and everything else stay in bytes. The KPIs, the table and the chart all take `rate`.
+  const rate = $derived(entry.kind === 'network' ? display.throughput : 'bytes');
   const valueOf = (id: string) => store.value(id);
   // The backend of a mounted page never changes.
   const stats = new StatsPoller(untrack(() => backend), () => sensors.map((s) => s.id), () => schema?.revision ?? null);
@@ -50,7 +50,7 @@
   <div class="page">
     {#if showServiceNotice}<ServiceNotice />{/if}
     <KpiRow {kpis} {valueOf} statsOf={stats.statsOf} {rate} />
-    <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} />
+    <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} {rate} />
     <SensorTable {sensors} {valueOf} {stats} {rate} />
     {#if hasProperties || entry.kind === 'gpu'}
       <div class="extra">

@@ -239,8 +239,9 @@ export const PROPERTY_ORDER = [
 ];
 
 /**
- * How numeric properties are shown. The labels of the W and °C limits already carry the
- * unit (Task 9), so those values are plain numbers; the PCIe ones read "Gen 4" and "x16".
+ * How numeric properties are shown. The labels of the W limits already carry the unit
+ * (Task 9), so those values are plain numbers; the °C limits are temperatures, shown in the
+ * temperature unit with its symbol; the PCIe ones read "Gen 4" and "x16".
  */
 const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   pcieMaxGen: 'pcie_generation',
@@ -248,11 +249,11 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   powerLimitDefaultW: 'number',
   powerLimitMinW: 'number',
   powerLimitMaxW: 'number',
-  tempSlowdownC: 'number',
-  tempShutdownC: 'number',
-  tempMaxC: 'number',
-  tempWarningC: 'number',
-  tempCriticalC: 'number',
+  tempSlowdownC: 'celsius',
+  tempShutdownC: 'celsius',
+  tempMaxC: 'celsius',
+  tempWarningC: 'celsius',
+  tempCriticalC: 'celsius',
 };
 
 export interface PropertyRow {

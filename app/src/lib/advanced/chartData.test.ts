@@ -8,6 +8,7 @@ import {
   PALETTE_TOKENS,
   WINDOWS,
   canAdd,
+  displayScale,
   fitSelection,
   formatTimeTick,
   initialSeries,
@@ -93,6 +94,31 @@ test('trim retains one point before the viewport so the left edge does not jump 
   buffer.append(121_000, [121]);
   buffer.trim(121_000);
   expect(buffer.data()[1]).toEqual([60, 70, 80, 90, 100, 110, 120, 121]);
+});
+
+test('data converts the drawn columns and leaves the stored values alone', () => {
+  const buffer = new ChartBuffer(['a', 'b', 'c'], 60);
+  buffer.append(1000, [100, 2, null]);
+  buffer.append(2000, [0, 4, 5]);
+  expect(buffer.data([(c) => (c * 9) / 5 + 32, undefined, (v) => v * 8])).toEqual([[1, 2], [212, 32], [2, 4], [null, 40]]);
+  expect(buffer.data()).toEqual([[1, 2], [100, 0], [2, 4], [null, 5]]);
+});
+
+test('display scales convert at draw time and format the converted values', () => {
+  const f = displayScale('celsius', { temperature: 'f', rate: 'bytes' });
+  expect(f.convert?.(100)).toBe(212);
+  expect(f.format(212, 'en', tEn)).toBe('212 °F');
+  expect(f.format(null, 'en', tEn)).toBe('—');
+  const c = displayScale('celsius', { temperature: 'c', rate: 'bits' });
+  expect(c.convert).toBeUndefined();
+  expect(c.format(100, 'en', tEn)).toBe('100 °C');
+  const bits = displayScale('bytes_per_second', { temperature: 'c', rate: 'bits' });
+  expect(bits.convert?.(1_000_000)).toBe(8_000_000);
+  expect(bits.format(8_000_000, 'en', tEn)).toBe('8.0 Mbit/s');
+  const bytes = displayScale('bytes_per_second', { temperature: 'f', rate: 'bytes' });
+  expect(bytes.convert).toBeUndefined();
+  expect(bytes.format(1024 ** 2, 'en', tEn)).toBe('1.0 MB/s');
+  expect(displayScale('percent', { temperature: 'f', rate: 'bits' }).convert).toBeUndefined();
 });
 
 test('data returns copies, so uPlot never sees later appends', () => {

@@ -6,6 +6,7 @@ import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
 import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
+import { spyChartFrames } from '../../test/chart-frames';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
@@ -1440,4 +1441,92 @@ test('real uPlot autoscales through the transition range exactly as through its 
   // The component's autoscale gate is closed once it has painted; open it as a snapshot does.
   const gateOpen = Object.fromEntries(Object.entries(configured.opts.scales!).map(([key, scale]) => [key, key === 'x' ? scale : { ...scale, auto: true }]));
   expect(await ranges(gateOpen)).toEqual(expected);
+});
+
+const NIC = 'network/mock-eth';
+const nicSensors = MOCK_SCHEMA.sensors.filter((s) => s.deviceId === NIC);
+const NIC_DEFAULTS = [`${NIC}/throughput/down`, `${NIC}/throughput/up`];
+/** Axis and legend text of the series on `scale`, for the value `v` in the units the plot holds. */
+function axisAndLegend(plot: FakeUplot, scale: string, v: number): [string, string] {
+  const axisIndex = plot.opts.axes!.findIndex((a) => a.scale === scale);
+  const axis = plot.opts.axes![axisIndex];
+  const series = plot.opts.series.find((s) => s.scale === scale)!;
+  const label = (axis.values as (u: uPlot, splits: number[]) => string[])(plot as unknown as uPlot, [v])[0];
+  const legend = (series.value as (u: uPlot, v: number | null) => string)(plot as unknown as uPlot, v);
+  return [label, legend];
+}
+
+test('history chart converts temperature series and axis to °F', async () => {
+  await connectSettings({ general: { temperatureUnit: 'f' } });
+  const backend = fakeBackend();
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+
+  // Column 1 holds the temperature in degrees Celsius: 11 and 21.
+  expect(plots[0].data).toEqual([[1, 2], [10, 20], [51.8, 69.8]]);
+  expect(plots[0].opts.series[2].scale).toBe('celsius');
+  expect(axisAndLegend(plots[0], 'celsius', 212)).toEqual(['212 °F', '212 °F']);
+  // Other units stay as they are.
+  expect(axisAndLegend(plots[0], 'percent', 50)).toEqual(['50%', '50%']);
+
+  // A live sample is converted too.
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  cleanup();
+  plots.length = 0;
+  renderChart(backend, store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: MOCK_SCHEMA.sensors.map((s) => (s.id === TEMP ? 100 : 0)) });
+  await vi.waitFor(() => expect(plots[0].data[2].at(-1)).toBe(212));
+});
+
+test('a temperature unit change redraws the chart from the buffer without reloading the history', async () => {
+  await connectSettings({ general: { temperatureUnit: 'f' } });
+  const backend = fakeBackend();
+  renderChart(backend);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(backend.historyCalls).toHaveLength(1);
+
+  await settings.update({ general: { temperatureUnit: 'c' } });
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect(backend.historyCalls).toHaveLength(1);
+  expect(plots[1].data).toEqual([[1, 2], [10, 20], [11, 21]]);
+  expect(axisAndLegend(plots[1], 'celsius', 100)).toEqual(['100 °C', '100 °C']);
+});
+
+test('network chart axis is in bit/s when bits are chosen', async () => {
+  const backend = fakeBackend();
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  render(HistoryChart, { sectionId: NIC, sensors: nicSensors, defaults: NIC_DEFAULTS, schema: MOCK_SCHEMA, store, backend, rate: 'bits' });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+
+  // Bytes per second in the history, bits per second on the chart.
+  expect(plots[0].data).toEqual([[1, 2], [80, 160], [88, 168]]);
+  const [axis, legend] = axisAndLegend(plots[0], 'bytes_per_second', 8e6);
+  expect(axis).toBe('8.0 Mbit/s');
+  expect(legend).toBe('8.0 Mbit/s');
+
+  cleanup();
+  plots.length = 0;
+  render(HistoryChart, { sectionId: NIC, sensors: nicSensors, defaults: NIC_DEFAULTS, schema: MOCK_SCHEMA, store, backend, rate: 'bytes' });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(plots[0].data).toEqual([[1, 2], [10, 20], [11, 21]]);
+  expect(axisAndLegend(plots[0], 'bytes_per_second', 8 * 1024 ** 2)[0]).toBe('8.0 MB/s');
+});
+
+test('chart and sparkline resubscribe when fps changes: chart', async () => {
+  await connectSettings({ general: { chartFps: 60 } });
+  const subscriptions = spyChartFrames();
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  const live = () => subscriptions.filter((s) => !s.stopped);
+  expect(live().map((s) => s.fps)).toEqual([60]);
+
+  await settings.update({ general: { chartFps: 30 } });
+  await vi.waitFor(() => expect(live().map((s) => s.fps)).toEqual([30]));
+  expect(subscriptions.map((s) => [s.fps, s.stopped])).toEqual([[60, true], [30, false]]);
+
+  cleanup();
+  expect(live()).toEqual([]);
 });

@@ -1,4 +1,5 @@
 import { MOCK_SCHEMA, mockValues } from '../backend/mock';
+import { connectSettings, disconnectSettings } from '../../test/settings';
 import { DASH, formatValue } from '../format';
 import { catalogs, i18n, translate } from '../i18n/index.svelte';
 import type { DeviceKind, Schema, Sensor, SensorStats } from '../types';
@@ -255,7 +256,7 @@ test('device properties are translated, formatted and ordered', () => {
     formatValue(4, 'pcie_generation', 'en', tEn),
     formatValue(16, 'lanes', 'en', tEn),
     '320',
-    '94',
+    '94 °C',
     'n/a',
     'abc',
   ]);
@@ -263,6 +264,22 @@ test('device properties are translated, formatted and ordered', () => {
   expect(rows.at(-1)?.label).toBe('zeta');
   expect(propertyRows({ id: GPU, kind: 'gpu', name: 'GPU', properties: { powerLimitMaxW: '12345.5', integrated: 'true' } }, 'it', (k) => translate('it', k)).map((r) => r.value)).toEqual(['Sì', '12.345,5']);
   expect(propertyRows({ id: 'x', kind: 'cpu', name: 'x' }, 'en', tEn)).toEqual([]);
+});
+
+test('temperature limits follow the temperature unit and their labels carry no unit', async () => {
+  const device = { id: GPU, kind: 'gpu' as const, name: 'GPU', properties: { tempSlowdownC: '94', tempCriticalC: '100' } };
+  expect(propertyRows(device, 'en', tEn).map((r) => r.value)).toEqual(['94 °C', '100 °C']);
+  await connectSettings({ general: { temperatureUnit: 'f' } });
+  try {
+    expect(propertyRows(device, 'en', tEn).map((r) => r.value)).toEqual(['201 °F', '212 °F']);
+  } finally {
+    disconnectSettings();
+  }
+  for (const locale of ['en', 'it'] as const) {
+    for (const key of PROPERTY_ORDER.filter((k) => k.startsWith('temp'))) {
+      expect(translate(locale, `property.${key}`)).not.toContain('°');
+    }
+  }
 });
 
 test('every known property has a label in both languages', () => {

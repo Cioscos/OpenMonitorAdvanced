@@ -10,6 +10,7 @@
     PALETTE_TOKENS,
     WINDOWS,
     canAdd,
+    displayScale,
     fitSelection,
     formatTimeTick,
     initialSeries,
@@ -27,10 +28,11 @@
   import { sensorLabel } from '../../lib/advanced/labels';
   import { loadSeries, loadWindow, saveSeries, saveWindow } from '../../lib/advanced/persist';
   import type { Backend } from '../../lib/backend/backend';
-  import { DASH, formatValue } from '../../lib/format';
+  import { DASH } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import type { HistorySeed, Schema, Sensor } from '../../lib/types';
+  import type { HistorySeed, Schema, Sensor, ThroughputUnit } from '../../lib/types';
+  import { display } from '../../lib/units.svelte';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
 
   let {
@@ -40,6 +42,7 @@
     schema,
     store,
     backend,
+    rate = 'bytes',
   }: {
     /** Section id; parents re-key the component when it changes. */
     sectionId: string;
@@ -49,6 +52,8 @@
     schema: Schema;
     store: LiveStore;
     backend: Backend;
+    /** How `bytes_per_second` series are drawn: 'bits' on network pages when so chosen. */
+    rate?: ThroughputUnit;
   } = $props();
 
   const HEIGHT = 260;
@@ -85,6 +90,8 @@
   let plotCssWidth = 0;
   /** Series the user hid in the legend, by id: every rebuild shows them hidden again. */
   let hiddenIds = new Set<string>();
+  /** Per-series conversion from the buffer's base units to the drawn ones; undefined = as stored. */
+  let converters: Array<((value: number) => number) | undefined> = [];
 
   type YRange = { min: number; max: number };
   /** Duration in ms of the move to a new automatic Y range. */
@@ -222,10 +229,12 @@
     plot.over.parentElement!.append(canvasClip, dotClip);
     // The Y transition runs on the chart's frame subscription, before its X translation.
     // Without a plot (empty selection, history loading) nothing asks for frames.
-    stopFrames = subscribeChartFrame((now) => {
-      stepY(now);
-      drawFrame(now);
-    });
+    stopFrames = subscribeChartFrame(onChartFrame, display.chartFps);
+  }
+
+  function onChartFrame(now: number) {
+    stepY(now);
+    drawFrame(now);
   }
 
   /**
@@ -416,9 +425,11 @@
     const border = read('--border');
     const { scales, seriesScale } = scaleLayout(ids, schema);
     const byId = new Map(sensors.map((s) => [s.id, s]));
-    // Known limit until the M5 unit settings: network sensors carry BytesPerSecond, so the
-    // axis and legend below stay in byte/s even though the KPIs and table (formatRate) show
-    // the same values converted to bit/s (see docs/follow-ups.md).
+    // Units apply at draw time: the buffer keeps °C and byte/s, and the data handed to uPlot,
+    // the axes and the legend are converted here, so a unit change only rebuilds the plot.
+    const units = { temperature: display.temperature, rate };
+    const shown = new Map(scales.map((unit) => [unit, displayScale(unit, units)]));
+    converters = ids.map((_, i) => shown.get(seriesScale[i])?.convert);
     // The horizontal grid follows the primary axis (side 3): its ticks line up with the grid,
     // so they stay on; the secondary axis (side 1) has no grid of its own, so a fixed tick mark
     // there would sit off the scrolling grid, and is left off. Both axes restrict uPlot's split
@@ -430,8 +441,8 @@
       stroke: muted,
       grid: { show: side === 3, stroke: border, width: 1 },
       ticks: { show: side === 3, stroke: border, width: 1 },
-      incrs: labelSafeIncrs(unit, i18n.locale, t),
-      values: (_u, splits) => splits.map((v) => formatValue(v, unit, i18n.locale, t)),
+      incrs: labelSafeIncrs(unit, i18n.locale, t, shown.get(unit)!.format),
+      values: (_u, splits) => splits.map((v) => shown.get(unit)!.format(v, i18n.locale, t)),
     });
     const paths: ChartCanvasPath[] = ids.map((_, i) => ({ stroke: null, gapsClip: null, color: palette[i] }));
     // A series that left the selection comes back visible.
@@ -469,7 +480,7 @@
             show: !hiddenIds.has(id),
             spanGaps: false,
             points: { show: false },
-            value: (_u: uPlot, v: number | null) => formatValue(v ?? null, unit, i18n.locale, t),
+            value: (_u: uPlot, v: number | null) => shown.get(unit)!.format(v ?? null, i18n.locale, t),
           };
         }),
       ],
@@ -502,7 +513,7 @@
         ...(scales[1] ? [axis(scales[1], 1)] : []),
       ],
     };
-    plot = new uPlot(opts, buffer.data(), container);
+    plot = new uPlot(opts, buffer.data(converters), container);
     createLayers(ids.map((_, i) => palette[i]));
     rebase(performance.now());
   }
@@ -519,7 +530,7 @@
     buffer.trim(timestampMs);
     viewport.sample(timestampMs, performance.now());
     plot.batch(() => {
-      plot!.setData(buffer!.data(), false);
+      plot!.setData(buffer!.data(converters), false);
       rebase(performance.now());
     });
   }
@@ -539,10 +550,23 @@
     untrack(() => tail(timestampMs));
   });
 
-  // Locale affects both the cached time labels and uPlot's legend/Y labels.
+  // Locale affects both the cached time labels and uPlot's legend/Y labels; the units change the
+  // plotted data, axes and legend. All rebuild the plot from the buffer, without new history.
   $effect(() => {
     void i18n.locale;
+    void display.temperature;
+    void rate;
     untrack(() => { if (!paused && buffer) build(buffer.ids); });
+  });
+
+  // A new frame rate replaces the running subscription; without a plot there is none.
+  $effect(() => {
+    const fps = display.chartFps;
+    untrack(() => {
+      if (!stopFrames) return;
+      stopFrames();
+      stopFrames = subscribeChartFrame(onChartFrame, fps);
+    });
   });
 
   onMount(() => {

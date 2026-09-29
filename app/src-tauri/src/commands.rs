@@ -5,7 +5,7 @@ use std::sync::PoisonError;
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
 use oma_core::model::Schema;
-use oma_core::sampler::unix_ms;
+use oma_core::sampler::{unix_ms, IntervalHandle};
 use oma_core::stats::SensorStats;
 use serde::Serialize;
 use tauri::State;
@@ -81,10 +81,11 @@ pub struct Session {
     pub interval_ms: u64,
 }
 
-pub(crate) fn session(engine: &Engine, interval_ms: u64) -> Session {
+/// `interval` is the live handle, so the answer follows a change of the setting.
+pub(crate) fn session(engine: &Engine, interval: &IntervalHandle) -> Session {
     Session {
         started_at_ms: engine.started_at_ms(),
-        interval_ms,
+        interval_ms: interval.get().as_millis() as u64,
     }
 }
 
@@ -138,7 +139,7 @@ pub fn reset_stats(state: State<'_, AppState>, ids: Vec<String>) {
 #[tauri::command(async)]
 pub fn get_session(state: State<'_, AppState>) -> Session {
     let engine = state.engine.lock().unwrap_or_else(PoisonError::into_inner);
-    session(&engine, state.interval_ms)
+    session(&engine, &state.interval)
 }
 
 /// Why vendor libraries were not loaded at startup (spec §8).
@@ -285,6 +286,8 @@ mod no_vendor_libraries {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
     use oma_core::provider::{Inventory, Provider, ProviderError};
@@ -388,16 +391,25 @@ mod tests {
 
     #[test]
     fn session_reports_the_first_tick_and_the_interval() {
+        let interval = IntervalHandle::new(Duration::from_millis(1_000));
         let engine = Engine::new(Vec::new(), 10);
         assert_eq!(
-            serde_json::to_value(session(&engine, 1_000)).expect("serialize"),
+            serde_json::to_value(session(&engine, &interval)).expect("serialize"),
             serde_json::json!({ "startedAtMs": null, "intervalMs": 1000 })
         );
         let engine = engine_after(&[1.0, 2.0]);
         assert_eq!(
-            serde_json::to_value(session(&engine, 1_000)).expect("serialize"),
+            serde_json::to_value(session(&engine, &interval)).expect("serialize"),
             serde_json::json!({ "startedAtMs": 1000, "intervalMs": 1000 })
         );
+    }
+
+    #[test]
+    fn session_reports_the_current_interval() {
+        let interval = IntervalHandle::new(Duration::from_millis(1_000));
+        let engine = Engine::new(Vec::new(), 10);
+        interval.set(Duration::from_millis(2_500));
+        assert_eq!(session(&engine, &interval).interval_ms, 2_500);
     }
 
     #[test]

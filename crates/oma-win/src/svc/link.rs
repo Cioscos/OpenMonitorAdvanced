@@ -137,6 +137,10 @@ pub enum LinkCommand {
     SetAntiCheat(bool),
     /// Starts the service once and connects, unless in anti-cheat mode.
     Start,
+    /// The sampling interval changed (milliseconds): a connected link
+    /// subscribes again at once, any other link uses it on its next
+    /// connection.
+    SetInterval(u32),
 }
 
 /// Timing and target of the link.
@@ -418,6 +422,10 @@ impl Machine {
                     self.close(disconnected(), now)
                 }
             }
+            // A renewed subscription (`SetInterval`) that could not be written.
+            (Event::Sent(false), Phase::FirstSample { .. } | Phase::Streaming { .. }) => {
+                self.close(disconnected(), now)
+            }
             (Event::Message(msg), _) if self.reads_connection() => self.on_message(msg, now),
             (Event::Closed(reason), phase) if phase.has_connection() => {
                 tracing::info!("sensor service connection closed: {reason:?}");
@@ -463,10 +471,36 @@ impl Machine {
             {
                 self.start()
             }
+            LinkCommand::SetInterval(ms) => self.set_interval(ms, now),
             // Same preference again, or Start while anti-cheat, connected or
             // already due after a pending stop.
             _ => Vec::new(),
         }
+    }
+
+    /// Remembers the new interval. If a subscription is active it is renewed
+    /// at once (the service accepts a second `Subscribe`), and while
+    /// streaming the silence limit restarts from now at three new intervals:
+    /// without that, a longer interval could trip the limit of the old one
+    /// before the service has sent its next snapshot at the new pace. The
+    /// deadline before the first snapshot is left alone.
+    fn set_interval(&mut self, ms: u32, now: Instant) -> Vec<Effect> {
+        if ms == self.settings.interval_ms {
+            return Vec::new();
+        }
+        self.settings.interval_ms = ms;
+        match self.phase {
+            Phase::FirstSample { .. } => {}
+            Phase::Streaming { .. } => {
+                self.deadline = Some(now + self.settings.interval() * 3);
+            }
+            // Not subscribed: `on_hello` sends the stored value.
+            _ => return Vec::new(),
+        }
+        vec![
+            Effect::SetInterval(self.settings.interval()),
+            Effect::Send(Message::Subscribe(Subscribe { interval_ms: ms })),
+        ]
     }
 
     fn start(&mut self) -> Vec<Effect> {
@@ -1672,6 +1706,151 @@ mod tests {
         while h.feed.view().snapshot.map(|(_, s)| s.seq) != Some(2) {
             assert!(Instant::now() < end, "the second snapshot never arrived");
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Waits until the connection has received `count` messages.
+    fn wait_for_sent(ctl: &ConnCtl, count: usize) -> Vec<Message> {
+        let end = Instant::now() + WAIT;
+        loop {
+            let sent = ctl.sent();
+            if sent.len() >= count {
+                return sent;
+            }
+            assert!(Instant::now() < end, "only {} messages sent", sent.len());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn set_interval_resubscribes_when_connected() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+
+        h.send(LinkCommand::SetInterval(2000));
+        let sent = wait_for_sent(&ctl, 2);
+        assert_eq!(
+            sent,
+            vec![
+                Message::Subscribe(Subscribe { interval_ms: 1000 }),
+                Message::Subscribe(Subscribe { interval_ms: 2000 }),
+            ]
+        );
+        let end = Instant::now() + WAIT;
+        while h.feed.view().interval != Duration::from_millis(2000) {
+            assert!(Instant::now() < end, "the feed interval never changed");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(h.status(), connected(), "the connection is kept");
+        assert_eq!(h.script.connects(), 1);
+
+        // The same interval again is not sent twice.
+        h.send(LinkCommand::SetInterval(2000));
+        cycles(2);
+        assert_eq!(ctl.sent().len(), 2);
+    }
+
+    #[test]
+    fn set_interval_while_disconnected_is_used_on_connect() {
+        let control = FakeControl::new(running());
+        let h = Harness::spawn(control, Script::with(vec![]), false);
+        // No pipe yet: the link keeps retrying.
+        h.wait_for(is(disconnected()));
+        h.send(LinkCommand::SetInterval(2000));
+        cycles(2);
+        let (conn, ctl) = streaming_conn(Some(PID));
+        h.script.add(conn);
+        h.wait_for(is(connected()));
+        assert_eq!(
+            ctl.sent(),
+            vec![Message::Subscribe(Subscribe { interval_ms: 2000 })]
+        );
+        assert_eq!(h.feed.view().interval, Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn the_silence_limit_follows_the_new_interval() {
+        let control = FakeControl::new(running());
+        let (conn, _ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        // With 1000 ms the link would wait 3 s (much longer than WAIT); with
+        // 40 ms it gives up after 120 ms.
+        h.send(LinkCommand::SetInterval(40));
+        h.wait_for(is(disconnected()));
+    }
+
+    #[test]
+    fn set_interval_moves_the_silence_deadline_of_a_streaming_link() {
+        let now = Instant::now();
+        let mut machine = Machine::new(LinkSettings::new("p", 1000), false);
+        machine.phase = Phase::Streaming { schema_len: 2 };
+        machine.deadline = Some(now + Duration::from_secs(3));
+
+        let effects = machine.decide(Event::Command(LinkCommand::SetInterval(5000)), now);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetInterval(Duration::from_millis(5000)),
+                Effect::Send(Message::Subscribe(Subscribe { interval_ms: 5000 })),
+            ]
+        );
+        assert_eq!(machine.deadline, Some(now + Duration::from_secs(15)));
+        assert_eq!(machine.phase, Phase::Streaming { schema_len: 2 });
+
+        // Same value: nothing to do.
+        assert!(machine
+            .decide(Event::Command(LinkCommand::SetInterval(5000)), now)
+            .is_empty());
+    }
+
+    #[test]
+    fn set_interval_before_the_first_sample_keeps_the_first_sample_deadline() {
+        let now = Instant::now();
+        let mut machine = Machine::new(LinkSettings::new("p", 1000), false);
+        let deadline = now + Duration::from_secs(30);
+        machine.phase = Phase::FirstSample { schema_len: None };
+        machine.deadline = Some(deadline);
+        let effects = machine.decide(Event::Command(LinkCommand::SetInterval(500)), now);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetInterval(Duration::from_millis(500)),
+                Effect::Send(Message::Subscribe(Subscribe { interval_ms: 500 })),
+            ]
+        );
+        assert_eq!(machine.deadline, Some(deadline));
+    }
+
+    #[test]
+    fn a_failed_resubscribe_disconnects() {
+        let now = Instant::now();
+        let mut machine = Machine::new(LinkSettings::new("p", 1000), false);
+        machine.phase = Phase::Streaming { schema_len: 2 };
+        machine.deadline = Some(now + Duration::from_secs(3));
+        assert!(machine.decide(Event::Sent(true), now).is_empty());
+        assert_eq!(machine.phase, Phase::Streaming { schema_len: 2 });
+        let effects = machine.decide(Event::Sent(false), now);
+        assert_eq!(effects, vec![Effect::Close, Effect::ClearFeed]);
+        assert_eq!(machine.phase, Phase::ConnectWait);
+    }
+
+    #[test]
+    fn set_interval_in_the_other_phases_only_stores_the_value() {
+        let now = Instant::now();
+        for phase in [
+            Phase::ConnectWait,
+            Phase::Hello,
+            Phase::AntiCheatIdle,
+            Phase::Probing { errors: 0 },
+        ] {
+            let mut machine = Machine::new(LinkSettings::new("p", 1000), false);
+            machine.phase = phase;
+            let effects = machine.decide(Event::Command(LinkCommand::SetInterval(3000)), now);
+            assert!(effects.is_empty(), "{phase:?}");
+            assert_eq!(machine.settings.interval_ms, 3000, "{phase:?}");
         }
     }
 

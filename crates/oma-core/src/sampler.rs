@@ -2,9 +2,9 @@
 //! timer resolution (spec §4.1).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::JoinHandle;
+use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::engine::{Engine, TickOutput};
@@ -55,15 +55,73 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
+/// The sampling interval, shared between the shell (which changes it when the
+/// setting changes) and the sampler thread (which reads it after every tick).
+/// `set` wakes the sampler so a new interval applies without waiting for the
+/// old one to run out. Clones share the same value.
+#[derive(Clone)]
+pub struct IntervalHandle(Arc<IntervalShared>);
+
+struct IntervalShared {
+    millis: AtomicU64,
+    /// The sampler thread to wake, once one is running.
+    sleeper: Mutex<Option<Thread>>,
+}
+
+impl IntervalHandle {
+    pub fn new(interval: Duration) -> Self {
+        Self(Arc::new(IntervalShared {
+            millis: AtomicU64::new(Self::to_millis(interval)),
+            sleeper: Mutex::new(None),
+        }))
+    }
+
+    /// At least one millisecond: a zero interval would make the sampler spin.
+    fn to_millis(interval: Duration) -> u64 {
+        u64::try_from(interval.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1)
+    }
+
+    pub fn get(&self) -> Duration {
+        Duration::from_millis(self.0.millis.load(Ordering::Acquire))
+    }
+
+    pub fn set(&self, interval: Duration) {
+        self.0
+            .millis
+            .store(Self::to_millis(interval), Ordering::Release);
+        if let Some(thread) = self
+            .0
+            .sleeper
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            thread.unpark();
+        }
+    }
+
+    /// Called by the sampler thread, so `set` can wake it.
+    fn register_sleeper(&self) {
+        *self
+            .0
+            .sleeper
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(std::thread::current());
+    }
+}
+
 pub struct Sampler {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Sampler {
-    /// Starts ticking `engine` every `interval`, calling `on_tick` after each
-    /// tick with the engine lock already released.
-    pub fn spawn<F>(engine: Arc<Mutex<Engine>>, interval: Duration, on_tick: F) -> Self
+    /// Starts ticking `engine` every `interval` (which may change while it
+    /// runs), calling `on_tick` after each tick with the engine lock already
+    /// released.
+    pub fn spawn<F>(engine: Arc<Mutex<Engine>>, interval: IntervalHandle, on_tick: F) -> Self
     where
         F: FnMut(&TickOutput) + Send + 'static,
     {
@@ -81,19 +139,25 @@ impl Sampler {
     /// iteration publishes nothing and the loop goes on. A panic while the
     /// engine lock is held poisons the mutex; `spawn` keeps locking it through
     /// the poison, like the Tauri commands do.
-    fn spawn_ticker<T, F>(interval: Duration, mut tick: T, mut on_tick: F) -> Self
+    ///
+    /// The interval is read again after every tick and while waiting. When it
+    /// changes, the next tick is due one new interval after the start of the
+    /// last tick, or right away if that moment has already passed: the new
+    /// pace holds from the next tick on, with no burst of catch-up ticks.
+    fn spawn_ticker<T, F>(interval: IntervalHandle, mut tick: T, mut on_tick: F) -> Self
     where
         T: FnMut(u64, u64) -> TickOutput + Send + 'static,
         F: FnMut(&TickOutput) + Send + 'static,
     {
-        assert!(!interval.is_zero(), "sampling interval must be positive");
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
             .name("oma-sampler".into())
             .spawn(move || {
+                interval.register_sleeper();
                 let epoch = Instant::now();
-                let mut deadline = epoch;
+                // When the tick that just ran was due (its start, without drift).
+                let mut anchor = epoch;
                 let mut panics = 0u64;
                 while !stop_flag.load(Ordering::Acquire) {
                     let monotonic_ms = epoch.elapsed().as_millis() as u64;
@@ -113,14 +177,21 @@ impl Sampler {
                             }
                         }
                     }
-                    deadline = next_deadline(deadline, Instant::now(), interval);
+                    let mut waiting_for = interval.get();
+                    let mut deadline = next_deadline(anchor, Instant::now(), waiting_for);
                     while !stop_flag.load(Ordering::Acquire) {
                         let now = Instant::now();
+                        let current = interval.get();
+                        if current != waiting_for {
+                            waiting_for = current;
+                            deadline = (anchor + current).max(now);
+                        }
                         if now >= deadline {
                             break;
                         }
                         std::thread::park_timeout(deadline - now);
                     }
+                    anchor = deadline;
                 }
             })
             .expect("failed to spawn the sampler thread");
@@ -242,7 +313,7 @@ mod tests {
             output(calls)
         };
         let (tx, rx) = mpsc::channel();
-        let sampler = Sampler::spawn_ticker(ms(10), tick, move |out| {
+        let sampler = Sampler::spawn_ticker(IntervalHandle::new(ms(10)), tick, move |out| {
             let _ = tx.send(out.snapshot.seq);
         });
         let seqs: Vec<u64> = (0..3)
@@ -264,7 +335,7 @@ mod tests {
         .join();
         assert!(engine.is_poisoned());
         let (tx, rx) = mpsc::channel();
-        let sampler = Sampler::spawn(engine, ms(10), move |out| {
+        let sampler = Sampler::spawn(engine, IntervalHandle::new(ms(10)), move |out| {
             let _ = tx.send(out.snapshot.values.clone());
         });
         let values = rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -292,7 +363,7 @@ mod tests {
     fn sampler_ticks_and_stops_promptly() {
         let engine = Arc::new(Mutex::new(Engine::new(vec![Box::new(Const)], 16)));
         let (tx, rx) = mpsc::channel();
-        let sampler = Sampler::spawn(engine.clone(), ms(20), move |out| {
+        let sampler = Sampler::spawn(engine.clone(), IntervalHandle::new(ms(20)), move |out| {
             let _ = tx.send(out.snapshot.seq);
         });
         let seqs: Vec<u64> = (0..3)
@@ -303,5 +374,71 @@ mod tests {
         sampler.stop();
         assert!(started.elapsed() < ms(500));
         assert!(engine.lock().unwrap().history().len() >= 3);
+    }
+
+    #[test]
+    fn interval_change_applies_on_next_tick() {
+        let interval = IntervalHandle::new(ms(20));
+        let (tx, rx) = mpsc::channel();
+        let sampler = Sampler::spawn_ticker(
+            interval.clone(),
+            |_, _| output(0),
+            move |_| {
+                let _ = tx.send(Instant::now());
+            },
+        );
+        for _ in 0..3 {
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        let changed_at = Instant::now();
+        interval.set(ms(80));
+        assert_eq!(interval.get(), ms(80));
+        let mut ticks = Vec::new();
+        while ticks.len() < 5 {
+            ticks.push(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        }
+        sampler.stop();
+        // A tick that was already running at the change may still be reported
+        // (at the old pace, on its own); from the first tick after the change
+        // on, ticks are at least one new interval apart. Timers never fire
+        // early, so 70 ms leaves 10 ms of slack for clock granularity.
+        let first_after = ticks.iter().position(|t| *t > changed_at).unwrap();
+        let after = &ticks[first_after..];
+        assert!(after.len() >= 3, "too few ticks after the change");
+        for pair in after.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(gap >= ms(70), "ticks only {gap:?} apart after the change");
+            assert!(gap < ms(1_500), "the new pace never took hold: {gap:?}");
+        }
+    }
+
+    #[test]
+    fn a_shorter_interval_wakes_the_sleeping_sampler() {
+        let interval = IntervalHandle::new(Duration::from_secs(60));
+        let (tx, rx) = mpsc::channel();
+        let sampler = Sampler::spawn_ticker(
+            interval.clone(),
+            |_, _| output(0),
+            move |_| {
+                let _ = tx.send(Instant::now());
+            },
+        );
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The next tick is a minute away; the new interval is already due.
+        interval.set(ms(20));
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the sampler did not wake up for the new interval");
+        let started = Instant::now();
+        sampler.stop();
+        assert!(started.elapsed() < ms(500));
+    }
+
+    #[test]
+    fn the_handle_reports_what_was_set() {
+        let interval = IntervalHandle::new(ms(1_000));
+        let other = interval.clone();
+        assert_eq!(other.get(), ms(1_000));
+        interval.set(ms(2_500));
+        assert_eq!(other.get(), ms(2_500));
     }
 }

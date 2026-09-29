@@ -108,6 +108,11 @@ impl Engine {
     pub fn sequence(&self) -> u64 {
         self.seq
     }
+    /// Resizes the history to the new sampling interval (one hour of
+    /// samples). The statistics are not affected.
+    pub fn set_history_capacity(&mut self, capacity: usize) {
+        self.history.set_capacity(capacity);
+    }
     pub fn stats(&self) -> &Stats {
         &self.stats
     }
@@ -669,6 +674,25 @@ mod tests {
         // y is unchanged: the sample of the first tick is still counted.
         assert_eq!(got[1].map(|s| s.count), Some(2));
         assert_eq!(got[2].map(|s| s.count), Some(1));
+    }
+
+    #[test]
+    fn a_new_history_capacity_resizes_the_history_and_leaves_the_stats_alone() {
+        let (p, _) = fake("a", inventory("dev/a", &["x"]));
+        let mut e = Engine::new(vec![p], 10);
+        for t in 1..=6u64 {
+            e.tick(t * 1_000, t * 1_000);
+        }
+        e.set_history_capacity(3);
+        let id = ids(&["dev/a/load/x"]);
+        assert_eq!(
+            e.history().window(&id, 0).timestamps_ms,
+            vec![4_000, 5_000, 6_000]
+        );
+        assert_eq!(e.stats().get(&id)[0].map(|s| s.count), Some(6));
+        e.set_history_capacity(20);
+        e.tick(7_000, 7_000);
+        assert_eq!(e.history().len(), 4);
     }
 
     #[test]

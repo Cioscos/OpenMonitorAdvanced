@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod interval;
 mod service;
 mod settings;
 mod tray;
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use oma_core::engine::Engine;
 use oma_core::provider::Provider;
-use oma_core::sampler::{history_capacity, Sampler};
+use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
 
 use crate::commands::{
@@ -20,15 +21,13 @@ use crate::commands::{
 use crate::service::ServiceShell;
 use crate::settings::{RealFs, SettingsStore, EVENT_SETTINGS};
 
-/// Default sampling interval (spec §4.1).
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const EVENT_SCHEMA: &str = "oma:schema";
 const EVENT_SNAPSHOT: &str = "oma:snapshot";
 
 pub struct AppState {
     pub engine: Arc<Mutex<Engine>>,
-    /// Sampling interval in milliseconds, reported by `get_session`.
-    pub interval_ms: u64,
+    /// The live sampling interval, reported by `get_session`.
+    pub interval: IntervalHandle,
 }
 
 /// Owns the sampler so it can be stopped cleanly on exit.
@@ -135,24 +134,6 @@ fn main() {
         oma_win::svc::ServiceStatusTable::default(),
     );
 
-    #[cfg(windows)]
-    let engine = Arc::new(Mutex::new(Engine::new(
-        providers(
-            switch.clone(),
-            processes.clone(),
-            oma_win::ServiceHandles {
-                feed: svc_feed.clone(),
-                drives: svc_drives,
-            },
-        ),
-        history_capacity(SAMPLE_INTERVAL),
-    )));
-    #[cfg(not(windows))]
-    let engine = Arc::new(Mutex::new(Engine::new(
-        providers(switch.clone(), processes.clone()),
-        history_capacity(SAMPLE_INTERVAL),
-    )));
-
     // Opened before anything reads a preference, so the tray, the sampler and
     // the UI commands all see the same settings from the first moment. The
     // M4 anti-cheat file is folded in before the service shell reads the flag.
@@ -167,6 +148,32 @@ fn main() {
         settings_file_existed,
     );
 
+    // The sampling interval starts from the stored setting (the default is 1 s);
+    // a value outside the accepted range cannot come out of the store, but the
+    // default is the safe fallback.
+    let initial_interval =
+        sample_interval(u64::from(settings_store.settings().general.interval_ms))
+            .unwrap_or(Duration::from_secs(1));
+    let interval = IntervalHandle::new(initial_interval);
+
+    #[cfg(windows)]
+    let engine = Arc::new(Mutex::new(Engine::new(
+        providers(
+            switch.clone(),
+            processes.clone(),
+            oma_win::ServiceHandles {
+                feed: svc_feed.clone(),
+                drives: svc_drives,
+            },
+        ),
+        history_capacity(initial_interval),
+    )));
+    #[cfg(not(windows))]
+    let engine = Arc::new(Mutex::new(Engine::new(
+        providers(switch.clone(), processes.clone()),
+        history_capacity(initial_interval),
+    )));
+
     // The link to the service starts in `.setup()` below, not here.
     #[cfg(windows)]
     let service_shell = ServiceShell::new(settings_store.clone(), svc_status.clone());
@@ -179,7 +186,7 @@ fn main() {
         }))
         .manage(AppState {
             engine: engine.clone(),
-            interval_ms: SAMPLE_INTERVAL.as_millis() as u64,
+            interval: interval.clone(),
         })
         .manage(StartupState::new(switch, status))
         .manage(GpuProcessState(processes))
@@ -207,8 +214,14 @@ fn main() {
             // being built, so it never probes, starts or connects to the
             // service (final review M2).
             #[cfg(windows)]
-            app.state::<ServiceShell>()
-                .spawn_link(svc_feed, SAMPLE_INTERVAL.as_millis() as u32);
+            app.state::<ServiceShell>().spawn_link(svc_feed);
+            // From here on, `general.intervalMs` drives history size, sampler and link.
+            interval::follow_interval(
+                app.state::<Arc<SettingsStore>>().inner(),
+                engine.clone(),
+                interval.clone(),
+                app.state::<ServiceShell>().interval_sink(),
+            );
             // Keeps an open window aligned after every settings change, whatever its origin.
             let settings_handle = app.handle().clone();
             app.state::<Arc<SettingsStore>>()
@@ -227,7 +240,7 @@ fn main() {
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
-            let sampler = Sampler::spawn(engine, SAMPLE_INTERVAL, move |out| {
+            let sampler = Sampler::spawn(engine.clone(), interval.clone(), move |out| {
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
                     return;

@@ -238,11 +238,12 @@ impl ServiceShell {
     /// reaches: `tauri_plugin_single_instance` ends a second launch while the
     /// app is being built, so that process never probes or starts the
     /// service, nor connects to its pipe (final review M2). Holds the
-    /// `link` lock while it reads the preference, and the store listener sends
-    /// under that same lock: a change is either read here or sent to the new
-    /// link (at worst both, with the same value), never lost in between.
+    /// `link` lock while it reads the preferences (anti-cheat mode and sampling
+    /// interval), and the store listeners send under that same lock: a change
+    /// is either read here or sent to the new link (at worst both, with the
+    /// same value), never lost in between.
     #[cfg(windows)]
-    pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed, interval_ms: u32) {
+    pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed) {
         use oma_win::svc::{pipe_connector, LinkSettings, ServiceLink, WindowsScm, SERVICE_NAME};
 
         let mut link = self.link.lock().unwrap_or_else(PoisonError::into_inner);
@@ -252,7 +253,10 @@ impl ServiceShell {
         *link = Some(ServiceLink::spawn(
             Arc::new(WindowsScm::new(SERVICE_NAME)),
             pipe_connector(),
-            LinkSettings::new(oma_ipc::PIPE_NAME, interval_ms),
+            LinkSettings::new(
+                oma_ipc::PIPE_NAME,
+                self.toggle.store.settings().general.interval_ms,
+            ),
             self.toggle.enabled(),
             self.status_table.clone(),
             feed,
@@ -263,6 +267,21 @@ impl ServiceShell {
     pub fn new(store: Arc<SettingsStore>) -> Self {
         Self {
             toggle: ToggleState::new(store, Box::new(|_| {})),
+        }
+    }
+
+    /// What tells the service link about a new sampling interval (for
+    /// [`crate::interval::follow_interval`]). It only takes the link lock and
+    /// sends on a channel, so it never blocks. Off Windows there is no link.
+    pub(crate) fn interval_sink(&self) -> Box<dyn Fn(u32) + Send + Sync> {
+        #[cfg(windows)]
+        {
+            let link = Arc::clone(&self.link);
+            Box::new(move |ms| send_to_link(&link, oma_win::svc::LinkCommand::SetInterval(ms)))
+        }
+        #[cfg(not(windows))]
+        {
+            Box::new(|_| {})
         }
     }
 

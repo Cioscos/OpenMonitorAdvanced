@@ -36,6 +36,31 @@ impl History {
         }
     }
 
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Changes how many samples are kept. A smaller capacity drops the oldest
+    /// samples (timestamps and every series together); a larger one keeps
+    /// them all and simply leaves room for more.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        assert!(capacity > 0, "history capacity must be positive");
+        self.capacity = capacity;
+        let excess = self.timestamps.len().saturating_sub(capacity);
+        if excess > 0 {
+            self.timestamps.drain(..excess);
+            for s in &mut self.series {
+                s.drain(..excess);
+            }
+        }
+        // Give the memory of dropped samples back; growing needs no reserve,
+        // `push` extends the buffers as samples arrive.
+        self.timestamps.shrink_to(capacity);
+        for s in &mut self.series {
+            s.shrink_to(capacity);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.timestamps.len()
     }
@@ -214,6 +239,57 @@ mod tests {
         let w = h.window(&ids(&["a"]), 2_000);
         assert_eq!(w.timestamps_ms, vec![2_000, 3_000]);
         assert_eq!(w.series[0], vec![Some(2_000.0), Some(3_000.0)]);
+    }
+
+    #[test]
+    fn shrinking_capacity_keeps_newest() {
+        let mut h = History::new(10);
+        h.set_sensors(&ids(&["a", "b"]));
+        for i in 1..=10u64 {
+            h.push(i * 1_000, &[Some(i as f64), Some(-(i as f64))]);
+        }
+        h.set_capacity(4);
+        assert_eq!(h.len(), 4);
+        let w = h.window(&ids(&["a", "b"]), 0);
+        assert_eq!(w.timestamps_ms, vec![7_000, 8_000, 9_000, 10_000]);
+        assert_eq!(
+            w.series[0],
+            vec![Some(7.0), Some(8.0), Some(9.0), Some(10.0)]
+        );
+        assert_eq!(
+            w.series[1],
+            vec![Some(-7.0), Some(-8.0), Some(-9.0), Some(-10.0)]
+        );
+        // The ring keeps rolling at the new size.
+        h.push(11_000, &[Some(11.0), Some(-11.0)]);
+        assert_eq!(h.len(), 4);
+        assert_eq!(
+            h.window(&ids(&["a"]), 0).timestamps_ms,
+            vec![8_000, 9_000, 10_000, 11_000]
+        );
+    }
+
+    #[test]
+    fn growing_capacity_keeps_everything() {
+        let mut h = History::new(4);
+        h.set_sensors(&ids(&["a"]));
+        for i in 1..=4u64 {
+            h.push(i, &[Some(i as f64)]);
+        }
+        h.set_capacity(8);
+        assert_eq!(h.len(), 4);
+        for i in 5..=8u64 {
+            h.push(i, &[Some(i as f64)]);
+        }
+        let w = h.window(&ids(&["a"]), 0);
+        assert_eq!(w.timestamps_ms, (1..=8).collect::<Vec<u64>>());
+        assert_eq!(
+            w.series[0],
+            (1..=8).map(|i| Some(i as f64)).collect::<Vec<_>>()
+        );
+        h.push(9, &[Some(9.0)]);
+        assert_eq!(h.len(), 8);
+        assert_eq!(h.window(&ids(&["a"]), 0).timestamps_ms[0], 2);
     }
 
     #[test]

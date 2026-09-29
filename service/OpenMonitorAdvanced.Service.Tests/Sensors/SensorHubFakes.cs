@@ -6,8 +6,11 @@ namespace OpenMonitorAdvanced.Service.Tests.Sensors;
 
 /// <summary>
 /// Scripted <see cref="IHardwareTree"/>: <see cref="Initial"/> is what <see cref="Open"/>
-/// exposes, <see cref="Storage"/> appears only on <see cref="EnableStorage"/> (the D6 gate),
-/// and every <c>Open</c>/<c>Update</c>/<c>Read</c>/<c>Dispose</c> (= LHM <c>Close</c>) is counted.
+/// exposes (only the roots of the requested modules, by <see cref="HardwareNode.Type"/>),
+/// <see cref="Storage"/> appears only on <see cref="EnableStorage"/> (the D6 gate),
+/// <see cref="SetModules"/> adds and removes the <see cref="Initial"/> roots of the modules it
+/// switches, and every <c>Open</c>/<c>SetModules</c>/<c>Update</c>/<c>Read</c>/<c>Dispose</c>
+/// (= LHM <c>Close</c>) is counted.
 /// </summary>
 internal sealed class FakeTree : IHardwareTree
 {
@@ -20,6 +23,9 @@ internal sealed class FakeTree : IHardwareTree
     private int _enableStorageCount;
     private int _updatesAfterClose;
     private int _throwOnNextRoots;
+    private int _setModulesCalls;
+    private int _setModulesFailures;
+    private ServiceModules _modules;
 
     public event Action? HardwareChanged;
 
@@ -33,6 +39,23 @@ internal sealed class FakeTree : IHardwareTree
 
     /// <summary>Runs at the start of <see cref="Update"/>, on the calling thread.</summary>
     public Action<HardwareNode>? BeforeUpdate { get; set; }
+
+    /// <summary>Runs at the start of <see cref="SetModules"/>, on the calling thread.</summary>
+    public Action<ServiceModules>? BeforeSetModules { get; set; }
+
+    /// <summary>Every <see cref="Roots"/> read throws while set (a schema rebuild that keeps failing).</summary>
+    public volatile bool ThrowOnRoots;
+
+    /// <summary>The modules <see cref="Open"/> was asked for; <see langword="null"/> before it.</summary>
+    public ServiceModules? OpenedModules { get; private set; }
+
+    public int SetModulesCalls => Volatile.Read(ref _setModulesCalls);
+
+    /// <summary>Every <see cref="SetModules"/> argument with its calling thread's name, in order.</summary>
+    public ConcurrentQueue<(ServiceModules Modules, string? Thread)> SetModulesLog { get; } = new();
+
+    /// <summary>The next <paramref name="count"/> <see cref="SetModules"/> calls throw without changing anything.</summary>
+    public void FailNextSetModules(int count) => Volatile.Write(ref _setModulesFailures, count);
 
     public int OpenCount => Volatile.Read(ref _openCount);
 
@@ -52,7 +75,7 @@ internal sealed class FakeTree : IHardwareTree
     {
         get
         {
-            if (Interlocked.Exchange(ref _throwOnNextRoots, 0) == 1)
+            if (Interlocked.Exchange(ref _throwOnNextRoots, 0) == 1 || ThrowOnRoots)
             {
                 throw new InvalidOperationException("roots unavailable");
             }
@@ -64,16 +87,39 @@ internal sealed class FakeTree : IHardwareTree
         }
     }
 
-    public IReadOnlyList<HardwareNode> Open()
+    public IReadOnlyList<HardwareNode> Open(ServiceModules enabled)
     {
         Interlocked.Increment(ref _openCount);
         OpenThreadName = Thread.CurrentThread.Name;
+        OpenedModules = enabled;
         lock (_gate)
         {
-            _roots = [.. Initial];
+            _modules = enabled;
+            _roots = [.. Initial.Where(r => IsOn(r, enabled))];
         }
 
         return Roots;
+    }
+
+    public void SetModules(ServiceModules enabled)
+    {
+        Interlocked.Increment(ref _setModulesCalls);
+        SetModulesLog.Enqueue((enabled, Thread.CurrentThread.Name));
+        BeforeSetModules?.Invoke(enabled);
+        if (Interlocked.Decrement(ref _setModulesFailures) >= 0)
+        {
+            throw new InvalidOperationException("a module failed to load");
+        }
+
+        Volatile.Write(ref _setModulesFailures, 0);
+        lock (_gate)
+        {
+            ServiceModules added = enabled & ~_modules;
+            _modules = enabled;
+            _roots = [.. _roots.Where(r => IsOn(r, enabled)), .. Initial.Where(r => (added & HardwareModules.Of(r.Type)) != 0)];
+        }
+
+        HardwareChanged?.Invoke();
     }
 
     public void Update(HardwareNode root)
@@ -124,6 +170,13 @@ internal sealed class FakeTree : IHardwareTree
     public int Reads(string sensorIdentifier) => _reads.GetValueOrDefault(sensorIdentifier);
 
     public void Dispose() => Interlocked.Increment(ref _closeCount);
+
+    /// <summary>A root outside the switchable groups (storage, or a type no module owns) is always there.</summary>
+    private static bool IsOn(HardwareNode root, ServiceModules enabled)
+    {
+        ServiceModules module = HardwareModules.Of(root.Type);
+        return (module & HardwareModules.TreeGroups) == 0 || (enabled & module) != 0;
+    }
 }
 
 internal sealed class FakeDisks : IDiskPowerProbe
@@ -131,8 +184,13 @@ internal sealed class FakeDisks : IDiskPowerProbe
     private int _spunDownQueries;
     private int _allActiveQueries;
     private int _describeCalls;
+    private readonly ConcurrentDictionary<int, int> _spunDownQueriesOf = new();
+    private readonly ConcurrentDictionary<int, int> _describeCallsOf = new();
 
     public volatile bool AllActive = true;
+
+    /// <summary>What <see cref="GateBlockers"/> answers while <see cref="AllActive"/> is false (default: drive 0 in standby).</summary>
+    public List<DriveBlocker> Blockers { get; } = [];
 
     public ConcurrentDictionary<int, bool?> SpunDown { get; } = new();
 
@@ -141,6 +199,10 @@ internal sealed class FakeDisks : IDiskPowerProbe
     public int AllActiveQueries => Volatile.Read(ref _allActiveQueries);
 
     public int DescribeCalls => Volatile.Read(ref _describeCalls);
+
+    public int SpunDownQueriesOf(int drive) => _spunDownQueriesOf.GetValueOrDefault(drive);
+
+    public int DescribeCallsOf(int drive) => _describeCallsOf.GetValueOrDefault(drive);
 
     /// <summary>Per-drive facts; a drive not listed is described as a spinning SATA HDD.</summary>
     public ConcurrentDictionary<int, DriveFacts?> Facts { get; } = new();
@@ -153,6 +215,7 @@ internal sealed class FakeDisks : IDiskPowerProbe
     public DriveFacts? Describe(int driveNumber)
     {
         Interlocked.Increment(ref _describeCalls);
+        _describeCallsOf.AddOrUpdate(driveNumber, 1, (_, n) => n + 1);
         DescribeThreads.Enqueue(Thread.CurrentThread.Name);
         BeforeDescribe?.Invoke(driveNumber);
         return Facts.TryGetValue(driveNumber, out DriveFacts? facts)
@@ -163,13 +226,21 @@ internal sealed class FakeDisks : IDiskPowerProbe
     public bool? IsSpunDown(int driveNumber)
     {
         Interlocked.Increment(ref _spunDownQueries);
+        _spunDownQueriesOf.AddOrUpdate(driveNumber, 1, (_, n) => n + 1);
         return SpunDown.TryGetValue(driveNumber, out bool? v) ? v : false;
     }
 
-    public bool AllRotationalDisksActive()
+    public IReadOnlyList<DriveBlocker> GateBlockers()
     {
         Interlocked.Increment(ref _allActiveQueries);
-        return AllActive;
+        if (AllActive)
+        {
+            return [];
+        }
+
+        return Blockers.Count > 0
+            ? [.. Blockers]
+            : [new DriveBlocker(new DriveFacts(0, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true), SpunDown: true)];
     }
 }
 

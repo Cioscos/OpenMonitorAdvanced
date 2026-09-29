@@ -31,11 +31,12 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// </para>
 /// <para>
 /// <b>D6.</b> The tree is opened without storage. <see cref="IHardwareTree.EnableStorage"/> is
-/// called only when <see cref="IDiskPowerProbe.AllRotationalDisksActive"/> says every drive that
-/// needs it (controller ruling R17) is spinning, re-checked on every storage round until it
-/// succeeds; afterwards each disk whose <see cref="DriveFacts.RequiresPowerCheck"/> holds is
-/// updated only when <see cref="IDiskPowerProbe.IsSpunDown"/> is <see langword="false"/>,
-/// otherwise its values are absent.
+/// called only when <see cref="IDiskPowerProbe.GateBlockers"/> says every drive that needs it
+/// (controller ruling R17) is spinning, re-checked on every storage round until it succeeds (the
+/// blockers' drive keys are the schema's <c>smartBlockedBy</c>); afterwards each disk whose
+/// <see cref="DriveFacts.RequiresPowerCheck"/> holds is updated only when
+/// <see cref="IDiskPowerProbe.IsSpunDown"/> is <see langword="false"/>, otherwise its values are
+/// absent.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The tree is never closed while the hub lives: without subscribers sampling
@@ -56,8 +57,28 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// says <c>pending</c> while it differs from the applied one. A subscriber's deliveries wait until
 /// the published block reflects the version its own request produced, so the schema forced after
 /// a request never shows the state from before it; the sample taken at once for a new request
-/// keeps the sampling schedule. Nothing applies the request yet (Task 12): the tree keeps every
-/// module on.
+/// keeps the sampling schedule.
+/// </para>
+/// <para>
+/// <b>Applying a request</b> (F2.3, P7, P10), each part on the thread that owns it:
+/// <list type="bullet">
+/// <item>the schema, at once on the sampler: the roots of switched-off modules and the disks whose
+/// drive key has SMART off leave the plan before that tick's updates, so its snapshot already
+/// uses the new schema, in the same revision;</item>
+/// <item>the LHM groups other than storage, on the sampler (<see cref="ModuleApplier"/>): opened
+/// with the requested ones only, later switched with <see cref="IHardwareTree.SetModules"/> once
+/// the storage worker has parked at the boundary of its loop (<see cref="StoragePark"/>), without
+/// the sampler ever waiting for it; after <see cref="ReconfigureTimeout"/> the request is
+/// <c>failed</c> and retried on every tick, never forced;</item>
+/// <item>storage, "softly" on the storage worker: switched off, its values and resolved disks are
+/// dropped and no gate, description, power check or update runs, but the LHM group stays open;
+/// a disk with SMART off is still described (access 0) and then neither power-checked nor
+/// updated. It still counts for the D6 gate (verdict c).</item>
+/// </list>
+/// The service block reports the groups actually open, the storage worker's applied storage part,
+/// the request's status and the gate blockers. When a schema rebuild fails the current plan gets
+/// the new block anyway (<c>failed</c> if the request's schema could not be built), so no client
+/// waits on a request that cannot be shown.
 /// </para>
 /// </remarks>
 public sealed class SensorHub : ISensorFeed, IDisposable
@@ -88,8 +109,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     // Sampler-owned state.
     private readonly List<(Subscriber Subscriber, bool ForcedSchema)> _dueScratch = [];
-    private readonly EffectiveConfig _applied = EffectiveConfig.AllOn;
+    private readonly ModuleApplier _applier;
     private DesiredConfig? _servedDesired;
+    private EffectiveConfig _schemaFilter = EffectiveConfig.AllOn; // the served request's schema effect
+    private EffectiveConfig _servedStoragePart = EffectiveConfig.AllOn.StoragePart;
+    private ReconfigurationStatus _status = ReconfigurationStatus.Applied;
+    private bool _rebuildFailing;
+    private (ServiceModules Groups, EffectiveConfig Storage, string[] Blockers, ReconfigurationStatus Status)? _stateInputs;
     private ServiceStateBlock _serviceState = ServiceStateBlock.AllActive;
     private long _reflectedVersion; // the _desired version the published service block reflects
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
@@ -99,6 +125,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private ulong _seq;
 
     // Storage-owned state.
+    private long _storageSyncedVersion;
     private bool _storageEnabled;
     private bool _storageGateLogged;
     private readonly Dictionary<string, bool?> _diskStates = new(StringComparer.Ordinal);
@@ -110,6 +137,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private volatile StorageCache _storageCache = StorageCache.Empty;
     private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
     private volatile bool _opened;
+    private volatile EffectiveConfig _storageApplied = EffectiveConfig.AllOn.StoragePart; // written by the storage worker
+    private volatile string[] _gateBlockers = []; // drive keys, written by the storage worker
+    private readonly StoragePark _park = new();
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _notUniqueLogged = new(StringComparer.Ordinal);
@@ -126,6 +156,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         _pawnIoAvailable = pawnIoAvailable;
         _time = time;
         _log = log;
+        _applier = new ModuleApplier(tree, _park, time, log, () => SetQuietly(_storageWake));
         _tree.HardwareChanged += OnHardwareChanged;
     }
 
@@ -134,6 +165,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>How long <see cref="Dispose"/> waits for each worker before giving up on it.</summary>
     internal TimeSpan WorkerJoinTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a request may stay <c>pending</c> before it is reported <c>failed</c> (it is still retried).</summary>
+    internal TimeSpan ReconfigureTimeout
+    {
+        get => _applier.Timeout;
+        init => _applier.Timeout = value;
+    }
 
     internal bool AnyWorkerAlive
     {
@@ -152,6 +190,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// <inheritdoc />
     /// <summary>The configuration the subscribers' requests add up to; <see langword="null"/> before the first subscription.</summary>
     internal DesiredConfig? Desired => _desired;
+
+    /// <summary>Whether the storage worker acknowledged a park the sampler has not released yet.</summary>
+    internal bool IsStorageParked => _park.IsParked;
 
     /// <inheritdoc />
     public IFeedSubscription Subscribe(FeedRequest request, Action<FeedUpdate> onUpdate)
@@ -214,8 +255,22 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         long tickStart = _time.GetTimestamp();
         ulong tickUnixMs = (ulong)_time.GetUtcNow().ToUnixTimeMilliseconds();
-        SyncServiceState();
+        ApplyDesired();
         Plan plan = _plan ?? OpenTree();
+        if (IsDisposed)
+        {
+            return; // disposed from this very thread while it switched groups
+        }
+
+        // A request's schema effect (or a new service block) is built before the updates, so a
+        // switched-off group is not updated from this tick on and this snapshot uses the new bindings.
+        bool rebuildFailed = false;
+        if (!plan.Filter.Equals(_schemaFilter) || !SchemaComparer.SameServiceState(plan.Built.Schema.Service, _serviceState))
+        {
+            Interlocked.Exchange(ref _structureDirty, 0);
+            plan = TryRebuildPlan(plan);
+            rebuildFailed = _rebuildFailing;
+        }
 
         _failedRoots.Clear();
         foreach (HardwareNode root in plan.UpdateRoots)
@@ -232,19 +287,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         // Rebuilt after the updates, so sensors LHM activates during an Update() are published
-        // (with their value) in this very tick. A failed rebuild keeps the current schema and is
+        // (with their value) in this very tick. A failed rebuild keeps the current devices and is
         // retried on the next tick.
-        if (Interlocked.Exchange(ref _structureDirty, 0) == 1)
+        if (!rebuildFailed && Interlocked.Exchange(ref _structureDirty, 0) == 1)
         {
-            try
-            {
-                plan = RebuildPlan(plan);
-            }
-            catch (Exception e)
-            {
-                Interlocked.Exchange(ref _structureDirty, 1);
-                LogRateLimited("schema-rebuild", e, "Rebuilding the schema failed; revision {Revision} stays in use and the rebuild is retried on the next tick", plan.Revision);
-            }
+            plan = TryRebuildPlan(plan);
         }
 
         var values = new double?[plan.LhmIds.Length];
@@ -337,10 +384,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         if (due || newRequest)
         {
-            TickOnce(keepSchedule: !due);
+            TickOnce(keepSchedule: !due); // applies the desired configuration first
         }
         else
         {
+            // Woken by the storage worker's park, a delivery deadline or a new subscriber: the
+            // applier steps anyway; a new service block goes out with the next sample.
+            ApplyDesired();
             DeliverDue(now);
         }
 
@@ -372,9 +422,16 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     internal void StorageOnce()
     {
+        SyncStorageConfig();
         if (!_opened || IsDisposed)
         {
             return;
+        }
+
+        EffectiveConfig config = _storageApplied;
+        if (!config.Enabled.HasFlag(ServiceModules.Storage))
+        {
+            return; // switched off softly (P10): no gate, no description, no power check, no update
         }
 
         if (!_storageEnabled && !TryEnableStorage())
@@ -423,6 +480,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             resolved[root.Identifier] = resolution;
+            if (resolution.Key is { } key && config.SmartDisabledDrives.Contains(key))
+            {
+                continue; // SMART off for this disk (P7): no CHECK POWER MODE, no update, not in the schema
+            }
+
             StorageInfo info = resolution.Info;
             if (resolution.Availability == DriveAvailability.NoMedia)
             {
@@ -481,6 +543,21 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     internal TimeSpan RunStorageDue()
     {
         if (IsDisposed)
+        {
+            return Timeout.InfiniteTimeSpan;
+        }
+
+        // The boundary of the loop: the storage part of a request is taken here, and here only the
+        // worker parks for the sampler's setters, doing no I/O until released (the loop's wait
+        // ends on the release's wake or on Dispose).
+        SyncStorageConfig();
+        bool parked = _park.Park(out bool acknowledged);
+        if (acknowledged)
+        {
+            SetQuietly(_samplerWake);
+        }
+
+        if (parked)
         {
             return Timeout.InfiniteTimeSpan;
         }
@@ -580,7 +657,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private Plan OpenTree()
     {
         long started = _time.GetTimestamp();
-        _tree.Open();
+
+        // Only the requested groups are ever built; storage waits for the D6 gate.
+        ServiceModules groups = (_servedDesired?.Config.Enabled ?? ServiceModules.All) & HardwareModules.TreeGroups;
+        _tree.Open(groups);
+        _applier.Open(groups);
+        ApplyDesired();
         _pawnIo = _pawnIoAvailable();
         _log.LogInformation("PawnIO available: {PawnIo}", _pawnIo);
 
@@ -589,8 +671,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         Plan plan = BuildPlan(_tree.Roots, current: null);
         _plan = plan;
         _log.LogInformation(
-            "Hardware tree opened in {Elapsed} ms: {Roots} roots, {Devices} devices, {Sensors} sensors (storage deferred until every rotational disk is active)",
+            "Hardware tree opened in {Elapsed} ms with {Groups}: {Roots} roots, {Devices} devices, {Sensors} sensors (storage deferred until every rotational disk is active)",
             (long)_time.GetElapsedTime(started).TotalMilliseconds,
+            groups,
             plan.UpdateRoots.Length,
             plan.Built.Schema.Devices.Count,
             plan.Built.Schema.Sensors.Count);
@@ -606,6 +689,40 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         SetQuietly(_storageWake);
         return plan;
+    }
+
+    /// <summary>
+    /// <see cref="RebuildPlan"/>, or on failure the current plan with the current service block
+    /// (<c>failed</c> when the request's schema could not be built), so a waiting client is
+    /// answered; the rebuild is retried on the next tick.
+    /// </summary>
+    private Plan TryRebuildPlan(Plan current)
+    {
+        if (_rebuildFailing)
+        {
+            _rebuildFailing = false;
+            UpdateServiceState();
+        }
+
+        try
+        {
+            return RebuildPlan(current);
+        }
+        catch (Exception e)
+        {
+            Interlocked.Exchange(ref _structureDirty, 1);
+            _rebuildFailing = true;
+            UpdateServiceState();
+            LogRateLimited("schema-rebuild", e, "Rebuilding the schema failed; the current devices stay in use and the rebuild is retried on the next tick");
+            if (SchemaComparer.SameServiceState(current.Built.Schema.Service, _serviceState))
+            {
+                return current;
+            }
+
+            BuiltSchema stamped = current.Built with { Schema = current.Built.Schema with { Service = _serviceState } };
+            _plan = new Plan(current.Roots, stamped, current.Revision + 1, current.Filter);
+            return _plan;
+        }
     }
 
     private Plan RebuildPlan(Plan current)
@@ -625,20 +742,30 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// The schema covers every non-storage root plus the disks the storage worker has resolved
-    /// (with their resolved identity); unresolved disks stay out until then.
+    /// The schema covers every non-storage root of a requested module plus the disks the storage
+    /// worker has resolved (with their resolved identity) whose SMART is on; unresolved disks stay
+    /// out until then. The plan only updates and reads the roots of requested modules.
     /// </summary>
     private Plan BuildPlan(IReadOnlyList<HardwareNode> roots, Plan? current)
     {
+        EffectiveConfig filter = _schemaFilter;
         IReadOnlyDictionary<string, DiskResolution> resolved = _resolvedDisks;
+        var planRoots = new List<HardwareNode>(roots.Count);
         var schemaRoots = new List<HardwareNode>(roots.Count);
         foreach (HardwareNode root in roots)
         {
+            if (!HardwareModules.IsOn(root.Type, filter.Enabled))
+            {
+                continue;
+            }
+
+            planRoots.Add(root);
             if (root.Type != HardwareType.Storage)
             {
                 schemaRoots.Add(root);
             }
-            else if (resolved.TryGetValue(root.Identifier, out DiskResolution? resolution))
+            else if (resolved.TryGetValue(root.Identifier, out DiskResolution? resolution)
+                && !(resolution.Key is { } key && filter.SmartDisabledDrives.Contains(key)))
             {
                 schemaRoots.Add(root with { Storage = resolution.Info });
             }
@@ -655,13 +782,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
         }
 
-        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins);
-        built = built with { Schema = built.Schema with { Service = _serviceState } };
+        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins, _serviceState);
         foreach (string skipped in built.SkippedRoots)
         {
             LogNotUnique(skipped);
         }
 
+        // A disk the request hides keeps its pin, so it comes back with the id its clients know.
+        var hidden = _storagePins.Where(pin => IsHidden(pin.Value.Info, filter)).ToList();
         _storagePins.Clear();
         foreach ((string rootId, DiskResolution resolution) in resolved)
         {
@@ -670,15 +798,26 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 _storagePins[rootId] = (resolution.Info, id);
             }
         }
+
+        foreach ((string rootId, (StorageInfo Info, string Id) pin) in hidden)
+        {
+            _storagePins.TryAdd(rootId, pin);
+        }
+
         if (current is null)
         {
-            return new Plan(roots, built, revision: 1);
+            return new Plan(planRoots, built, revision: 1, filter);
         }
 
         return SchemaComparer.SameStructure(current.Built, built)
-            ? new Plan(roots, current.Built, current.Revision)
-            : new Plan(roots, built, current.Revision + 1);
+            ? new Plan(planRoots, current.Built, current.Revision, filter)
+            : new Plan(planRoots, built, current.Revision + 1, filter);
     }
+
+    /// <summary>Whether <paramref name="filter"/> keeps that disk out of the schema (storage off, or its SMART off).</summary>
+    private static bool IsHidden(StorageInfo info, EffectiveConfig filter) =>
+        !filter.Enabled.HasFlag(ServiceModules.Storage)
+        || (DriveKey.Compute(info.DescriptorModel, info.DescriptorSerial) is { } key && filter.SmartDisabledDrives.Contains(key));
 
     /// <summary>
     /// The disk's identity with the descriptor model/serial and the rotational flag, from
@@ -766,7 +905,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         bool allActive;
         try
         {
-            allActive = _disks.AllRotationalDisksActive();
+            IReadOnlyList<DriveBlocker> blockers = _disks.GateBlockers();
+            PublishGateBlockers(blockers);
+            allActive = blockers.Count == 0;
         }
         catch (Exception e)
         {
@@ -798,6 +939,55 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         _storageEnabled = true;
         _log.LogInformation("Every rotational disk is active: storage enabled");
         return true;
+    }
+
+    /// <summary>Storage worker: the drive keys of the disks that keep the gate closed (a disk without a key cannot be named).</summary>
+    private void PublishGateBlockers(IReadOnlyList<DriveBlocker> blockers)
+    {
+        string[] keys = [.. blockers.Select(b => b.Key).OfType<string>().Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+        if (!keys.SequenceEqual(_gateBlockers))
+        {
+            _gateBlockers = keys;
+        }
+    }
+
+    /// <summary>
+    /// Storage worker: takes the storage part of a new request. Switched off (P10), the values,
+    /// the resolved disks and the gate blockers are dropped at once, with no I/O and the LHM group
+    /// left open; switched on, or with another SMART selection, a round runs at once.
+    /// </summary>
+    private void SyncStorageConfig()
+    {
+        DesiredConfig? desired = _desired;
+        if (desired is null || desired.Version == _storageSyncedVersion)
+        {
+            return;
+        }
+
+        _storageSyncedVersion = desired.Version;
+        EffectiveConfig part = desired.Config.StoragePart;
+        if (part.Equals(_storageApplied))
+        {
+            return;
+        }
+
+        if (!part.Enabled.HasFlag(ServiceModules.Storage))
+        {
+            _storageCache = StorageCache.Empty;
+            _resolvedDisks = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
+            _gateBlockers = [];
+            Interlocked.Exchange(ref _structureDirty, 1);
+        }
+        else
+        {
+            lock (_subLock)
+            {
+                _nextStorageDue = _time.GetTimestamp();
+            }
+        }
+
+        _storageApplied = part;
+        SetQuietly(_samplerWake); // the sampler reports the request as applied
     }
 
     private void CollectValues(HardwareNode node, Dictionary<string, double?> cache)
@@ -970,29 +1160,58 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// Sampler: folds a new <c>_desired</c> into the schema's service block. A changed block is a
-    /// structural change (a new revision, rebuilt in this tick). Until the applier lands (Task 12)
-    /// <c>_applied</c> stays <see cref="EffectiveConfig.AllOn"/>, so a request that switches
-    /// anything off stays <c>pending</c>.
+    /// Sampler, at the start of every <see cref="RunDue"/>: serves a new <c>_desired</c> (its schema
+    /// filter takes effect in this tick), lets the <see cref="ModuleApplier"/> step the LHM groups
+    /// and refreshes the service block. A changed block is a structural change: the tick rebuilds
+    /// the plan before its updates, with a new revision.
     /// </summary>
-    private void SyncServiceState()
+    private void ApplyDesired()
     {
         DesiredConfig? desired = _desired;
-        if (ReferenceEquals(desired, _servedDesired))
+        if (!ReferenceEquals(desired, _servedDesired))
+        {
+            _servedDesired = desired;
+            _schemaFilter = desired?.Config ?? EffectiveConfig.AllOn;
+            _servedStoragePart = _schemaFilter.StoragePart;
+        }
+
+        _status = desired is null
+            ? ReconfigurationStatus.Applied
+            : _applier.Step(desired, _storageApplied.Equals(_servedStoragePart));
+        UpdateServiceState();
+    }
+
+    /// <summary>
+    /// Sampler: the service block from what is actually applied: the groups open in the tree,
+    /// the storage part the storage worker took, the request's status (<c>failed</c> too while
+    /// the request's schema cannot be built) and the gate blockers.
+    /// </summary>
+    private void UpdateServiceState()
+    {
+        ReconfigurationStatus status = _rebuildFailing && _plan is { } plan && !plan.Filter.Equals(_schemaFilter)
+            ? ReconfigurationStatus.Failed
+            : _status;
+        EffectiveConfig storage = _storageApplied;
+        (ServiceModules, EffectiveConfig, string[], ReconfigurationStatus) inputs = (_applier.Groups, storage, _gateBlockers, status);
+        if (_stateInputs is { } last && last.Groups == inputs.Item1 && last.Storage.Equals(inputs.Item2) && ReferenceEquals(last.Blockers, inputs.Item3) && last.Status == inputs.Item4)
         {
             return;
         }
 
-        _servedDesired = desired;
+        _stateInputs = inputs;
         var state = new ServiceStateBlock(
-            ServiceModuleNames.ToWire(_applied.Enabled),
-            _applied.SmartDisabledDrives.Order(StringComparer.Ordinal).ToArray(),
-            desired is null || desired.Config.Equals(_applied) ? "applied" : "pending",
-            []);
+            ServiceModuleNames.ToWire(_applier.Groups | (storage.Enabled & ServiceModules.Storage)),
+            [.. storage.SmartDisabledDrives.Order(StringComparer.Ordinal)],
+            status switch
+            {
+                ReconfigurationStatus.Applied => "applied",
+                ReconfigurationStatus.Pending => "pending",
+                _ => "failed",
+            },
+            inputs.Item3);
         if (!SchemaComparer.SameServiceState(state, _serviceState))
         {
             _serviceState = state;
-            Interlocked.Exchange(ref _structureDirty, 1);
         }
     }
 
@@ -1112,7 +1331,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     internal sealed record DesiredConfig(long Version, EffectiveConfig Config, long RequestedAt);
 
     /// <summary>A disk's resolved identity; only a <paramref name="Complete"/> one is reused (and its device id pinned).</summary>
-    private sealed record DiskResolution(StorageInfo Info, DriveAvailability Availability, bool Complete);
+    private sealed record DiskResolution(StorageInfo Info, DriveAvailability Availability, bool Complete)
+    {
+        /// <summary>Its <see cref="DriveKey"/> from the descriptor model and serial; <see langword="null"/> without them.</summary>
+        public string? Key { get; } = DriveKey.Compute(Info.DescriptorModel, Info.DescriptorSerial);
+    }
 
     /// <summary>Raw storage values of one round, keyed by LHM sensor identifier, with the round's monotonic start.</summary>
     private sealed record StorageCache(long Timestamp, IReadOnlyDictionary<string, double?> Values)
@@ -1120,13 +1343,18 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         public static StorageCache Empty { get; } = new(long.MinValue, new Dictionary<string, double?>());
     }
 
-    /// <summary>A schema revision with its per-binding sampling plan (sampler-owned, replaced as a whole).</summary>
+    /// <summary>
+    /// A schema revision with its per-binding sampling plan (sampler-owned, replaced as a whole),
+    /// over the roots of the modules <paramref name="filter"/> keeps on.
+    /// </summary>
     private sealed class Plan
     {
-        public Plan(IReadOnlyList<HardwareNode> roots, BuiltSchema built, int revision)
+        public Plan(IReadOnlyList<HardwareNode> roots, BuiltSchema built, int revision, EffectiveConfig filter)
         {
+            Roots = roots;
             Built = built;
             Revision = revision;
+            Filter = filter;
             UpdateRoots = roots.Where(r => r.Type != HardwareType.Storage).ToArray();
 
             var owners = new Dictionary<string, (string Root, bool Storage)>(StringComparer.Ordinal);
@@ -1155,9 +1383,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             Debug.Assert(built.Schema.Sensors.Count == count, "bindings are index-aligned with the schema sensors");
         }
 
+        public IReadOnlyList<HardwareNode> Roots { get; }
+
         public BuiltSchema Built { get; }
 
         public int Revision { get; }
+
+        /// <summary>The request whose schema effect this plan has.</summary>
+        public EffectiveConfig Filter { get; }
 
         public HardwareNode[] UpdateRoots { get; }
 

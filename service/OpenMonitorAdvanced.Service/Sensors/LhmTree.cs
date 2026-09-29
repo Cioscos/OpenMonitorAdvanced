@@ -7,17 +7,27 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <summary>
 /// The LibreHardwareMonitor 0.9.6 <see cref="IHardwareTree"/>, and the only type that touches
 /// <see cref="Computer"/>. Its hardware paths need administrator rights and the real hardware, so
-/// they are exercised live in Task 15; only <see cref="Dispose"/> is unit-tested, over a
-/// <see cref="Computer"/> with no group enabled. See <c>docs/superpowers/references/m4/s1-lhm.md</c>.
+/// they are exercised live in Task 15; unit tests cover <see cref="Dispose"/> over a
+/// <see cref="Computer"/> with no group enabled, and the groups that <see cref="Open"/> and
+/// <see cref="SetModules"/> ask for over a computer never opened. See
+/// <c>docs/superpowers/references/m4/s1-lhm.md</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>D6.</b> <see cref="Open"/> enables CPU, motherboard, memory, controllers and PSUs with
-/// storage disabled: LHM's <c>StorageGroup</c> constructor already runs
+/// <b>D6.</b> <see cref="Open"/> enables the requested CPU, motherboard, memory, controller and
+/// PSU groups with storage disabled: LHM's <c>StorageGroup</c> constructor already runs
 /// <c>StorageManager.ReloadStorages()</c>, and DiskInfoToolkit's identification reads sector 0,
 /// which wakes a sleeping HDD. <see cref="EnableStorage"/> sets
 /// <see cref="Computer.IsStorageEnabled"/> later (the setter adds the group to an open computer),
-/// only when the hub's gate allows it.
+/// only when the hub's gate allows it, and nothing ever clears it (P10: switching it off and on
+/// again would identify every disk again and leak the old group on a static event).
+/// </para>
+/// <para>
+/// <b>Groups.</b> <see cref="SetModules"/> flips LHM's setters on an open computer: removing a
+/// group closes it (PawnIO modules, Super I/O, HID handles) on the calling thread, adding one runs
+/// its detection there. The hub calls it on the sampler only while its storage worker is parked,
+/// since LHM's own guarantee (no group closed during an update) relies on <c>Computer.Accept</c>,
+/// which this class does not use.
 /// </para>
 /// <para>
 /// <b>Threads.</b> Each root is cached as an immutable <see cref="HardwareNode"/> built on the
@@ -37,6 +47,7 @@ public sealed class LhmTree : IHardwareTree
 {
     private readonly ILogger<LhmTree> _log;
     private readonly Func<Computer> _createComputer;
+    private readonly Action<Computer> _openComputer;
     private readonly object _structureLock = new();
     private readonly List<Entry> _entries = []; // guarded by _structureLock
     private volatile Composition _composition = Composition.Empty;
@@ -50,11 +61,16 @@ public sealed class LhmTree : IHardwareTree
     {
     }
 
-    /// <summary>Tests only: <paramref name="createComputer"/> replaces the configured <see cref="Computer"/>.</summary>
-    internal LhmTree(ILogger<LhmTree> log, Func<Computer> createComputer)
+    /// <summary>
+    /// Tests only: <paramref name="createComputer"/> replaces the <see cref="Computer"/> and
+    /// <paramref name="openComputer"/> its <c>Open()</c> (a computer never opened only records the
+    /// flags its setters are given, without building a group).
+    /// </summary>
+    internal LhmTree(ILogger<LhmTree> log, Func<Computer> createComputer, Action<Computer>? openComputer = null)
     {
         _log = log;
         _createComputer = createComputer;
+        _openComputer = openComputer ?? (computer => computer.Open());
     }
 
     /// <inheritdoc />
@@ -75,7 +91,7 @@ public sealed class LhmTree : IHardwareTree
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<HardwareNode> Open()
+    public IReadOnlyList<HardwareNode> Open(ServiceModules enabled)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
         if (_computer is not null)
@@ -84,11 +100,21 @@ public sealed class LhmTree : IHardwareTree
         }
 
         Computer computer = _createComputer();
+        computer.IsCpuEnabled = enabled.HasFlag(ServiceModules.Cpu);
+        computer.IsMotherboardEnabled = enabled.HasFlag(ServiceModules.Motherboard);
+        computer.IsMemoryEnabled = enabled.HasFlag(ServiceModules.Memory);
+        computer.IsControllerEnabled = enabled.HasFlag(ServiceModules.Controller);
+        computer.IsPsuEnabled = enabled.HasFlag(ServiceModules.Psu);
+        computer.IsStorageEnabled = false; // D6: see EnableStorage
+        computer.IsGpuEnabled = false;
+        computer.IsNetworkEnabled = false;
+        computer.IsBatteryEnabled = false;
+        computer.IsPowerMonitorEnabled = false;
         computer.HardwareAdded += OnMembershipChanged;
         computer.HardwareRemoved += OnMembershipChanged;
         try
         {
-            computer.Open();
+            _openComputer(computer);
         }
         catch
         {
@@ -143,6 +169,75 @@ public sealed class LhmTree : IHardwareTree
     /// <inheritdoc />
     public double? Read(string sensorIdentifier) =>
         _composition.Sensors.TryGetValue(sensorIdentifier, out ISensor? sensor) && sensor.Value is float value ? value : null;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Removals first, then (after the memory group) a full collection with its finalizers, then
+    /// additions: RAMSPDToolkit's <c>~SPDAccessor</c> restores each DIMM's SPD page over SMBus, so
+    /// those writes finish, with the driver still loaded (see <see cref="Dispose"/>), before a new
+    /// memory detection can use the bus.
+    /// </remarks>
+    public void SetModules(ServiceModules enabled)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
+        Computer computer = _computer ?? throw new InvalidOperationException("The tree is not open.");
+        try
+        {
+            bool memoryRemoved = computer.IsMemoryEnabled && !enabled.HasFlag(ServiceModules.Memory);
+            Switch(computer, enabled, on: false);
+            if (memoryRemoved)
+            {
+                Reconcile(); // drops our references to the closed DIMMs, so they can be finalized
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            Switch(computer, enabled, on: true);
+        }
+        finally
+        {
+            // Whatever the setters did (also before one threw) is reflected before returning.
+            Interlocked.Exchange(ref _membershipDirty, 0);
+            Reconcile();
+        }
+    }
+
+    /// <summary>Flips the setter of every group whose state differs and that <paramref name="enabled"/> turns <paramref name="on"/> (or off); never storage.</summary>
+    private void Switch(Computer computer, ServiceModules enabled, bool on)
+    {
+        if (computer.IsCpuEnabled != on && enabled.HasFlag(ServiceModules.Cpu) == on)
+        {
+            LogSwitch(ServiceModules.Cpu, on);
+            computer.IsCpuEnabled = on;
+        }
+
+        if (computer.IsMotherboardEnabled != on && enabled.HasFlag(ServiceModules.Motherboard) == on)
+        {
+            LogSwitch(ServiceModules.Motherboard, on);
+            computer.IsMotherboardEnabled = on;
+        }
+
+        if (computer.IsMemoryEnabled != on && enabled.HasFlag(ServiceModules.Memory) == on)
+        {
+            LogSwitch(ServiceModules.Memory, on);
+            computer.IsMemoryEnabled = on;
+        }
+
+        if (computer.IsControllerEnabled != on && enabled.HasFlag(ServiceModules.Controller) == on)
+        {
+            LogSwitch(ServiceModules.Controller, on);
+            computer.IsControllerEnabled = on;
+        }
+
+        if (computer.IsPsuEnabled != on && enabled.HasFlag(ServiceModules.Psu) == on)
+        {
+            LogSwitch(ServiceModules.Psu, on);
+            computer.IsPsuEnabled = on;
+        }
+    }
+
+    private void LogSwitch(ServiceModules module, bool on) =>
+        _log.LogInformation("{Action} the LibreHardwareMonitor {Module} group", on ? "Opening" : "Closing", module);
 
     /// <inheritdoc />
     public void EnableStorage()
@@ -218,19 +313,8 @@ public sealed class LhmTree : IHardwareTree
         }
     }
 
-    private static Computer CreateComputer() => new()
-    {
-        IsCpuEnabled = true,
-        IsMotherboardEnabled = true,
-        IsMemoryEnabled = true,
-        IsControllerEnabled = true,
-        IsPsuEnabled = true,
-        IsStorageEnabled = false, // D6: see EnableStorage
-        IsGpuEnabled = false,
-        IsNetworkEnabled = false,
-        IsBatteryEnabled = false,
-        IsPowerMonitorEnabled = false,
-    };
+    /// <summary>A computer with no group: <see cref="Open"/> chooses them.</summary>
+    private static Computer CreateComputer() => new();
 
     private void OnMembershipChanged(IHardware hardware)
     {

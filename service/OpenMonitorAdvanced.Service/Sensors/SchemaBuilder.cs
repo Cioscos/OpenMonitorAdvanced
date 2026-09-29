@@ -65,7 +65,11 @@ public static partial class SchemaBuilder
     [GeneratedRegex(@"^DIMM #\d+$")]
     private static partial Regex DimmTemperaturePattern();
 
-    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null)
+    /// <summary>
+    /// The schema of <paramref name="roots"/>, with <paramref name="service"/> as its service block
+    /// (every module active when omitted).
+    /// </summary>
+    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null, ServiceStateBlock? service = null)
     {
         var output = new Output();
 
@@ -112,7 +116,7 @@ public static partial class SchemaBuilder
             }
         }
 
-        return new BuiltSchema(new SchemaMessage(output.Devices, output.Sensors, ServiceStateBlock.AllActive), output.Bindings)
+        return new BuiltSchema(new SchemaMessage(output.Devices, output.Sensors, service ?? ServiceStateBlock.AllActive), output.Bindings)
         {
             StorageDeviceIds = storageIds,
             SkippedRoots = output.Skipped,

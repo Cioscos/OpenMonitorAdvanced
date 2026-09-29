@@ -1079,8 +1079,9 @@ public sealed class SensorHubTests
         Assert.Equal(0, h.Tree.OpenCount);
         h.Hub.TickOnce();
         h.Hub.RunStorageDue();
-        (int, int, int, int, int, int, int, int) Touches() => (
+        (int, int, int, int, int, int, int, int, int) Touches() => (
             h.Tree.OpenCount,
+            h.Tree.SetModulesCalls,
             h.Tree.EnableStorageCount,
             h.Tree.Updates("/amdcpu/0"),
             h.Tree.Updates("/hdd/0"),
@@ -1231,7 +1232,7 @@ public sealed class SensorHubTests
         sub.Update(Requests.Of(1000, ServiceModules.Psu));
         h.Hub.RunDue();
 
-        // Nothing applies requests yet (Task 12): every module stays active, the request waits.
+        // The PSU group is switched only once the storage worker parks: it stays active meanwhile.
         ServiceStateBlock pending = LatestSchema(a).Service;
         Assert.Equal("pending", pending.Reconfiguration);
         Assert.Equal(ProtocolConstants.Modules, pending.ActiveModules);
@@ -1247,7 +1248,7 @@ public sealed class SensorHubTests
     }
 
     [Fact]
-    public void AFirstRequestWithADisabledModuleIsPending()
+    public void AFirstRequestWithADisabledModuleIsAppliedByTheOpen()
     {
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
@@ -1255,8 +1256,11 @@ public sealed class SensorHubTests
 
         h.Hub.TickOnce();
 
-        Assert.Equal("pending", LatestSchema(a).Service.Reconfiguration);
+        ServiceStateBlock state = LatestSchema(a).Service;
+        Assert.Equal("applied", state.Reconfiguration);
+        Assert.Equal(["cpu", "motherboard", "memory", "storage", "psu"], state.ActiveModules);
         Assert.Equal(1, h.Hub.Revision);
+        Assert.Equal(0, h.Tree.SetModulesCalls);
     }
 
     [Fact]
@@ -1319,5 +1323,528 @@ public sealed class SensorHubTests
         // The first client still gets a fresh sample every second on its original phase.
         Assert.Equal([(0L, 0L), (1000, 1000), (2000, 2000), (3000, 3000), (4000, 4000), (5000, 5000)], deliveries);
         Assert.Equal(7, h.Tree.Updates("/amdcpu/0")); // six on schedule, one for the new request
+    }
+
+    // ---- Task 12: applying module and per-disk SMART requests on the owning threads ----
+
+    private const string WdcTemp = "/hdd/1/temperature/0";
+
+    /// <summary>The drive key of <see cref="Hdd"/> as <see cref="FakeDisks"/> describes it by default.</summary>
+    private static readonly string HddKey = DriveKey.Compute("ST2000DM008-2FR102", "DESCRIPTOR-SERIAL")!;
+
+    private static readonly string WdcKey = DriveKey.Compute("WDC WD40EFRX-68N32N0", "WD-WCC7K0000001")!;
+
+    private static HardwareNode Wdc() => new(
+        "/hdd/1",
+        HardwareType.Storage,
+        "WDC WD40EFRX-68N32N0",
+        [new SensorNode(WdcTemp, SensorType.Temperature, "Temperature", 0)],
+        [],
+        new StorageInfo(1, null, null, "WD-WCC7K0000001", Rotational: true));
+
+    private static DriveFacts WdcFacts() =>
+        new(1, DriveAvailability.Present, "WDC WD40EFRX-68N32N0", "WD-WCC7K0000001", BusType: 0x0B, SeekPenalty: true);
+
+    private static bool HasMemory(SchemaMessage schema) => schema.Devices.Any(d => d.Kind == "memory");
+
+    private static bool HasStorage(SchemaMessage schema) => schema.Devices.Any(d => d.Kind == "storage");
+
+    private static int ReconfigurationWarnings(Harness h) =>
+        h.Log.Entries.Count(e => e.Level == LogLevel.Warning && e.Message.Contains("reconfiguration", StringComparison.OrdinalIgnoreCase));
+
+    [Fact]
+    public void ModulesDisabledBeforeTheFirstTickAreNeverOpened()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        List<FeedUpdate> a = h.Subscribe(Requests.Of(1000, ServiceModules.Memory), out _);
+
+        h.Hub.TickOnce();
+
+        // Storage stays out of the open as well (D6): only the storage worker's gate enables it.
+        Assert.Equal(ServiceModules.Cpu | ServiceModules.Motherboard | ServiceModules.Controller | ServiceModules.Psu, h.Tree.OpenedModules);
+        Assert.Equal(0, h.Tree.Updates("/ram"));
+        Assert.False(HasMemory(LatestSchema(a)));
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(0, h.Tree.SetModulesCalls);
+    }
+
+    [Fact]
+    public void DisablingAModuleDropsItsDevicesInTheSnapshotsRevision()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        h.Tree.Values[CpuTotal] = 10;
+        h.Tree.Values[RamUsed] = 2;
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        Assert.True(HasMemory(LatestSchema(a)));
+        int ramUpdates = h.Tree.Updates("/ram");
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        h.Hub.RunDue();
+
+        // The same update carries the new schema and a snapshot built with its bindings.
+        FeedUpdate answer = a[^1];
+        Assert.NotNull(answer.Schema);
+        Assert.False(HasMemory(answer.Schema));
+        Assert.Equal(answer.Schema.Sensors.Count, answer.Snapshot.Values.Count);
+        Assert.Equal(10, ValueOf(a, a.Count - 1, "load", "total"));
+        Assert.Equal("pending", answer.Schema.Service.Reconfiguration);
+        Assert.Equal(2, h.Hub.Revision); // devices and service block change in one revision
+
+        // From that very tick the group is no longer updated, although it is still loaded.
+        Assert.Equal(ramUpdates, h.Tree.Updates("/ram"));
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal(ramUpdates, h.Tree.Updates("/ram"));
+        Assert.Equal(0, h.Tree.SetModulesCalls);
+    }
+
+    [Fact]
+    public void SettersWaitForTheStorageWorkerToPark()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        h.Hub.RunDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal(0, h.Tree.SetModulesCalls); // the storage worker has not parked yet
+
+        // The storage worker parks at the boundary of its loop, and stays parked even when a round is due.
+        Assert.Equal(Timeout.InfiniteTimeSpan, h.Hub.RunStorageDue());
+        Assert.True(h.Hub.IsStorageParked);
+        h.Advance(30_000);
+        Assert.Equal(Timeout.InfiniteTimeSpan, h.Hub.RunStorageDue());
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+        Assert.Equal(0, h.Tree.SetModulesCalls);
+
+        h.Hub.RunDue();
+        (ServiceModules modules, _) = Assert.Single(h.Tree.SetModulesLog);
+        Assert.Equal(ServiceModules.Cpu | ServiceModules.Motherboard | ServiceModules.Controller | ServiceModules.Psu, modules);
+        Assert.False(h.Hub.IsStorageParked);
+
+        h.Hub.RunStorageDue(); // released: the due round runs
+        Assert.Equal(2, h.Tree.Updates("/hdd/0"));
+
+        h.Advance(1000);
+        h.Hub.RunDue();
+        ServiceStateBlock state = LatestSchema(a).Service;
+        Assert.Equal("applied", state.Reconfiguration);
+        Assert.Equal(["cpu", "motherboard", "storage", "controller", "psu"], state.ActiveModules);
+    }
+
+    [Fact]
+    public void ABlockedStorageWorkerLeadsToFailedWithoutApplying()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Type == HardwareType.Storage)
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(30), ct);
+            }
+        };
+        var storage = new Thread(() => h.Hub.RunStorageDue()) { IsBackground = true, Name = "test-storage" };
+        storage.Start();
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10), ct), "the storage round never reached the disk");
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        h.Hub.RunDue();
+        Assert.Equal("pending", LatestSchema(a).Service.Reconfiguration);
+        int cpuUpdates = h.Tree.Updates("/amdcpu/0");
+        for (int i = 0; i < 20; i++)
+        {
+            h.Advance(1000);
+            h.Hub.RunDue();
+        }
+
+        // Past the timeout: failed, one warning, CPU sampling going on, no setter under the busy worker.
+        Assert.Equal("failed", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(1, ReconfigurationWarnings(h));
+        Assert.Equal(cpuUpdates + 20, h.Tree.Updates("/amdcpu/0"));
+        Assert.Equal(0, h.Tree.SetModulesCalls);
+        Assert.False(HasMemory(LatestSchema(a))); // the schema already reflects the request
+
+        release.Set();
+        Assert.True(storage.Join(TimeSpan.FromSeconds(10)));
+        h.Tree.BeforeUpdate = null;
+        h.Hub.RunStorageDue(); // the next loop boundary: parks
+        h.Hub.RunDue();
+        Assert.Equal(1, h.Tree.SetModulesCalls);
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(1, ReconfigurationWarnings(h));
+    }
+
+    [Fact]
+    public void AFailingSetterIsFailedOnceAndRetriedWithANewPark()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Tree.FailNextSetModules(2);
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            h.Hub.RunDue(); // asks for the park
+            h.Hub.RunStorageDue(); // parks
+            h.Hub.RunDue(); // the setter throws: the worker is released anyway
+            Assert.False(h.Hub.IsStorageParked);
+        }
+
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("failed", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal(1, ReconfigurationWarnings(h));
+
+        h.Hub.RunStorageDue();
+        h.Hub.RunDue();
+        Assert.Equal(3, h.Tree.SetModulesCalls);
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+    }
+
+    [Fact]
+    public void APersistentlyFailingRebuildStillAnswersEveryRequest()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Initial.Add(Ram());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Tree.ThrowOnRoots = true;
+
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+        h.Hub.RunDue();
+
+        // The requester is answered with the current state, not starved waiting for a rebuild.
+        FeedUpdate answer = a[^1];
+        Assert.NotNull(answer.Schema);
+        Assert.Equal("failed", answer.Schema.Service.Reconfiguration);
+        Assert.Equal(answer.Schema.Sensors.Count, answer.Snapshot.Values.Count);
+
+        // A client that subscribes meanwhile gets its schema too.
+        List<FeedUpdate> b = h.Subscribe(Requests.Of(1000, ServiceModules.Memory), out _);
+        h.Hub.RunDue();
+        Assert.Equal("failed", Assert.Single(b).Schema?.Service.Reconfiguration);
+
+        // Retried on every tick; the rebuild error is rate-limited, not one warning per tick.
+        for (int i = 0; i < 3; i++)
+        {
+            h.Advance(1000);
+            h.Hub.RunDue();
+        }
+
+        Assert.Single(h.Log.Entries, e => e.Level == LogLevel.Warning && e.Exception is InvalidOperationException { Message: "roots unavailable" });
+
+        h.Tree.ThrowOnRoots = false;
+        h.Advance(1000);
+        h.Hub.RunDue();
+        SchemaMessage rebuilt = LatestSchema(a);
+        Assert.False(HasMemory(rebuilt));
+        Assert.Equal("pending", rebuilt.Service.Reconfiguration); // the group waits for the storage worker's park
+    }
+
+    [Fact]
+    public void DisablingStorageClearsItsCacheAndStopsDiskIo()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal(40, ValueOf(a, a.Count - 1, "temperature", "drive"));
+        var before = (h.Tree.Updates("/hdd/0"), h.Tree.Reads(HddTemp), h.Disks.SpunDownQueries, h.Disks.DescribeCalls, h.Disks.AllActiveQueries);
+
+        sub.Update(Requests.Of(1000, ServiceModules.Storage));
+        h.Hub.RunDue();
+        Assert.False(HasStorage(LatestSchema(a))); // at once, before the storage worker ran
+        for (int round = 0; round < 3; round++)
+        {
+            h.Hub.RunStorageDue();
+            h.Advance(30_000);
+            h.Hub.RunDue();
+        }
+
+        Assert.Equal(before, (h.Tree.Updates("/hdd/0"), h.Tree.Reads(HddTemp), h.Disks.SpunDownQueries, h.Disks.DescribeCalls, h.Disks.AllActiveQueries));
+        ServiceStateBlock state = LatestSchema(a).Service;
+        Assert.False(HasStorage(LatestSchema(a)));
+        Assert.Equal("applied", state.Reconfiguration);
+        Assert.DoesNotContain("storage", state.ActiveModules);
+        Assert.Equal(0, h.Tree.SetModulesCalls); // soft: the LHM group stays open
+    }
+
+    [Fact]
+    public void AStorageRequestIsAppliedOnlyOnceTheStorageWorkerTookIt()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+
+        sub.Update(Requests.Of(1000, ServiceModules.None, HddKey));
+        h.Hub.RunDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        ServiceStateBlock waiting = LatestSchema(a).Service;
+        Assert.Equal("pending", waiting.Reconfiguration);
+        Assert.Empty(waiting.SmartDisabledDrives); // what the storage worker applies, not what was asked
+
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        Assert.Equal([HddKey], LatestSchema(a).Service.SmartDisabledDrives);
+    }
+
+    [Fact]
+    public void ReEnablingStorageDoesNotReloadTheGroup()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        sub.Update(Requests.Of(1000, ServiceModules.Storage));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        int powerChecks = h.Disks.SpunDownQueries;
+
+        h.Advance(1000);
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunDue();
+        Assert.False(HasStorage(LatestSchema(a))); // the resolved disks went with the cache
+
+        h.Hub.RunStorageDue(); // a round at once, without a new gate or a new group
+        Assert.Equal(1, h.Tree.EnableStorageCount);
+        Assert.Equal(1, h.Disks.AllActiveQueries);
+        Assert.Equal(powerChecks + 1, h.Disks.SpunDownQueries);
+        Assert.Equal(2, h.Tree.Updates("/hdd/0"));
+
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.True(HasStorage(LatestSchema(a)));
+        Assert.Equal(40, ValueOf(a, a.Count - 1, "temperature", "drive"));
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+    }
+
+    [Fact]
+    public void StorageEnabledForTheFirstTimeLaterStillGoesThroughTheD6Gate()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Disks.AllActive = false;
+        h.Subscribe(Requests.Of(1000, ServiceModules.Storage), out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        for (int round = 0; round < 3; round++)
+        {
+            h.Hub.RunStorageDue();
+            h.Advance(30_000);
+        }
+
+        Assert.Equal((0, 0, 0, 0), (h.Disks.AllActiveQueries, h.Disks.SpunDownQueries, h.Disks.DescribeCalls, h.Tree.EnableStorageCount));
+
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunStorageDue();
+        Assert.Equal(1, h.Disks.AllActiveQueries);
+        Assert.Equal(0, h.Tree.EnableStorageCount);
+
+        h.Disks.AllActive = true;
+        h.Advance(30_000);
+        h.Hub.RunStorageDue();
+        Assert.Equal(1, h.Tree.EnableStorageCount);
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+    }
+
+    [Fact]
+    public void DisposeReleasesAParkedStorageWorker()
+    {
+        var tree = new FakeTree();
+        tree.Initial.Add(Cpu());
+        tree.Initial.Add(Ram());
+        tree.Storage.Add(Hdd());
+        var log = new ListLogger<SensorHub>();
+        var hub = new SensorHub(tree, new FakeDisks(), () => true, new FakeTimeProvider(), log);
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var storageUpdated = new ManualResetEventSlim();
+        using var disposed = new ManualResetEventSlim();
+        tree.BeforeUpdate = root =>
+        {
+            if (root.Type == HardwareType.Storage)
+            {
+                storageUpdated.Set();
+            }
+        };
+        bool parkedAtDispose = false;
+        string? setterThread = null;
+        tree.BeforeSetModules = _ =>
+        {
+            // The storage worker acknowledged the park and waits for its release: stop the hub now.
+            setterThread = Thread.CurrentThread.Name;
+            parkedAtDispose = hub.IsStorageParked;
+            hub.Dispose();
+            disposed.Set();
+        };
+
+        IFeedSubscription sub = hub.Subscribe(Requests.Of(1000), _ => { });
+        Assert.True(storageUpdated.Wait(TimeSpan.FromSeconds(10), ct), "the storage thread never ran its first round");
+        sub.Update(Requests.Of(1000, ServiceModules.Memory));
+
+        Assert.True(disposed.Wait(TimeSpan.FromSeconds(30), ct), "the setter never ran");
+        Assert.Equal("oma-sampler", setterThread);
+        Assert.True(parkedAtDispose);
+        Assert.Equal(1, tree.CloseCount); // the parked worker stopped at once, so the tree could be closed
+        Assert.DoesNotContain(log.Entries, e => e.Message.Contains("did not stop", StringComparison.Ordinal));
+        Assert.Equal(0, tree.UpdatesAfterClose);
+    }
+
+    [Fact]
+    public void ASmartDisabledDiskIsNeitherPowerCheckedNorUpdated()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(Wdc());
+        h.Disks.Facts[1] = WdcFacts();
+        h.Subscribe(Requests.Of(1000, ServiceModules.None, HddKey), out _);
+        h.Hub.TickOnce();
+
+        for (int round = 1; round <= 2; round++)
+        {
+            h.Hub.RunStorageDue();
+            h.Advance(30_000);
+            Assert.Equal(0, h.Disks.SpunDownQueriesOf(0));
+            Assert.Equal(0, h.Tree.Updates("/hdd/0"));
+            Assert.Equal(round, h.Disks.SpunDownQueriesOf(1));
+            Assert.Equal(round, h.Tree.Updates("/hdd/1"));
+        }
+
+        // Described once (access 0, never wakes it) to learn its key, then remembered.
+        Assert.Equal(1, h.Disks.DescribeCallsOf(0));
+    }
+
+    [Fact]
+    public void ASmartDisabledDiskLeavesTheSchemaAndReturnsWithItsId()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(Wdc());
+        h.Disks.Facts[1] = WdcFacts();
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        string hddId = Assert.Single(LatestSchema(a).Devices, d => d.Hint is StorageHint { PhysicalDrive: 0 }).Id;
+        int revision = h.Hub.Revision;
+
+        sub.Update(Requests.Of(1000, ServiceModules.None, HddKey));
+        h.Hub.RunDue();
+        SchemaMessage without = LatestSchema(a);
+        Assert.DoesNotContain(without.Devices, d => d.Hint is StorageHint { PhysicalDrive: 0 });
+        Assert.Contains(without.Devices, d => d.Hint is StorageHint { PhysicalDrive: 1 });
+        Assert.Equal(revision + 1, h.Hub.Revision);
+
+        // Applied once the storage worker took the request.
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal([HddKey], LatestSchema(a).Service.SmartDisabledDrives);
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+
+        h.Advance(1000);
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunDue();
+        Assert.Equal(hddId, Assert.Single(LatestSchema(a).Devices, d => d.Hint is StorageHint { PhysicalDrive: 0 }).Id);
+    }
+
+    [Fact]
+    public void ASmartDisabledDiskStillHoldsTheD6Gate()
+    {
+        // Verdict (c): LHM cannot leave one disk out of the discovery, so switching its SMART off
+        // does not take it out of the gate either.
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Disks.AllActive = false;
+        h.Disks.Blockers.Add(new DriveBlocker(new DriveFacts(0, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true), SpunDown: true));
+        List<FeedUpdate> a = h.Subscribe(Requests.Of(1000, ServiceModules.None, HddKey), out _);
+        h.Hub.TickOnce();
+        for (int round = 0; round < 2; round++)
+        {
+            h.Hub.RunStorageDue();
+            h.Advance(30_000);
+        }
+
+        h.Hub.RunDue();
+        Assert.Equal(2, h.Disks.AllActiveQueries);
+        Assert.Equal(0, h.Tree.EnableStorageCount);
+        Assert.Equal([HddKey], LatestSchema(a).Service.SmartBlockedBy);
+    }
+
+    [Fact]
+    public void GateBlockersAreReportedAsDriveKeys()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Disks.AllActive = false;
+        h.Disks.Blockers.Add(new DriveBlocker(WdcFacts(), SpunDown: true));
+        h.Disks.Blockers.Add(new DriveBlocker(new DriveFacts(3, DriveAvailability.Present, "USB Bridge", null, BusType: 0x07, SeekPenalty: null), SpunDown: null)); // no serial: no key
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        Assert.Empty(LatestSchema(a).Service.SmartBlockedBy);
+
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal([WdcKey], LatestSchema(a).Service.SmartBlockedBy);
+        int revision = h.Hub.Revision;
+
+        h.Disks.AllActive = true;
+        h.Advance(30_000);
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Empty(LatestSchema(a).Service.SmartBlockedBy);
+        Assert.True(h.Hub.Revision > revision);
     }
 }

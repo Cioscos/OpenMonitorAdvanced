@@ -40,7 +40,7 @@ public sealed class LhmTreeTests
         try
         {
             var tree = new LhmTree(NullLogger<LhmTree>.Instance, () => new Computer());
-            tree.Open();
+            tree.Open(ServiceModules.None);
             int gen2Before = GC.CollectionCount(2);
 
             tree.Dispose();
@@ -52,6 +52,73 @@ public sealed class LhmTreeTests
         finally
         {
             DriverManager.Driver = previous;
+        }
+    }
+
+    /// <summary>
+    /// The seam opens nothing, so LHM's setters only record their flag (no group is built): what
+    /// is checked is which groups <see cref="LhmTree"/> asks LHM for.
+    /// </summary>
+    private static (LhmTree Tree, Func<Computer?> Opened) NotOpening()
+    {
+        Computer? opened = null;
+        var tree = new LhmTree(NullLogger<LhmTree>.Instance, () => new Computer(), computer => opened = computer);
+        return (tree, () => opened);
+    }
+
+    private static (bool Cpu, bool Motherboard, bool Memory, bool Storage, bool Controller, bool Psu, bool Gpu, bool Network, bool Battery, bool PowerMonitor) Flags(Computer c) =>
+        (c.IsCpuEnabled, c.IsMotherboardEnabled, c.IsMemoryEnabled, c.IsStorageEnabled, c.IsControllerEnabled, c.IsPsuEnabled, c.IsGpuEnabled, c.IsNetworkEnabled, c.IsBatteryEnabled, c.IsPowerMonitorEnabled);
+
+    [Fact]
+    public void OpenCreatesOnlyTheRequestedGroups()
+    {
+        (LhmTree tree, Func<Computer?> opened) = NotOpening();
+        using (tree)
+        {
+            // Storage in the request changes nothing: the D6 gate enables it later.
+            tree.Open(ServiceModules.Cpu | ServiceModules.Memory | ServiceModules.Psu | ServiceModules.Storage);
+
+            Computer computer = Assert.IsType<Computer>(opened());
+            Assert.Equal((true, false, true, false, false, true, false, false, false, false), Flags(computer));
+        }
+    }
+
+    [Fact]
+    public void SetModulesNeverTouchesStorage()
+    {
+        (LhmTree tree, Func<Computer?> opened) = NotOpening();
+        using (tree)
+        {
+            tree.Open(ServiceModules.All);
+            Computer computer = opened()!;
+
+            tree.SetModules(ServiceModules.All);
+            Assert.False(computer.IsStorageEnabled);
+
+            tree.EnableStorage();
+            tree.SetModules(ServiceModules.None);
+            Assert.Equal((false, false, false, true, false, false, false, false, false, false), Flags(computer));
+
+            tree.SetModules(ServiceModules.Motherboard | ServiceModules.Controller);
+            Assert.Equal((false, true, false, true, true, false, false, false, false, false), Flags(computer));
+        }
+    }
+
+    [Fact]
+    public void RemovingMemoryRunsItsFinalizersBeforeReturning()
+    {
+        // RAMSPDToolkit's ~SPDAccessor restores the SPD page over SMBus: after the memory group
+        // is closed its finalizers run at once, with the driver loaded, before any re-enable.
+        (LhmTree tree, _) = NotOpening();
+        using (tree)
+        {
+            tree.Open(ServiceModules.Cpu | ServiceModules.Memory);
+            int gen2 = GC.CollectionCount(2);
+            tree.SetModules(ServiceModules.Cpu | ServiceModules.Memory | ServiceModules.Psu);
+            Assert.Equal(gen2, GC.CollectionCount(2)); // nothing removed: no collection
+
+            tree.SetModules(ServiceModules.Cpu);
+            Assert.True(GC.CollectionCount(2) > gen2);
         }
     }
 

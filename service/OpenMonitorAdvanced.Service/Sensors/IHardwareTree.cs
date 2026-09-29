@@ -9,15 +9,28 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// Threading contract: the hub calls <see cref="Update"/> and <see cref="Read"/> for a given root
 /// from one thread only (the sampler for every non-storage root, the storage worker for storage
 /// roots), and never calls <see cref="IDisposable.Dispose"/> while either is running.
-/// <see cref="Roots"/> may be read from both threads.
+/// <see cref="Roots"/> may be read from both threads. <see cref="Open"/> and
+/// <see cref="SetModules"/> run on the sampler, the latter only while the storage worker is
+/// parked (spec M5 §2.8: no group is closed while another thread updates hardware);
+/// <see cref="EnableStorage"/> runs on the storage worker.
 /// </remarks>
 public interface IHardwareTree : IDisposable
 {
     /// <summary>
-    /// Opens the tree with safe discovery only: storage stays disabled (decision D6), so opening
-    /// never enumerates or identifies a disk. Returns the roots, like <see cref="Roots"/>.
+    /// Opens the tree with the <paramref name="enabled"/> groups of <see cref="HardwareModules.TreeGroups"/>
+    /// only, so a group switched off before the first tick is never built. Storage stays disabled
+    /// whatever <paramref name="enabled"/> says (decision D6), so opening never enumerates or
+    /// identifies a disk. Returns the roots, like <see cref="Roots"/>.
     /// </summary>
-    IReadOnlyList<HardwareNode> Open();
+    IReadOnlyList<HardwareNode> Open(ServiceModules enabled);
+
+    /// <summary>
+    /// Adds and removes the groups of <see cref="HardwareModules.TreeGroups"/> so that exactly the
+    /// <paramref name="enabled"/> ones are open; storage is never touched (P10). The membership is
+    /// reconciled before returning, so <see cref="Roots"/> never lists hardware of a closed group.
+    /// A group that fails to load throws, and is attempted again by the next call.
+    /// </summary>
+    void SetModules(ServiceModules enabled);
 
     /// <summary>The current roots (after hardware added/removed or sensors activated/deactivated).</summary>
     IReadOnlyList<HardwareNode> Roots { get; }
@@ -48,11 +61,13 @@ public interface IDiskPowerProbe
     bool? IsSpunDown(int driveNumber);
 
     /// <summary>
-    /// The D6 gate (controller ruling R17): every <c>PhysicalDriveN</c> whose
-    /// <see cref="DriveFacts.RequiresPowerCheck"/> is true answers <see cref="IsSpunDown"/> ==
-    /// <see langword="false"/>.
+    /// The D6 gate (controller ruling R17): the <c>PhysicalDriveN</c>s whose
+    /// <see cref="DriveFacts.RequiresPowerCheck"/> is true and that do not answer
+    /// <see cref="IsSpunDown"/> == <see langword="false"/>. The gate is open when the list is
+    /// empty; each blocker's <see cref="DriveBlocker.Key"/> is what the schema's
+    /// <c>smartBlockedBy</c> reports.
     /// </summary>
-    bool AllRotationalDisksActive();
+    IReadOnlyList<DriveBlocker> GateBlockers();
 
     /// <summary>
     /// Model, serial, bus type and seek penalty of <c>\\.\PhysicalDriveN</c>, read with access 0
@@ -107,4 +122,8 @@ public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability,
 }
 
 /// <summary>A drive that keeps the D6 gate closed, with its power-mode answer (standby or unknown).</summary>
-public sealed record DriveBlocker(DriveFacts Drive, bool? SpunDown);
+public sealed record DriveBlocker(DriveFacts Drive, bool? SpunDown)
+{
+    /// <summary>Its <see cref="DriveKey"/> from the descriptor model and serial; <see langword="null"/> when either is missing.</summary>
+    public string? Key => DriveKey.Compute(Drive.Model, Drive.Serial);
+}

@@ -1,3 +1,4 @@
+using LibreHardwareMonitor.Hardware;
 using OpenMonitorAdvanced.Service.Protocol;
 
 namespace OpenMonitorAdvanced.Service.Sensors;
@@ -38,8 +39,11 @@ public sealed record FeedRequest(uint IntervalMs, ServiceModules Disabled, IRead
 /// </summary>
 public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string> SmartDisabledDrives)
 {
-    /// <summary>Every module on, every drive's SMART on: what the tree opens with today.</summary>
+    /// <summary>Every module on, every drive's SMART on: the configuration before any request.</summary>
     public static EffectiveConfig AllOn { get; } = new(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal));
+
+    /// <summary>The part the storage worker applies: the storage flag alone and the SMART-disabled drives.</summary>
+    public EffectiveConfig StoragePart => new(Enabled & ServiceModules.Storage, SmartDisabledDrives);
 
     /// <summary>
     /// A module is on if at least one request keeps it on; a drive's SMART is on if at least one
@@ -89,6 +93,40 @@ public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string
         }
 
         return HashCode.Combine(Enabled, SmartDisabledDrives.Count, drives);
+    }
+}
+
+/// <summary>Which <see cref="ServiceModules"/> group an LHM root belongs to.</summary>
+public static class HardwareModules
+{
+    /// <summary>
+    /// The groups switched with LHM's setters (<see cref="IHardwareTree.SetModules"/>). Storage is
+    /// not one of them: it is enabled once through the D6 gate and switched off "softly" (P10).
+    /// </summary>
+    public const ServiceModules TreeGroups = ServiceModules.All & ~ServiceModules.Storage;
+
+    /// <summary>
+    /// The group of a root of that type: <c>IsControllerEnabled</c> yields coolers (fan and pump
+    /// controllers); the Super I/O and the embedded controller come with the motherboard.
+    /// <see cref="ServiceModules.None"/> for a type the service never enables (GPU, network,
+    /// battery, power monitor): no request filters it.
+    /// </summary>
+    public static ServiceModules Of(HardwareType type) => type switch
+    {
+        HardwareType.Cpu => ServiceModules.Cpu,
+        HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController => ServiceModules.Motherboard,
+        HardwareType.Memory => ServiceModules.Memory,
+        HardwareType.Storage => ServiceModules.Storage,
+        HardwareType.Cooler => ServiceModules.Controller,
+        HardwareType.Psu => ServiceModules.Psu,
+        _ => ServiceModules.None,
+    };
+
+    /// <summary>Whether a root of that type is on in <paramref name="enabled"/> (always, for a type no module owns).</summary>
+    public static bool IsOn(HardwareType type, ServiceModules enabled)
+    {
+        ServiceModules module = Of(type);
+        return module == ServiceModules.None || (enabled & module) != 0;
     }
 }
 

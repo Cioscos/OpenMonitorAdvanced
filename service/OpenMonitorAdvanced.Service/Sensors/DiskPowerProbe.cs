@@ -17,7 +17,7 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <item><see cref="IsSpunDown"/>: ATA <c>CHECK POWER MODE</c> (0xE5) through
 /// <c>IOCTL_ATA_PASS_THROUGH</c>, a non-media command that never spins a drive up (needs
 /// read/write access: the service runs as LocalSystem);</item>
-/// <item><see cref="AllRotationalDisksActive"/>: the gate of controller ruling R17 over those
+/// <item><see cref="GateBlockers"/>: the gate of controller ruling R17 over those
 /// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="FindGateBlockers"/>).</item>
 /// </list>
 /// The IOCTLs need an elevated process and a real disk (verified in Task 15); the decision
@@ -72,12 +72,15 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     public DriveFacts? Describe(int driveNumber) => driveNumber < 0 ? null : _describe(driveNumber);
 
     /// <inheritdoc />
-    public bool AllRotationalDisksActive()
+    public IReadOnlyList<DriveBlocker> GateBlockers()
     {
         IReadOnlyList<DriveBlocker> blockers = FindGateBlockers(_enumerateDrives(), IsSpunDown);
         LogBlockersOnChange(blockers);
-        return blockers.Count == 0;
+        return blockers;
     }
+
+    /// <summary>Whether the D6 gate is open: <see cref="GateBlockers"/> is empty.</summary>
+    public bool AllRotationalDisksActive() => GateBlockers().Count == 0;
 
     /// <summary>
     /// Controller ruling R17: the drives that keep the D6 gate closed. A drive whose

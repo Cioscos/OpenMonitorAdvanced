@@ -12,7 +12,7 @@ jobs:
   checks:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Installs the toolchain pinned in rust-toolchain.toml (channel and
       # components), instead of a floating `stable`.
@@ -21,11 +21,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm

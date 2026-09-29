@@ -14,7 +14,8 @@ use crate::i18n::{resolve, t, Lang};
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
 use crate::tray_icon::{
-    icon_text, render, tooltip, IconStyle, TooltipItem, ICON_SIZE, NEUTRAL, PRODUCT_NAME,
+    icon_text, render, tooltip, unit_mark, IconStyle, TooltipItem, UnitMark, ICON_SIZE, NEUTRAL,
+    PRODUCT_NAME,
 };
 use crate::window;
 
@@ -101,8 +102,8 @@ impl Resolved {
 struct State {
     lang: Lang,
     resolved: Option<Resolved>,
-    /// Text and style of the icon last sent.
-    icon: Option<(String, IconStyle)>,
+    /// Text, unit mark and style of the icon last sent.
+    icon: Option<(String, UnitMark, IconStyle)>,
     tooltip: Option<String>,
 }
 
@@ -155,14 +156,17 @@ impl<B: TrayBackend> TrayController<B> {
 
         let (value, unit) = reading(icon);
         let text = icon_text(value, unit, temperature);
+        let mark = unit_mark(value, unit);
         let style = NEUTRAL;
         if !state
             .icon
             .as_ref()
-            .is_some_and(|(sent, sent_style)| *sent == text && *sent_style == style)
+            .is_some_and(|(sent, sent_mark, sent_style)| {
+                *sent == text && *sent_mark == mark && *sent_style == style
+            })
         {
-            self.backend.set_icon(render(&text, style));
-            state.icon = Some((text, style));
+            self.backend.set_icon(render(&text, mark, style));
+            state.icon = Some((text, mark, style));
         }
 
         let item = |label_key, index| {
@@ -536,7 +540,7 @@ mod tests {
                 calls.tooltips,
                 ["CPU 45 \u{b0}C \u{b7} GPU 62 \u{b0}C \u{b7} RAM 48 %"]
             );
-            assert_eq!(calls.icons[0], render("62", NEUTRAL));
+            assert_eq!(calls.icons[0], render("62", UnitMark::Degree, NEUTRAL));
         }
 
         // Only the CPU changes: the icon (GPU) stays, the tooltip follows.
@@ -567,10 +571,44 @@ mod tests {
         tray.update(&schema, &snap, &settings);
 
         let calls = backend.0.lock().unwrap();
-        assert_eq!(calls.icons, [render("62", NEUTRAL), render("48", NEUTRAL)]);
+        assert_eq!(
+            calls.icons,
+            [
+                render("62", UnitMark::Degree, NEUTRAL),
+                render("48", UnitMark::Percent, NEUTRAL)
+            ]
+        );
         assert_eq!(
             calls.tooltips[1],
             "CPU 113 \u{b0}F \u{b7} GPU 144 \u{b0}F \u{b7} RAM 48 %"
+        );
+    }
+
+    #[test]
+    fn update_resends_the_icon_when_only_the_unit_mark_changes() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        // Same number on the icon: the GPU at 48 degrees, then the RAM at 48 %.
+        let snap = snapshot(
+            &schema,
+            &[(CPU_TEMP, 45.0), (DGPU_TEMP, 48.0), (RAM_LOAD, 48.0)],
+        );
+
+        let mut settings = Settings::default();
+        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &settings);
+        settings.tray.icon_sensor = Some(RAM_LOAD.to_owned());
+        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &settings);
+
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(
+            calls.icons,
+            [
+                render("48", UnitMark::Degree, NEUTRAL),
+                render("48", UnitMark::Percent, NEUTRAL)
+            ]
         );
     }
 

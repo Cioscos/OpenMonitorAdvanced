@@ -21,13 +21,36 @@ pub const NEUTRAL: IconStyle = IconStyle {
     foreground: [0xf5, 0xee, 0xfe, 0xff],
 };
 
+/// The small mark in the icon's top-right corner that says what the number is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitMark {
+    None,
+    Degree,
+    Percent,
+}
+
+/// The mark for a reading: a degree sign for temperatures (Celsius or
+/// Fahrenheit, the tooltip says which), a percent sign for loads, nothing for
+/// other units or a missing value.
+pub fn unit_mark(value: Option<f64>, unit: Unit) -> UnitMark {
+    if !value.is_some_and(f64::is_finite) {
+        return UnitMark::None;
+    }
+    match unit {
+        Unit::Celsius => UnitMark::Degree,
+        Unit::Percent => UnitMark::Percent,
+        _ => UnitMark::None,
+    }
+}
+
 const DASH: &str = "\u{2014}";
 const CORNER_RADIUS: f64 = 6.0;
 const MAX_TOOLTIP_UNITS: usize = 127;
 const SEPARATOR: &str = " \u{b7} ";
 
-/// Whole-number text for the icon: no unit symbol, Fahrenheit for temperatures
-/// when asked, limited to -99..=999 so it fits in three characters.
+/// Whole-number text for the icon: no unit symbol (the unit is the separate
+/// [`UnitMark`]), Fahrenheit for temperatures when asked, limited to -99..=999
+/// so it fits in three characters.
 pub fn icon_text(value: Option<f64>, unit: Unit, temperature: TemperatureUnit) -> String {
     match value.filter(|v| v.is_finite()) {
         Some(v) => whole(display_value(v, unit, temperature))
@@ -96,9 +119,109 @@ fn glyph(c: char) -> Option<[&'static str; GLYPH_H]> {
     })
 }
 
+// Hand-written 5x5 unit marks, drawn 1:1 in the top-right corner.
+const MARK_W: usize = 5;
+const MARK_X: usize = 24;
+const MARK_Y: usize = 2;
+
+fn mark_glyph(mark: UnitMark) -> &'static [&'static str] {
+    match mark {
+        UnitMark::None => &[],
+        UnitMark::Degree => &[".###.", "#...#", "#...#", "#...#", ".###."],
+        UnitMark::Percent => &["##..#", "##.#.", "..#..", ".#.##", "#..##"],
+    }
+}
+
+/// The lit pixels of the unit mark, as (x, y).
+fn mark_pixels(mark: UnitMark) -> Vec<(usize, usize)> {
+    let mut pixels = Vec::new();
+    for (row, line) in mark_glyph(mark).iter().enumerate() {
+        for (col, _) in line.bytes().enumerate().filter(|&(_, b)| b == b'#') {
+            pixels.push((MARK_X + col, MARK_Y + row));
+        }
+    }
+    debug_assert!(MARK_X + MARK_W < ICON_SIZE as usize);
+    pixels
+}
+
+/// How the digits are scaled and placed: `across` icon pixels per glyph pixel
+/// horizontally, `heights[row]` vertically, the first row at `top`.
+struct Layout {
+    across: usize,
+    heights: [usize; GLYPH_H],
+    top: usize,
+}
+
+/// With a mark and a scale of 3 the digits give up two rows (rows 1 and 6 of
+/// the glyph are drawn 2 px tall) so they start below the mark: 22 rows from
+/// row 8, instead of 24 rows centered.
+const TALL_HEIGHTS_WITH_MARK: [usize; GLYPH_H] = [3, 2, 3, 3, 3, 3, 2, 3];
+/// First row of the digits when a mark is drawn: the mark ends on row 6 and one
+/// row stays free between them.
+const TOP_WITH_MARK: usize = 8;
+
+fn layout(count: usize, mark: UnitMark) -> Layout {
+    let size = ICON_SIZE as usize;
+    // The largest scale (3, 2 or 1) whose text, with one scaled pixel between
+    // characters, stays within the 30 central columns.
+    let scale = (1..=3)
+        .rev()
+        .find(|&s| text_width(count, s) <= size - 2)
+        .unwrap_or(1);
+    if mark != UnitMark::None && scale == 3 {
+        Layout {
+            across: scale,
+            heights: TALL_HEIGHTS_WITH_MARK,
+            top: TOP_WITH_MARK,
+        }
+    } else {
+        // Scale 2 (three characters) is 16 rows from row 8: below the mark as it is.
+        Layout {
+            across: scale,
+            heights: [scale; GLYPH_H],
+            top: (size - GLYPH_H * scale) / 2,
+        }
+    }
+}
+
+fn text_width(count: usize, scale: usize) -> usize {
+    (count * GLYPH_W + count.saturating_sub(1)) * scale
+}
+
+/// The lit pixels of `text`, as (x, y), laid out for a picture with `mark`.
+fn digit_pixels(text: &str, mark: UnitMark) -> Vec<(usize, usize)> {
+    let size = ICON_SIZE as usize;
+    let glyphs: Vec<_> = text.chars().filter_map(glyph).collect();
+    if glyphs.is_empty() {
+        return Vec::new();
+    }
+    let layout = layout(glyphs.len(), mark);
+    let left = (size - text_width(glyphs.len(), layout.across).min(size)) / 2;
+    let mut pixels = Vec::new();
+    for (index, rows) in glyphs.iter().enumerate() {
+        let origin = left + index * (GLYPH_W + 1) * layout.across;
+        let mut y = layout.top;
+        for (line, &height) in rows.iter().zip(&layout.heights) {
+            for (col, _) in line.bytes().enumerate().filter(|&(_, b)| b == b'#') {
+                for dy in 0..height {
+                    for dx in 0..layout.across {
+                        let x = origin + col * layout.across + dx;
+                        if x < size {
+                            pixels.push((x, y + dy));
+                        }
+                    }
+                }
+            }
+            y += height;
+        }
+    }
+    pixels
+}
+
 /// A rounded square in `style.background` (transparent corners, anti-aliased
-/// edge) with `text` centered in `style.foreground`, as RGBA.
-pub fn render(text: &str, style: IconStyle) -> Vec<u8> {
+/// edge) with `text` centered in `style.foreground`, and the unit `mark` small
+/// in the top-right corner; as RGBA.
+pub fn render(text: &str, mark: UnitMark, style: IconStyle) -> Vec<u8> {
     let size = ICON_SIZE as usize;
     let mut rgba = vec![0u8; size * size * 4];
     for y in 0..size {
@@ -108,35 +231,11 @@ pub fn render(text: &str, style: IconStyle) -> Vec<u8> {
             rgba[(y * size + x) * 4..][..4].copy_from_slice(&pixel);
         }
     }
-
-    let glyphs: Vec<_> = text.chars().filter_map(glyph).collect();
-    if glyphs.is_empty() {
-        return rgba;
-    }
-    // The largest scale (3, 2 or 1) whose text, with one scaled pixel between
-    // characters, stays within the 30 central columns.
-    let count = glyphs.len();
-    let width_at = |scale: usize| (count * GLYPH_W + (count - 1)) * scale;
-    let scale = (1..=3)
-        .rev()
-        .find(|&s| width_at(s) <= size - 2)
-        .unwrap_or(1);
-    let left = (size - width_at(scale).min(size)) / 2;
-    let top = (size - GLYPH_H * scale) / 2;
-    for (index, rows) in glyphs.iter().enumerate() {
-        let origin = left + index * (GLYPH_W + 1) * scale;
-        for (row, line) in rows.iter().enumerate() {
-            for (col, _) in line.bytes().enumerate().filter(|&(_, b)| b == b'#') {
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let (px, py) = (origin + col * scale + dx, top + row * scale + dy);
-                        if px < size {
-                            rgba[(py * size + px) * 4..][..4].copy_from_slice(&style.foreground);
-                        }
-                    }
-                }
-            }
-        }
+    for (x, y) in digit_pixels(text, mark)
+        .into_iter()
+        .chain(mark_pixels(mark))
+    {
+        rgba[(y * size + x) * 4..][..4].copy_from_slice(&style.foreground);
     }
     rgba
 }
@@ -278,41 +377,129 @@ mod tests {
         assert_eq!(icon_text(Some(-150.0), Unit::Celsius, C), "-99");
     }
 
+    const DEG: UnitMark = UnitMark::Degree;
+    const PCT: UnitMark = UnitMark::Percent;
+    const NONE: UnitMark = UnitMark::None;
+
+    #[test]
+    fn unit_mark_follows_the_unit() {
+        // The mark is the degree sign whatever the temperature setting is.
+        assert_eq!(unit_mark(Some(45.0), Unit::Celsius), DEG);
+        assert_eq!(unit_mark(Some(45.0), Unit::Percent), PCT);
+        assert_eq!(unit_mark(Some(45.0), Unit::Watt), NONE);
+        assert_eq!(unit_mark(Some(45.0), Unit::Megahertz), NONE);
+        assert_eq!(unit_mark(None, Unit::Celsius), NONE);
+        assert_eq!(unit_mark(Some(f64::NAN), Unit::Percent), NONE);
+        assert_eq!(unit_mark(Some(f64::INFINITY), Unit::Celsius), NONE);
+    }
+
     #[test]
     fn render_is_rgba_32x32() {
-        let img = render("45", NEUTRAL);
-        assert_eq!(img.len(), 4096);
-        assert_eq!(px(&img, 0, 0)[3], 0, "corner is transparent");
-        assert_eq!(px(&img, 16, 2), NEUTRAL.background);
-        assert!(!fg_pixels(&img, NEUTRAL).is_empty());
+        for mark in [NONE, DEG, PCT] {
+            let img = render("45", mark, NEUTRAL);
+            assert_eq!(img.len(), 4096);
+            assert_eq!(px(&img, 0, 0)[3], 0, "corner is transparent");
+            assert_eq!(px(&img, 16, 4), NEUTRAL.background);
+            assert!(!fg_pixels(&img, NEUTRAL).is_empty());
+        }
     }
 
     #[test]
     fn render_fits_three_digits_and_minus() {
-        for text in ["212", "-99", "999", "—"] {
-            let img = render(text, NEUTRAL);
-            let pixels = fg_pixels(&img, NEUTRAL);
-            assert!(!pixels.is_empty(), "{text} draws something");
-            assert!(
-                pixels.iter().all(|&(x, _)| x != 0 && x != ICON_SIZE - 1),
-                "{text} leaves columns 0 and 31 free"
-            );
+        for mark in [NONE, DEG, PCT] {
+            for text in ["212", "-99", "999", "88", "5", "—"] {
+                let img = render(text, mark, NEUTRAL);
+                let pixels = fg_pixels(&img, NEUTRAL);
+                assert!(!pixels.is_empty(), "{text} draws something");
+                assert!(
+                    pixels.iter().all(|&(x, _)| x != 0 && x != ICON_SIZE - 1),
+                    "{text} {mark:?} leaves columns 0 and 31 free"
+                );
+            }
         }
     }
 
     #[test]
     fn render_draws_two_digits_large() {
-        let img = render("88", NEUTRAL);
-        let pixels = fg_pixels(&img, NEUTRAL);
-        let top = pixels.iter().map(|&(_, y)| y).min().unwrap();
-        let bottom = pixels.iter().map(|&(_, y)| y).max().unwrap();
-        assert!(bottom - top + 1 >= 16, "rows {top}..={bottom}");
+        for mark in [NONE, DEG, PCT] {
+            let digits = digit_pixels("88", mark);
+            let top = digits.iter().map(|&(_, y)| y).min().unwrap();
+            let bottom = digits.iter().map(|&(_, y)| y).max().unwrap();
+            assert!(bottom - top + 1 >= 16, "{mark:?}: rows {top}..={bottom}");
+            // What the picture shows is what was computed.
+            let img = render("88", mark, NEUTRAL);
+            let rows = fg_pixels(&img, NEUTRAL);
+            assert!(rows.iter().any(|&(_, y)| y as usize == bottom));
+        }
     }
 
     #[test]
     fn render_distinguishes_glyphs() {
-        assert_ne!(render("45", NEUTRAL), render("46", NEUTRAL));
-        assert_ne!(render("-", NEUTRAL), render("—", NEUTRAL));
+        assert_ne!(render("45", DEG, NEUTRAL), render("46", DEG, NEUTRAL));
+        assert_ne!(render("-", NONE, NEUTRAL), render("—", NONE, NEUTRAL));
+    }
+
+    #[test]
+    fn mark_is_drawn_top_right_without_touching_digits() {
+        for mark in [DEG, PCT] {
+            let marks = mark_pixels(mark);
+            assert!(!marks.is_empty());
+            assert!(
+                marks.iter().all(|&(x, y)| (24..=29).contains(&x) && y <= 7),
+                "{mark:?} sits in the top-right corner"
+            );
+            let left = marks.iter().map(|&(x, _)| x).min().unwrap();
+            let right = marks.iter().map(|&(x, _)| x).max().unwrap();
+            let width = right - left + 1;
+            assert!((5..=7).contains(&width), "{mark:?} is {width} px wide");
+
+            for text in ["88", "5", "45", "212", "-99", "999", "100", "-5", "0"] {
+                let digits = digit_pixels(text, mark);
+                assert!(!digits.is_empty(), "{text}");
+                for &(dx, dy) in &digits {
+                    for &(mx, my) in &marks {
+                        assert!(
+                            dx.abs_diff(mx) > 1 || dy.abs_diff(my) > 1,
+                            "{text} {mark:?}: digit ({dx},{dy}) touches mark ({mx},{my})"
+                        );
+                    }
+                }
+                // The picture is exactly the digits plus the mark.
+                let img = render(text, mark, NEUTRAL);
+                let mut expected: Vec<(u32, u32)> = digits
+                    .iter()
+                    .chain(&marks)
+                    .map(|&(x, y)| (x as u32, y as u32))
+                    .collect();
+                expected.sort_by_key(|&(x, y)| (y, x));
+                expected.dedup();
+                assert_eq!(fg_pixels(&img, NEUTRAL), expected, "{text} {mark:?}");
+                assert!(
+                    expected.iter().all(|&(x, _)| x != 0 && x != ICON_SIZE - 1),
+                    "{text} {mark:?} leaves columns 0 and 31 free"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degree_and_percent_marks_differ() {
+        assert_ne!(mark_pixels(DEG), mark_pixels(PCT));
+        assert_ne!(render("45", DEG, NEUTRAL), render("45", PCT, NEUTRAL));
+        assert_ne!(render("45", DEG, NEUTRAL), render("45", NONE, NEUTRAL));
+        assert_ne!(render("45", PCT, NEUTRAL), render("45", NONE, NEUTRAL));
+    }
+
+    #[test]
+    fn no_mark_for_the_dash() {
+        assert!(mark_pixels(NONE).is_empty());
+        let mark = unit_mark(None, Unit::Celsius);
+        assert_eq!(mark, NONE);
+        let img = render("—", mark, NEUTRAL);
+        // Only the dash bar is drawn: nothing near the corner.
+        let pixels = fg_pixels(&img, NEUTRAL);
+        assert!(!pixels.is_empty());
+        assert!(pixels.iter().all(|&(_, y)| y > 8));
     }
 
     fn item(label_key: &'static str, value: Option<f64>, unit: Unit) -> TooltipItem {
@@ -379,8 +566,19 @@ mod tests {
     #[test]
     #[ignore = "prints the icons for a visual check"]
     fn print_icons() {
-        for text in ["45", "212", "-99", "—"] {
-            println!("== {text}\n{}", ascii(&render(text, NEUTRAL), NEUTRAL));
+        for (text, mark) in [
+            ("45", DEG),
+            ("48", PCT),
+            ("212", DEG),
+            ("-99", DEG),
+            ("7", PCT),
+            ("120", NONE),
+            ("—", NONE),
+        ] {
+            println!(
+                "== {text} {mark:?}\n{}",
+                ascii(&render(text, mark, NEUTRAL), NEUTRAL)
+            );
         }
     }
 }

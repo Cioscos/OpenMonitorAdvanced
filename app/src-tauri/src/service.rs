@@ -68,6 +68,9 @@ pub fn anti_cheat_path() -> Option<PathBuf> {
 /// The tray's anti-cheat check item, abstracted so [`ToggleState`] is
 /// testable without a running Tauri app.
 ///
+/// `refresh` runs from the settings-store listener, possibly on the settings
+/// writer thread, so it must never block (see [`ToggleState`]).
+///
 /// `refresh` is given a way to read the flag's *current* value rather than
 /// one fixed at the time it was scheduled: on Windows the real update must
 /// run on the main thread (see the impl below), and by the time it gets
@@ -82,10 +85,10 @@ pub trait ToggleIndicator: Send + Sync {
 // so this impl is not `#[cfg(windows)]`: `Arc::new(item) as Arc<dyn
 // ToggleIndicator>` in `tray.rs` — which is not cfg-gated either — compiles
 // on every platform. Off Windows, `ServiceShell::set_anti_cheat`'s
-// `#[cfg(not(windows))]` impl never calls `ToggleState::set` or
-// `refresh_indicator`, so a click's native, self-toggling checkbox state is
-// never corrected back to the (always-`false`, off Windows) in-memory flag:
-// the checkbox can drift from it permanently. Harmless, since off Windows
+// `#[cfg(not(windows))]` impl never calls `ToggleState::set`, so the store
+// never changes and a click's native, self-toggling checkbox state is never
+// corrected back to the (always-`false`, off Windows) stored flag: the
+// checkbox can drift from it permanently. Harmless, since off Windows
 // the flag drives no real behaviour, but worth knowing before wiring this
 // checkbox to anything else off Windows.
 impl ToggleIndicator for tauri::menu::CheckMenuItem<tauri::Wry> {
@@ -122,43 +125,45 @@ fn refresh_indicator(tray_item: &Mutex<Option<Arc<dyn ToggleIndicator>>>, flag: 
     }
 }
 
-/// The anti-cheat preference: it lives in the settings store, and this keeps
-/// the tray checkbox aligned with it. A store listener moves the checkbox on
-/// every change of `sources.antiCheat`, whichever way it was made (the tray,
-/// the `set_anti_cheat` command or the settings view). It is portable, with no
-/// dependency on [`oma_win::svc::ServiceLink`] or a Tauri app, so it is tested
-/// directly (see the `tests` module below).
+/// What follows a change of the anti-cheat preference besides the tray
+/// checkbox: the command to the service link. Must never block.
+type LinkSink = Box<dyn Fn(bool) + Send + Sync>;
+
+/// The anti-cheat preference: it lives in the settings store (`sources.antiCheat`),
+/// and one store listener makes everything else follow it, so the tray, the
+/// settings view, the `set_anti_cheat` command and the file cannot disagree.
+/// On every change of the value, whichever way it was made, the listener
+/// moves the tray checkbox and sends the new value to the service link.
+///
+/// The listener may run on any thread that changes the store, the settings
+/// writer included, and always in store order. Both effects must therefore
+/// never block: `ToggleIndicator::refresh` only posts to the main thread, and
+/// the link sink only takes the link lock and sends on a channel.
+///
+/// It is portable, with no dependency on [`oma_win::svc::ServiceLink`] or a
+/// Tauri app, so it is tested directly (see the `tests` module below).
 struct ToggleState {
     store: Arc<SettingsStore>,
-    /// Last value the listener saw. `Arc` so the reader handed to the
-    /// indicator is `'static` and never needs `self`: it runs later, on the
-    /// main thread, after every lock below has been released.
+    /// Last value the listener saw, so only a change fires the effects. `Arc`
+    /// so the reader handed to the indicator is `'static` and never needs
+    /// `self`: it runs later, on the main thread, after every lock has been
+    /// released.
     flag: Arc<AtomicBool>,
     tray_item: TrayItem,
-    /// Serializes the store change and the link command of one toggle, so
-    /// concurrent toggles (the command runs on a tokio task, the tray click on
-    /// the event-loop thread) reach the store and the link in the same order.
-    /// Never held while waiting for the save, or across an `await`. Locked by
-    /// `set` (which off Windows only a test calls) and, on Windows, by
-    /// `ServiceShell::spawn_link`.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    write: Mutex<()>,
 }
 
 impl ToggleState {
-    fn new(store: Arc<SettingsStore>) -> Self {
+    fn new(store: Arc<SettingsStore>, link: LinkSink) -> Self {
         let flag = Arc::new(AtomicBool::new(store.settings().sources.anti_cheat));
         let tray_item: TrayItem = Arc::default();
         {
             let flag = Arc::clone(&flag);
             let tray_item = Arc::clone(&tray_item);
-            // Runs on whichever thread changes the store, the settings writer
-            // included: it only posts the checkbox update (see the
-            // `CheckMenuItem` impl above), which never blocks.
             store.subscribe(Box::new(move |settings, _| {
                 let now = settings.sources.anti_cheat;
                 if flag.swap(now, Ordering::SeqCst) != now {
                     refresh_indicator(&tray_item, &flag);
+                    link(now);
                 }
             }));
         }
@@ -166,7 +171,6 @@ impl ToggleState {
             store,
             flag,
             tray_item,
-            write: Mutex::new(()),
         }
     }
 
@@ -182,21 +186,16 @@ impl ToggleState {
         refresh_indicator(&self.tray_item, &self.flag);
     }
 
-    /// Stores `enabled` and runs `apply` (the caller's link command), in that
-    /// order and under `write`; the checkbox follows through the store
-    /// listener. Then waits for the save with `write` released. A failed save
-    /// does not undo the mode: it stays applied and the store's persistence
-    /// state shows the error.
+    /// Stores `enabled`; the checkbox and the link follow through the store
+    /// listener. Then waits for the save. A failed save does not undo the
+    /// mode: it stays applied and the store's persistence state shows the
+    /// error.
     /// Off Windows only a test calls this (`ServiceShell::set_anti_cheat`'s
     /// `#[cfg(not(windows))]` impl never persists, so it never reaches here).
     #[cfg_attr(not(windows), allow(dead_code))]
-    fn set(&self, enabled: bool, apply: impl FnOnce()) {
-        {
-            let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
-            self.store
-                .update_with(|settings| settings.sources.anti_cheat = enabled);
-            apply();
-        }
+    fn set(&self, enabled: bool) {
+        self.store
+            .update_with(|settings| settings.sources.anti_cheat = enabled);
         if let Err(reason) = self.store.flush_now(FLUSH_TIMEOUT) {
             tracing::warn!(%reason, "the anti-cheat preference is applied but not saved");
         }
@@ -208,7 +207,7 @@ impl ToggleState {
 pub struct ServiceShell {
     toggle: ToggleState,
     #[cfg(windows)]
-    link: Mutex<Option<oma_win::svc::ServiceLink>>,
+    link: Arc<Mutex<Option<oma_win::svc::ServiceLink>>>,
     #[cfg(windows)]
     status_table: oma_win::svc::ServiceStatusTable,
 }
@@ -220,9 +219,16 @@ impl ServiceShell {
     /// [`oma_win::ServiceHandles`], and the link writes it once running.
     #[cfg(windows)]
     pub fn new(store: Arc<SettingsStore>, status_table: oma_win::svc::ServiceStatusTable) -> Self {
+        let link: Arc<Mutex<Option<oma_win::svc::ServiceLink>>> = Arc::default();
+        let sink = Arc::clone(&link);
         Self {
-            toggle: ToggleState::new(store),
-            link: Mutex::new(None),
+            toggle: ToggleState::new(
+                store,
+                Box::new(move |enabled| {
+                    send_to_link(&sink, oma_win::svc::LinkCommand::SetAntiCheat(enabled));
+                }),
+            ),
+            link,
             status_table,
         }
     }
@@ -232,18 +238,13 @@ impl ServiceShell {
     /// reaches: `tauri_plugin_single_instance` ends a second launch while the
     /// app is being built, so that process never probes or starts the
     /// service, nor connects to its pipe (final review M2). Holds the
-    /// toggle's `write` lock, so a concurrent toggle is either read here or
-    /// sent to the new link, never lost in between (same lock order as
-    /// `ToggleState::set`: `write`, then `link`).
+    /// `link` lock while it reads the preference, and the store listener sends
+    /// under that same lock: a change is either read here or sent to the new
+    /// link (at worst both, with the same value), never lost in between.
     #[cfg(windows)]
     pub fn spawn_link(&self, feed: oma_win::svc::SvcFeed, interval_ms: u32) {
         use oma_win::svc::{pipe_connector, LinkSettings, ServiceLink, WindowsScm, SERVICE_NAME};
 
-        let _write = self
-            .toggle
-            .write
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let mut link = self.link.lock().unwrap_or_else(PoisonError::into_inner);
         if link.is_some() {
             return;
@@ -261,7 +262,7 @@ impl ServiceShell {
     #[cfg(not(windows))]
     pub fn new(store: Arc<SettingsStore>) -> Self {
         Self {
-            toggle: ToggleState::new(store),
+            toggle: ToggleState::new(store, Box::new(|_| {})),
         }
     }
 
@@ -274,6 +275,18 @@ impl ServiceShell {
     }
 }
 
+/// Sends `command` to the running link, if any. Only takes the `link` lock and
+/// pushes on a channel, so the store listener may call it from any thread.
+#[cfg(windows)]
+fn send_to_link(
+    link: &Mutex<Option<oma_win::svc::ServiceLink>>,
+    command: oma_win::svc::LinkCommand,
+) {
+    if let Some(link) = link.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        link.send(command);
+    }
+}
+
 #[cfg(windows)]
 impl ServiceShell {
     fn status(&self) -> ServiceStatus {
@@ -281,28 +294,18 @@ impl ServiceShell {
     }
 
     /// The one toggle path: the `set_anti_cheat` command and the tray's
-    /// check item both call this and nothing else. Order: the store change
-    /// (which moves the tray checkbox through its listener), the link command
-    /// (`apply`, run by `ToggleState::set` while `write` is still held), then
-    /// the wait for the save. A failed save does not undo the mode, so this
-    /// answers `Ok` either way; the store's persistence state carries the
-    /// error.
+    /// check item both call this and nothing else. It changes the store and
+    /// waits for the save; the tray checkbox and the link command follow the
+    /// store's listener (`ToggleState`), as they do for a change made from the
+    /// settings view. A failed save does not undo the mode, so this answers
+    /// `Ok` either way; the store's persistence state carries the error.
     pub(crate) fn set_anti_cheat(&self, enabled: bool) -> Result<ServiceStatus, String> {
-        self.toggle.set(enabled, || {
-            self.send_link(oma_win::svc::LinkCommand::SetAntiCheat(enabled));
-        });
+        self.toggle.set(enabled);
         Ok(self.status())
     }
 
     fn send_link(&self, command: oma_win::svc::LinkCommand) {
-        if let Some(link) = self
-            .link
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
-            link.send(command);
-        }
+        send_to_link(&self.link, command);
     }
 
     pub(crate) fn start(&self) -> ServiceStatus {
@@ -387,8 +390,25 @@ mod tests {
         }
     }
 
+    type Sent = Arc<Mutex<Vec<bool>>>;
+
     fn new_store(fs: &Arc<FakeFs>) -> Arc<SettingsStore> {
         Arc::new(open_fast(fs))
+    }
+
+    /// A toggle whose link commands land in the returned list.
+    fn toggle_with_sink(store: &Arc<SettingsStore>) -> (ToggleState, Sent) {
+        let sent = Sent::default();
+        let sink = Arc::clone(&sent);
+        let toggle = ToggleState::new(
+            Arc::clone(store),
+            Box::new(move |enabled| sink.lock().unwrap().push(enabled)),
+        );
+        (toggle, sent)
+    }
+
+    fn snapshot<T: Clone>(list: &Mutex<Vec<T>>) -> Vec<T> {
+        list.lock().unwrap().clone()
     }
 
     fn set_anti_cheat_in_store(store: &SettingsStore, enabled: bool) {
@@ -401,7 +421,7 @@ mod tests {
     fn anti_cheat_follows_the_store_and_defaults_off() {
         let fs = FakeFs::new();
         let store = new_store(&fs);
-        let toggle = ToggleState::new(store.clone());
+        let (toggle, _) = toggle_with_sink(&store);
         assert!(!toggle.enabled());
         set_anti_cheat_in_store(&store, true);
         assert!(toggle.enabled());
@@ -410,7 +430,7 @@ mod tests {
             &test_path(),
             br#"{"version":1,"sources":{"antiCheat":true}}"#,
         );
-        assert!(ToggleState::new(new_store(&fs)).enabled());
+        assert!(toggle_with_sink(&new_store(&fs)).0.enabled());
     }
 
     #[test]
@@ -418,20 +438,19 @@ mod tests {
         let fs = FakeFs::new();
         fs.fail_next_writes(usize::MAX);
         let store = new_store(&fs);
-        let toggle = ToggleState::new(store.clone());
+        let (toggle, sent) = toggle_with_sink(&store);
         let indicator = Arc::new(FakeIndicator::default());
         toggle.set_tray_item(indicator.clone());
         assert_eq!(indicator.calls(), vec![false]);
 
-        let applied = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&applied);
-        toggle.set(true, move || sink.lock().unwrap().push(true));
+        toggle.set(true);
 
         // The mode is on, in the link, in the store and on the checkbox.
-        assert_eq!(*applied.lock().unwrap(), vec![true]);
         assert!(toggle.enabled());
         assert!(store.settings().sources.anti_cheat);
-        assert_eq!(indicator.calls(), vec![false, true]);
+        wait_until("the link command and the checkbox", || {
+            snapshot(&sent) == [true] && indicator.calls() == [false, true]
+        });
         // The failed save shows in the persistence state instead.
         wait_until("the save error", || {
             matches!(store.state().persistence, Persistence::Error { .. })
@@ -443,58 +462,64 @@ mod tests {
     fn tray_and_settings_view_agree_on_anti_cheat() {
         let fs = FakeFs::new();
         let store = new_store(&fs);
-        let toggle = ToggleState::new(store.clone());
+        let (toggle, sent) = toggle_with_sink(&store);
         let indicator = Arc::new(FakeIndicator::default());
         toggle.set_tray_item(indicator.clone());
 
-        // A change made from the settings view moves the tray checkbox.
+        // A change made from the settings view moves the checkbox and
+        // reaches the service link, exactly like a tray click.
         set_anti_cheat_in_store(&store, true);
-        assert_eq!(indicator.calls(), vec![false, true]);
+        wait_until("the change reaching the link and the checkbox", || {
+            snapshot(&sent) == [true] && indicator.calls() == [false, true]
+        });
         assert!(toggle.enabled());
-        // An unrelated change leaves it alone.
+        // An unrelated change leaves both alone.
         store
             .update(&serde_json::json!({"general": {"intervalMs": 2000}}))
             .unwrap();
         set_anti_cheat_in_store(&store, false);
-        assert_eq!(indicator.calls(), vec![false, true, false]);
+        wait_until("the second change", || {
+            snapshot(&sent) == [true, false] && indicator.calls() == [false, true, false]
+        });
+    }
+
+    #[test]
+    fn setting_the_same_value_sends_no_link_command() {
+        let fs = FakeFs::new();
+        let store = new_store(&fs);
+        let (toggle, sent) = toggle_with_sink(&store);
+        toggle.set(false); // already off
+        toggle.set(true);
+        toggle.set(true);
+        wait_until("the single command", || snapshot(&sent) == [true]);
+        store.flush_now(Duration::from_secs(5)).unwrap();
+        assert_eq!(snapshot(&sent), vec![true]);
     }
 
     #[test]
     fn tray_and_command_use_the_same_toggle_path() {
         let fs = FakeFs::new();
         let store = new_store(&fs);
-        let toggle = ToggleState::new(store.clone());
+        let (toggle, sent) = toggle_with_sink(&store);
         let indicator = Arc::new(FakeIndicator::default());
         toggle.set_tray_item(indicator.clone());
-        let applied = Arc::new(Mutex::new(Vec::new()));
 
         // Simulates the `set_anti_cheat` command: the caller passes the
         // desired value directly.
-        let applied_clone = Arc::clone(&applied);
-        toggle.set(true, move || applied_clone.lock().unwrap().push(true));
+        toggle.set(true);
         assert!(toggle.enabled());
         assert_eq!(stored_json(&fs)["sources"]["antiCheat"], true);
 
         // Simulates the tray's check item: the caller computes the opposite
         // of the current preference. Both go through `ToggleState::set`.
         let requested = !toggle.enabled();
-        let applied_clone = Arc::clone(&applied);
-        toggle.set(requested, move || {
-            applied_clone.lock().unwrap().push(requested)
-        });
+        toggle.set(requested);
         assert_eq!(toggle.enabled(), requested);
         assert_eq!(stored_json(&fs)["sources"]["antiCheat"], requested);
 
-        assert_eq!(
-            indicator.calls(),
-            vec![false, true, false],
-            "the indicator only ever reflects the store"
-        );
-        assert_eq!(
-            *applied.lock().unwrap(),
-            vec![true, false],
-            "apply (the link command) ran once per set, with the saved value,              regardless of which caller asked"
-        );
+        wait_until("the checkbox and the link", || {
+            indicator.calls() == [false, true, false] && snapshot(&sent) == [true, false]
+        });
         assert_eq!(store.state().persistence, Persistence::Ok);
     }
 
@@ -559,20 +584,17 @@ mod tests {
     fn concurrent_toggles_serialize_to_a_consistent_final_state() {
         let fs = FakeFs::new();
         let store = new_store(&fs);
-        let toggle = Arc::new(ToggleState::new(store.clone()));
+        let (toggle, sent) = toggle_with_sink(&store);
+        let toggle = Arc::new(toggle);
         let indicator = Arc::new(FakeIndicator::default());
         toggle.set_tray_item(indicator.clone());
-        let applied = Arc::new(Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..8u32)
             .map(|i| {
                 let toggle = Arc::clone(&toggle);
-                let applied = Arc::clone(&applied);
                 std::thread::spawn(move || {
                     for j in 0..50u32 {
-                        let enabled = (i + j) % 2 == 0;
-                        let applied = Arc::clone(&applied);
-                        toggle.set(enabled, move || applied.lock().unwrap().push(enabled));
+                        toggle.set((i + j) % 2 == 0);
                     }
                 })
             })
@@ -588,9 +610,11 @@ mod tests {
             final_flag,
             "the file and the in-memory flag must agree after every writer is done"
         );
-        // The last link command is the last stored value: `write` orders them.
-        assert_eq!(applied.lock().unwrap().last().copied(), Some(final_flag));
-        // The checkbox ends on the stored value, too.
-        assert_eq!(indicator.calls().last().copied(), Some(final_flag));
+        // Listeners run in store order, so the last link command and the last
+        // checkbox update are the last stored value.
+        wait_until("the link and the checkbox to settle", || {
+            snapshot(&sent).last().copied() == Some(final_flag)
+                && indicator.calls().last().copied() == Some(final_flag)
+        });
     }
 }

@@ -55,8 +55,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     )?;
     let quit = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &anti_cheat, &quit])?;
-    // Shared with `set_anti_cheat` (see `ServiceShell::set_anti_cheat`): the
-    // command and this check item update the same checkbox the same way.
+    // The checkbox follows the settings store (see `ToggleState`), whichever
+    // way `sources.antiCheat` changes: this item, the `set_anti_cheat`
+    // command or the settings view.
     app.state::<ServiceShell>()
         .set_tray_item(Arc::new(anti_cheat) as Arc<dyn crate::service::ToggleIndicator>);
     TrayIconBuilder::with_id("main")
@@ -68,12 +69,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "open" => window::show_main(app),
             "anti_cheat" => {
                 let shell = app.state::<ServiceShell>();
-                // Read outside `ToggleState`'s lock, so this can race a
-                // concurrent `set_anti_cheat` command: acceptable (last
-                // writer wins, ruling), since `ServiceShell::set_anti_cheat`
-                // itself serializes the save/flag/link-command sequence and
-                // always re-syncs the checkbox to the value it actually
-                // applied, never to a value merely requested here.
+                // Read here, so this can race a concurrent `set_anti_cheat`
+                // command or a settings-view change: acceptable (last
+                // writer wins, ruling). `set_anti_cheat` only changes the
+                // store; the checkbox and the link command follow the store
+                // listener, in store order, so both always end on the value
+                // the store holds, never on one merely requested here.
                 let enabled = !shell.anti_cheat_enabled();
                 let _ = shell.set_anti_cheat(enabled);
             }

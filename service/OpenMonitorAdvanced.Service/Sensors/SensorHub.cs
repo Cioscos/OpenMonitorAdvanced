@@ -53,8 +53,11 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// published as an immutable <see cref="DesiredConfig"/> with a growing version; without
 /// subscribers the last one stays. These calls come from pipe sessions and never touch the tree:
 /// the sampler folds the desired configuration into the schema's <c>service</c> block, which
-/// says <c>pending</c> while it differs from the applied one. Nothing applies it yet (Task 12):
-/// the tree keeps every module on.
+/// says <c>pending</c> while it differs from the applied one. A subscriber's deliveries wait until
+/// the published block reflects the version its own request produced, so the schema forced after
+/// a request never shows the state from before it; the sample taken at once for a new request
+/// keeps the sampling schedule. Nothing applies the request yet (Task 12): the tree keeps every
+/// module on.
 /// </para>
 /// </remarks>
 public sealed class SensorHub : ISensorFeed, IDisposable
@@ -88,6 +91,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly EffectiveConfig _applied = EffectiveConfig.AllOn;
     private DesiredConfig? _servedDesired;
     private ServiceStateBlock _serviceState = ServiceStateBlock.AllActive;
+    private long _reflectedVersion; // the _desired version the published service block reflects
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
     private Plan? _plan;
     private readonly Dictionary<string, (StorageInfo Info, string Id)> _storagePins = new(StringComparer.Ordinal);
@@ -173,6 +177,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             };
             _subscribers.Add(subscriber);
             RecomputeLocked();
+            subscriber.RequestVersion = _desired?.Version ?? 0;
             if (_subscribers.Count == 1 && _opened)
             {
                 // Idle -> active: a storage round right away, so a quick reconnect does not wait
@@ -195,8 +200,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         return subscriber;
     }
 
-    /// <summary>One sampling tick: opens the tree the first time, updates every non-storage root, publishes a snapshot and delivers it to the due subscribers.</summary>
-    internal void TickOnce()
+    /// <summary>
+    /// One sampling tick: opens the tree the first time, updates every non-storage root, publishes a
+    /// snapshot and delivers it to the due subscribers. With <paramref name="keepSchedule"/> (the
+    /// extra sample for a new request) the sampling anchor and the next due time stay as they are.
+    /// </summary>
+    internal void TickOnce(bool keepSchedule = false)
     {
         if (IsDisposed)
         {
@@ -263,19 +272,42 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         long anchor;
         lock (_subLock)
         {
-            // Anchored to the schedule when this tick is on time (or late by less than an
-            // interval); resynced to the actual start when early (a direct call) or further behind.
-            long scheduled = _nextSampleDue;
-            bool onSchedule = scheduled != long.MinValue && scheduled <= tickStart && tickStart - scheduled < _minIntervalTicks;
-            anchor = onSchedule ? scheduled : tickStart;
-            _sampleAnchor = anchor;
-            _sampled = true;
-            _nextSampleDue = anchor + _minIntervalTicks;
+            if (keepSchedule && _sampled)
+            {
+                // An off-schedule sample for a new request: the phase every subscriber is on stays.
+                anchor = _sampleAnchor;
+            }
+            else
+            {
+                anchor = ScheduleNextSampleLocked(tickStart);
+            }
+        }
+
+        // The block the published schema carries reflects the served request only once the plan
+        // was rebuilt with it (a failed rebuild keeps the older block, and the older version).
+        if (SchemaComparer.SameServiceState(plan.Built.Schema.Service, _serviceState))
+        {
+            _reflectedVersion = _servedDesired?.Version ?? 0;
         }
 
         _seq++;
-        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values), anchor);
+        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values), anchor, _reflectedVersion);
         DeliverDue(_time.GetTimestamp());
+    }
+
+    /// <summary>
+    /// Anchors this sample to the schedule when it is on time (or late by less than an interval);
+    /// resynced to the actual start when early (a direct call) or further behind. Returns the anchor.
+    /// </summary>
+    private long ScheduleNextSampleLocked(long tickStart)
+    {
+        long scheduled = _nextSampleDue;
+        bool onSchedule = scheduled != long.MinValue && scheduled <= tickStart && tickStart - scheduled < _minIntervalTicks;
+        long anchor = onSchedule ? scheduled : tickStart;
+        _sampleAnchor = anchor;
+        _sampled = true;
+        _nextSampleDue = anchor + _minIntervalTicks;
+        return anchor;
     }
 
     /// <summary>One wake of the sampler loop: a sampling tick if one is due, otherwise only the due deliveries. Returns the delay until the next wake.</summary>
@@ -287,7 +319,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         long now = _time.GetTimestamp();
-        bool sample;
+        bool due;
+        bool newRequest;
         lock (_subLock)
         {
             if (_subscribers.Count == 0)
@@ -295,14 +328,16 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return Timeout.InfiniteTimeSpan;
             }
 
-            // A new desired configuration changes the schema's service block: sampled at once, so
-            // the schema a resubscribing client gets next already reflects its request.
-            sample = _plan is null || now >= _nextSampleDue || !ReferenceEquals(_desired, _servedDesired);
+            due = _plan is null || now >= _nextSampleDue;
+
+            // A new desired configuration changes the schema's service block: sampled at once
+            // (off schedule, without moving it), so the requesting client is answered with it.
+            newRequest = !ReferenceEquals(_desired, _servedDesired);
         }
 
-        if (sample)
+        if (due || newRequest)
         {
-            TickOnce();
+            TickOnce(keepSchedule: !due);
         }
         else
         {
@@ -316,13 +351,18 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return Timeout.InfiniteTimeSpan;
             }
 
-            long due = _nextSampleDue;
+            long wake = _nextSampleDue;
             foreach (Subscriber s in _subscribers)
             {
-                due = Math.Min(due, s.NextDue);
+                if (s.RequestVersion > _reflectedVersion)
+                {
+                    continue; // waits for a sample that reflects its request (at the latest the next one)
+                }
+
+                wake = Math.Min(wake, s.NextDue);
             }
 
-            return TicksUntil(due);
+            return TicksUntil(wake);
         }
     }
 
@@ -802,9 +842,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             foreach (Subscriber s in _subscribers)
             {
-                if (now < s.NextDue)
+                if (now < s.NextDue || s.RequestVersion > published.ReflectedVersion)
                 {
-                    continue;
+                    continue; // not due, or its request is not in this schema yet: stays due
                 }
 
                 // Anchored to the schedule; the first delivery sets the phase from the sample it
@@ -864,6 +904,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             subscriber.Scheduled = false;
             subscriber.ForceSchema = true;
             configChanged = RecomputeLocked();
+            subscriber.RequestVersion = _desired?.Version ?? 0;
         }
 
         SetQuietly(_samplerWake);
@@ -1061,7 +1102,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// Schema, bindings and snapshot published together, so a snapshot always matches the schema
     /// sent with it; <paramref name="SampleAnchor"/> is the scheduled (monotonic) time of the sample.
     /// </summary>
-    private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot, long SampleAnchor);
+    /// <remarks><paramref name="ReflectedVersion"/> is the <c>_desired</c> version the schema's service block reflects.</remarks>
+    private sealed record Published(int Revision, SchemaMessage Schema, SnapshotMessage Snapshot, long SampleAnchor, long ReflectedVersion);
 
     /// <summary>
     /// The configuration the subscribers ask for, replaced as a whole: <paramref name="Version"/>
@@ -1155,6 +1197,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         /// <summary>The next delivery carries the schema whatever the revision (set by <see cref="Update"/>); guarded by <c>_subLock</c>.</summary>
         public bool ForceSchema { get; set; }
+
+        /// <summary>The <c>_desired</c> version after this subscriber's latest request: nothing is delivered from an older state; guarded by <c>_subLock</c>.</summary>
+        public long RequestVersion { get; set; }
 
         public Action<FeedUpdate> OnUpdate { get; } = onUpdate;
 

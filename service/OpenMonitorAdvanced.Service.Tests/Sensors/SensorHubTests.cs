@@ -1258,4 +1258,66 @@ public sealed class SensorHubTests
         Assert.Equal("pending", LatestSchema(a).Service.Reconfiguration);
         Assert.Equal(1, h.Hub.Revision);
     }
+
+    [Fact]
+    public void AResubscribeDuringATickWaitsForTheStateAfterItsRequest()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        Assert.Equal("applied", LatestSchema(a).Service.Reconfiguration);
+        h.Advance(1000);
+
+        // The request lands while this tick is updating LHM, after it read the desired configuration.
+        bool asked = false;
+        h.Tree.BeforeUpdate = _ =>
+        {
+            if (!asked)
+            {
+                asked = true;
+                sub.Update(Requests.Of(1000, ServiceModules.Psu));
+            }
+        };
+        h.Hub.TickOnce();
+        Assert.True(asked);
+
+        // Nothing answers the request with the state from before it.
+        Assert.Single(a);
+
+        // The next wake samples at once, answers with the new state, and keeps the sampling phase.
+        TimeSpan next = h.Hub.RunDue();
+        FeedUpdate answer = a[^1];
+        Assert.NotNull(answer.Schema);
+        Assert.Equal("pending", answer.Schema.Service.Reconfiguration);
+        Assert.Equal(TimeSpan.FromMilliseconds(1000), next);
+    }
+
+    [Fact]
+    public void AConfigurationChangeKeepsTheSamplingPhaseOfOtherSubscribers()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        long start = h.Time.GetUtcNow().ToUnixTimeMilliseconds();
+        var deliveries = new List<(long At, long SampledAt)>();
+        h.Hub.Subscribe(Requests.Of(1000, ServiceModules.Psu), u =>
+            deliveries.Add((h.Time.GetUtcNow().ToUnixTimeMilliseconds() - start, (long)u.Snapshot.TimestampMs - start)));
+        List<FeedUpdate> b = h.Subscribe(1000, out IFeedSubscription other);
+        h.Hub.RunDue();
+        h.Advance(300);
+
+        other.Update(Requests.Of(1000, ServiceModules.Psu)); // now nobody wants the PSU: the configuration changes
+        for (int guard = 0; h.Time.GetUtcNow().ToUnixTimeMilliseconds() - start <= 5000; guard++)
+        {
+            Assert.True(guard < 100, "the sampler loop did not make progress");
+            TimeSpan delay = h.Hub.RunDue();
+            Assert.True(delay > TimeSpan.Zero && delay != Timeout.InfiniteTimeSpan, $"unexpected delay {delay}");
+            h.Time.Advance(delay);
+        }
+
+        Assert.Equal("pending", b[1].Schema?.Service.Reconfiguration);
+        // The first client still gets a fresh sample every second on its original phase.
+        Assert.Equal([(0L, 0L), (1000, 1000), (2000, 2000), (3000, 3000), (4000, 4000), (5000, 5000)], deliveries);
+        Assert.Equal(7, h.Tree.Updates("/amdcpu/0")); // six on schedule, one for the new request
+    }
 }

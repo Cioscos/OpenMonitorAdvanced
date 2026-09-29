@@ -412,9 +412,16 @@ struct Machine {
     service: Option<WireServiceState>,
     /// A `Subscribe` that may change the service's sources went out and no
     /// schema has answered it yet: the sources read as pending meanwhile.
+    ///
+    /// Accepted trade-off: a single boolean can read `Applied` briefly if an
+    /// `applied` schema was already on the pipe when a second `Subscribe` went
+    /// out; the service's delivery gate keeps that window narrow, and a flag
+    /// that could stay set forever would be worse.
     awaiting: bool,
-    /// The generation of the drive table the last `Subscribe` and the
-    /// published sources were built from.
+    /// The generation of the drive table the last `Subscribe` was built from
+    /// (written only by `subscribe_message` and `on_drives_changed`, never by
+    /// the translation of the published sources, which has no say in whether
+    /// the service was told about a disk).
     drive_generation: u64,
     /// The drive keys of the last `Subscribe`.
     sent_keys: Vec<String>,
@@ -618,7 +625,6 @@ impl Machine {
     /// Rebuilds the published sources from the service's last block, this
     /// client's pending request and `drives`.
     fn refresh_sources(&mut self, drives: &DriveIds) {
-        self.drive_generation = drives.generation;
         let Some(block) = &self.service else {
             self.status.sources = None;
             return;
@@ -654,6 +660,7 @@ impl Machine {
     /// request and the names in the sources may have changed with it.
     fn on_drives_changed(&mut self) -> Vec<Effect> {
         let drives = self.settings.drives.get();
+        self.drive_generation = drives.generation;
         let mut effects = Vec::new();
         if !self.request.smart_disabled_drives.is_empty() {
             let mut keys = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
@@ -3288,6 +3295,34 @@ mod tests {
         m.phase = Phase::Hello;
         let effects = m.decide(Event::Message(hello(PROTOCOL_VERSION)), now);
         assert!(effects.contains(&Effect::Send(subscribe_with(&["psu"], &[]))));
+    }
+
+    #[test]
+    fn a_disk_published_before_the_first_schema_is_still_sent() {
+        let now = Instant::now();
+        let drives = DriveIdTable::default();
+        let settings = LinkSettings {
+            sources: request(&[], &[DISK_ID]),
+            drives: drives.clone(),
+            ..test_settings()
+        };
+        // Hello and Subscribe go out with no disk known.
+        let mut m = subscribed_with(settings, now, subscribe_with(&[], &[]));
+        // Storage discovery runs before the first schema arrives.
+        drives.publish(one_disk_table().get().drives);
+        m.decide(Event::Message(schema(2)), now);
+        // The schema translated the sources with the new table, but that must
+        // not count as having sent its keys: the first snapshot sends them.
+        let effects = m.decide(Event::Message(snapshot(1, 2)), now);
+        assert!(
+            effects.contains(&Effect::Send(subscribe_with(&[], &[disk_key()]))),
+            "{effects:?}"
+        );
+        // Then it is settled.
+        assert_eq!(
+            m.decide(Event::Message(snapshot(2, 2)), now),
+            vec![Effect::SetSnapshot(wire_snapshot(2, 2))]
+        );
     }
 
     #[test]

@@ -9,5 +9,6 @@ pub mod provider;
 pub mod rate;
 pub mod sampler;
 pub mod sanitize;
+pub mod settings;
 pub mod stats;
 mod worker;

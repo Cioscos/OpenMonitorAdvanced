@@ -310,19 +310,38 @@ impl PipeClient {
     ///
     /// One reader per connection: a second call only reports `Closed(Io(170))`.
     pub fn start_reader(&self, events: SyncSender<PipeEvent>) -> PipeReader {
+        self.start_reader_with(move |event| match events.try_send(event) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!("sensor pipe consumer is not keeping up; closing");
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        })
+    }
+
+    /// Like [`start_reader`](Self::start_reader), but each event goes to
+    /// `deliver`, which must not block: it returns `false` when nobody can
+    /// take the event (the consumer is gone or overwhelmed), and the reader
+    /// then closes the connection without a `Closed` event. `deliver` is
+    /// dropped when the reader exits.
+    pub fn start_reader_with(
+        &self,
+        deliver: impl Fn(PipeEvent) -> bool + Send + 'static,
+    ) -> PipeReader {
         let inert = PipeReader {
             stop: None,
             thread: None,
         };
         if self.shared.reader_started.swap(true, Ordering::AcqRel) {
-            let _ = events.try_send(PipeEvent::Closed(CloseReason::Io(ERROR_BUSY.0)));
+            let _ = deliver(PipeEvent::Closed(CloseReason::Io(ERROR_BUSY.0)));
             return inert;
         }
         let (stop, read_event) = match (new_event(), new_event()) {
             (Ok(stop), Ok(read_event)) => (Arc::new(stop), read_event),
             (Err(code), _) | (_, Err(code)) => {
                 self.shared.broken.store(true, Ordering::Release);
-                let _ = events.try_send(PipeEvent::Closed(CloseReason::Io(code)));
+                let _ = deliver(PipeEvent::Closed(CloseReason::Io(code)));
                 return inert;
             }
         };
@@ -330,14 +349,14 @@ impl PipeClient {
         let thread_stop = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name("oma-pipe-reader".to_owned())
-            .spawn(move || run_reader(&shared, &thread_stop, &read_event, events));
+            .spawn(move || run_reader(&shared, &thread_stop, &read_event, &deliver));
         match spawned {
             Ok(thread) => PipeReader {
                 stop: Some(stop),
                 thread: Some(thread),
             },
             Err(e) => {
-                // The closure, and with it the sender, is gone: the receiver sees Disconnected.
+                // The closure, and with it `deliver`, is gone: a receiver behind it sees Disconnected.
                 tracing::warn!("cannot start the sensor pipe reader: {e}");
                 self.shared.broken.store(true, Ordering::Release);
                 inert
@@ -352,23 +371,23 @@ fn run_reader(
     shared: &Shared,
     stop: &OwnedHandle,
     read_event: &OwnedHandle,
-    events: SyncSender<PipeEvent>,
+    deliver: &impl Fn(PipeEvent) -> bool,
 ) {
-    let reason = read_until_closed(shared.pipe.0, stop, read_event, &events);
+    let reason = read_until_closed(shared.pipe.0, stop, read_event, deliver);
     if !matches!(reason, Some(CloseReason::Stopped)) {
         shared.broken.store(true, Ordering::Release);
     }
     if let Some(reason) = reason {
-        let _ = events.try_send(PipeEvent::Closed(reason));
+        let _ = deliver(PipeEvent::Closed(reason));
     }
 }
 
-/// `None` means the channel is full or gone: nobody can be told.
+/// `None` means the consumer is full or gone: nobody can be told.
 fn read_until_closed(
     h: HANDLE,
     stop: &OwnedHandle,
     read_event: &OwnedHandle,
-    events: &SyncSender<PipeEvent>,
+    deliver: &impl Fn(PipeEvent) -> bool,
 ) -> Option<CloseReason> {
     let mut buf = vec![0u8; READ_CHUNK];
     let mut decoder = FrameDecoder::new();
@@ -406,14 +425,11 @@ fn read_until_closed(
         // Drain to Ok(None) after every push (ruling R8).
         loop {
             match decoder.next_message() {
-                Ok(Some(msg)) => match events.try_send(PipeEvent::Message(msg)) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        tracing::warn!("sensor pipe consumer is not keeping up; closing");
+                Ok(Some(msg)) => {
+                    if !deliver(PipeEvent::Message(msg)) {
                         return None;
                     }
-                    Err(TrySendError::Disconnected(_)) => return None,
-                },
+                }
                 Ok(None) => break,
                 Err(e) => return Some(CloseReason::Protocol(e)),
             }

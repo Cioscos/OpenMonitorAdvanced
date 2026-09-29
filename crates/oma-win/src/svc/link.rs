@@ -8,6 +8,12 @@
 //! calls, connection, feed updates). The thread only waits for events and
 //! runs effects, so the rules are tested without threads or clocks.
 //!
+//! The thread blocks on one queue until the next event: commands from the
+//! shell and, for the open connection, the messages and the close that its
+//! reader forwards through a [`LinkSink`] all arrive on it. Between events it
+//! sleeps until the machine's deadline (or for good when there is none), so a
+//! connected link costs no timer wake-ups.
+//!
 //! Limits, by design:
 //! - The anti-cheat preference is per user and only restrains this app: it
 //!   stops the service once, verifies the stop, and then leaves the service
@@ -15,6 +21,11 @@
 //!   again, the app does not fight back with a loop of STOPs (on a PC with
 //!   several users logged on, one can already stop the service for the
 //!   others: the accepted multi-user limit of spec §2.2).
+//! - After `Incompatible` or `PidMismatch` the link does not reconnect on its
+//!   own: every connection would reset the service's idle timer, so a service
+//!   that cannot be served would never idle out. It keeps asking the SCM at
+//!   each `retry` and connects again only on a `Start` command or when the SCM
+//!   shows the service running as something new (a restart, a new process).
 //! - The reconnect loop never starts the service: only the launch probe, a
 //!   `Start` command and leaving anti-cheat mode call `start()`. The launch
 //!   probe starts the service only when its first conclusive answer is
@@ -30,8 +41,10 @@
 //!   touching the connection again.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, sync_channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -43,14 +56,8 @@ use super::pipe::{CloseReason, ConnectError, PipeClient, PipeEvent, PipeReader};
 use super::scm::{RunState, ServiceControl, ServiceQuery};
 use super::status::{ServiceDetail, ServiceState, ServiceStatus, ServiceStatusTable};
 
-/// Longest a wait on an open connection goes without looking at commands.
-const POLL_SLICE: Duration = Duration::from_millis(50);
-
 /// Longest [`ServiceLink::shutdown`] waits for the thread before detaching it.
 pub const JOIN_WAIT: Duration = Duration::from_millis(500);
-
-/// Capacity of the pipe reader's channel (see [`PipeClient::start_reader`]).
-const READER_CHANNEL: usize = 8;
 
 /// Win32 codes the rules tell apart.
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -69,25 +76,56 @@ pub trait Connection: Send {
     /// PID of the process serving the pipe, read on this connection.
     fn server_pid(&self) -> Option<u32>;
     fn send(&mut self, msg: &Message) -> std::io::Result<()>;
-    /// The next message, `Ok(None)` when `timeout` passes without one, or
-    /// `Err` once the connection has closed.
-    fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Message>, CloseReason>;
 }
 
-/// Opens a [`Connection`] to the named pipe.
-pub type Connector = Arc<dyn Fn(&str) -> Result<Box<dyn Connection>, ConnectError> + Send + Sync>;
+/// Where a connection delivers what it receives: the link thread's queue,
+/// tagged with the connection's id so the thread can discard what arrives
+/// late from a connection it has already dropped.
+///
+/// Delivery never blocks. The queue is not bounded: the thread drains it
+/// between short effects, and the service sends one snapshot per interval.
+#[derive(Clone)]
+pub struct LinkSink {
+    id: u64,
+    tx: Sender<Input>,
+}
 
-/// The real connector: a [`PipeClient`] with its reader behind a
-/// `sync_channel(8)`.
+impl LinkSink {
+    #[cfg(test)]
+    fn new(id: u64, tx: Sender<Input>) -> Self {
+        Self { id, tx }
+    }
+
+    /// Hands over a message; `false` when the link is gone.
+    pub fn message(&self, msg: Message) -> bool {
+        self.tx.send(Input::Message(self.id, msg)).is_ok()
+    }
+
+    /// Reports that the connection ended. Sent at most once per connection.
+    pub fn closed(&self, reason: CloseReason) {
+        let _ = self.tx.send(Input::Closed(self.id, reason));
+    }
+}
+
+/// Opens a [`Connection`] to the named pipe; its reader delivers to `sink`.
+pub type Connector =
+    Arc<dyn Fn(&str, LinkSink) -> Result<Box<dyn Connection>, ConnectError> + Send + Sync>;
+
+/// The real connector: a [`PipeClient`] whose reader thread forwards
+/// messages and the close to the link's queue.
 pub fn pipe_connector() -> Connector {
-    Arc::new(|pipe_name: &str| {
+    Arc::new(|pipe_name: &str, sink: LinkSink| {
         let client = PipeClient::connect(pipe_name)?;
-        let (tx, events) = sync_channel(READER_CHANNEL);
-        let reader = client.start_reader(tx);
+        let reader = client.start_reader_with(move |event| match event {
+            PipeEvent::Message(msg) => sink.message(msg),
+            PipeEvent::Closed(reason) => {
+                sink.closed(reason);
+                true
+            }
+        });
         Ok(Box::new(PipeConnection {
             reader: Some(reader),
             client,
-            events,
         }) as Box<dyn Connection>)
     })
 }
@@ -98,7 +136,6 @@ pub fn pipe_connector() -> Connector {
 struct PipeConnection {
     reader: Option<PipeReader>,
     client: PipeClient,
-    events: Receiver<PipeEvent>,
 }
 
 impl Connection for PipeConnection {
@@ -108,16 +145,6 @@ impl Connection for PipeConnection {
 
     fn send(&mut self, msg: &Message) -> std::io::Result<()> {
         self.client.send(msg)
-    }
-
-    fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Message>, CloseReason> {
-        match self.events.recv_timeout(timeout) {
-            Ok(PipeEvent::Message(msg)) => Ok(Some(msg)),
-            Ok(PipeEvent::Closed(reason)) => Err(reason),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            // The reader is gone without a Closed event: its channel overflowed.
-            Err(RecvTimeoutError::Disconnected) => Err(CloseReason::Disconnected),
-        }
     }
 }
 
@@ -294,6 +321,12 @@ enum Phase {
     StopWait { since: Instant, stop_sent: bool },
     /// Anti-cheat mode, stop confirmed or failed: nothing to do.
     AntiCheatIdle,
+    /// `Incompatible` or `PidMismatch`: no reconnection by itself. At the
+    /// deadline the SCM is asked whether the service changed since `baseline`
+    /// (unknown until the first answer).
+    Held { baseline: Option<ServiceQuery> },
+    /// Held; the SCM query is out.
+    HeldQuery { baseline: Option<ServiceQuery> },
 }
 
 impl Phase {
@@ -353,6 +386,9 @@ struct Machine {
     deadline: Option<Instant>,
     /// A missing pipe reads as `Starting` until then.
     grace_until: Option<Instant>,
+    /// The service PID confirmed by the last accepted connection: what the
+    /// SCM showed when the service turned out to be incompatible.
+    verified_pid: Option<u32>,
 }
 
 impl Machine {
@@ -369,6 +405,7 @@ impl Machine {
             phase: Phase::Probing { errors: 0 },
             deadline: None,
             grace_until: None,
+            verified_pid: None,
         }
     }
 
@@ -407,6 +444,9 @@ impl Machine {
             }
             (Event::Queried(q), Phase::StopQuery { since, stop_sent }) => {
                 self.on_stop_query(q, since, stop_sent, now)
+            }
+            (Event::Queried(q), Phase::HeldQuery { baseline }) => {
+                self.on_held_query(q, baseline, now)
             }
             (Event::Started(result), Phase::StartSent) => self.on_started(result, now),
             (Event::StopSent(result), Phase::StopSent { since }) => {
@@ -526,6 +566,46 @@ impl Machine {
         vec![Effect::Close, Effect::ClearFeed]
     }
 
+    /// Closes the connection and empties the feed like [`close`](Self::close),
+    /// but does not reconnect by itself: see [`Phase::Held`].
+    fn hold(
+        &mut self,
+        status: ServiceStatus,
+        baseline: Option<ServiceQuery>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        self.status = status;
+        self.grace_until = None;
+        self.go(Phase::Held { baseline }, Some(now + self.settings.retry));
+        vec![Effect::Close, Effect::ClearFeed]
+    }
+
+    /// The SCM's answer while held: connect again only if the service is
+    /// running (or starting) as something new. Anything else just becomes the
+    /// new baseline, so that the next `Running` counts as a change; errors
+    /// say nothing.
+    fn on_held_query(
+        &mut self,
+        query: ServiceQuery,
+        baseline: Option<ServiceQuery>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let mut baseline = baseline;
+        match query {
+            ServiceQuery::State {
+                state: RunState::Running | RunState::StartPending,
+                ..
+            } if baseline.is_some_and(|b| b != query) => {
+                tracing::info!("sensor service changed ({query:?}); connecting again");
+                return self.connect_now();
+            }
+            ServiceQuery::State { .. } | ServiceQuery::NotInstalled => baseline = Some(query),
+            ServiceQuery::Error(_) | ServiceQuery::AccessDenied => {}
+        }
+        self.go(Phase::Held { baseline }, Some(now + self.settings.retry));
+        Vec::new()
+    }
+
     fn on_timer(&mut self, now: Instant) -> Vec<Effect> {
         if self.deadline.is_none_or(|d| now < d) {
             return Vec::new();
@@ -536,6 +616,10 @@ impl Machine {
                 vec![Effect::Query]
             }
             Phase::ConnectWait => self.connect_now(),
+            Phase::Held { baseline } => {
+                self.go(Phase::HeldQuery { baseline }, None);
+                vec![Effect::Query]
+            }
             Phase::Hello => {
                 tracing::info!("sensor service sent no Hello in time");
                 self.close(disconnected(), now)
@@ -710,6 +794,7 @@ impl Machine {
                 pid,
             } if pid != 0 && server_pid == Some(pid) => {
                 self.grace_until = None;
+                self.verified_pid = Some(pid);
                 self.go(Phase::Hello, Some(now + self.settings.hello_timeout));
                 Vec::new()
             }
@@ -736,7 +821,8 @@ impl Machine {
                          ({other:?}); disconnecting"
                     );
                 }
-                self.close(mismatch, now)
+                // Only a change at the SCM (or "Avvia") is worth another try.
+                self.hold(mismatch, Some(other), now)
             }
         }
     }
@@ -804,7 +890,7 @@ impl Machine {
                         hello.protocol_version
                     );
                 }
-                self.close(status(ServiceState::Incompatible, None), now)
+                self.hold_incompatible(now)
             }
             Message::Error(error) => self.on_error(error, now),
             other => {
@@ -817,10 +903,20 @@ impl Machine {
     fn on_error(&mut self, error: WireError, now: Instant) -> Vec<Effect> {
         tracing::warn!("sensor service error {}: {}", error.code, error.message);
         if error.code == UNSUPPORTED_VERSION {
-            self.close(status(ServiceState::Incompatible, None), now)
+            self.hold_incompatible(now)
         } else {
             self.close(disconnected(), now)
         }
+    }
+
+    /// The service speaks another protocol: it stays so until it is
+    /// restarted, which the SCM shows as a new process.
+    fn hold_incompatible(&mut self, now: Instant) -> Vec<Effect> {
+        let baseline = self.verified_pid.map(|pid| ServiceQuery::State {
+            state: RunState::Running,
+            pid,
+        });
+        self.hold(status(ServiceState::Incompatible, None), baseline, now)
     }
 
     // ---- anti-cheat: the verified stop ----
@@ -920,11 +1016,19 @@ impl Machine {
     }
 }
 
-/// What reaches the thread on its command channel.
+/// What reaches the link thread on its one queue.
 enum Input {
     Command(LinkCommand),
     Shutdown,
+    /// A message of connection `.0`.
+    Message(u64, Message),
+    /// Connection `.0` ended.
+    Closed(u64, CloseReason),
 }
+
+/// Ids of connections, unique across links, so that an event tagged with
+/// the id of a dropped connection can be told from the current one's.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
 /// The link thread: waits for events and runs the machine's effects.
 struct Driver {
@@ -933,11 +1037,25 @@ struct Driver {
     connector: Connector,
     status: ServiceStatusTable,
     feed: SvcFeed,
-    commands: Receiver<Input>,
+    /// The one queue: commands, shutdown, and what the connection's reader
+    /// forwards.
+    inbox: Receiver<Input>,
+    /// A sender on `inbox`, for the sinks of new connections.
+    sender: Sender<Input>,
     stop: Arc<AtomicBool>,
     conn: Option<Box<dyn Connection>>,
+    /// Id of the current connection (the one `conn` holds, or that is being
+    /// opened): events tagged with another id are discarded.
+    conn_id: Option<u64>,
+    /// Events of the current connection that arrived while the machine was
+    /// not reading it (for instance the server's `Hello` during the PID
+    /// check), in order.
+    unread: VecDeque<Event>,
     /// Results of effects, handled before any new wait.
     pending: VecDeque<Event>,
+    /// How many times the thread went to sleep on `inbox`.
+    #[cfg(test)]
+    waits: Arc<AtomicUsize>,
 }
 
 impl Driver {
@@ -964,53 +1082,58 @@ impl Driver {
     }
 
     /// The next command, message, close or deadline; `None` on shutdown.
+    /// Sleeps on the queue until the machine's deadline, or until something
+    /// arrives when there is no deadline.
     fn next_event(&mut self) -> Option<Event> {
         loop {
             if self.stopping() {
                 return None;
             }
-            // Commands first: a queued command is not delayed by a retry
-            // that happens to fall due at the same time.
-            match self.commands.try_recv() {
-                Ok(input) => return Self::command_event(input),
-                Err(TryRecvError::Disconnected) => return None,
-                Err(TryRecvError::Empty) => {}
-            }
-            let now = Instant::now();
-            let left = match self.machine.deadline {
-                Some(deadline) if now >= deadline => return Some(Event::Timer),
-                Some(deadline) => Some(deadline - now),
-                None => None,
-            };
-            match (&mut self.conn, self.machine.reads_connection()) {
-                // Reads in short slices so commands and shutdown are seen in time.
-                (Some(conn), true) => {
-                    let slice = left.map_or(POLL_SLICE, |left| left.min(POLL_SLICE));
-                    match conn.recv_timeout(slice) {
-                        Ok(Some(msg)) => return Some(Event::Message(msg)),
-                        Ok(None) => {}
-                        Err(reason) => return Some(Event::Closed(reason)),
-                    }
+            if self.machine.reads_connection() {
+                if let Some(event) = self.unread.pop_front() {
+                    return Some(event);
                 }
-                _ => {
-                    let input = match left {
-                        Some(left) => match self.commands.recv_timeout(left) {
+            }
+            // What is already queued comes before a deadline that falls due
+            // at the same time: a command is not delayed by a retry.
+            let input = match self.inbox.try_recv() {
+                Ok(input) => input,
+                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Empty) => {
+                    let left = match self.machine.deadline {
+                        Some(deadline) => {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                return Some(Event::Timer);
+                            }
+                            Some(deadline - now)
+                        }
+                        None => None,
+                    };
+                    #[cfg(test)]
+                    self.waits.fetch_add(1, Ordering::Relaxed);
+                    match left {
+                        Some(left) => match self.inbox.recv_timeout(left) {
                             Ok(input) => input,
                             Err(RecvTimeoutError::Timeout) => continue,
                             Err(RecvTimeoutError::Disconnected) => return None,
                         },
-                        None => self.commands.recv().ok()?,
-                    };
-                    return Self::command_event(input);
+                        None => self.inbox.recv().ok()?,
+                    }
                 }
+            };
+            match input {
+                Input::Command(command) => return Some(Event::Command(command)),
+                Input::Shutdown => return None,
+                Input::Message(id, msg) if self.conn_id == Some(id) => {
+                    self.unread.push_back(Event::Message(msg));
+                }
+                Input::Closed(id, reason) if self.conn_id == Some(id) => {
+                    self.unread.push_back(Event::Closed(reason));
+                }
+                // A late event of a connection that is already gone.
+                Input::Message(..) | Input::Closed(..) => {}
             }
-        }
-    }
-
-    fn command_event(input: Input) -> Option<Event> {
-        match input {
-            Input::Command(command) => Some(Event::Command(command)),
-            Input::Shutdown => None,
         }
     }
 
@@ -1021,11 +1144,24 @@ impl Driver {
                 Effect::Start => self.pending.push_back(Event::Started(self.control.start())),
                 Effect::Stop => self.pending.push_back(Event::StopSent(self.control.stop())),
                 Effect::Connect => {
-                    let result = (self.connector)(&self.machine.settings.pipe_name).map(|conn| {
-                        let pid = conn.server_pid();
-                        self.conn = Some(conn);
-                        pid
-                    });
+                    let id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
+                    self.conn_id = Some(id);
+                    self.unread.clear();
+                    let sink = LinkSink {
+                        id,
+                        tx: self.sender.clone(),
+                    };
+                    let result = match (self.connector)(&self.machine.settings.pipe_name, sink) {
+                        Ok(conn) => {
+                            let pid = conn.server_pid();
+                            self.conn = Some(conn);
+                            Ok(pid)
+                        }
+                        Err(e) => {
+                            self.conn_id = None;
+                            Err(e)
+                        }
+                    };
                     self.pending.push_back(Event::Connected(result));
                 }
                 Effect::Send(msg) => {
@@ -1043,7 +1179,11 @@ impl Driver {
                         };
                     self.pending.push_back(Event::Sent(ok));
                 }
-                Effect::Close => self.conn = None,
+                Effect::Close => {
+                    self.conn = None;
+                    self.conn_id = None;
+                    self.unread.clear();
+                }
                 Effect::ClearFeed => self.feed.clear(),
                 Effect::SetInterval(interval) => self.feed.set_interval(interval),
                 Effect::SetSchema(schema) => self.feed.set_schema(schema),
@@ -1063,6 +1203,8 @@ pub struct ServiceLink {
     commands: Sender<Input>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    waits: Arc<AtomicUsize>,
 }
 
 impl ServiceLink {
@@ -1078,18 +1220,25 @@ impl ServiceLink {
     ) -> Self {
         let machine = Machine::new(settings, anti_cheat);
         status.set(machine.status);
-        let (commands, rx) = mpsc::channel();
+        let (commands, inbox) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let waits = Arc::new(AtomicUsize::new(0));
         let driver = Driver {
             machine,
             control,
             connector,
             status,
             feed,
-            commands: rx,
+            inbox,
+            sender: commands.clone(),
             stop: Arc::clone(&stop),
             conn: None,
+            conn_id: None,
+            unread: VecDeque::new(),
             pending: VecDeque::new(),
+            #[cfg(test)]
+            waits: Arc::clone(&waits),
         };
         let thread = std::thread::Builder::new()
             .name("oma-service-link".to_owned())
@@ -1105,19 +1254,34 @@ impl ServiceLink {
             commands,
             stop,
             thread,
+            #[cfg(test)]
+            waits,
         }
     }
 
+    /// Never blocks.
     pub fn send(&self, command: LinkCommand) {
         let _ = self.commands.send(Input::Command(command));
+    }
+
+    /// How many times the thread has gone to sleep waiting for an event.
+    #[cfg(test)]
+    fn waits(&self) -> usize {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    /// Tells the thread to stop. The thread holds a sender of its own queue,
+    /// so it would not notice the link being dropped otherwise.
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.commands.send(Input::Shutdown);
     }
 
     /// Stops the thread, closing any connection. Returns within
     /// [`JOIN_WAIT`] (plus a few milliseconds): a thread still inside a
     /// blocking call by then is detached (see the module notes).
     pub fn shutdown(mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.commands.send(Input::Shutdown);
+        self.signal_stop();
         let Some(thread) = self.thread.take() else {
             return;
         };
@@ -1133,9 +1297,18 @@ impl ServiceLink {
     }
 }
 
+impl Drop for ServiceLink {
+    /// A link dropped without [`shutdown`](Self::shutdown) still stops its
+    /// thread (which is then left to exit by itself).
+    fn drop(&mut self) {
+        self.signal_stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
     use oma_ipc::{Hello, WireDevice, WireSensor};
@@ -1299,14 +1472,45 @@ mod tests {
         Close(CloseReason),
     }
 
+    /// Where a scripted connection's events go: nowhere until the link opens
+    /// the connection and hands over its sink, which flushes what was queued.
+    #[derive(Default)]
+    struct FakePipe {
+        sink: Option<LinkSink>,
+        queued: Vec<Step>,
+    }
+
+    impl FakePipe {
+        fn deliver(&mut self, step: Step) {
+            match &self.sink {
+                Some(sink) => match step {
+                    Step::Msg(m) => {
+                        sink.message(m);
+                    }
+                    Step::Close(r) => sink.closed(r),
+                },
+                None => self.queued.push(step),
+            }
+        }
+    }
+
     struct FakeConn {
         pid: Option<u32>,
-        steps: Receiver<Step>,
-        /// Keeps `steps` open whatever the test does with its sender.
-        _keep: Sender<Step>,
+        pipe: Arc<Mutex<FakePipe>>,
         sent: Arc<Mutex<Vec<Message>>>,
         send_block: Duration,
         alive: Arc<AtomicBool>,
+    }
+
+    impl FakeConn {
+        /// The link opened this connection: events flow from now on.
+        fn attach(&self, sink: LinkSink) {
+            let mut pipe = self.pipe.lock().unwrap();
+            pipe.sink = Some(sink);
+            for step in std::mem::take(&mut pipe.queued) {
+                pipe.deliver(step);
+            }
+        }
     }
 
     impl Drop for FakeConn {
@@ -1327,33 +1531,28 @@ mod tests {
             self.sent.lock().unwrap().push(msg.clone());
             Ok(())
         }
-
-        fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Message>, CloseReason> {
-            match self.steps.recv_timeout(timeout) {
-                Ok(Step::Msg(m)) => Ok(Some(m)),
-                Ok(Step::Close(r)) => Err(r),
-                Err(_) => Ok(None),
-            }
-        }
     }
 
-    /// The test's end of a scripted connection.
+    /// The test's end of a scripted connection. It keeps working after the
+    /// link dropped the connection, like a reader that still has events in
+    /// flight.
     #[derive(Clone)]
     struct ConnCtl {
-        tx: Sender<Step>,
+        pipe: Arc<Mutex<FakePipe>>,
         sent: Arc<Mutex<Vec<Message>>>,
         alive: Arc<AtomicBool>,
     }
 
     impl ConnCtl {
         fn push(&self, msg: Message) {
-            self.tx.send(Step::Msg(msg)).unwrap();
+            self.pipe.lock().unwrap().deliver(Step::Msg(msg));
         }
 
         fn close(&self) {
-            self.tx
-                .send(Step::Close(CloseReason::Disconnected))
-                .unwrap();
+            self.pipe
+                .lock()
+                .unwrap()
+                .deliver(Step::Close(CloseReason::Disconnected));
         }
 
         fn sent(&self) -> Vec<Message> {
@@ -1366,18 +1565,17 @@ mod tests {
     }
 
     fn fake_conn(pid: Option<u32>) -> (FakeConn, ConnCtl) {
-        let (tx, rx) = mpsc::channel();
+        let pipe = Arc::new(Mutex::new(FakePipe::default()));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let conn = FakeConn {
             pid,
-            steps: rx,
-            _keep: tx.clone(),
+            pipe: Arc::clone(&pipe),
             sent: Arc::clone(&sent),
             send_block: Duration::ZERO,
             alive: Arc::clone(&alive),
         };
-        (conn, ConnCtl { tx, sent, alive })
+        (conn, ConnCtl { pipe, sent, alive })
     }
 
     /// A connection that greets, describes two sensors and sends one snapshot.
@@ -1417,11 +1615,13 @@ mod tests {
 
         fn connector(self: &Arc<Self>) -> Connector {
             let script = Arc::clone(self);
-            Arc::new(move |_name: &str| {
+            Arc::new(move |_name: &str, sink: LinkSink| {
                 *script.connects.lock().unwrap() += 1;
                 let next = script.conns.lock().unwrap().pop_front();
-                next.unwrap_or(Err(ConnectError::NotFound))
-                    .map(|c| Box::new(c) as Box<dyn Connection>)
+                next.unwrap_or(Err(ConnectError::NotFound)).map(|c| {
+                    c.attach(sink);
+                    Box::new(c) as Box<dyn Connection>
+                })
             })
         }
     }
@@ -1663,10 +1863,177 @@ mod tests {
         let incompatible = st(ServiceState::Incompatible, None);
         h.wait_for(is(incompatible));
         assert!(ctl.sent().is_empty(), "no Subscribe after a foreign Hello");
-        let connects = h.script.connects();
+        // The SCM is asked at every retry, but the service is not connected
+        // again (each connection would reset its idle timer).
+        let queries = h.control.queries();
         cycles(5);
-        assert!(h.script.connects() > connects, "the connection is retried");
-        assert_eq!(h.status(), incompatible, "retries do not change the state");
+        assert!(h.control.queries() >= queries + 3, "the SCM is still asked");
+        assert_eq!(h.script.connects(), 1, "no reconnection by itself");
+        assert_eq!(h.status(), incompatible);
+
+        // "Avvia" tries again.
+        h.send(LinkCommand::Start);
+        cycles(2);
+        assert!(h.script.connects() >= 2, "the command connects again");
+        assert_eq!(h.control.starts(), 1, "started once, at the command");
+    }
+
+    #[test]
+    fn incompatible_is_not_retried_until_start() {
+        // Fake time: the rules alone, no clock.
+        let t0 = Instant::now();
+        let (mut m, _) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        m.decide(Event::Queried(running()), t0);
+        assert_eq!(
+            m.decide(Event::Message(hello(PROTOCOL_VERSION + 1)), t0),
+            vec![Effect::Close, Effect::ClearFeed]
+        );
+        assert_eq!(m.status, st(ServiceState::Incompatible, None));
+
+        // 20 s of retries with the same running service: the SCM is asked
+        // each time, and no connection is made.
+        let retry = m.settings.retry;
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(20) {
+            t += retry;
+            assert_eq!(
+                m.decide(Event::Timer, t),
+                vec![Effect::Query],
+                "at {:?}",
+                t - t0
+            );
+            assert_eq!(m.decide(Event::Queried(running()), t), vec![]);
+        }
+        assert_eq!(m.status, st(ServiceState::Incompatible, None));
+
+        // "Avvia": the service is started (a no-op if running) and connected once.
+        assert_eq!(
+            m.decide(Event::Command(LinkCommand::Start), t),
+            vec![Effect::Start]
+        );
+        assert_eq!(m.decide(Event::Started(Ok(())), t), vec![Effect::Connect]);
+    }
+
+    #[test]
+    fn a_restarted_incompatible_service_is_connected_again() {
+        let t0 = Instant::now();
+        let (mut m, _) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Message(hello(PROTOCOL_VERSION + 1)), t0);
+
+        let retry = m.settings.retry;
+        let t1 = t0 + retry;
+        m.decide(Event::Timer, t1);
+        assert_eq!(
+            m.decide(Event::Queried(in_state(RunState::Stopped)), t1),
+            vec![]
+        );
+        // Upgraded and started by someone else: a new process.
+        let t2 = t1 + retry;
+        assert_eq!(m.decide(Event::Timer, t2), vec![Effect::Query]);
+        let upgraded = ServiceQuery::State {
+            state: RunState::Running,
+            pid: PID + 9,
+        };
+        assert_eq!(
+            m.decide(Event::Queried(upgraded), t2),
+            vec![Effect::Connect]
+        );
+    }
+
+    #[test]
+    fn pid_mismatch_waits_for_an_scm_change() {
+        let t0 = Instant::now();
+        let (mut m, _) = machine(false);
+        let pid1 = ServiceQuery::State {
+            state: RunState::Running,
+            pid: 1,
+        };
+        let pid2 = ServiceQuery::State {
+            state: RunState::Running,
+            pid: 2,
+        };
+        assert_eq!(m.decide(Event::Queried(pid1), t0), vec![Effect::Connect]);
+        // Someone else serves the pipe.
+        m.decide(Event::Connected(Ok(Some(99))), t0);
+        assert_eq!(
+            m.decide(Event::Queried(pid1), t0),
+            vec![Effect::Close, Effect::ClearFeed]
+        );
+        assert_eq!(
+            m.status,
+            st(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch))
+        );
+
+        let retry = m.settings.retry;
+        let mut t = t0;
+        let mut step = |m: &mut Machine, answer: ServiceQuery| {
+            t += retry;
+            assert_eq!(m.decide(Event::Timer, t), vec![Effect::Query]);
+            m.decide(Event::Queried(answer), t)
+        };
+        // Unchanged, then stopped: still no connection.
+        assert_eq!(step(&mut m, pid1), vec![]);
+        assert_eq!(step(&mut m, pid1), vec![]);
+        assert_eq!(step(&mut m, in_state(RunState::Stopped)), vec![]);
+        assert_eq!(step(&mut m, in_state(RunState::Stopped)), vec![]);
+        // A transient error says nothing.
+        assert_eq!(step(&mut m, ServiceQuery::Error(1115)), vec![]);
+        // Running again as a new process: one new connection.
+        assert_eq!(step(&mut m, pid2), vec![Effect::Connect]);
+        assert_eq!(m.phase, Phase::Connecting);
+    }
+
+    #[test]
+    fn a_pid_mismatch_is_retried_after_the_service_finishes_starting() {
+        // The pipe answered while the SCM still said StartPending.
+        let t0 = Instant::now();
+        let (mut m, _) = machine(false);
+        m.decide(Event::Queried(running()), t0);
+        m.decide(Event::Connected(Ok(Some(PID))), t0);
+        let pending = ServiceQuery::State {
+            state: RunState::StartPending,
+            pid: PID,
+        };
+        m.decide(Event::Queried(pending), t0);
+        let t1 = t0 + m.settings.retry;
+        m.decide(Event::Timer, t1);
+        assert_eq!(
+            m.decide(Event::Queried(running()), t1),
+            vec![Effect::Connect]
+        );
+    }
+
+    #[test]
+    fn a_threaded_pid_mismatch_reconnects_only_on_an_scm_change() {
+        let control = FakeControl::new(ServiceQuery::State {
+            state: RunState::Running,
+            pid: 1,
+        });
+        let (impostor, _ctl) = streaming_conn(Some(77));
+        let h = Harness::spawn(Arc::clone(&control), Script::with(vec![impostor]), false);
+        h.wait_for(is(st(
+            ServiceState::Unreachable,
+            Some(ServiceDetail::PidMismatch),
+        )));
+        cycles(6);
+        assert_eq!(h.script.connects(), 1, "no reconnection while unchanged");
+
+        control.set_query(in_state(RunState::Stopped));
+        cycles(4);
+        assert_eq!(h.script.connects(), 1, "a stopped service is not connected");
+        let (real, _ctl2) = streaming_conn(Some(2));
+        h.script.add(real);
+        control.set_query(ServiceQuery::State {
+            state: RunState::Running,
+            pid: 2,
+        });
+        h.wait_for(is(connected()));
+        assert_eq!(h.script.connects(), 2);
     }
 
     #[test]
@@ -1991,6 +2358,188 @@ mod tests {
         assert_eq!(h.control.starts(), 0);
     }
 
+    // ---- one queue, no wake-ups ----
+
+    /// A driver around `machine` for tests that call `next_event` directly.
+    fn bare_driver(machine: Machine) -> (Driver, Sender<Input>) {
+        let (tx, rx) = mpsc::channel();
+        let driver = Driver {
+            machine,
+            control: FakeControl::new(running()),
+            connector: Script::with(vec![]).connector(),
+            status: ServiceStatusTable::default(),
+            feed: SvcFeed::default(),
+            inbox: rx,
+            sender: tx.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+            conn: None,
+            conn_id: Some(7),
+            unread: VecDeque::new(),
+            pending: VecDeque::new(),
+            waits: Arc::new(AtomicUsize::new(0)),
+        };
+        (driver, tx)
+    }
+
+    #[test]
+    fn connected_link_does_not_wake_between_events() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        let waits = h.link.as_ref().unwrap().waits();
+
+        // Interval 1000 ms, no message: the silence limit is 3 s away.
+        std::thread::sleep(Duration::from_secs(1));
+        let idle = h.link.as_ref().unwrap().waits() - waits;
+        assert!(idle <= 3, "the thread woke {idle} times in 1 s");
+        assert_eq!(h.status(), connected());
+
+        // And it is still listening.
+        ctl.push(snapshot(2, 2));
+        let end = Instant::now() + WAIT;
+        while h.feed.view().snapshot.map(|(_, s)| s.seq) != Some(2) {
+            assert!(Instant::now() < end, "the second snapshot never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn messages_and_commands_share_one_queue() {
+        // In order, without waiting between them.
+        let t0 = Instant::now();
+        let (mut driver, tx) = bare_driver(subscribed(t0));
+        tx.send(Input::Message(7, schema(2))).unwrap();
+        tx.send(Input::Command(LinkCommand::SetInterval(2000)))
+            .unwrap();
+        tx.send(Input::Message(7, snapshot(1, 2))).unwrap();
+        assert!(matches!(
+            driver.next_event(),
+            Some(Event::Message(Message::Schema(_)))
+        ));
+        assert!(matches!(
+            driver.next_event(),
+            Some(Event::Command(LinkCommand::SetInterval(2000)))
+        ));
+        assert!(matches!(
+            driver.next_event(),
+            Some(Event::Message(Message::Snapshot(_)))
+        ));
+        assert_eq!(
+            driver.waits.load(Ordering::Relaxed),
+            0,
+            "nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn a_command_sent_while_a_snapshot_arrives_is_handled_at_once() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+
+        // The old 50 ms read slice would take up to 50 ms; here the bound is
+        // generous for a loaded machine but still under one slice.
+        let start = Instant::now();
+        ctl.push(snapshot(2, 2));
+        h.send(LinkCommand::SetInterval(2000));
+        wait_for_sent(&ctl, 2);
+        let took = start.elapsed();
+        assert!(took < Duration::from_millis(45), "took {took:?}");
+    }
+
+    #[test]
+    fn late_events_of_a_closed_connection_are_ignored() {
+        let control = FakeControl::new(running());
+        let (first, ctl1) = streaming_conn(Some(PID));
+        let h = Harness::spawn(control, Script::with(vec![first]), false);
+        h.wait_for(is(connected()));
+        let (second, _ctl2) = streaming_conn(Some(PID));
+        h.script.add(second);
+        ctl1.close();
+        h.wait_for(is(disconnected()));
+        h.wait_for(is(connected()));
+        let generation = h.feed.view().generation;
+
+        // The first connection's reader still had events in flight.
+        ctl1.push(schema(5));
+        ctl1.push(snapshot(9, 5));
+        ctl1.close();
+        cycles(3);
+        assert_eq!(h.status(), connected(), "the new connection is untouched");
+        let view = h.feed.view();
+        assert_eq!(view.generation, generation);
+        assert_eq!(view.schema.map(|s| s.sensors.len()), Some(2));
+        assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
+    }
+
+    #[test]
+    fn events_of_another_connection_are_dropped_by_next_event() {
+        let t0 = Instant::now();
+        let (mut driver, tx) = bare_driver(subscribed(t0));
+        tx.send(Input::Message(6, schema(9))).unwrap();
+        tx.send(Input::Closed(6, CloseReason::Disconnected))
+            .unwrap();
+        tx.send(Input::Message(7, schema(2))).unwrap();
+        assert!(matches!(
+            driver.next_event(),
+            Some(Event::Message(Message::Schema(s))) if s.sensors.len() == 2
+        ));
+    }
+
+    #[test]
+    fn a_hello_that_arrives_while_verifying_is_not_lost() {
+        // The server greets at once; the machine is still checking the PID.
+        let control = FakeControl::new(running());
+        let (conn, ctl) = fake_conn(Some(PID));
+        ctl.push(hello(PROTOCOL_VERSION));
+        ctl.push(schema(2));
+        ctl.push(snapshot(1, 2));
+        let h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        assert_eq!(h.feed.view().snapshot.map(|(_, s)| s.seq), Some(1));
+    }
+
+    #[test]
+    fn unread_messages_wait_for_the_machine_and_keep_their_order() {
+        let t0 = Instant::now();
+        let (m, _) = machine(false);
+        let (mut driver, tx) = bare_driver(m);
+        // Verifying: not reading the connection yet.
+        driver.machine.phase = Phase::Verifying {
+            server_pid: Some(PID),
+        };
+        driver.machine.deadline = Some(t0 + Duration::from_millis(30));
+        tx.send(Input::Message(7, hello(PROTOCOL_VERSION))).unwrap();
+        tx.send(Input::Closed(7, CloseReason::Disconnected))
+            .unwrap();
+        assert!(matches!(driver.next_event(), Some(Event::Timer)));
+
+        driver.machine.phase = Phase::Hello;
+        driver.machine.deadline = None;
+        assert!(matches!(
+            driver.next_event(),
+            Some(Event::Message(Message::Hello(_)))
+        ));
+        assert!(matches!(driver.next_event(), Some(Event::Closed(_))));
+    }
+
+    #[test]
+    fn dropping_the_link_without_shutdown_stops_the_thread() {
+        let control = FakeControl::new(running());
+        let (conn, ctl) = streaming_conn(Some(PID));
+        let mut h = Harness::spawn(control, Script::with(vec![conn]), false);
+        h.wait_for(is(connected()));
+        assert!(ctl.is_alive());
+        drop(h.link.take());
+        let end = Instant::now() + WAIT;
+        while ctl.is_alive() {
+            assert!(Instant::now() < end, "the thread never stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     // ---- anti-cheat mode ----
 
     #[test]
@@ -2252,7 +2801,10 @@ mod tests {
             ServiceState::Unreachable,
             Some(ServiceDetail::PidMismatch),
         )));
-        // The next attempt finds no pipe: the SCM says why.
+        // No automatic retry now: the user's "Avvia" tries again, and finds
+        // no pipe (the SCM says why).
+        cycles(1);
+        h.send(LinkCommand::Start);
         wait_for(&h.status, is(disconnected()), Duration::from_secs(2));
     }
 
@@ -2518,7 +3070,13 @@ mod tests {
             m.status,
             st(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch))
         );
-        assert_eq!(m.phase, Phase::ConnectWait);
+        // Not a plain retry: the SCM must show a change before the next try.
+        assert_eq!(
+            m.phase,
+            Phase::Held {
+                baseline: Some(restarted)
+            }
+        );
     }
 
     #[test]
@@ -2585,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn decide_incompatible_is_kept_while_retrying() {
+    fn decide_incompatible_is_kept_across_an_explicit_start() {
         let (mut m, t0) = machine(false);
         m.decide(Event::Queried(running()), t0);
         m.decide(Event::Connected(Ok(Some(PID))), t0);
@@ -2594,13 +3152,23 @@ mod tests {
         assert_eq!(m.status, st(ServiceState::Incompatible, None));
 
         let t1 = t0 + Duration::from_millis(20);
-        assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Connect]);
         assert_eq!(
-            m.decide(Event::Connected(Err(ConnectError::NotFound)), t1),
+            m.decide(Event::Command(LinkCommand::Start), t1),
+            vec![Effect::Start]
+        );
+        assert_eq!(m.decide(Event::Started(Ok(())), t1), vec![Effect::Connect]);
+        assert_eq!(
+            m.decide(Event::Connected(Ok(Some(PID))), t1),
             vec![Effect::Query]
         );
         m.decide(Event::Queried(running()), t1);
+        // Still the same service: the state is reported again, and held again.
+        assert_eq!(
+            m.decide(Event::Message(hello(PROTOCOL_VERSION + 1)), t1),
+            vec![Effect::Close, Effect::ClearFeed]
+        );
         assert_eq!(m.status, st(ServiceState::Incompatible, None));
+        assert!(matches!(m.phase, Phase::Held { .. }));
     }
 
     #[test]
@@ -2801,13 +3369,10 @@ mod tests {
     fn decide_connect_loop_refreshes_the_reason_from_the_scm() {
         let (mut m, t0) = machine(false);
         m.decide(Event::Queried(running()), t0);
-        m.decide(Event::Connected(Ok(Some(PID + 1))), t0);
+        m.decide(Event::Connected(Err(ConnectError::NotFound)), t0);
         m.decide(Event::Queried(running()), t0);
         let denied = st(ServiceState::Unreachable, Some(ServiceDetail::AccessDenied));
-        assert_eq!(
-            m.status,
-            st(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch))
-        );
+        assert_eq!(m.status, disconnected());
         let mut t = t0;
         for (answer, expected) in [
             (in_state(RunState::Stopped), disconnected()),
@@ -2987,27 +3552,29 @@ mod tests {
     fn pipe_connector_reads_and_writes_the_real_pipe() {
         let server = FakeServer::new();
         let connect = pipe_connector();
-        let mut conn = connect(&server.name).expect("connect to the fake server");
+        let (tx, inbox) = mpsc::channel();
+        let mut conn = connect(&server.name, LinkSink::new(3, tx)).expect("connect");
         server.accept();
         assert_eq!(conn.server_pid(), Some(std::process::id()));
 
         server.send(&hello(PROTOCOL_VERSION));
-        let got = conn.recv_timeout(Duration::from_secs(5)).expect("open");
-        assert_eq!(got, Some(hello(PROTOCOL_VERSION)));
-        assert_eq!(conn.recv_timeout(Duration::from_millis(10)).unwrap(), None);
+        match inbox.recv_timeout(Duration::from_secs(5)).expect("open") {
+            Input::Message(3, msg) => assert_eq!(msg, hello(PROTOCOL_VERSION)),
+            _ => panic!("expected the Hello of connection 3"),
+        }
+        assert!(inbox.recv_timeout(Duration::from_millis(10)).is_err());
 
         let subscribe = Message::Subscribe(Subscribe { interval_ms: 1000 });
         conn.send(&subscribe).expect("send");
         assert_eq!(server.recv(), subscribe);
 
         server.disconnect();
-        let end = Instant::now() + Duration::from_secs(5);
-        loop {
-            match conn.recv_timeout(Duration::from_millis(50)) {
-                Err(_) => break,
-                Ok(None) => assert!(Instant::now() < end, "the close never arrived"),
-                Ok(Some(m)) => panic!("unexpected {m:?}"),
-            }
+        match inbox
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the close")
+        {
+            Input::Closed(3, _) => {}
+            _ => panic!("expected the close of connection 3"),
         }
     }
 }

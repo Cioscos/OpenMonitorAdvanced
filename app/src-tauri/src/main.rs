@@ -2,9 +2,6 @@
 
 mod commands;
 mod service;
-// The store API is consumed step by step: tray, sampler, autostart and the
-// service link subscribe in the following M5a tasks.
-#[allow(dead_code)]
 mod settings;
 mod tray;
 mod window;
@@ -156,15 +153,25 @@ fn main() {
         history_capacity(SAMPLE_INTERVAL),
     )));
 
+    // Opened before anything reads a preference, so the tray, the sampler and
+    // the UI commands all see the same settings from the first moment. The
+    // M4 anti-cheat file is folded in before the service shell reads the flag.
+    let settings_fs = Arc::new(RealFs);
+    let settings_path = settings::settings_path();
+    let settings_file_existed = settings_path.as_deref().is_some_and(|path| path.exists());
+    let settings_store = Arc::new(SettingsStore::open(settings_path, settings_fs.clone()));
+    settings::migrate::migrate_service_v1(
+        &settings_store,
+        settings_fs.as_ref(),
+        service::anti_cheat_path().as_deref(),
+        settings_file_existed,
+    );
+
     // The link to the service starts in `.setup()` below, not here.
     #[cfg(windows)]
-    let service_shell = ServiceShell::new(service::anti_cheat_path(), svc_status.clone());
+    let service_shell = ServiceShell::new(settings_store.clone(), svc_status.clone());
     #[cfg(not(windows))]
-    let service_shell = ServiceShell::new(service::anti_cheat_path());
-
-    // Created before the Builder so the tray, the sampler and the UI commands
-    // all read the same settings from the first moment.
-    let settings_store = SettingsStore::open(settings::settings_path(), Arc::new(RealFs));
+    let service_shell = ServiceShell::new(settings_store.clone());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -192,6 +199,7 @@ fn main() {
             service::start_service,
             settings::commands::get_settings,
             settings::commands::update_settings,
+            settings::commands::import_webview_state,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -203,7 +211,7 @@ fn main() {
                 .spawn_link(svc_feed, SAMPLE_INTERVAL.as_millis() as u32);
             // Keeps an open window aligned after every settings change, whatever its origin.
             let settings_handle = app.handle().clone();
-            app.state::<SettingsStore>()
+            app.state::<Arc<SettingsStore>>()
                 .subscribe(Box::new(move |_, state| {
                     if settings_handle.get_webview_window(window::MAIN).is_some() {
                         let _ = settings_handle.emit(EVENT_SETTINGS, state);
@@ -260,7 +268,7 @@ fn main() {
                 }
             }
             // Final save (bounded) before the service link goes away.
-            if let Some(store) = app.try_state::<SettingsStore>() {
+            if let Some(store) = app.try_state::<Arc<SettingsStore>>() {
                 if let Err(reason) = store.shutdown(Duration::from_secs(2)) {
                     tracing::error!(%reason, "the settings could not be saved on exit");
                 }

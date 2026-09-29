@@ -18,6 +18,7 @@
     "allow-set-anti-cheat",
     "allow-start-service",
     "allow-get-settings",
-    "allow-update-settings"
+    "allow-update-settings",
+    "allow-import-webview-state"
   ]
 }

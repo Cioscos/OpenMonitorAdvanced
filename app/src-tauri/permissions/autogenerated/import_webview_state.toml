@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-webview-state"
+description = "Enables the import_webview_state command without any pre-configured scope."
+commands.allow = ["import_webview_state"]
+
+[[permission]]
+identifier = "deny-import-webview-state"
+description = "Denies the import_webview_state command without any pre-configured scope."
+commands.deny = ["import_webview_state"]

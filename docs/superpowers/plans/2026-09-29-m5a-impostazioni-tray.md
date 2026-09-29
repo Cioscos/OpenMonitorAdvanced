@@ -391,15 +391,17 @@ Condizioni che la spec implica e che i test di funzionalità da soli non coprire
   pub const ICON_SIZE: u32 = 32;
   pub struct IconStyle { pub background: [u8; 4], pub foreground: [u8; 4] }
   pub const NEUTRAL: IconStyle;   // background #211733, foreground #f5eefe
-  pub fn icon_text(value: Option<f64>, unit: Unit, temperature: TemperatureUnit) -> String;
-  pub fn render(text: &str, style: IconStyle) -> Vec<u8>;                  // RGBA, ICON_SIZE² × 4 bytes
+  pub enum IconContent { Text(String), Bar(u8) }                           // un numero, oppure una barra piena al 0..=100 %
+  pub fn icon_content(value: Option<f64>, unit: Unit, temperature: TemperatureUnit) -> IconContent;
+  pub fn render(content: &IconContent, style: IconStyle) -> Vec<u8>;      // RGBA, ICON_SIZE² × 4 bytes
   pub struct TooltipItem { pub label_key: &'static str, pub value: Option<f64>, pub unit: Unit }
   pub fn tooltip(lang: Lang, items: &[TooltipItem], temperature: TemperatureUnit) -> String;
   ```
 - **Regole:**
   - chiavi nuove: `tray.open` (esistente), `tray.viewSimple`, `tray.viewAdvanced`, `tray.antiCheat` (esistente), `tray.quit` (esistente), `tray.tooltip.cpu` ("CPU"), `tray.tooltip.gpu` ("GPU"), `tray.tooltip.ram` ("RAM"); en: "Simple view", "Advanced view"; it: "Vista Semplificata", "Vista Avanzata";
-  - `icon_text`: `None` o non finito → "—"; temperatura convertita in °F se richiesto (`c * 9/5 + 32`); arrotondamento all'intero; limitato a −99…999; nessuna lettera di unità nel testo; l'unità è un piccolo segno a parte in alto a destra (`unit_mark`: `°` per `Unit::Celsius`, sia °C sia °F, `%` per `Unit::Percent`, nessuno per le altre unità e per "—"; `render(text, mark, style)`), deciso con l'utente dopo la verifica dal vivo della tray;
-  - `render`: quadrato arrotondato (raggio 6 px, angoli trasparenti) nel colore di sfondo, testo centrato nel colore del primo piano con un font bitmap scritto a mano nel sorgente per `0–9`, `-` e `—` (niente dipendenze); fino a 2 caratteri le cifre sono alte almeno 16 px, con 3 caratteri il testo sta tutto entro i 30 px centrali;
+  - `icon_content`: un valore in `Unit::Percent` finito è `Bar(n)`, con `n` l'intero arrotondato (lo stesso del tooltip) limitato a 0…100; ogni altra unità è `Text(icon_text(..))`; assente o non finito → `Text("—")` qualunque sia l'unità. Come LibreHardwareMonitor: barra per i carichi, numero per il resto; deciso con l'utente dopo la verifica dal vivo della tray (un piccolo segno di unità `°`/`%` era stato provato e scartato perché troppo piccolo);
+  - `icon_text` (interno): temperatura convertita in °F se richiesto (`c * 9/5 + 32`); arrotondamento all'intero; limitato a −99…999; nessuna lettera di unità;
+  - `render`: quadrato arrotondato (raggio 6 px, angoli trasparenti) nel colore di sfondo; `Text`: testo centrato nel colore del primo piano con un font bitmap scritto a mano nel sorgente per `0–9`, `-` e `—` (niente dipendenze), fino a 2 caratteri le cifre sono alte 24 px (almeno 16), con 3 caratteri il testo sta tutto entro i 30 px centrali; `Bar`: binario di 16×24 px centrato, contorno di 2 px, 1 px di vuoto e riempimento dal basso (18 righe di area; 0 → vuoto, ogni valore > 0 almeno una riga, pieno solo a 100), solo colori di primo piano e di sfondo;
   - `tooltip`: `"CPU 45 °C · GPU 62 °C · RAM 48 %"`, con i numeri formattati come nella UI (temperatura intera, percentuale intera), voci senza valore omesse, `" · "` come separatore; se supera 127 unità UTF-16 si tronca all'ultima voce intera e si aggiunge `…`.
 
 - [ ] **Step 1: test che falliscono:**
@@ -408,10 +410,13 @@ Condizioni che la spec implica e che i test di funzionalità da soli non coprire
   - `sensor_label_uses_the_catalog_and_arg` (`Label::with_arg("cpu.load.thread","3")` → testo del catalogo con 3);
   - `rust_keys_exist_in_both_catalogs` (ogni chiave di `RUST_KEYS` in `en.json` e `it.json`);
   - `icon_text_handles_extremes` (`None` → "—"; `NaN` → "—"; 45.4 °C → "45"; 100 → "100"; 100 °C in °F → "212"; −5.6 → "-6"; 1500 → "999"; −150 → "-99");
+  - `icon_content_is_a_bar_for_finite_percentages_only` (0 → `Bar(0)`; 45,4 → `Bar(45)`; 99,6 → `Bar(100)`; −3 → `Bar(0)`; 250 → `Bar(100)`; °F non tocca le percentuali; °C, W e MHz restano `Text`) e `non_finite_percent_is_a_dash` (`None`, `NaN`, infinito → `Text("—")` per ogni unità);
   - `render_is_rgba_32x32` (lunghezza 4096; pixel (0,0) trasparente; pixel (16,2) nel colore di sfondo);
   - `render_fits_three_digits_and_minus` (per "212", "-99", "—": nessun pixel del primo piano nelle colonne 0 e 31);
-  - `render_draws_two_digits_large` (per "88" i pixel del primo piano coprono almeno 16 righe);
-  - `tooltip_formats_and_truncates` (esempio sopra; con un valore assente la voce manca; con etichette lunghe la stringa è ≤ 127 unità UTF-16 e finisce con `…`).
+  - `render_draws_two_digits_large` (per "88" i pixel del primo piano coprono almeno 16 righe) e `temperatures_are_numbers_without_a_mark` ("45" occupa le righe 4…27, "212" le righe 8…23, niente nell'angolo in alto a destra);
+  - `percent_is_drawn_as_a_bar` (sonda sulla colonna centrale dell'area di riempimento: 0 → nessuna riga, 1 → una riga in basso, 50 → metà delle righe, 99 → non pieno, 100 → tutte; monotona; il binario, largo 14–18 px e alto 22–24 px, è centrato) e `bar_fits_the_icon` (nessun pixel nelle colonne 0 e 31, solo i due colori dello stile);
+  - `tooltip_formats_and_truncates` (esempio sopra; con un valore assente la voce manca; con etichette lunghe la stringa è ≤ 127 unità UTF-16 e finisce con `…`);
+  - controller (`tray.rs`): `update_redraws_the_icon_when_what_is_drawn_changes` (lo stesso 48 come temperatura e poi come carico rinvia l'icona; il livello della barra che cambia la rinvia; lo stesso livello no).
 - [ ] **Step 2:** `cargo test -p oma-app` → FAIL.
 - [ ] **Step 3: implementa;** `tray.rs` usa `i18n::t` al posto di `labels_for` (i test `italian_locales_get_italian_labels` e `other_locales_fall_back_to_english` passano su `i18n::resolve` + `t`).
 - [ ] **Step 4:** `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cd app && pnpm test` → verdi (il test delle chiavi i18n della UI vede le chiavi nuove in entrambe le lingue).

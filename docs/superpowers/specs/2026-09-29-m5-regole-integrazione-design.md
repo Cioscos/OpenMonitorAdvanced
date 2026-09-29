@@ -133,9 +133,9 @@ Le preferenze si applicano a caldo entro i limiti delle fonti. Lo scaricamento d
   "Vista Semplificata" e "Vista Avanzata" aprono la finestra (creandola se serve) sulla vista scelta.
 - **Icona dinamica:**
   - un'icona RGBA 32×32 disegnata in Rust con un font bitmap delle cifre, del segno meno e del trattino, scritto a mano nel sorgente: niente dipendenze di font né rasterizzatori;
-  - mostra il valore arrotondato del sensore di `iconSensor`, nelle unità di visualizzazione, senza le lettere dell'unità (due cifre, tre se servono, per esempio `100` o `-5`); "—" se il valore è assente. Un piccolo segno nell'angolo in alto a destra dice che cosa è il numero: `°` per le temperature (sia °C sia °F: C o F stanno nel tooltip), `%` per i carichi, nessun segno per le altre unità e per "—". Deciso con l'utente dopo la verifica dal vivo della tray, perché il solo numero non faceva capire se fosse una temperatura o una percentuale;
+  - il sensore di `iconSensor` si disegna in due modi, come fa LibreHardwareMonitor: le temperature (e ogni unità che non sia una percentuale) come il valore arrotondato, nelle unità di visualizzazione e senza le lettere dell'unità (due cifre, tre se servono, per esempio `100` o `-5`); i carichi in percentuale come una barra verticale che si riempie dal basso (binario di 16×24 px con contorno, riempimento proporzionale al valore arrotondato tra 0 e 100: vuoto a 0, almeno una riga sopra lo 0, pieno solo a 100), senza cifre. "—" se il valore è assente o non finito, qualunque sia l'unità. La barra usa solo i colori di primo piano e di sfondo dello stile. Deciso con l'utente dopo la verifica dal vivo della tray: il solo numero non faceva capire se fosse una temperatura o una percentuale, e un piccolo segno di unità (`°` o `%`, 5×5 px) risultava troppo piccolo per vedersi;
   - lo sfondo è un quadrato arrotondato: nella M5a sempre neutro (`--surface-2`), dalla M5b il colore del livello (§3.5), dalla M5c con un pallino rosso nell'angolo durante la registrazione;
-  - si ridisegna e si invia a Windows solo quando cambiano numero, colore o pallino. Il rendering è una funzione pura, testata sui pixel.
+  - si ridisegna e si invia a Windows solo quando cambia ciò che si disegna (il numero, oppure il livello intero della barra, e il passaggio dall'uno all'altra), il colore o il pallino. Il rendering è una funzione pura, testata sui pixel.
 - **Tooltip:** `CPU 45 °C · GPU 62 °C · RAM 48 %`, con le unità scelte; le voci senza valore si omettono. Si tronca entro i 127 caratteri di `NOTIFYICONDATA` e si aggiorna solo quando il testo cambia. Dalla M5b, se il livello non è `ok`, il verdetto precede i valori.
 - **Chiudi nella tray** (`closeToTray`): se è attivo, chiudere la finestra la distrugge e l'app resta nella tray (comportamento attuale); se è disattivato, chiudere la finestra chiude l'app.
 - **Avvio con Windows** (`autostart`):
@@ -407,7 +407,7 @@ TDD come nelle milestone precedenti: prima i test che falliscono, poi l'implemen
 - **Shell e `oma-win`:**
   - scrittura atomica, coalescenza, recupero del file corrotto, migrazione di `service.json` su una cartella temporanea;
   - valore `Run` su una chiave di test sotto HKCU, errori di accesso e stato effettivo di avvio sconosciuto/disabilitato senza scritture a `StartupApproved`;
-  - rendering dell'icona della tray (pixel attesi per cifre, trattino, colori e pallino);
+  - rendering dell'icona della tray (pixel attesi per cifre, trattino, barra, colori e pallino);
   - traduzioni Rust e troncamento del tooltip;
   - cooldown dei toast e selezione delle voci della tray per stato, come funzioni pure;
   - thread di scrittura CSV con un writer finto: coda piena, errore di scrittura, flush.

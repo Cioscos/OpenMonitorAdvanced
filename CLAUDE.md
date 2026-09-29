@@ -3,7 +3,7 @@
 Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplificata e vista Avanzata, palette Synthwave, nessun privilegio amministrativo per CPU/RAM/dischi/rete/GPU.
 
 - **Spec (fonte di verità):** `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`
-- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata e M4 servizio completate; poi M5 regole e integrazione, M6 rifinitura)
+- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5a impostazioni e tray completate; poi M5b regole e M5c log CSV, che con M5a formano M5 regole e integrazione; infine M6 rifinitura)
 - **Budget prestazioni:** `docs/perf-budget.md` (nucleo a riposo < 1% CPU, tray < 30 MB, finestra < 200 MB WebView2 compresa); si misura a ogni milestone con `scripts/measure-footprint.ps1`
 
 ## Struttura

@@ -32,6 +32,15 @@ SMART data.
     value comes from;
   - static device details, such as the PCIe link, power limits and temperature thresholds;
   - for GPUs, the processes using the GPU, with their load and memory.
+- **Settings view.** Language, temperature in °C or °F, network speed in bit/s or byte/s,
+  sampling interval (0.5 to 5 s), chart refresh rate (60, 30 or 15 FPS), default view, closing
+  to the tray, starting with Windows and the sensor shown by the tray icon. The *Data sources*
+  section switches each GPU vendor library, anti-cheat compatible mode, each service module
+  and, per disk, SMART reads on or off, and shows the PawnIO status. *About* lists the versions
+  and the licences. Settings are stored in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
+- **Tray icon.** The icon shows the chosen sensor live: a temperature as a number, a load as a
+  vertical bar. The tooltip lists CPU, GPU and RAM, and the menu opens the Simple or the
+  Advanced view directly.
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -94,7 +103,8 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   BattlEye is known. None of this has been tested against a real anti-cheat-protected game yet.
 - **Known limits.** On a PC with several signed-in users, any of them can stop the service for
   everyone. A disk that Windows reports in standby is not queried, so it shows no health data while
-  asleep.
+  asleep. If a connected disk cannot confirm its power state when the service starts (a USB
+  stick, for example), SMART reads stay off for all disks until it is unplugged.
 
 ## Build from source
 

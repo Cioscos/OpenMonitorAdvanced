@@ -256,6 +256,8 @@ misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 | M3 | same machine, same drivers, build `21896f5` | window, continuously visible for 61 min (Advanced GPU, 1 h, 8 series; raw live tail) | 0.06 | 23.9 | 6 | 149.9 | yes |
 | M4 | same machine, PawnIO 2.2.0, Windows 11 Pro 10.0.26200, service installed | window (`oma-service` connected, Task 15 live verification) | 0.03 | 19.5 | 6 | 141.2 | yes |
 | M4 | same machine, same conditions | tray | 0.07 | 17.3 | 0 | 17.3 | yes |
+| M5a | same machine, PawnIO 2.2.0, release build of the branch, service installed, dynamic tray icon active | window (Advanced view, `oma-service` connected) | 0.96 (7 processes; core 0.04) | 20.5 | 6 | 186.6 | yes |
+| M5a | same machine, same conditions | tray | 0.04 | 17.3 | 0 | 17.3 | yes |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
@@ -263,8 +265,44 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 |---|---|---|---|---|
 | M4 | AMD Ryzen 7 7800X3D, B650, 2× DDR5, 1 SATA HDD, 1 SATA SSD, 2 NVMe, RTX 4080 + AMD iGPU, Windows 11 Pro 10.0.26200, PawnIO 2.2.0 | window | 0.03 | 51.6 MB |
 | M4 | same machine, same conditions | tray | 0.04 | 52.7 MB |
+| M5a | same machine, release build of the branch | window | 0.01 | 63.2 MB |
+| M5a | same machine, same conditions | tray | 0.01 | 62.9 MB |
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M5a measurement details
+
+Measured 2026-09-30 on the development machine (16 logical processors,
+Windows 11 Pro 10.0.26200, PawnIO 2.2.0) with the release build installed by
+the NSIS setup, `scripts/measure-footprint.ps1 -Service`, `oma-service`
+connected, no history fill. In the tray run the dynamic tray icon (number or
+bar, tooltip) was active.
+
+```
+Mode              : tray
+CorePercentCpu    : 0.04
+TotalAppPercentCpu: 0.04
+AppPrivateMB      : 17.3
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.01 %
+Service Private   : 62.9 MB
+
+Mode              : window (Advanced view)
+CorePercentCpu    : 0.04
+TotalAppPercentCpu: 0.96 (7 processes)
+AppPrivateMB      : 20.5
+WebView2Processes : 6
+TotalPrivateMB    : 186.6
+Service CPU       : 0.01 %
+Service Private   : 63.2 MB
+```
+
+All budget items are met (app CPU < 1 %; tray < 30 MB; window < 200 MB in
+total; service CPU < 1 %, service private bytes < 80 MB). The window row is
+the closest to the limit: 0.96 % of the machine across the seven processes
+and 186.6 MB in total, up from 141.2 MB at M4. The Settings view was not measured
+separately: the Advanced view is the heavier one. The service private bytes grew by about
+10 MB over M4 (51.6 to 63.2 MB) but stay under the 80 MB budget.
 
 ## M4 measurement details
 

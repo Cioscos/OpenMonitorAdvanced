@@ -34,6 +34,16 @@ temperature, tensioni, ventole e dati SMART.
   - i dettagli statici del dispositivo, come il collegamento PCIe, i limiti di potenza e le
     soglie di temperatura;
   - per le GPU, i processi che le usano, con carico e memoria.
+- **Vista Impostazioni.** Lingua, temperatura in °C o °F, velocità di rete in bit/s o byte/s,
+  intervallo di campionamento (da 0,5 a 5 s), frequenza di aggiornamento dei grafici (60, 30 o
+  15 FPS), vista predefinita, chiusura nel tray, avvio con Windows e sensore mostrato
+  dall'icona del tray. La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
+  di GPU, la modalità compatibile con gli anti-cheat, ogni modulo del servizio e, disco per
+  disco, la lettura SMART, e mostra lo stato di PawnIO. *Informazioni* elenca versioni e
+  licenze. Le impostazioni sono salvate in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
+- **Icona nel tray.** L'icona mostra dal vivo il sensore scelto: una temperatura come numero,
+  un carico come barra verticale. Il suggerimento mostra CPU, GPU e RAM, e il menu apre
+  direttamente la vista Semplificata o Avanzata.
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -99,7 +109,9 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   gioco protetto da un anti-cheat reale.
 - **Limiti noti.** Su un PC con più utenti collegati, ognuno di loro può fermare il servizio per
   tutti. Un disco che Windows segnala in standby non viene interrogato, quindi non mostra dati di
-  salute mentre dorme.
+  salute mentre dorme. Se un disco collegato non conferma il proprio stato di alimentazione
+  all'avvio del servizio (per esempio una chiavetta USB), la lettura SMART resta spenta per tutti
+  i dischi finché non viene scollegato.
 
 ## Compilare dal sorgente
 

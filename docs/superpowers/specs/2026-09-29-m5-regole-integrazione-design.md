@@ -1,7 +1,7 @@
 # M5 — Regole e integrazione: design di dettaglio
 
 - **Data:** 2026-09-29
-- **Stato:** approvato in brainstorming, in attesa di revisione della spec scritta
+- **Stato:** revisione tecnica del 2026-09-29 applicata; le verifiche di fattibilità indicate sotto restano prerequisiti dei rispettivi piani, non funzionalità già verificate.
 - **Spec principale:** `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`. Per i punti trattati qui, questa spec di dettaglio ha la precedenza; tutto il resto (palette, budget, sicurezza, protocollo, convenzioni) resta come nella spec principale.
 
 ## 1. Intento e confini
@@ -32,7 +32,7 @@ La M5 trasforma OpenMonitor Advanced da monitor che mostra i dati a monitor che 
 | B5 | Il motore regole gira **dentro `Engine::tick`**, sul thread del campionatore. |
 | B6 | Il CSV si scrive su un **thread dedicato** alimentato da un canale limitato. |
 | B7 | La CPU ha **due regole predefinite** (temperatura e throttling termico) invece di una regola con due condizioni. |
-| B8 | TjMax dei Ryzen da una **tabella per famiglia** nel servizio, esposta come proprietà del device CPU. |
+| B8 | TjMax dei Ryzen da una **tabella per modello/SKU con fonti ufficiali** nel servizio, esposta come proprietà del device CPU; senza identificazione certa niente `tjMaxC` (§3.1). |
 | B9 | Lo spazio libero si esprime come **percentuale usata** (≥ 90% / ≥ 97%), perché il sensore esistente è quello. |
 | B10 | Il log si comanda anche da un **registratore in stile nastro** nella barra superiore e da una **scorciatoia globale** (richiesta dell'utente). |
 
@@ -73,8 +73,9 @@ File `%APPDATA%\OpenMonitorAdvanced\settings.json`, chiavi camelCase. I tipi sta
     "series": {}                 // id sezione -> id sensori
   },
   "view": { "last": "simple" },  // ultima vista scelta, per defaultView = "last"
-  "rules": { "overrides": {}, "custom": [] },  // M5b, §3.5
-  "log": { }                     // M5c, §4.5
+  "rules": { "overrides": {}, "custom": [] },  // M5b, §3.2
+  "log": { },                    // M5c, §4.5
+  "migrations": { "serviceV1": false, "webviewV1": false }
 }
 ```
 
@@ -86,25 +87,29 @@ File `%APPDATA%\OpenMonitorAdvanced\settings.json`, chiavi camelCase. I tipi sta
 
 - **Chiavi mancanti** prendono il default; **chiavi sconosciute** si ignorano e si perdono alla scrittura successiva (il file non è pensato per essere modificato a mano).
 - **Valori fuori intervallo** si correggono al valore valido più vicino (per esempio `intervalMs: 700` diventa 500, `800` diventa 1000, `750` diventa 1000 perché a pari distanza vince il maggiore, `9000` diventa 5000) e la correzione finisce nel log di diagnostica.
-- **File illeggibile o JSON non valido:** il file si rinomina `settings.json.bad-<AAAAMMGG-hhmmss>` e l'app parte con i default. La UI mostra una riga di avviso nelle Impostazioni, con il nome del file conservato.
+- **JSON non valido:** si conserva il file come `settings.json.bad-<AAAAMMGG-hhmmss>-<suffisso univoco>` prima di usare e salvare i default. Un errore di accesso o di I/O non dimostra che il file sia corrotto: in quel caso, o se la conservazione fallisce, non si sovrascrive l'originale e si usano i default solo in memoria, mostrando l'errore. Tipi errati ed enum sconosciuti si recuperano per campo con default e diagnostica; le regole semanticamente invalide vengono escluse dalla valutazione e segnalate, conservando l'originale prima di una riscrittura.
 - **`version` più recente di quella nota** (downgrade dell'app): il file non viene mai sovrascritto. L'app usa ciò che capisce, tiene le modifiche solo in memoria e la UI mostra l'avviso "impostazioni di una versione più recente: le modifiche non verranno salvate".
 - **Scrittura atomica:** si scrive `settings.json.tmp` e lo si sostituisce con `ReplaceFileW` (oppure `MoveFileExW` con `MOVEFILE_REPLACE_EXISTING` se il file non esiste ancora). Un solo writer, protetto da un mutex, serializza tutte le scritture.
 - **Scritture ravvicinate** (per esempio uno slider) si coalescono: la patch si applica subito in memoria, il file si scrive al più una volta ogni 500 ms e sempre alla chiusura dell'app.
+- **Errori di salvataggio:** restano visibili nella UI e nella diagnostica; la revisione in memoria rimane dirty e si ritenta senza dichiararla persistita. Il writer salva snapshot con revisione crescente e non può rimpiazzare una revisione nuova con una vecchia. Il flush finale ha attesa limitata e segnala un eventuale fallimento.
 
 ### 2.3 Comandi ed eventi
 
-- `get_settings() -> Settings`: le impostazioni effettive, con lo stato del file (`ok` | `recovered` con il nome del file conservato | `readOnly`).
-- `update_settings(patch) -> Settings`: la patch è un oggetto parziale con la stessa forma del file. Rust la applica, valida, corregge, salva e restituisce il risultato; un errore di validazione (per esempio in una regola, §3.6) restituisce il campo e la chiave i18n del messaggio, senza applicare nulla.
+- `get_settings() -> SettingsState`: `{ settings, revision, persistedRevision, persistence, applyStatus }`; `persistence` distingue `ok`, `pending`, `recovered` con percorso, `readOnly` e `error` con motivo. `applyStatus` distingue preferenze richieste ed effetti esterni ancora pendenti o falliti (servizio, registro, hotkey).
+- `update_settings(patch) -> SettingsState`: Rust serializza le patch, valida l'intero risultato e lo applica in memoria; la persistenza è differita secondo §2.2. Un errore di validazione restituisce campo e chiave i18n senza applicare nulla. Oggetti uniti ricorsivamente, array sostituiti interamente, chiavi omesse invariate; `null` è ammesso solo nei campi nullable. Per eliminare un override si usa `reset_rule_override(ruleId)`, senza attribuire a `null` anche il significato di cancellazione. Nei livelli delle regole `warn: null` o `crit: null` disabilita quel livello.
 - Evento `oma:settings`: parte dopo ogni modifica applicata, anche se l'origine è la tray (per esempio l'anti-cheat), così una finestra aperta resta allineata.
+- Gli eventi portano `SettingsState` anche al completamento/fallimento del salvataggio o di un effetto esterno. La UI sottoscrive gli eventi prima del getter e ignora revisioni obsolete; `version` e i marcatori di migrazione non sono modificabili con patch ordinarie.
 
 ### 2.4 Migrazioni al primo avvio della M5
 
-- **Anti-cheat:** se `%LOCALAPPDATA%\OpenMonitorAdvanced\service.json` esiste, il suo valore va in `sources.antiCheat`, poi il file si cancella. Se la scrittura di `settings.json` fallisce, `service.json` resta dov'è e la migrazione si ritenta al prossimo avvio.
-- **Vista Avanzata e ultima vista:** la UI, al primo avvio in cui `advanced` e `view` sono ai valori di default e in `localStorage` esistono le chiavi `oma.advanced.*` o `oma.view` (`App.svelte`), le invia con `update_settings` una sola volta, poi le cancella. Da quel momento `persist.ts` e `App.svelte` leggono e scrivono tramite le impostazioni, non più tramite `localStorage`.
+- **Migrazioni idempotenti:** il formato include marcatori interni `migrations.serviceV1` e `migrations.webviewV1`. Non si deduce una prima esecuzione dall'uguaglianza ai default: l'utente può averli scelti intenzionalmente. Un file corrente già esistente prevale sui valori legacy; in modalità readOnly o errore non si cancellano sorgenti legacy.
+- **Anti-cheat:** se manca il file corrente, si importa `%LOCALAPPDATA%\OpenMonitorAdvanced\service.json`. Valori importati e marcatore si salvano insieme; il legacy si elimina solo dopo conferma di persistenza, altrimenti si ritenta al prossimo avvio senza sovrascrivere preferenze correnti.
+- **Vista Avanzata e ultima vista:** un comando dedicato importa una sola volta le chiavi `oma.advanced.*` e `oma.view` (`App.svelte`), senza sovrascrivere campi già impostati nel file corrente o modificati nella sessione. Il comando restituisce conferma solo dopo la persistenza del marcatore e dei valori; solo allora la UI elimina le chiavi legacy. Da quel momento `persist.ts` e `App.svelte` usano le impostazioni.
+- Finché `webviewV1` è falso, il writer non materializza su disco i default dei campi `advanced`/`view` ancora assenti: conserva la distinzione tra assente e impostato, anche dopo un avvio solo nella tray. Il comando completa il marcatore anche quando non trova chiavi legacy. Una scrittura esplicita dell'utente prevale sempre sull'importazione.
 
 ### 2.5 Applicazione a caldo
 
-Nessuna impostazione richiede un riavvio.
+Le preferenze si applicano a caldo entro i limiti delle fonti. Lo scaricamento delle DLL già caricate e l'eventuale riavvio richiesto da PawnIO restano esclusi da questa promessa.
 
 - **Lingua:** la UI cambia catalogo. La tray rigenera le etichette del menu con la lingua scelta; con `system` continua a seguire `sys_locale` come nella M4.
 - **Unità:** solo formattazione nella UI (`format.ts`), nel tooltip della tray, nei messaggi delle regole e nel CSV. Si chiude così il follow-up del grafico di rete, oggi in byte/s su asse e legenda anche quando KPI e tabella sono in bit/s.
@@ -129,14 +134,14 @@ Nessuna impostazione richiede un riavvio.
 - **Icona dinamica:**
   - un'icona RGBA 32×32 disegnata in Rust con un font bitmap delle cifre, del segno meno e del trattino, scritto a mano nel sorgente: niente dipendenze di font né rasterizzatori;
   - mostra il valore arrotondato del sensore di `iconSensor`, nelle unità di visualizzazione e senza il simbolo dell'unità (due cifre, tre se servono, per esempio `100` o `-5`); "—" se il valore è assente;
-  - lo sfondo è un quadrato arrotondato: nella M5a sempre neutro (`--surface-2`), dalla M5b il colore del livello (§3.4), dalla M5c con un pallino rosso nell'angolo durante la registrazione;
+  - lo sfondo è un quadrato arrotondato: nella M5a sempre neutro (`--surface-2`), dalla M5b il colore del livello (§3.5), dalla M5c con un pallino rosso nell'angolo durante la registrazione;
   - si ridisegna e si invia a Windows solo quando cambiano numero, colore o pallino. Il rendering è una funzione pura, testata sui pixel.
 - **Tooltip:** `CPU 45 °C · GPU 62 °C · RAM 48 %`, con le unità scelte; le voci senza valore si omettono. Si tronca entro i 127 caratteri di `NOTIFYICONDATA` e si aggiorna solo quando il testo cambia. Dalla M5b, se il livello non è `ok`, il verdetto precede i valori.
 - **Chiudi nella tray** (`closeToTray`): se è attivo, chiudere la finestra la distrugge e l'app resta nella tray (comportamento attuale); se è disattivato, chiudere la finestra chiude l'app.
 - **Avvio con Windows** (`autostart`):
   - `oma-win` scrive il valore `OpenMonitor Advanced` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, con il percorso dell'eseguibile tra virgolette seguito da `--minimized`, senza plugin;
-  - l'interruttore mostra lo stato reale del registro, riletto all'apertura delle Impostazioni, perché l'utente può disattivare l'avvio anche da Gestione attività. `StartupApproved\Run` è la chiave con cui Gestione attività disattiva la voce: se lì risulta disattivata, l'interruttore è spento. Riattivarlo da noi ripristina anche quella voce;
-  - il campo `tray.autostart` segue lo stato letto;
+  - si distinguono voce `Run` configurata dall'app e abilitazione effettiva da parte di Windows. Non si scrivono formati binari non documentati di `StartupApproved\Run`: il piano verifica come rilevare lo stato sulle versioni Windows supportate; se non è determinabile si mostra «stato gestito da Windows» e si rimanda alle impostazioni di avvio;
+  - `tray.autostart` indica la voce configurata dall'app, riletta all'apertura delle Impostazioni; il controllo non dichiara riuscita una scrittura al registro fallita;
   - il disinstallatore rimuove il valore `Run` dell'utente che disinstalla (hook NSIS in `oma.nsh`). I valori di altri utenti restano: puntano a un eseguibile che non c'è più, e Windows li ignora. È un limite accettato.
 - **Seconda istanza:** il callback di single-instance legge gli argomenti; apre la finestra solo se la seconda istanza è stata lanciata senza `--minimized`. `scripts/measure-footprint.ps1 -FillHistoryMinutes`, che si basa su una seconda istanza senza argomenti, continua a funzionare.
 
@@ -160,11 +165,15 @@ Nessuna impostazione richiede un riavvio.
 
 - **`Subscribe`** aggiunge:
   - `disabledModules: [string]`, con i valori `cpu`, `motherboard`, `memory`, `storage`, `controller`, `psu`;
-  - `smartDisabledDrives: [string]`, gli id dei device disco lato servizio.
+  - `smartDisabledDrives: [string]`, le chiavi del descrittore dei dischi (`driveKey` = `sha256(trim(model) + "\0" + trim(serial))` dei testi di `STORAGE_DEVICE_DESCRIPTOR`, in esadecimale minuscolo), calcolabili da app e servizio anche prima della discovery di LibreHardwareMonitor. L'app persiste l'id core del disco e lo traduce a ogni `Subscribe`; un disco senza modello o seriale nel descrittore non è selezionabile. Il servizio rifiuta moduli sconosciuti, più di 64 chiavi e chiavi malformate.
 
   Le chiavi sono sempre presenti (liste vuote se non c'è nulla), come vuole la regola del protocollo.
-- **`Hello`** aggiunge `pawnIo: string`: `ok`, `missing` (driver non installato o non caricabile) oppure `rebootPending` (installato ma serve un riavvio). La UI lo mostra in Fonti dati e, se non è `ok`, con una riga nel popup del badge del servizio, che oggi scompare lasciando mancare i sensori di CPU, scheda madre e DIMM senza spiegazione (`docs/follow-ups.md`).
-- **Più client:** il servizio è condiviso tra gli utenti della macchina. Un modulo si spegne solo se **tutti** i client collegati lo vogliono spento, e lo stesso vale per lo SMART di un disco. Quando un client si scollega, la configurazione effettiva si ricalcola. Accendere o spegnere un modulo usa i setter di `Computer` di LibreHardwareMonitor (che aggiungono o rimuovono il gruppo su un computer aperto) e rigenera lo schema. Per i dischi resta valido il filtro D6: lo SMART di un disco con lo SMART spento non si legge e quel disco non partecipa alla conferma dello stato di alimentazione. Questo chiude il follow-up del disco USB il cui bridge rifiuta il pass-through ATA.
+- **`Schema`** aggiunge il blocco `service: { activeModules, smartDisabledDrives, reconfiguration: "applied" | "pending" | "failed", smartBlockedBy }` con lo stato **globale** effettivo e le `driveKey` che tengono chiuso il gate D6; un suo cambio conta come cambio di struttura. Serve ad `applyStatus` e alla distinzione tra richiesta locale e stato globale.
+- **`Hello`** aggiunge `pawnIo: string`: `ok`, `missing`, `unavailable` (presente ma non accessibile/caricabile), `unknown` (diagnosi non conclusiva) oppure `rebootPending`, ammesso solo con evidenza esplicita dell'installer riferita al boot corrente: il marcatore `HKLM\SOFTWARE\OpenMonitorAdvanced` `PawnIoRebootRequestedUtc`, scritto dall'installer quando il setup di PawnIO restituisce 3010 e più recente del boot corrente. `ok` quando il device si apre. La probe booleana attuale non basta a dedurre un riavvio necessario. La UI mostra lo stato in Fonti dati e nel popup del badge; un esito diverso da `ok` resta visibile anche con servizio collegato.
+- **Più client:** si aggregano le richieste dei client con sottoscrizione attiva, non le sole connessioni. Un modulo resta attivo se almeno un sottoscrittore lo richiede; lo SMART di un disco resta attivo se lo richiede almeno un sottoscrittore che abilita anche storage. Un nuovo `Subscribe` sostituisce atomicamente la precedente richiesta di quel client. La UI distingue richiesta locale da attività globale e spiega che altri utenti possono mantenere una fonte accesa; il client filtra le fonti che ha escluso. Senza sottoscrittori resta il ciclo di inattività della M4.
+- **Proprietà dei thread:** i callback della pipe accodano configurazioni, senza chiamare i setter LHM. Il piano deve definire una barriera fra sampler e storage worker prima di aggiungere/rimuovere hardware: nessun gruppo si chiude mentre un altro worker lo legge o aggiorna. Schema e snapshot sono pubblicati con la stessa revisione; cache dei gruppi disabilitati invalidate. La barriera non tiene lock condivisi durante I/O hardware e ha un timeout con stato di errore, senza forzare la chiusura sotto un worker bloccato.
+- **Esito della verifica (nota `docs/superpowers/references/m5/f1-service-reconfiguration.md`, verdetto c):** LibreHardwareMonitor 0.9.6 non offre un filtro per disco prima della discovery, e aggirare il gate sveglierebbe il disco. Si conserva il gate globale D6; l'interruttore SMART per disco vale solo dopo la discovery (niente `CHECK POWER MODE`, niente `Update`, disco fuori dallo schema del servizio) e la UI dichiara il limite. Lo storage spento a runtime non chiama mai `IsStorageEnabled = false`: il giro dei dischi si ferma e il gruppo resta aperto. Il follow-up del disco USB resta aperto; la soluzione indicata è un ripiego SAT per `CHECK POWER MODE`, fuori dalla M5a.
+- **Prerequisito M5a — esclusione SMART prima della discovery (testo originale della revisione):** oggi `IHardwareTree.EnableStorage()` abilita l'intero gruppo e può identificare tutti i dischi. Saltare il solo `Update` non basta a escludere un disco dal gate D6. Prima di promettere il controllo per disco, verificare sul codice LHM fissato nel progetto un filtro applicabile anche alla creazione/apertura dell'hardware. Gli id selezionabili devono provenire dall'inventario sicuro, disponibile anche quando D6 blocca lo SMART. Se il filtro non è realizzabile, conservare il gate globale D6, dichiarare il limite nella UI e lasciare aperto il follow-up USB; non aggirare il gate per rendere operativo l'interruttore. La decisione e i test diventano parte del piano M5a.
 - **Fixture:** si rigenerano `hello.msgpack` e `subscribe.msgpack` con `OMA_WRITE_FIXTURES=1`, a thread singolo; i test Rust e .NET le confrontano byte per byte.
 
 ### 2.9 Correzioni della shell incluse nella M5a
@@ -184,9 +193,11 @@ Prima di scrivere le mappature, uno spike su questa macchina (Ryzen con iGPU AMD
 - se esiste un sensore di throttling termico della CPU (Intel: "Thermal throttling" o simili; AMD: probabilmente assente) e come mapparlo come `flag`;
 - quale sensore NVMe o SMART porta il critical warning, oggi scartato da `MatchStorageSensor` insieme alle soglie ("Warning…", "Critical…"), da mappare come `flag` (`…/flag/critical-warning`);
 - se LibreHardwareMonitor espone TjMax per Intel (per esempio da "Distance to TjMax" più la temperatura del core);
-- la **tabella TjMax per famiglia AMD** (B8), per nome o famiglia/modello del processore. Valori iniziali da verificare nelle fonti AMD: Zen 4 e Zen 5 desktop 95 °C, varianti X3D 89 °C, Zen 3 desktop 90 °C, mobile secondo la famiglia. Il valore diventa la proprietà `tjMaxC` del device CPU nel servizio.
+- la **tabella TjMax AMD** (B8), con corrispondenze esplicite per modello/SKU e fonti ufficiali registrate per ogni voce. Famiglia Zen o suffisso X3D da soli non giustificano un limite unico: in caso di identificazione ambigua non si pubblica `tjMaxC` e si usa il ripiego dichiarato dalla regola. Il valore va associato alla temperatura fisica corretta, evitando sensori con offset di controllo.
 
 L'esito si registra in `docs/superpowers/references/m5/` come per gli spike della M4. Una regola il cui sensore non esiste non ha istanze e non compare nel banner.
+
+Lo spike su questa macchina non valida Intel o tutti i controller SATA/NVMe. Ogni mapping richiede una fixture e la verifica del significato nel sorgente della dipendenza: una soglia «Critical temperature» non è un flag di critical warning, e un contatore di eventi non è un throttling attualmente attivo. Le regole senza evidenza restano senza mapping, con il limite documentato.
 
 ### 3.2 Modello
 
@@ -230,35 +241,37 @@ Gli id dei sensori obiettivo si fissano nel piano della M5b, dopo lo spike, con 
 
 ### 3.4 Valutazione
 
-- **Istanze:** a ogni cambio di schema, ogni regola attiva si espande in istanze, una per sensore concreto che corrisponde al `target`. Per ogni istanza si risolvono le soglie dalle proprietà del device. Un'istanza che esisteva già (stesso id di regola e di sensore) conserva il suo stato; un sensore che sparisce porta via la sua istanza. Anche modificare una regola ricrea le sue istanze, azzerandone lo stato.
+- **Istanze:** l'espansione avviene al cambio di schema o regole. Si conserva lo stato solo se coincidono id di regola/sensore, fonte, unità, condizione, soglie risolte, durate e isteresi. Cambi semantici azzerano i timer e rivalutano; cambiare soltanto `notify` non azzera lo stato né genera un ingresso. Un sensore scomparso rimuove l'istanza, ma la perdita di copertura resta esplicita nel report. Il cooldown delle notifiche è separato e sopravvive a ricreazioni e riconnessioni nella stessa sessione.
 - **Confronti:** `above` scatta con valore ≥ soglia, `below` con valore ≤ soglia, `flagActive` con valore ≠ 0.
 - **Macchina a stati per istanza:** livelli `ok`, `warn`, `crit`.
-  - **Ingresso:** il livello candidato è il più grave la cui condizione è vera. Se resta vera ininterrottamente per la durata di quel livello, l'istanza entra nel livello. Una durata di 0 s fa entrare subito, al primo tick. Da `ok` si può entrare direttamente in `crit`, se la condizione del critico regge per la sua durata.
-  - **Uscita:** da un livello si esce quando il valore resta oltre la soglia di quel livello meno l'isteresi (più l'isteresi per `below`; per `flagActive`, con il flag a 0) per tutta la durata dell'isteresi. Da `crit` si scende a `warn` se la condizione di `warn` è ancora vera, altrimenti a `ok`.
+  - **Ingresso:** timer indipendente per ogni livello, a partire dal primo campione valido che soddisfa la condizione. Scatta il livello più grave il cui timer è maturato; la sola presenza della condizione critica non blocca un'attenzione già maturata. Durata 0 significa ingresso al primo tick. Esempio: attenzione 10 s e critico 60 s, valore sempre sopra entrambe → `warn` dopo 10 s, `crit` dopo 60 s.
+  - **Uscita:** condizione stretta `value < threshold − amount` per `above`, `value > threshold + amount` per `below`, flag uguale a 0 per `flagActive`, mantenuta per `hysteresis.durationS`. L'uguaglianza non fa uscire, anche con isteresi 0. All'uscita da `crit` si scende a `warn` solo se il suo ingresso è maturato e il suo rientro non è maturato, altrimenti a `ok`; i timer di entrambi i livelli vengono mantenuti anche durante `crit`. Un'escalation maturata ha precedenza sul rientro.
   - **Valori assenti:** non fanno entrare né uscire da un livello e azzerano i timer di ingresso e di uscita in corso. Un buco di un tick non fa scattare nulla e non spegne un allarme.
 - **Orologio:** quello monotono del tick, passato al motore. I test usano un orologio finto e non dormono.
-- **Livello complessivo:** il più grave tra le istanze; `neutral` se non esiste nessuna istanza, per esempio con tutte le regole disattivate.
+- **Continuità e qualità:** il motore valuta dopo merge e sanitizzazione. Un valore trattenuto per timeout non è una nuova misura e non fa maturare i timer; le cache lente dei dischi sono valide solo entro il TTL della fonte, senza reinterpretare la cadenza del tick come cadenza del sensore. Il piano deve esporre al motore questa qualità oggi non contenuta nel solo `Option<f64>`. Sospensione/ripresa e buchi oltre la validità della fonte azzerano i timer: il tempo non osservato non prova una condizione continua.
+- **Livello complessivo:** il più grave tra gli allarmi conservati e le istanze valutabili; senza allarmi e senza dati validi è `neutral`, non `ok`. Si distingue la gravità dalla copertura (`complete`, `partial`, `unavailable`); una perdita di servizio o di valori non viene annunciata come guarigione. Gli obiettivi opzionali mai rilevati non degradano la copertura; quelli già osservati e poi persi sì, fino a ritorno o disabilitazione esplicita della regola. Un allarme con valore assente mantiene il livello con indicazione «dato non disponibile», senza nuovi toast.
 
 ### 3.5 Uscite
 
 - **`HealthReport`**, prodotto dal tick e inviato alla UI con l'evento `oma:health` solo quando cambia; il comando `get_health` lo restituisce all'apertura della finestra:
   - `level`: `neutral` | `ok` | `warn` | `crit`;
   - `sinceMs`: istante (ora di sistema) da cui dura il livello complessivo;
+  - `revision`, `coverage`, `unavailableTargets[]`: revisione monotona del report e copertura; ogni allarme porta anche validità e istante dell'ultima misura valida. Le durate derivano dal monotono, non dalla sottrazione di due orari di sistema;
   - `alerts[]`: una voce per istanza in `warn` o `crit`, con `ruleId`, `sensorId`, `level`, `value`, `threshold`, `sinceMs`, `messageKey` e `params`.
 
-  "Cambia" significa: cambia il livello complessivo, o l'insieme o il livello degli allarmi, oppure il valore arrotondato di un allarme (per il testo del banner). Il valore si arrotonda alla precisione di visualizzazione, così un sensore che oscilla di decimi non genera eventi a ogni tick.
+  "Cambia" significa: cambia il livello complessivo, la copertura, l'insieme, il livello o la validità degli allarmi, oppure il valore arrotondato di un allarme (per il testo del banner). Il valore si arrotonda alla precisione di visualizzazione, così un sensore che oscilla di decimi non genera eventi a ogni tick.
 - **Banner della vista Semplificata:**
   - un allarme: "GPU surriscaldata (92 °C)", da `rule.<id>.message` con `{device}` (nome del device) e `{value}` formattato nelle unità scelte;
   - più allarmi: "N problemi", con un elenco a tendina accessibile da tastiera, ordinato per gravità e poi per durata;
-  - nessun allarme: "Tutto in ordine" con la durata;
+  - nessun allarme e copertura completa: "Tutto in ordine" con la durata; con copertura parziale: "Nessun allarme nei sensori disponibili — dati incompleti";
   - `neutral`: il messaggio attuale "monitoraggio attivo da…".
 
   Le regole personalizzate usano messaggi generici: `rule.custom.above` ("{sensor} sopra {threshold} ({value})"), `rule.custom.below`, `rule.custom.flag`.
 - **Notifiche (toast di Windows):**
   - implementate in `oma-win` con le API WinRT del crate `windows` (`ToastNotificationManager`, `ToastNotification`), senza plugin;
-  - un toast quando un'istanza con `notify` attivo per quel livello entra nel livello; poi silenzio per quell'istanza e quel livello finché non esce dal livello **e** sono passati almeno 5 minuti dall'ultimo toast (B2). Il cooldown è una funzione pura e ha i suoi test;
+  - un toast quando un'istanza con `notify` attivo per quel livello entra nel livello; poi silenzio per quell'istanza e quel livello finché non esce dal livello **e** sono passati almeno 5 minuti dall'ultimo tentativo di toast (B2). Un rientro prima della scadenza è soppresso, senza toast differito alla scadenza: occorre un nuovo ingresso ammissibile. Anche un tentativo fallito consuma il cooldown, per evitare raffiche di tentativi. Il cooldown è una funzione pura e ha i suoi test;
   - titolo e testo localizzati in Rust con gli stessi cataloghi `en.json`/`it.json` della tray, nella lingua delle impostazioni;
-  - un clic sul toast, finché l'app è in esecuzione (sempre vero, perché vive nella tray), apre la finestra sulla pagina del device nella vista Avanzata tramite l'evento `Activated`. Un clic dopo la chiusura dell'app non fa nulla: niente attivatore COM registrato;
+  - un clic sul toast, se l'app è ancora in esecuzione, apre la finestra sulla pagina del device tramite `Activated`; se il device non esiste più apre la vista Avanzata con un messaggio. Nessuna riattivazione a processo terminato e niente attivatore COM registrato; verificare il comportamento sull'app installata prima di confermare questo percorso nel piano;
   - **AUMID:** quello della scorciatoia del menu Start creata dall'installer. Il piano verifica quale AUMID imposta il template NSIS di Tauri e, se serve, lo fissa sull'`identifier` `io.github.openmonitoradvanced` in `oma.nsh`. In sviluppo (`pnpm tauri dev`, senza scorciatoia) i toast possono comparire sotto un'altra identità o non comparire: limite accettato;
   - un toast che fallisce finisce nel log di diagnostica e non ha altri effetti.
 - **Tray:** lo sfondo dell'icona segue il livello: `ok` `--ok`, `warn` `--warn`, `crit` `--crit`, `neutral` `--surface-2`. Le cifre sono chiare su `neutral` e scure sui colori di stato, per il contrasto. Il tooltip antepone il verdetto ("GPU surriscaldata (92 °C) · CPU 45 °C · …") quando il livello è `warn` o `crit`.
@@ -275,12 +288,15 @@ Gli id dei sensori obiettivo si fissano nel piano della M5b, dopo lo spike, con 
   - durate da 0 a 600 s;
   - isteresi con quantità ≥ 0 e durata da 0 a 600 s;
   - sensore o selettore sintatticamente valido; una regola personalizzata su un sensore che oggi non esiste è ammessa, perché il sensore può arrivare con il servizio.
+  - numeri finiti, id univoci, unità compatibile e `flagActive` riservato ai flag; per un sensore assente la regola conserva l'unità attesa e resta inattiva se al ritorno non coincide;
+  - l'ordine delle soglie si verifica anche dopo la risoluzione delle proprietà, per ogni istanza; se invalido, l'istanza è indisponibile con diagnostica, senza confronti arbitrari;
+  - massimo 256 regole personalizzate; il limite e gli errori sono verificati anche al caricamento da file.
 
   La UI mostra l'errore accanto al campo.
 
 ### 3.7 Costo
 
-La valutazione costa O(istanze) confronti per tick: qualche centinaio di istanze al massimo, meno di un microsecondo. Nessuna allocazione per tick quando lo stato non cambia; l'espansione dei selettori avviene solo al cambio di schema o di regole; `oma:health` non parte se non cambia nulla.
+La valutazione costa O(istanze) confronti per tick. Il tempo effettivo e le allocazioni del motore si misurano con fixture grandi, senza promettere un microsecondo non misurato; l'obiettivo è nessuna allocazione nella valutazione a stato stabile, escluso il costo già presente del tick. Traduzione, toast, I/O e serializzazione per la UI restano fuori dalla valutazione. `oma:health` include anche cambi di copertura e validità; lingua/unità fanno riformattare la UI e la tray anche senza cambio di gravità. Getter ed eventi seguono revisioni per evitare snapshot obsoleti alla riapertura della finestra.
 
 ## 4. Log CSV (M5c)
 
@@ -290,11 +306,13 @@ La valutazione costa O(istanze) confronti per tick: qualche centinaio di istanze
 - **Comandi Rust:** `log_start`, `log_pause`, `log_resume`, `log_stop`, `get_log_status`. Sono gli stessi per UI, tray e scorciatoia; un comando non valido nello stato corrente (per esempio `log_pause` in `idle`) non fa nulla e restituisce lo stato.
 - **Evento `oma:log`:** stato, percorso del file corrente, tempo registrato (pause escluse), righe scritte, byte, numero della parte, motivo dell'errore. Parte a ogni cambio di stato e, durante la registrazione, al più una volta al secondo per i contatori.
 - **Pausa:** il file resta aperto e non si scrivono righe; alla ripresa i timestamp mostrano il salto.
-- **Stop:** svuota il buffer e chiude il file. Anche durante la registrazione il buffer si svuota almeno ogni 5 s o ogni 64 KB, così un crash perde al massimo pochi secondi. La chiusura dell'app ferma la registrazione in modo pulito.
+- **Stop:** impedisce nuovi invii, drena le righe già accettate, esegue il flush e chiude il file; `idle` e la risposta di successo arrivano solo dopo conferma del writer. Il buffer si svuota almeno ogni 5 s o ogni 64 KiB, anche in pausa; il flush del buffer non garantisce la persistenza fisica in caso di perdita di alimentazione. La chiusura attende al massimo 5 s: oltre quel limite registra il mancato completamento, senza dichiarare tutte le righe salvate né bloccare indefinitamente l'uscita.
 
 ### 4.2 Architettura (B6)
 
 - A ogni tick il campionatore, se la registrazione è attiva e il tick è uno di quelli da registrare, manda al thread di scrittura una riga grezza: timestamp, offset del fuso e valori delle colonne scelte. Il canale è limitato (per esempio 64 righe); se è pieno la riga si scarta, il conteggio delle righe scartate si registra nel log di diagnostica e compare nell'evento `oma:log`.
+- **Ordine e concorrenza:** un coordinatore serializza comandi da UI, tray e hotkey e assegna un id di sessione. Ogni riga porta la revisione del layout e un riferimento immutabile a colonne/unità; il writer non consulta lo schema globale corrente. Pause/stop sono barriere ordinate rispetto alle righe accettate, non messaggi scartabili quando la coda è piena. Nessuna attesa del writer sul thread di campionamento. Le righe precedenti alla pausa possono essere drenate prima della conferma `paused`; dopo la conferma non ne restano da scrivere.
+- **Limiti:** oltre alle 64 righe, la coda ha un budget massimo di 4 MiB inclusi i layout trattenuti, e 4096 colonne. Superare i limiti di configurazione impedisce l'avvio con errore esplicito; la saturazione scarta solo righe, con contatore cumulativo e diagnostica limitata a una segnalazione al minuto. Contatori di righe/byte scritti vengono dal writer, non dagli invii del sampler. Gli errori di una vecchia sessione non modificano quella successiva.
 - Il **formatter** è una funzione pura in `oma-core::csv`: intestazione, righe, numeri, BOM. Il thread di scrittura, nella shell, gestisce file, buffer, dimensione e parti.
 - **Offset del fuso:** la shell lo calcola per ogni riga con le API di Windows in `oma-win` (con cache per minuto), così il cambio dell'ora legale si vede nelle righe e il formatter resta portabile.
 
@@ -302,18 +320,21 @@ La valutazione costa O(istanze) confronti per tick: qualche centinaio di istanze
 
 Dalla spec principale §4.4, con queste precisazioni:
 
-- **Nome del file:** `oma-<AAAA-MM-GG_hh-mm-ss>.csv`, all'ora locale di avvio; le parti successive sono `…-part2.csv`, `…-part3.csv`.
+- **Nome del file:** `oma-<AAAA-MM-GG_hh-mm-ss>.csv`, all'ora locale di avvio; le parti successive sono `…-part2.csv`, `…-part3.csv`. Tutti i file si creano in modalità esclusiva, mai con troncamento; in caso di collisione si aggiunge un suffisso univoco mantenuto per tutta la sessione.
 - **Nuova parte**, con la sua intestazione e il BOM:
-  - oltre la dimensione massima (100 MB di default, da 10 MB a 2 GB);
-  - quando cambia l'insieme delle colonne, per esempio perché si collega un disco o arriva il servizio.
+  - prima di scrivere una riga che supererebbe la dimensione massima (100 MiB di default, da 10 a 2048 MiB, BOM e intestazione inclusi); una riga con intestazione più grande del limite produce errore, senza ciclo infinito di rotazioni;
+  - quando cambia il layout effettivo: id, ordine, etichette o unità delle colonne scelte. Un cambio di schema che non modifica le colonne scelte non crea una parte.
 
   Ogni file resta così coerente per Excel.
+
+  Separatore `,`, punto decimale `.`, UTF-8 con BOM e terminatori CRLF indipendenti dalla lingua. Il BOM non imposta il separatore regionale di Excel: per alcune configurazioni italiane serve l'importazione CSV esplicita. Le intestazioni includono anche l'id stabile del sensore per distinguere nomi uguali; un campo testuale che inizia con `=`, `+`, `-` o `@` viene prefissato da apostrofo prima dell'escaping, per non interpretarlo come formula all'apertura in un foglio di calcolo.
 - **Colonne:**
   - prima colonna `Timestamp`, in ISO 8601 all'ora locale con i millisecondi e l'offset (`2026-09-29T14:03:12.000+02:00`);
-  - poi un sensore per colonna, nell'ordine dello schema, con intestazione `Dispositivo / Sensore [unità]` nella lingua dell'app, per esempio `NVIDIA GeForce RTX 4080 / Temperatura core [°C]`. Un campo che contiene `,`, `"` o un a capo va tra virgolette doppie, con le virgolette interne raddoppiate.
-- **Valori:** nelle **unità di visualizzazione** scelte all'avvio della registrazione (`[°F]`, `[bit/s]`), con al massimo 3 decimali e senza zeri finali; i flag come 0/1; i valori assenti come celle vuote. Cambiare unità durante la registrazione vale dalla parte successiva.
+  - poi un sensore per colonna, nell'ordine dello schema, con intestazione `Dispositivo / Sensore [unità] {sensorId}` nella lingua dell'app. Un campo che contiene `,`, `"` o un a capo va tra virgolette doppie, con le virgolette interne raddoppiate.
+- **Valori:** nelle **unità di visualizzazione** fissate per la parte (`[°F]`, `[bit/s]`), con al massimo 3 decimali e senza zeri finali; i flag come 0/1; valori assenti o non finiti come celle vuote. Un cambio di lingua o unità richiede una nuova parte prima della prossima riga, senza mescolare layout vecchio e nuovo nella coda.
 - **Intervallo:** ogni N tick dello scheduler, con N tra 1, 2, 5, 10, 30 e 60 (di default 1). Si scrive l'ultimo valore del tick, senza medie.
 - **Colonne scelte:** tutti i sensori (default) oppure un elenco di id. Un sensore scelto che non esiste non ha colonna; se arriva, apre una nuova parte.
+- **Modifiche durante la sessione:** cartella e dimensione massima valgono dal prossimo avvio; selezione sensori, lingua e unità dalla prima riga del nuovo layout; `everyTicks` dal prossimo tick, azzerando la fase. Si registra il primo tick dopo avvio/ripresa e poi ogni N tick; i tick persi non vengono recuperati. Il tempo registrato usa un orologio monotono e non include pause o sospensione del PC. I contatori sono cumulativi per sessione; dimensione della parte corrente esposta separatamente. Nessuna colonna disponibile impedisce l'avvio; se tutte spariscono durante la sessione si ammettono righe con solo timestamp, senza falsi valori.
 - **Errore di scrittura** (disco pieno, chiavetta rimossa, cartella senza permessi): la registrazione passa in `error` con il motivo; se la finestra è chiusa parte un toast, a prescindere dalle impostazioni delle regole.
 
 ### 4.4 Registratore nella UI e nella tray
@@ -362,11 +383,12 @@ La sezione `log` di `settings.json`:
 
 ### 4.6 Scorciatoia globale
 
-- Si registra con `tauri-plugin-global-shortcut` (basato su `RegisterHotKey`) **solo dal lato Rust**: nessuna capability del plugin esposta a JavaScript. Funziona anche a finestra chiusa e in gioco.
-- `RegisterHotKey` non installa hook della tastiera, quindi non è un comportamento che gli anti-cheat penalizzano.
+- Si registra con `tauri-plugin-global-shortcut` (basato su `RegisterHotKey`) **solo dal lato Rust**: nessuna capability del plugin esposta a JavaScript. Resta registrata anche a finestra chiusa; il funzionamento in gioco è soggetto ai limiti sotto.
+- Non si installano hook della tastiera. Compatibilità con anti-cheat e ricezione in ogni modalità di gioco non sono garantite e vanno verificate; un toast può essere soppresso dalle impostazioni notifiche di Windows.
 - **Default:** `Ctrl+Alt+Shift+R` avvia e ferma la registrazione, attiva di default; la scorciatoia di pausa/ripresa non ha una combinazione di default.
-- Se la registrazione della combinazione fallisce (è già di un'altra app), la scorciatoia resta inattiva, il fatto finisce nel log e la sezione Log CSV lo mostra.
-- Un avvio o uno stop dati dalla scorciatoia mostrano un breve toast di conferma, perché in gioco la tray non si vede; con un gioco a schermo intero Windows lo trattiene, come ogni toast.
+- Se la registrazione iniziale della combinazione fallisce, la scorciatoia resta inattiva, il motivo effettivo finisce nel log e la sezione Log CSV lo mostra; il conflitto con un'altra app è uno dei possibili motivi.
+- Toggle e pausa non possono usare la stessa combinazione. Il cambio registra prima la nuova combinazione e rilascia la precedente solo dopo successo; al fallimento mostra preferenza richiesta e combinazione ancora effettiva. Si reagisce solo alla pressione iniziale, ignorando rilascio e ripetizioni, per evitare più avvii/stop da una pressione prolungata.
+- Un avvio o uno stop dati dalla scorciatoia richiedono un breve toast dopo la conferma del writer; un fallimento mostra l'errore, mai una conferma di successo. La visibilità del toast dipende dalle impostazioni di Windows.
 
 ## 5. Internazionalizzazione
 
@@ -384,7 +406,7 @@ TDD come nelle milestone precedenti: prima i test che falliscono, poi l'implemen
   - `csv`: BOM, intestazione con virgolette, offset positivo e negativo, cambio dell'ora legale tra due righe, decimali e zeri finali, celle vuote, flag, conversione delle unità, nuova parte per dimensione e per colonne, pausa.
 - **Shell e `oma-win`:**
   - scrittura atomica, coalescenza, recupero del file corrotto, migrazione di `service.json` su una cartella temporanea;
-  - valore `Run` e `StartupApproved\Run` su una chiave di test sotto HKCU;
+  - valore `Run` su una chiave di test sotto HKCU, errori di accesso e stato effettivo di avvio sconosciuto/disabilitato senza scritture a `StartupApproved`;
   - rendering dell'icona della tray (pixel attesi per cifre, trattino, colori e pallino);
   - traduzioni Rust e troncamento del tooltip;
   - cooldown dei toast e selezione delle voci della tray per stato, come funzioni pure;
@@ -402,6 +424,12 @@ TDD come nelle milestone precedenti: prima i test che falliscono, poi l'implemen
   - stesse chiavi nelle due lingue.
 
   Il backend finto simula impostazioni, regole, allarmi e log, per sviluppare e verificare la UI nel browser.
+- **Casi obbligatori emersi dalla revisione:**
+  - persistenza differita fallita, patch concorrenti, enum sconosciuti, ripristino override, migrazione interrotta prima/dopo il salvataggio e file futuro con legacy ancora presenti;
+  - timer warn/crit indipendenti, uguaglianza con isteresi zero, sospensione, valori trattenuti/cache scadute, perdita del servizio e copertura parziale, cambio di proprietà/unità/fonte, riconnessione senza raffica di toast;
+  - sostituzione atomica di `Subscribe`, filtro locale con altro client attivo, esclusione SMART anche durante discovery e cambio moduli mentre lo storage worker è in I/O;
+  - coda CSV piena durante pausa/stop, cambio layout con righe arretrate, nomi file in collisione, errore di flush, timeout di chiusura, cambio lingua/unità, limite in byte e in colonne, hotkey ripetuta;
+  - i test puri verificano formatter e decisioni di rotazione; filesystem, pause e drenaggio appartengono ai test del writer nella shell, non al formatter di `oma-core`.
 - **Verifiche dal vivo:** solo osservazione. I clic su tray, toast, finestra e scorciatoia li fa l'utente, su richiesta (regola del progetto).
 
 ## 7. Budget
@@ -443,7 +471,7 @@ Alla fine della M5c si aggiornano `docs/follow-ups.md` (voci chiuse e nuove), il
 
 ## 9. Modifiche alla spec principale
 
-Da applicare insieme a questa spec:
+I rimandi alla M5 sotto elencati sono già presenti nella spec principale. Per i dettagli corretti in questa revisione prevale questo documento; in particolare B8 non autorizza limiti TjMax generici senza evidenza per modello e l'esclusione SMART resta subordinata alla verifica di §2.8.
 
 - §4.3: la CPU ha due regole (B7), la temperatura dei dischi vale per ogni disco con il sensore, lo spazio libero si esprime come percentuale usata (B9); rimando a questa spec per modello e valutazione.
 - §4.4: registratore nella UI e scorciatoia globale (B10); rimando a questa spec.
@@ -451,3 +479,15 @@ Da applicare insieme a questa spec:
 - §7.4 e §9: il controllo degli aggiornamenti passa alla M6 (B3).
 - §7.5: la deroga per il pallino del registratore (§4.4 di questa spec).
 - §14: la M5 si esegue in tre piani (B1).
+
+## 10. Esito della revisione tecnica
+
+Criticità corrette nel testo, in ordine di impatto:
+
+1. **Alta — SMART e concorrenza del servizio (§2.8):** il codice attuale apre storage globalmente e assegna i dischi a un worker separato. Escludere solo gli aggiornamenti o chiamare setter da una sessione della pipe non garantisce D6 né la sicurezza del ciclo di vita. Filtro prima della discovery e barriera dei worker sono prerequisiti del piano M5a.
+2. **Alta — falsi verdetti e transizioni (§3.4–3.5):** mancavano copertura, qualità dei dati, continuità dopo sospensione e timer indipendenti. Sono stati definiti; perdere un sensore non equivale a un rientro dell'allarme.
+3. **Alta — integrità del CSV (§4.1–4.3):** mancavano barriere di stop/pausa, layout associato alle righe accodate e creazione esclusiva dei file. Ora sono espliciti, insieme ai limiti della coda e agli errori di flush.
+4. **Media — impostazioni e migrazioni (§2.2–2.4):** applicazione in memoria non equivale a persistenza; default intenzionali non identificano una prima esecuzione. Aggiunti revisioni, stati di errore e marcatori persistiti prima della cancellazione dei dati legacy.
+5. **Media — presupposti hardware e Windows (§2.6, §2.8, §3.1, §3.5, §4.6):** rimossi limiti termici generalizzati e promesse non provate su PawnIO, avvio, toast e anti-cheat. Le verifiche non eseguibili con fixture locali restano esplicite nei piani.
+
+Questa revisione modifica la specifica, non implementa né certifica i comportamenti descritti. Fattibilità del filtro SMART per disco e protocollo di riconfigurazione dei worker sono stati risolti dalla nota `docs/superpowers/references/m5/f1-service-reconfiguration.md` (2026-09-29) e recepiti in §2.8 e nel piano M5a; lo spike S1 deve documentare sensori e soglie reali prima della M5b.

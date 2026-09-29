@@ -7,6 +7,27 @@ use oma_core::settings::encode;
 
 use super::store::{lock, Inner};
 
+/// Pause between the save attempts of `shutdown`.
+const SHUTDOWN_RETRY_PAUSE: Duration = Duration::from_millis(150);
+
+/// Why a flush did not complete.
+enum FlushError {
+    /// Nothing will ever be written (blocked store, stopped writer).
+    Permanent(String),
+    /// A save attempt failed; another attempt may succeed.
+    WriteFailed(String),
+    Timeout,
+}
+
+impl FlushError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Permanent(reason) | Self::WriteFailed(reason) => reason,
+            Self::Timeout => "timed out waiting for the settings to be saved".into(),
+        }
+    }
+}
+
 impl Inner {
     /// Starts the `oma-settings-writer` thread.
     pub(super) fn spawn_writer(self: &Arc<Self>) {
@@ -98,6 +119,10 @@ impl Inner {
     }
 
     pub(super) fn flush_now(&self, timeout: Duration) -> Result<(), String> {
+        self.flush(timeout).map_err(FlushError::into_message)
+    }
+
+    fn flush(&self, timeout: Duration) -> Result<(), FlushError> {
         let deadline = Instant::now() + timeout;
         let mut core = lock(&self.core);
         if !core.is_dirty() {
@@ -106,11 +131,15 @@ impl Inner {
         match &core.blocked {
             // Read-only by design: nothing is ever written, which is not a failure.
             Some(super::Persistence::ReadOnly { .. }) => return Ok(()),
-            Some(super::Persistence::Error { reason }) => return Err(reason.clone()),
+            Some(super::Persistence::Error { reason }) => {
+                return Err(FlushError::Permanent(reason.clone()))
+            }
             _ => {}
         }
         if core.writer_done {
-            return Err("the settings writer is stopped".into());
+            return Err(FlushError::Permanent(
+                "the settings writer is stopped".into(),
+            ));
         }
         let target = core.revision;
         core.flush_target = target;
@@ -121,11 +150,11 @@ impl Inner {
                 return Ok(());
             }
             if let Some(reason) = &core.flush_failed {
-                return Err(reason.clone());
+                return Err(FlushError::WriteFailed(reason.clone()));
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err("timed out waiting for the settings to be saved".into());
+                return Err(FlushError::Timeout);
             }
             core = self
                 .cv
@@ -136,9 +165,25 @@ impl Inner {
     }
 
     /// Final flush, then stops the writer; never waits longer than `timeout`.
+    /// A failed save is retried every [`SHUTDOWN_RETRY_PAUSE`] until the
+    /// deadline, so a transient failure (an antivirus scanning the temporary
+    /// file) does not lose the last changes.
     pub(super) fn shutdown(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
-        let flushed = self.flush_now(timeout);
+        let flushed = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.flush(remaining) {
+                Err(FlushError::WriteFailed(reason)) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break Err(reason);
+                    }
+                    tracing::warn!(%reason, "final settings save failed; retrying");
+                    std::thread::sleep(SHUTDOWN_RETRY_PAUSE.min(remaining));
+                }
+                other => break other.map_err(FlushError::into_message),
+            }
+        };
         let mut core = lock(&self.core);
         core.stop = true;
         self.cv.notify_all();
@@ -304,6 +349,46 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(fs.writes().len(), 1);
+    }
+
+    #[test]
+    fn shutdown_retries_a_failed_write_within_its_deadline() {
+        let fs = FakeFs::new();
+        fs.fail_next_writes(2);
+        // The window and the retry delay are far longer than the test.
+        let store = SettingsStore::open_with(
+            Some(test_path()),
+            fs.clone(),
+            Timings {
+                coalesce: Duration::from_secs(60),
+                retry: Duration::from_secs(60),
+            },
+        );
+        store
+            .update(&json!({"general": {"intervalMs": 2500}}))
+            .unwrap();
+        store.shutdown(LONG).unwrap();
+        assert_eq!(fs.write_attempts(), 3);
+        assert_eq!(stored_json(&fs)["general"]["intervalMs"], 2500);
+        assert_eq!(store.state().persisted_revision, 1);
+    }
+
+    #[test]
+    fn shutdown_gives_up_on_a_persistent_failure_at_its_deadline() {
+        let fs = FakeFs::new();
+        fs.fail_next_writes(1_000_000);
+        let store = slow_window(&fs, Duration::from_secs(60));
+        store
+            .update(&json!({"general": {"intervalMs": 2500}}))
+            .unwrap();
+        let started = Instant::now();
+        let result = store.shutdown(Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        assert!(result.is_err());
+        assert!(elapsed >= Duration::from_millis(450), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert!(fs.write_attempts() >= 2, "it retried");
+        assert_eq!(store.state().persisted_revision, 0);
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl SettingsFs for RealFs {
         let replaced = oma_win::fsutil::replace_file(&tmp, path);
         #[cfg(not(windows))]
         let replaced = std::fs::rename(&tmp, path);
-        if replaced.is_err() {
+        if replaced.is_err() && remove_tmp_after_failed_replace(path.exists()) {
             let _ = std::fs::remove_file(&tmp);
         }
         replaced
@@ -88,6 +88,14 @@ impl SettingsFs for RealFs {
     fn remove(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
     }
+}
+
+/// After a failed replace, the temporary file is garbage only while the target
+/// still exists. A failed `ReplaceFileW` can leave the target missing with the
+/// data only in the temporary file (e.g. an antivirus holding the new file), so
+/// it is kept then, and the next save overwrites it.
+pub(crate) fn remove_tmp_after_failed_replace(target_exists: bool) -> bool {
+    target_exists
 }
 
 /// Where the settings stand on disk.
@@ -149,7 +157,14 @@ pub struct SettingsState {
 }
 
 /// Called after every applied change and every state change, outside the
-/// store's lock, in `seq` order.
+/// store lock, in `seq` order.
+///
+/// A listener may run on any thread that changes the store, including the
+/// `oma-settings-writer` thread (which reports saves and save failures). It
+/// must therefore be quick and must not call `flush_now` or `shutdown`: on the
+/// writer thread they would wait for the writer itself. Calling `update`,
+/// `update_with` or `set_effect` is fine; the resulting state is delivered
+/// after the current one.
 pub type Listener = Box<dyn Fn(&Settings, &SettingsState) + Send + Sync>;
 
 /// `AAAAMMGG-hhmmss` (UTC) of a Unix time.
@@ -205,6 +220,14 @@ mod tests {
             bad_file_name("settings.json", "20231114-221320", 42, 3),
             "settings.json.bad-20231114-221320-42-3"
         );
+    }
+
+    #[test]
+    fn the_temporary_file_is_removed_only_when_the_target_survives() {
+        // The target is intact (or already replaced): the temporary copy is garbage.
+        assert!(remove_tmp_after_failed_replace(true));
+        // The target is missing: the temporary file may hold the only copy.
+        assert!(!remove_tmp_after_failed_replace(false));
     }
 
     #[test]

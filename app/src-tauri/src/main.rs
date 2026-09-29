@@ -1,10 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod i18n;
 mod interval;
 mod service;
 mod settings;
 mod tray;
+#[allow(dead_code)] // wired into the tray in the next task
+mod tray_icon;
 mod window;
 
 use std::sync::{Arc, Mutex, PoisonError};

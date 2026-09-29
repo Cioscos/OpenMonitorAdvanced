@@ -6,54 +6,29 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
+use oma_core::settings::Language;
+
+use crate::i18n::{resolve, t};
 use crate::service::ServiceShell;
 use crate::window;
 
-pub struct TrayLabels {
-    pub open: String,
-    pub quit: String,
-    pub anti_cheat: String,
-}
-
-/// The webview may be destroyed, so tray labels are localized in Rust.
-pub fn labels_for(locale: &str) -> TrayLabels {
-    let en: serde_json::Value =
-        serde_json::from_str(include_str!("../../src/lib/i18n/en.json")).expect("en catalog");
-    let it: serde_json::Value =
-        serde_json::from_str(include_str!("../../src/lib/i18n/it.json")).expect("it catalog");
-    let base = locale.split(['-', '_']).next().unwrap_or("");
-    let catalog = if base.eq_ignore_ascii_case("it") {
-        &it
-    } else {
-        &en
-    };
-    let text = |key: &str| {
-        catalog[key]
-            .as_str()
-            .or_else(|| en[key].as_str())
-            .expect("tray key")
-            .to_owned()
-    };
-    TrayLabels {
-        open: text("tray.open"),
-        quit: text("tray.quit"),
-        anti_cheat: text("tray.antiCheat"),
-    }
-}
-
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let labels = labels_for(&sys_locale::get_locale().unwrap_or_default());
-    let open = MenuItem::with_id(app, "open", labels.open, true, None::<&str>)?;
+    // The webview may be destroyed, so tray labels are localized in Rust.
+    let lang = resolve(
+        Language::System,
+        &sys_locale::get_locale().unwrap_or_default(),
+    );
+    let open = MenuItem::with_id(app, "open", t(lang, "tray.open", &[]), true, None::<&str>)?;
     let initial_anti_cheat = app.state::<ServiceShell>().anti_cheat_enabled();
     let anti_cheat = CheckMenuItem::with_id(
         app,
         "anti_cheat",
-        labels.anti_cheat,
+        t(lang, "tray.antiCheat", &[]),
         true,
         initial_anti_cheat,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t(lang, "tray.quit", &[]), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &anti_cheat, &quit])?;
     // The checkbox follows the settings store (see `ToggleState`), whichever
     // way `sources.antiCheat` changes: this item, the `set_anti_cheat`
@@ -99,21 +74,25 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 mod tests {
     use super::*;
 
+    fn text(locale: &str, key: &str) -> String {
+        t(resolve(Language::System, locale), key, &[])
+    }
+
     #[test]
     fn italian_locales_get_italian_labels() {
-        assert_eq!(labels_for("it-IT").open, "Apri");
-        assert_eq!(labels_for("it").quit, "Esci");
+        assert_eq!(text("it-IT", "tray.open"), "Apri");
+        assert_eq!(text("it", "tray.quit"), "Esci");
         assert_eq!(
-            labels_for("it-IT").anti_cheat,
+            text("it-IT", "tray.antiCheat"),
             "Modalità compatibile anti-cheat"
         );
     }
 
     #[test]
     fn other_locales_fall_back_to_english() {
-        assert_eq!(labels_for("en-US").open, "Open");
-        assert_eq!(labels_for("de-DE").quit, "Quit");
-        assert_eq!(labels_for("").open, "Open");
-        assert_eq!(labels_for("en").anti_cheat, "Anti-cheat compatible mode");
+        assert_eq!(text("en-US", "tray.open"), "Open");
+        assert_eq!(text("de-DE", "tray.quit"), "Quit");
+        assert_eq!(text("", "tray.open"), "Open");
+        assert_eq!(text("en", "tray.antiCheat"), "Anti-cheat compatible mode");
     }
 }

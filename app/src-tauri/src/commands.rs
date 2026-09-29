@@ -1,23 +1,25 @@
 //! Tauri commands called by the UI (see app/src/lib/backend/tauri.ts).
 
-use std::sync::PoisonError;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
 use oma_core::model::Schema;
 use oma_core::sampler::{unix_ms, IntervalHandle};
+use oma_core::settings::VendorLibraries;
 use oma_core::stats::SensorStats;
 use serde::Serialize;
 use tauri::State;
 
+use crate::settings::{Effect, EffectStatus, SettingsStore};
 use crate::AppState;
 
 #[cfg(not(windows))]
 pub use no_gpu_processes::{GpuProcess, GpuProcessTable};
 #[cfg(not(windows))]
-pub use no_vendor_libraries::VendorSwitch;
+pub use no_vendor_libraries::{Vendor, VendorMask, VendorSwitch};
 #[cfg(windows)]
-pub use oma_win::gpu::{GpuProcess, GpuProcessTable, VendorSwitch};
+pub use oma_win::gpu::{GpuProcess, GpuProcessTable, Vendor, VendorMask, VendorSwitch};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,6 +232,59 @@ pub fn enable_vendor_libraries(state: State<'_, StartupState>) -> StartupStatus 
     state.enable_vendor_libraries()
 }
 
+/// The vendor libraries the settings leave switched on.
+pub(crate) fn vendor_mask(libraries: &VendorLibraries) -> VendorMask {
+    VendorMask::NONE
+        .with(Vendor::Nvml, libraries.nvml)
+        .with(Vendor::Nvapi, libraries.nvapi)
+        .with(Vendor::Adl, libraries.adl)
+        .with(Vendor::Igcl, libraries.igcl)
+}
+
+/// Keeps the GPU provider's per-library switches in step with
+/// `sources.vendorLibraries`: every change of the set is stored in `switch`
+/// (the provider notices it at its next poll and rediscovers) and reported as
+/// applied. `applied` is the set `switch` was built with; the store is checked
+/// once right after subscribing, so a change made in between is not lost.
+///
+/// The listener may run on the settings writer thread or on a command thread:
+/// it compares masks under a private lock (which also orders it against the
+/// catch-up below) and, on a change, does one atomic store and a status update
+/// (queued by the store when called from a listener); it never waits for the
+/// store or the provider. Libraries already
+/// loaded are never unloaded (D1); this only decides which ones the next
+/// discovery uses.
+pub(crate) fn follow_vendor_libraries(
+    store: &Arc<SettingsStore>,
+    switch: VendorSwitch,
+    applied: VendorMask,
+) {
+    let last = Mutex::new(applied);
+    let apply = {
+        let store = Arc::clone(store);
+        move |libraries: &VendorLibraries| {
+            let mask = vendor_mask(libraries);
+            {
+                let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+                if *last == mask {
+                    return;
+                }
+                *last = mask;
+                switch.set_libraries(mask);
+            }
+            // Outside the lock: called from outside a delivery (the catch-up),
+            // `set_effect` delivers to the listeners at once, this one included.
+            store.set_effect(Effect::VendorLibraries, EffectStatus::Applied);
+        }
+    };
+    let apply = Arc::new(apply);
+    let listener = Arc::clone(&apply);
+    store.subscribe(Box::new(move |settings, _| {
+        listener(&settings.sources.vendor_libraries)
+    }));
+    apply(&store.settings().sources.vendor_libraries);
+}
+
 /// Per-process GPU usage, published by the GPU provider every tick (decision D5).
 pub struct GpuProcessState(pub GpuProcessTable);
 
@@ -263,23 +318,70 @@ mod no_gpu_processes {
 /// Off Windows there are no GPU vendor libraries: the switch only keeps state.
 #[cfg(not(windows))]
 mod no_vendor_libraries {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::Arc;
 
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Vendor {
+        Nvml,
+        Nvapi,
+        Adl,
+        Igcl,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct VendorMask(u8);
+
+    impl VendorMask {
+        pub const NONE: VendorMask = VendorMask(0);
+        pub const ALL: VendorMask = VendorMask(0b1111);
+
+        pub fn contains(self, vendor: Vendor) -> bool {
+            self.0 & (1 << vendor as u8) != 0
+        }
+
+        #[must_use]
+        pub fn with(self, vendor: Vendor, on: bool) -> Self {
+            let bit = 1 << vendor as u8;
+            Self(if on { self.0 | bit } else { self.0 & !bit })
+        }
+    }
+
     #[derive(Debug, Clone, Default)]
-    pub struct VendorSwitch(Arc<AtomicBool>);
+    pub struct VendorSwitch(Arc<Switches>);
+
+    #[derive(Debug, Default)]
+    struct Switches {
+        master: AtomicBool,
+        libraries: AtomicU8,
+    }
 
     impl VendorSwitch {
-        pub fn new(enabled: bool) -> Self {
-            Self(Arc::new(AtomicBool::new(enabled)))
+        pub fn new(master: bool, libraries: VendorMask) -> Self {
+            Self(Arc::new(Switches {
+                master: AtomicBool::new(master),
+                libraries: AtomicU8::new(libraries.0),
+            }))
         }
 
         pub fn enabled(&self) -> bool {
-            self.0.load(Ordering::Relaxed)
+            self.0.master.load(Ordering::Relaxed)
         }
 
         pub fn enable(&self) {
-            self.0.store(true, Ordering::Relaxed);
+            self.0.master.store(true, Ordering::Relaxed);
+        }
+
+        pub fn set_libraries(&self, libraries: VendorMask) {
+            self.0.libraries.store(libraries.0, Ordering::Relaxed);
+        }
+
+        pub fn effective(&self) -> VendorMask {
+            if self.enabled() {
+                VendorMask(self.0.libraries.load(Ordering::Relaxed))
+            } else {
+                VendorMask::NONE
+            }
         }
     }
 }
@@ -291,6 +393,7 @@ mod tests {
     use super::*;
     use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
     use oma_core::provider::{Inventory, Provider, ProviderError};
+    use oma_core::settings::VendorLibraries;
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -496,7 +599,7 @@ mod tests {
 
     #[test]
     fn enabling_vendor_libraries_leaves_safe_mode() {
-        let switch = VendorSwitch::new(false);
+        let switch = VendorSwitch::new(false, VendorMask::ALL);
         let state = StartupState::new(switch.clone(), StartupStatus::at_startup(true, None));
         assert!(state.current().safe_mode);
 
@@ -505,5 +608,89 @@ mod tests {
         assert!(!status.safe_mode);
         assert_eq!(status.reason, Some(SafeModeReason::Flag));
         assert!(!state.current().safe_mode);
+    }
+
+    fn vendor_store() -> Arc<SettingsStore> {
+        Arc::new(crate::settings::fake_fs::open_fast(
+            &crate::settings::fake_fs::FakeFs::new(),
+        ))
+    }
+
+    fn only(vendors: &[Vendor]) -> VendorMask {
+        vendors
+            .iter()
+            .fold(VendorMask::NONE, |mask, v| mask.with(*v, true))
+    }
+
+    #[test]
+    fn the_mask_follows_the_library_switches() {
+        let mut libraries = VendorLibraries::default();
+        assert_eq!(vendor_mask(&libraries), VendorMask::ALL);
+        libraries.nvapi = false;
+        libraries.igcl = false;
+        assert_eq!(vendor_mask(&libraries), only(&[Vendor::Nvml, Vendor::Adl]));
+    }
+
+    #[test]
+    fn a_library_switch_reaches_the_gpu_switch_and_reports_applied() {
+        let store = vendor_store();
+        let switch = VendorSwitch::new(true, VendorMask::ALL);
+        follow_vendor_libraries(&store, switch.clone(), VendorMask::ALL);
+        assert_eq!(
+            store.state().apply_status.vendor_libraries,
+            EffectStatus::Idle,
+            "nothing changed yet"
+        );
+
+        store.update_with(|s| s.sources.vendor_libraries.nvml = false);
+        assert_eq!(
+            switch.effective(),
+            only(&[Vendor::Nvapi, Vendor::Adl, Vendor::Igcl])
+        );
+        assert_eq!(
+            store.state().apply_status.vendor_libraries,
+            EffectStatus::Applied
+        );
+    }
+
+    #[test]
+    fn other_settings_leave_the_gpu_switch_alone() {
+        let store = vendor_store();
+        let switch = VendorSwitch::new(true, VendorMask::ALL);
+        follow_vendor_libraries(&store, switch.clone(), VendorMask::ALL);
+        store.update_with(|s| s.general.interval_ms = 2_000);
+        store.update_with(|s| s.sources.anti_cheat = true);
+        assert_eq!(switch.effective(), VendorMask::ALL);
+        assert_eq!(
+            store.state().apply_status.vendor_libraries,
+            EffectStatus::Idle
+        );
+    }
+
+    #[test]
+    fn a_change_made_before_following_is_not_lost() {
+        let store = vendor_store();
+        store.update_with(|s| s.sources.vendor_libraries.adl = false);
+        let switch = VendorSwitch::new(true, VendorMask::ALL);
+        follow_vendor_libraries(&store, switch.clone(), VendorMask::ALL);
+        assert_eq!(
+            switch.effective(),
+            only(&[Vendor::Nvml, Vendor::Nvapi, Vendor::Igcl])
+        );
+    }
+
+    #[test]
+    fn safe_mode_keeps_the_master_off_while_switches_change() {
+        let store = vendor_store();
+        let switch = VendorSwitch::new(false, VendorMask::ALL);
+        follow_vendor_libraries(&store, switch.clone(), VendorMask::ALL);
+        store.update_with(|s| s.sources.vendor_libraries.nvml = false);
+        assert!(!switch.enabled());
+        assert_eq!(switch.effective(), VendorMask::NONE);
+        switch.enable();
+        assert_eq!(
+            switch.effective(),
+            only(&[Vendor::Nvapi, Vendor::Adl, Vendor::Igcl])
+        );
     }
 }

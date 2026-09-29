@@ -6,7 +6,7 @@ use std::time::Duration;
 use oma_core::model::{Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
 use oma_win::cpu::CpuProvider;
-use oma_win::gpu::{GpuProcessTable, GpuProvider, VendorSwitch};
+use oma_win::gpu::{GpuProcessTable, GpuProvider, Vendor, VendorMask, VendorSwitch};
 use oma_win::memory::MemoryProvider;
 use oma_win::network::NetworkProvider;
 use oma_win::storage::StorageProvider;
@@ -227,7 +227,10 @@ fn assert_gpu_devices(inventory: &Inventory) {
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_finds_both_gpus_with_merged_sources() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut p = GpuProvider::new(VendorSwitch::new(true), GpuProcessTable::new());
+    let mut p = GpuProvider::new(
+        VendorSwitch::new(true, VendorMask::ALL),
+        GpuProcessTable::new(),
+    );
     let (inventory, values) = discover_and_poll(&mut p);
     assert_gpu_devices(&inventory);
 
@@ -270,7 +273,10 @@ fn gpu_provider_finds_both_gpus_with_merged_sources() {
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_in_safe_mode_uses_only_base_layers() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut p = GpuProvider::new(VendorSwitch::new(false), GpuProcessTable::new());
+    let mut p = GpuProvider::new(
+        VendorSwitch::new(false, VendorMask::ALL),
+        GpuProcessTable::new(),
+    );
     let (inventory, values) = discover_and_poll(&mut p);
     assert_gpu_devices(&inventory);
     for sensor in &inventory.sensors {
@@ -309,7 +315,10 @@ fn gpu_property<'a>(inventory: &'a Inventory, id: &str, key: &str) -> Option<&'a
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_reports_pcie_link_and_static_limits() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut p = GpuProvider::new(VendorSwitch::new(true), GpuProcessTable::new());
+    let mut p = GpuProvider::new(
+        VendorSwitch::new(true, VendorMask::ALL),
+        GpuProcessTable::new(),
+    );
     let (inventory, values) = discover_and_poll(&mut p);
     assert_gpu_devices(&inventory);
 
@@ -357,7 +366,10 @@ fn gpu_provider_reports_pcie_link_and_static_limits() {
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_in_safe_mode_keeps_the_pnp_max_link() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut p = GpuProvider::new(VendorSwitch::new(false), GpuProcessTable::new());
+    let mut p = GpuProvider::new(
+        VendorSwitch::new(false, VendorMask::ALL),
+        GpuProcessTable::new(),
+    );
     let inventory = p.discover().expect("discover");
     for id in [NVIDIA, AMD] {
         assert_eq!(
@@ -380,7 +392,7 @@ fn gpu_provider_in_safe_mode_keeps_the_pnp_max_link() {
 fn gpu_provider_publishes_per_process_usage() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
     let processes = GpuProcessTable::new();
-    let mut p = GpuProvider::new(VendorSwitch::new(true), processes.clone());
+    let mut p = GpuProvider::new(VendorSwitch::new(true, VendorMask::ALL), processes.clone());
     discover_and_poll(&mut p);
 
     let rows = processes.processes(NVIDIA);
@@ -405,7 +417,7 @@ fn gpu_provider_publishes_per_process_usage() {
 #[ignore = "requires real Windows hardware"]
 fn gpu_provider_loads_vendor_libraries_when_reenabled() {
     let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let switch = VendorSwitch::new(false);
+    let switch = VendorSwitch::new(false, VendorMask::ALL);
     let mut p = GpuProvider::new(switch.clone(), GpuProcessTable::new());
     p.discover().expect("discover in safe mode");
     p.poll().expect("poll in safe mode");
@@ -415,4 +427,30 @@ fn gpu_provider_loads_vendor_libraries_when_reenabled() {
     let inventory = p.discover().expect("discover with vendor libraries");
     let (_, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
     assert_eq!(temperature.source, Source::Nvml);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_provider_honours_per_library_switches() {
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let switch = VendorSwitch::new(true, VendorMask::ALL.with(Vendor::Nvml, false));
+    let mut p = GpuProvider::new(switch.clone(), GpuProcessTable::new());
+    let inventory = p.discover().expect("discover without NVML");
+    let (_, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_ne!(temperature.source, Source::Nvml);
+    p.poll().expect("poll without NVML");
+
+    switch.set_libraries(VendorMask::ALL);
+    assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+    let inventory = p.discover().expect("discover with NVML");
+    let (_, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_eq!(temperature.source, Source::Nvml);
+
+    // Switching NVML off again leaves the loaded library alone and falls back.
+    switch.set_libraries(VendorMask::ALL.with(Vendor::Nvml, false));
+    assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+    let inventory = p.discover().expect("discover with NVML off again");
+    let (_, temperature) = gpu_sensor(&inventory, NVIDIA, "temperature/core");
+    assert_ne!(temperature.source, Source::Nvml);
+    p.poll().expect("poll with NVML off again");
 }

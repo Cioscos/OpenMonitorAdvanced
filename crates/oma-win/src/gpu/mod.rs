@@ -22,7 +22,7 @@ pub(crate) mod trim;
 pub use processes::{GpuProcess, GpuProcessTable};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use oma_core::merge;
@@ -33,28 +33,109 @@ use adapter::{Adapter, PciAddress};
 use field::GpuField;
 use layer::{GpuLayer, Readings};
 
-/// Shared on/off switch for GPU vendor libraries (safe mode, spec §8).
+/// A GPU vendor library, in merge priority order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vendor {
+    Nvml,
+    Nvapi,
+    Adl,
+    Igcl,
+}
+
+impl Vendor {
+    const ALL: [Vendor; 4] = [Vendor::Nvml, Vendor::Nvapi, Vendor::Adl, Vendor::Igcl];
+
+    fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// Which vendor libraries are switched on: one bit per [`Vendor`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct VendorMask(u8);
+
+impl VendorMask {
+    pub const NONE: VendorMask = VendorMask(0);
+    pub const ALL: VendorMask = VendorMask(0b1111);
+
+    pub fn contains(self, vendor: Vendor) -> bool {
+        self.0 & vendor.bit() != 0
+    }
+
+    #[must_use]
+    pub fn with(self, vendor: Vendor, on: bool) -> Self {
+        if on {
+            Self(self.0 | vendor.bit())
+        } else {
+            Self(self.0 & !vendor.bit())
+        }
+    }
+}
+
+/// Shared switches for the GPU vendor libraries. The master is safe mode
+/// (spec §8) and wins over the per-library switches of the settings
+/// (spec M5 §2.5). Every operation is a single atomic access, so any thread
+/// may call them; the GPU provider notices a change on its next poll.
 #[derive(Debug, Clone, Default)]
-pub struct VendorSwitch(Arc<AtomicBool>);
+pub struct VendorSwitch(Arc<Switches>);
+
+#[derive(Debug, Default)]
+struct Switches {
+    master: AtomicBool,
+    libraries: AtomicU8,
+}
 
 impl VendorSwitch {
-    pub fn new(enabled: bool) -> Self {
-        Self(Arc::new(AtomicBool::new(enabled)))
+    /// `master` is `!safe_mode`; `libraries` are the per-library switches.
+    pub fn new(master: bool, libraries: VendorMask) -> Self {
+        Self(Arc::new(Switches {
+            master: AtomicBool::new(master),
+            libraries: AtomicU8::new(libraries.0),
+        }))
     }
 
+    /// The master switch: false while in safe mode.
     pub fn enabled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.master.load(Ordering::Acquire)
     }
 
-    /// Turns vendor libraries on for every clone of this switch. The GPU
-    /// provider notices on its next poll and rediscovers.
+    /// Turns the master on for every clone of this switch ("Re-enable"); the
+    /// per-library switches still apply.
     pub fn enable(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.master.store(true, Ordering::Release);
+    }
+
+    /// Replaces the per-library switches. A library already loaded stays
+    /// loaded (D1): switching it off only leaves it out of the next discovery.
+    pub fn set_libraries(&self, libraries: VendorMask) {
+        self.0.libraries.store(libraries.0, Ordering::Release);
+    }
+
+    /// The libraries that may be used now: the switches while the master is
+    /// on, none in safe mode.
+    pub fn effective(&self) -> VendorMask {
+        if self.enabled() {
+            VendorMask(self.0.libraries.load(Ordering::Acquire))
+        } else {
+            VendorMask::NONE
+        }
     }
 }
 
 type Enumerate = Box<dyn FnMut() -> Result<Vec<Adapter>, ProviderError> + Send>;
-type MakeVendor = Box<dyn FnMut() -> Vec<Box<dyn GpuLayer>> + Send>;
+/// Loads one vendor library and wraps it in its layer; `None` when the
+/// library is absent or fails to initialise. Called at most once.
+type MakeLayer = Box<dyn FnOnce() -> Option<Box<dyn GpuLayer>> + Send>;
+
+/// One vendor library of the provider: created by the first discovery that
+/// sees it switched on, then kept for the process lifetime (D1).
+enum VendorSlot {
+    /// Not created yet.
+    Pending(MakeLayer),
+    /// Creation was tried: the library is absent or failed to initialise.
+    Absent,
+    Loaded(Box<dyn GpuLayer>),
+}
 
 /// Where the value of one sensor comes from.
 struct Slot {
@@ -71,8 +152,8 @@ struct State {
     /// Last successful topology, including the empty-adapter case.
     topology: Vec<Adapter>,
     topology_checked: Option<std::time::Instant>,
-    /// Switch state seen at discover; a change means rediscover.
-    vendor_on: bool,
+    /// Effective vendor mask seen at discover; a change means rediscover.
+    vendor_mask: VendorMask,
     /// One entry per sensor, in inventory order.
     slots: Vec<Slot>,
     /// Per active layer: already warned about a failing sample in this streak.
@@ -82,9 +163,8 @@ struct State {
 pub struct GpuProvider {
     enumerate: Enumerate,
     base: Vec<Box<dyn GpuLayer>>,
-    vendor: Vec<Box<dyn GpuLayer>>,
-    /// Taken (so called at most once) by the first discover with the switch on.
-    make_vendor: Option<MakeVendor>,
+    /// One slot per vendor library, in [`Vendor::ALL`] order.
+    vendor: Vec<VendorSlot>,
     switch: VendorSwitch,
     state: State,
     /// PCI address last seen per LUID, kept across discovers (see `restore_pci`).
@@ -94,19 +174,24 @@ pub struct GpuProvider {
 }
 
 impl GpuProvider {
-    /// Test/assembly constructor. `vendor` layers are created by `make_vendor` only while the switch is on,
-    /// once, on the first discover that sees the switch on; they then stay for the process lifetime (D1).
+    /// Test/assembly constructor. A vendor layer is created by its `MakeLayer`
+    /// on the first discover that sees its library in the effective mask, and
+    /// then stays for the process lifetime (D1), used or not.
     pub(crate) fn with_layers(
         enumerate: Enumerate,
         base: Vec<Box<dyn GpuLayer>>, // priority order: d3dkmt, dxgi, pdh, pnp
-        make_vendor: MakeVendor,      // priority order: nvml, nvapi, adl, igcl
+        make_vendor: [(Vendor, MakeLayer); 4],
         switch: VendorSwitch,
     ) -> Self {
+        let mut make_vendor = make_vendor;
+        make_vendor.sort_by_key(|(vendor, _)| *vendor as u8);
         Self {
             enumerate,
             base,
-            vendor: Vec::new(),
-            make_vendor: Some(make_vendor),
+            vendor: make_vendor
+                .into_iter()
+                .map(|(_, make)| VendorSlot::Pending(make))
+                .collect(),
             switch,
             state: State::default(),
             known_pci: HashMap::new(),
@@ -114,17 +199,40 @@ impl GpuProvider {
         }
     }
 
-    /// Active layers in priority order: vendor layers (only while on) ++ base layers.
-    fn active_layers(&mut self, vendor_on: bool) -> Vec<&mut Box<dyn GpuLayer>> {
-        let vendor: &mut [Box<dyn GpuLayer>] = if vendor_on { &mut self.vendor } else { &mut [] };
-        vendor.iter_mut().chain(self.base.iter_mut()).collect()
+    /// Creates the layers of the libraries in `mask` that were never tried.
+    fn load_vendors(&mut self, mask: VendorMask) {
+        for (slot, vendor) in self.vendor.iter_mut().zip(Vendor::ALL) {
+            if mask.contains(vendor) && matches!(slot, VendorSlot::Pending(_)) {
+                let VendorSlot::Pending(make) = std::mem::replace(slot, VendorSlot::Absent) else {
+                    continue;
+                };
+                if let Some(layer) = make() {
+                    *slot = VendorSlot::Loaded(layer);
+                }
+            }
+        }
+    }
+
+    /// Active layers in priority order: the loaded vendor layers whose library
+    /// is in `mask` (nvml, nvapi, adl, igcl), then the base layers.
+    fn active_layers(&mut self, mask: VendorMask) -> Vec<&mut Box<dyn GpuLayer>> {
+        let vendor =
+            self.vendor
+                .iter_mut()
+                .zip(Vendor::ALL)
+                .filter_map(|(slot, vendor)| match slot {
+                    VendorSlot::Loaded(layer) if mask.contains(vendor) => Some(layer),
+                    _ => None,
+                });
+        vendor.chain(self.base.iter_mut()).collect()
     }
 }
 
 impl GpuProvider {
     /// The real provider: DXGI/DXCore/D3DKMT enumeration, the base layers
     /// (D3DKMT, DXGI, PDH, PnP) always on, and the vendor libraries (NVML,
-    /// NVAPI, ADL, IGCL) loaded on the first discover that sees `switch` on.
+    /// NVAPI, ADL, IGCL) each loaded on the first discover that sees it
+    /// switched on in `switch`.
     /// The PDH layer publishes the per-process GPU usage into `processes`.
     pub fn new(switch: VendorSwitch, processes: GpuProcessTable) -> Self {
         let mut provider = Self::with_layers(
@@ -135,7 +243,12 @@ impl GpuProvider {
                 Box::new(pdh::PdhLayer::new(processes.clone())),
                 Box::new(pnp::PnpLayer::default()),
             ],
-            Box::new(load_vendor_layers),
+            [
+                (Vendor::Nvml, load_vendor(nvml::NvmlLayer::load)),
+                (Vendor::Nvapi, load_vendor(nvapi::NvapiLayer::load)),
+                (Vendor::Adl, load_vendor(adl::AdlLayer::load)),
+                (Vendor::Igcl, load_vendor(igcl::IgclLayer::load)),
+            ],
             switch,
         );
         provider.processes = processes;
@@ -143,23 +256,20 @@ impl GpuProvider {
     }
 }
 
-/// Loads every GPU vendor library installed on this machine, in merge
-/// priority order. A library that is absent or fails to initialise is
-/// skipped. Called at most once per provider: loaded libraries stay for the
-/// process lifetime (decision D1).
-fn load_vendor_layers() -> Vec<Box<dyn GpuLayer>> {
-    let candidates: [Option<Box<dyn GpuLayer>>; 4] = [
-        nvml::NvmlLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
-        nvapi::NvapiLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
-        adl::AdlLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
-        igcl::IgclLayer::load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>),
-    ];
-    let layers: Vec<Box<dyn GpuLayer>> = candidates.into_iter().flatten().collect();
-    let sources: Vec<_> = layers.iter().map(|layer| layer.source()).collect();
-    tracing::info!(?sources, "GPU vendor libraries loaded");
-    // A vendor DLL may have installed its own top-level exception filter.
-    crate::crash::rearm_crash_marker();
-    layers
+/// Wraps the loader of one vendor library. A library that is absent or fails
+/// to initialise gives no layer. Called at most once per provider: a loaded
+/// library stays for the process lifetime (decision D1).
+fn load_vendor<L: GpuLayer + 'static>(load: fn() -> Option<L>) -> MakeLayer {
+    Box::new(move || {
+        let layer = load().map(|layer| Box::new(layer) as Box<dyn GpuLayer>);
+        tracing::info!(
+            source = ?layer.as_ref().map(|layer| layer.source()),
+            "GPU vendor library loaded"
+        );
+        // A vendor DLL may have installed its own top-level exception filter.
+        crate::crash::rearm_crash_marker();
+        layer
+    })
 }
 
 /// Gives back the PCI address of an adapter whose kernel query failed this time but
@@ -215,14 +325,10 @@ impl Provider for GpuProvider {
         self.state = State::default();
         let mut adapters = (self.enumerate)()?;
         restore_pci(&mut self.known_pci, &mut adapters);
-        let vendor_on = self.switch.enabled();
-        if vendor_on {
-            if let Some(mut make_vendor) = self.make_vendor.take() {
-                self.vendor = make_vendor();
-            }
-        }
+        let vendor_mask = self.switch.effective();
+        self.load_vendors(vendor_mask);
         let count = adapters.len();
-        let mut layers = self.active_layers(vendor_on);
+        let mut layers = self.active_layers(vendor_mask);
         let supported: Vec<Vec<BTreeSet<GpuField>>> = layers
             .iter_mut()
             .map(|layer| {
@@ -291,7 +397,7 @@ impl Provider for GpuProvider {
             adapters: count,
             topology: adapters,
             topology_checked: Some(std::time::Instant::now()),
-            vendor_on,
+            vendor_mask,
             slots,
             failing,
         };
@@ -310,11 +416,12 @@ impl Provider for GpuProvider {
 
 impl GpuProvider {
     fn poll_inner(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
-        // Re-enabling vendor libraries ("Riattiva") is observed only here. While the
-        // engine backs this provider off (repeated failures, or repeated Rediscovers
-        // per decision D8) poll is not called, so the switch can take up to the
-        // 60 s maximum backoff to be picked up.
-        if self.switch.enabled() != self.state.vendor_on {
+        // A change of the vendor libraries in use (a per-library switch, or
+        // "Riattiva") is observed only here. While the engine backs this provider
+        // off (repeated failures, or repeated Rediscovers per decision D8) poll is
+        // not called, so a change can take up to the 60 s maximum backoff to be
+        // picked up.
+        if self.switch.effective() != self.state.vendor_mask {
             return Err(ProviderError::Rediscover);
         }
         // A newly connected GPU cannot invalidate a handle that we never opened.
@@ -333,10 +440,10 @@ impl GpuProvider {
             }
         }
         let count = self.state.adapters;
-        let vendor_on = self.state.vendor_on;
+        let vendor_mask = self.state.vendor_mask;
         let mut samples: Vec<Option<Vec<Readings>>> = Vec::new();
         let mut failed = Vec::new();
-        for layer in self.active_layers(vendor_on) {
+        for layer in self.active_layers(vendor_mask) {
             match layer.sample() {
                 Ok(readings) if readings.len() == count => {
                     samples.push(Some(readings));
@@ -396,6 +503,8 @@ mod tests {
         wrong_len: Option<usize>,
         attach_calls: usize,
         sample_calls: usize,
+        /// Times a `FakeLayer` sharing this script was dropped.
+        drops: usize,
         /// Per adapter: the static properties the layer reports.
         properties: Vec<BTreeMap<String, String>>,
     }
@@ -404,6 +513,12 @@ mod tests {
         source: Source,
         experimental: Vec<GpuField>,
         script: Arc<Mutex<Script>>,
+    }
+
+    impl Drop for FakeLayer {
+        fn drop(&mut self) {
+            self.script.lock().unwrap().drops += 1;
+        }
     }
 
     impl GpuLayer for FakeLayer {
@@ -446,6 +561,8 @@ mod tests {
             s.properties.get(adapter).cloned().unwrap_or_default()
         }
     }
+
+    type Shared = Arc<Mutex<Script>>;
 
     /// A fake layer; `per_adapter[i]` lists the fields (and values) it has for adapter `i`.
     fn fake(
@@ -514,23 +631,61 @@ mod tests {
         }
     }
 
-    /// Builds a provider; the returned counter counts `make_vendor` calls.
+    /// Creation counts per vendor library, shared with the `make` closures.
+    #[derive(Clone, Default)]
+    struct Made(Arc<[AtomicUsize; 4]>);
+
+    impl Made {
+        fn of(&self, vendor: Vendor) -> usize {
+            self.0[vendor as usize].load(Ordering::SeqCst)
+        }
+
+        fn total(&self) -> usize {
+            self.0.iter().map(|n| n.load(Ordering::SeqCst)).sum()
+        }
+    }
+
+    /// One maker per vendor library: it counts its calls and hands out the layer
+    /// whose `source()` matches (none for a library "not installed").
+    fn makers(layers: Vec<Box<dyn GpuLayer>>, made: &Made) -> [(Vendor, MakeLayer); 4] {
+        let mut layers: Vec<Option<Box<dyn GpuLayer>>> = layers.into_iter().map(Some).collect();
+        let mut take = |source: Source| {
+            layers
+                .iter_mut()
+                .find(|slot| slot.as_ref().is_some_and(|l| l.source() == source))
+                .and_then(Option::take)
+        };
+        let mut maker = |vendor: Vendor, source: Source| -> (Vendor, MakeLayer) {
+            let layer = take(source);
+            let made = made.clone();
+            (
+                vendor,
+                Box::new(move || {
+                    made.0[vendor as usize].fetch_add(1, Ordering::SeqCst);
+                    layer
+                }),
+            )
+        };
+        [
+            maker(Vendor::Nvml, Source::Nvml),
+            maker(Vendor::Nvapi, Source::Nvapi),
+            maker(Vendor::Adl, Source::Adl),
+            maker(Vendor::Igcl, Source::Igcl),
+        ]
+    }
+
+    /// Builds a provider; vendor layers are matched to their library by `source()`.
     fn provider(
         adapters: Vec<Adapter>,
         base: Vec<Box<dyn GpuLayer>>,
         vendor: Vec<Box<dyn GpuLayer>>,
         switch: &VendorSwitch,
-    ) -> (GpuProvider, Arc<AtomicUsize>) {
-        let made = Arc::new(AtomicUsize::new(0));
-        let counter = made.clone();
-        let mut vendor = Some(vendor);
+    ) -> (GpuProvider, Made) {
+        let made = Made::default();
         let provider = GpuProvider::with_layers(
             Box::new(move || Ok(adapters.clone())),
             base,
-            Box::new(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                vendor.take().unwrap_or_default()
-            }),
+            makers(vendor, &made),
             switch.clone(),
         );
         (provider, made)
@@ -557,7 +712,7 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt, pdh],
             vec![nvml],
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
         assert_eq!(
@@ -591,7 +746,7 @@ mod tests {
             vec![nvidia(), amd_igpu()],
             vec![d3dkmt],
             vec![nvml],
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
         assert_eq!(
@@ -615,7 +770,7 @@ mod tests {
             ],
             Vec::new(),
             Vec::new(),
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
         let ids: Vec<_> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
@@ -661,7 +816,7 @@ mod tests {
             vec![nvidia()],
             Vec::new(),
             vec![Box::new(nvapi)],
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
         let flags: Vec<_> = inventory
@@ -685,7 +840,7 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt],
             Vec::new(),
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         p.discover().unwrap();
         script
@@ -707,7 +862,7 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt, pdh],
             Vec::new(),
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         p.discover().unwrap();
         script
@@ -727,7 +882,7 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt, pdh],
             Vec::new(),
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         p.discover().unwrap();
         script.lock().unwrap().wrong_len = Some(2);
@@ -744,10 +899,14 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt, dxgi],
             Vec::new(),
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
-        assert_eq!(made.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            made.total(),
+            4,
+            "each library is tried once and found absent"
+        );
         assert_eq!(
             ids_and_sources(&inventory),
             vec![
@@ -769,7 +928,7 @@ mod tests {
             vec![nvidia()],
             vec![d3dkmt],
             vec![nvml],
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         for _ in 0..2 {
             let inventory = p.discover().unwrap();
@@ -779,13 +938,13 @@ mod tests {
             );
             assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
         }
-        assert_eq!(made.load(Ordering::SeqCst), 0);
+        assert_eq!(made.total(), 0);
         assert_eq!(nvml_script.lock().unwrap().attach_calls, 0);
     }
 
     #[test]
     fn enabling_switch_triggers_rediscover() {
-        let switch = VendorSwitch::new(false);
+        let switch = VendorSwitch::new(false, VendorMask::ALL);
         let (nvml, nvml_script) = fake(Source::Nvml, &[&[(GpuField::TemperatureCore, 54.0)]]);
         let (d3dkmt, d3dkmt_script) = fake(Source::D3dkmt, &[&[(GpuField::TemperatureCore, 50.0)]]);
         let (mut p, made) = provider(vec![nvidia()], vec![d3dkmt], vec![nvml], &switch);
@@ -810,7 +969,7 @@ mod tests {
         assert_eq!(p.poll(), Err(ProviderError::Rediscover));
         p.discover().unwrap();
         assert_eq!(p.poll().unwrap(), vec![Some(54.0)]);
-        assert_eq!(made.load(Ordering::SeqCst), 1);
+        assert_eq!(made.of(Vendor::Nvml), 1);
         assert_eq!(nvml_script.lock().unwrap().attach_calls, 2);
     }
 
@@ -821,7 +980,7 @@ mod tests {
             Vec::new(),
             vec![d3dkmt],
             Vec::new(),
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         assert_eq!(p.discover().unwrap(), Inventory::default());
         assert_eq!(p.poll().unwrap(), Vec::<Option<f64>>::new());
@@ -829,32 +988,184 @@ mod tests {
 
     #[test]
     fn enumeration_error_is_returned_and_loads_nothing() {
-        let made = Arc::new(AtomicUsize::new(0));
-        let counter = made.clone();
+        let made = Made::default();
         let mut p = GpuProvider::with_layers(
             Box::new(|| Err(ProviderError::Failed("DXGI unavailable".into()))),
             Vec::new(),
-            Box::new(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Vec::new()
-            }),
-            VendorSwitch::new(true),
+            makers(Vec::new(), &made),
+            VendorSwitch::new(true, VendorMask::ALL),
         );
         assert_eq!(
             p.discover(),
             Err(ProviderError::Failed("DXGI unavailable".into()))
         );
-        assert_eq!(made.load(Ordering::SeqCst), 0);
+        assert_eq!(made.total(), 0);
     }
 
     #[test]
     fn vendor_switch_is_shared_between_clones() {
         assert!(!VendorSwitch::default().enabled());
-        let a = VendorSwitch::new(false);
+        assert_eq!(VendorSwitch::default().effective(), VendorMask::NONE);
+        let a = VendorSwitch::new(false, VendorMask::ALL);
         let b = a.clone();
         b.enable();
         assert!(a.enabled());
-        assert!(VendorSwitch::new(true).enabled());
+        b.set_libraries(VendorMask::NONE.with(Vendor::Adl, true));
+        assert_eq!(a.effective(), VendorMask::NONE.with(Vendor::Adl, true));
+        assert!(VendorSwitch::new(true, VendorMask::ALL).enabled());
+    }
+
+    #[test]
+    fn vendor_mask_has_one_bit_per_library() {
+        let vendors = [Vendor::Nvml, Vendor::Nvapi, Vendor::Adl, Vendor::Igcl];
+        for v in vendors {
+            assert!(VendorMask::ALL.contains(v));
+            assert!(!VendorMask::NONE.contains(v));
+            let only = VendorMask::NONE.with(v, true);
+            for other in vendors {
+                assert_eq!(only.contains(other), other == v);
+            }
+            assert_eq!(
+                VendorMask::ALL.with(v, false).with(v, true),
+                VendorMask::ALL
+            );
+        }
+        assert_eq!(VendorMask::default(), VendorMask::NONE);
+    }
+
+    /// All four libraries installed, each with a distinct temperature.
+    fn four_vendors() -> Vec<(Box<dyn GpuLayer>, Shared)> {
+        [
+            (Source::Nvml, 54.0),
+            (Source::Nvapi, 55.0),
+            (Source::Adl, 56.0),
+            (Source::Igcl, 57.0),
+        ]
+        .into_iter()
+        .map(|(source, celsius)| fake(source, &[&[(GpuField::TemperatureCore, celsius)]]))
+        .collect()
+    }
+
+    fn temperature_source(inventory: &Inventory) -> Source {
+        inventory
+            .sensors
+            .iter()
+            .find(|s| s.id.ends_with("temperature/core"))
+            .expect("a core temperature")
+            .source
+    }
+
+    #[test]
+    fn disabled_vendor_is_never_created() {
+        let switch = VendorSwitch::new(true, VendorMask::ALL.with(Vendor::Nvml, false));
+        let (layers, _): (Vec<_>, Vec<_>) = four_vendors().into_iter().unzip();
+        let (mut p, made) = provider(vec![nvidia()], Vec::new(), layers, &switch);
+        let inventory = p.discover().unwrap();
+        assert_eq!(made.of(Vendor::Nvml), 0);
+        for v in [Vendor::Nvapi, Vendor::Adl, Vendor::Igcl] {
+            assert_eq!(made.of(v), 1);
+        }
+        assert_eq!(temperature_source(&inventory), Source::Nvapi);
+    }
+
+    #[test]
+    fn enabling_one_vendor_creates_only_that_layer() {
+        let switch = VendorSwitch::new(true, VendorMask::NONE.with(Vendor::Adl, true));
+        let (layers, scripts): (Vec<_>, Vec<_>) = four_vendors().into_iter().unzip();
+        let (mut p, made) = provider(vec![nvidia()], Vec::new(), layers, &switch);
+        let inventory = p.discover().unwrap();
+        assert_eq!(made.total(), 1);
+        assert_eq!(made.of(Vendor::Adl), 1);
+        assert_eq!(temperature_source(&inventory), Source::Adl);
+        assert_eq!(p.poll().unwrap(), vec![Some(56.0)]);
+        let attached: Vec<_> = scripts
+            .iter()
+            .map(|s| s.lock().unwrap().attach_calls)
+            .collect();
+        assert_eq!(attached, [0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn disabling_a_loaded_vendor_excludes_it_without_dropping() {
+        let switch = VendorSwitch::new(true, VendorMask::ALL);
+        let (nvml, nvml_script) = fake(Source::Nvml, &[&[(GpuField::TemperatureCore, 54.0)]]);
+        let (d3dkmt, _) = fake(Source::D3dkmt, &[&[(GpuField::TemperatureCore, 50.0)]]);
+        let (mut p, made) = provider(vec![nvidia()], vec![d3dkmt], vec![nvml], &switch);
+        let inventory = p.discover().unwrap();
+        assert_eq!(temperature_source(&inventory), Source::Nvml);
+
+        switch.set_libraries(VendorMask::ALL.with(Vendor::Nvml, false));
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        let inventory = p.discover().unwrap();
+        assert_eq!(temperature_source(&inventory), Source::D3dkmt);
+        assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
+        {
+            let script = nvml_script.lock().unwrap();
+            assert_eq!(script.drops, 0, "a loaded library is never unloaded");
+            assert_eq!(script.attach_calls, 1, "excluded from discovery");
+            assert_eq!(script.sample_calls, 0, "and from polling");
+        }
+
+        // Switching it back on reuses the layer: no second creation, no drop.
+        switch.set_libraries(VendorMask::ALL);
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        let inventory = p.discover().unwrap();
+        assert_eq!(temperature_source(&inventory), Source::Nvml);
+        assert_eq!(made.of(Vendor::Nvml), 1);
+        assert_eq!(nvml_script.lock().unwrap().drops, 0);
+    }
+
+    #[test]
+    fn mask_change_requests_rediscover() {
+        let switch = VendorSwitch::new(true, VendorMask::ALL);
+        let (d3dkmt, _) = fake(Source::D3dkmt, &[&[(GpuField::TemperatureCore, 50.0)]]);
+        let (mut p, _) = provider(vec![nvidia()], vec![d3dkmt], Vec::new(), &switch);
+        p.discover().unwrap();
+        assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
+        switch.set_libraries(VendorMask::ALL); // same mask: nothing to do
+        assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
+        switch.set_libraries(VendorMask::ALL.with(Vendor::Igcl, false));
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        p.discover().unwrap();
+        assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
+    }
+
+    #[test]
+    fn safe_mode_master_overrides_libraries() {
+        let switch = VendorSwitch::new(false, VendorMask::ALL);
+        assert!(!switch.enabled());
+        assert_eq!(switch.effective(), VendorMask::NONE);
+        let (layers, _): (Vec<_>, Vec<_>) = four_vendors().into_iter().unzip();
+        let (d3dkmt, _) = fake(Source::D3dkmt, &[&[(GpuField::TemperatureCore, 50.0)]]);
+        let (mut p, made) = provider(vec![nvidia()], vec![d3dkmt], layers, &switch);
+        let inventory = p.discover().unwrap();
+        assert_eq!(temperature_source(&inventory), Source::D3dkmt);
+        // Changing switches in safe mode changes nothing that is visible.
+        switch.set_libraries(VendorMask::NONE);
+        switch.set_libraries(VendorMask::ALL);
+        assert_eq!(p.poll().unwrap(), vec![Some(50.0)]);
+        assert_eq!(made.total(), 0);
+    }
+
+    #[test]
+    fn reenable_respects_library_switches() {
+        let switch = VendorSwitch::new(false, VendorMask::NONE.with(Vendor::Igcl, true));
+        let (layers, _): (Vec<_>, Vec<_>) = four_vendors().into_iter().unzip();
+        let (d3dkmt, _) = fake(Source::D3dkmt, &[&[(GpuField::TemperatureCore, 50.0)]]);
+        let (mut p, made) = provider(vec![nvidia()], vec![d3dkmt], layers, &switch);
+        p.discover().unwrap();
+        assert_eq!(made.total(), 0);
+
+        switch.enable();
+        assert_eq!(
+            switch.effective(),
+            VendorMask::NONE.with(Vendor::Igcl, true)
+        );
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        let inventory = p.discover().unwrap();
+        assert_eq!(temperature_source(&inventory), Source::Igcl);
+        assert_eq!(made.total(), 1);
+        assert_eq!(made.of(Vendor::Igcl), 1);
     }
 
     fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -880,7 +1191,7 @@ mod tests {
             vec![nvidia(), amd_igpu()],
             vec![pnp],
             vec![nvml],
-            &VendorSwitch::new(true),
+            &VendorSwitch::new(true, VendorMask::ALL),
         );
         let inventory = p.discover().unwrap();
         let nv = &inventory.devices[0].properties;
@@ -918,7 +1229,7 @@ mod tests {
             vec![nvidia()],
             vec![pnp],
             vec![nvml],
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         let device = &p.discover().unwrap().devices[0];
         assert_eq!(device.properties["pcieMaxGen"], "4");
@@ -932,8 +1243,8 @@ mod tests {
         let mut gpu = GpuProvider::with_layers(
             Box::new(move || Ok(enumerated.lock().unwrap().clone())),
             vec![],
-            Box::new(Vec::new),
-            VendorSwitch::new(false),
+            makers(Vec::new(), &Made::default()),
+            VendorSwitch::new(false, VendorMask::ALL),
         );
         assert_eq!(
             gpu.discover().unwrap().devices[0].id,
@@ -970,7 +1281,7 @@ mod tests {
             vec![nvidia(), amd_igpu()],
             Vec::new(),
             Vec::new(),
-            &VendorSwitch::new(false),
+            &VendorSwitch::new(false, VendorMask::ALL),
         );
         let table = GpuProcessTable::new();
         p.processes = table.clone();
@@ -996,7 +1307,7 @@ mod tests {
                 vec![nvidia()],
                 Vec::new(),
                 Vec::new(),
-                &VendorSwitch::new(false),
+                &VendorSwitch::new(false, VendorMask::ALL),
             );
             let table = GpuProcessTable::new();
             p.processes = table.clone();
@@ -1046,8 +1357,8 @@ mod tests {
         let mut gpu = GpuProvider::with_layers(
             Box::new(move || Ok(enumerated.lock().unwrap().clone())),
             vec![],
-            Box::new(Vec::new),
-            VendorSwitch::new(false),
+            makers(Vec::new(), &Made::default()),
+            VendorSwitch::new(false, VendorMask::ALL),
         );
         assert!(gpu.discover().unwrap().devices.is_empty());
         topology.lock().unwrap().push(virtual_adapter(0x10DE));

@@ -370,8 +370,7 @@ impl SettingsStore {
         self.inner.flush_now(timeout)
     }
 
-    // Called by the effects of the next M5a tasks.
-    #[allow(dead_code)]
+    /// Records the state of an effect outside the file and tells the listeners.
     pub fn set_effect(&self, effect: Effect, status: EffectStatus) {
         let mut core = lock(&self.inner.core);
         let slot = match effect {

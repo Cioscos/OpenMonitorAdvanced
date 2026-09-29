@@ -27,9 +27,10 @@ pub struct ServiceHandles {
     pub drives: storage::DriveIdTable,
 }
 
-/// Every unprivileged Windows provider, in display order. `vendor` is the
-/// safe-mode switch for the GPU vendor libraries (spec §8); `processes`
-/// receives the per-process GPU usage (read by the shell's `get_gpu_processes`).
+/// Every unprivileged Windows provider, in display order. `vendor` holds the
+/// switches for the GPU vendor libraries: safe mode (spec §8) and one per
+/// library. `processes` receives the per-process GPU usage (read by the
+/// shell's `get_gpu_processes`).
 /// `service` is last: it binds its devices onto the ids the other providers
 /// (CPU, memory, storage) have already published for this discovery.
 pub fn default_providers(

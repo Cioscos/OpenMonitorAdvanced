@@ -16,7 +16,8 @@ use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampl
 use tauri::{Emitter, Manager, RunEvent};
 
 use crate::commands::{
-    GpuProcessState, GpuProcessTable, StartupState, StartupStatus, VendorSwitch,
+    follow_vendor_libraries, vendor_mask, GpuProcessState, GpuProcessTable, StartupState,
+    StartupStatus, VendorSwitch,
 };
 use crate::service::ServiceShell;
 use crate::settings::{RealFs, SettingsStore, EVENT_SETTINGS};
@@ -124,7 +125,6 @@ fn main() {
     if status.safe_mode {
         tracing::warn!(reason = ?status.reason, "safe mode: GPU vendor libraries are not loaded");
     }
-    let switch = VendorSwitch::new(!status.safe_mode);
     let processes = GpuProcessTable::new();
 
     #[cfg(windows)]
@@ -147,6 +147,13 @@ fn main() {
         service::anti_cheat_path().as_deref(),
         settings_file_existed,
     );
+
+    // Safe mode is the master of the vendor-library switches; the per-library
+    // switches start from the stored settings and follow every later change
+    // (a library already loaded stays loaded, D1).
+    let initial_libraries = vendor_mask(&settings_store.settings().sources.vendor_libraries);
+    let switch = VendorSwitch::new(!status.safe_mode, initial_libraries);
+    follow_vendor_libraries(&settings_store, switch.clone(), initial_libraries);
 
     // The sampling interval starts from the stored setting (the default is 1 s);
     // a value outside the accepted range cannot come out of the store, but the

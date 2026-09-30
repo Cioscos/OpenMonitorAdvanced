@@ -24,7 +24,7 @@
 - **L5. Verifica crittografica della policy `test`.** `X509Chain.Build` verifica una catena di certificati, non l'integrità della firma sul PE; `UnknownError` non è un'eccezione accettabile in base alla sola catena. In un runner GitHub ospitato effimero o una VM di collaudo, un helper importa temporaneamente la sola radice di prova configurata in `Cert:\LocalMachine\Root` (non `CurrentUser\Root`: l'aggiunta a quello store apre una finestra di conferma di Windows che in un runner senza desktop blocca o fallisce; `LocalMachine` richiede un processo amministratore, come sui runner ospitati), verifica la firma incorporata con stato `Valid`, firmatario di prova fissato, timestamp valido, e rimuove in `finally` soltanto il certificato che ha aggiunto. Se la radice esisteva, non la rimuove. La policy `release` non importa radici e usa esclusivamente la fiducia ordinaria di Windows. L'ambiente è "isolato dichiarato" solo con `$env:RUNNER_ENVIRONMENT -eq 'github-hosted'`, oppure con `$env:OMA_ISOLATED_TRUST -eq '1'` impostato a mano in una VM o in Windows Sandbox; in più il processo dev'essere amministratore. Altrimenti la verifica `test` si ferma prima dell'import. La variabile allenta solo la guardia sull'ambiente, non i controlli di firma; i test unitari usano provider iniettati. Fonte: [Microsoft, WinVerifyTrust](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust). Il metodo completo va collaudato con SignPath prima di abilitarlo.
 - **L6. Marcatori delle note.** `<!-- oma:changes:start -->` / `<!-- oma:changes:end -->` racchiudono le novità scritte a mano; `<!-- oma:generated:start -->` / `<!-- oma:generated:end -->` il blocco tecnico. Ciascuno deve comparire esattamente una volta, nell'ordine changes → generated.
 - **L7. Gate CI.** Il preflight chiede a `gh api` i run di `ci.yml` del repository corrente, `event=push`, `head_branch=main`, con `head_sha` uguale allo SHA del run di release. Valuta il run pertinente più recente e il suo ultimo `run_attempt`: richiede `completed`, `conclusion: success` e tutti i job `checks`, `service`, `installer`, `scripts`, `actionlint` riusciti. Un verde vecchio non maschera un rerun rosso/in corso. Run e job sono paginati; non si usano job di tentativi precedenti. I nomi restano gli id senza `name:` o si aggiorna esplicitamente la lista attesa. Errori API/autenticazione non diventano "nessun run". Fonti: [run GitHub](https://docs.github.com/en/rest/actions/workflow-runs), [job GitHub](https://docs.github.com/en/rest/actions/workflow-jobs).
-- **L8. `--locked`.** La prima passata usa `pnpm tauri build --bundles nsis -- --locked`; lo spike conferma il passaggio a cargo con Tauri CLI 2.11.5. La CLI documenta `--` per gli argomenti al runner ([sorgenti Tauri](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-cli/src/build.rs)). Se il relay non funziona, correggere l'invocazione o usare un runner che imponga `--locked`; non eseguire una build sbloccata. `cargo metadata --locked` e il controllo del diff del lockfile restano controlli aggiuntivi, non sostituti del vincolo durante la build.
+- **L8. `--locked`.** La prima passata usa, da `pwsh`, `pnpm tauri build --bundles nsis -v '--' --locked`. Un `--` nudo viene consumato da `pnpm.ps1`, e Tauri rifiuta `--locked` con exit 2. Alternative equivalenti: `pnpm.cmd … -- --locked` oppure lo step con `shell: bash`. Il log di `-v` deve contenere `cargo build --locked`, e lo si verifica. Lo spike conferma il passaggio a cargo con Tauri CLI 2.11.5. La CLI documenta `--` per gli argomenti al runner ([sorgenti Tauri](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-cli/src/build.rs)). Se il relay non funziona, correggere l'invocazione o usare un runner che imponga `--locked`; non eseguire una build sbloccata. `cargo metadata --locked` e il controllo del diff del lockfile restano controlli aggiuntivi, non sostituti del vincolo durante la build.
 - **L9. Riconoscimento dell'uninstaller e dei plugin.** Le regex `UninstallerPathPattern` e `PluginPathPattern` si ricavano dallo spike (Task 1) e si scrivono nella sezione "Esito dello spike" di questo piano. Il Task 2 le usa come costanti di `OmaSigning.psm1`.
 - **L10. Versioni delle azioni.** In `release.yml` e nella composite action ogni `uses:` è fissato allo SHA completo, con commento `# vX.Y.Z`. `ci.yml` conserva i tag che ha, salvo ciò che passa alla composite action. L'implementer ricava gli SHA con `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (e dereferenzia i tag annotati).
 
@@ -192,7 +192,7 @@ Gli script dello spike vivono in `target/spike/`, che non si committa. Il risult
     - `app` se il percorso è `expected.app`;
     - `setup` se è `expected.setupDir/expected.setupName`;
     - `plugin` se corrisponde a `PluginPathPattern` e il nome è uno dei cinque della spec §3.1;
-    - `uninstaller` se corrisponde a `UninstallerPathPattern`;
+    - `uninstaller` se corrisponde a `UninstallerPathPattern` e la directory catturata `dir` è uguale, senza distinzione di maiuscole, a `[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')`. Si scrive come un'unica espressione, `($p -match $UninstallerPathPattern) -and ($Matches['dir'] -ieq [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\'))`, perché altrimenti `$Matches` può essere rimasto da un match precedente;
     - qualunque altro percorso: errore `unexpected file passed to signCommand: <path>`.
   - **Duplicati:** un secondo `app`, `uninstaller` o `setup` nella stessa passata è un errore `duplicate <role> call`.
   - **`collect`:** copia `app` e `uninstaller` in `unsigned/<name>`; `register-service` copia lì anche `oma-service.exe`. Il setup viene registrato senza copiarlo in `unsigned/`, che deve contenere esattamente i tre binari. I plugin restano intatti; hash prima/dopo devono coincidere.
@@ -225,7 +225,7 @@ Gli script dello spike vivono in `target/spike/`, che non si committa. Il risult
 - [ ] **Step 4:** stesso comando → PASS.
 - [ ] **Step 5: gate dell'uninstaller.**
   - Riga 101 di `installer.nsi`: `  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0 ; OMA`.
-  - Verifica: prima `build-installer-payload.ps1`; `init` in `target/signing-local` con contesto locale esplicito, poi in `app/` `pnpm tauri build --bundles nsis --config ../target/signing-local/tauri.sign.collect.json -- --locked`. Registrare il servizio, poi dalla radice `sign-shim.ps1 -Mode check -Pass collect -StateRoot …` con il contesto atteso. Atteso: exit 0 e un setup prodotto; ripetere anche la prova negativa del comando uninstaller con il codice definitivo.
+  - Verifica: prima `build-installer-payload.ps1`; `init` in `target/signing-local` con contesto locale esplicito, poi in `app/` `pnpm tauri build --bundles nsis --config ../target/signing-local/tauri.sign.collect.json -v '--' --locked` (da `pwsh`; controllare nel log la riga `cargo build --locked`). Registrare il servizio, poi dalla radice `sign-shim.ps1 -Mode check -Pass collect -StateRoot …` con il contesto atteso. Atteso: exit 0 e un setup prodotto; ripetere anche la prova negativa del comando uninstaller con il codice definitivo.
 - [ ] **Step 6: commit** `feat(release): add the two-pass signing shim`.
 
 ---
@@ -661,9 +661,13 @@ Eseguito il 2026-09-30 sul PC di sviluppo (processo non elevato), branch `feat/m
 **Regex di L9** (costanti di `OmaSigning.psm1`, sul percorso normalizzato; convalidate in B e C in modalità stretta, cioè senza la scoperta permissiva di A):
 
 ```powershell
-$UninstallerPathPattern = '(?i)^(?<dir>.+)\\nst[0-9a-f]{1,4}\.tmp$'   # e $Matches['dir'] -ieq [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
-$PluginPathPattern = '(?i)^' + [regex]::Escape($RepoRoot) + '\\target\\release\\nsis\\x64\\Plugins\\x86-unicode\\(?:NSISdl|StartMenu|System|nsDialogs|additional\\nsis_tauri_utils)\.dll$'
+$UninstallerPathPattern = '(?i)^(?<dir>.+)\\nst[0-9a-f]{1,4}\.tmp\z'
+$PluginPathPattern = '(?i)^' + [regex]::Escape($RepoRoot) + '\\target\\release\\nsis\\x64\\Plugins\\x86-unicode\\(?:NSISdl|StartMenu|System|nsDialogs|additional\\nsis_tauri_utils)\.dll\z'
+# uninstaller, in un'unica espressione (altrimenti $Matches può essere quello di un match precedente):
+($p -match $UninstallerPathPattern) -and ($Matches['dir'] -ieq [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\'))
 ```
+
+- Ancoraggio con `\z`, non `$`: in .NET `$` accetta anche un `\n` finale. Ricontrollato: `\z` rifiuta `…\nst2A98.tmp` seguito da `\n` e `…\System.dll` seguito da `\n`, e accetta ancora i percorsi reali.
 
 - Il controllo sulla directory è parte del riconoscimento: in C, con `TEMP` diverso, ha riconosciuto `tmp-c\nstAA3F.tmp`.
 - Le regex rifiutano `…\additional\evil.dll`, `System.dll.bak`, `nst2A98.exe` e `nstZZ.tmp`.
@@ -703,6 +707,7 @@ $PluginPathPattern = '(?i)^' + [regex]::Escape($RepoRoot) + '\\target\\release\\
 |---|---|---|---|
 | `oma-app.exe` (A) | OpenMonitor Advanced | 0.2.0 | 0.2.0 |
 | uninstaller (A) | OpenMonitor Advanced | 0.2.0 | 0.2.0 |
+| setup (A) | OpenMonitor Advanced | 0.2.0 | 0.2.0 |
 | `oma-service.exe` | oma-service | `0.2.0+79070a2fc6b88a4c61d9b51ac4a417644dd1d84c` | 0.2.0.0 |
 
 Il servizio conferma il §3.4 punto 5: manca `Product`. In più `ProductVersion` include `+<commit>` (versione informativa di SourceLink): chi confronta la versione deve togliere il suffisso `+…`, oppure il progetto deve impostare `IncludeSourceRevisionInInformationalVersion=false`.

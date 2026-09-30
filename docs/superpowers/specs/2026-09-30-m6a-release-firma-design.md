@@ -60,7 +60,7 @@ Nel bundler di tauri-cli 2.11.5 (`crates/tauri-bundler/src/bundle.rs`), per ogni
 2. lo **modifica** con `patch_binary`, che scrive nell'exe il tipo di pacchetto (`nsis`);
 3. se la firma è configurata (`settings.windows().can_sign()`), lo firma;
 4. costruisce l'installer NSIS: con la firma configurata, il template esegue `!uninstfinalize` con lo stesso comando sull'uninstaller e alla fine Tauri firma il setup;
-5. ripristina l'exe originale.
+5. ripristina l'exe originale, ma solo se il bundle riesce. Dopo un bundle fallito `oma-app.exe` resta modificato e nel percorso di output resta il setup della passata precedente, perché il `rename` finale non avviene (spike, Task 1). Il workflow rimuove il setup in uscita prima di ogni passata e, dopo, controlla che il setup sia nuovo.
 
 Inoltre il bundler NSIS chiama `signCommand` su cinque plugin: `NSISdl.dll`, `StartMenu.dll`, `System.dll`, `nsDialogs.dll`, `additional/nsis_tauri_utils.dll`. Queste chiamate non vanno interpretate come uninstaller e non devono inviare codice di terzi a SignPath. Fonte: [bundler NSIS di Tauri 2.11.5](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs).
 
@@ -74,7 +74,7 @@ In CI, e solo lì, `bundle.windows.signCommand` punta allo shim, passato con `--
 pwsh -NoProfile -File <percorso-assoluto>/scripts/sign-shim.ps1 -Mode collect|apply -Path "%1"
 ```
 
-Il config temporaneo usa la forma strutturata di `signCommand` (`cmd` e `args`, con `%1` come argomento a sé). Script e radice dello stato hanno percorsi assoluti: Tauri viene eseguito da `app/`, mentre `!uninstfinalize` può usare un'altra directory corrente. Quoting, spazi e apici nel percorso si verificano nello spike; il comando mostrato sopra è illustrativo. Fonte: [implementazione del comando di firma Tauri](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-bundler/src/bundle/windows/sign.rs).
+Il config temporaneo usa la forma strutturata di `signCommand` (`cmd` e `args`, con `%1` come argomento a sé). Script e radice dello stato hanno percorsi assoluti. Le chiamate dirette di Tauri (app, plugin, setup) partono con directory corrente `app\src-tauri`, quelle di makensis tramite `!uninstfinalize` con `target\release\nsis\x64`. Lo spike ha verificato il quoting: argomenti con spazi e parentesi arrivano intatti anche attraverso `!uninstfinalize`. Il comando però finisce tra apici singoli in una stringa NSIS, quindi argomenti e percorsi non devono contenere `'` né `$`. Il comando mostrato sopra è illustrativo. Fonte: [implementazione del comando di firma Tauri](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-bundler/src/bundle/windows/sign.rs).
 
 Stato in `target/signing/`, ricreato vuoto all'inizio di ciascun run e mai recuperato dalla cache:
 
@@ -87,7 +87,7 @@ Riconoscimento del ruolo dal percorso normalizzato ricevuto:
 - `app`: `oma-app.exe` nel percorso di build atteso;
 - `setup`: il percorso di output atteso per versione/architettura, non solo un suffisso;
 - plugin di terzi: solo l'elenco del §3.1, nelle copie dei plugin della toolchain Tauri attesa; esito positivo senza modifica né inclusione nell'artifact di firma, con hash prima/dopo e log esplicito;
-- `uninstaller`: solo il PE temporaneo `.exe` identificato dallo spike, accettato **una sola volta** per passata; il nome canonico nell'artifact è `uninstall.exe`.
+- `uninstaller`: solo il PE temporaneo identificato dallo spike, `nstXXXX.tmp` (estensione `.tmp`, non `.exe`) nella directory restituita da `GetTempPath`, accettato **una sola volta** per passata; il nome canonico nell'artifact è `uninstall.exe`.
 
 Qualunque percorso non previsto o ruolo duplicato fa fallire lo shim: nessun generico "altro file = uninstaller". Lo spike definisce il riconoscimento del temporaneo NSIS e dei plugin; una nuova versione di Tauri richiede di riconfermare questo contratto.
 
@@ -149,7 +149,7 @@ Un solo job `release` su `windows-latest`, `timeout-minutes: 240`, nell'environm
 7. §5: verifica delle firme, `SHA256SUMS.txt`, attestazione;
 8. per un tag: bozza di release (§5.3); per `workflow_dispatch`: `upload-artifact` del setup e di `SHA256SUMS.txt`.
 
-Prima di compilare si controllano configurazione della firma e, per i tag, eventuale release già pubblicata. Le build Rust usano `--locked`. Il preflight di release richiede anche un run CI completato con successo sullo stesso SHA (job checks, service, installer, scripts e actionlint): non basta che il commit sia un antenato di `main`. Se assente/in corso/fallito, il run si ferma prima delle richieste di firma e si può rieseguire dopo il verde.
+Prima di compilare si controllano configurazione della firma e, per i tag, eventuale release già pubblicata. Le build Rust usano `--locked`. Da `pwsh` un `--` nudo viene consumato da `pnpm.ps1` e Tauri rifiuta `--locked`: si scrive `'--'` tra apici, si usa `pnpm.cmd` oppure lo step gira con `shell: bash`. In ogni caso si controlla che il log di `-v` contenga `cargo build --locked`. Il preflight di release richiede anche un run CI completato con successo sullo stesso SHA (job checks, service, installer, scripts e actionlint): non basta che il commit sia un antenato di `main`. Se assente/in corso/fallito, il run si ferma prima delle richieste di firma e si può rieseguire dopo il verde.
 
 **Firma attiva:** la variabile `SIGNPATH_ORGANIZATION_ID` e il secret `SIGNPATH_API_TOKEN` esistono entrambi. Prima dell'attivazione, se entrambi sono assenti gli step si saltano e il log lo dice con un `::notice::`; con un solo dei due il workflow fallisce. Dopo il collaudo reale si imposta nell'environment `REQUIRE_SIGNING=true`: credenziali assenti diventano un errore anche per il dispatch, evitando un ritorno accidentale a release non firmate. Il secret non si usa direttamente in `if:`: uno step calcola l'output booleano senza stampare il valore. Un errore SignPath non ripiega mai sul percorso non firmato.
 
@@ -185,11 +185,11 @@ Tutto si calcola sul **setup finale** (dopo la firma n. 2, o dopo la prima passa
 pwsh scripts/verify-signatures.ps1 -Setup <percorso> -Policy release|test|none
 ```
 
-- **`release`:** firma incorporata valida sul setup e sui binari propri, identità del certificato approvato per il progetto (CN esatto `SignPath Foundation` e certificato consentito, senza semplice ricerca di sottostringa), timestamp valido e metadati prodotto/versione attesi. La configurazione del certificato deve consentire un rinnovo esplicito. Estrae il setup con 7-Zip, controllandone l'exit code, e richiede esattamente i file attesi: `oma-app.exe`, `oma-service.exe` e, se visibile nello spike, `uninstall.exe`. Gli hash dei file estratti devono coincidere con quelli firmati del §3.3; la firma da sola non identifica il payload di questo run. `PawnIO_setup.exe` mantiene hash e firmatario già fissati dal progetto.
+- **`release`:** firma incorporata valida sul setup e sui binari propri, identità del certificato approvato per il progetto (CN esatto `SignPath Foundation` e certificato consentito, senza semplice ricerca di sottostringa), timestamp valido e metadati prodotto/versione attesi. La configurazione del certificato deve consentire un rinnovo esplicito. Estrae il setup con 7-Zip, controllandone l'exit code, e richiede esattamente i file attesi: `oma-app.exe` e `oma-service.exe`. `uninstall.exe` non è tra questi, perché lo spike ha mostrato che 7-Zip non lo vede. Gli hash dei file estratti devono coincidere con quelli firmati del §3.3; la firma da sola non identifica il payload di questo run. `PawnIO_setup.exe` mantiene hash e firmatario già fissati dal progetto.
 - **`test`:** stessi controlli di integrità, identità del certificato di prova atteso, metadati e hash. Il solo certificato presente non basta: `HashMismatch`, `NotSigned`, `UnknownError` e gli altri errori falliscono; la sola catena non attendibile del certificato di prova è ammessa. Lo spike valida il metodo (eventuale verifica con trust temporaneo nel runner) senza indebolire la policy `release`. Fonte: [stati della firma PowerShell](https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.signaturestatus).
 - **`none`:** setup non vuoto, estrazione riuscita, presenza dei payload propri e integrità/firma originale di PawnIO; scrive l'avviso "unsigned build". Anche il percorso non firmato deve verificare il contenuto dell'installer.
 
-Se 7-Zip non espone l'uninstaller, si verifica comunque la copia firmata restituita da SignPath e l'esito `apply`, ma il riepilogo dichiara che la firma dell'uninstaller **installato** resta da verificare. Il collaudo manuale del §8.2 è obbligatorio prima della prima pubblicazione firmata e dopo modifiche al meccanismo NSIS.
+7-Zip non espone l'uninstaller (spike, Task 1, con 7-Zip 26.01). Per l'uninstaller valgono comunque i controlli del manifest e degli hash: la copia firmata restituita da SignPath deve essere verificata e l'esito `apply` deve confermare lo SHA-256 raccolto. Il riepilogo dichiara però che la firma dell'uninstaller **installato** resta una verifica manuale: installazione in un ambiente isolato (§8.2) e prova con SignPath del Task 10. Il collaudo manuale del §8.2 è obbligatorio prima della prima pubblicazione firmata e dopo modifiche al meccanismo NSIS.
 
 L'accesso alle firme passa per un parametro iniettabile, così i test Pester usano un finto.
 

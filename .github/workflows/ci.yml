@@ -113,7 +113,18 @@ jobs:
       - name: Script tests (Integration)
         run: |
           Import-Module Pester -RequiredVersion 5.7.1
-          Invoke-Pester -Path scripts/tests -TagFilter Integration -CI
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'scripts/tests'
+          $config.Run.PassThru = $true
+          $config.Filter.Tag = 'Integration'
+          $config.TestResult.Enabled = $true
+          $result = Invoke-Pester -Configuration $config
+          # Skipped tests must not look green: without elevation or the
+          # isolated environment the Integration tests skip, leaving no real
+          # crypto coverage.
+          if ($result.PassedCount -eq 0 -or $result.SkippedCount -gt 0 -or $result.FailedCount -gt 0) {
+            throw "Integration run not clean: passed=$($result.PassedCount) skipped=$($result.SkippedCount) failed=$($result.FailedCount)"
+          }
 
   actionlint:
     runs-on: ubuntu-latest
@@ -146,7 +157,7 @@ jobs:
       - name: Validate composite action schema
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet check-jsonschema==0.38.2
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet check-jsonschema==0.38.2 ruamel.yaml==0.19.1
           "$RUNNER_TEMP/venv/bin/check-jsonschema" --builtin-schema vendor.github-actions .github/actions/*/action.yml
 
       - name: Check composite action steps

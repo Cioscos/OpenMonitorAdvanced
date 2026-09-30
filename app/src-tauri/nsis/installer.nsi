@@ -98,7 +98,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Uninstaller signing command
 !if "${UNINSTALLERSIGNCOMMAND}" != ""
-  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}'
+  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0 ; OMA
 !endif
 
 ; Handle install mode, `perUser`, `perMachine` or `both`

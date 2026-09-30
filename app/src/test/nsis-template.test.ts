@@ -40,11 +40,13 @@ describe('custom NSIS template', () => {
   });
 
   it('the template differs from upstream only on lines marked OMA', () => {
-    // Added lines end with "; OMA ..."; template sections are hidden with "-".
+    // Added lines end with "; OMA ..."; template sections are hidden with "-"; the uninstaller
+    // signing command gets the "= 0" exit code gate (M6a: a failed signCommand aborts makensis).
+    const gate = /^( {2}!uninstfinalize '\$\{UNINSTALLERSIGNCOMMAND\}') = 0 ; OMA$/;
     const ours = read(resolve(nsisDir, 'installer.nsi'))
       .split('\n')
-      .filter((l) => !/ ; OMA( .*)?$/.test(l) || / ; OMA hidden$/.test(l))
-      .map((l) => l.replace(/^Section -(\w+) ; OMA hidden$/, 'Section $1'))
+      .filter((l) => !/ ; OMA( .*)?$/.test(l) || / ; OMA hidden$/.test(l) || gate.test(l))
+      .map((l) => l.replace(/^Section -(\w+) ; OMA hidden$/, 'Section $1').replace(gate, '$1'))
       .join('\n');
     expect(ours).toBe(read(resolve(nsisDir, upstreamFiles[0])));
   });

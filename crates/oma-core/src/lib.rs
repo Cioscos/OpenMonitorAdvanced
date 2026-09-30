@@ -7,6 +7,7 @@ pub mod merge;
 pub mod model;
 pub mod provider;
 pub mod rate;
+pub mod rules;
 pub mod sampler;
 pub mod sanitize;
 pub mod settings;

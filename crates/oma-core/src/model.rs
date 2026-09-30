@@ -89,7 +89,7 @@ pub enum Unit {
 }
 
 /// Where a reading comes from; shown as a badge in the Advanced view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Pdh,
@@ -110,10 +110,10 @@ pub enum Source {
 
 /// Translatable label. The UI looks up `sensor.<key>` in its catalogs and
 /// substitutes `{arg}` (e.g. a thread index or a drive letter).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Label {
     pub key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arg: Option<String>,
 }
 
@@ -133,19 +133,19 @@ impl Label {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     pub id: String,
     pub kind: DeviceKind,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub properties: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sensor {
     pub id: String,
@@ -157,7 +157,7 @@ pub struct Sensor {
     pub category: String,
     /// Read through an undocumented or unverified interface (spec §5.2): the
     /// UI marks it. Serialized only when `true`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub experimental: bool,
 }
 
@@ -192,7 +192,7 @@ impl Sensor {
 
 /// Every device and sensor currently known. `revision` changes whenever the
 /// hardware set changes; snapshot values are indexed by `sensors` order.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schema {
     pub revision: u64,
     pub devices: Vec<Device>,
@@ -369,5 +369,85 @@ mod tests {
             serde_json::to_value(&snap).unwrap(),
             json!({ "revision": 1, "seq": 2, "timestampMs": 3, "values": [1.5, null] })
         );
+    }
+
+    #[test]
+    fn schema_deserializes_from_its_json() {
+        let value = json!({
+            "revision": 7,
+            "devices": [
+                { "id": "cpu/0", "kind": "cpu", "name": "CPU", "vendor": "AMD",
+                  "properties": { "tjMaxC": "95" } },
+                { "id": "memory/0", "kind": "memory", "name": "RAM" }
+            ],
+            "sensors": [
+                { "id": "cpu/0/temperature/tctl", "deviceId": "cpu/0", "kind": "temperature",
+                  "unit": "celsius", "label": { "key": "cpu.temperature.tctl" },
+                  "source": "lhm", "category": "temperature", "experimental": true },
+                { "id": "cpu/0/load/thread", "deviceId": "cpu/0", "kind": "load",
+                  "unit": "percent", "label": { "key": "cpu.load.thread", "arg": "3" },
+                  "source": "pdh", "category": "load" }
+            ]
+        });
+        let schema: Schema = serde_json::from_value(value).unwrap();
+        assert_eq!(schema.revision, 7);
+        assert_eq!(schema.devices[0].properties["tjMaxC"], "95");
+        assert_eq!(schema.devices[0].vendor.as_deref(), Some("AMD"));
+        assert!(schema.devices[1].properties.is_empty());
+        assert_eq!(schema.devices[1].vendor, None);
+        assert_eq!(schema.sensors[0].source, Source::Lhm);
+        assert!(schema.sensors[0].experimental);
+        assert!(!schema.sensors[1].experimental);
+        assert_eq!(
+            schema.sensors[1].label,
+            Label::with_arg("cpu.load.thread", "3")
+        );
+    }
+
+    #[test]
+    fn schema_round_trip_preserves_omitted_defaults() {
+        let schema = Schema {
+            revision: 2,
+            devices: vec![
+                Device {
+                    id: "cpu/0".into(),
+                    kind: DeviceKind::Cpu,
+                    name: "CPU".into(),
+                    vendor: None,
+                    properties: Default::default(),
+                },
+                Device {
+                    id: "storage/0".into(),
+                    kind: DeviceKind::Storage,
+                    name: "Disk".into(),
+                    vendor: Some("ACME".into()),
+                    properties: [("tempWarningC".to_owned(), "70".to_owned())].into(),
+                },
+            ],
+            sensors: vec![
+                Sensor::new(
+                    "cpu/0",
+                    SensorKind::Load,
+                    "total",
+                    Unit::Percent,
+                    Label::new("cpu.load.total"),
+                    Source::Pdh,
+                ),
+                Sensor::new(
+                    "storage/0",
+                    SensorKind::Temperature,
+                    "drive",
+                    Unit::Celsius,
+                    Label::with_arg("storage.temperature", "C:"),
+                    Source::Lhm,
+                )
+                .experimental(),
+            ],
+        };
+        let json = serde_json::to_value(&schema).unwrap();
+        assert!(json["devices"][0].get("properties").is_none());
+        assert!(json["sensors"][0].get("experimental").is_none());
+        let back: Schema = serde_json::from_value(json).unwrap();
+        assert_eq!(back, schema);
     }
 }

@@ -130,50 +130,53 @@
   {#if devices.length === 0}
     <p class="empty">{t('settings.log.sensors.none')}</p>
   {:else}
-    <ul class="tree" role="tree" aria-label={t('settings.log.sensors.tree')}>
-      {#each devices as device (device.id)}
-        {@const state = stateOf(device.sensors)}
-        <li role="treeitem" aria-selected={state === 'all'} aria-expanded={isOpenDevice(device.id)}>
-          <div class="row device">
-            {@render chevron(isOpenDevice(device.id), device.arg ?? device.label, () => (closedDevices[device.id] = isOpenDevice(device.id)))}
-            <label class="pick">
-              <input type="checkbox" checked={state === 'all'} use:tri={state} onchange={() => toggle(device.sensors)} />
-              <span class="name">{device.label}{#if device.arg}{' '}<span class="arg">{device.arg}</span>{/if}</span>
-            </label>
-            <span class="of">{countOn(device.sensors)}/{device.sensors.length}</span>
-          </div>
-          {#if isOpenDevice(device.id)}
-            <ul role="group" class="branch">
-              {#each device.categories as category (category.key)}
-                {@const cstate = stateOf(category.sensors)}
-                <li role="treeitem" aria-selected={cstate === 'all'} aria-expanded={isOpenCategory(category.key)}>
-                  <div class="row">
-                    {@render chevron(isOpenCategory(category.key), category.name, () => (openCategories[category.key] = !isOpenCategory(category.key)))}
-                    <label class="pick">
-                      <input type="checkbox" checked={cstate === 'all'} use:tri={cstate} onchange={() => toggle(category.sensors)} />
-                      <span class="name">{category.name}</span>
-                    </label>
-                    <span class="of">{countOn(category.sensors)}/{category.sensors.length}</span>
-                  </div>
-                  {#if isOpenCategory(category.key)}
-                    <ul role="group" class="branch leaves">
-                      {#each category.sensors as sensor (sensor.id)}
-                        <li role="treeitem" aria-selected={selected.has(sensor.id)}>
-                          <label class="pick leaf">
-                            <input type="checkbox" checked={selected.has(sensor.id)} onchange={() => toggle([sensor])} />
-                            <span class="name">{names.get(sensor.id)}</span>
-                          </label>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </li>
-      {/each}
-    </ul>
+    <!-- Nested lists of labelled checkboxes, not an ARIA tree: that role promises arrow-key navigation. -->
+    <div class="tree" role="group" aria-label={t('settings.log.sensors.tree')}>
+      <ul class="roots">
+        {#each devices as device (device.id)}
+          {@const state = stateOf(device.sensors)}
+          <li>
+            <div class="row device">
+              {@render chevron(isOpenDevice(device.id), device.arg ?? device.label, () => (closedDevices[device.id] = isOpenDevice(device.id)))}
+              <label class="pick">
+                <input type="checkbox" checked={state === 'all'} use:tri={state} onchange={() => toggle(device.sensors)} />
+                <span class="name">{device.label}{#if device.arg}{' '}<span class="arg">{device.arg}</span>{/if}</span>
+              </label>
+              <span class="of">{countOn(device.sensors)}/{device.sensors.length}</span>
+            </div>
+            {#if isOpenDevice(device.id)}
+              <ul class="branch">
+                {#each device.categories as category (category.key)}
+                  {@const cstate = stateOf(category.sensors)}
+                  <li>
+                    <div class="row">
+                      {@render chevron(isOpenCategory(category.key), category.name, () => (openCategories[category.key] = !isOpenCategory(category.key)))}
+                      <label class="pick">
+                        <input type="checkbox" checked={cstate === 'all'} use:tri={cstate} onchange={() => toggle(category.sensors)} />
+                        <span class="name">{category.name}</span>
+                      </label>
+                      <span class="of">{countOn(category.sensors)}/{category.sensors.length}</span>
+                    </div>
+                    {#if isOpenCategory(category.key)}
+                      <ul class="branch leaves">
+                        {#each category.sensors as sensor (sensor.id)}
+                          <li>
+                            <label class="pick leaf">
+                              <input type="checkbox" checked={selected.has(sensor.id)} onchange={() => toggle([sensor])} />
+                              <span class="name">{names.get(sensor.id)}</span>
+                            </label>
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </div>
   {/if}
   {#if missing.length > 0}
     <p class="missing">{t('settings.log.sensors.missing', { count: missing.length })}</p>
@@ -223,7 +226,7 @@
     border-radius: 0 8px 8px 0;
     color: var(--text);
   }
-  .tree,
+  .roots,
   .branch {
     margin: 0;
     padding: 0;

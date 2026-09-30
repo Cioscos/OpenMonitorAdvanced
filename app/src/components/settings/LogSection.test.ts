@@ -95,10 +95,15 @@ test('all_sensors_switch_seeds_the_list', async () => {
   const { patches } = await setup();
   const all = screen.getByRole('switch', { name: t('settings.log.sensors.all') });
   expect(all.getAttribute('aria-checked')).toBe('true');
-  expect(screen.queryByRole('tree')).toBeNull();
+  const sensorGroup = () => screen.queryByRole('group', { name: t('settings.log.sensors.tree') });
+  expect(sensorGroup()).toBeNull();
   await fireEvent.click(all);
   await waitFor(() => expect(patches).toEqual([{ log: { sensors: MOCK_SCHEMA.sensors.map((s) => s.id) } }]));
-  await screen.findByRole('tree');
+  await waitFor(() => expect(sensorGroup()).not.toBeNull());
+  // Plain nested lists of checkboxes: no tree roles without the tree's arrow keys.
+  expect(screen.queryByRole('tree')).toBeNull();
+  expect(screen.queryAllByRole('treeitem')).toEqual([]);
+  expect(within(sensorGroup()!).getAllByRole('checkbox').length).toBeGreaterThan(0);
   expect(screen.getByRole('switch', { name: t('settings.log.sensors.all') }).getAttribute('aria-checked')).toBe('false');
   // Turning it back on records everything again.
   await fireEvent.click(screen.getByRole('switch', { name: t('settings.log.sensors.all') }));

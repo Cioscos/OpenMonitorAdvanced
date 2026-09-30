@@ -126,19 +126,20 @@ test('the network tile opens the network page', async () => {
   await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('network/mock-eth'));
 });
 
-test('the health banner counts from the start of the core session', async () => {
-  const now = 50_000_000;
+test('the health banner shows the core clock, not a difference of system times', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
-  backend.session = { startedAtMs: now - 125 * 60_000, intervalMs: 1000 };
+  backend.healthClock = { revision: 0, levelElapsedMs: 125 * 60_000 };
   const store = new LiveStore();
   render(App, { backend, store });
   await vi.waitFor(() => expect(store.schema).not.toBeNull());
-  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: now, values: mockValues(1) });
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 50_000_000, values: mockValues(1) });
 
   await vi.waitFor(() => expect(screen.getByText('for 2 h 5 min')).toBeTruthy());
+  backend.emitHealthClock({ revision: 0, levelElapsedMs: 126 * 60_000 });
+  await vi.waitFor(() => expect(screen.getByText('for 2 h 6 min')).toBeTruthy());
 });
 
-test('without a session start the banner counts from the first snapshot', async () => {
+test('without a clock the banner starts from zero', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new LiveStore();
   render(App, { backend, store });
@@ -297,6 +298,29 @@ test('a navigate event that arrives before the initial view is chosen wins', asy
 
   await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
   expect(backend.navigateSubscribedBeforePendingRead).toBe(true);
+});
+
+test('a navigate event that arrives while the pending read is in flight is acknowledged', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  // The shell records a request right after answering the first read: the reply is null but the
+  // event reaches the page before the view is chosen.
+  const take = backend.takePendingView.bind(backend);
+  let first = true;
+  backend.takePendingView = async () => {
+    const view = await take();
+    if (first) {
+      first = false;
+      backend.pendingView = { view: 'advanced' };
+      backend.emitNavigate({ view: 'advanced' });
+    }
+    return view;
+  };
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  await vi.waitFor(() => expect(backend.takePendingViewCalls).toBe(2));
+  expect(backend.pendingView).toBeNull();
 });
 
 test('a navigate event while the window is open switches the view and remembers it', async () => {

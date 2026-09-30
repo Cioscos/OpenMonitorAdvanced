@@ -7,6 +7,7 @@
   import TopBar from './components/TopBar.svelte';
   import { saveSection } from './lib/advanced/persist';
   import { createBackend, type Backend } from './lib/backend';
+  import { health } from './lib/health.svelte';
   import { LiveStore, connect } from './lib/live.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
@@ -56,6 +57,7 @@
     let offSettings: (() => void) | undefined;
     let offNavigate: (() => void) | undefined;
     let offService: (() => void) | undefined;
+    let offHealth: (() => void) | undefined;
     let cancelled = false;
     // Ordering race (spec §6): a late `getServiceStatus` reply must never overwrite a status
     // already delivered by `oma:service`, so the event subscription is set up first and this
@@ -71,6 +73,13 @@
         else off = unsubscribe;
       })
       .catch((error) => console.error('backend connection failed', error));
+    health
+      .connect(backend)
+      .then((unsubscribe) => {
+        if (cancelled) unsubscribe();
+        else offHealth = unsubscribe;
+      })
+      .catch((error) => console.error('health unavailable', error));
     backend
       .onServiceStatus((status) => {
         serviceEventSeen = true;
@@ -124,6 +133,9 @@
       const target = requested ?? pending;
       view = initialView(settings.state!, target?.view ?? null);
       chosen = true;
+      // A request that arrived while the read was in flight was applied above but may still be
+      // recorded by the shell: taking it again acknowledges it, so it does not replay on a cold mount.
+      if (requested !== null) backend.takePendingView().catch((error) => console.error('navigation request not acknowledged', error));
       ready = true;
       // A view the tray or a toast asked for is now the one last shown.
       if (target !== null) navigate(target);
@@ -133,6 +145,7 @@
       clearInterval(clock);
       document.removeEventListener('visibilitychange', visibility);
       off?.();
+      offHealth?.();
       offService?.();
       offSettings?.();
       offNavigate?.();
@@ -190,7 +203,7 @@
   {/if}
   {#if visible && ready}
     {#if view === 'simple'}
-      <SimpleView {store} startedAtMs={session?.startedAtMs ?? null} onOpenAdvanced={openAdvanced} />
+      <SimpleView {store} onOpenAdvanced={openAdvanced} />
     {:else if view === 'advanced'}
       <AdvancedView {store} {backend} {service} {focus} onFocused={() => (focus = null)} />
     {:else}

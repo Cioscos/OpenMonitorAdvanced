@@ -2,6 +2,8 @@ import type {
   AppInfo,
   AutostartStatus,
   GpuProcess,
+  HealthClock,
+  HealthReport,
   HistorySeed,
   KnownPath,
   LegacyWebviewState,
@@ -67,6 +69,14 @@ export interface Backend {
   takePendingView(): Promise<NavigationTarget | null>;
   /** A tray item or a toast asked for a view while the window was open. */
   onNavigate(cb: (target: NavigationTarget) => void): Promise<Unsubscribe>;
+  /** The rules engine's current verdict. */
+  getHealth(): Promise<HealthReport>;
+  /** Emitted when the report changes. Listeners must drop reports with an old `revision`. */
+  onHealth(cb: (report: HealthReport) => void): Promise<Unsubscribe>;
+  /** Time in the current level, monotonic; belongs to the report of the same `revision`. */
+  getHealthClock(): Promise<HealthClock>;
+  /** At most once a second while the window is open. */
+  onHealthClock(cb: (clock: HealthClock) => void): Promise<Unsubscribe>;
   /** Re-reads the start-up entry as Windows sees it. */
   refreshAutostart(): Promise<AutostartStatus>;
   /** Versions and folders for the About page. */

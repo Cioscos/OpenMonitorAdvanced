@@ -4,6 +4,8 @@ import type {
   AppInfo,
   AutostartStatus,
   GpuProcess,
+  HealthClock,
+  HealthReport,
   HistorySeed,
   HistoryWindow,
   KnownPath,
@@ -64,6 +66,13 @@ export class FakeBackend implements Backend {
   /** Runs at the start of `takePendingView`, e.g. to emit an `oma:navigate` in the gap. */
   beforeTakePendingView: (() => void) | null = null;
   navigateSubscribedBeforePendingRead = false;
+  /** What `getHealth`/`getHealthClock` return; `emitHealth`/`emitHealthClock` replace them and notify listeners. */
+  health: HealthReport = { level: 'neutral', sinceMs: 0, revision: 0, coverage: 'complete', unavailableTargets: [], alerts: [] };
+  healthClock: HealthClock = { revision: 0, levelElapsedMs: 0 };
+  /** Order of the health reads and subscriptions, to check that the UI subscribes first. */
+  healthCalls: string[] = [];
+  /** Set to reject `getHealth` with this error. */
+  healthError: string | null = null;
   autostart: AutostartStatus = { configured: false, effective: 'notConfigured', error: null };
   refreshAutostartCalls = 0;
   appInfo: AppInfo = {
@@ -80,6 +89,8 @@ export class FakeBackend implements Backend {
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
   #settingsListeners = new Set<(s: SettingsState) => void>();
+  #healthListeners = new Set<(r: HealthReport) => void>();
+  #healthClockListeners = new Set<(c: HealthClock) => void>();
   #navigateListeners = new Set<(t: NavigationTarget) => void>();
 
   constructor(schema: Schema) {
@@ -206,6 +217,34 @@ export class FakeBackend implements Backend {
     return () => this.#navigateListeners.delete(cb);
   }
 
+  async getHealth(): Promise<HealthReport> {
+    this.healthCalls.push('getHealth');
+    if (this.healthError !== null) throw new Error(this.healthError);
+    return this.health;
+  }
+
+  async onHealth(cb: (r: HealthReport) => void): Promise<Unsubscribe> {
+    this.healthCalls.push('onHealth');
+    this.#healthListeners.add(cb);
+    return () => this.#healthListeners.delete(cb);
+  }
+
+  async getHealthClock(): Promise<HealthClock> {
+    this.healthCalls.push('getHealthClock');
+    return this.healthClock;
+  }
+
+  async onHealthClock(cb: (c: HealthClock) => void): Promise<Unsubscribe> {
+    this.healthCalls.push('onHealthClock');
+    this.#healthClockListeners.add(cb);
+    return () => this.#healthClockListeners.delete(cb);
+  }
+
+  /** Number of live health listeners (report plus clock). */
+  get healthListenerCount(): number {
+    return this.#healthListeners.size + this.#healthClockListeners.size;
+  }
+
   async refreshAutostart(): Promise<AutostartStatus> {
     this.refreshAutostartCalls++;
     return this.autostart;
@@ -223,6 +262,16 @@ export class FakeBackend implements Backend {
   /** Delivers an arbitrary state to the `onSettings` listeners (e.g. a stale one). */
   emitSettings(state: SettingsState): void {
     this.#settingsListeners.forEach((cb) => cb(state));
+  }
+
+  emitHealth(report: HealthReport): void {
+    this.health = report;
+    this.#healthListeners.forEach((cb) => cb(report));
+  }
+
+  emitHealthClock(clock: HealthClock): void {
+    this.healthClock = clock;
+    this.#healthClockListeners.forEach((cb) => cb(clock));
   }
 
   emitNavigate(target: NavigationTarget): void {

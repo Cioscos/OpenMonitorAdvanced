@@ -1,6 +1,9 @@
 import type {
+  Alert,
   AutostartEffective,
   GpuProcess,
+  HealthClock,
+  HealthReport,
   HistoryWindow,
   Label,
   Schema,
@@ -214,6 +217,56 @@ function valuesFor(schema: Schema, t: number): (number | null)[] {
   return schema === SERVICE_MOCK_SCHEMA ? [...mockValues(t), ...serviceMockValues(t)] : mockValues(t);
 }
 
+/** Seconds each phase of the demonstration cycle lasts. */
+const HEALTH_PHASE_S = 8;
+
+/** The alert of the demonstration cycle: the mock GPU's temperature at `value` °C. */
+function mockGpuAlert(level: 'warn' | 'crit', value: number, sinceMs: number): Alert {
+  return {
+    ruleId: 'gpu-temp',
+    sensorId: `${GPU}/temperature/core`,
+    deviceId: GPU,
+    unit: 'celsius',
+    sensorLabel: { key: 'gpu.temperature.core' },
+    level,
+    value,
+    threshold: level === 'crit' ? 90 : 83,
+    sinceMs,
+    valid: true,
+    lastValidMs: sinceMs,
+    messageKey: 'rule.gpu-temp.message',
+    params: { device: 'Mock GeForce RTX 4080' },
+  };
+}
+
+/**
+ * Demonstration of the rules engine for `pnpm dev`: all clear, then a GPU warning, a GPU critical
+ * alert, and back. Phases change every `HEALTH_PHASE_S` seconds; the clock counts in the phase.
+ */
+function mockHealthCycle(now: () => number = Date.now) {
+  const startedAt = now();
+  let phase = -1;
+  let revision = 0;
+  let phaseStartedAt = startedAt;
+  let report: HealthReport = { level: 'ok', sinceMs: startedAt, revision, coverage: 'complete', unavailableTargets: [], alerts: [] };
+  const advance = (): boolean => {
+    const next = Math.floor((now() - startedAt) / (HEALTH_PHASE_S * 1000)) % 3;
+    if (next === phase) return false;
+    phase = next;
+    phaseStartedAt = now();
+    const level = (['ok', 'warn', 'crit'] as const)[next];
+    const alerts = level === 'ok' ? [] : [mockGpuAlert(level, level === 'warn' ? 86 : 93, phaseStartedAt)];
+    report = { level, sinceMs: phaseStartedAt, revision: ++revision, coverage: 'complete', unavailableTargets: [], alerts };
+    return true;
+  };
+  advance();
+  return {
+    report: () => report,
+    clock: (): HealthClock => ({ revision: report.revision, levelElapsedMs: now() - phaseStartedAt }),
+    advance,
+  };
+}
+
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
   const initialState = parseServiceState(typeof location === 'undefined' ? '' : location.search);
@@ -234,6 +287,25 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const settings = new MockSettings(parsePersistence(typeof location === 'undefined' ? '' : location.search));
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
+  const cycle = mockHealthCycle();
+  const healthListeners = new Set<(r: HealthReport) => void>();
+  const clockListeners = new Set<(c: HealthClock) => void>();
+  let healthTimer: ReturnType<typeof setInterval> | undefined;
+  const tickHealth = () => {
+    if (cycle.advance()) healthListeners.forEach((cb) => cb(cycle.report()));
+    clockListeners.forEach((cb) => cb(cycle.clock()));
+  };
+  const watchHealth = <T>(set: Set<T>, cb: T) => {
+    set.add(cb);
+    healthTimer ??= setInterval(tickHealth, 1000);
+    return () => {
+      set.delete(cb);
+      if (healthListeners.size + clockListeners.size === 0 && healthTimer !== undefined) {
+        clearInterval(healthTimer);
+        healthTimer = undefined;
+      }
+    };
+  };
   const emit = () => {
     seq++;
     const snapshot: Snapshot = { revision: schema.revision, seq, timestampMs: Date.now(), values: valuesFor(schema, seq) };
@@ -304,6 +376,10 @@ export function createMockBackend(intervalMs = 1000): Backend {
     importWebviewState: async (legacy) => settings.import(legacy),
     takePendingView: async () => null,
     onNavigate: async () => () => {},
+    getHealth: async () => cycle.report(),
+    onHealth: async (cb) => watchHealth(healthListeners, cb),
+    getHealthClock: async () => cycle.clock(),
+    onHealthClock: async (cb) => watchHealth(clockListeners, cb),
     refreshAutostart: async () => {
       const configured = settings.state().settings.tray.autostart;
       return { configured, effective: autostart ?? (configured ? 'enabled' : 'notConfigured'), error: null };

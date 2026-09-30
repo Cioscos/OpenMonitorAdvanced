@@ -379,3 +379,46 @@ export interface AppInfo {
 
 /** The only places `openKnownPath` opens (never a path the UI chooses). */
 export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'startupAppsSettings';
+
+/** Overall level of the rules engine; `neutral` when there is nothing to judge yet. */
+export type HealthLevel = 'neutral' | 'ok' | 'warn' | 'crit';
+
+/** An instance in `warn` or `crit`, current or retained after its sensor was lost. Mirrors `Alert` in oma-core. */
+export interface Alert {
+  ruleId: string;
+  sensorId: string;
+  deviceId: string;
+  /** Presentation fields kept from the last schema that had the sensor. */
+  unit: Unit;
+  sensorLabel: Label;
+  level: 'ok' | 'warn' | 'crit';
+  /** Raw value of the last fresh valid tick; null when there never was one. */
+  value: number | null;
+  /** Threshold of `level`; null for flags. */
+  threshold: number | null;
+  /** System time the instance entered `level`, display only. */
+  sinceMs: number;
+  /** Whether the latest tick had a value for the sensor. */
+  valid: boolean;
+  lastValidMs: number | null;
+  messageKey: string;
+  params: Record<string, string>;
+}
+
+/** The rules engine's verdict (`get_health`, `oma:health`); `revision` goes up on every change. */
+export interface HealthReport {
+  level: HealthLevel;
+  sinceMs: number;
+  revision: number;
+  coverage: 'complete' | 'partial' | 'unavailable';
+  unavailableTargets: { ruleId: string; sensorId: string }[];
+  /** Crit first, then the oldest entry, then rule and sensor id. */
+  alerts: Alert[];
+}
+
+/** Monotonic time in the current level, for the report of the same `revision` (`oma:health-clock`). */
+export interface HealthClock {
+  revision: number;
+  levelElapsedMs: number;
+}
+

@@ -93,6 +93,18 @@ test('banner_shows_all_clear_with_duration', async () => {
   expect(screen.getByText('for 12 min')).toBeTruthy();
 });
 
+test('banner says less than a minute during the first minute', async () => {
+  const backend = await withHealth(healthReport({}), 59_999);
+  setup();
+  expect(screen.getByText('for less than a minute')).toBeTruthy();
+  expect(screen.queryByText('for 0 min')).toBeNull();
+  backend.emitHealthClock({ revision: 1, levelElapsedMs: 60_000 });
+  await vi.waitFor(() => expect(screen.getByText('for 1 min')).toBeTruthy());
+  i18n.locale = 'it';
+  backend.emitHealthClock({ revision: 1, levelElapsedMs: 0 });
+  await vi.waitFor(() => expect(screen.getByText('da meno di un minuto')).toBeTruthy());
+});
+
 test('banner_lists_problems_and_opens_with_keyboard', async () => {
   const ram = gpuAlert({ ruleId: 'ram-used', sensorId: 'memory/0/load/used', deviceId: 'memory/0', unit: 'percent', level: 'warn', value: 91, messageKey: 'rule.ram-used.message', params: {} });
   const backend = await withHealth(healthReport({ level: 'crit', alerts: [gpuAlert(), ram] }));

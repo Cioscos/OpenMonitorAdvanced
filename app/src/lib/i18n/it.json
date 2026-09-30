@@ -142,6 +142,7 @@
   "service.pageNotice": "Temperature, tensioni e altri sensori disponibili con il servizio.",
   "health.monitoring": "Monitoraggio attivo",
   "health.since": "da {duration}",
+  "health.sinceUnderMinute": "da meno di un minuto",
   "health.problems": "{count} problemi",
   "health.allClear": "Tutto in ordine",
   "health.partial": "Nessun allarme nei sensori disponibili — dati incompleti",

@@ -142,6 +142,7 @@
   "service.pageNotice": "Temperatures, voltages and more sensors are available with the service.",
   "health.monitoring": "Monitoring active",
   "health.since": "for {duration}",
+  "health.sinceUnderMinute": "for less than a minute",
   "health.problems": "{count} problems",
   "health.allClear": "All clear",
   "health.partial": "No alerts on the available sensors — incomplete data",

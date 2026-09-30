@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatDuration } from '../../lib/format';
+  import { sinceText } from '../../lib/health.svelte';
   import { t } from '../../lib/i18n/index.svelte';
   import type { HealthLevel } from '../../lib/types';
 
@@ -59,7 +59,7 @@
       {:else}
         <div class="title">{title}</div>
       {/if}
-      <div class="sub">{t('health.since', { duration: formatDuration(elapsedMs, t) })}</div>
+      <div class="sub">{sinceText(elapsedMs, t)}</div>
     </div>
   </div>
   {#if expanded}

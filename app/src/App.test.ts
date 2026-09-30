@@ -147,7 +147,7 @@ test('without a clock the banner starts from zero', async () => {
   backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 50_000_000, values: mockValues(1) });
   flushSync();
 
-  expect(screen.getByText('for 0 min')).toBeTruthy();
+  expect(screen.getByText('for less than a minute')).toBeTruthy();
 });
 
 test('the stale badge appears after five silent seconds and goes away with new data', async () => {

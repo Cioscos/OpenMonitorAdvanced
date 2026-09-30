@@ -1,5 +1,5 @@
 import type { Backend, Unsubscribe } from './backend/backend';
-import { DASH, formatTemperature, formatValue } from './format';
+import { DASH, formatDuration, formatTemperature, formatValue } from './format';
 import type { Translate } from './i18n/index.svelte';
 import type { Alert, HealthClock, HealthReport, Schema, TemperatureUnit, ThroughputUnit, Unit } from './types';
 
@@ -124,4 +124,10 @@ export function bannerText(
   if (messages.length > 1) return { title: t('health.problems', { count: messages.length }), items: messages };
   if (report.level === 'neutral') return { title: t('health.monitoring'), items: [] };
   return { title: t(report.coverage === 'complete' ? 'health.allClear' : 'health.partial'), items: [] };
+}
+
+/** How long the banner's level has lasted: "for 12 min", and "for less than a minute" before the first minute. */
+export function sinceText(elapsedMs: number, t: Translate): string {
+  if (elapsedMs < 60_000) return t('health.sinceUnderMinute');
+  return t('health.since', { duration: formatDuration(elapsedMs, t) });
 }

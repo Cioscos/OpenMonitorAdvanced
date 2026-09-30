@@ -245,12 +245,63 @@ export interface Settings {
     series: Record<string, string[]>;
   };
   view: { last?: ViewKind };
-  /** Opaque until the rules milestone. */
-  rules: Record<string, unknown>;
+  rules: RulesSettings;
   /** Opaque until the log milestone. */
   log: Record<string, unknown>;
   migrations: { serviceV1: boolean; webviewV1: boolean };
 }
+
+/** `{ fixed }`, or a property of the sensor's device plus `offset`, with `fallback` when it is missing. */
+export type Threshold = { fixed: number } | { property: string; offset: number; fallback: number };
+
+/** One alert level; `threshold` is null only with `flagActive`. */
+export interface LevelSpec {
+  threshold: Threshold | null;
+  durationS: number;
+}
+
+/** One sensor by id, or every sensor of a device kind and sensor kind whose name is in `names` (empty: all). */
+export type RuleTarget = { sensor: string } | { deviceKind: DeviceKind; sensorKind: SensorKind; names: string[] };
+
+export type RuleCondition = 'above' | 'below' | 'flagActive';
+
+/** Mirrors `oma_core::rules::Rule`; thresholds and hysteresis are in the sensor's base unit. */
+export interface Rule {
+  id: string;
+  target: RuleTarget;
+  unit: Unit;
+  condition: RuleCondition;
+  warn: LevelSpec | null;
+  crit: LevelSpec | null;
+  hysteresis: { amount: number; durationS: number };
+  enabled: boolean;
+  notify: { warn: boolean; crit: boolean };
+}
+
+/** The changed fields of a built-in rule; `warn: null` / `crit: null` switch the level off. */
+export interface RuleOverride {
+  enabled?: boolean;
+  warn?: LevelSpec | null;
+  crit?: LevelSpec | null;
+  hysteresis?: Rule['hysteresis'];
+  notify?: Rule['notify'];
+}
+
+/** What the settings file keeps about rules: overrides per built-in rule id, then the custom rules. */
+export interface RulesSettings {
+  overrides: Record<string, RuleOverride>;
+  custom: Rule[];
+}
+
+/**
+ * What opening the settings file had to fix; `invalidRule` marks a custom rule (`rules.custom.2`) or an
+ * override field (`rules.overrides.gpu-temp.warn`) left out, with the i18n key of the reason.
+ */
+export type SettingsDiagnostic = { path: string } & (
+  | { kind: 'wrongType' | 'unknownVariant' | 'missingVersion' }
+  | { kind: 'corrected'; from: string; to: string }
+  | { kind: 'invalidRule'; key: string }
+);
 
 /** Where the settings stand on disk. `recovered` carries the path the corrupt file was kept at. */
 export type Persistence =
@@ -271,6 +322,8 @@ export interface SettingsState {
   seq: number;
   persistence: Persistence;
   applyStatus: { service: EffectStatus; autostart: EffectStatus; vendorLibraries: EffectStatus };
+  /** What opening the file fixed or left out, for the whole session. */
+  diagnostics: SettingsDiagnostic[];
 }
 
 /** A rejected patch: the camelCase path of the failing field and an i18n key. */
@@ -281,8 +334,13 @@ export interface PatchError {
 
 export type DeepPartial<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
 
-/** Objects merge, arrays and scalars replace; `null` only on the nullable fields. */
-export type SettingsPatch = DeepPartial<Omit<Settings, 'version' | 'migrations' | 'rules' | 'log'>>;
+/**
+ * Objects merge, arrays and scalars replace; `null` only on the nullable fields. The fields of a rule
+ * override (`warn`, `crit`, `hysteresis`, `notify`) replace whole, and `rules.custom` is an array.
+ */
+export type SettingsPatch = DeepPartial<Omit<Settings, 'version' | 'migrations' | 'rules' | 'log'>> & {
+  rules?: { overrides?: Record<string, RuleOverride>; custom?: Rule[] };
+};
 
 /** What the web view kept in `localStorage` before the settings file existed. */
 export interface LegacyWebviewState {

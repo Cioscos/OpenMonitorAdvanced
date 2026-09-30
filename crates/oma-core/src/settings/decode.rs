@@ -2,27 +2,49 @@
 
 use std::collections::BTreeMap;
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::{
     ChartFps, DefaultView, Language, Settings, TemperatureUnit, ThroughputUnit, ViewKind,
     INTERVAL_VALUES, WINDOW_VALUES,
 };
+use crate::rules::{
+    is_builtin, nested, validate_override, validate_rules, CustomRules, Rule, RuleOverride,
+    RulesSettings,
+};
 
-#[derive(Clone, Debug, PartialEq)]
+/// Serialized as `{"path": …, "kind": "invalidRule", "key": …}`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Diagnostic {
     /// camelCase path such as `general.intervalMs`.
     pub path: String,
+    #[serde(flatten)]
     pub kind: DiagnosticKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DiagnosticKind {
     WrongType,
     UnknownVariant,
-    Corrected { from: String, to: String },
+    Corrected {
+        from: String,
+        to: String,
+    },
     MissingVersion,
+    /// A custom rule or an override field left out of the rules; `key` is the
+    /// i18n key of the reason (`settings.error.type` when it does not parse).
+    /// The path is the whole rule (`rules.custom.2`) or the override field
+    /// (`rules.overrides.gpu-temp.warn`).
+    InvalidRule {
+        key: &'static str,
+    },
 }
+
+/// i18n key of a value that does not parse.
+pub(super) const TYPE_ERROR: &str = "settings.error.type";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VersionStatus {
@@ -142,8 +164,8 @@ pub fn decode_lenient(value: &Value) -> Decoded {
     let view = reader.section(root, "", "view");
     settings.view.last = reader.variant(&view, "view", "last", true, ViewKind::parse);
 
-    if let Some(rules) = reader.opaque_object(root, "rules") {
-        settings.rules = rules;
+    if let Some(rules) = root.get("rules") {
+        settings.rules = reader.rules(rules);
     }
     if let Some(log) = reader.opaque_object(root, "log") {
         settings.log = log;
@@ -341,7 +363,118 @@ impl Reader {
         series
     }
 
-    /// `rules` / `log`: kept verbatim when objects.
+    /// The rules section, keeping every valid part: an invalid custom rule is
+    /// left out whole, an invalid override field alone. Overrides for rules
+    /// that do not exist (any more) are dropped silently (spec M5 §3.2). The
+    /// result always passes [`validate_rules`].
+    fn rules(&mut self, value: &Value) -> RulesSettings {
+        let mut rules = RulesSettings::default();
+        let Value::Object(section) = value else {
+            self.push("rules".into(), DiagnosticKind::WrongType);
+            return rules;
+        };
+        match section.get("overrides") {
+            None => {}
+            Some(Value::Object(overrides)) => {
+                for (id, over) in overrides {
+                    if let Some(over) = self.rule_override(id, over) {
+                        rules.overrides.insert(id.clone(), over);
+                    }
+                }
+            }
+            Some(_) => self.push("rules.overrides".into(), DiagnosticKind::WrongType),
+        }
+        match section.get("custom") {
+            None => {}
+            Some(Value::Array(items)) => {
+                let mut admitted = CustomRules::default();
+                for (i, item) in items.iter().enumerate() {
+                    let path = format!("rules.custom.{i}");
+                    let Ok(rule) = serde_json::from_value::<Rule>(item.clone()) else {
+                        self.push(path, DiagnosticKind::InvalidRule { key: TYPE_ERROR });
+                        continue;
+                    };
+                    match admitted.admit(&rule) {
+                        Ok(()) => rules.custom.push(rule),
+                        Err(e) => self.push(path, DiagnosticKind::InvalidRule { key: e.key }),
+                    }
+                }
+            }
+            Some(_) => self.push("rules.custom".into(), DiagnosticKind::WrongType),
+        }
+        debug_assert_eq!(validate_rules(&rules), Ok(()));
+        rules
+    }
+
+    /// One override, field by field; `None` for an unknown rule or when
+    /// nothing valid is left of a non-object.
+    fn rule_override(&mut self, id: &str, value: &Value) -> Option<RuleOverride> {
+        let path = format!("rules.overrides.{id}");
+        // An unknown id is ignored, whatever it holds.
+        if !is_builtin(id) {
+            return None;
+        }
+        let Value::Object(fields) = value else {
+            self.push(path, DiagnosticKind::InvalidRule { key: TYPE_ERROR });
+            return None;
+        };
+        // Each field on its own; `null` is a value only for the levels.
+        let mut over = RuleOverride {
+            enabled: self.override_field(&path, "enabled", fields),
+            warn: self.override_field(&path, "warn", fields),
+            crit: self.override_field(&path, "crit", fields),
+            hysteresis: self.override_field(&path, "hysteresis", fields),
+            notify: self.override_field(&path, "notify", fields),
+        };
+
+        // Fields valid alone may still make the rule invalid together; drop
+        // the fields the error points at until the rule is valid.
+        while let Err(e) = validate_override(id, &over) {
+            let group = e.key == "rules.error.order" || e.key == "rules.error.noLevel";
+            let mut dropped = Vec::new();
+            if (group || e.field.starts_with("warn")) && over.warn.take().is_some() {
+                dropped.push("warn");
+            }
+            if (group || e.field.starts_with("crit")) && over.crit.take().is_some() {
+                dropped.push("crit");
+            }
+            if e.field.starts_with("hysteresis") && over.hysteresis.take().is_some() {
+                dropped.push("hysteresis");
+            }
+            if dropped.is_empty() {
+                // Not caused by an override field: the built-in rule itself
+                // is broken, which its own tests rule out. Keep nothing.
+                debug_assert!(false, "built-in rule {id} is invalid: {e:?}");
+                return None;
+            }
+            for name in dropped {
+                self.push(
+                    nested(&path, name),
+                    DiagnosticKind::InvalidRule { key: e.key },
+                );
+            }
+        }
+        Some(over)
+    }
+
+    /// The override field `name` when present and it parses, else a diagnostic.
+    fn override_field<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        name: &str,
+        fields: &Obj,
+    ) -> Option<T> {
+        let parsed = serde_json::from_value::<T>(fields.get(name)?.clone());
+        if parsed.is_err() {
+            self.push(
+                nested(path, name),
+                DiagnosticKind::InvalidRule { key: TYPE_ERROR },
+            );
+        }
+        parsed.ok()
+    }
+
+    /// `log`: kept verbatim when an object.
     fn opaque_object(&mut self, root: &Obj, key: &str) -> Option<Value> {
         match root.get(key)? {
             v @ Value::Object(_) => Some(v.clone()),
@@ -355,10 +488,15 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::super::test_support::everything_changed;
     use super::super::*;
+    use crate::rules::{
+        effective_rules, validate_rules, Notify, Rule, RuleOverride, RulesSettings,
+    };
 
     fn decode(value: serde_json::Value) -> Decoded {
         decode_lenient(&value)
@@ -519,14 +657,264 @@ mod tests {
     #[test]
     fn rules_and_log_are_preserved_when_objects() {
         let want = everything_changed();
-        let d = decode(json!({"version": 1, "rules": want.rules, "log": want.log}));
+        let rules = serde_json::to_value(&want.rules).unwrap();
+        let d = decode(json!({"version": 1, "rules": rules, "log": want.log}));
         assert_eq!(d.settings.rules, want.rules);
         assert_eq!(d.settings.log, want.log);
+        assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
 
         let d = decode(json!({"version": 1, "rules": 3, "log": []}));
         assert_eq!(d.settings.rules, Settings::default().rules);
         assert_eq!(d.settings.log, Settings::default().log);
         assert_eq!(d.diagnostics.len(), 2);
+    }
+
+    const ID_A: &str = "custom-00000000-0000-4000-8000-00000000000a";
+    const ID_B: &str = "custom-00000000-0000-4000-8000-00000000000b";
+
+    /// A custom rule on a CPU temperature with only a warning level.
+    fn custom_rule(id: &str, threshold: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": id,
+            "target": {"sensor": "cpu/0/temperature/package"},
+            "unit": "celsius",
+            "condition": "above",
+            "warn": {"threshold": threshold, "durationS": 0},
+            "crit": null
+        })
+    }
+
+    fn invalid(path: &str, key: &'static str) -> Diagnostic {
+        Diagnostic {
+            path: path.into(),
+            kind: DiagnosticKind::InvalidRule { key },
+        }
+    }
+
+    #[test]
+    fn invalid_rules_are_excluded_and_reported() {
+        let first_a = custom_rule(ID_A, json!({"fixed": 70}));
+        let d = decode(json!({
+            "version": 1,
+            "rules": {
+                "overrides": {
+                    "gpu-temp": {
+                        "warn": {"threshold": {"fixed": "x"}, "durationS": 30},
+                        "enabled": false
+                    }
+                },
+                "custom": [
+                    first_a,
+                    custom_rule(ID_B, json!("alta")),
+                    custom_rule(ID_A, json!({"fixed": 75}))
+                ]
+            }
+        }));
+        let rules = &d.settings.rules;
+        assert_eq!(
+            rules.custom,
+            vec![serde_json::from_value::<Rule>(first_a).unwrap()]
+        );
+        assert_eq!(
+            rules.overrides,
+            BTreeMap::from([(
+                "gpu-temp".to_string(),
+                RuleOverride {
+                    enabled: Some(false),
+                    ..RuleOverride::default()
+                }
+            )])
+        );
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                invalid("rules.overrides.gpu-temp.warn", "settings.error.type"),
+                invalid("rules.custom.1", "settings.error.type"),
+                invalid("rules.custom.2", "rules.error.duplicateId"),
+            ]
+        );
+        assert_eq!(validate_rules(rules), Ok(()));
+    }
+
+    #[test]
+    fn a_duplicate_id_keeps_the_first_valid_rule() {
+        // The first rule with the id is invalid, so the second one is kept.
+        let mut broken = custom_rule(ID_A, json!({"fixed": 70}));
+        broken["warn"]["durationS"] = json!(601);
+        let d = decode(json!({"version": 1, "rules": {"custom": [
+            broken,
+            custom_rule(ID_A, json!({"fixed": 75})),
+        ]}}));
+        assert_eq!(d.settings.rules.custom.len(), 1);
+        assert_eq!(
+            d.settings.rules.custom[0].warn.as_ref().unwrap().duration_s,
+            0
+        );
+        assert_eq!(
+            d.diagnostics,
+            vec![invalid("rules.custom.0", "rules.error.duration")]
+        );
+    }
+
+    #[test]
+    fn cross_field_invalid_overrides_restore_default_levels() {
+        let d = decode(json!({"version": 1, "rules": {"overrides": {
+            // Warning 95 above the default critical 90.
+            "gpu-temp": {
+                "warn": {"threshold": {"fixed": 95}, "durationS": 30},
+                "enabled": false,
+                "notify": {"warn": true, "crit": true}
+            },
+            // Both levels off.
+            "gpu-hotspot": {"warn": null, "crit": null, "enabled": false}
+        }}}));
+        let overrides = &d.settings.rules.overrides;
+        assert_eq!(
+            overrides["gpu-temp"],
+            RuleOverride {
+                enabled: Some(false),
+                notify: Some(Notify {
+                    warn: true,
+                    crit: true
+                }),
+                ..RuleOverride::default()
+            }
+        );
+        assert_eq!(
+            overrides["gpu-hotspot"],
+            RuleOverride {
+                enabled: Some(false),
+                ..RuleOverride::default()
+            }
+        );
+        let effective = effective_rules(&d.settings.rules);
+        let defaults = crate::rules::default_rules();
+        for id in ["gpu-temp", "gpu-hotspot"] {
+            let rule = effective.iter().find(|r| r.id == id).unwrap();
+            let default = defaults.iter().find(|r| r.id == id).unwrap();
+            assert_eq!((&rule.warn, &rule.crit), (&default.warn, &default.crit));
+            assert!(!rule.enabled);
+        }
+        // Map order is not part of the contract.
+        let mut diagnostics = d.diagnostics.clone();
+        diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            diagnostics,
+            vec![
+                invalid("rules.overrides.gpu-hotspot.crit", "rules.error.noLevel"),
+                invalid("rules.overrides.gpu-hotspot.warn", "rules.error.noLevel"),
+                invalid("rules.overrides.gpu-temp.warn", "rules.error.order"),
+            ]
+        );
+        assert_eq!(validate_rules(&d.settings.rules), Ok(()));
+    }
+
+    #[test]
+    fn single_invalid_override_fields_are_dropped_alone() {
+        let d = decode(json!({"version": 1, "rules": {"overrides": {
+            "gpu-temp": {
+                "crit": {"threshold": {"fixed": 99}, "durationS": 601},
+                "hysteresis": {"amount": -1, "durationS": 0},
+                "notify": "loud",
+                "enabled": false
+            },
+            "ram-used": 7
+        }}}));
+        assert_eq!(
+            d.settings.rules.overrides,
+            BTreeMap::from([(
+                "gpu-temp".to_string(),
+                RuleOverride {
+                    enabled: Some(false),
+                    ..RuleOverride::default()
+                }
+            )])
+        );
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                invalid("rules.overrides.gpu-temp.notify", "settings.error.type"),
+                invalid("rules.overrides.gpu-temp.crit", "rules.error.duration"),
+                invalid(
+                    "rules.overrides.gpu-temp.hysteresis",
+                    "rules.error.hysteresis"
+                ),
+                invalid("rules.overrides.ram-used", "settings.error.type"),
+            ]
+        );
+    }
+
+    #[test]
+    fn overrides_for_unknown_rules_are_dropped_silently() {
+        let d = decode(json!({"version": 1, "rules": {"overrides": {
+            "no-such-rule": {"enabled": false},
+            "gpu-temp": {"enabled": false}
+        }}}));
+        assert_eq!(
+            d.settings.rules.overrides.keys().collect::<Vec<_>>(),
+            ["gpu-temp"]
+        );
+        assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+        assert_eq!(validate_rules(&d.settings.rules), Ok(()));
+    }
+
+    #[test]
+    fn too_many_custom_rules_are_truncated_on_load() {
+        let id = |n: usize| format!("custom-00000000-0000-4000-8000-{n:012x}");
+        let mut custom = vec![custom_rule(&id(9999), json!({"fixed": f64::NAN}))];
+        // `json!` turns NaN into null: the first rule is invalid.
+        custom.extend((0..300).map(|n| custom_rule(&id(n), json!({"fixed": 70}))));
+        let d = decode(json!({"version": 1, "rules": {"custom": custom}}));
+        let kept = &d.settings.rules.custom;
+        assert_eq!(kept.len(), crate::rules::MAX_CUSTOM_RULES);
+        assert_eq!(kept[0].id, id(0));
+        assert_eq!(kept.last().unwrap().id, id(255));
+        let mut want = vec![invalid("rules.custom.0", "settings.error.type")];
+        want.extend(
+            (257..=300).map(|i| invalid(&format!("rules.custom.{i}"), "rules.error.tooMany")),
+        );
+        assert_eq!(d.diagnostics, want);
+        assert_eq!(validate_rules(&d.settings.rules), Ok(()));
+    }
+
+    #[test]
+    fn wrong_rules_containers_fall_back() {
+        let d = decode(json!({"version": 1, "rules": {"overrides": [], "custom": {}}}));
+        assert_eq!(d.settings.rules, RulesSettings::default());
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                Diagnostic {
+                    path: "rules.overrides".into(),
+                    kind: DiagnosticKind::WrongType
+                },
+                Diagnostic {
+                    path: "rules.custom".into(),
+                    kind: DiagnosticKind::WrongType
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn diagnostics_serialize_with_a_kind_tag() {
+        let value = serde_json::to_value(vec![
+            invalid("rules.custom.1", "settings.error.type"),
+            corrected("general.intervalMs", "700", "500"),
+            Diagnostic {
+                path: "version".into(),
+                kind: DiagnosticKind::MissingVersion,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                {"path": "rules.custom.1", "kind": "invalidRule", "key": "settings.error.type"},
+                {"path": "general.intervalMs", "kind": "corrected", "from": "700", "to": "500"},
+                {"path": "version", "kind": "missingVersion"}
+            ])
+        );
     }
 
     #[test]

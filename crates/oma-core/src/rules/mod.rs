@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{DeviceKind, SensorKind, Unit};
 
+pub(crate) use validate::{nested, validate_override, CustomRules};
 pub use validate::{validate_rule, validate_rules, RuleError};
 
 /// Most custom rules a settings file may hold.
@@ -340,6 +341,11 @@ pub fn default_rules() -> Vec<Rule> {
             fixed_level(5.0, 0),
         ),
     ]
+}
+
+/// Whether `id` names a built-in rule.
+pub(crate) fn is_builtin(id: &str) -> bool {
+    default_rules().iter().any(|rule| rule.id == id)
 }
 
 impl Rule {
@@ -781,7 +787,7 @@ mod tests {
             .overrides
             .insert("ram-used".into(), RuleOverride::default());
         let encoded = crate::settings::encode(&crate::settings::Settings {
-            rules: serde_json::to_value(&settings).unwrap(),
+            rules: settings.clone(),
             ..crate::settings::Settings::default()
         });
         let back: RulesSettings = serde_json::from_value(encoded["rules"].clone()).unwrap();

@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use oma_core::settings::encode;
 
-use super::store::{lock, Inner};
+use super::store::{lock, place_aside, Inner};
+use super::Persistence;
 
 /// Pause between the save attempts of `shutdown`.
 const SHUTDOWN_RETRY_PAUSE: Duration = Duration::from_millis(150);
@@ -42,7 +43,7 @@ impl Inner {
                 let mut core = lock(&self.core);
                 core.writer_done = true;
                 if core.blocked.is_none() {
-                    core.blocked = Some(super::Persistence::Error {
+                    core.blocked = Some(Persistence::Error {
                         reason: format!("writer: {err}"),
                     });
                 }
@@ -77,6 +78,33 @@ impl Inner {
                     .wait_timeout(core, due - now)
                     .unwrap_or_else(|e| e.into_inner())
                     .0;
+                continue;
+            }
+
+            if core.backup_pending {
+                // Copy the file aside before its first replacement (R6).
+                drop(core);
+                let result = match &self.path {
+                    Some(path) => place_aside(path, |target| self.fs.copy_exclusive(path, target)),
+                    None => Err(std::io::Error::other("no settings path")),
+                };
+                core = lock(&self.core);
+                match result {
+                    Ok(kept) => {
+                        tracing::warn!(kept = %kept.display(), "settings file with invalid rules kept before saving");
+                        core.backup_pending = false;
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, "cannot back up the settings file with invalid rules; changes will not be saved");
+                        let reason = format!("backup: {err}");
+                        if core.flush_target > core.persisted_revision {
+                            core.flush_failed = Some(reason.clone());
+                        }
+                        core.blocked = Some(Persistence::Error { reason });
+                        self.commit(core);
+                        core = lock(&self.core);
+                    }
+                }
                 continue;
             }
 
@@ -130,8 +158,8 @@ impl Inner {
         }
         match &core.blocked {
             // Read-only by design: nothing is ever written, which is not a failure.
-            Some(super::Persistence::ReadOnly { .. }) => return Ok(()),
-            Some(super::Persistence::Error { reason }) => {
+            Some(Persistence::ReadOnly { .. }) => return Ok(()),
+            Some(Persistence::Error { reason }) => {
                 return Err(FlushError::Permanent(reason.clone()))
             }
             _ => {}

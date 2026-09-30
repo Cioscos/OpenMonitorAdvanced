@@ -53,6 +53,18 @@ pub fn import_webview_state(
     import_webview(&store, legacy)
 }
 
+/// Removes the override of a built-in rule ("Restore"); an id that is not a
+/// built-in rule is `rules.error.unknownRule`.
+#[tauri::command(async)]
+pub fn reset_rule_override(
+    store: State<'_, Arc<SettingsStore>>,
+    rule_id: String,
+) -> Result<SettingsState, PatchErrorDto> {
+    store
+        .reset_rule_override(&rule_id)
+        .map_err(PatchErrorDto::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

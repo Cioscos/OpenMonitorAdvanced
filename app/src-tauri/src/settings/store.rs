@@ -8,7 +8,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oma_core::settings::{
-    apply_patch, decode_lenient, encode, Decoded, PatchError, Settings, VersionStatus,
+    apply_patch, decode_lenient, encode, reset_rule_override, Decoded, Diagnostic, DiagnosticKind,
+    PatchError, Settings, VersionStatus,
 };
 use serde_json::Value;
 
@@ -45,6 +46,11 @@ pub(super) struct Core {
     pub blocked: Option<Persistence>,
     /// Where the corrupt file was kept; sticky for the session.
     pub recovered: Option<String>,
+    /// What the tolerant decoder had to fix when opening; sticky for the session.
+    pub diagnostics: Vec<Diagnostic>,
+    /// The file on disk holds rules that were left out: it must be copied
+    /// aside before the first save replaces it (R6).
+    pub backup_pending: bool,
     /// Reason of the last failed save, cleared by the next successful one.
     pub write_error: Option<String>,
     pub apply_status: ApplyStatus,
@@ -91,6 +97,7 @@ impl Core {
             seq: self.seq,
             persistence: self.persistence(),
             apply_status: self.apply_status.clone(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 
@@ -192,6 +199,8 @@ struct Loaded {
     revision: u64,
     blocked: Option<Persistence>,
     recovered: Option<String>,
+    diagnostics: Vec<Diagnostic>,
+    backup_pending: bool,
 }
 
 impl Loaded {
@@ -201,8 +210,18 @@ impl Loaded {
             revision,
             blocked,
             recovered,
+            diagnostics: Vec::new(),
+            backup_pending: false,
         }
     }
+}
+
+/// Whether decoding left rules out, so the file holds more than a save keeps.
+fn drops_rules(decoded: &Decoded) -> bool {
+    decoded
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.kind, DiagnosticKind::InvalidRule { .. }))
 }
 
 fn unix_secs() -> u64 {
@@ -213,7 +232,7 @@ fn unix_secs() -> u64 {
 
 /// Runs `place` with unique `<name>.bad-<stamp>-<pid>[-n]` targets next to
 /// `path` until one is free; `Ok` carries the target that was used.
-fn place_aside(
+pub(super) fn place_aside(
     path: &Path,
     mut place: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<PathBuf> {
@@ -313,10 +332,13 @@ fn load_leftover(fs: &dyn SettingsFs, path: &Path) -> Loaded {
             revision: 0,
             blocked: Some(blocked),
             recovered: None,
+            diagnostics: decoded.diagnostics,
+            backup_pending: false,
         };
     }
     // `write_atomic` reuses the temporary file, so copy it aside first; the
-    // copy is the stable backup `Recovered` points to. Revision 1 is unsaved.
+    // copy is the stable backup `Recovered` points to, and also the backup of
+    // any rules the decoder left out. Revision 1 is unsaved.
     match place_aside(&tmp, |target| fs.copy_exclusive(&tmp, target)) {
         Ok(kept) => {
             tracing::warn!(kept = %kept.display(), "adopted a leftover settings.json.tmp; it will be saved as settings.json");
@@ -325,6 +347,8 @@ fn load_leftover(fs: &dyn SettingsFs, path: &Path) -> Loaded {
                 revision: 1,
                 blocked: None,
                 recovered: Some(kept.display().to_string()),
+                diagnostics: decoded.diagnostics,
+                backup_pending: false,
             }
         }
         Err(err) => {
@@ -336,6 +360,8 @@ fn load_leftover(fs: &dyn SettingsFs, path: &Path) -> Loaded {
                     reason: format!("preserve: {err}"),
                 }),
                 recovered: None,
+                diagnostics: decoded.diagnostics,
+                backup_pending: false,
             }
         }
     }
@@ -379,11 +405,16 @@ fn load(path: Option<&Path>, fs: &dyn SettingsFs) -> Loaded {
             Err(err) => tracing::warn!(%err, "cannot remove the leftover settings.json.tmp"),
         }
     }
+    // Rules left out stay only in the file until the first save, which copies
+    // it aside first (the writer does, so opening alone creates no copy).
+    let backup_pending = blocked.is_none() && drops_rules(&decoded);
     Loaded {
         settings: decoded.settings,
         revision: 0,
         blocked,
         recovered: None,
+        diagnostics: decoded.diagnostics,
+        backup_pending,
     }
 }
 
@@ -410,6 +441,8 @@ impl SettingsStore {
             seq: 0,
             blocked: loaded.blocked,
             recovered: loaded.recovered,
+            diagnostics: loaded.diagnostics,
+            backup_pending: loaded.backup_pending,
             write_error: None,
             apply_status: ApplyStatus::default(),
             dirty_since: (loaded.revision > 0).then(Instant::now),
@@ -455,6 +488,14 @@ impl SettingsStore {
     pub fn update(&self, patch: &Value) -> Result<SettingsState, PatchError> {
         let core = lock(&self.inner.core);
         let next = apply_patch(&core.settings, patch)?;
+        Ok(self.inner.apply(core, next))
+    }
+
+    /// Drops the override of the built-in rule `rule_id` ("Restore"); no
+    /// override is not an error, an id that is not built in is.
+    pub fn reset_rule_override(&self, rule_id: &str) -> Result<SettingsState, PatchError> {
+        let core = lock(&self.inner.core);
+        let next = reset_rule_override(&core.settings, rule_id)?;
         Ok(self.inner.apply(core, next))
     }
 
@@ -955,6 +996,205 @@ mod tests {
         assert_eq!(fs.write_attempts(), 0);
         assert_eq!(fs.file(&test_tmp_path()).unwrap(), TMP_3000);
         assert!(fs.files_with_prefix("settings.json.tmp.bad-").is_empty());
+    }
+
+    /// A settings file with one valid and one broken custom rule.
+    fn file_with_invalid_rule() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "general": {"intervalMs": 2000},
+            "rules": {"custom": [
+                {
+                    "id": "custom-00000000-0000-4000-8000-000000000001",
+                    "target": {"sensor": "cpu/0/temperature/package"},
+                    "unit": "celsius", "condition": "above",
+                    "warn": {"threshold": {"fixed": 70}, "durationS": 0}, "crit": null
+                },
+                {
+                    "id": "custom-00000000-0000-4000-8000-000000000002",
+                    "target": {"sensor": "cpu/0/temperature/package"},
+                    "unit": "celsius", "condition": "above",
+                    "warn": {"threshold": "alta", "durationS": 0}, "crit": null
+                }
+            ]}
+        }))
+        .unwrap()
+    }
+
+    fn backups(fs: &FakeFs) -> Vec<std::path::PathBuf> {
+        fs.files_with_prefix("settings.json.bad-")
+    }
+
+    #[test]
+    fn invalid_rules_back_up_the_file_before_writing() {
+        let original = file_with_invalid_rule();
+        let fs = FakeFs::new().with_file(&test_path(), &original);
+        let store = open_fast(&fs);
+        assert_eq!(store.settings().rules.custom.len(), 1);
+        // Opening alone copies nothing: there is nothing to overwrite yet.
+        assert_eq!(fs.ops(), ["read", "remove"]);
+        store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "remove", "copy", "write"]);
+        let kept = backups(&fs);
+        assert_eq!(kept.len(), 1);
+        let name = kept[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("settings.json.bad-"), "{name}");
+        assert!(
+            name.ends_with(&format!("-{}", std::process::id())),
+            "{name}"
+        );
+        assert_eq!(fs.file(&kept[0]).unwrap(), original);
+        // The rewritten file holds only the valid rule.
+        assert_eq!(
+            stored_json(&fs)["rules"]["custom"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // After a successful backup the next saves copy nothing again.
+        store
+            .update(&json!({"general": {"intervalMs": 3500}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "remove", "copy", "write", "write"]);
+        assert_eq!(store.state().persistence, Persistence::Ok);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn backup_collision_never_overwrites() {
+        let original = file_with_invalid_rule();
+        let fs = FakeFs::new().with_file(&test_path(), &original);
+        fs.collide_next_copies(2);
+        let store = open_fast(&fs);
+        store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(
+            fs.ops(),
+            ["read", "remove", "copy", "copy", "copy", "write"]
+        );
+        let kept = backups(&fs);
+        assert_eq!(kept.len(), 1);
+        let name = kept[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.ends_with(&format!("-{}-3", std::process::id())),
+            "{name}"
+        );
+        assert_eq!(fs.file(&kept[0]).unwrap(), original);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn backup_failure_blocks_writes() {
+        let original = file_with_invalid_rule();
+        let fs = FakeFs::new().with_file(&test_path(), &original);
+        fs.set_fail_copy(true);
+        let store = open_fast(&fs);
+        store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        assert!(store.flush_now(LONG).is_err());
+        assert!(matches!(
+            store.state().persistence,
+            Persistence::Error { .. }
+        ));
+        // A later change is not written either, and the original is untouched.
+        store
+            .update(&json!({"general": {"intervalMs": 3500}}))
+            .unwrap();
+        assert!(store.flush_now(Duration::from_millis(200)).is_err());
+        assert_eq!(fs.write_attempts(), 0);
+        assert_eq!(fs.file(&test_path()).unwrap(), original);
+        assert!(backups(&fs).is_empty());
+        assert_eq!(store.settings().general.interval_ms, 3500);
+    }
+
+    #[test]
+    fn adopted_tmp_with_invalid_rules_is_backed_up_once() {
+        let original = file_with_invalid_rule();
+        let fs = FakeFs::new().with_file(&test_tmp_path(), &original);
+        let store = open_fast(&fs);
+        store.flush_now(LONG).unwrap();
+        // The copy made when adopting the leftover is the backup.
+        assert_eq!(fs.ops(), ["read", "read", "copy", "write"]);
+        let kept = fs.files_with_prefix("settings.json.tmp.bad-");
+        assert_eq!(fs.file(&kept[0]).unwrap(), original);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn valid_rules_are_never_backed_up() {
+        let fs = FakeFs::new().with_file(&test_path(), MAIN_2000);
+        let store = open_fast(&fs);
+        store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "remove", "write"]);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn load_diagnostics_reach_settings_state() {
+        let fs = FakeFs::new().with_file(&test_path(), &file_with_invalid_rule());
+        let store = open_fast(&fs);
+        let want = json!([{
+            "path": "rules.custom.1",
+            "kind": "invalidRule",
+            "key": "settings.error.type"
+        }]);
+        let json = serde_json::to_value(store.state()).unwrap();
+        assert_eq!(json["diagnostics"], want);
+        // Still there after a change, so the Rules page can list what was left out.
+        let state = store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap()["diagnostics"], want);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn reset_rule_override_removes_the_entry() {
+        let fs = FakeFs::new();
+        let store = open_fast(&fs);
+        store
+            .update(&json!({"rules": {"overrides": {
+                "gpu-temp": {"enabled": false},
+                "ram-used": {"enabled": false}
+            }}}))
+            .unwrap();
+        let state = store.reset_rule_override("gpu-temp").unwrap();
+        assert_eq!(
+            state.settings["rules"]["overrides"],
+            json!({"ram-used": {"enabled": false}})
+        );
+        // No entry left: not an error, and no new revision.
+        let again = store.reset_rule_override("gpu-temp").unwrap();
+        assert_eq!(again.revision, state.revision);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn reset_unknown_rule_is_an_error() {
+        let fs = FakeFs::new();
+        let store = open_fast(&fs);
+        let before = store.state();
+        let err = store
+            .reset_rule_override("custom-00000000-0000-4000-8000-000000000001")
+            .unwrap_err();
+        assert_eq!(
+            err.field,
+            "rules.overrides.custom-00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(err.key, "rules.error.unknownRule");
+        assert_eq!(store.state(), before);
+        store.shutdown(LONG).unwrap();
     }
 
     #[test]

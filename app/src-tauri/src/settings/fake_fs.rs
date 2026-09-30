@@ -25,6 +25,7 @@ struct State {
     fail_preserve: bool,
     fail_copy: bool,
     preserve_collisions: usize,
+    copy_collisions: usize,
     fail_read: bool,
     block_writes: bool,
 }
@@ -98,6 +99,11 @@ impl FakeFs {
     /// The next `n` calls of `preserve` report that the target name exists.
     pub(crate) fn collide_next_preserves(&self, n: usize) {
         self.lock().preserve_collisions = n;
+    }
+
+    /// The next `n` calls of `copy_exclusive` report that the target name exists.
+    pub(crate) fn collide_next_copies(&self, n: usize) {
+        self.lock().copy_collisions = n;
     }
 
     pub(crate) fn set_fail_read(&self, fail: bool) {
@@ -198,6 +204,10 @@ impl SettingsFs for FakeFs {
                 io::ErrorKind::PermissionDenied,
                 "injected copy",
             ));
+        }
+        if state.copy_collisions > 0 {
+            state.copy_collisions -= 1;
+            return Err(io::ErrorKind::AlreadyExists.into());
         }
         if state.files.contains_key(to) {
             return Err(io::ErrorKind::AlreadyExists.into());

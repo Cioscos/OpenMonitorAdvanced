@@ -1,8 +1,10 @@
 import type {
   LegacyWebviewState,
+  LevelSpec,
   PatchError,
   Persistence,
   Settings,
+  SettingsDiagnostic,
   SettingsPatch,
   SettingsState,
 } from '../types';
@@ -26,7 +28,29 @@ const NUMBERS: Record<string, readonly number[]> = {
   'advanced.window': WINDOWS,
 };
 
-type Node = 'leaf' | 'nullable' | 'free' | { [key: string]: Node };
+/** Ids of the built-in rules (`oma_core::rules::default_rules`). */
+const BUILTIN_RULES = [
+  'cpu-temp',
+  'cpu-throttle',
+  'gpu-temp',
+  'gpu-hotspot',
+  'gpu-mem-temp',
+  'gpu-throttle',
+  'disk-temp',
+  'disk-wear',
+  'disk-critical',
+  'volume-used',
+  'ram-used',
+  'battery-low',
+];
+const MAX_DURATION_S = 600;
+const MAX_CUSTOM_RULES = 256;
+const CUSTOM_ID = /^custom-[0-9a-f-]{36}$/;
+
+/** `overrides`: free keys, each an object of `OVERRIDE_SHAPE`. */
+type Node = 'leaf' | 'nullable' | 'free' | 'overrides' | { [key: string]: Node };
+
+const OVERRIDE_SHAPE: { [key: string]: Node } = { enabled: 'leaf', warn: 'nullable', crit: 'nullable', hysteresis: 'leaf', notify: 'leaf' };
 
 /** Patchable shape, as in `patch.rs`. */
 const SHAPE: { [key: string]: Node } = {
@@ -40,8 +64,9 @@ const SHAPE: { [key: string]: Node } = {
   },
   advanced: { section: 'nullable', window: 'nullable', series: 'free' },
   view: { last: 'nullable' },
+  rules: { overrides: 'overrides', custom: 'leaf' },
 };
-const READ_ONLY = ['version', 'migrations', 'rules', 'log'];
+const READ_ONLY = ['version', 'migrations', 'log'];
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -62,6 +87,14 @@ function checkShape(patch: Record<string, unknown>, shape: { [key: string]: Node
     if (node === undefined) fail(field, 'settings.error.unknownField');
     if (node === 'leaf' || node === 'free') {
       if (value === null) fail(field, 'settings.error.null');
+    } else if (node === 'overrides') {
+      if (value === null) fail(field, 'settings.error.null');
+      if (isObject(value)) {
+        for (const [id, over] of Object.entries(value)) {
+          if (over === null) fail(`${field}.${id}`, 'settings.error.null');
+          if (isObject(over)) checkShape(over, OVERRIDE_SHAPE, `${field}.${id}`);
+        }
+      }
     } else if (node !== 'nullable') {
       if (value === null) fail(field, 'settings.error.null');
       if (isObject(value)) checkShape(value, node as { [key: string]: Node }, field);
@@ -101,12 +134,66 @@ function checkTypes(merged: Record<string, unknown>): void {
   }
 }
 
-/** Objects merge recursively, everything else replaces. */
-function merge(base: Record<string, unknown>, patch: Record<string, unknown>): void {
+/** The only rule checks of the mock: level shape, durations, threshold order and hysteresis. */
+function checkLevels(path: string, rule: { warn?: LevelSpec | null; crit?: LevelSpec | null; hysteresis?: unknown }): void {
+  for (const name of ['warn', 'crit'] as const) {
+    const level = rule[name];
+    if (level === undefined || level === null) continue;
+    if (!isObject(level) || typeof level.durationS !== 'number') fail(`${path}.${name}`, 'settings.error.type');
+    if (level.durationS < 0 || level.durationS > MAX_DURATION_S) fail(`${path}.${name}.durationS`, 'rules.error.duration');
+  }
+  const hysteresis = rule.hysteresis;
+  if (hysteresis !== undefined) {
+    if (!isObject(hysteresis) || typeof hysteresis.amount !== 'number' || typeof hysteresis.durationS !== 'number') {
+      fail(`${path}.hysteresis`, 'settings.error.type');
+    }
+    const { amount, durationS } = hysteresis as { amount: number; durationS: number };
+    if (amount < 0) fail(`${path}.hysteresis.amount`, 'rules.error.hysteresis');
+    if (durationS < 0 || durationS > MAX_DURATION_S) fail(`${path}.hysteresis.durationS`, 'rules.error.duration');
+  }
+}
+
+const fixedOf = (level: LevelSpec | null | undefined): number | undefined =>
+  level?.threshold && 'fixed' in level.threshold ? level.threshold.fixed : undefined;
+
+/** A subset of `validate_rules`: enough for the UI to show errors next to the fields. */
+function checkRules(rules: unknown): void {
+  if (!isObject(rules)) return fail('rules', 'settings.error.type');
+  const { overrides, custom } = rules;
+  if (!isObject(overrides)) fail('rules.overrides', 'settings.error.type');
+  if (!Array.isArray(custom)) fail('rules.custom', 'settings.error.type');
+  for (const [id, over] of Object.entries(overrides as Record<string, unknown>)) {
+    const path = `rules.overrides.${id}`;
+    if (!BUILTIN_RULES.includes(id)) fail(path, 'rules.error.unknownRule');
+    if (!isObject(over)) fail(path, 'settings.error.type');
+    checkLevels(path, over as Parameters<typeof checkLevels>[1]);
+  }
+  const rulesList = custom as unknown[];
+  if (rulesList.length > MAX_CUSTOM_RULES) fail('rules.custom', 'rules.error.tooMany');
+  const seen = new Set<string>();
+  rulesList.forEach((item, i) => {
+    const path = `rules.custom.${i}`;
+    if (!isObject(item) || typeof item.id !== 'string') return fail(path, 'settings.error.type');
+    if (!CUSTOM_ID.test(item.id)) fail(`${path}.id`, 'rules.error.customId');
+    const rule = item as { warn?: LevelSpec | null; crit?: LevelSpec | null; condition?: string };
+    if (!rule.warn && !rule.crit) fail(`${path}.levels`, 'rules.error.noLevel');
+    checkLevels(path, rule);
+    const [warn, crit] = [fixedOf(rule.warn), fixedOf(rule.crit)];
+    if (warn !== undefined && crit !== undefined && (rule.condition === 'below' ? crit > warn : crit < warn)) {
+      fail(`${path}.crit`, 'rules.error.order');
+    }
+    if (seen.has(item.id)) fail(`${path}.id`, 'rules.error.duplicateId');
+    seen.add(item.id);
+  });
+}
+
+/** Objects merge recursively, everything else replaces, and so do the fields of a rule override. */
+function merge(base: Record<string, unknown>, patch: Record<string, unknown>, path: string[] = []): void {
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
     const existing = base[key];
-    if (isObject(existing) && isObject(value)) merge(existing, value);
+    const wholeField = path.length === 3 && path[0] === 'rules' && path[1] === 'overrides';
+    if (isObject(existing) && isObject(value) && !wholeField) merge(existing, value, [...path, key]);
     else base[key] = clone(value);
   }
 }
@@ -152,13 +239,15 @@ export function parsePersistence(search: string): Persistence {
 export class MockSettings {
   #settings: Settings;
   #persistence: Persistence;
+  #diagnostics: SettingsDiagnostic[];
   #revision = 0;
   #seq = 0;
   #listeners = new Set<(state: SettingsState) => void>();
 
-  constructor(persistence: Persistence = { kind: 'ok' }) {
+  constructor(persistence: Persistence = { kind: 'ok' }, diagnostics: SettingsDiagnostic[] = []) {
     this.#settings = defaultSettings();
     this.#persistence = persistence;
+    this.#diagnostics = diagnostics;
   }
 
   state(): SettingsState {
@@ -169,6 +258,7 @@ export class MockSettings {
       seq: this.#seq,
       persistence: this.#persistence,
       applyStatus: { service: { kind: 'idle' }, autostart: { kind: 'idle' }, vendorLibraries: { kind: 'idle' } },
+      diagnostics: clone(this.#diagnostics),
     };
   }
 
@@ -186,12 +276,22 @@ export class MockSettings {
     const merged = clone(this.#settings) as unknown as Record<string, unknown>;
     merge(merged, patch as Record<string, unknown>);
     checkTypes(merged);
+    checkRules(merged.rules);
     // An unset field is absent, never null (the Rust encoding).
     const advanced = merged.advanced as Record<string, unknown>;
     for (const key of ['section', 'window']) if (advanced[key] === null) delete advanced[key];
     const view = merged.view as Record<string, unknown>;
     if (view.last === null) delete view.last;
     return this.#commit(merged as unknown as Settings);
+  }
+
+  /** Drops the override of a built-in rule, like `reset_rule_override`; no entry changes nothing. */
+  resetRuleOverride(ruleId: string): SettingsState {
+    if (!BUILTIN_RULES.includes(ruleId)) fail(`rules.overrides.${ruleId}`, 'rules.error.unknownRule');
+    if (!(ruleId in this.#settings.rules.overrides)) return this.state();
+    const next = clone(this.#settings);
+    delete next.rules.overrides[ruleId];
+    return this.#commit(next);
   }
 
   /** Fills only what is unset, sets the marker once (`webviewV1`), like `import_webview`. */

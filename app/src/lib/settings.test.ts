@@ -1,5 +1,5 @@
 import { MOCK_SCHEMA } from './backend/mock';
-import type { SettingsState } from './types';
+import type { Rule, SettingsState } from './types';
 import { i18n } from './i18n/index.svelte';
 import {
   LEGACY_SECTION_KEY,
@@ -59,6 +59,48 @@ test('an event delivered before the read reply beats the older reply', async () 
   unsubscribe = await store.connect(backend);
 
   expect(store.state?.revision).toBe(7);
+});
+
+/** A custom rule on the CPU package temperature with fixed thresholds. */
+const customRule = (warn: number, crit: number): Rule => ({
+  id: 'custom-00000000-0000-4000-8000-000000000001',
+  target: { sensor: 'cpu/0/temperature/package' },
+  unit: 'celsius',
+  condition: 'above',
+  warn: { threshold: { fixed: warn }, durationS: 0 },
+  crit: { threshold: { fixed: crit }, durationS: 0 },
+  hysteresis: { amount: 3, durationS: 10 },
+  enabled: true,
+  notify: { warn: false, crit: true },
+});
+
+test('a rejected rule patch puts the error on the rule field', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new SettingsStore();
+  unsubscribe = await store.connect(backend);
+
+  expect(await store.update({ rules: { custom: [customRule(90, 80)] } })).toBe(false);
+
+  expect(store.errors).toEqual({ 'rules.custom.0.crit': 'rules.error.order' });
+  expect(store.state?.settings.rules.custom).toEqual([]);
+
+  // Replacing the list with a valid one clears the errors below it.
+  expect(await store.update({ rules: { custom: [customRule(80, 90)] } })).toBe(true);
+  expect(store.errors).toEqual({});
+  expect(store.state?.settings.rules.custom).toHaveLength(1);
+});
+
+test('resetting a rule override drops its entry and reports an unknown rule', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new SettingsStore();
+  unsubscribe = await store.connect(backend);
+  await store.update({ rules: { overrides: { 'gpu-temp': { enabled: false }, 'ram-used': { enabled: false } } } });
+
+  expect(await store.resetRuleOverride('gpu-temp')).toBe(true);
+  expect(store.state?.settings.rules.overrides).toEqual({ 'ram-used': { enabled: false } });
+
+  expect(await store.resetRuleOverride('no-such-rule')).toBe(false);
+  expect(store.errors).toEqual({ 'rules.overrides.no-such-rule': 'rules.error.unknownRule' });
 });
 
 test('failed patch exposes the field error', async () => {

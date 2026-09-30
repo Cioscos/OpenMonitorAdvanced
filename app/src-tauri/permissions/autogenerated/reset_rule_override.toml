@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-rule-override"
+description = "Enables the reset_rule_override command without any pre-configured scope."
+commands.allow = ["reset_rule_override"]
+
+[[permission]]
+identifier = "deny-reset-rule-override"
+description = "Denies the reset_rule_override command without any pre-configured scope."
+commands.deny = ["reset_rule_override"]

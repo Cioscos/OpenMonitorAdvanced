@@ -252,6 +252,65 @@ test('mock backend rejects an unknown field and null on a plain field', async ()
   });
 });
 
+const RULE_ID = 'custom-00000000-0000-4000-8000-000000000001';
+const customRule = (warn: number, crit: number, durationS = 0) => ({
+  id: RULE_ID,
+  target: { sensor: 'cpu/0/temperature/package' },
+  unit: 'celsius' as const,
+  condition: 'above' as const,
+  warn: { threshold: { fixed: warn }, durationS },
+  crit: { threshold: { fixed: crit }, durationS: 0 },
+  hysteresis: { amount: 3, durationS: 10 },
+  enabled: true,
+  notify: { warn: false, crit: true },
+});
+
+test('mock rule overrides replace level objects whole', async () => {
+  const backend = createMockBackend();
+  await backend.updateSettings({
+    rules: {
+      overrides: {
+        'gpu-temp': { enabled: false, warn: { threshold: { property: 'tjMaxC', offset: -10, fallback: 80 }, durationS: 30 } },
+      },
+    },
+  });
+  const state = await backend.updateSettings({ rules: { overrides: { 'gpu-temp': { warn: { threshold: { fixed: 85 }, durationS: 20 } } } } });
+  expect(state.settings.rules.overrides['gpu-temp']).toEqual({ enabled: false, warn: { threshold: { fixed: 85 }, durationS: 20 } });
+  expect(state.diagnostics).toEqual([]);
+});
+
+test('mock backend rejects misordered thresholds, long durations and unknown rules', async () => {
+  const backend = createMockBackend();
+  await expect(backend.updateSettings({ rules: { custom: [customRule(90, 80)] } })).rejects.toEqual({
+    field: 'rules.custom.0.crit',
+    key: 'rules.error.order',
+  });
+  await expect(backend.updateSettings({ rules: { custom: [customRule(80, 90, 601)] } })).rejects.toEqual({
+    field: 'rules.custom.0.warn.durationS',
+    key: 'rules.error.duration',
+  });
+  await expect(
+    backend.updateSettings({ rules: { overrides: { 'gpu-temp': { hysteresis: { amount: 1, durationS: 601 } } } } }),
+  ).rejects.toEqual({ field: 'rules.overrides.gpu-temp.hysteresis.durationS', key: 'rules.error.duration' });
+  await expect(backend.updateSettings({ rules: { overrides: { nope: { enabled: false } } } })).rejects.toEqual({
+    field: 'rules.overrides.nope',
+    key: 'rules.error.unknownRule',
+  });
+  expect((await backend.getSettings()).settings.rules).toEqual({ overrides: {}, custom: [] });
+});
+
+test('mock resetRuleOverride removes the entry and rejects an unknown rule', async () => {
+  const backend = createMockBackend();
+  await backend.updateSettings({ rules: { overrides: { 'gpu-temp': { enabled: false } } } });
+  expect((await backend.resetRuleOverride('gpu-temp')).settings.rules.overrides).toEqual({});
+  // Nothing to remove: not an error.
+  await expect(backend.resetRuleOverride('gpu-temp')).resolves.toBeDefined();
+  await expect(backend.resetRuleOverride(RULE_ID)).rejects.toEqual({
+    field: `rules.overrides.${RULE_ID}`,
+    key: 'rules.error.unknownRule',
+  });
+});
+
 test('mock settings keep revisions and a growing seq, and events follow updates', async () => {
   const backend = createMockBackend();
   const seen: number[] = [];

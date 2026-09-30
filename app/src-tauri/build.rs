@@ -14,6 +14,7 @@ fn main() {
             "start_service",
             "get_settings",
             "update_settings",
+            "reset_rule_override",
             "import_webview_state",
             "take_pending_view",
             "refresh_autostart",

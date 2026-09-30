@@ -299,6 +299,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
     getSettings: async () => settings.state(),
     // Rejects with a plain `{ field, key }` object, like the Tauri command.
     updateSettings: async (patch) => settings.update(patch),
+    resetRuleOverride: async (ruleId) => settings.resetRuleOverride(ruleId),
     onSettings: async (cb) => settings.subscribe(cb),
     importWebviewState: async (legacy) => settings.import(legacy),
     takePendingView: async () => null,

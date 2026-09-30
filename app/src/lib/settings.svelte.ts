@@ -70,10 +70,32 @@ export class SettingsStore {
       }
       return false;
     }
-    const cleared = patchPaths(patch);
-    const remaining = Object.entries(this.errors).filter(([field]) => !cleared.some((p) => field === p || field.startsWith(`${p}.`)));
-    if (remaining.length !== Object.keys(this.errors).length) this.errors = Object.fromEntries(remaining);
+    this.#clear(patchPaths(patch));
     return true;
+  }
+
+  /** Drops the override of a built-in rule. `false` when it was rejected (see `errors`) or could not be sent. */
+  async resetRuleOverride(ruleId: string): Promise<boolean> {
+    const backend = this.#backend;
+    if (backend === null) return false;
+    try {
+      this.accept(await backend.resetRuleOverride(ruleId));
+    } catch (error) {
+      if (isPatchError(error)) {
+        this.errors = { ...this.errors, [error.field]: error.key };
+      } else {
+        console.error('rule reset failed', error);
+      }
+      return false;
+    }
+    this.#clear([`rules.overrides.${ruleId}`]);
+    return true;
+  }
+
+  /** Forgets the errors of these fields and of everything below them. */
+  #clear(paths: string[]): void {
+    const remaining = Object.entries(this.errors).filter(([field]) => !paths.some((p) => field === p || field.startsWith(`${p}.`)));
+    if (remaining.length !== Object.keys(this.errors).length) this.errors = Object.fromEntries(remaining);
   }
 }
 

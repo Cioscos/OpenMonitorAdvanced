@@ -51,6 +51,8 @@ export interface Backend {
   getSettings(): Promise<SettingsState>;
   /** Applies a patch; rejects with a `PatchError` (`{ field, key }`) and changes nothing when it is invalid. */
   updateSettings(patch: SettingsPatch): Promise<SettingsState>;
+  /** Drops the override of a built-in rule ("Restore"); rejects with `rules.error.unknownRule` for other ids. */
+  resetRuleOverride(ruleId: string): Promise<SettingsState>;
   /** Every applied change, also those made from the tray. Listeners must drop states with an old `seq`. */
   onSettings(cb: (state: SettingsState) => void): Promise<Unsubscribe>;
   /**

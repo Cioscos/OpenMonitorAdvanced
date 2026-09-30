@@ -38,6 +38,7 @@ export function createTauriBackend(): Backend {
     getSettings: () => invoke<SettingsState>('get_settings'),
     // A rejected patch arrives as the serialized `{ field, key }` object.
     updateSettings: (patch) => invoke<SettingsState>('update_settings', { patch }),
+    resetRuleOverride: (ruleId) => invoke<SettingsState>('reset_rule_override', { ruleId }),
     onSettings: (cb) => listen<SettingsState>('oma:settings', (e) => cb(e.payload)),
     importWebviewState: (legacy) => invoke<SettingsState>('import_webview_state', { legacy }),
     takePendingView: () => invoke<ViewKind | null>('take_pending_view'),

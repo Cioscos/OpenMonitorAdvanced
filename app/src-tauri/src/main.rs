@@ -243,6 +243,7 @@ fn main() {
             service::start_service,
             settings::commands::get_settings,
             settings::commands::update_settings,
+            settings::commands::reset_rule_override,
             settings::commands::import_webview_state,
         ])
         .setup(move |app| {

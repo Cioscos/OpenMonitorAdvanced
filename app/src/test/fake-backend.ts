@@ -172,6 +172,10 @@ export class FakeBackend implements Backend {
     return this.settings.update(patch);
   }
 
+  async resetRuleOverride(ruleId: string): Promise<SettingsState> {
+    return this.settings.resetRuleOverride(ruleId);
+  }
+
   async onSettings(cb: (s: SettingsState) => void): Promise<Unsubscribe> {
     this.settingsCalls.push('onSettings');
     this.#settingsListeners.add(cb);

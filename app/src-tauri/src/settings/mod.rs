@@ -12,7 +12,7 @@ mod writer;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use oma_core::settings::Settings;
+use oma_core::settings::{Diagnostic, Settings};
 use serde::Serialize;
 
 pub use store::SettingsStore;
@@ -180,6 +180,9 @@ pub struct SettingsState {
     pub seq: u64,
     pub persistence: Persistence,
     pub apply_status: ApplyStatus,
+    /// What opening the file had to fix or leave out (rules included), for the
+    /// whole session.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Called after every applied change and every state change, outside the
@@ -268,6 +271,7 @@ mod tests {
                 vendor_libraries: EffectStatus::Failed { reason: "r".into() },
                 ..ApplyStatus::default()
             },
+            diagnostics: Vec::new(),
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["persistedRevision"], 1);

@@ -9,8 +9,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::rules::RulesSettings;
+
 pub use decode::{decode_lenient, Decoded, Diagnostic, DiagnosticKind, VersionStatus};
-pub use patch::{apply_patch, PatchError};
+pub use patch::{apply_patch, reset_rule_override, PatchError};
 
 /// Format version written to and understood from the settings file.
 pub const SETTINGS_VERSION: u32 = 1;
@@ -251,16 +253,12 @@ pub struct Settings {
     pub sources: Sources,
     pub advanced: AdvancedState,
     pub view: ViewState,
-    /// Opaque in M5a (M5b fills it in).
-    pub rules: Value,
+    /// Overrides of the built-in rules and the custom rules; always passes
+    /// [`crate::rules::validate_rules`].
+    pub rules: RulesSettings,
     /// Opaque in M5a (M5c fills it in).
     pub log: Value,
     pub migrations: Migrations,
-}
-
-/// Default of the `rules` section.
-pub(crate) fn default_rules() -> Value {
-    json!({ "overrides": {}, "custom": [] })
 }
 
 /// Default of the `log` section.
@@ -277,7 +275,7 @@ impl Default for Settings {
             sources: Sources::default(),
             advanced: AdvancedState::default(),
             view: ViewState::default(),
-            rules: default_rules(),
+            rules: RulesSettings::default(),
             log: default_log(),
             migrations: Migrations::default(),
         }
@@ -338,7 +336,7 @@ pub fn encode(settings: &Settings) -> Value {
         },
         "advanced": advanced,
         "view": view,
-        "rules": settings.rules,
+        "rules": serde_json::to_value(&settings.rules).unwrap_or_else(|_| json!({})),
         "log": settings.log,
         "migrations": {
             "serviceV1": settings.migrations.service_v1,
@@ -397,7 +395,28 @@ pub(crate) mod test_support {
             view: ViewState {
                 last: Some(ViewKind::Advanced),
             },
-            rules: json!({"overrides": {"a": {"warn": 1}}, "custom": [{"id": "x"}]}),
+            rules: serde_json::from_value(json!({
+                "overrides": {
+                    "gpu-temp": {"enabled": false, "crit": null},
+                    "ram-used": {
+                        "warn": {"threshold": {"fixed": 85.0}, "durationS": 5},
+                        "hysteresis": {"amount": 1.0, "durationS": 2},
+                        "notify": {"warn": true, "crit": false}
+                    }
+                },
+                "custom": [{
+                    "id": "custom-00000000-0000-4000-8000-000000000001",
+                    "target": {"sensor": "cpu/0/temperature/package"},
+                    "unit": "celsius",
+                    "condition": "above",
+                    "warn": {"threshold": {"fixed": 70.0}, "durationS": 0},
+                    "crit": null,
+                    "hysteresis": {"amount": 3.0, "durationS": 10},
+                    "enabled": true,
+                    "notify": {"warn": false, "crit": true}
+                }]
+            }))
+            .expect("valid rules"),
             log: json!({"dir": "C:/logs"}),
             migrations: Migrations {
                 service_v1: true,

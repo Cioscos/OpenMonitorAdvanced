@@ -2,8 +2,9 @@
 
 use serde_json::{Map, Value};
 
-use super::decode::{decode_lenient, DiagnosticKind};
+use super::decode::{decode_lenient, Diagnostic, DiagnosticKind, TYPE_ERROR};
 use super::{encode, Settings};
+use crate::rules::{is_builtin, validate_rules, RulesSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatchError {
@@ -29,6 +30,8 @@ enum Node {
         nullable: bool,
     },
     Object(&'static [(&'static str, Node)]),
+    /// Free-form keys, each holding an object of this shape.
+    Map(&'static [(&'static str, Node)]),
     /// Free-form map: its keys are never unknown.
     Free,
 }
@@ -42,7 +45,7 @@ const fn nullable() -> Node {
 }
 
 /// Sections that a patch may never touch.
-const READ_ONLY: [&str; 4] = ["version", "migrations", "rules", "log"];
+const READ_ONLY: [&str; 3] = ["version", "migrations", "log"];
 
 const SCHEMA: &[(&str, Node)] = &[
     (
@@ -100,7 +103,29 @@ const SCHEMA: &[(&str, Node)] = &[
         ]),
     ),
     ("view", Node::Object(&[("last", nullable())])),
+    (
+        "rules",
+        Node::Object(&[
+            (
+                "overrides",
+                Node::Map(&[
+                    ("enabled", leaf()),
+                    ("warn", nullable()),
+                    ("crit", nullable()),
+                    ("hysteresis", leaf()),
+                    ("notify", leaf()),
+                ]),
+            ),
+            ("custom", leaf()),
+        ]),
+    ),
 ];
+
+/// Whether the object at `path` is replaced whole instead of merged: the
+/// fields of a rule override (R5).
+fn replaced_whole(path: &[String]) -> bool {
+    matches!(path, [rules, overrides, _, _] if rules == "rules" && overrides == "overrides")
+}
 
 fn join(parent: &str, key: &str) -> String {
     if parent.is_empty() {
@@ -138,18 +163,39 @@ fn check_shape(
                 // A non-object here is caught as a wrong type by the decoder.
                 _ => {}
             },
+            Node::Map(children) => match value {
+                Value::Null => return Err(PatchError::new(field, "settings.error.null")),
+                Value::Object(map) => {
+                    for (entry, value) in map {
+                        let entry_field = join(&field, entry);
+                        match value {
+                            Value::Null => {
+                                return Err(PatchError::new(entry_field, "settings.error.null"))
+                            }
+                            Value::Object(fields) => check_shape(fields, children, &entry_field)?,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            },
         }
     }
     Ok(())
 }
 
-/// Objects merge recursively, everything else (arrays included) replaces.
-fn merge(base: &mut Value, patch: &Value) {
+/// Objects merge recursively, everything else (arrays included) replaces, and
+/// so do the fields of a rule override. `path` is where `base` sits.
+fn merge(base: &mut Value, patch: &Value, path: &mut Vec<String>) {
     match (base, patch) {
-        (Value::Object(base), Value::Object(patch)) => {
+        (Value::Object(base), Value::Object(patch)) if !replaced_whole(path) => {
             for (key, value) in patch {
                 match base.get_mut(key) {
-                    Some(existing) => merge(existing, value),
+                    Some(existing) => {
+                        path.push(key.clone());
+                        merge(existing, value, path);
+                        path.pop();
+                    }
                     None => {
                         base.insert(key.clone(), value.clone());
                     }
@@ -158,6 +204,32 @@ fn merge(base: &mut Value, patch: &Value) {
         }
         (base, patch) => *base = patch.clone(),
     }
+}
+
+/// The rules section of a merged document, decoded strictly: the first value
+/// that does not parse, or the first rule that fails [`validate_rules`], is the
+/// error, with its full path.
+fn strict_rules(merged: &Value, diagnostics: &[Diagnostic]) -> Result<RulesSettings, PatchError> {
+    let section = merged.get("rules").cloned().unwrap_or(Value::Null);
+    if let Some(overrides) = section.get("overrides").and_then(Value::as_object) {
+        // The tolerant decoder drops these silently; a patch may not add one.
+        if let Some(id) = overrides.keys().find(|id| !is_builtin(id)) {
+            return Err(PatchError::new(
+                format!("rules.overrides.{id}"),
+                "rules.error.unknownRule",
+            ));
+        }
+    }
+    let rules = serde_json::from_value::<RulesSettings>(section).map_err(|_| {
+        // The tolerant decoder located the value that does not parse.
+        let path = diagnostics
+            .iter()
+            .find(|d| d.kind == (DiagnosticKind::InvalidRule { key: TYPE_ERROR }))
+            .map_or("rules", |d| d.path.as_str());
+        PatchError::new(path, TYPE_ERROR)
+    })?;
+    validate_rules(&rules).map_err(|(field, key)| PatchError::new(field, key))?;
+    Ok(rules)
 }
 
 /// Applies `patch` to `current` and validates the whole result strictly: any
@@ -173,18 +245,43 @@ pub fn apply_patch(current: &Settings, patch: &Value) -> Result<Settings, PatchE
     check_shape(patch_map, SCHEMA, "")?;
 
     let mut merged = encode(current);
-    merge(&mut merged, patch);
+    merge(&mut merged, patch, &mut Vec::new());
     let decoded = decode_lenient(&merged);
-    if let Some(diagnostic) = decoded.diagnostics.into_iter().next() {
+    // Rules are checked strictly below, with their full paths.
+    let other = decoded
+        .diagnostics
+        .iter()
+        .find(|d| !matches!(d.kind, DiagnosticKind::InvalidRule { .. }));
+    if let Some(diagnostic) = other {
         let key = match diagnostic.kind {
             DiagnosticKind::Corrected { .. } => "settings.error.range",
             DiagnosticKind::WrongType
             | DiagnosticKind::UnknownVariant
-            | DiagnosticKind::MissingVersion => "settings.error.type",
+            | DiagnosticKind::MissingVersion
+            | DiagnosticKind::InvalidRule { .. } => TYPE_ERROR,
         };
-        return Err(PatchError::new(diagnostic.path, key));
+        return Err(PatchError::new(diagnostic.path.clone(), key));
     }
-    Ok(decoded.settings)
+    let rules = strict_rules(&merged, &decoded.diagnostics)?;
+    Ok(Settings {
+        rules,
+        ..decoded.settings
+    })
+}
+
+/// `current` without the override of the built-in rule `rule_id` ("Restore"
+/// in the rules table); no override is not an error, an id that is not a
+/// built-in rule is.
+pub fn reset_rule_override(current: &Settings, rule_id: &str) -> Result<Settings, PatchError> {
+    if !is_builtin(rule_id) {
+        return Err(PatchError::new(
+            format!("rules.overrides.{rule_id}"),
+            "rules.error.unknownRule",
+        ));
+    }
+    let mut next = current.clone();
+    next.rules.overrides.remove(rule_id);
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -283,9 +380,29 @@ mod tests {
                 json!({"migrations": {"webviewV1": true}}),
                 err("migrations", "settings.error.readOnlyField"),
             ),
+            (json!({"rules": null}), err("rules", "settings.error.null")),
             (
-                json!({"rules": {}}),
-                err("rules", "settings.error.readOnlyField"),
+                json!({"rules": {"overrides": {"gpu-temp": null}}}),
+                err("rules.overrides.gpu-temp", "settings.error.null"),
+            ),
+            (
+                json!({"rules": {"overrides": {"gpu-temp": {"enabled": null}}}}),
+                err("rules.overrides.gpu-temp.enabled", "settings.error.null"),
+            ),
+            (
+                json!({"rules": {"overrides": {"gpu-temp": {"target": {}}}}}),
+                err(
+                    "rules.overrides.gpu-temp.target",
+                    "settings.error.unknownField",
+                ),
+            ),
+            (
+                json!({"rules": {"custom": null}}),
+                err("rules.custom", "settings.error.null"),
+            ),
+            (
+                json!({"rules": {"extra": 1}}),
+                err("rules.extra", "settings.error.unknownField"),
             ),
             (
                 json!({"log": {}}),
@@ -340,6 +457,124 @@ mod tests {
             Err(err("general.intervalMs", "settings.error.range"))
         );
         assert_eq!(current, snapshot);
+    }
+
+    const CUSTOM_ID: &str = "custom-00000000-0000-4000-8000-000000000001";
+
+    fn custom_rule(warn: f64, crit: f64, warn_duration: u32) -> serde_json::Value {
+        json!({
+            "id": CUSTOM_ID,
+            "target": {"sensor": "cpu/0/temperature/package"},
+            "unit": "celsius",
+            "condition": "above",
+            "warn": {"threshold": {"fixed": warn}, "durationS": warn_duration},
+            "crit": {"threshold": {"fixed": crit}, "durationS": 0}
+        })
+    }
+
+    #[test]
+    fn rules_patch_replaces_level_objects() {
+        let property_warn = json!({
+            "threshold": {"property": "tjMaxC", "offset": -10.0, "fallback": 80.0},
+            "durationS": 30
+        });
+        let start = apply_patch(
+            &Settings::default(),
+            &json!({"rules": {"overrides": {"gpu-temp": {"warn": property_warn, "enabled": false}}}}),
+        )
+        .unwrap();
+        let next = apply_patch(
+            &start,
+            &json!({"rules": {"overrides": {"gpu-temp": {
+                "warn": {"threshold": {"fixed": 85}, "durationS": 20}
+            }}}}),
+        )
+        .unwrap();
+        let over = &encode(&next)["rules"]["overrides"]["gpu-temp"];
+        // The level object was replaced whole: no key of the property threshold is left.
+        assert_eq!(
+            over,
+            &json!({"enabled": false, "warn": {"threshold": {"fixed": 85.0}, "durationS": 20}})
+        );
+
+        // `null` switches a level off; the other override fields stay.
+        let off = apply_patch(
+            &next,
+            &json!({"rules": {"overrides": {"gpu-temp": {"crit": null}}}}),
+        )
+        .unwrap();
+        let over = &off.rules.overrides["gpu-temp"];
+        assert_eq!(over.crit, Some(None));
+        assert_eq!(over.enabled, Some(false));
+    }
+
+    #[test]
+    fn rules_patch_is_validated() {
+        let current = Settings::default();
+        let cases = [
+            (
+                json!({"rules": {"custom": [custom_rule(90.0, 80.0, 0)]}}),
+                err("rules.custom.0.crit", "rules.error.order"),
+            ),
+            (
+                json!({"rules": {"custom": [custom_rule(80.0, 90.0, 601)]}}),
+                err("rules.custom.0.warn.durationS", "rules.error.duration"),
+            ),
+            (
+                json!({"rules": {"custom": [{"id": CUSTOM_ID, "warn": "alta"}]}}),
+                err("rules.custom.0", "settings.error.type"),
+            ),
+            (
+                json!({"rules": {"custom": [custom_rule(80.0, 90.0, 0), custom_rule(80.0, 90.0, 0)]}}),
+                err("rules.custom.1.id", "rules.error.duplicateId"),
+            ),
+            (
+                json!({"rules": {"overrides": {"gpu-temp": {"warn": {"threshold": {"fixed": 95}, "durationS": 0}}}}}),
+                err("rules.overrides.gpu-temp.crit", "rules.error.order"),
+            ),
+            (
+                json!({"rules": {"overrides": {"gpu-temp": {"warn": {"threshold": {"fixed": "x"}, "durationS": 0}}}}}),
+                err("rules.overrides.gpu-temp.warn", "settings.error.type"),
+            ),
+            (
+                json!({"rules": {"overrides": {"no-such-rule": {"enabled": false}}}}),
+                err("rules.overrides.no-such-rule", "rules.error.unknownRule"),
+            ),
+            (
+                json!({"rules": {"custom": {}}}),
+                err("rules.custom", "settings.error.type"),
+            ),
+        ];
+        for (patch, want) in cases {
+            assert_eq!(apply_patch(&current, &patch), Err(want), "patch {patch}");
+        }
+        assert_eq!(current, Settings::default());
+
+        let ok = apply_patch(
+            &current,
+            &json!({"rules": {"custom": [custom_rule(80.0, 90.0, 0)]}}),
+        )
+        .unwrap();
+        assert_eq!(ok.rules.custom.len(), 1);
+        assert_eq!(ok.rules.custom[0].id, CUSTOM_ID);
+    }
+
+    #[test]
+    fn reset_rule_override_removes_only_that_entry() {
+        let start = everything_changed();
+        assert!(start.rules.overrides.contains_key("gpu-temp"));
+        let next = reset_rule_override(&start, "gpu-temp").unwrap();
+        assert!(!next.rules.overrides.contains_key("gpu-temp"));
+        assert_eq!(next.rules.custom, start.rules.custom);
+        // No entry: nothing changes and it is not an error.
+        assert_eq!(reset_rule_override(&next, "gpu-temp").unwrap(), next);
+        assert_eq!(
+            reset_rule_override(&start, "no-such-rule"),
+            Err(err(
+                "rules.overrides.no-such-rule",
+                "rules.error.unknownRule"
+            ))
+        );
     }
 
     #[test]

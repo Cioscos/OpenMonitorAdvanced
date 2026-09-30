@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use super::{
-    default_rules, Condition, Hysteresis, LevelSpec, Rule, RulesSettings, Target, Threshold,
-    MAX_CUSTOM_RULES, MAX_DURATION_S,
+    default_rules, Condition, Hysteresis, LevelSpec, Rule, RuleOverride, RulesSettings, Target,
+    Threshold, MAX_CUSTOM_RULES, MAX_DURATION_S,
 };
 use crate::model::{SensorKind, Unit};
 
@@ -125,7 +125,7 @@ pub fn validate_rule(rule: &Rule) -> Result<(), RuleError> {
             Condition::FlagActive => false,
         };
         if misordered {
-            return Err(err("crit.threshold", "rules.error.order"));
+            return Err(err("crit", "rules.error.order"));
         }
     }
     Ok(())
@@ -141,34 +141,72 @@ fn is_custom_id(id: &str) -> bool {
     })
 }
 
+/// Admits the custom rules of a section one at a time, in order, with the
+/// checks that span the list: id shape, validity, unique id and the count.
+/// Invalid rules do not claim their id, so a later valid rule with the same
+/// id is still admitted.
+#[derive(Default)]
+pub(crate) struct CustomRules {
+    seen: HashSet<String>,
+}
+
+pub(crate) const TOO_MANY: &str = "rules.error.tooMany";
+
+impl CustomRules {
+    /// Checks `rule` as the next custom rule; on success it counts towards
+    /// the limit and its id is taken. `field` is relative to the rule; it is
+    /// empty for [`TOO_MANY`].
+    pub(crate) fn admit(&mut self, rule: &Rule) -> Result<(), RuleError> {
+        if !is_custom_id(&rule.id) {
+            return Err(err("id", "rules.error.customId"));
+        }
+        validate_rule(rule)?;
+        if self.seen.contains(&rule.id) {
+            return Err(err("id", "rules.error.duplicateId"));
+        }
+        if self.seen.len() >= MAX_CUSTOM_RULES {
+            return Err(err("", TOO_MANY));
+        }
+        self.seen.insert(rule.id.clone());
+        Ok(())
+    }
+}
+
+/// Checks the override of the built-in rule `id` on the rule it produces.
+/// `field` is relative to the override; it is empty for an unknown id.
+pub(crate) fn validate_override(id: &str, over: &RuleOverride) -> Result<(), RuleError> {
+    let Some(default) = default_rules().into_iter().find(|r| r.id == id) else {
+        return Err(err("", "rules.error.unknownRule"));
+    };
+    validate_rule(&default.with_override(over))
+}
+
+/// `path.field`, or `path` alone for an empty field.
+pub(crate) fn nested(path: &str, field: &str) -> String {
+    if field.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}.{field}")
+    }
+}
+
 /// Checks the whole rules section; on failure returns the settings path of the
 /// first problem (`rules.custom.3.warn.durationS`) and its i18n key.
 pub fn validate_rules(settings: &RulesSettings) -> Result<(), (String, &'static str)> {
-    if settings.custom.len() > MAX_CUSTOM_RULES {
-        return Err(("rules.custom".to_owned(), "rules.error.tooMany"));
-    }
-
-    let defaults = default_rules();
     for (id, over) in &settings.overrides {
-        let path = format!("rules.overrides.{id}");
-        let Some(default) = defaults.iter().find(|r| &r.id == id) else {
-            return Err((path, "rules.error.unknownRule"));
-        };
-        // An override is checked on the rule it produces.
-        validate_rule(&default.clone().with_override(over))
-            .map_err(|e| (format!("{path}.{}", e.field), e.key))?;
+        validate_override(id, over)
+            .map_err(|e| (nested(&format!("rules.overrides.{id}"), &e.field), e.key))?;
     }
 
-    let mut seen = HashSet::new();
+    let mut custom = CustomRules::default();
     for (i, rule) in settings.custom.iter().enumerate() {
-        let path = format!("rules.custom.{i}");
-        if !is_custom_id(&rule.id) {
-            return Err((format!("{path}.id"), "rules.error.customId"));
-        }
-        if !seen.insert(rule.id.as_str()) {
-            return Err((format!("{path}.id"), "rules.error.duplicateId"));
-        }
-        validate_rule(rule).map_err(|e| (format!("{path}.{}", e.field), e.key))?;
+        custom.admit(rule).map_err(|e| {
+            if e.key == TOO_MANY {
+                ("rules.custom".to_owned(), e.key)
+            } else {
+                (nested(&format!("rules.custom.{i}"), &e.field), e.key)
+            }
+        })?;
     }
     Ok(())
 }
@@ -234,7 +272,7 @@ mod tests {
         };
         assert_eq!(
             error_of(&above_order),
-            ("crit.threshold".to_owned(), "rules.error.order")
+            ("crit".to_owned(), "rules.error.order")
         );
         let below_order = Rule {
             condition: Condition::Below,
@@ -505,7 +543,7 @@ mod tests {
         assert_eq!(
             validate_rules(&broken_override),
             Err((
-                "rules.overrides.gpu-temp.crit.threshold".to_owned(),
+                "rules.overrides.gpu-temp.crit".to_owned(),
                 "rules.error.order"
             ))
         );

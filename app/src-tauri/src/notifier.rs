@@ -3,11 +3,11 @@
 
 use oma_core::engine::TickOutput;
 use oma_core::model::Schema;
-use oma_core::rules::{Cooldown, HealthReport, LevelEntry};
+use oma_core::rules::{Alert, Cooldown, HealthReport, LevelEntry};
 use oma_core::settings::Settings;
 use serde::Deserialize;
 
-use crate::i18n::{t, Lang};
+use crate::i18n::{sensor_label, t, Lang};
 use crate::tray::language_for;
 use crate::tray_icon::alert_text;
 
@@ -69,24 +69,29 @@ impl<S: ToastSink> Notifier<S> {
                 settings.general.temperature_unit,
                 settings.general.throughput_unit,
             );
-            self.sink.show(
-                rule_title(lang, &entry.rule_id),
-                body,
-                launch_for(&entry.device_id),
-            );
+            self.sink
+                .show(rule_title(lang, alert), body, launch_for(&entry.device_id));
         }
     }
 }
 
-/// `rule.<id>.name` for a built-in rule, `rule.custom.name` otherwise.
-fn rule_title(lang: Lang, rule_id: &str) -> String {
-    let key = format!("rule.{rule_id}.name");
+/// `rule.<id>.name` for a built-in rule; for a custom one, the device and
+/// the sensor as the tray and the banner name them ("CPU · Total load"),
+/// or `rule.custom.name` when the sensor's label has no translation.
+fn rule_title(lang: Lang, alert: &Alert) -> String {
+    let key = format!("rule.{}.name", alert.rule_id);
     let title = t(lang, &key, &[]);
     // `t` gives the key back for an id without a name: a custom rule.
-    if title == key {
-        t(lang, "rule.custom.name", &[])
-    } else {
-        title
+    if title != key {
+        return title;
+    }
+    let label = sensor_label(lang, &alert.sensor_label);
+    if label == format!("sensor.{}", alert.sensor_label.key) {
+        return t(lang, "rule.custom.name", &[]);
+    }
+    match alert.params.get("device") {
+        Some(device) if !device.is_empty() => format!("{device} · {label}"),
+        _ => label,
     }
 }
 
@@ -424,8 +429,26 @@ mod tests {
             0,
         );
         let toasts = recorder.toasts();
-        assert_eq!(toasts[0].0, "Regola personalizzata");
+        // The device and the sensor, as the tray and the banner name them.
+        assert_eq!(toasts[0].0, "Ryzen 7 · Tctl/Tdie");
         assert_eq!(toasts[0].1, "Tctl/Tdie sopra 95 °C (97 °C)");
+    }
+
+    #[test]
+    fn custom_rule_without_a_known_label_uses_the_generic_title() {
+        let id = "custom-0b1c2d3e-4f50-4617-8293-a4b5c6d7e8f9";
+        let recorder = Recorder::default();
+        let mut notifier = Notifier::new(recorder.clone());
+        let mut unknown = alert(id, CPU_TEMP, "cpu/0", Level::Crit);
+        unknown.sensor_label = Label::new("cpu.temperature.nope");
+        notifier.on_entries(
+            &[entry(id, Level::Crit, true)],
+            &report(vec![unknown]),
+            &cpu_schema(true),
+            &settings(Language::It),
+            0,
+        );
+        assert_eq!(recorder.toasts()[0].0, "Regola personalizzata");
     }
 
     #[test]

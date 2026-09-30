@@ -7,6 +7,8 @@ pub mod crash;
 pub(crate) mod dynlib;
 pub mod fsutil;
 pub mod gpu;
+pub mod known_folder;
+pub mod local_time;
 pub mod memory;
 pub mod network;
 mod pdh;

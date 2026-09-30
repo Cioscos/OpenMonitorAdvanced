@@ -1,14 +1,15 @@
 //! Tolerant decoding of the settings file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
 use super::{
-    ChartFps, DefaultView, Language, Settings, TemperatureUnit, ThroughputUnit, ViewKind,
-    INTERVAL_VALUES, WINDOW_VALUES,
+    ChartFps, DefaultView, Language, LogSettings, Settings, TemperatureUnit, ThroughputUnit,
+    ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
 };
 use crate::rules::{
     is_builtin, nested, validate_override, validate_rules, CustomRules, Rule, RuleOverride,
@@ -167,9 +168,7 @@ pub fn decode_lenient(value: &Value) -> Decoded {
     if let Some(rules) = root.get("rules") {
         settings.rules = reader.rules(rules);
     }
-    if let Some(log) = reader.opaque_object(root, "log") {
-        settings.log = log;
-    }
+    settings.log = reader.log(root);
 
     let migrations = reader.section(root, "", "migrations");
     let m = &mut settings.migrations;
@@ -474,13 +473,134 @@ impl Reader {
         parsed.ok()
     }
 
-    /// `log`: kept verbatim when an object.
-    fn opaque_object(&mut self, root: &Obj, key: &str) -> Option<Value> {
-        match root.get(key)? {
-            v @ Value::Object(_) => Some(v.clone()),
+    /// The `log` section: each field on its own, values outside the rules
+    /// brought inside them (spec M5c L11) with a `Corrected` diagnostic.
+    fn log(&mut self, root: &Obj) -> LogSettings {
+        let section = self.section(root, "", "log");
+        let mut log = LogSettings::default();
+
+        match lookup(&section, "folder", true) {
+            None => {}
+            Some(Value::String(text)) if is_absolute_folder(text) => {
+                log.folder = Some(text.clone());
+            }
+            Some(Value::String(text)) => self.push(
+                "log.folder".into(),
+                DiagnosticKind::Corrected {
+                    from: text.clone(),
+                    to: "null".into(),
+                },
+            ),
+            Some(_) => self.push("log.folder".into(), DiagnosticKind::WrongType),
+        }
+
+        log.sensors = self.log_sensors(&section);
+
+        if let Some(v) = self.choice(&section, "log", "everyTicks", false, &EVERY_TICKS) {
+            log.every_ticks = v;
+        }
+        match lookup(&section, "maxFileMb", false) {
+            None => {}
+            Some(Value::Number(n)) => {
+                let x = n.as_f64().unwrap_or(f64::from(log.max_file_mb));
+                let (min, max) = (*MAX_FILE_MB.start(), *MAX_FILE_MB.end());
+                let clamped = x.clamp(f64::from(min), f64::from(max)).round() as u32;
+                if x != f64::from(clamped) {
+                    self.push(
+                        "log.maxFileMb".into(),
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: clamped.to_string(),
+                        },
+                    );
+                }
+                log.max_file_mb = clamped;
+            }
+            Some(_) => self.push("log.maxFileMb".into(), DiagnosticKind::WrongType),
+        }
+
+        (log.hotkey_toggle, _) = self.hotkey(&section, "hotkeyToggle", log.hotkey_toggle.clone());
+        let (pause, pause_text) = self.hotkey(&section, "hotkeyPause", None);
+        log.hotkey_pause = pause;
+        if log.hotkey_pause.is_some() && log.hotkey_pause == log.hotkey_toggle {
+            self.push(
+                "log.hotkeyPause".into(),
+                DiagnosticKind::Corrected {
+                    from: pause_text.unwrap_or_default(),
+                    to: "null".into(),
+                },
+            );
+            log.hotkey_pause = None;
+        }
+        log
+    }
+
+    /// `log.sensors`: `null` or missing = every sensor; empty and repeated ids
+    /// are dropped and the list is cut at [`MAX_LOG_SENSORS`].
+    fn log_sensors(&mut self, section: &Obj) -> Option<Vec<String>> {
+        let items = match lookup(section, "sensors", true)? {
+            Value::Array(items) => items,
             _ => {
-                self.push(key.into(), DiagnosticKind::WrongType);
-                None
+                self.push("log.sensors".into(), DiagnosticKind::WrongType);
+                return None;
+            }
+        };
+        let Some(ids) = items
+            .iter()
+            .map(|item| item.as_str())
+            .collect::<Option<Vec<&str>>>()
+        else {
+            self.push("log.sensors".into(), DiagnosticKind::WrongType);
+            return None;
+        };
+        let mut seen = HashSet::new();
+        let kept: Vec<String> = ids
+            .iter()
+            .filter(|id| !id.is_empty() && seen.insert(**id))
+            .take(MAX_LOG_SENSORS)
+            .map(|id| id.to_string())
+            .collect();
+        if kept.len() != ids.len() {
+            self.push(
+                "log.sensors".into(),
+                DiagnosticKind::Corrected {
+                    from: format!("{} entries", ids.len()),
+                    to: format!("{} entries", kept.len()),
+                },
+            );
+        }
+        Some(kept)
+    }
+
+    /// A hotkey field in canonical form, with the text as written. Missing
+    /// keeps `default`, `null` switches it off, unreadable text is dropped
+    /// with a diagnostic.
+    fn hotkey(
+        &mut self,
+        section: &Obj,
+        key: &str,
+        default: Option<String>,
+    ) -> (Option<String>, Option<String>) {
+        let path = join("log", key);
+        match section.get(key) {
+            None => (default, None),
+            Some(Value::Null) => (None, None),
+            Some(Value::String(text)) => match canonical_hotkey(text) {
+                Some(canonical) => (Some(canonical), Some(text.clone())),
+                None => {
+                    self.push(
+                        path,
+                        DiagnosticKind::Corrected {
+                            from: text.clone(),
+                            to: "null".into(),
+                        },
+                    );
+                    (None, None)
+                }
+            },
+            Some(_) => {
+                self.push(path, DiagnosticKind::WrongType);
+                (default, None)
             }
         }
     }
@@ -658,7 +778,7 @@ mod tests {
     fn rules_and_log_are_preserved_when_objects() {
         let want = everything_changed();
         let rules = serde_json::to_value(&want.rules).unwrap();
-        let d = decode(json!({"version": 1, "rules": rules, "log": want.log}));
+        let d = decode(json!({"version": 1, "rules": rules, "log": encode(&want)["log"]}));
         assert_eq!(d.settings.rules, want.rules);
         assert_eq!(d.settings.log, want.log);
         assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
@@ -667,6 +787,79 @@ mod tests {
         assert_eq!(d.settings.rules, Settings::default().rules);
         assert_eq!(d.settings.log, Settings::default().log);
         assert_eq!(d.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn log_round_trips() {
+        let want = everything_changed();
+        let d = decode(encode(&want));
+        assert_eq!(d.settings.log, want.log);
+        assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+        // Missing keys take the defaults; an explicit null switches a hotkey off.
+        let d = decode(json!({"version": 1, "log": {}}));
+        assert_eq!(d.settings.log, LogSettings::default());
+        assert!(d.diagnostics.is_empty());
+        let d = decode(json!({"version": 1, "log": {"hotkeyToggle": null}}));
+        assert_eq!(d.settings.log.hotkey_toggle, None);
+        assert!(d.diagnostics.is_empty());
+        // A readable hotkey is stored canonical, without a diagnostic.
+        let d = decode(json!({"version": 1, "log": {"hotkeyToggle": "shift + alt + p"}}));
+        assert_eq!(d.settings.log.hotkey_toggle.as_deref(), Some("Alt+Shift+P"));
+        assert!(d.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn lenient_log_corrects_hand_edits() {
+        let d = decode(json!({"version": 1, "log": {
+            "everyTicks": 7,
+            "maxFileMb": 5,
+            "folder": "logs",
+            "hotkeyToggle": "Ctrl+Alt+R",
+            "hotkeyPause": "alt+ctrl+r",
+            "sensors": ["a", "", "a"]
+        }}));
+        let log = &d.settings.log;
+        assert_eq!(log.every_ticks, 5);
+        assert_eq!(log.max_file_mb, 10);
+        assert_eq!(log.folder, None);
+        assert_eq!(log.hotkey_toggle.as_deref(), Some("Ctrl+Alt+R"));
+        assert_eq!(log.hotkey_pause, None);
+        assert_eq!(log.sensors, Some(vec!["a".to_string()]));
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                corrected("log.folder", "logs", "null"),
+                corrected("log.sensors", "3 entries", "1 entries"),
+                corrected("log.everyTicks", "7", "5"),
+                corrected("log.maxFileMb", "5", "10"),
+                corrected("log.hotkeyPause", "alt+ctrl+r", "null"),
+            ]
+        );
+
+        let d = decode(json!({"version": 1, "log": {
+            "maxFileMb": 5000, "everyTicks": 100, "hotkeyToggle": "Ctrl+R", "hotkeyPause": "nonsense"
+        }}));
+        assert_eq!(d.settings.log.max_file_mb, 2048);
+        assert_eq!(d.settings.log.every_ticks, 60);
+        assert_eq!(d.settings.log.hotkey_toggle, None);
+        assert_eq!(d.settings.log.hotkey_pause, None);
+        assert_eq!(d.diagnostics.len(), 4);
+
+        let many: Vec<String> = (0..4100).map(|i| format!("s{i}")).collect();
+        let d = decode(json!({"version": 1, "log": {"sensors": many}}));
+        assert_eq!(d.settings.log.sensors.as_ref().map(Vec::len), Some(4096));
+        assert_eq!(d.diagnostics.len(), 1);
+
+        // A value of the wrong type falls back to the default, with a diagnostic.
+        let d = decode(json!({"version": 1, "log": {
+            "everyTicks": "1", "folder": 3, "sensors": [1], "hotkeyToggle": true, "maxFileMb": null
+        }}));
+        assert_eq!(d.settings.log, LogSettings::default());
+        assert_eq!(d.diagnostics.len(), 5);
+        assert!(d
+            .diagnostics
+            .iter()
+            .all(|x| x.kind == DiagnosticKind::WrongType));
     }
 
     const ID_A: &str = "custom-00000000-0000-4000-8000-00000000000a";

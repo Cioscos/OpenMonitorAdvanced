@@ -252,6 +252,40 @@ test('mock backend rejects an unknown field and null on a plain field', async ()
   });
 });
 
+test('mock backend applies a valid log patch and stores hotkeys canonical', async () => {
+  const backend = createMockBackend();
+  const state = await backend.updateSettings({
+    log: { everyTicks: 30, maxFileMb: 512, sensors: ['a', 'b'], hotkeyPause: 'shift + ctrl + p' },
+  });
+  expect(state.settings.log).toEqual({
+    folder: null,
+    sensors: ['a', 'b'],
+    everyTicks: 30,
+    maxFileMb: 512,
+    hotkeyToggle: 'Ctrl+Alt+Shift+R',
+    hotkeyPause: 'Ctrl+Shift+P',
+  });
+  const back = await backend.updateSettings({ log: { sensors: null } });
+  expect(back.settings.log.sensors).toBeNull();
+});
+
+test('mock backend rejects log values the way the core does', async () => {
+  const backend = createMockBackend();
+  const cases: [Parameters<typeof backend.updateSettings>[0], string, string][] = [
+    [{ log: { everyTicks: 7 } } as never, 'log.everyTicks', 'settings.error.range'],
+    [{ log: { maxFileMb: 9 } }, 'log.maxFileMb', 'settings.error.range'],
+    [{ log: { folder: 'logs' } }, 'log.folder', 'settings.error.folder'],
+    [{ log: { hotkeyToggle: 'Ctrl+R' } }, 'log.hotkeyToggle', 'settings.error.hotkey'],
+    [{ log: { hotkeyPause: 'alt+shift+ctrl+r' } }, 'log.hotkeyPause', 'settings.error.hotkeyDuplicate'],
+    [{ log: { sensors: ['a', 'a'] } }, 'log.sensors', 'settings.error.sensors'],
+    [{ log: { sensors: [''] } }, 'log.sensors', 'settings.error.sensors'],
+  ];
+  for (const [patch, field, key] of cases) {
+    await expect(backend.updateSettings(patch)).rejects.toEqual({ field, key });
+  }
+  expect((await backend.getSettings()).settings.log.everyTicks).toBe(1);
+});
+
 const RULE_ID = 'custom-00000000-0000-4000-8000-000000000001';
 const customRule = (warn: number, crit: number, durationS = 0) => ({
   id: RULE_ID,

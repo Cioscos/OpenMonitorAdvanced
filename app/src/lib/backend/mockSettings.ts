@@ -18,6 +18,9 @@ import type { Unsubscribe } from './backend';
 const INTERVALS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000];
 const WINDOWS = [60, 300, 1800, 3600];
 const FPS = [15, 30, 60];
+const EVERY_TICKS = [1, 2, 5, 10, 30, 60];
+const MAX_FILE_MB = [10, 2048] as const;
+const MAX_LOG_SENSORS = 4096;
 
 const ENUMS: Record<string, readonly string[]> = {
   'general.language': ['system', 'en', 'it'],
@@ -30,6 +33,7 @@ const NUMBERS: Record<string, readonly number[]> = {
   'general.intervalMs': INTERVALS,
   'general.chartFps': FPS,
   'advanced.window': WINDOWS,
+  'log.everyTicks': EVERY_TICKS,
 };
 
 /** The built-in rules, from the fixture that a Rust test keeps equal to `oma_core::rules::default_rules`. */
@@ -56,9 +60,10 @@ const SHAPE: { [key: string]: Node } = {
   },
   advanced: { section: 'nullable', window: 'nullable', series: 'free' },
   view: { last: 'nullable' },
+  log: { folder: 'nullable', sensors: 'nullable', everyTicks: 'leaf', maxFileMb: 'leaf', hotkeyToggle: 'nullable', hotkeyPause: 'nullable' },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
-const READ_ONLY = ['version', 'migrations', 'log'];
+const READ_ONLY = ['version', 'migrations'];
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -124,6 +129,52 @@ function checkTypes(merged: Record<string, unknown>): void {
   if (!isObject(series) || !Object.values(series).every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === 'string'))) {
     fail('advanced.series', 'settings.error.type');
   }
+}
+
+/** The canonical spelling of a hotkey (`Ctrl+Alt+Shift+R`), or null when unreadable or with fewer than two modifiers. */
+export function canonicalHotkey(text: string): string | null {
+  const parts = text.split('+').map((part) => part.trim());
+  if (parts.some((part) => part === '')) return null;
+  const key = parts.pop() as string;
+  const found = new Set<string>();
+  for (const part of parts) {
+    const name = { ctrl: 'Ctrl', control: 'Ctrl', alt: 'Alt', shift: 'Shift' }[part.toLowerCase()];
+    if (!name || found.has(name)) return null;
+    found.add(name);
+  }
+  if (found.size < 2) return null;
+  const fn = /^f([1-9]\d?)$/i.exec(key);
+  const spelled = /^[a-z0-9]$/i.test(key) ? key.toUpperCase() : fn && Number(fn[1]) <= 24 ? `F${fn[1]}` : null;
+  if (!spelled) return null;
+  return ['Ctrl', 'Alt', 'Shift'].filter((name) => found.has(name)).concat(spelled).join('+');
+}
+
+/** `is_absolute_folder`: `X:` plus a slash, or a UNC share. */
+const isAbsoluteFolder = (path: string) => /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]+\\[^\\]+/.test(path);
+
+/** The log checks of the strict decoder; hotkeys are stored canonical. */
+function checkLog(log: Record<string, unknown>): void {
+  const { folder, sensors, maxFileMb, hotkeyToggle, hotkeyPause } = log;
+  if (folder !== null && typeof folder !== 'string') fail('log.folder', 'settings.error.type');
+  if (typeof folder === 'string' && !isAbsoluteFolder(folder)) fail('log.folder', 'settings.error.folder');
+  if (sensors !== null) {
+    if (!Array.isArray(sensors) || !sensors.every((id) => typeof id === 'string')) fail('log.sensors', 'settings.error.type');
+    const ids = sensors as string[];
+    if (ids.length > MAX_LOG_SENSORS || ids.some((id) => id === '') || new Set(ids).size !== ids.length) fail('log.sensors', 'settings.error.sensors');
+  }
+  if (typeof maxFileMb !== 'number') fail('log.maxFileMb', 'settings.error.type');
+  if ((maxFileMb as number) < MAX_FILE_MB[0] || (maxFileMb as number) > MAX_FILE_MB[1] || !Number.isInteger(maxFileMb)) fail('log.maxFileMb', 'settings.error.range');
+  for (const key of ['hotkeyToggle', 'hotkeyPause'] as const) {
+    const value = log[key];
+    if (value === null) continue;
+    if (typeof value !== 'string') fail(`log.${key}`, 'settings.error.type');
+    const canonical = canonicalHotkey(value as string);
+    if (!canonical) fail(`log.${key}`, 'settings.error.hotkey');
+    log[key] = canonical;
+  }
+  if (log.hotkeyPause !== null && log.hotkeyPause === log.hotkeyToggle) fail('log.hotkeyPause', 'settings.error.hotkeyDuplicate');
+  void hotkeyToggle;
+  void hotkeyPause;
 }
 
 /** The only rule checks of the mock: level shape, durations, threshold order and hysteresis. */
@@ -211,7 +262,7 @@ export function defaultSettings(): Settings {
     advanced: { series: {} },
     view: {},
     rules: { overrides: {}, custom: [] },
-    log: {},
+    log: { folder: null, sensors: null, everyTicks: 1, maxFileMb: 100, hotkeyToggle: 'Ctrl+Alt+Shift+R', hotkeyPause: null },
     migrations: { serviceV1: false, webviewV1: false },
   };
 }
@@ -274,6 +325,7 @@ export class MockSettings {
     const merged = clone(this.#settings) as unknown as Record<string, unknown>;
     merge(merged, patch as Record<string, unknown>);
     checkTypes(merged);
+    checkLog(merged.log as Record<string, unknown>);
     checkRules(merged.rules);
     // An unset field is absent, never null (the Rust encoding).
     const advanced = merged.advanced as Record<string, unknown>;

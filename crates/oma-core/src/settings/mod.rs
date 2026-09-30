@@ -3,6 +3,7 @@
 //! lives in the shell (`app/src-tauri`).
 
 mod decode;
+pub mod log;
 mod patch;
 
 use std::collections::BTreeMap;
@@ -10,6 +11,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::rules::RulesSettings;
+
+pub use log::LogSettings;
 
 pub use decode::{decode_lenient, Decoded, Diagnostic, DiagnosticKind, VersionStatus};
 pub use patch::{apply_patch, reset_rule_override, PatchError};
@@ -256,14 +259,8 @@ pub struct Settings {
     /// Overrides of the built-in rules and the custom rules; always passes
     /// [`crate::rules::validate_rules`].
     pub rules: RulesSettings,
-    /// Opaque in M5a (M5c fills it in).
-    pub log: Value,
+    pub log: LogSettings,
     pub migrations: Migrations,
-}
-
-/// Default of the `log` section.
-pub(crate) fn default_log() -> Value {
-    json!({})
 }
 
 impl Default for Settings {
@@ -276,7 +273,7 @@ impl Default for Settings {
             advanced: AdvancedState::default(),
             view: ViewState::default(),
             rules: RulesSettings::default(),
-            log: default_log(),
+            log: LogSettings::default(),
             migrations: Migrations::default(),
         }
     }
@@ -337,7 +334,7 @@ pub fn encode(settings: &Settings) -> Value {
         "advanced": advanced,
         "view": view,
         "rules": serde_json::to_value(&settings.rules).unwrap_or_else(|_| json!({})),
-        "log": settings.log,
+        "log": settings.log.encode(),
         "migrations": {
             "serviceV1": settings.migrations.service_v1,
             "webviewV1": settings.migrations.webview_v1,
@@ -417,7 +414,17 @@ pub(crate) mod test_support {
                 }]
             }))
             .expect("valid rules"),
-            log: json!({"dir": "C:/logs"}),
+            log: LogSettings {
+                folder: Some("D:\\logs".into()),
+                sensors: Some(vec![
+                    "cpu/0/load/total".into(),
+                    "gpu0/temperature/core".into(),
+                ]),
+                every_ticks: 10,
+                max_file_mb: 512,
+                hotkey_toggle: Some("Ctrl+Shift+F9".into()),
+                hotkey_pause: Some("Ctrl+Alt+P".into()),
+            },
             migrations: Migrations {
                 service_v1: true,
                 webview_v1: true,
@@ -448,7 +455,8 @@ mod tests {
             "advanced": {"series": {}},
             "view": {},
             "rules": {"overrides": {}, "custom": []},
-            "log": {},
+            "log": {"folder": null, "sensors": null, "everyTicks": 1, "maxFileMb": 100,
+                    "hotkeyToggle": "Ctrl+Alt+Shift+R", "hotkeyPause": null},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

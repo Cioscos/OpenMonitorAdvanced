@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use super::decode::{decode_lenient, Diagnostic, DiagnosticKind, TYPE_ERROR};
 use super::{encode, Settings};
+use crate::hotkey::parse_hotkey;
 use crate::rules::{is_builtin, validate_rules, RulesSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +46,7 @@ const fn nullable() -> Node {
 }
 
 /// Sections that a patch may never touch.
-const READ_ONLY: [&str; 3] = ["version", "migrations", "log"];
+const READ_ONLY: [&str; 2] = ["version", "migrations"];
 
 const SCHEMA: &[(&str, Node)] = &[
     (
@@ -103,6 +104,17 @@ const SCHEMA: &[(&str, Node)] = &[
         ]),
     ),
     ("view", Node::Object(&[("last", nullable())])),
+    (
+        "log",
+        Node::Object(&[
+            ("folder", nullable()),
+            ("sensors", nullable()),
+            ("everyTicks", leaf()),
+            ("maxFileMb", leaf()),
+            ("hotkeyToggle", nullable()),
+            ("hotkeyPause", nullable()),
+        ]),
+    ),
     (
         "rules",
         Node::Object(&[
@@ -232,6 +244,28 @@ fn strict_rules(merged: &Value, diagnostics: &[Diagnostic]) -> Result<RulesSetti
     Ok(rules)
 }
 
+/// i18n key of a value the decoder had to correct: the log fields have their
+/// own, everything else is out of range.
+fn corrected_key(merged: &Value, path: &str) -> &'static str {
+    match path {
+        "log.folder" => "settings.error.folder",
+        "log.sensors" => "settings.error.sensors",
+        "log.hotkeyToggle" => "settings.error.hotkey",
+        // A pause hotkey that reads fine was only corrected for being the toggle's twin.
+        "log.hotkeyPause" => {
+            let readable = merged["log"]["hotkeyPause"]
+                .as_str()
+                .is_some_and(|text| parse_hotkey(text).is_ok());
+            if readable {
+                "settings.error.hotkeyDuplicate"
+            } else {
+                "settings.error.hotkey"
+            }
+        }
+        _ => "settings.error.range",
+    }
+}
+
 /// Applies `patch` to `current` and validates the whole result strictly: any
 /// value the tolerant decoder would have had to fix is an error instead.
 /// Pure: on error nothing is changed.
@@ -254,7 +288,7 @@ pub fn apply_patch(current: &Settings, patch: &Value) -> Result<Settings, PatchE
         .find(|d| !matches!(d.kind, DiagnosticKind::InvalidRule { .. }));
     if let Some(diagnostic) = other {
         let key = match diagnostic.kind {
-            DiagnosticKind::Corrected { .. } => "settings.error.range",
+            DiagnosticKind::Corrected { .. } => corrected_key(&merged, &diagnostic.path),
             DiagnosticKind::WrongType
             | DiagnosticKind::UnknownVariant
             | DiagnosticKind::MissingVersion
@@ -291,6 +325,11 @@ mod tests {
     use super::super::test_support::everything_changed;
     use super::super::*;
     use super::READ_ONLY;
+
+    #[test]
+    fn only_version_and_migrations_are_read_only() {
+        assert_eq!(READ_ONLY, ["version", "migrations"]);
+    }
 
     fn err(field: &str, key: &'static str) -> PatchError {
         PatchError {
@@ -404,9 +443,14 @@ mod tests {
                 json!({"rules": {"extra": 1}}),
                 err("rules.extra", "settings.error.unknownField"),
             ),
+            (json!({"log": null}), err("log", "settings.error.null")),
             (
-                json!({"log": {}}),
-                err("log", "settings.error.readOnlyField"),
+                json!({"log": {"everyTicks": null}}),
+                err("log.everyTicks", "settings.error.null"),
+            ),
+            (
+                json!({"log": {"nope": 1}}),
+                err("log.nope", "settings.error.unknownField"),
             ),
             (json!([]), err("", "settings.error.notObject")),
             (json!("x"), err("", "settings.error.notObject")),
@@ -414,6 +458,108 @@ mod tests {
         for (patch, want) in cases {
             assert_eq!(apply_patch(&base, &patch), Err(want), "patch {patch}");
         }
+    }
+
+    #[test]
+    fn log_patch_rules() {
+        let base = Settings::default();
+        let many: Vec<String> = (0..4097).map(|i| format!("s{i}")).collect();
+        let cases = [
+            (
+                json!({"log": {"everyTicks": 7}}),
+                err("log.everyTicks", "settings.error.range"),
+            ),
+            (
+                json!({"log": {"maxFileMb": 9}}),
+                err("log.maxFileMb", "settings.error.range"),
+            ),
+            (
+                json!({"log": {"maxFileMb": 2049}}),
+                err("log.maxFileMb", "settings.error.range"),
+            ),
+            (
+                json!({"log": {"everyTicks": "1"}}),
+                err("log.everyTicks", "settings.error.type"),
+            ),
+            (
+                json!({"log": {"folder": "logs"}}),
+                err("log.folder", "settings.error.folder"),
+            ),
+            (
+                json!({"log": {"folder": ""}}),
+                err("log.folder", "settings.error.folder"),
+            ),
+            (
+                json!({"log": {"folder": 4}}),
+                err("log.folder", "settings.error.type"),
+            ),
+            (
+                json!({"log": {"hotkeyToggle": "Ctrl+R"}}),
+                err("log.hotkeyToggle", "settings.error.hotkey"),
+            ),
+            (
+                json!({"log": {"hotkeyPause": "Ctrl+Alt+Space"}}),
+                err("log.hotkeyPause", "settings.error.hotkey"),
+            ),
+            (
+                json!({"log": {"hotkeyPause": "shift+alt+ctrl+r"}}),
+                err("log.hotkeyPause", "settings.error.hotkeyDuplicate"),
+            ),
+            (
+                json!({"log": {"sensors": ["a", "a"]}}),
+                err("log.sensors", "settings.error.sensors"),
+            ),
+            (
+                json!({"log": {"sensors": ["a", ""]}}),
+                err("log.sensors", "settings.error.sensors"),
+            ),
+            (
+                json!({"log": {"sensors": many}}),
+                err("log.sensors", "settings.error.sensors"),
+            ),
+            (
+                json!({"log": {"sensors": [1]}}),
+                err("log.sensors", "settings.error.type"),
+            ),
+        ];
+        for (patch, want) in cases {
+            assert_eq!(apply_patch(&base, &patch), Err(want), "patch {patch}");
+        }
+        // Moving the toggle onto the pause hotkey is a duplicate too.
+        let with_pause =
+            apply_patch(&base, &json!({"log": {"hotkeyPause": "Ctrl+Alt+P"}})).unwrap();
+        assert_eq!(
+            apply_patch(&with_pause, &json!({"log": {"hotkeyToggle": "Ctrl+Alt+P"}})),
+            Err(err("log.hotkeyPause", "settings.error.hotkeyDuplicate"))
+        );
+
+        let ok = apply_patch(
+            &base,
+            &json!({"log": {
+                "folder": "D:\\logs", "sensors": ["a", "b"], "everyTicks": 30, "maxFileMb": 2048,
+                "hotkeyToggle": null, "hotkeyPause": "Ctrl+Shift+F9"
+            }}),
+        )
+        .unwrap();
+        assert_eq!(ok.log.folder.as_deref(), Some("D:\\logs"));
+        assert_eq!(ok.log.sensors, Some(vec!["a".into(), "b".into()]));
+        assert_eq!((ok.log.every_ticks, ok.log.max_file_mb), (30, 2048));
+        assert_eq!(ok.log.hotkey_toggle, None);
+        // Arrays replace; null goes back to "all sensors" and the default folder.
+        let back = apply_patch(&ok, &json!({"log": {"sensors": null, "folder": null}})).unwrap();
+        assert_eq!((back.log.sensors, back.log.folder), (None, None));
+    }
+
+    #[test]
+    fn hotkeys_are_stored_canonical() {
+        let next = apply_patch(
+            &Settings::default(),
+            &json!({"log": {"hotkeyToggle": "shift+ctrl+t", "hotkeyPause": " alt + ctrl + f9 "}}),
+        )
+        .unwrap();
+        assert_eq!(next.log.hotkey_toggle.as_deref(), Some("Ctrl+Shift+T"));
+        assert_eq!(next.log.hotkey_pause.as_deref(), Some("Ctrl+Alt+F9"));
+        assert_eq!(encode(&next)["log"]["hotkeyPause"], json!("Ctrl+Alt+F9"));
     }
 
     #[test]

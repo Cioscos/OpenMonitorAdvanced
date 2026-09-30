@@ -225,6 +225,21 @@ export interface ServiceModules {
  * The settings file as the core encodes it (camelCase). `advanced.section`, `advanced.window` and
  * `view.last` are absent (not null) while never set; `advanced.series` holds only the sections set.
  */
+export type LogEveryTicks = 1 | 2 | 5 | 10 | 30 | 60;
+
+/** The `log` section: hotkeys are stored in canonical form (`Ctrl+Alt+Shift+R`). */
+export interface LogSettings {
+  /** Absolute folder, or null for `Documents\OpenMonitor Advanced\logs`. */
+  folder: string | null;
+  /** Sensor ids, or null for all of them. */
+  sensors: string[] | null;
+  everyTicks: LogEveryTicks;
+  /** 10 to 2048. */
+  maxFileMb: number;
+  hotkeyToggle: string | null;
+  hotkeyPause: string | null;
+}
+
 export interface Settings {
   version: number;
   general: {
@@ -254,8 +269,8 @@ export interface Settings {
   };
   view: { last?: ViewKind };
   rules: RulesSettings;
-  /** Opaque until the log milestone. */
-  log: Record<string, unknown>;
+  /** CSV sensor log; `null` folder = the default one, `null` sensors = all. */
+  log: LogSettings;
   migrations: { serviceV1: boolean; webviewV1: boolean };
 }
 
@@ -368,7 +383,7 @@ export type DeepPartial<T> = T extends readonly unknown[] ? T : T extends object
  * Objects merge, arrays and scalars replace; `null` only on the nullable fields. The fields of a rule
  * override (`warn`, `crit`, `hysteresis`, `notify`) replace whole, and `rules.custom` is an array.
  */
-export type SettingsPatch = DeepPartial<Omit<Settings, 'version' | 'migrations' | 'rules' | 'log'>> & {
+export type SettingsPatch = DeepPartial<Omit<Settings, 'version' | 'migrations' | 'rules'>> & {
   rules?: { overrides?: Record<string, RuleOverride>; custom?: Rule[] };
 };
 

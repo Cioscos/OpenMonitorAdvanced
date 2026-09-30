@@ -3,6 +3,7 @@
 
 pub mod engine;
 pub mod history;
+pub mod hotkey;
 pub mod merge;
 pub mod model;
 pub mod provider;

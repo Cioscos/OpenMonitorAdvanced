@@ -5,6 +5,8 @@ use std::io;
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 
+use crate::fsutil::to_io_error;
+
 /// Milliseconds between 1601-01-01 (the FILETIME epoch) and the Unix epoch.
 const UNIX_EPOCH_AS_FILETIME_MS: u64 = 11_644_473_600_000;
 
@@ -47,12 +49,10 @@ pub fn utc_offset_minutes(unix_ms: u64) -> io::Result<i32> {
     let mut utc = SYSTEMTIME::default();
     let mut local = SYSTEMTIME::default();
     // SAFETY: `ft` and `utc` are valid for the call.
-    unsafe { FileTimeToSystemTime(&ft, &mut utc) }
-        .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+    unsafe { FileTimeToSystemTime(&ft, &mut utc) }.map_err(to_io_error)?;
     // SAFETY: a null time zone selects the current one; `utc` and `local`
     // are valid for the call.
-    unsafe { SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut local) }
-        .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+    unsafe { SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut local) }.map_err(to_io_error)?;
     Ok(offset_between(&utc, &local))
 }
 

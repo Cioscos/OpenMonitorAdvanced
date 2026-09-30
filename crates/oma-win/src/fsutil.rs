@@ -84,10 +84,13 @@ pub fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
     Err(to_io_error(err))
 }
 
-fn to_io_error(err: windows::core::Error) -> std::io::Error {
+/// An `io::Error` for a Windows error: a `FACILITY_WIN32` HRESULT becomes
+/// its Win32 code, so `raw_os_error` gives what callers match on; any other
+/// HRESULT is not an OS error code and keeps only its message.
+pub(crate) fn to_io_error(err: windows::core::Error) -> std::io::Error {
     match win32_code(err.code().0) {
         Some(code) => std::io::Error::from_raw_os_error(code as i32),
-        None => std::io::Error::from(err),
+        None => std::io::Error::other(err),
     }
 }
 
@@ -113,6 +116,21 @@ mod tests {
         assert_eq!(win32_code(0x8007_0002_u32 as i32), Some(2));
         assert_eq!(win32_code(0x8000_4005_u32 as i32), None);
         assert_eq!(win32_code(0), None);
+    }
+
+    #[test]
+    fn io_error_keeps_win32_codes_and_wraps_other_hresults() {
+        use windows::core::{Error, HRESULT};
+        let path_not_found = to_io_error(Error::from_hresult(HRESULT(0x8007_0003_u32 as i32)));
+        assert_eq!(path_not_found.raw_os_error(), Some(3));
+        assert_eq!(path_not_found.kind(), std::io::ErrorKind::NotFound);
+        // E_FAIL is no Win32 code: no raw code, the message is kept.
+        let e_fail = Error::from_hresult(HRESULT(0x8000_4005_u32 as i32));
+        let message = e_fail.message();
+        let other = to_io_error(e_fail);
+        assert_eq!(other.raw_os_error(), None);
+        assert_eq!(other.kind(), std::io::ErrorKind::Other);
+        assert!(other.to_string().contains(&message), "{other}");
     }
 
     #[test]

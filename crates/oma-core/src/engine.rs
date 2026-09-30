@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use crate::history::History;
 use crate::model::{Device, Schema, Snapshot};
 use crate::provider::{Inventory, Provider};
+use crate::rules::{HealthClock, HealthReport, LevelEntry, Rule, RuleEngine, RuleStatus};
 use crate::sanitize::{sanitize_sensor, DiscardLog};
 use crate::stats::Stats;
 use crate::worker::Worker;
@@ -31,6 +32,10 @@ pub struct TickOutput {
     pub schema: Option<Schema>,
     /// One entry per `snapshot.values`, same order.
     pub quality: Vec<Quality>,
+    /// The health report, when this tick changed it; always on the first tick.
+    pub health: Option<HealthReport>,
+    /// Instances that entered a more severe level in this tick.
+    pub entries: Vec<LevelEntry>,
 }
 
 struct Slot {
@@ -92,6 +97,9 @@ pub struct Engine {
     started_at_ms: Option<u64>,
     /// Rate limit of the "discarding implausible value" debug line.
     discards: DiscardLog,
+    rules: RuleEngine,
+    /// `monotonic_ms` of the latest tick, the epoch of the rules' timers.
+    last_monotonic_ms: u64,
     seq: u64,
 }
 
@@ -114,6 +122,8 @@ impl Engine {
             stats: Stats::new(),
             started_at_ms: None,
             discards: DiscardLog::default(),
+            rules: RuleEngine::new(),
+            last_monotonic_ms: 0,
             seq: 0,
         }
     }
@@ -140,6 +150,27 @@ impl Engine {
     /// `timestamp_ms` of the first tick; `None` before it.
     pub fn started_at_ms(&self) -> Option<u64> {
         self.started_at_ms
+    }
+
+    /// Replaces the alert rules; they take effect on the next tick.
+    pub fn set_rules(&mut self, rules: Vec<Rule>) {
+        self.rules.set_rules(rules);
+    }
+    /// The sampling interval, for the rules' suspend detection.
+    pub fn set_interval_ms(&mut self, interval_ms: u64) {
+        self.rules.set_interval_ms(interval_ms);
+    }
+    /// The latest health report.
+    pub fn health(&self) -> &HealthReport {
+        self.rules.report()
+    }
+    /// How long the overall level has lasted, at the latest tick.
+    pub fn health_clock(&self) -> HealthClock {
+        self.rules.clock(self.last_monotonic_ms)
+    }
+    /// Every rule with its instances, for the rules settings.
+    pub fn rule_status(&self) -> Vec<RuleStatus> {
+        self.rules.status()
     }
 
     /// `timestamp_ms` is Unix time for display; `monotonic_ms` drives retry deadlines.
@@ -253,6 +284,17 @@ impl Engine {
         self.history.push(timestamp_ms, &values);
         self.stats.push(&values);
         self.seq += 1;
+        self.last_monotonic_ms = monotonic_ms;
+        // The rules see the sanitized values; a new merged schema is flagged
+        // even when its revision number repeats (a reconnecting service).
+        let evaluation = self.rules.evaluate(
+            &self.schema,
+            changed,
+            &values,
+            &quality,
+            monotonic_ms,
+            timestamp_ms,
+        );
         TickOutput {
             snapshot: Snapshot {
                 revision: self.schema.revision,
@@ -262,6 +304,8 @@ impl Engine {
             },
             schema: changed.then(|| self.schema.clone()),
             quality,
+            health: evaluation.report,
+            entries: evaluation.entries,
         }
     }
 }
@@ -375,6 +419,176 @@ mod tests {
         assert_eq!(out.snapshot.seq, 1);
         assert_eq!(out.snapshot.values, vec![Some(1.0), Some(1.0)]);
         assert!(e.tick(2_000, 2_000).schema.is_none());
+    }
+
+    /// One `cpu/0` temperature sensor, `package`, in °C.
+    fn temperature_inventory() -> Inventory {
+        Inventory {
+            devices: vec![Device {
+                id: "cpu/0".into(),
+                kind: DeviceKind::Cpu,
+                name: "cpu".into(),
+                vendor: None,
+                properties: Default::default(),
+            }],
+            sensors: vec![Sensor::new(
+                "cpu/0",
+                SensorKind::Temperature,
+                "package",
+                Unit::Celsius,
+                Label::new("test"),
+                Source::Mock,
+            )],
+        }
+    }
+
+    /// Warns at 80 °C at once.
+    fn hot_rule() -> crate::rules::Rule {
+        use crate::rules::{Condition, Hysteresis, LevelSpec, Notify, Rule, Target, Threshold};
+        Rule {
+            id: "custom-00000000-0000-4000-8000-000000000001".into(),
+            target: Target::Sensor {
+                sensor: "cpu/0/temperature/package".into(),
+            },
+            unit: Unit::Celsius,
+            condition: Condition::Above,
+            warn: Some(LevelSpec {
+                threshold: Some(Threshold::Fixed { fixed: 80.0 }),
+                duration_s: 0,
+            }),
+            crit: None,
+            hysteresis: Hysteresis::default(),
+            enabled: true,
+            notify: Notify::default(),
+        }
+    }
+
+    #[test]
+    fn tick_reports_health_on_first_tick_then_only_on_change() {
+        let (p, script) = fake("a", temperature_inventory());
+        script.lock().unwrap().polls.extend([
+            Ok(vec![Some(50.0)]),
+            Ok(vec![Some(51.0)]),
+            Ok(vec![Some(90.0)]),
+            Ok(vec![Some(90.0)]),
+        ]);
+        let mut e = Engine::new(vec![p], 10);
+        e.set_rules(vec![hot_rule()]);
+        let first = e.tick(1_000, 1_000);
+        let report = first.health.expect("health on the first tick");
+        assert_eq!(report.revision, 1);
+        assert!(first.entries.is_empty());
+        assert_eq!(e.health(), &report);
+        // A different value that changes nothing on screen: no new report.
+        let second = e.tick(2_000, 2_000);
+        assert!(second.health.is_none());
+        // The alarm shows up: a new report and an entry.
+        let third = e.tick(3_000, 3_000);
+        let report = third.health.expect("health changes with the alarm");
+        assert_eq!(report.revision, 2);
+        assert_eq!(report.alerts.len(), 1);
+        assert_eq!(third.entries.len(), 1);
+        assert_eq!(third.entries[0].level, crate::rules::Level::Warn);
+        // Stays in alarm at the same reading: no report, no entry.
+        let fourth = e.tick(4_000, 4_000);
+        assert!(fourth.health.is_none());
+        assert!(fourth.entries.is_empty());
+        assert_eq!(e.health().revision, 2);
+    }
+
+    #[test]
+    fn rules_see_sanitized_values() {
+        let (p, script) = fake("a", temperature_inventory());
+        // 200 °C is implausible: the snapshot has no value and the rule none.
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(200.0)]));
+        let mut e = Engine::new(vec![p], 10);
+        e.set_rules(vec![hot_rule()]);
+        let out = e.tick(1_000, 1_000);
+        assert_eq!(out.snapshot.values, vec![None]);
+        assert!(out.entries.is_empty());
+        let report = out.health.expect("first tick");
+        assert!(report.alerts.is_empty());
+        assert_eq!(report.unavailable_targets.len(), 1);
+    }
+
+    #[test]
+    fn set_rules_takes_effect_on_the_next_tick() {
+        let (p, script) = fake("a", temperature_inventory());
+        script.lock().unwrap().polls.extend([
+            Ok(vec![Some(90.0)]),
+            Ok(vec![Some(90.0)]),
+            Ok(vec![Some(90.0)]),
+        ]);
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(1_000, 1_000);
+        assert!(out.health.is_some());
+        assert!(out.entries.is_empty());
+        assert!(e.rule_status().is_empty());
+        e.set_rules(vec![hot_rule()]);
+        // The new rule is listed at once, without instances.
+        let status = e.rule_status();
+        assert_eq!(status.len(), 1);
+        assert!(status[0].instances.is_empty());
+        let out = e.tick(2_000, 2_000);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(
+            out.health
+                .expect("the rules changed the report")
+                .alerts
+                .len(),
+            1
+        );
+        assert_eq!(e.rule_status()[0].instances.len(), 1);
+        assert!(e.tick(3_000, 3_000).entries.is_empty());
+    }
+
+    #[test]
+    fn health_clock_uses_the_monotonic_time_of_the_latest_tick() {
+        let (p, _) = fake("a", temperature_inventory());
+        let mut e = Engine::new(vec![p], 10);
+        e.tick(1_000_000, 10_000);
+        e.tick(1_001_000, 14_000);
+        let clock = e.health_clock();
+        assert_eq!(clock.revision, e.health().revision);
+        assert_eq!(clock.level_elapsed_ms, 4_000);
+    }
+
+    #[test]
+    fn rule_state_survives_a_schema_change() {
+        let (p, script) = fake("a", temperature_inventory());
+        let mut e = Engine::new(vec![p], 10);
+        e.set_rules(vec![hot_rule()]);
+        script.lock().unwrap().polls.push_back(Ok(vec![Some(90.0)]));
+        assert_eq!(e.tick(1_000, 1_000).entries.len(), 1);
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Err(ProviderError::Rediscover));
+            let mut inventory = temperature_inventory();
+            inventory.sensors.push(Sensor::new(
+                "cpu/0",
+                SensorKind::Temperature,
+                "tdie",
+                Unit::Celsius,
+                Label::new("test"),
+                Source::Mock,
+            ));
+            s.inventory = inventory;
+        }
+        e.tick(2_000, 2_000);
+        script
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(90.0), Some(40.0)]));
+        let out = e.tick(3_000, 3_000);
+        assert!(out.schema.is_some());
+        // Still in alarm, no second entry for the same instance.
+        assert!(out.entries.is_empty());
+        assert_eq!(e.health().alerts.len(), 1);
     }
 
     #[test]

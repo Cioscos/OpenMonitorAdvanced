@@ -300,6 +300,8 @@ mod tests {
             },
             schema: None,
             quality: Vec::new(),
+            health: None,
+            entries: Vec::new(),
         }
     }
 

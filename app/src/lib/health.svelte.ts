@@ -80,8 +80,20 @@ function formatAlertValue(value: number | null, unit: Unit, locale: string, t: T
   return formatValue(value, unit, locale, t, { rate: throughput });
 }
 
+/**
+ * Throughput follows the setting on network devices and is shown in bytes elsewhere, like the
+ * device pages of the Advanced view and the tray. A device gone from the schema (a retained
+ * alert) is recognized by its id.
+ */
+function rateFor(schema: Schema | null, deviceId: string, throughput: ThroughputUnit): ThroughputUnit {
+  const device = schema?.devices.find((d) => d.id === deviceId);
+  const network = device === undefined ? deviceId.startsWith('network/') : device.kind === 'network';
+  return network ? throughput : 'bytes';
+}
+
 function alertMessage(alert: Alert, schema: Schema | null, t: Translate, locale: string, temperature: TemperatureUnit, throughput: ThroughputUnit): string {
-  const format = (value: number | null) => formatAlertValue(value, alert.unit, locale, t, temperature, throughput);
+  const rate = rateFor(schema, alert.deviceId, throughput);
+  const format = (value: number | null) => formatAlertValue(value, alert.unit, locale, t, temperature, rate);
   const device = alert.params.device ?? schema?.devices.find((d) => d.id === alert.deviceId)?.name ?? alert.deviceId;
   return t(alert.messageKey, {
     ...alert.params,

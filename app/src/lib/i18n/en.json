@@ -166,7 +166,7 @@
   "rule.disk-critical.name": "Disk critical warning",
   "rule.disk-critical.message": "{device} reports a critical warning",
   "rule.volume-used.name": "Volume space used",
-  "rule.volume-used.message": "Volume almost full on {device} ({value})",
+  "rule.volume-used.message": "{sensor} almost full ({value})",
   "rule.ram-used.name": "RAM used",
   "rule.ram-used.message": "Memory almost full ({value})",
   "rule.battery-low.name": "Low battery",

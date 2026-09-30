@@ -333,7 +333,8 @@ fn utf16_len(text: &str) -> usize {
 /// The text of one alert, shared by the tooltip verdict and the toast: its
 /// `messageKey` with `{device}` (and the other report params), `{sensor}`
 /// (the translated label), `{threshold}` and `{value}` in the chosen units;
-/// `{value}` is "—" while the sensor has no value.
+/// `{value}` is "—" while the sensor has no value. Values read like the
+/// tooltip's (`92 %`), so the verdict matches the values after it.
 pub fn alert_text(
     lang: Lang,
     alert: &Alert,
@@ -343,11 +344,11 @@ pub fn alert_text(
 ) -> String {
     let rate = rate_for(schema, &alert.device_id, throughput);
     let value = if alert.valid {
-        format_value(lang, alert.value, alert.unit, temperature, rate)
+        alert_value(lang, alert.value, alert.unit, temperature, rate)
     } else {
         DASH.to_owned()
     };
-    let threshold = format_value(lang, alert.threshold, alert.unit, temperature, rate);
+    let threshold = alert_value(lang, alert.threshold, alert.unit, temperature, rate);
     let sensor = sensor_label(lang, &alert.sensor_label);
     // The computed params come first: `t` uses the first one with a name.
     let params: Vec<(&str, &str)> = [
@@ -399,6 +400,21 @@ fn rate_for(schema: &Schema, device_id: &str, throughput: ThroughputUnit) -> Thr
         throughput
     } else {
         ThroughputUnit::Bytes
+    }
+}
+
+/// A value in an alert's text: [`format_value`], with percentages in the
+/// tray tooltip's style (`92 %`, ruling R-E).
+fn alert_value(
+    lang: Lang,
+    value: Option<f64>,
+    unit: Unit,
+    temperature: TemperatureUnit,
+    rate: ThroughputUnit,
+) -> String {
+    match value.filter(|v| v.is_finite()) {
+        Some(v) if unit == Unit::Percent => format!("{} %", number(v, 0, lang)),
+        _ => format_value(lang, value, unit, temperature, rate),
     }
 }
 
@@ -972,6 +988,49 @@ mod tests {
                 None
             );
         }
+    }
+
+    fn ram_full() -> Alert {
+        let mut ram = alert("ram-used", "memory/0", Unit::Percent, Level::Warn, 92.4);
+        ram.sensor_label = Label::new("memory.load");
+        ram.params = BTreeMap::new();
+        ram
+    }
+
+    #[test]
+    fn verdict_uses_the_tray_percent_style() {
+        let one = report(OverallLevel::Warn, vec![ram_full()]);
+        let verdict_en = verdict(Lang::En, &one, &schema(), C, B);
+        assert_eq!(verdict_en.as_deref(), Some("Memory almost full (92 %)"));
+        assert_eq!(
+            verdict(Lang::It, &one, &schema(), C, B).as_deref(),
+            Some("Memoria quasi piena (92 %)")
+        );
+        // The verdict and the values after it read the same way.
+        let items = [item("tray.tooltip.ram", Some(92.4), Unit::Percent)];
+        assert_eq!(
+            tooltip(Lang::En, verdict_en.as_deref(), &items, C),
+            "Memory almost full (92 %) · RAM 92 %"
+        );
+        // The toast body shares the text, threshold included.
+        let mut custom = ram_full();
+        custom.message_key = "rule.custom.above".to_owned();
+        assert_eq!(
+            alert_text(Lang::En, &custom, &schema(), C, B),
+            format!(
+                "{} above 90 % (92 %)",
+                sensor_label(Lang::En, &custom.sensor_label)
+            )
+        );
+    }
+
+    #[test]
+    fn volume_messages_name_the_volume() {
+        let mut volume = alert("volume-used", "storage/0", Unit::Percent, Level::Warn, 95.0);
+        volume.sensor_label = Label::with_arg("storage.volumeUsed", "C:");
+        let text = |lang| alert_text(lang, &volume, &schema(), C, B);
+        assert_eq!(text(Lang::En), "Volume C: used almost full (95 %)");
+        assert_eq!(text(Lang::It), "Volume C: occupato quasi pieno (95 %)");
     }
 
     #[test]

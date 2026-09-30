@@ -187,6 +187,7 @@ test('unit_and_language_changes_reformat_without_health_event', () => {
     ruleId: 'custom-0b0c7c6e-1f0a-4a7b-9d55-000000000002',
     unit: 'bytes_per_second',
     sensorId: 'network/mock-eth/throughput/down',
+    deviceId: 'network/mock-eth',
     sensorLabel: { key: 'network.down' },
     messageKey: 'rule.custom.above',
     level: 'warn',
@@ -196,4 +197,46 @@ test('unit_and_language_changes_reformat_without_health_event', () => {
   const nr = report({ level: 'warn', alerts: [net] });
   expect(text(nr, { throughput: 'bits' }).title).toContain('1.0 Gbit/s');
   expect(text(nr, { throughput: 'bytes' }).title).toContain('MB/s');
+});
+
+test('throughput_follows_the_setting_on_network_devices_only', () => {
+  const net = alert({
+    ruleId: 'custom-0b0c7c6e-1f0a-4a7b-9d55-000000000003',
+    unit: 'bytes_per_second',
+    sensorId: 'network/mock-eth/throughput/down',
+    deviceId: 'network/mock-eth',
+    sensorLabel: { key: 'network.down' },
+    messageKey: 'rule.custom.above',
+    level: 'warn',
+    value: 12_500_000,
+    threshold: 10_000_000,
+    params: { device: 'Ethernet' },
+  });
+  const one = (a: Alert, throughput: 'bits' | 'bytes') => text(report({ level: 'warn', alerts: [a] }), { throughput }).title;
+  expect(one(net, 'bits')).toBe('Download above 80 Mbit/s (100 Mbit/s)');
+  expect(one(net, 'bytes')).toBe('Download above 9.5 MB/s (11.9 MB/s)');
+  // Disks show bytes, like their page in the Advanced view and the tray.
+  const disk = { ...net, sensorId: 'storage/device-mock-ssd/throughput/read', deviceId: 'storage/device-mock-ssd', sensorLabel: { key: 'storage.read' } };
+  expect(one(disk, 'bits')).toBe(`${tEn('sensor.storage.read')} above 9.5 MB/s (11.9 MB/s)`);
+  // A network device gone from the schema is still recognized by its id.
+  const gone = { ...net, sensorId: 'network/gone/throughput/down', deviceId: 'network/gone' };
+  expect(one(gone, 'bits')).toBe('Download above 80 Mbit/s (100 Mbit/s)');
+});
+
+test('volume_used_message_names_the_volume', () => {
+  const volume = alert({
+    ruleId: 'volume-used',
+    sensorId: 'storage/device-mock-ssd/percent/volume-mock-guid',
+    deviceId: 'storage/device-mock-ssd',
+    unit: 'percent',
+    sensorLabel: { key: 'storage.volumeUsed', arg: 'C:' },
+    level: 'warn',
+    value: 95,
+    threshold: 90,
+    messageKey: 'rule.volume-used.message',
+    params: { device: 'Disk 0 (C:)' },
+  });
+  const r = report({ level: 'warn', alerts: [volume] });
+  expect(text(r).title).toBe('Volume C: used almost full (95%)');
+  expect(text(r, { t: tIt, locale: 'it' }).title).toBe('Volume C: occupato quasi pieno (95%)');
 });

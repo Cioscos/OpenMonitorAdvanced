@@ -48,9 +48,11 @@ impl WriteFailure {
         match error.raw_os_error() {
             // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
             Some(39 | 112) => Self::DiskFull,
-            // ERROR_PATH_NOT_FOUND, ERROR_NOT_READY, ERROR_DEV_NOT_EXIST,
+            // ERROR_PATH_NOT_FOUND, ERROR_INVALID_DRIVE, ERROR_NOT_READY,
+            // ERROR_DEV_NOT_EXIST, ERROR_NO_SUCH_DEVICE, ERROR_FILE_INVALID
+            // (an open handle on a dismounted volume), ERROR_IO_DEVICE,
             // ERROR_DEVICE_NOT_CONNECTED
-            Some(3 | 21 | 55 | 1167) => Self::Unavailable,
+            Some(3 | 15 | 21 | 55 | 433 | 1006 | 1117 | 1167) => Self::Unavailable,
             // ERROR_ACCESS_DENIED
             Some(5) => Self::Denied,
             _ => Self::Other(error.to_string()),
@@ -1368,7 +1370,7 @@ mod tests {
         let key = |code: i32| WriteFailure::from_io(&io::Error::from_raw_os_error(code));
         assert_eq!(key(39), WriteFailure::DiskFull);
         assert_eq!(key(112), WriteFailure::DiskFull);
-        for code in [3, 21, 55, 1167] {
+        for code in [3, 15, 21, 55, 433, 1006, 1117, 1167] {
             assert_eq!(key(code), WriteFailure::Unavailable, "code {code}");
         }
         assert_eq!(key(5), WriteFailure::Denied);

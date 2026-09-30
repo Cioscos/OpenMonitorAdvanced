@@ -13,7 +13,7 @@ import type {
   Snapshot,
   StartupStatus,
   StatsReply,
-  ViewKind,
+  NavigationTarget,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -60,10 +60,13 @@ export interface Backend {
    * disk; rejects with `persist_failed` (try again at the next start) or `read_only`.
    */
   importWebviewState(legacy: LegacyWebviewState): Promise<SettingsState>;
-  /** The view a tray item asked for before the window existed; returned once. */
-  takePendingView(): Promise<ViewKind | null>;
-  /** A tray item asked for a view while the window was already open. */
-  onNavigate(cb: (view: ViewKind) => void): Promise<Unsubscribe>;
+  /**
+   * The latest request of a tray item or a toast, returned once: read at mount, and after each
+   * `onNavigate` event as its acknowledgment (a page still loading may have missed the event).
+   */
+  takePendingView(): Promise<NavigationTarget | null>;
+  /** A tray item or a toast asked for a view while the window was open. */
+  onNavigate(cb: (target: NavigationTarget) => void): Promise<Unsubscribe>;
   /** Re-reads the start-up entry as Windows sees it. */
   refreshAutostart(): Promise<AutostartStatus>;
   /** Versions and folders for the About page. */

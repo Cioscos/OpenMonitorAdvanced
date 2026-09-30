@@ -302,6 +302,7 @@ mod tests {
             quality: Vec::new(),
             health: None,
             entries: Vec::new(),
+            monotonic_ms: 0,
         }
     }
 

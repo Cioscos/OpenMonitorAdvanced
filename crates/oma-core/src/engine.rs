@@ -36,6 +36,9 @@ pub struct TickOutput {
     pub health: Option<HealthReport>,
     /// Instances that entered a more severe level in this tick.
     pub entries: Vec<LevelEntry>,
+    /// The tick's `monotonic_ms`, the clock of the rules' timers (and of the
+    /// toast cooldown).
+    pub monotonic_ms: u64,
 }
 
 struct Slot {
@@ -306,6 +309,7 @@ impl Engine {
             quality,
             health: evaluation.report,
             entries: evaluation.entries,
+            monotonic_ms,
         }
     }
 }
@@ -555,6 +559,15 @@ mod tests {
         let clock = e.health_clock();
         assert_eq!(clock.revision, e.health().revision);
         assert_eq!(clock.level_elapsed_ms, 4_000);
+    }
+
+    #[test]
+    fn tick_output_carries_the_rules_clock() {
+        // The toast cooldown runs on the same monotonic clock as the rules.
+        let (p, _) = fake("a", temperature_inventory());
+        let mut e = Engine::new(vec![p], 10);
+        assert_eq!(e.tick(1_000_000, 10_000).monotonic_ms, 10_000);
+        assert_eq!(e.tick(1_001_000, 14_000).monotonic_ms, 14_000);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::service::ServiceShell;
 use crate::settings::{Effect, EffectStatus, SettingsStore};
-use crate::window::NavState;
+use crate::window::{NavState, NavigationTarget};
 use crate::AppState;
 
 #[cfg(not(windows))]
@@ -257,11 +257,12 @@ impl StartupState {
     }
 }
 
-/// The view a tray item asked for before the window existed: `"simple"`,
-/// `"advanced"` or `null`. Returned once (the request is consumed).
+/// The latest navigation request of a tray item or a toast
+/// (`{ view, deviceId? }`), or `null`. Returned once: the UI takes it at
+/// mount and after each `oma:navigate` (the acknowledgment).
 #[tauri::command(async)]
-pub fn take_pending_view(nav: State<'_, NavState>) -> Option<&'static str> {
-    nav.take().map(oma_core::settings::ViewKind::as_str)
+pub fn take_pending_view(nav: State<'_, NavState>) -> Option<NavigationTarget> {
+    nav.take()
 }
 
 #[tauri::command(async)]

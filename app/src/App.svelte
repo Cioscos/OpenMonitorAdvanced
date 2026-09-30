@@ -10,7 +10,7 @@
   import { LiveStore, connect } from './lib/live.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
-  import type { ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
+  import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
   import type { View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
@@ -30,6 +30,8 @@
   /** The view the settings screen goes back to. */
   let previous = $state<ViewKind>('simple');
   let gear = $state<HTMLButtonElement | undefined>();
+  /** The device page a clicked toast asked for, until the Advanced view has opened it. */
+  let focus = $state<{ deviceId: string } | null>(null);
 
   /** Shows a view and remembers Simple/Advanced as the last one (the settings screen is never saved). */
   function showView(next: View) {
@@ -38,6 +40,12 @@
     if (next !== 'settings' && settings.state?.settings.view.last !== next) {
       settings.update({ view: { last: next } });
     }
+  }
+
+  /** Follows a tray item or a toast: its view and, for a toast, its device page. */
+  function navigate(target: NavigationTarget) {
+    if (target.deviceId !== undefined) focus = { deviceId: target.deviceId };
+    showView(target.view);
   }
 
   onMount(() => {
@@ -91,16 +99,19 @@
         if (!cancelled) session = value;
       })
       .catch((error) => console.error('session unavailable', error));
-    // Subscribing to `oma:navigate` comes before asking for the pending view: the shell clears its
-    // request when the window is already open and emits the event instead, but on a cold WebView2
-    // start the page may not have been listening yet. An event that arrives before the first view
-    // is chosen wins over the saved preferences.
+    // Subscribing to `oma:navigate` comes before asking for the pending view: the shell emits the
+    // event to an open window, but on a cold WebView2 start the page may not be listening yet, so
+    // it also keeps every request until the page takes it. An event that arrives before the first
+    // view is chosen wins over the saved preferences; a later one is acknowledged by taking the
+    // request.
     async function start() {
-      let requested = null as ViewKind | null;
+      let requested = null as NavigationTarget | null;
       let chosen = false;
       const unlistenNavigate = await backend.onNavigate((target) => {
-        if (chosen) showView(target);
-        else requested = target;
+        if (chosen) {
+          navigate(target);
+          backend.takePendingView().catch((error) => console.error('navigation request not acknowledged', error));
+        } else requested = target;
       });
       if (cancelled) return unlistenNavigate();
       offNavigate = unlistenNavigate;
@@ -111,11 +122,11 @@
       const pending = await backend.takePendingView();
       if (cancelled) return;
       const target = requested ?? pending;
-      view = initialView(settings.state!, target);
+      view = initialView(settings.state!, target?.view ?? null);
       chosen = true;
       ready = true;
-      // A view the tray asked for is now the one last shown.
-      if (target !== null) showView(target);
+      // A view the tray or a toast asked for is now the one last shown.
+      if (target !== null) navigate(target);
     }
     return () => {
       cancelled = true;
@@ -181,7 +192,7 @@
     {#if view === 'simple'}
       <SimpleView {store} startedAtMs={session?.startedAtMs ?? null} onOpenAdvanced={openAdvanced} />
     {:else if view === 'advanced'}
-      <AdvancedView {store} {backend} {service} />
+      <AdvancedView {store} {backend} {service} {focus} onFocused={() => (focus = null)} />
     {:else}
       <SettingsView {store} {backend} {service} onBack={closeSettings} />
     {/if}

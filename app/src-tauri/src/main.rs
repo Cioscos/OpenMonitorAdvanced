@@ -4,6 +4,7 @@ mod autostart;
 mod commands;
 mod i18n;
 mod interval;
+mod notifier;
 mod rules;
 mod service;
 mod settings;
@@ -15,9 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use oma_core::engine::Engine;
-use oma_core::model::Schema;
 use oma_core::provider::Provider;
-use oma_core::rules::HealthReport;
 use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
 
@@ -306,22 +305,18 @@ fn main() {
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
-            // The tray follows every tick, window or not; the schema and the
-            // health report arrive only when they change, so the latest ones
-            // are kept for the tray.
-            let mut tray_schema: Option<Schema> = None;
-            let mut tray_health = HealthReport::default();
+            // The tray and the toasts follow every tick, window or not. One
+            // feed (and one toast cooldown) lives for the whole session; it
+            // keeps the latest schema and health report, which arrive only
+            // when they change.
+            let mut alerts = notifier::AlertFeed::new(notifier::system_sink(app.handle()));
             let clock_engine = engine.clone();
             let mut clock_pacer = rules::ClockPacer::default();
             let sampler = Sampler::spawn(engine.clone(), interval.clone(), move |out| {
-                if let Some(schema) = &out.schema {
-                    tray_schema = Some(schema.clone());
-                }
-                if let Some(health) = &out.health {
-                    tray_health = health.clone();
-                }
-                if let Some(schema) = &tray_schema {
-                    tray.update(schema, &out.snapshot, &tray_health, &store.snapshot());
+                let settings = store.snapshot();
+                alerts.tick(out, &settings);
+                if let Some(schema) = alerts.schema() {
+                    tray.update(schema, &out.snapshot, alerts.health(), &settings);
                 }
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {

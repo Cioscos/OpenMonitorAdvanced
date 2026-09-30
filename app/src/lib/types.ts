@@ -203,6 +203,14 @@ export type ChartFps = 60 | 30 | 15;
 export type DefaultView = 'simple' | 'advanced' | 'last';
 /** A view that can be remembered or requested from the tray. */
 export type ViewKind = 'simple' | 'advanced';
+/**
+ * Where `oma:navigate` and `take_pending_view` send the window: a tray item names only the view, a
+ * clicked toast the Advanced view and the device whose page it opens.
+ */
+export interface NavigationTarget {
+  view: ViewKind;
+  deviceId?: string;
+}
 
 export interface ServiceModules {
   cpu: boolean;

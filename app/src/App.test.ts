@@ -279,7 +279,7 @@ test('the default view beats the last one', async () => {
 test('a view requested from the tray at start beats the default', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   await backend.settings.update({ general: { defaultView: 'simple' } });
-  backend.pendingView = 'advanced';
+  backend.pendingView = { view: 'advanced' };
   render(App, { backend, store: new LiveStore() });
 
   await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
@@ -291,8 +291,8 @@ test('a view requested from the tray at start beats the default', async () => {
 test('a navigate event that arrives before the initial view is chosen wins', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   await backend.settings.update({ general: { defaultView: 'simple' } });
-  // The shell emitted `oma:navigate` and cleared its pending view before the page was listening.
-  backend.beforeTakePendingView = () => backend.emitNavigate('advanced');
+  // The shell emitted `oma:navigate` before the page was listening.
+  backend.beforeTakePendingView = () => backend.emitNavigate({ view: 'advanced' });
   render(App, { backend, store: new LiveStore() });
 
   await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
@@ -305,13 +305,66 @@ test('a navigate event while the window is open switches the view and remembers 
   render(App, { backend, store: new LiveStore() });
   await simpleShown();
 
-  backend.emitNavigate('advanced');
+  backend.emitNavigate({ view: 'advanced' });
   await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
   await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
 
-  backend.emitNavigate('simple');
+  backend.emitNavigate({ view: 'simple' });
   await simpleShown();
   await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('simple'));
+});
+
+test('a navigate event is acknowledged by taking the pending request', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+  const calls = backend.takePendingViewCalls;
+
+  // The shell keeps the request until the page takes it, even with the window open.
+  backend.pendingView = { view: 'advanced' };
+  backend.emitNavigate({ view: 'advanced' });
+  await vi.waitFor(() => expect(backend.takePendingViewCalls).toBe(calls + 1));
+  expect(backend.pendingView).toBeNull();
+});
+
+test('a toast opens the page of its device', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  backend.pendingView = { view: 'advanced', deviceId: 'storage/device-mock-ssd' };
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('Disk'));
+  expect(screen.getByText('Disk 0 (C:)', { selector: '.device' })).toBeTruthy();
+  expect(screen.queryByText('The device of this alert is no longer available.')).toBeNull();
+  await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('storage/device-mock-ssd'));
+});
+
+test('a toast clicked with the window open switches to its device', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  backend.emitNavigate({ view: 'advanced', deviceId: 'gpu/pci-0000:01:00.0' });
+  await vi.waitFor(() => expect(pageTitle()).toBe('GPU'));
+
+  // Already on the Advanced view: another device's toast still moves the page.
+  backend.emitNavigate({ view: 'advanced', deviceId: 'storage/device-mock-ssd' });
+  await vi.waitFor(() => expect(pageTitle()).toBe('Disk'));
+});
+
+test('missing device shows fallback', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  backend.pendingView = { view: 'advanced', deviceId: 'storage/gone' };
+  render(App, { backend, store: new LiveStore() });
+
+  await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
+  expect(screen.getByText('The device of this alert is no longer available.').getAttribute('role')).toBe('status');
+
+  // Choosing a page clears the message.
+  await fireEvent.click(screen.getByRole('button', { name: /RAM/ }));
+  await vi.waitFor(() => expect(screen.queryByText('The device of this alert is no longer available.')).toBeNull());
 });
 
 test('switching view saves the last one', async () => {

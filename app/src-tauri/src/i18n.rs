@@ -52,6 +52,7 @@ pub const RUST_KEYS: &[&str] = &[
     "rule.ram-used.message",
     "rule.battery-low.name",
     "rule.battery-low.message",
+    "rule.custom.name",
     "rule.custom.above",
     "rule.custom.below",
     "rule.custom.flag",
@@ -59,6 +60,7 @@ pub const RUST_KEYS: &[&str] = &[
     "health.allClear",
     "health.partial",
     "health.unavailableValue",
+    "health.deviceGone",
 ];
 
 type Catalog = HashMap<String, String>;

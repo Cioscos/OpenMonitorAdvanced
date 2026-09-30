@@ -17,7 +17,7 @@ import type {
   Snapshot,
   StartupStatus,
   StatsReply,
-  ViewKind,
+  NavigationTarget,
 } from '../lib/types';
 
 export interface HistoryCall {
@@ -59,7 +59,7 @@ export class FakeBackend implements Backend {
   /** Set to reject `importWebviewState` with this error instead of importing. */
   importError: string | null = null;
   /** What `takePendingView` returns (once). */
-  pendingView: ViewKind | null = null;
+  pendingView: NavigationTarget | null = null;
   takePendingViewCalls = 0;
   /** Runs at the start of `takePendingView`, e.g. to emit an `oma:navigate` in the gap. */
   beforeTakePendingView: (() => void) | null = null;
@@ -80,7 +80,7 @@ export class FakeBackend implements Backend {
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
   #settingsListeners = new Set<(s: SettingsState) => void>();
-  #navigateListeners = new Set<(v: ViewKind) => void>();
+  #navigateListeners = new Set<(t: NavigationTarget) => void>();
 
   constructor(schema: Schema) {
     this.schema = schema;
@@ -192,7 +192,7 @@ export class FakeBackend implements Backend {
     return this.settings.import(legacy);
   }
 
-  async takePendingView(): Promise<ViewKind | null> {
+  async takePendingView(): Promise<NavigationTarget | null> {
     this.takePendingViewCalls++;
     this.navigateSubscribedBeforePendingRead = this.#navigateListeners.size > 0;
     this.beforeTakePendingView?.();
@@ -201,7 +201,7 @@ export class FakeBackend implements Backend {
     return view;
   }
 
-  async onNavigate(cb: (v: ViewKind) => void): Promise<Unsubscribe> {
+  async onNavigate(cb: (t: NavigationTarget) => void): Promise<Unsubscribe> {
     this.#navigateListeners.add(cb);
     return () => this.#navigateListeners.delete(cb);
   }
@@ -225,8 +225,8 @@ export class FakeBackend implements Backend {
     this.#settingsListeners.forEach((cb) => cb(state));
   }
 
-  emitNavigate(view: ViewKind): void {
-    this.#navigateListeners.forEach((cb) => cb(view));
+  emitNavigate(target: NavigationTarget): void {
+    this.#navigateListeners.forEach((cb) => cb(target));
   }
 
   emitSchema(schema: Schema): void {

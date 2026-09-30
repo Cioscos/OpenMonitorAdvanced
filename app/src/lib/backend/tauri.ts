@@ -12,7 +12,7 @@ import type {
   Snapshot,
   StartupStatus,
   StatsReply,
-  ViewKind,
+  NavigationTarget,
 } from '../types';
 import type { Backend } from './backend';
 
@@ -41,8 +41,8 @@ export function createTauriBackend(): Backend {
     resetRuleOverride: (ruleId) => invoke<SettingsState>('reset_rule_override', { ruleId }),
     onSettings: (cb) => listen<SettingsState>('oma:settings', (e) => cb(e.payload)),
     importWebviewState: (legacy) => invoke<SettingsState>('import_webview_state', { legacy }),
-    takePendingView: () => invoke<ViewKind | null>('take_pending_view'),
-    onNavigate: (cb) => listen<ViewKind>('oma:navigate', (e) => cb(e.payload)),
+    takePendingView: () => invoke<NavigationTarget | null>('take_pending_view'),
+    onNavigate: (cb) => listen<NavigationTarget>('oma:navigate', (e) => cb(e.payload)),
     refreshAutostart: () => invoke<AutostartStatus>('refresh_autostart'),
     getAppInfo: () => invoke<AppInfo>('get_app_info'),
     // A unit variant of `KnownPath`: the camelCase string is the whole value.

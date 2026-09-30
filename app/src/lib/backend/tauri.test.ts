@@ -65,6 +65,6 @@ test('event payloads reach the listeners unwrapped', async () => {
   expect(onSettings).toHaveBeenCalledWith({ seq: 3 });
   await backend.onNavigate(onNavigate);
   const navigateHandler = vi.mocked(listen).mock.lastCall![1] as (e: { payload: unknown }) => void;
-  navigateHandler({ payload: 'advanced' });
-  expect(onNavigate).toHaveBeenCalledWith('advanced');
+  navigateHandler({ payload: { view: 'advanced', deviceId: 'gpu/0' } });
+  expect(onNavigate).toHaveBeenCalledWith({ view: 'advanced', deviceId: 'gpu/0' });
 });

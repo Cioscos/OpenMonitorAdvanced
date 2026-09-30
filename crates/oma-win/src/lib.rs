@@ -17,6 +17,7 @@ mod storage_identity;
 mod storage_ioctl;
 mod storage_temperature;
 pub mod svc;
+pub mod toast;
 
 use oma_core::provider::Provider;
 

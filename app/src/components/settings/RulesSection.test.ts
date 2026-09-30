@@ -411,10 +411,13 @@ test('enabling a rule again drops its now-empty override', async () => {
 
 test('the out-of-order summary agrees with the count', async () => {
   const problem = (sensorId: string) => ({ ...instance(sensorId, 90, 80), valid: false, problem: 'order' as const });
+  // Fake timers: the next poll comes a second after the first reply, as long as `waitFor` waits.
+  vi.useFakeTimers();
   const { backend } = await setup();
   backend.ruleStatus = status().map((s) =>
     s.ruleId === 'disk-temp' ? { ...s, instances: [problem(`${SSD}/temperature/drive`)] } : s.ruleId === 'gpu-temp' ? { ...s, instances: [problem('a'), problem('b')] } : s,
   );
+  await vi.advanceTimersByTimeAsync(1000);
   await vi.waitFor(() => expect(row(t('rule.disk-temp.name')).textContent).toContain('out of order on 1 sensor:'));
   expect(row(t('rule.gpu-temp.name')).textContent).toContain('out of order on 2 sensors:');
 });

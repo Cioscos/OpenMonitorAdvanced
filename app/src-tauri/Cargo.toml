@@ -20,6 +20,7 @@ tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.4"
 sys-locale = "0.3"
 tauri-plugin-global-shortcut = "~2.3"
+tauri-plugin-dialog = "2.7"
 
 [target.'cfg(windows)'.dependencies]
 oma-win.workspace = true

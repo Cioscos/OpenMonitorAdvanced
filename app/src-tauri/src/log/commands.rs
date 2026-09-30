@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 use super::session::{LogEnv, LogService, LogState, LogStatus, EVENT_LOG};
 use crate::i18n::{t, Lang};
@@ -61,6 +62,26 @@ pub async fn open_log_folder(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_folder(&log))
         .await
         .map_err(|err| err.to_string())?
+}
+
+/// Opens the folder picker over the main window and answers the chosen path,
+/// or `None` when the user cancels (L13). The UI saves the path with
+/// `settings.update`. `async` so the blocking dialog never holds the main
+/// thread, which has to keep pumping the dialog's messages.
+#[tauri::command(async)]
+pub fn pick_log_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let mut dialog = app.dialog().file();
+    if let Some(window) = app.get_webview_window(MAIN) {
+        dialog = dialog.set_parent(&window);
+    }
+    let picked = dialog.blocking_pick_folder();
+    match picked {
+        None => Ok(None),
+        Some(path) => path
+            .into_path()
+            .map(|p| Some(p.to_string_lossy().into_owned()))
+            .map_err(|err| err.to_string()),
+    }
 }
 
 fn open_folder(log: &LogService) -> Result<(), String> {

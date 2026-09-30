@@ -1,9 +1,9 @@
 /** `settings` is the settings screen; only `simple` and `advanced` are ever remembered as the last view. */
 export type View = 'simple' | 'advanced' | 'settings';
 
-/** A place inside the settings screen: today only the rules, optionally with "New rule" filled in for a sensor. */
+/** A place inside the settings screen: the rules, optionally with "New rule" filled in for a sensor. */
 export interface SettingsTarget {
-  section: 'rules';
+  section: 'rules' | 'log';
   newRuleSensor?: string;
 }
 

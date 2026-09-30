@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pick-log-folder"
+description = "Enables the pick_log_folder command without any pre-configured scope."
+commands.allow = ["pick_log_folder"]
+
+[[permission]]
+identifier = "deny-pick-log-folder"
+description = "Denies the pick_log_folder command without any pre-configured scope."
+commands.deny = ["pick_log_folder"]

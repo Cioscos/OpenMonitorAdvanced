@@ -221,6 +221,7 @@ fn main() {
         }))
         // Rust side only: no `global-shortcut:*` permission reaches the UI.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(window::NavState::default())
         .manage(AppState {
             engine: engine.clone(),
@@ -260,6 +261,7 @@ fn main() {
             log::commands::log_stop,
             log::commands::get_log_status,
             log::commands::open_log_folder,
+            log::commands::pick_log_folder,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

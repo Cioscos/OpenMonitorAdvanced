@@ -30,6 +30,7 @@ fn main() {
             "log_stop",
             "get_log_status",
             "open_log_folder",
+            "pick_log_folder",
         ]),
     ))
     .expect("Tauri build")

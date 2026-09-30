@@ -250,6 +250,12 @@ pub struct SvcProvider {
     /// `Inventory::sensors` order.
     kept: Vec<usize>,
     interval: Duration,
+    /// `seq` of the snapshot the last `poll` read, within the current
+    /// connection; reset on every (re)discovery, since a restarted service
+    /// may begin again from the same number.
+    last_seq: Option<u64>,
+    /// The last `poll` read the same snapshot as the one before it.
+    repeated: bool,
 }
 
 impl SvcProvider {
@@ -261,6 +267,8 @@ impl SvcProvider {
             bound_drives_generation: 0,
             kept: Vec::new(),
             interval: Duration::default(),
+            last_seq: None,
+            repeated: false,
         }
     }
 }
@@ -276,6 +284,8 @@ impl Provider for SvcProvider {
         self.bound_generation = view.generation;
         self.bound_drives_generation = drives.generation;
         self.interval = view.interval;
+        self.last_seq = None;
+        self.repeated = false;
         let Some(schema) = view.schema else {
             self.kept = Vec::new();
             return Ok(Inventory::default());
@@ -288,22 +298,33 @@ impl Provider for SvcProvider {
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
         let view = self.feed.view();
         let drives = self.drives.get();
+        self.repeated = false;
         if view.generation != self.bound_generation
             || drives.generation != self.bound_drives_generation
         {
+            self.last_seq = None;
             return Err(ProviderError::Rediscover);
         }
         let Some((received, snapshot)) = view.snapshot else {
+            self.last_seq = None;
             return Ok(vec![None; self.kept.len()]);
         };
         if received.elapsed() > view.interval * 3 {
             return Ok(vec![None; self.kept.len()]);
         }
+        // The core polls at its own rate: the same `seq` as the previous poll
+        // (same connection) is the same measurement read again.
+        self.repeated = self.last_seq == Some(snapshot.seq);
+        self.last_seq = Some(snapshot.seq);
         Ok(self
             .kept
             .iter()
             .map(|&i| snapshot.values.get(i).copied().flatten())
             .collect())
+    }
+
+    fn repeated(&self) -> bool {
+        self.repeated
     }
 }
 
@@ -778,6 +799,85 @@ mod tests {
             stale_at,
         );
         assert_eq!(p.poll().expect("poll"), vec![None]);
+    }
+
+    fn snapshot_with_seq(seq: u64) -> WireSnapshot {
+        WireSnapshot {
+            seq,
+            timestamp_ms: 0,
+            values: vec![Some(1.0)],
+        }
+    }
+
+    #[test]
+    fn same_service_seq_is_repeated() {
+        let feed = SvcFeed::default();
+        feed.set_schema(wire_schema());
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        assert!(!p.repeated(), "nothing polled yet");
+        feed.set_snapshot(snapshot_with_seq(7), Instant::now());
+        p.poll().expect("poll");
+        assert!(!p.repeated(), "the first snapshot is new");
+        // The service sends every 1 s but the core polls faster: same seq.
+        p.poll().expect("poll");
+        assert!(p.repeated());
+        p.poll().expect("poll");
+        assert!(p.repeated());
+    }
+
+    #[test]
+    fn new_service_seq_is_fresh() {
+        let feed = SvcFeed::default();
+        feed.set_schema(wire_schema());
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        feed.set_snapshot(snapshot_with_seq(7), Instant::now());
+        p.poll().expect("poll");
+        p.poll().expect("poll");
+        assert!(p.repeated());
+        feed.set_snapshot(snapshot_with_seq(8), Instant::now());
+        p.poll().expect("poll");
+        assert!(!p.repeated());
+    }
+
+    #[test]
+    fn first_snapshot_after_reconnect_is_fresh_even_with_same_seq() {
+        let feed = SvcFeed::default();
+        feed.set_schema(wire_schema());
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        feed.set_snapshot(snapshot_with_seq(5), Instant::now());
+        p.poll().expect("poll");
+
+        // The link drops and a restarted service starts again from seq 5.
+        feed.clear();
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        p.discover().expect("discover after clear");
+        feed.set_schema(wire_schema());
+        p.discover().expect("discover with the new schema");
+        feed.set_snapshot(snapshot_with_seq(5), Instant::now());
+        p.poll().expect("poll");
+        assert!(!p.repeated());
+        p.poll().expect("poll");
+        assert!(p.repeated());
+    }
+
+    #[test]
+    fn missing_or_stale_snapshot_is_not_repeated() {
+        let feed = SvcFeed::default();
+        feed.set_schema(wire_schema());
+        feed.set_interval(Duration::from_millis(100));
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        p.poll().expect("no snapshot yet");
+        assert!(!p.repeated());
+        feed.set_snapshot(
+            snapshot_with_seq(1),
+            Instant::now() - Duration::from_millis(400),
+        );
+        p.poll().expect("stale");
+        assert!(!p.repeated());
     }
 
     #[test]

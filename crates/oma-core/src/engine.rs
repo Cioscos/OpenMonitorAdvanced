@@ -13,16 +13,33 @@ pub fn backoff_ms(failures: u32) -> u64 {
     (5_000u64 << failures.saturating_sub(1).min(4)).min(60_000)
 }
 
+/// Whether a value of a snapshot is a new measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// Measured by this tick, or declared valid by its source. An absent
+    /// value (`None`) is always `Fresh`: absence is not a held measurement.
+    Fresh,
+    /// The same measurement as before: the provider said so
+    /// (`Provider::repeated`) or missed the deadline and the engine
+    /// republished its last values.
+    Held,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickOutput {
     pub snapshot: Snapshot,
     pub schema: Option<Schema>,
+    /// One entry per `snapshot.values`, same order.
+    pub quality: Vec<Quality>,
 }
 
 struct Slot {
     worker: Worker,
     inventory: Inventory,
     last: Vec<Option<f64>>,
+    /// `last` is not a new measurement: the provider reported a repeat or the
+    /// slot just republished it after a missed deadline.
+    held: bool,
     /// Set once a pending request has already missed one deadline: the next
     /// miss in a row means the provider is still hung, so its values are
     /// cleared instead of being republished forever (spec §4.1/§8).
@@ -87,6 +104,7 @@ impl Engine {
                     worker: Worker::spawn(p),
                     inventory: Inventory::default(),
                     last: Vec::new(),
+                    held: false,
                     timed_out: false,
                     keep: Vec::new(),
                 })
@@ -139,6 +157,7 @@ impl Engine {
                     changed |= slot.inventory != sample.inventory;
                     slot.inventory = sample.inventory;
                     slot.last = sample.values;
+                    slot.held = sample.repeated;
                     slot.timed_out = false;
                 }
                 // A timeout retains the last values for one cycle only (§4.1); a
@@ -147,8 +166,12 @@ impl Engine {
                 // worker/request is spawned while busy.
                 None if slot.timed_out => {
                     slot.last = vec![None; slot.last.len()];
+                    slot.held = false;
                 }
-                None => slot.timed_out = true,
+                None => {
+                    slot.timed_out = true;
+                    slot.held = true;
+                }
             }
         }
         if changed {
@@ -199,32 +222,34 @@ impl Engine {
             self.discards.retain(&ids);
         }
         let discards = &mut self.discards;
-        let values: Vec<_> = self
-            .slots
-            .iter()
-            .flat_map(|slot| {
-                slot.keep
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &kept)| kept)
-                    .map(move |(i, _)| slot.last.get(i).copied().flatten())
-            })
-            .zip(&self.schema.sensors)
-            .map(|(value, sensor)| {
-                let clean = sanitize_sensor(sensor, value);
-                if let (Some(raw), None) = (value, clean) {
-                    if discards.should_log(&sensor.id, monotonic_ms) {
-                        tracing::debug!(
-                            sensor = %sensor.id,
-                            unit = ?sensor.unit,
-                            value = raw,
-                            "discarding implausible value"
-                        );
-                    }
+        let mut values = Vec::with_capacity(self.schema.sensors.len());
+        let mut quality = Vec::with_capacity(self.schema.sensors.len());
+        let kept_values = self.slots.iter().flat_map(|slot| {
+            slot.keep
+                .iter()
+                .enumerate()
+                .filter(|&(_, &kept)| kept)
+                .map(move |(i, _)| (slot.last.get(i).copied().flatten(), slot.held))
+        });
+        for ((value, held), sensor) in kept_values.zip(&self.schema.sensors) {
+            let clean = sanitize_sensor(sensor, value);
+            if let (Some(raw), None) = (value, clean) {
+                if discards.should_log(&sensor.id, monotonic_ms) {
+                    tracing::debug!(
+                        sensor = %sensor.id,
+                        unit = ?sensor.unit,
+                        value = raw,
+                        "discarding implausible value"
+                    );
                 }
-                clean
-            })
-            .collect();
+            }
+            values.push(clean);
+            quality.push(if clean.is_some() && held {
+                Quality::Held
+            } else {
+                Quality::Fresh
+            });
+        }
         self.history.push(timestamp_ms, &values);
         self.stats.push(&values);
         self.seq += 1;
@@ -236,6 +261,7 @@ impl Engine {
                 values,
             },
             schema: changed.then(|| self.schema.clone()),
+            quality,
         }
     }
 }
@@ -257,6 +283,8 @@ mod tests {
         polls: VecDeque<PollResult>,
         discover_calls: usize,
         poll_calls: usize,
+        /// What `Provider::repeated` answers after each poll.
+        repeated: bool,
     }
 
     struct Fake {
@@ -285,6 +313,10 @@ mod tests {
             s.polls
                 .pop_front()
                 .unwrap_or_else(|| Ok(vec![Some(1.0); n]))
+        }
+
+        fn repeated(&self) -> bool {
+            self.script.lock().unwrap().repeated
         }
     }
 
@@ -765,6 +797,122 @@ mod tests {
         assert_eq!(schema.sensors.len(), 2);
         assert_eq!(schema.sensors[0].source, Source::Mock);
         assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+    }
+
+    #[test]
+    fn fresh_poll_marks_values_fresh() {
+        let (p, _) = fake("a", inventory("dev/a", &["x", "y"]));
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
+        assert_eq!(out.quality.len(), out.snapshot.values.len());
+    }
+
+    #[test]
+    fn timed_out_slot_marks_republished_values_held() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow = SlowPoll {
+            wait,
+            calls: calls.clone(),
+        };
+        let (fast, _) = fake("fast", inventory("dev/fast", &["x"]));
+        let mut e = Engine::new(vec![Box::new(slow), fast], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
+        // First miss: the last value is republished and is no measurement.
+        let out = e.tick(1_000, 1_000);
+        assert_eq!(out.snapshot.values, vec![Some(42.0), Some(1.0)]);
+        assert_eq!(out.quality, vec![Quality::Held, Quality::Fresh]);
+        // Second miss: the value is gone, and an absent value is not "held".
+        let out = e.tick(2_000, 2_000);
+        assert_eq!(out.snapshot.values, vec![None, Some(1.0)]);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
+        drop(e);
+        drop(release);
+    }
+
+    #[test]
+    fn repeated_provider_marks_its_values_held() {
+        let (a, script_a) = fake("a", inventory("dev/a", &["x", "y"]));
+        let (b, _) = fake("b", inventory("dev/b", &["z"]));
+        script_a
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(3.0), None]));
+        script_a.lock().unwrap().repeated = true;
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.snapshot.values, vec![Some(3.0), None, Some(1.0)]);
+        assert_eq!(
+            out.quality,
+            vec![Quality::Held, Quality::Fresh, Quality::Fresh]
+        );
+        script_a.lock().unwrap().repeated = false;
+        let out = e.tick(1_000, 1_000);
+        assert_eq!(out.quality, vec![Quality::Fresh; 3]);
+    }
+
+    #[test]
+    fn implausible_value_is_fresh_even_from_a_repeated_provider() {
+        let (p, script) = fake("a", inventory("dev/a", &["x"]));
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Ok(vec![Some(150.0)]));
+            s.repeated = true;
+        }
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.snapshot.values, vec![None]);
+        assert_eq!(out.quality, vec![Quality::Fresh]);
+    }
+
+    #[test]
+    fn quality_is_aligned_after_a_schema_change() {
+        // "a" (repeated) and "b" both expose dev/a/load/x: "a" wins it, so
+        // "b" contributes only its second sensor, with its own quality.
+        let (a, script_a) = fake("a", inventory("dev/a", &["x"]));
+        let b_inv = Inventory {
+            devices: inventory("dev/a", &["x"]).devices,
+            sensors: ["x", "y"]
+                .iter()
+                .map(|n| {
+                    Sensor::new(
+                        "dev/a",
+                        SensorKind::Load,
+                        n,
+                        Unit::Percent,
+                        Label::new("test"),
+                        Source::Lhm,
+                    )
+                })
+                .collect(),
+        };
+        let (b, script_b) = fake("b", b_inv);
+        script_a.lock().unwrap().repeated = true;
+        script_b
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(Ok(vec![Some(9.0), Some(2.0)]));
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(1_000, 1_000);
+        assert!(out.schema.is_some());
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+        assert_eq!(out.quality, vec![Quality::Held, Quality::Fresh]);
+        // "a" disappears from the schema: "b" now owns both sensors and the
+        // quality vector follows the new layout.
+        {
+            let mut s = script_a.lock().unwrap();
+            s.inventory = Inventory::default();
+            s.polls.push_back(Err(ProviderError::Rediscover));
+        }
+        e.tick(2_000, 2_000);
+        let out = e.tick(3_000, 3_000);
+        assert!(out.schema.is_some());
+        assert_eq!(out.snapshot.values.len(), 2);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
     }
 
     #[test]

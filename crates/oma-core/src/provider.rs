@@ -28,4 +28,12 @@ pub trait Provider: Send {
 
     /// Reads current values, aligned with the sensors of the last `discover`.
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError>;
+
+    /// `true` when the last `poll` carried no new measurement: its values
+    /// repeat the ones before (e.g. the service has not sent a new snapshot
+    /// yet). The engine marks them `Quality::Held`. A cache the source
+    /// declares valid within its TTL is not a repeat.
+    fn repeated(&self) -> bool {
+        false
+    }
 }

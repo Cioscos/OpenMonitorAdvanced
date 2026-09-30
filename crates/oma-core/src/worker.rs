@@ -14,6 +14,8 @@ const FREE_REDISCOVERS: u32 = 3;
 pub(crate) struct Sample {
     pub inventory: Inventory,
     pub values: Vec<Option<f64>>,
+    /// The provider reported that this poll carried no new measurement.
+    pub repeated: bool,
 }
 
 pub(crate) struct Worker {
@@ -36,6 +38,7 @@ impl Worker {
                 let mut retry_at = 0u64;
                 while let Ok(now) = requests.recv() {
                     let mut values = vec![None; inventory.sensors.len()];
+                    let mut repeated = false;
                     if now >= retry_at {
                         // A Rust panic is isolated; native DLL access violations are not catchable.
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -47,12 +50,13 @@ impl Worker {
                             if polled.len() != inventory.sensors.len() {
                                 return Err(ProviderError::Failed("poll value count mismatch".into()));
                             }
-                            Ok(polled)
+                            Ok((polled, provider.repeated()))
                         }))
                         .unwrap_or_else(|_| Err(ProviderError::Failed("provider panicked".into())));
                         match result {
-                            Ok(polled) => {
+                            Ok((polled, was_repeated)) => {
                                 values = polled;
+                                repeated = was_repeated;
                                 // Only a successful poll ends a failure or rediscovery streak.
                                 failures = 0;
                                 rediscovers = 0;
@@ -84,6 +88,7 @@ impl Worker {
                         .send(Sample {
                             inventory: inventory.clone(),
                             values,
+                            repeated,
                         })
                         .is_err()
                     {

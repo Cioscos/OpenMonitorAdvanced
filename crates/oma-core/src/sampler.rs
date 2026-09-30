@@ -299,6 +299,7 @@ mod tests {
                 values: Vec::new(),
             },
             schema: None,
+            quality: Vec::new(),
         }
     }
 

@@ -16,13 +16,14 @@ use super::{SettingsFs, SettingsStore};
 #[derive(Default)]
 struct State {
     files: HashMap<PathBuf, Vec<u8>>,
-    /// Operation names in call order: `read`, `write`, `preserve`, `remove`.
+    /// Operation names in call order: `read`, `write`, `preserve`, `copy`, `remove`.
     ops: Vec<String>,
     /// Payloads of the successful writes, in order.
     writes: Vec<Vec<u8>>,
     write_attempts: usize,
     fail_writes: usize,
     fail_preserve: bool,
+    fail_copy: bool,
     preserve_collisions: usize,
     fail_read: bool,
     block_writes: bool,
@@ -88,6 +89,10 @@ impl FakeFs {
 
     pub(crate) fn set_fail_preserve(&self, fail: bool) {
         self.lock().fail_preserve = fail;
+    }
+
+    pub(crate) fn set_fail_copy(&self, fail: bool) {
+        self.lock().fail_copy = fail;
     }
 
     /// The next `n` calls of `preserve` report that the target name exists.
@@ -185,6 +190,27 @@ impl SettingsFs for FakeFs {
         Ok(())
     }
 
+    fn copy_exclusive(&self, path: &Path, to: &Path) -> io::Result<()> {
+        let mut state = self.lock();
+        state.ops.push("copy".into());
+        if state.fail_copy {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected copy",
+            ));
+        }
+        if state.files.contains_key(to) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let bytes = state
+            .files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        state.files.insert(to.to_path_buf(), bytes);
+        Ok(())
+    }
+
     fn remove(&self, path: &Path) -> io::Result<()> {
         let mut state = self.lock();
         state.ops.push("remove".into());
@@ -196,6 +222,11 @@ impl SettingsFs for FakeFs {
 /// The settings path used by the tests.
 pub(crate) fn test_path() -> PathBuf {
     PathBuf::from("C:/oma-test/settings.json")
+}
+
+/// The temporary file next to the test settings path.
+pub(crate) fn test_tmp_path() -> PathBuf {
+    super::tmp_path(&test_path())
 }
 
 /// Short timings for tests that do not depend on the coalescing window.

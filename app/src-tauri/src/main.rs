@@ -304,7 +304,7 @@ fn main() {
                     tray_schema = Some(schema.clone());
                 }
                 if let Some(schema) = &tray_schema {
-                    tray.update(schema, &out.snapshot, &store.settings());
+                    tray.update(schema, &out.snapshot, &store.snapshot());
                 }
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
@@ -340,7 +340,7 @@ fn main() {
         } => {
             let close_to_tray = app
                 .try_state::<Arc<SettingsStore>>()
-                .is_none_or(|store| store.settings().tray.close_to_tray);
+                .is_none_or(|store| store.snapshot().tray.close_to_tray);
             if keep_running_on_last_close(close_to_tray) {
                 api.prevent_exit();
             }

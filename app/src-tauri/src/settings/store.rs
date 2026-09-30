@@ -8,13 +8,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oma_core::settings::{
-    apply_patch, decode_lenient, encode, PatchError, Settings, VersionStatus,
+    apply_patch, decode_lenient, encode, Decoded, PatchError, Settings, VersionStatus,
 };
 use serde_json::Value;
 
 use super::{
-    bad_file_name, format_stamp, ApplyStatus, Effect, EffectStatus, Listener, Persistence,
-    SettingsFs, SettingsState,
+    bad_file_name, format_stamp, tmp_path, ApplyStatus, Effect, EffectStatus, Listener,
+    Persistence, SettingsFs, SettingsState,
 };
 
 /// Writer timings: the coalescing window and the delay before a retry.
@@ -35,7 +35,8 @@ impl Default for Timings {
 
 /// Everything protected by the store mutex.
 pub(super) struct Core {
-    pub settings: Settings,
+    /// Replaced (never mutated) on every change, so readers share it.
+    pub settings: Arc<Settings>,
     pub revision: u64,
     pub persisted_revision: u64,
     pub seq: u64,
@@ -105,7 +106,7 @@ impl Core {
 
 #[derive(Default)]
 struct Queue {
-    items: VecDeque<(Settings, SettingsState)>,
+    items: VecDeque<(Arc<Settings>, SettingsState)>,
     draining: bool,
 }
 
@@ -136,7 +137,7 @@ impl Inner {
         let state = core.state();
         lock(&self.queue)
             .items
-            .push_back((core.settings.clone(), state.clone()));
+            .push_back((Arc::clone(&core.settings), state.clone()));
         drop(core);
         self.cv.notify_all();
         self.drain();
@@ -164,7 +165,7 @@ impl Inner {
             };
             let listeners = lock(&self.listeners).clone();
             for listener in listeners {
-                if catch_unwind(AssertUnwindSafe(|| listener(&item.0, &item.1))).is_err() {
+                if catch_unwind(AssertUnwindSafe(|| listener(item.0.as_ref(), &item.1))).is_err() {
                     tracing::error!("a settings listener panicked");
                 }
             }
@@ -173,10 +174,10 @@ impl Inner {
 
     /// Applies `next` if it differs from the current settings.
     fn apply(&self, mut core: MutexGuard<'_, Core>, next: Settings) -> SettingsState {
-        if next == core.settings {
+        if next == *core.settings {
             return core.state();
         }
-        core.settings = next;
+        core.settings = Arc::new(next);
         core.revision += 1;
         if core.dirty_since.is_none() {
             core.dirty_since = Some(Instant::now());
@@ -193,14 +194,29 @@ struct Loaded {
     recovered: Option<String>,
 }
 
+impl Loaded {
+    fn defaults(blocked: Option<Persistence>, recovered: Option<String>, revision: u64) -> Self {
+        Self {
+            settings: Settings::default(),
+            revision,
+            blocked,
+            recovered,
+        }
+    }
+}
+
 fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
-/// Moves a corrupt file aside under a unique name; `Ok` carries the new path.
-fn preserve_corrupt(fs: &dyn SettingsFs, path: &Path) -> std::io::Result<PathBuf> {
+/// Runs `place` with unique `<name>.bad-<stamp>-<pid>[-n]` targets next to
+/// `path` until one is free; `Ok` carries the target that was used.
+fn place_aside(
+    path: &Path,
+    mut place: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
     let base = path.file_name().map_or_else(
         || "settings.json".into(),
         |n| n.to_string_lossy().into_owned(),
@@ -210,7 +226,7 @@ fn preserve_corrupt(fs: &dyn SettingsFs, path: &Path) -> std::io::Result<PathBuf
     let mut attempt = 1;
     loop {
         let target = path.with_file_name(bad_file_name(&base, &stamp, pid, attempt));
-        match fs.preserve(path, &target) {
+        match place(&target) {
             Ok(()) => return Ok(target),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt < 1_000 => {
                 attempt += 1;
@@ -220,16 +236,115 @@ fn preserve_corrupt(fs: &dyn SettingsFs, path: &Path) -> std::io::Result<PathBuf
     }
 }
 
-fn load(path: Option<&Path>, fs: &dyn SettingsFs) -> Loaded {
-    let defaults = |blocked, recovered, revision| Loaded {
-        settings: Settings::default(),
-        revision,
-        blocked,
-        recovered,
+/// The decoded document when `bytes` are a JSON object, `None` when corrupt.
+fn parse(bytes: &[u8]) -> Option<Decoded> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) if value.is_object() => {
+            let decoded = decode_lenient(&value);
+            for diagnostic in &decoded.diagnostics {
+                tracing::warn!(path = %diagnostic.path, kind = ?diagnostic.kind, "settings file deviation");
+            }
+            Some(decoded)
+        }
+        _ => None,
+    }
+}
+
+/// The blocking state a decoded document implies: `ReadOnly` for a newer version.
+fn version_block(decoded: &Decoded) -> Option<Persistence> {
+    match decoded.version {
+        VersionStatus::Current => None,
+        VersionStatus::Future(version) => {
+            tracing::warn!(version, "settings file is from a newer version: read-only");
+            Some(Persistence::ReadOnly {
+                reason: "futureVersion".into(),
+            })
+        }
+    }
+}
+
+/// The file cannot be used: move it aside and start from defaults, which the
+/// writer saves (revision 1 is unsaved). If it cannot be moved, writes stay
+/// blocked so the file is never overwritten.
+fn recover_corrupt(fs: &dyn SettingsFs, file: &Path) -> Loaded {
+    match place_aside(file, |target| fs.preserve(file, target)) {
+        Ok(kept) => {
+            tracing::warn!(kept = %kept.display(), "corrupt settings file kept; defaults will be saved");
+            Loaded::defaults(None, Some(kept.display().to_string()), 1)
+        }
+        Err(err) => {
+            tracing::error!(%err, "cannot preserve the corrupt settings file; changes will not be saved");
+            Loaded::defaults(
+                Some(Persistence::Error {
+                    reason: format!("preserve: {err}"),
+                }),
+                None,
+                0,
+            )
+        }
+    }
+}
+
+/// `settings.json` is missing: a failed save may have left the new content in
+/// `settings.json.tmp`. It is read with the same checks as the file itself.
+fn load_leftover(fs: &dyn SettingsFs, path: &Path) -> Loaded {
+    let tmp = tmp_path(path);
+    let bytes = match fs.read(&tmp) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Loaded::defaults(None, None, 0),
+        Err(err) => {
+            tracing::error!(%err, path = %tmp.display(), "cannot read the leftover settings file; changes will not be saved");
+            return Loaded::defaults(
+                Some(Persistence::Error {
+                    reason: format!("read: {err}"),
+                }),
+                None,
+                0,
+            );
+        }
     };
+    let Some(decoded) = parse(&bytes) else {
+        return recover_corrupt(fs, &tmp);
+    };
+    if let Some(blocked) = version_block(&decoded) {
+        // Read-only: no file is touched.
+        return Loaded {
+            settings: decoded.settings,
+            revision: 0,
+            blocked: Some(blocked),
+            recovered: None,
+        };
+    }
+    // `write_atomic` reuses the temporary file, so copy it aside first; the
+    // copy is the stable backup `Recovered` points to. Revision 1 is unsaved.
+    match place_aside(&tmp, |target| fs.copy_exclusive(&tmp, target)) {
+        Ok(kept) => {
+            tracing::warn!(kept = %kept.display(), "adopted a leftover settings.json.tmp; it will be saved as settings.json");
+            Loaded {
+                settings: decoded.settings,
+                revision: 1,
+                blocked: None,
+                recovered: Some(kept.display().to_string()),
+            }
+        }
+        Err(err) => {
+            tracing::error!(%err, "cannot back up the leftover settings file; changes will not be saved");
+            Loaded {
+                settings: decoded.settings,
+                revision: 0,
+                blocked: Some(Persistence::Error {
+                    reason: format!("preserve: {err}"),
+                }),
+                recovered: None,
+            }
+        }
+    }
+}
+
+fn load(path: Option<&Path>, fs: &dyn SettingsFs) -> Loaded {
     let Some(path) = path else {
         tracing::warn!("no settings path: settings stay in memory");
-        return defaults(
+        return Loaded::defaults(
             Some(Persistence::Error {
                 reason: "noSettingsPath".into(),
             }),
@@ -239,10 +354,10 @@ fn load(path: Option<&Path>, fs: &dyn SettingsFs) -> Loaded {
     };
     let bytes = match fs.read(path) {
         Ok(Some(bytes)) => bytes,
-        Ok(None) => return defaults(None, None, 0),
+        Ok(None) => return load_leftover(fs, path),
         Err(err) => {
             tracing::error!(%err, path = %path.display(), "cannot read the settings file; changes will not be saved");
-            return defaults(
+            return Loaded::defaults(
                 Some(Persistence::Error {
                     reason: format!("read: {err}"),
                 }),
@@ -251,45 +366,24 @@ fn load(path: Option<&Path>, fs: &dyn SettingsFs) -> Loaded {
             );
         }
     };
-    match serde_json::from_slice::<Value>(&bytes) {
-        Ok(value) if value.is_object() => {
-            let decoded = decode_lenient(&value);
-            for diagnostic in &decoded.diagnostics {
-                tracing::warn!(path = %diagnostic.path, kind = ?diagnostic.kind, "settings file deviation");
-            }
-            let blocked = match decoded.version {
-                VersionStatus::Current => None,
-                VersionStatus::Future(version) => {
-                    tracing::warn!(version, "settings file is from a newer version: read-only");
-                    Some(Persistence::ReadOnly {
-                        reason: "futureVersion".into(),
-                    })
-                }
-            };
-            Loaded {
-                settings: decoded.settings,
-                revision: 0,
-                blocked,
-                recovered: None,
-            }
+    let Some(decoded) = parse(&bytes) else {
+        return recover_corrupt(fs, path);
+    };
+    let blocked = version_block(&decoded);
+    if blocked.is_none() {
+        // A readable, valid file prevails over a leftover from an earlier save.
+        // With any other outcome the leftover stays: it may hold the only good copy.
+        match fs.remove(&tmp_path(path)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(%err, "cannot remove the leftover settings.json.tmp"),
         }
-        _ => match preserve_corrupt(fs, path) {
-            Ok(kept) => {
-                tracing::warn!(kept = %kept.display(), "corrupt settings file kept; defaults will be saved");
-                // Revision 1 is unsaved: the writer saves the defaults.
-                defaults(None, Some(kept.display().to_string()), 1)
-            }
-            Err(err) => {
-                tracing::error!(%err, "cannot preserve the corrupt settings file; changes will not be saved");
-                defaults(
-                    Some(Persistence::Error {
-                        reason: format!("preserve: {err}"),
-                    }),
-                    None,
-                    0,
-                )
-            }
-        },
+    }
+    Loaded {
+        settings: decoded.settings,
+        revision: 0,
+        blocked,
+        recovered: None,
     }
 }
 
@@ -310,7 +404,7 @@ impl SettingsStore {
     ) -> Self {
         let loaded = load(path.as_deref(), fs.as_ref());
         let core = Core {
-            settings: loaded.settings,
+            settings: Arc::new(loaded.settings),
             revision: loaded.revision,
             persisted_revision: 0,
             seq: 0,
@@ -339,8 +433,16 @@ impl SettingsStore {
         Self { inner }
     }
 
+    /// An owned copy, for callers that change it. Readers that only look
+    /// (the tick) use [`Self::snapshot`].
     pub fn settings(&self) -> Settings {
-        lock(&self.inner.core).settings.clone()
+        Settings::clone(&lock(&self.inner.core).settings)
+    }
+
+    /// The current settings, shared: the value is replaced on every change, so
+    /// this is a reference-count bump and never a deep clone.
+    pub fn snapshot(&self) -> Arc<Settings> {
+        Arc::clone(&lock(&self.inner.core).settings)
     }
 
     pub fn state(&self) -> SettingsState {
@@ -360,7 +462,7 @@ impl SettingsStore {
     /// under the store lock and must not call back into the store.
     pub fn update_with(&self, change: impl FnOnce(&mut Settings)) -> SettingsState {
         let core = lock(&self.inner.core);
-        let mut next = core.settings.clone();
+        let mut next = Settings::clone(&core.settings);
         change(&mut next);
         self.inner.apply(core, next)
     }
@@ -412,7 +514,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::settings::fake_fs::{open_fast, stored_json, test_path, wait_until, FakeFs};
+    use crate::settings::fake_fs::{
+        open_fast, stored_json, test_path, test_tmp_path, wait_until, FakeFs,
+    };
     use crate::settings::Persistence;
 
     const LONG: Duration = Duration::from_secs(5);
@@ -677,6 +781,202 @@ mod tests {
             .unwrap();
         assert_eq!(store.settings().general.interval_ms, 2500);
         assert_eq!(store.state().revision, 2);
+        store.shutdown(LONG).unwrap();
+    }
+
+    const MAIN_2000: &[u8] = br#"{"version":1,"general":{"intervalMs":2000}}"#;
+    const TMP_3000: &[u8] = br#"{"version":1,"general":{"intervalMs":3000}}"#;
+
+    #[test]
+    fn leftover_tmp_is_removed_when_the_file_exists() {
+        let fs = FakeFs::new()
+            .with_file(&test_path(), MAIN_2000)
+            .with_file(&test_tmp_path(), TMP_3000);
+        let store = open_fast(&fs);
+        let state = store.state();
+        assert_eq!(state.persistence, Persistence::Ok);
+        assert_eq!(interval(&state), 2000);
+        assert_eq!(fs.file(&test_tmp_path()), None);
+        assert_eq!(fs.file(&test_path()).unwrap(), MAIN_2000);
+        store.shutdown(LONG).unwrap();
+        assert_eq!(fs.write_attempts(), 0);
+    }
+
+    #[test]
+    fn leftover_tmp_is_adopted_when_the_file_is_missing() {
+        let fs = FakeFs::new().with_file(&test_tmp_path(), TMP_3000);
+        let store = open_fast(&fs);
+        let Persistence::Recovered { path } = store.state().persistence else {
+            panic!("expected Recovered, got {:?}", store.state().persistence);
+        };
+        assert!(path.contains("settings.json.tmp.bad-"), "{path}");
+        assert_eq!(store.settings().general.interval_ms, 3000);
+        store.flush_now(LONG).unwrap();
+        // The next save goes to settings.json with the adopted values.
+        assert_eq!(stored_json(&fs)["general"]["intervalMs"], 3000);
+        let state = store.state();
+        assert!(matches!(state.persistence, Persistence::Recovered { .. }));
+        assert_eq!(state.persisted_revision, state.revision);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn corrupt_leftover_tmp_is_preserved_and_defaults_are_used() {
+        let fs = FakeFs::new().with_file(&test_tmp_path(), b"{ not json");
+        let store = open_fast(&fs);
+        let Persistence::Recovered { path } = store.state().persistence else {
+            panic!("expected Recovered, got {:?}", store.state().persistence);
+        };
+        assert!(path.contains("settings.json.tmp.bad-"), "{path}");
+        assert_eq!(store.settings(), Settings::default());
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "read", "preserve", "write"]);
+        let kept = fs.files_with_prefix("settings.json.tmp.bad-");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs.file(&kept[0]).unwrap(), b"{ not json");
+        assert_eq!(fs.file(&test_tmp_path()), None);
+        assert_eq!(stored_json(&fs)["general"]["intervalMs"], 1000);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn future_version_tmp_is_read_only() {
+        let tmp = br#"{"version":99,"general":{"intervalMs":3000}}"#;
+        let fs = FakeFs::new().with_file(&test_tmp_path(), tmp);
+        let store = open_fast(&fs);
+        assert_eq!(
+            store.state().persistence,
+            Persistence::ReadOnly {
+                reason: "futureVersion".into()
+            }
+        );
+        assert_eq!(store.settings().general.interval_ms, 3000);
+        store
+            .update(&json!({"general": {"intervalMs": 4000}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fs.write_attempts(), 0);
+        // No file was touched: no backup, no move, no removal.
+        assert_eq!(fs.ops(), ["read", "read"]);
+        assert_eq!(fs.file(&test_tmp_path()).unwrap(), tmp);
+        assert_eq!(fs.file(&test_path()), None);
+    }
+
+    #[test]
+    fn invalid_primary_does_not_delete_tmp() {
+        // A corrupt file, a file from a newer version and an unreadable file:
+        // the leftover may hold the only good copy, so it is never removed.
+        enum Primary {
+            Corrupt,
+            Future,
+            Unreadable,
+        }
+        for kind in [Primary::Corrupt, Primary::Future, Primary::Unreadable] {
+            let main: &[u8] = match kind {
+                Primary::Corrupt => b"{ not json",
+                Primary::Future => br#"{"version":99}"#,
+                Primary::Unreadable => b"{}",
+            };
+            let fs = FakeFs::new()
+                .with_file(&test_path(), main)
+                .with_file(&test_tmp_path(), TMP_3000);
+            fs.set_fail_read(matches!(kind, Primary::Unreadable));
+            let store = open_fast(&fs);
+            // The existing recovery or blocking path ran; the leftover is
+            // neither read, adopted nor removed.
+            assert_eq!(store.settings().general.interval_ms, 1000);
+            assert_eq!(fs.ops().first().map(String::as_str), Some("read"));
+            assert!(!fs.ops().contains(&"remove".to_string()), "{:?}", fs.ops());
+            let persistence = store.state().persistence;
+            match kind {
+                Primary::Corrupt => assert!(
+                    matches!(&persistence, Persistence::Recovered { path } if path.contains("settings.json.bad-")),
+                    "{persistence:?}"
+                ),
+                Primary::Future => {
+                    assert!(matches!(persistence, Persistence::ReadOnly { .. }));
+                }
+                Primary::Unreadable => {
+                    assert!(matches!(persistence, Persistence::Error { .. }));
+                }
+            }
+            let _ = store.shutdown(Duration::from_millis(500));
+            assert_eq!(fs.file(&test_tmp_path()).unwrap(), TMP_3000);
+        }
+    }
+
+    #[test]
+    fn adopted_tmp_is_backed_up_before_atomic_write() {
+        let fs = FakeFs::new().with_file(&test_tmp_path(), TMP_3000);
+        let store = open_fast(&fs);
+        store.flush_now(LONG).unwrap();
+        // Read the file, read the leftover, copy it aside, only then save.
+        assert_eq!(fs.ops(), ["read", "read", "copy", "write"]);
+        let Persistence::Recovered { path } = store.state().persistence else {
+            panic!("expected Recovered");
+        };
+        assert_eq!(fs.file(std::path::Path::new(&path)).unwrap(), TMP_3000);
+        store.shutdown(LONG).unwrap();
+    }
+
+    #[test]
+    fn adopted_tmp_backup_survives_a_failed_write() {
+        let fs = FakeFs::new().with_file(&test_tmp_path(), TMP_3000);
+        fs.fail_next_writes(1_000);
+        let store = open_fast(&fs);
+        assert!(store.flush_now(Duration::from_millis(300)).is_err());
+        assert!(matches!(
+            store.state().persistence,
+            Persistence::Error { .. }
+        ));
+        let kept = fs.files_with_prefix("settings.json.tmp.bad-");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs.file(&kept[0]).unwrap(), TMP_3000);
+        // The leftover stays until a save succeeds, so a restart adopts it again.
+        assert_eq!(fs.file(&test_tmp_path()).unwrap(), TMP_3000);
+        assert_eq!(fs.file(&test_path()), None);
+    }
+
+    #[test]
+    fn adopted_tmp_backup_failure_blocks_writes() {
+        let fs = FakeFs::new().with_file(&test_tmp_path(), TMP_3000);
+        fs.set_fail_copy(true);
+        let store = open_fast(&fs);
+        assert!(matches!(
+            store.state().persistence,
+            Persistence::Error { .. }
+        ));
+        store
+            .update(&json!({"general": {"intervalMs": 4000}}))
+            .unwrap();
+        assert!(store.flush_now(Duration::from_millis(200)).is_err());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fs.write_attempts(), 0);
+        assert_eq!(fs.file(&test_tmp_path()).unwrap(), TMP_3000);
+        assert!(fs.files_with_prefix("settings.json.tmp.bad-").is_empty());
+    }
+
+    #[test]
+    fn snapshot_shares_the_current_value() {
+        let fs = FakeFs::new();
+        let store = open_fast(&fs);
+        let (first, second) = (store.snapshot(), store.snapshot());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(*first, store.settings());
+        // An update that changes nothing keeps the same allocation.
+        store
+            .update(&json!({"general": {"intervalMs": 1000}}))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &store.snapshot()));
+        store
+            .update(&json!({"general": {"intervalMs": 2000}}))
+            .unwrap();
+        let third = store.snapshot();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(third.general.interval_ms, 2000);
+        // The old snapshot is unchanged.
+        assert_eq!(first.general.interval_ms, 1000);
         store.shutdown(LONG).unwrap();
     }
 }

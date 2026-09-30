@@ -193,6 +193,7 @@ mod tests {
 
     use super::super::test_support::everything_changed;
     use super::super::*;
+    use super::READ_ONLY;
 
     fn err(field: &str, key: &'static str) -> PatchError {
         PatchError {
@@ -339,5 +340,22 @@ mod tests {
             Err(err("general.intervalMs", "settings.error.range"))
         );
         assert_eq!(current, snapshot);
+    }
+
+    #[test]
+    fn patch_schema_covers_every_encoded_field() {
+        // Ties the field names of `encode`, `decode_lenient` and the patch
+        // schema together: a field added to one and not the others fails here.
+        let mut patch = encode(&everything_changed());
+        for key in READ_ONLY {
+            patch.as_object_mut().unwrap().remove(key);
+        }
+        let applied = apply_patch(&Settings::default(), &patch)
+            .unwrap_or_else(|e| panic!("the schema rejects an encoded field: {e:?}"));
+        let mut round = encode(&applied);
+        for key in READ_ONLY {
+            round.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(round, patch);
     }
 }

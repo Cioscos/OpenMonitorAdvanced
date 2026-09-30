@@ -38,7 +38,17 @@ pub trait SettingsFs: Send + Sync {
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Renames `path` to `to`; fails with `AlreadyExists` instead of overwriting `to`.
     fn preserve(&self, path: &Path, to: &Path) -> io::Result<()>;
+    /// Copies `path` to `to`, leaving `path` in place; fails with `AlreadyExists`
+    /// instead of overwriting `to`.
+    fn copy_exclusive(&self, path: &Path, to: &Path) -> io::Result<()>;
     fn remove(&self, path: &Path) -> io::Result<()>;
+}
+
+/// The temporary file `write_atomic` uses next to `path`.
+pub(crate) fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+    PathBuf::from(name)
 }
 
 /// The real file system.
@@ -59,9 +69,7 @@ impl SettingsFs for RealFs {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        let mut tmp_name = path.as_os_str().to_owned();
-        tmp_name.push(".tmp");
-        let tmp = PathBuf::from(tmp_name);
+        let tmp = tmp_path(path);
         {
             let mut file = std::fs::File::create(&tmp)?;
             file.write_all(bytes)?;
@@ -84,6 +92,23 @@ impl SettingsFs for RealFs {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         std::fs::rename(path, to)
+    }
+
+    fn copy_exclusive(&self, path: &Path, to: &Path) -> io::Result<()> {
+        use std::io::Write as _;
+
+        let bytes = std::fs::read(path)?;
+        // `create_new` fails with `AlreadyExists` atomically.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+        if written.is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(to);
+        }
+        written
     }
 
     fn remove(&self, path: &Path) -> io::Result<()> {
@@ -280,6 +305,15 @@ mod tests {
         let err = fs.preserve(&path, &kept).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs.read(&kept).unwrap().as_deref(), Some(&b"two"[..]));
+
+        // Copy keeps the source and refuses to overwrite an existing target.
+        let copy = dir.join("sub").join("settings.json.tmp.bad-y");
+        fs.copy_exclusive(&path, &copy).unwrap();
+        assert_eq!(fs.read(&copy).unwrap().as_deref(), Some(&b"three"[..]));
+        assert_eq!(fs.read(&path).unwrap().as_deref(), Some(&b"three"[..]));
+        let err = fs.copy_exclusive(&path, &copy).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        fs.remove(&copy).unwrap();
 
         fs.remove(&kept).unwrap();
         assert_eq!(fs.read(&kept).unwrap(), None);

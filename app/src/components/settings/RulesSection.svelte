@@ -169,13 +169,6 @@
     draft = null;
   }
 
-  /** A rule on `sensor` whose thresholds are still to be typed (NaN reads as an empty field). */
-  function blankRule(sensor: Sensor): Rule {
-    const rule = newCustomRule(sensor);
-    const blank = (level: Rule['warn']) => (level?.threshold ? { ...level, threshold: { fixed: Number.NaN } } : level);
-    return { ...rule, warn: blank(rule.warn), crit: blank(rule.crit) };
-  }
-
   function pickSensor(id: string) {
     if (draft === null) return;
     const sensor = schema?.sensors.find((s) => s.id === id) ?? null;
@@ -186,7 +179,7 @@
       draft = { ...draft, sensor, rule: { ...draft.rule, target: { sensor: sensor.id } } };
     } else {
       const scales = scalesFor(sensor.unit, prefs);
-      draft = { ...draft, sensor, rule: blankRule(sensor), scales, scale: defaultScale(scales, []) };
+      draft = { ...draft, sensor, rule: newCustomRule(sensor), scales, scale: defaultScale(scales, []) };
     }
   }
 

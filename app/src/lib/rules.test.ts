@@ -83,7 +83,9 @@ test('new_rule_picks_the_condition_from_the_unit', () => {
   const temp = newCustomRule(sensorOf('gpu/pci-0000:01:00.0/temperature/core'));
   expect(temp.condition).toBe('above');
   expect(temp.unit).toBe('celsius');
-  expect(temp.warn?.threshold).toEqual({ fixed: expect.any(Number) });
+  // Only the critical level, with its threshold still to be typed (NaN reads as an empty field).
+  expect(temp.warn).toBeNull();
+  expect(temp.crit).toEqual({ threshold: { fixed: Number.NaN }, durationS: 10 });
   expect(temp.hysteresis).toEqual({ amount: 3, durationS: 10 });
   expect(temp.notify).toEqual({ warn: false, crit: true });
   expect(temp.enabled).toBe(true);

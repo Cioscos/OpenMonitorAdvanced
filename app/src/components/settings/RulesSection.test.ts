@@ -268,16 +268,30 @@ test('create_rule_for_a_flag_offers_only_flag_active', async () => {
 test('creating a rule adds it once it is complete', async () => {
   const { patches } = await setup();
   await openNewRule('rtx', `${GPU}/temperature/core`);
+  // Only the critical level is on, with an empty threshold; each switch says which level it uses.
+  const warnLevel = screen.getByRole('switch', { name: 'Use the Warning level' });
+  const critLevel = screen.getByRole('switch', { name: 'Use the Critical level' });
+  expect(warnLevel.getAttribute('aria-checked')).toBe('false');
+  expect(critLevel.getAttribute('aria-checked')).toBe('true');
+  expect(screen.queryByLabelText(t('rules.editor.warnThreshold'))).toBeNull();
+  expect(input(t('rules.editor.critThreshold')).value).toBe('');
+  expect(input(t('rules.editor.critDuration')).value).toBe('10');
   const create = screen.getByRole('button', { name: t('rules.create') }) as HTMLButtonElement;
   expect(create.disabled).toBe(true);
-  await typeAndEnter(t('rules.editor.warnThreshold'), '80');
+  await typeAndEnter(t('rules.editor.critThreshold'), '80');
   expect(patches).toEqual([]);
   expect(create.disabled).toBe(false);
   await fireEvent.click(create);
   await vi.waitFor(() => expect(custom()).toHaveLength(1));
   expect(patches).toHaveLength(1);
-  expect(custom()[0]).toMatchObject({ target: { sensor: `${GPU}/temperature/core` }, condition: 'above', warn: { threshold: { fixed: 80 } } });
+  expect(custom()[0]).toMatchObject({ target: { sensor: `${GPU}/temperature/core` }, condition: 'above', warn: null, crit: { threshold: { fixed: 80 }, durationS: 10 } });
   expect(screen.getByRole('row', { name: t('sensor.gpu.temperature.core') })).toBeTruthy();
+});
+
+test('the level switches name their level in Italian too', () => {
+  i18n.locale = 'it';
+  expect(t('rules.editor.warnLevel')).toBe('Usa il livello Attenzione');
+  expect(t('rules.editor.critLevel')).toBe('Usa il livello Critico');
 });
 
 test('incomplete_numeric_input_is_not_saved', async () => {
@@ -301,9 +315,9 @@ test('incomplete_numeric_input_is_not_saved', async () => {
 test('cancel_new_rule_does_not_persist', async () => {
   const { patches } = await setup();
   await openNewRule('rtx', `${GPU}/temperature/core`);
-  await typeAndEnter(t('rules.editor.warnThreshold'), '80');
+  await typeAndEnter(t('rules.editor.critThreshold'), '80');
   await fireEvent.click(screen.getByRole('button', { name: t('rules.cancel') }));
-  expect(screen.queryByLabelText(t('rules.editor.warnThreshold'))).toBeNull();
+  expect(screen.queryByLabelText(t('rules.editor.critThreshold'))).toBeNull();
   expect(patches).toEqual([]);
   expect(custom()).toEqual([]);
 });
@@ -327,21 +341,21 @@ test('throughput_threshold_and_hysteresis_round_trip', async () => {
   await setup();
   await openNewRule('ethernet', 'network/mock-eth/throughput/down');
   expect((screen.getByLabelText(t('rules.editor.scale')) as HTMLSelectElement).value).toBe('Mbit/s');
-  await typeAndEnter(t('rules.editor.warnThreshold'), '100');
+  await typeAndEnter(t('rules.editor.critThreshold'), '100');
   // A change of preference while the draft is open keeps the draft's unit.
   await settings.update({ general: { throughputUnit: 'bytes' } });
   expect((screen.getByLabelText(t('rules.editor.scale')) as HTMLSelectElement).value).toBe('Mbit/s');
-  expect(input(t('rules.editor.warnThreshold')).value).toBe('100');
+  expect(input(t('rules.editor.critThreshold')).value).toBe('100');
   await typeAndEnter(t('rules.editor.hysteresisAmount'), '8');
   await fireEvent.click(screen.getByRole('button', { name: t('rules.create') }));
   await vi.waitFor(() => expect(custom()).toHaveLength(1));
-  expect(custom()[0].warn?.threshold).toEqual({ fixed: 12_500_000 });
+  expect(custom()[0].crit?.threshold).toEqual({ fixed: 12_500_000 });
   expect(custom()[0].hysteresis.amount).toBe(1_000_000);
 
   await settings.update({ general: { throughputUnit: 'bits' } });
   await open(t('sensor.network.down'));
   expect((screen.getByLabelText(t('rules.editor.scale')) as HTMLSelectElement).value).toBe('Mbit/s');
-  expect(input(t('rules.editor.warnThreshold')).value).toBe('100');
+  expect(input(t('rules.editor.critThreshold')).value).toBe('100');
   expect(input(t('rules.editor.hysteresisAmount')).value).toBe('8');
 });
 

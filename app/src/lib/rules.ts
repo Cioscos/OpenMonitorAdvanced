@@ -120,8 +120,9 @@ export function newCustomRule(sensor: Sensor): Rule {
     target: { sensor: sensor.id },
     unit: sensor.unit,
     condition: conditionsFor(sensor.unit)[0],
-    warn: flag ? null : { threshold: { fixed: 0 }, durationS: 30 },
-    crit: flag ? { threshold: null, durationS: 10 } : null,
+    // Only the critical level; a number is still to be typed (NaN reads as an empty field).
+    warn: null,
+    crit: { threshold: flag ? null : { fixed: Number.NaN }, durationS: 10 },
     hysteresis: { amount: 3, durationS: 10 },
     enabled: true,
     notify: { warn: false, crit: true },

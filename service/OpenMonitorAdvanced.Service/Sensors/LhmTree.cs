@@ -1,7 +1,9 @@
+using DiskInfoToolkit.Interop.Enums;
 using LibreHardwareMonitor.Hardware;
 using LibreHardwareMonitor.Hardware.Cpu;
 using LibreHardwareMonitor.Hardware.Storage;
 using Microsoft.Extensions.Logging;
+using SmartAttribute = DiskInfoToolkit.SmartAttribute;
 
 namespace OpenMonitorAdvanced.Service.Sensors;
 
@@ -170,6 +172,34 @@ public sealed class LhmTree : IHardwareTree
     /// <inheritdoc />
     public double? Read(string sensorIdentifier) =>
         _composition.Sensors.TryGetValue(sensorIdentifier, out ISensor? sensor) && sensor.Value is float value ? value : null;
+
+    /// <inheritdoc />
+    public byte? ReadNvmeCriticalWarning(string storageIdentifier) =>
+        _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? CriticalWarningOf(entry.Hardware) : null;
+
+    /// <summary>
+    /// The Critical Warning attribute of an NVMe disk (<c>SmartAttributeType.CriticalWarning</c>,
+    /// byte 0 of the SMART/Health log), as the last <c>Update()</c> left it. Never the raw id
+    /// <c>0x01</c>, which is "Read Error Rate" on ATA. Members are read directly (no reflection).
+    /// </summary>
+    private static byte? CriticalWarningOf(IHardware hardware)
+    {
+        if (hardware is not StorageDevice { Storage: { IsNVMe: true, Smart: { } smart } })
+        {
+            return null;
+        }
+
+        foreach (SmartAttribute attribute in smart.SmartAttributes)
+        {
+            if (attribute.Info.Type == SmartAttributeType.CriticalWarning)
+            {
+                byte[]? raw = attribute.Attribute.RawValue;
+                return raw is { Length: > 0 } ? raw[0] : null;
+            }
+        }
+
+        return null;
+    }
 
     /// <inheritdoc />
     /// <remarks>
@@ -393,7 +423,7 @@ public sealed class LhmTree : IHardwareTree
             _log.LogWarning("{Identifier} has no PhysicalDrive number: it cannot be described or power-checked, so it stays out of the schema", hardware.Identifier.ToString());
         }
 
-        return new StorageInfo(storage.DriveNumber, null, null, storage.SerialNumber, Rotational: true);
+        return new StorageInfo(storage.DriveNumber, null, null, storage.SerialNumber, Rotational: true, IsNvme: storage.IsNVMe);
     }
 
     /// <summary>Must hold <c>_structureLock</c>.</summary>
@@ -440,7 +470,9 @@ public sealed class LhmTree : IHardwareTree
         }
 
         HardwareNode[] children = [.. hardware.SubHardware.Select(sub => BuildNode(sub, null, sensors))];
-        return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, storage, ReadCpuInfo(hardware, active));
+        // The attribute list is filled by an Update(): a node rebuilt after one reports it.
+        StorageInfo? withHealth = storage is null ? null : storage with { HasCriticalWarning = storage.IsNvme && CriticalWarningOf(hardware) is not null };
+        return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, withHealth, ReadCpuInfo(hardware, active));
     }
 
     /// <summary>

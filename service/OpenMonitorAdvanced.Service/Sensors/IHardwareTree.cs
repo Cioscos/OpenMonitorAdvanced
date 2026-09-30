@@ -42,6 +42,14 @@ public interface IHardwareTree : IDisposable
     double? Read(string sensorIdentifier);
 
     /// <summary>
+    /// The NVMe Critical Warning byte (log page 02h, byte 0) of that storage hardware, from
+    /// DiskInfoToolkit's SMART attributes as the last <see cref="Update"/> left them: no command
+    /// is sent. <see langword="null"/> when the hardware is unknown or has no such attribute.
+    /// Called from the storage worker only, right after the storage root's update.
+    /// </summary>
+    byte? ReadNvmeCriticalWarning(string storageIdentifier);
+
+    /// <summary>
     /// Raised when hardware is added or removed, or when a sensor is activated or deactivated.
     /// Handlers must only record the change (they may run inside an LHM callback or an update).
     /// </summary>

@@ -220,7 +220,7 @@ public sealed class SchemaBuilderTests
                 Sensor("/nvme/2/factor/24", SensorType.Factor, "Power On Count", 24),
             ],
             [],
-            new StorageInfo(2, "Drive", null, "S1", Rotational: false));
+            new StorageInfo(2, "Drive", null, "S1", Rotational: false, IsNvme: true, HasCriticalWarning: true));
 
         BuiltSchema schema = Build([cpu, ram, dimm, disk], pawnIoAvailable: true);
 
@@ -633,6 +633,74 @@ public sealed class SchemaBuilderTests
         Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "load" && s.Name.Contains("used", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(schema.Schema.Sensors, s => s.LabelKey == "lhm.raw");
         Assert.Equal(12, schema.Schema.Sensors.Count);
+    }
+
+    private static HardwareNode NvmeDisk(bool isNvme, bool hasCriticalWarning) => new(
+        "/nvme/2",
+        HardwareType.Storage,
+        "Fanxiang S880 2TB",
+        [
+            Sensor("/nvme/2/temperature/0", SensorType.Temperature, "Composite Temperature", 0),
+            Sensor("/nvme/2/temperature/10", SensorType.Temperature, "Warning Temperature", 10),
+            Sensor("/nvme/2/temperature/11", SensorType.Temperature, "Critical Temperature", 11),
+            Sensor("/nvme/2/level/102", SensorType.Level, "Percentage Used", 102),
+        ],
+        [],
+        new StorageInfo(2, "Fanxiang S880 2TB", "eui.abc.", "IDENTIFY-1", Rotational: false, IsNvme: isNvme, HasCriticalWarning: hasCriticalWarning));
+
+    [Fact]
+    public void NvmePublishesTheCriticalWarningFlag()
+    {
+        BuiltSchema schema = Build([NvmeDisk(isNvme: true, hasCriticalWarning: true)], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        WireSensor flag = Find(schema, device.Id, "flag", "critical-warning");
+        Assert.Equal("boolean", flag.Unit);
+        Assert.Equal("storage.criticalWarning", flag.LabelKey);
+        Assert.Null(flag.LabelArg);
+        Assert.Equal("flag", flag.Category);
+        Find(schema, device.Id, "percent", "wear");
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Name is "sensor-10" or "sensor-11");
+        Assert.Single(schema.Schema.Sensors, s => s.Kind == "temperature");
+
+        int at = schema.Schema.Sensors.ToList().IndexOf(flag);
+        Assert.Equal(new SensorBinding("/nvme/2", 1.0, BindingSource.NvmeCriticalWarning), schema.Bindings[at]);
+        Assert.All(schema.Bindings.Where((_, i) => i != at), b => Assert.Equal(BindingSource.Sensor, b.Source));
+    }
+
+    [Fact]
+    public void ANvmeWithoutTheAttributeHasNoCriticalWarning()
+    {
+        foreach (bool nvme in new[] { true, false })
+        {
+            BuiltSchema schema = Build([NvmeDisk(isNvme: nvme, hasCriticalWarning: !nvme)], pawnIoAvailable: true);
+            Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "flag");
+        }
+    }
+
+    [Fact]
+    public void SataDisksHaveNoCriticalWarning()
+    {
+        var ssd = new HardwareNode(
+            "/ssd/1",
+            HardwareType.Storage,
+            "Corsair Force LS SSD",
+            [Sensor("/ssd/1/temperature/0", SensorType.Temperature, "Temperature", 0), Sensor("/ssd/1/level/0", SensorType.Level, "Life", 0)],
+            [],
+            new StorageInfo(1, "Corsair Force LS SSD", null, "SSD-SERIAL", Rotational: false));
+        var hdd = new HardwareNode(
+            "/hdd/0",
+            HardwareType.Storage,
+            "ST2000DM008-2FR102",
+            [Sensor("/hdd/0/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(0, "ST2000DM008-2FR102", null, "HDD-SERIAL", Rotational: true));
+
+        BuiltSchema schema = Build([ssd, hdd], pawnIoAvailable: true);
+
+        Assert.Equal(2, schema.Schema.Devices.Count);
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "flag");
+        Assert.All(schema.Bindings, b => Assert.Equal(BindingSource.Sensor, b.Source));
     }
 
     [Fact]

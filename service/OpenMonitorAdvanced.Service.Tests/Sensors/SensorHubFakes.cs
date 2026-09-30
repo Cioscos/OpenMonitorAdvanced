@@ -17,6 +17,7 @@ internal sealed class FakeTree : IHardwareTree
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, int> _updates = new();
     private readonly ConcurrentDictionary<string, int> _reads = new();
+    private readonly ConcurrentDictionary<string, int> _criticalWarningReads = new();
     private List<HardwareNode> _roots = [];
     private int _openCount;
     private int _closeCount;
@@ -36,6 +37,9 @@ internal sealed class FakeTree : IHardwareTree
     public ConcurrentDictionary<string, double?> Values { get; } = new();
 
     public ConcurrentDictionary<string, bool> Failing { get; } = new();
+
+    /// <summary>The critical warning byte <see cref="ReadNvmeCriticalWarning"/> answers per storage identifier; absent = the attribute is not there.</summary>
+    public ConcurrentDictionary<string, byte?> NvmeCriticalWarnings { get; } = new();
 
     /// <summary>Runs at the start of <see cref="Update"/>, on the calling thread.</summary>
     public Action<HardwareNode>? BeforeUpdate { get; set; }
@@ -143,6 +147,12 @@ internal sealed class FakeTree : IHardwareTree
         return Values.TryGetValue(sensorIdentifier, out double? v) ? v : null;
     }
 
+    public byte? ReadNvmeCriticalWarning(string storageIdentifier)
+    {
+        _criticalWarningReads.AddOrUpdate(storageIdentifier, 1, (_, n) => n + 1);
+        return NvmeCriticalWarnings.TryGetValue(storageIdentifier, out byte? v) ? v : null;
+    }
+
     public void EnableStorage()
     {
         Interlocked.Increment(ref _enableStorageCount);
@@ -168,6 +178,8 @@ internal sealed class FakeTree : IHardwareTree
     public int Updates(string rootIdentifier) => _updates.GetValueOrDefault(rootIdentifier);
 
     public int Reads(string sensorIdentifier) => _reads.GetValueOrDefault(sensorIdentifier);
+
+    public int CriticalWarningReads(string storageIdentifier) => _criticalWarningReads.GetValueOrDefault(storageIdentifier);
 
     public void Dispose() => Interlocked.Increment(ref _closeCount);
 

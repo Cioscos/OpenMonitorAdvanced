@@ -135,6 +135,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     // Shared, published by reference swap.
     private volatile DesiredConfig? _desired; // written under _subLock
     private volatile Published? _published;
+    /// <summary>
+    /// Critical Warning bits that make the flag 1: available spare, reliability, read-only,
+    /// volatile backup and PMR (NVMe base spec 2.0). Bit 1 (temperature) is transient and stays
+    /// with the temperature rules; bits 6-7 are reserved.
+    /// </summary>
+    private const int CriticalWarningMask = 0x3D;
+
     private volatile StorageCache _storageCache = StorageCache.Empty;
     private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
     private volatile bool _opened;
@@ -527,7 +534,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             // Re-fetched: the update may have activated sensors (a new node for this root).
-            CollectValues(FindRoot(root.Identifier) ?? root, cache);
+            HardwareNode fresh = FindRoot(root.Identifier) ?? root;
+            CollectValues(fresh, cache);
+            resolved[root.Identifier] = CollectCriticalWarning(fresh, resolution, cache);
         }
 
         if (!SameResolution(previous, resolved))
@@ -777,7 +786,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         var pins = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach ((string rootId, (StorageInfo info, string id)) in _storagePins)
         {
-            if (resolved.TryGetValue(rootId, out DiskResolution? resolution) && resolution.Complete && resolution.Info == info)
+            if (resolved.TryGetValue(rootId, out DiskResolution? resolution) && resolution.Complete && Identity(resolution.Info) == Identity(info))
             {
                 pins[rootId] = id;
             }
@@ -814,6 +823,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             ? new Plan(planRoots, current.Built, current.Revision, filter)
             : new Plan(planRoots, built, current.Revision + 1, filter);
     }
+
+    /// <summary>The disk identity a pinned id depends on: the NVMe health flags come and go with updates and never change an id.</summary>
+    private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false };
 
     /// <summary>Whether <paramref name="filter"/> keeps that disk out of the schema (storage off, or its SMART off).</summary>
     private static bool IsHidden(StorageInfo info, EffectiveConfig filter) =>
@@ -989,6 +1001,42 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         _storageApplied = part;
         SetQuietly(_samplerWake); // the sampler reports the request as applied
+    }
+
+    /// <summary>
+    /// The NVMe critical warning of a just-updated disk as a 0/1 flag under the disk's own
+    /// identifier (its binding's key), read from the SMART attributes that same update left
+    /// (no extra command). Returns the resolution with the disk's current NVMe flags: the first
+    /// update is what makes the attribute exist, and that changes the schema.
+    /// </summary>
+    private DiskResolution CollectCriticalWarning(HardwareNode fresh, DiskResolution resolution, Dictionary<string, double?> cache)
+    {
+        StorageInfo? current = fresh.Storage;
+        if (current is null)
+        {
+            return resolution;
+        }
+
+        if (current is { IsNvme: true, HasCriticalWarning: true })
+        {
+            byte? raw;
+            try
+            {
+                raw = _tree.ReadNvmeCriticalWarning(fresh.Identifier);
+            }
+            catch (Exception e)
+            {
+                LogRateLimited("critical-warning:" + fresh.Identifier, e, "Reading the critical warning of {Root} failed", fresh.Identifier);
+                raw = null;
+            }
+
+            cache[fresh.Identifier] = raw is byte b ? ((b & CriticalWarningMask) != 0 ? 1.0 : 0.0) : null;
+        }
+
+        StorageInfo info = resolution.Info;
+        return info.IsNvme == current.IsNvme && info.HasCriticalWarning == current.HasCriticalWarning
+            ? resolution
+            : resolution with { Info = info with { IsNvme = current.IsNvme, HasCriticalWarning = current.HasCriticalWarning } };
     }
 
     private void CollectValues(HardwareNode node, Dictionary<string, double?> cache)
@@ -1374,7 +1422,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 SensorBinding binding = built.Bindings[i];
                 LhmIds[i] = binding.LhmIdentifier;
                 Scales[i] = binding.Scale;
-                if (owners.TryGetValue(binding.LhmIdentifier, out (string Root, bool Storage) owner))
+                if (binding.Source == BindingSource.NvmeCriticalWarning)
+                {
+                    // Keyed by the storage hardware identifier, and only ever cached by the storage worker.
+                    FromStorage[i] = true;
+                    Owner[i] = binding.LhmIdentifier;
+                }
+                else if (owners.TryGetValue(binding.LhmIdentifier, out (string Root, bool Storage) owner))
                 {
                     FromStorage[i] = owner.Storage;
                     Owner[i] = owner.Root;

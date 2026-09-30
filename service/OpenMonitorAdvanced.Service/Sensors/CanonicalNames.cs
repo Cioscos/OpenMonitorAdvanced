@@ -44,6 +44,7 @@ public static class CanonicalNames
         "storage.life",
         "storage.availableSpare",
         "storage.percentUsed",
+        "storage.criticalWarning",
         "storage.hostRead",
         "storage.hostWritten",
         "storage.powerOnHours",

@@ -39,20 +39,40 @@ public sealed record SensorNode(
 /// same drive (never from DiskInfoToolkit); <paramref name="DriveSerial"/> is LHM's own
 /// ATA/NVMe IDENTIFY serial (<c>StorageInfo.DriveSerial</c>, i.e. LHM's <c>SerialNumber</c>);
 /// <paramref name="Rotational"/> is informational only for <see cref="SchemaBuilder"/>.
+/// <paramref name="IsNvme"/> is DiskInfoToolkit's <c>Storage.IsNVMe</c>; <paramref name="HasCriticalWarning"/>
+/// says its SMART attribute list holds the NVMe Critical Warning attribute (true only after an
+/// <c>Update()</c> read the SMART/Health log), so the schema publishes the
+/// <c>flag/critical-warning</c> sensor only for a disk that can answer it.
 /// </summary>
 public sealed record StorageInfo(
     int DriveNumber,
     string? DescriptorModel,
     string? DescriptorSerial,
     string? DriveSerial,
-    bool Rotational);
+    bool Rotational,
+    bool IsNvme = false,
+    bool HasCriticalWarning = false);
+
+/// <summary>Where the value behind a <see cref="SensorBinding"/> comes from.</summary>
+public enum BindingSource
+{
+    /// <summary>An LHM sensor: <see cref="IHardwareTree.Read"/>.</summary>
+    Sensor,
+
+    /// <summary>
+    /// The NVMe Critical Warning byte of a storage hardware, read from DiskInfoToolkit's SMART
+    /// attributes by <see cref="IHardwareTree.ReadNvmeCriticalWarning"/> and published as 0/1.
+    /// </summary>
+    NvmeCriticalWarning,
+}
 
 /// <summary>
 /// Binds one emitted <see cref="Protocol.WireSensor"/> back to the LHM sensor it was
 /// derived from: <c>wire value = LHM value * Scale</c>. <see cref="BuiltSchema.Bindings"/>
-/// is index-aligned with <c>Schema.Sensors</c>.
+/// is index-aligned with <c>Schema.Sensors</c>. For <see cref="BindingSource.NvmeCriticalWarning"/>
+/// <paramref name="LhmIdentifier"/> is the storage hardware identifier, not a sensor's.
 /// </summary>
-public sealed record SensorBinding(string LhmIdentifier, double Scale);
+public sealed record SensorBinding(string LhmIdentifier, double Scale, BindingSource Source = BindingSource.Sensor);
 
 /// <summary>The wire schema built from a hardware tree, plus its sensor bindings.</summary>
 public sealed record BuiltSchema(SchemaMessage Schema, IReadOnlyList<SensorBinding> Bindings)

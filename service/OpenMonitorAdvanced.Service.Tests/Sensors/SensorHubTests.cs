@@ -1674,6 +1674,144 @@ public sealed class SensorHubTests
         Assert.Equal([HddKey], LatestSchema(a).Service.SmartDisabledDrives);
     }
 
+    private const string NvmeId = "/nvme/2";
+    private const string NvmeTemp = "/nvme/2/temperature/0";
+
+    private static readonly string NvmeKey = DriveKey.Compute("Fanxiang S880 2TB", "NVME-SERIAL")!;
+
+    private static HardwareNode Nvme() => new(
+        NvmeId,
+        HardwareType.Storage,
+        "Fanxiang S880 2TB",
+        [new SensorNode(NvmeTemp, SensorType.Temperature, "Composite Temperature", 0)],
+        [],
+        new StorageInfo(2, null, null, "NVME-SERIAL", Rotational: true, IsNvme: true, HasCriticalWarning: true));
+
+    /// <summary>A harness with the NVMe disk resolved (bus type NVMe, no seek penalty) and one subscriber.</summary>
+    private static Harness NvmeHarness(out List<FeedUpdate> updates, out IFeedSubscription subscription)
+    {
+        var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Nvme());
+        h.Tree.Values[NvmeTemp] = 41;
+        h.Disks.Facts[2] = new DriveFacts(2, DriveAvailability.Present, "Fanxiang S880 2TB", "NVME-SERIAL", BusType: DriveFacts.BusTypeNvme, SeekPenalty: false);
+        updates = h.Subscribe(1000, out subscription);
+        return h;
+    }
+
+    [Theory]
+    [InlineData((byte)0x00, 0)]
+    [InlineData((byte)0x02, 0)] // the transient temperature bit alone
+    [InlineData((byte)0xC0, 0)] // reserved bits
+    [InlineData((byte)0x01, 1)]
+    [InlineData((byte)0x04, 1)]
+    [InlineData((byte)0x06, 1)] // reliability degraded, with the temperature bit
+    [InlineData((byte)0x3D, 1)]
+    public void CriticalWarningMasksTheTemperatureBit(byte raw, int expected)
+    {
+        using Harness h = NvmeHarness(out List<FeedUpdate> a, out _);
+        h.Tree.NvmeCriticalWarnings[NvmeId] = raw;
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+
+        Assert.Equal(expected, ValueOf(a, a.Count - 1, "flag", "critical-warning"));
+        Assert.Equal(41, ValueOf(a, a.Count - 1, "temperature", "drive"));
+    }
+
+    [Fact]
+    public void CriticalWarningIsAbsentWhenTheAttributeCannotBeRead()
+    {
+        using Harness h = NvmeHarness(out List<FeedUpdate> a, out _);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+
+        Assert.Null(ValueOf(a, a.Count - 1, "flag", "critical-warning"));
+    }
+
+    [Fact]
+    public void CriticalWarningIsReadOnlyAfterTheDiskUpdate()
+    {
+        using Harness h = NvmeHarness(out _, out _);
+        int readsAtUpdate = -1;
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Identifier == NvmeId)
+            {
+                readsAtUpdate = h.Tree.CriticalWarningReads(NvmeId);
+            }
+        };
+        h.Tree.NvmeCriticalWarnings[NvmeId] = 0x04;
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+
+        Assert.Equal(0, readsAtUpdate); // the attribute is read after the update, never before
+        Assert.Equal(1, h.Tree.Updates(NvmeId));
+        Assert.Equal(1, h.Tree.CriticalWarningReads(NvmeId));
+        h.Advance(1000);
+        h.Hub.TickOnce(); // the sampler reads the cached value, not the tree
+        Assert.Equal(1, h.Tree.CriticalWarningReads(NvmeId));
+    }
+
+    [Fact]
+    public void CriticalWarningFollowsTheSmartSwitch()
+    {
+        using Harness h = NvmeHarness(out List<FeedUpdate> a, out IFeedSubscription sub);
+        h.Tree.NvmeCriticalWarnings[NvmeId] = 0x04;
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal(1, ValueOf(a, a.Count - 1, "flag", "critical-warning"));
+
+        sub.Update(Requests.Of(1000, ServiceModules.None, NvmeKey));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.DoesNotContain(LatestSchema(a).Sensors, s => s.Kind == "flag");
+        int reads = h.Tree.CriticalWarningReads(NvmeId);
+
+        h.Advance(30_000);
+        h.Hub.RunStorageDue();
+        Assert.Equal(reads, h.Tree.CriticalWarningReads(NvmeId)); // SMART off: no update, no read
+
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal(1, ValueOf(a, a.Count - 1, "flag", "critical-warning"));
+    }
+
+    [Fact]
+    public void CriticalWarningAppearsOnceTheFirstUpdateExposesTheAttribute()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        HardwareNode before = Nvme() with { Storage = Nvme().Storage! with { HasCriticalWarning = false } };
+        h.Tree.Storage.Add(before);
+        h.Tree.Values[NvmeTemp] = 41;
+        h.Disks.Facts[2] = new DriveFacts(2, DriveAvailability.Present, "Fanxiang S880 2TB", "NVME-SERIAL", BusType: DriveFacts.BusTypeNvme, SeekPenalty: false);
+        // As LhmTree does: the first Update() rebuilds the node, now with the attribute.
+        h.Tree.BeforeUpdate = _ =>
+        {
+            h.Tree.NvmeCriticalWarnings[NvmeId] = 0x04;
+            h.Tree.Replace(h.Tree.Roots.Select(r => r.Identifier == NvmeId ? Nvme() : r).ToArray());
+        };
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        Assert.DoesNotContain(LatestSchema(a).Sensors, s => s.Kind == "flag");
+
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal(1, ValueOf(a, a.Count - 1, "flag", "critical-warning"));
+    }
+
     [Fact]
     public void ReEnablingStorageDoesNotReloadTheGroup()
     {

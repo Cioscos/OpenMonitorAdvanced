@@ -511,6 +511,14 @@ public static partial class SchemaBuilder
             localBindings.Add(new SensorBinding(s.Identifier, m.Scale));
         }
 
+        // Not an LHM sensor: the NVMe Critical Warning attribute of DiskInfoToolkit's SMART log,
+        // bound to the storage hardware itself. The unit is explicit, "flag" has none in UnitByKind.
+        if (node.Storage is { IsNvme: true, HasCriticalWarning: true })
+        {
+            local.Add(new WireSensor(deviceId, "flag", "critical-warning", "boolean", "storage.criticalWarning", LabelArg: null, "flag"));
+            localBindings.Add(new SensorBinding(node.Identifier, 1.0, BindingSource.NvmeCriticalWarning));
+        }
+
         if (local.Count == 0 && properties.Count == 0)
         {
             return;

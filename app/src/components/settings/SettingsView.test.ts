@@ -249,3 +249,20 @@ test('back_returns_to_advanced', async () => {
   await fireEvent.click(screen.getByRole('button', { name: t('settings.title') }));
   expect(screen.getByRole('heading', { name: t('settings.section.general') })).toBeTruthy();
 });
+
+test('the new-rule sensor prefills the draft only once', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+  await fireEvent.click(await screen.findByRole('tab', { name: t('view.advanced') }));
+  const create = await screen.findAllByRole('button', { name: t('advanced.table.createRule') });
+  await fireEvent.click(create[0]);
+  await vi.waitFor(() => expect(screen.getByRole('group', { name: t('rules.new') })).toBeTruthy());
+
+  // Leaving Rules and coming back does not reopen a pre-filled draft.
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.section.general') }));
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.section.rules') }));
+  flushSync();
+  expect(screen.getByRole('heading', { name: t('settings.section.rules') })).toBeTruthy();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByRole('group', { name: t('rules.new') })).toBeNull();
+});

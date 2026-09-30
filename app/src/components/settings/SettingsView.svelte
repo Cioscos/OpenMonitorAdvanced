@@ -26,6 +26,15 @@
   // Opened on a target (a sensor row's "Create rule…"), the screen starts on that section.
   // svelte-ignore state_referenced_locally
   let section = $state<Section>(target?.section ?? 'general');
+  // The sensor to prefill "New rule" with is handed over once: after the first section change a
+  // remounted Rules section starts without a draft.
+  // svelte-ignore state_referenced_locally
+  let newRuleSensor = $state(target?.newRuleSensor);
+
+  function show(id: Section) {
+    section = id;
+    newRuleSensor = undefined;
+  }
 </script>
 
 <div class="settings">
@@ -43,7 +52,7 @@
         class="entry"
         class:on={section === id}
         aria-current={section === id ? 'page' : undefined}
-        onclick={() => (section = id)}
+        onclick={() => show(id)}
       >
         {t(`settings.section.${id}`)}
       </button>
@@ -58,7 +67,7 @@
     {#if section === 'general'}
       <GeneralSection {store} {backend} />
     {:else if section === 'rules'}
-      <RulesSection {store} {backend} newRuleSensor={target?.newRuleSensor} />
+      <RulesSection {store} {backend} {newRuleSensor} />
     {:else if section === 'sources'}
       <SourcesSection {store} {backend} {service} />
     {:else}

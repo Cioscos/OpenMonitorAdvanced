@@ -1,9 +1,11 @@
-//! Dynamic tray icon (a number on a rounded square) and tooltip, as pure functions.
+//! Dynamic tray icon (a number on a rounded square in the color of the health
+//! level), tooltip and alert texts, as pure functions.
 
-use oma_core::model::Unit;
-use oma_core::settings::TemperatureUnit;
+use oma_core::model::{DeviceKind, Schema, Unit};
+use oma_core::rules::{Alert, HealthReport, OverallLevel};
+use oma_core::settings::{TemperatureUnit, ThroughputUnit};
 
-use crate::i18n::{t, Lang};
+use crate::i18n::{sensor_label, t, Lang};
 
 pub const ICON_SIZE: u32 = 32;
 
@@ -16,10 +18,42 @@ pub struct IconStyle {
     pub foreground: [u8; 4],
 }
 
+/// `--surface-2` with light (`--text`) digits: no alert and no valid data yet.
 pub const NEUTRAL: IconStyle = IconStyle {
     background: [0x21, 0x17, 0x33, 0xff],
     foreground: [0xf5, 0xee, 0xfe, 0xff],
 };
+
+/// Dark digits on the status colors, for contrast.
+const ON_STATUS: [u8; 4] = [0x0f, 0x0a, 0x1a, 0xff];
+
+/// `--ok`.
+pub const OK: IconStyle = IconStyle {
+    background: [0x3e, 0xe8, 0xb5, 0xff],
+    foreground: ON_STATUS,
+};
+
+/// `--warn`.
+pub const WARN: IconStyle = IconStyle {
+    background: [0xff, 0xc5, 0x3d, 0xff],
+    foreground: ON_STATUS,
+};
+
+/// `--crit`.
+pub const CRIT: IconStyle = IconStyle {
+    background: [0xff, 0x4d, 0x4d, 0xff],
+    foreground: ON_STATUS,
+};
+
+/// The icon's colors for the overall health level (spec §3.5).
+pub fn style_for(level: OverallLevel) -> IconStyle {
+    match level {
+        OverallLevel::Neutral => NEUTRAL,
+        OverallLevel::Ok => OK,
+        OverallLevel::Warn => WARN,
+        OverallLevel::Crit => CRIT,
+    }
+}
 
 /// What the icon draws: a whole number, or a bar filled to a percentage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,21 +270,29 @@ pub struct TooltipItem {
     pub unit: Unit,
 }
 
-/// `"CPU 45 °C · GPU 62 °C · RAM 48 %"`: items without a value are left out,
-/// and with none left the tooltip is [`PRODUCT_NAME`]; a result over 127
-/// UTF-16 units (the tray tooltip limit) is cut after the last whole item that
-/// fits, plus `…`.
-pub fn tooltip(lang: Lang, items: &[TooltipItem], temperature: TemperatureUnit) -> String {
-    let parts: Vec<String> = items
-        .iter()
-        .filter_map(|item| {
-            let value = item.value.filter(|v| v.is_finite())?;
-            let label = t(lang, item.label_key, &[]);
-            Some(format!(
-                "{label} {}",
-                tooltip_value(value, item.unit, temperature)
-            ))
-        })
+/// `"CPU 45 °C · GPU 62 °C · RAM 48 %"`, after the verdict when there is one
+/// (`"RTX 4080 overheating (92 °C) · CPU 45 °C · …"`): items without a value
+/// are left out, and with nothing left the tooltip is [`PRODUCT_NAME`]; a
+/// result over 127 UTF-16 units (the tray tooltip limit) is cut after the last
+/// whole part that fits, plus `…`, so the verdict is the last to go.
+pub fn tooltip(
+    lang: Lang,
+    verdict: Option<&str>,
+    items: &[TooltipItem],
+    temperature: TemperatureUnit,
+) -> String {
+    let values = items.iter().filter_map(|item| {
+        let value = item.value.filter(|v| v.is_finite())?;
+        let label = t(lang, item.label_key, &[]);
+        Some(format!(
+            "{label} {}",
+            tooltip_value(value, item.unit, temperature)
+        ))
+    });
+    let parts: Vec<String> = verdict
+        .map(str::to_owned)
+        .into_iter()
+        .chain(values)
         .collect();
     if parts.is_empty() {
         return PRODUCT_NAME.to_owned();
@@ -286,6 +328,185 @@ pub fn tooltip(lang: Lang, items: &[TooltipItem], temperature: TemperatureUnit) 
 
 fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
+}
+
+/// The text of one alert, shared by the tooltip verdict and the toast: its
+/// `messageKey` with `{device}` (and the other report params), `{sensor}`
+/// (the translated label), `{threshold}` and `{value}` in the chosen units;
+/// `{value}` is "—" while the sensor has no value.
+pub fn alert_text(
+    lang: Lang,
+    alert: &Alert,
+    schema: &Schema,
+    temperature: TemperatureUnit,
+    throughput: ThroughputUnit,
+) -> String {
+    let rate = rate_for(schema, &alert.device_id, throughput);
+    let value = if alert.valid {
+        format_value(lang, alert.value, alert.unit, temperature, rate)
+    } else {
+        DASH.to_owned()
+    };
+    let threshold = format_value(lang, alert.threshold, alert.unit, temperature, rate);
+    let sensor = sensor_label(lang, &alert.sensor_label);
+    // The computed params come first: `t` uses the first one with a name.
+    let params: Vec<(&str, &str)> = [
+        ("sensor", sensor.as_str()),
+        ("threshold", threshold.as_str()),
+        ("value", value.as_str()),
+    ]
+    .into_iter()
+    .chain(alert.params.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+    .collect();
+    t(lang, &alert.message_key, &params)
+}
+
+/// What the tray says before its values: nothing at `neutral` or `ok`, the
+/// alert's text with one alert, "N problems" with more.
+pub fn verdict(
+    lang: Lang,
+    report: &HealthReport,
+    schema: &Schema,
+    temperature: TemperatureUnit,
+    throughput: ThroughputUnit,
+) -> Option<String> {
+    match report.level {
+        OverallLevel::Neutral | OverallLevel::Ok => None,
+        OverallLevel::Warn | OverallLevel::Crit => match report.alerts.as_slice() {
+            [] => None,
+            [alert] => Some(alert_text(lang, alert, schema, temperature, throughput)),
+            alerts => {
+                let count = alerts.len().to_string();
+                Some(t(lang, "health.problems", &[("count", &count)]))
+            }
+        },
+    }
+}
+
+/// Throughput follows the setting on network devices and is shown in bytes
+/// elsewhere, like the device pages of the Advanced view. A device gone
+/// from the schema (a retained alert) is recognized by its id.
+fn rate_for(schema: &Schema, device_id: &str, throughput: ThroughputUnit) -> ThroughputUnit {
+    let network = schema
+        .devices
+        .iter()
+        .find(|device| device.id == device_id)
+        .map_or_else(
+            || device_id.starts_with("network/"),
+            |device| device.kind == DeviceKind::Network,
+        );
+    if network {
+        throughput
+    } else {
+        ThroughputUnit::Bytes
+    }
+}
+
+const BYTE_UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+const BIT_UNITS: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
+const JOULE_UNITS: [&str; 4] = ["J", "kJ", "MJ", "GJ"];
+
+/// A sensor value as `formatValue` in `app/src/lib/format.ts` shows it, with
+/// `rate` for bytes per second; "—" when absent or not finite.
+fn format_value(
+    lang: Lang,
+    value: Option<f64>,
+    unit: Unit,
+    temperature: TemperatureUnit,
+    rate: ThroughputUnit,
+) -> String {
+    let Some(v) = value.filter(|v| v.is_finite()) else {
+        return DASH.to_owned();
+    };
+    let n = |value: f64, digits: usize| number(value, digits, lang);
+    match unit {
+        Unit::Celsius => {
+            let symbol = match temperature {
+                TemperatureUnit::C => "\u{b0}C",
+                TemperatureUnit::F => "\u{b0}F",
+            };
+            format!("{} {symbol}", n(display_value(v, unit, temperature), 0))
+        }
+        Unit::Percent => format!("{}%", n(v, 0)),
+        Unit::Megahertz if v >= 1000.0 => format!("{} GHz", n(v / 1000.0, 2)),
+        Unit::Megahertz => format!("{} MHz", n(v, 0)),
+        Unit::Watt => format!("{} W", n(v, 0)),
+        Unit::Volt => format!("{} V", n(v, 3)),
+        Unit::Ampere => format!("{} A", n(v, 1)),
+        Unit::Rpm => format!("{} RPM", n(v, 0)),
+        Unit::Bytes => stepped(v, 1024.0, &BYTE_UNITS, lang),
+        Unit::BytesPerSecond => throughput(v, rate, lang),
+        Unit::BitsPerSecond => throughput(v / 8.0, ThroughputUnit::Bits, lang),
+        Unit::Joule => stepped(v, 1000.0, &JOULE_UNITS, lang),
+        Unit::Boolean => t(lang, if v >= 0.5 { "flag.on" } else { "flag.off" }, &[]),
+        // `Math.round`: half up.
+        Unit::PcieGeneration => format!("Gen {}", (v + 0.5).floor()),
+        Unit::Lanes => format!("x{}", (v + 0.5).floor()),
+        Unit::Hours => format!("{} h", n(v, 0)),
+        Unit::Count => n(v, 0),
+    }
+}
+
+/// `value` divided by `step` while it reaches it, with the matching unit.
+fn scaled(mut value: f64, step: f64, units: &[&str]) -> (f64, usize) {
+    let mut unit = 0;
+    while value.abs() >= step && unit < units.len() - 1 {
+        value /= step;
+        unit += 1;
+    }
+    (value, unit)
+}
+
+/// `formatBytes` and `formatEnergy`: a decimal only between the first step
+/// and 100.
+fn stepped(value: f64, step: f64, units: &[&str], lang: Lang) -> String {
+    let (value, unit) = scaled(value, step, units);
+    let digits = usize::from(unit != 0 && value < 100.0);
+    format!("{} {}", number(value, digits, lang), units[unit])
+}
+
+/// `formatRate`: bits with decimal steps, or bytes with binary steps.
+fn throughput(bytes_per_second: f64, rate: ThroughputUnit, lang: Lang) -> String {
+    match rate {
+        ThroughputUnit::Bytes => {
+            format!("{}/s", stepped(bytes_per_second, 1024.0, &BYTE_UNITS, lang))
+        }
+        ThroughputUnit::Bits => {
+            let (value, unit) = scaled(bytes_per_second * 8.0, 1000.0, &BIT_UNITS);
+            let digits = usize::from(value < 10.0);
+            format!("{} {}", number(value, digits, lang), BIT_UNITS[unit])
+        }
+    }
+}
+
+/// `Intl.NumberFormat` for `en` and `it`: `digits` decimals rounded half away
+/// from zero (`format!` would round ties to even), the language's decimal
+/// separator, and thousands grouped from four digits in English, five in
+/// Italian. A value rounded to zero has no sign.
+fn number(value: f64, digits: usize, lang: Lang) -> String {
+    let scale = 10f64.powi(digits as i32);
+    let rounded = (value * scale).round() / scale;
+    let text = format!("{:.*}", digits, rounded.abs());
+    let (int, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let (group, decimal, grouping_from) = match lang {
+        Lang::En => (',', '.', 4),
+        Lang::It => ('.', ',', 5),
+    };
+    let mut out = String::with_capacity(text.len() + 4);
+    if rounded < 0.0 {
+        out.push('-');
+    }
+    for (i, c) in int.chars().enumerate() {
+        if int.len() >= grouping_from && i > 0 && (int.len() - i) % 3 == 0 {
+            out.push(group);
+        }
+        out.push(c);
+    }
+    if !frac.is_empty() {
+        out.push(decimal);
+        out.push_str(frac);
+    }
+    out
 }
 
 fn tooltip_value(value: f64, unit: Unit, temperature: TemperatureUnit) -> String {
@@ -545,11 +766,11 @@ mod tests {
             item("tray.tooltip.ram", Some(48.0), Unit::Percent),
         ];
         assert_eq!(
-            tooltip(Lang::En, &items, C),
+            tooltip(Lang::En, None, &items, C),
             "CPU 45 °C · GPU 62 °C · RAM 48 %"
         );
         assert_eq!(
-            tooltip(Lang::En, &items, TemperatureUnit::F),
+            tooltip(Lang::En, None, &items, TemperatureUnit::F),
             "CPU 113 °F · GPU 143 °F · RAM 48 %"
         );
 
@@ -558,15 +779,15 @@ mod tests {
             item("tray.tooltip.gpu", None, Unit::Celsius),
             item("tray.tooltip.ram", Some(48.0), Unit::Percent),
         ];
-        assert_eq!(tooltip(Lang::En, &missing, C), "CPU 45 °C · RAM 48 %");
+        assert_eq!(tooltip(Lang::En, None, &missing, C), "CPU 45 °C · RAM 48 %");
 
         // Nothing to show yet (the first tick): the product name, never an empty tooltip.
-        assert_eq!(tooltip(Lang::En, &[], C), "OpenMonitor Advanced");
+        assert_eq!(tooltip(Lang::En, None, &[], C), "OpenMonitor Advanced");
         let none = [
             item("tray.tooltip.cpu", None, Unit::Celsius),
             item("tray.tooltip.gpu", Some(f64::NAN), Unit::Celsius),
         ];
-        assert_eq!(tooltip(Lang::It, &none, C), "OpenMonitor Advanced");
+        assert_eq!(tooltip(Lang::It, None, &none, C), "OpenMonitor Advanced");
 
         // Unknown keys are shown as they are, which makes long labels easy to test.
         const LONG: &str = "a-very-long-label-that-eats-the-tooltip-budget-of-the-tray";
@@ -575,7 +796,7 @@ mod tests {
             item(LONG, Some(2.0), Unit::Percent),
             item(LONG, Some(3.0), Unit::Percent),
         ];
-        let text = tooltip(Lang::En, &long, C);
+        let text = tooltip(Lang::En, None, &long, C);
         assert!(text.encode_utf16().count() <= 127, "{text}");
         assert!(text.ends_with('…'), "{text}");
         assert!(text.starts_with(&format!("{LONG} 1 %")), "{text}");
@@ -585,9 +806,307 @@ mod tests {
     #[test]
     fn tooltip_truncates_a_single_oversized_item() {
         let huge: &'static str = Box::leak("x".repeat(200).into_boxed_str());
-        let text = tooltip(Lang::En, &[item(huge, Some(1.0), Unit::Percent)], C);
+        let text = tooltip(Lang::En, None, &[item(huge, Some(1.0), Unit::Percent)], C);
         assert!(text.encode_utf16().count() <= 127);
         assert!(text.ends_with('…'));
+    }
+
+    // --- Health level colors and the verdict ---
+
+    use std::collections::BTreeMap;
+
+    use oma_core::model::{Device, DeviceKind, Label};
+    use oma_core::rules::{Coverage, Level};
+
+    const B: ThroughputUnit = ThroughputUnit::Bits;
+    const GPU: &str = "gpu/pci-0000:01:00.0";
+    const NIC: &str = "network/{1234}";
+
+    fn schema() -> Schema {
+        let device = |id: &str, kind, name: &str| Device {
+            id: id.to_owned(),
+            kind,
+            name: name.to_owned(),
+            vendor: None,
+            properties: BTreeMap::new(),
+        };
+        Schema {
+            revision: 3,
+            devices: vec![
+                device(GPU, DeviceKind::Gpu, "RTX 4080"),
+                device(NIC, DeviceKind::Network, "Ethernet"),
+                device("storage/0", DeviceKind::Storage, "Samsung 990"),
+            ],
+            sensors: Vec::new(),
+        }
+    }
+
+    fn alert(rule_id: &str, device_id: &str, unit: Unit, level: Level, value: f64) -> Alert {
+        let device = schema()
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map_or_else(|| device_id.to_owned(), |d| d.name.clone());
+        Alert {
+            rule_id: rule_id.to_owned(),
+            sensor_id: format!("{device_id}/temperature/core"),
+            device_id: device_id.to_owned(),
+            unit,
+            sensor_label: Label::new("gpu.temperature.core"),
+            level,
+            value: Some(value),
+            threshold: Some(90.0),
+            since_ms: 1_000,
+            valid: true,
+            last_valid_ms: Some(1_000),
+            message_key: format!("rule.{rule_id}.message"),
+            params: BTreeMap::from([("device".to_owned(), device)]),
+        }
+    }
+
+    fn gpu_hot() -> Alert {
+        alert("gpu-temp", GPU, Unit::Celsius, Level::Crit, 92.4)
+    }
+
+    fn report(level: OverallLevel, alerts: Vec<Alert>) -> HealthReport {
+        HealthReport {
+            level,
+            since_ms: 1_000,
+            revision: 4,
+            coverage: Coverage::Complete,
+            unavailable_targets: Vec::new(),
+            alerts,
+        }
+    }
+
+    fn opaque(hex: u32) -> [u8; 4] {
+        let [_, r, g, b] = hex.to_be_bytes();
+        [r, g, b, 0xff]
+    }
+
+    #[test]
+    fn level_styles_use_the_palette() {
+        const DARK: u32 = 0x0f0a1a;
+        const LIGHT: u32 = 0xf5eefe;
+        let cases = [
+            (OverallLevel::Neutral, 0x211733, LIGHT),
+            (OverallLevel::Ok, 0x3ee8b5, DARK),
+            (OverallLevel::Warn, 0xffc53d, DARK),
+            (OverallLevel::Crit, 0xff4d4d, DARK),
+        ];
+        for (level, background, foreground) in cases {
+            let style = style_for(level);
+            assert_eq!(style.background, opaque(background), "{level:?}");
+            assert_eq!(style.foreground, opaque(foreground), "{level:?}");
+            // The drawn pixels: the square in the background, digits and bar
+            // in the foreground.
+            let digits = render(&num("88"), style);
+            assert_eq!(px(&digits, 16, 2), opaque(background), "{level:?}");
+            assert!(!fg_pixels(&digits, style).is_empty(), "{level:?}");
+            let bar = render(&IconContent::Bar(100), style);
+            assert_eq!(px(&bar, 16, 20), opaque(foreground), "{level:?}");
+        }
+        assert_eq!(style_for(OverallLevel::Neutral), NEUTRAL);
+        assert_eq!(
+            [
+                style_for(OverallLevel::Ok),
+                style_for(OverallLevel::Warn),
+                style_for(OverallLevel::Crit)
+            ],
+            [OK, WARN, CRIT]
+        );
+    }
+
+    #[test]
+    fn verdict_with_one_alert() {
+        let one = report(OverallLevel::Crit, vec![gpu_hot()]);
+        assert_eq!(
+            verdict(Lang::En, &one, &schema(), C, B).as_deref(),
+            Some("RTX 4080 overheating (92 °C)")
+        );
+        assert_eq!(
+            verdict(Lang::It, &one, &schema(), C, B).as_deref(),
+            Some("RTX 4080 surriscaldata (92 °C)")
+        );
+        // A value no longer measured is a dash, never the old number.
+        let mut lost = gpu_hot();
+        lost.valid = false;
+        assert_eq!(
+            verdict(
+                Lang::En,
+                &report(OverallLevel::Crit, vec![lost]),
+                &schema(),
+                C,
+                B
+            )
+            .as_deref(),
+            Some("RTX 4080 overheating (—)")
+        );
+    }
+
+    #[test]
+    fn verdict_with_many_alerts() {
+        let many = report(
+            OverallLevel::Crit,
+            vec![
+                gpu_hot(),
+                alert("disk-temp", "storage/0", Unit::Celsius, Level::Warn, 71.0),
+                alert("volume-used", "storage/0", Unit::Percent, Level::Warn, 95.0),
+            ],
+        );
+        assert_eq!(
+            verdict(Lang::En, &many, &schema(), C, B).as_deref(),
+            Some("3 problems")
+        );
+        assert_eq!(
+            verdict(Lang::It, &many, &schema(), C, B).as_deref(),
+            Some("3 problemi")
+        );
+    }
+
+    #[test]
+    fn verdict_absent_when_ok() {
+        for level in [OverallLevel::Neutral, OverallLevel::Ok] {
+            assert_eq!(
+                verdict(Lang::En, &report(level, Vec::new()), &schema(), C, B),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn verdict_formats_fahrenheit() {
+        let one = report(OverallLevel::Crit, vec![gpu_hot()]);
+        assert_eq!(
+            verdict(Lang::En, &one, &schema(), TemperatureUnit::F, B).as_deref(),
+            Some("RTX 4080 overheating (198 °F)")
+        );
+    }
+
+    #[test]
+    fn custom_rules_name_the_sensor_and_the_threshold() {
+        let mut above = gpu_hot();
+        above.rule_id = "custom-00000000-0000-4000-8000-000000000001".to_owned();
+        above.message_key = "rule.custom.above".to_owned();
+        let text =
+            |alert: &Alert, lang, temperature| alert_text(lang, alert, &schema(), temperature, B);
+        assert_eq!(
+            text(&above, Lang::En, C),
+            "Core temperature above 90 °C (92 °C)"
+        );
+        assert_eq!(
+            text(&above, Lang::It, TemperatureUnit::F),
+            "Temperatura core sopra 194 °F (198 °F)"
+        );
+        let mut below = above.clone();
+        below.message_key = "rule.custom.below".to_owned();
+        assert_eq!(
+            text(&below, Lang::En, C),
+            "Core temperature below 90 °C (92 °C)"
+        );
+        let mut flag = above.clone();
+        flag.message_key = "rule.custom.flag".to_owned();
+        flag.unit = Unit::Boolean;
+        flag.sensor_label = Label::new("gpu.throttle.thermal");
+        flag.threshold = None;
+        flag.value = Some(1.0);
+        assert_eq!(
+            text(&flag, Lang::En, C),
+            "Thermal throttling on RTX 4080: active"
+        );
+        assert_eq!(
+            text(&flag, Lang::It, C),
+            "Limitazione termica su RTX 4080: attivo"
+        );
+    }
+
+    #[test]
+    fn throughput_follows_the_setting_on_network_devices_only() {
+        let mut net = alert(
+            "custom-x",
+            NIC,
+            Unit::BytesPerSecond,
+            Level::Warn,
+            12_500_000.0,
+        );
+        net.message_key = "rule.custom.above".to_owned();
+        net.sensor_label = Label::new("network.down");
+        net.threshold = Some(10_000_000.0);
+        assert_eq!(
+            alert_text(Lang::En, &net, &schema(), C, ThroughputUnit::Bits),
+            "Download above 80 Mbit/s (100 Mbit/s)"
+        );
+        assert_eq!(
+            alert_text(Lang::It, &net, &schema(), C, ThroughputUnit::Bytes),
+            "Download sopra 9,5 MB/s (11,9 MB/s)"
+        );
+        // Disks show bytes, like their page in the Advanced view.
+        let mut disk = net.clone();
+        disk.device_id = "storage/0".to_owned();
+        assert_eq!(
+            alert_text(Lang::En, &disk, &schema(), C, ThroughputUnit::Bits),
+            "Download above 9.5 MB/s (11.9 MB/s)"
+        );
+        // A network device gone from the schema is still recognized by its id.
+        let mut gone = net.clone();
+        gone.device_id = "network/{gone}".to_owned();
+        assert_eq!(
+            alert_text(Lang::En, &gone, &schema(), C, ThroughputUnit::Bits),
+            "Download above 80 Mbit/s (100 Mbit/s)"
+        );
+    }
+
+    #[test]
+    fn format_value_mirrors_the_ui_formatter() {
+        let f = |value: f64, unit, lang| format_value(lang, Some(value), unit, C, B);
+        assert_eq!(f(48.0, Unit::Percent, Lang::En), "48%");
+        assert_eq!(f(3_200.0, Unit::Megahertz, Lang::En), "3.20 GHz");
+        assert_eq!(f(3_200.0, Unit::Megahertz, Lang::It), "3,20 GHz");
+        assert_eq!(f(800.0, Unit::Megahertz, Lang::En), "800 MHz");
+        assert_eq!(f(1.2346, Unit::Volt, Lang::En), "1.235 V");
+        assert_eq!(f(12.34, Unit::Ampere, Lang::It), "12,3 A");
+        assert_eq!(f(1_500.0, Unit::Rpm, Lang::En), "1,500 RPM");
+        assert_eq!(f(1_500.0, Unit::Rpm, Lang::It), "1500 RPM");
+        assert_eq!(f(15_000.0, Unit::Count, Lang::It), "15.000");
+        assert_eq!(f(1_234_567.0, Unit::Hours, Lang::En), "1,234,567 h");
+        assert_eq!(f(512.0, Unit::Bytes, Lang::En), "512 B");
+        assert_eq!(f(1_536.0, Unit::Bytes, Lang::En), "1.5 KB");
+        assert_eq!(f(4.0, Unit::PcieGeneration, Lang::En), "Gen 4");
+        assert_eq!(f(16.0, Unit::Lanes, Lang::En), "x16");
+        assert_eq!(f(1.0, Unit::Boolean, Lang::En), "Active");
+        assert_eq!(f(0.0, Unit::Boolean, Lang::It), "No");
+        assert_eq!(f(2_500.0, Unit::Joule, Lang::En), "2.5 kJ");
+        assert_eq!(f(1_000.0, Unit::BitsPerSecond, Lang::En), "1.0 kbit/s");
+        assert_eq!(f(-0.2, Unit::Celsius, Lang::En), "0 °C");
+        assert_eq!(f(-5.6, Unit::Celsius, Lang::En), "-6 °C");
+        assert_eq!(format_value(Lang::En, None, Unit::Celsius, C, B), "—");
+        assert_eq!(
+            format_value(Lang::En, Some(f64::NAN), Unit::Percent, C, B),
+            "—"
+        );
+    }
+
+    #[test]
+    fn tooltip_starts_with_the_verdict_and_keeps_the_limit() {
+        let items = [
+            item("tray.tooltip.cpu", Some(45.0), Unit::Celsius),
+            item("tray.tooltip.gpu", Some(92.0), Unit::Celsius),
+        ];
+        assert_eq!(
+            tooltip(Lang::En, Some("RTX 4080 overheating (92 °C)"), &items, C),
+            "RTX 4080 overheating (92 °C) · CPU 45 °C · GPU 92 °C"
+        );
+        // A verdict without any value to show stands alone.
+        assert_eq!(tooltip(Lang::En, Some("2 problems"), &[], C), "2 problems");
+        // A long verdict keeps its start; the values are dropped first.
+        let long = "x".repeat(120);
+        let text = tooltip(Lang::En, Some(&long), &items, C);
+        assert!(text.encode_utf16().count() <= 127, "{text}");
+        assert!(text.starts_with(&long), "{text}");
+        let huge = "y".repeat(300);
+        let text = tooltip(Lang::En, Some(&huge), &items, C);
+        assert!(text.encode_utf16().count() <= 127, "{text}");
+        assert!(text.starts_with("yyy") && text.ends_with('…'), "{text}");
     }
 
     #[test]

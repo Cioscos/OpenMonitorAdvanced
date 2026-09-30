@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-health-clock"
+description = "Enables the get_health_clock command without any pre-configured scope."
+commands.allow = ["get_health_clock"]
+
+[[permission]]
+identifier = "deny-get-health-clock"
+description = "Denies the get_health_clock command without any pre-configured scope."
+commands.deny = ["get_health_clock"]

@@ -20,6 +20,9 @@ fn main() {
             "refresh_autostart",
             "get_app_info",
             "open_known_path",
+            "get_health",
+            "get_rule_status",
+            "get_health_clock",
         ]),
     ))
     .expect("Tauri build")

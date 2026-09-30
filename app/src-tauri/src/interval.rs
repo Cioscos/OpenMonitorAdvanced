@@ -12,11 +12,12 @@ use crate::settings::SettingsStore;
 pub type LinkSink = Box<dyn Fn(u32) + Send + Sync>;
 
 /// Applies every change of `general.intervalMs` to the running app, in this
-/// order: the history is resized to one hour of samples at the new pace, the
-/// sampler is given the new interval (and woken), and the link is told. The
-/// value the engine and sampler were started with is taken as the current
-/// one, and the store is checked once right after subscribing, so a change
-/// made before the listener existed is not lost.
+/// order: the history is resized to one hour of samples at the new pace and
+/// the rules are given the interval for their suspend detection, the sampler
+/// is given the new interval (and woken), and the link is told. The value the
+/// sampler was started with is taken as the current one and given to the
+/// rules at once, and the store is checked once right after subscribing, so
+/// a change made before the listener existed is not lost.
 ///
 /// The listener runs on whichever thread changes the store, the settings
 /// writer included, so it must be quick and must never wait for the store:
@@ -29,6 +30,11 @@ pub fn follow_interval(
     interval: IntervalHandle,
     link: LinkSink,
 ) {
+    // The rules start at 1 s; the sampler may already run at another pace.
+    engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .set_interval_ms(interval.get().as_millis() as u64);
     // The interval applied last; also serializes the listener with the
     // catch-up below, so changes are applied in store order.
     let applied = Mutex::new(interval.get().as_millis() as u32);
@@ -42,10 +48,11 @@ pub fn follow_interval(
             return;
         };
         *applied = ms;
-        engine
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_history_capacity(history_capacity(new));
+        {
+            let mut engine = engine.lock().unwrap_or_else(PoisonError::into_inner);
+            engine.set_history_capacity(history_capacity(new));
+            engine.set_interval_ms(u64::from(ms));
+        }
         interval.set(new);
         link(ms);
     };
@@ -63,6 +70,9 @@ mod tests {
     use std::time::Duration;
 
     use oma_core::engine::Engine;
+    use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
+    use oma_core::provider::{Inventory, Provider, ProviderError};
+    use oma_core::rules::{default_rules, OverallLevel};
     use oma_core::sampler::IntervalHandle;
 
     use super::*;
@@ -146,6 +156,90 @@ mod tests {
         assert_eq!(capacity(&rig), 1_800);
         assert_eq!(sent(&rig), vec![2000]);
         assert_eq!(rig.store.settings().general.interval_ms, 2_000);
+    }
+
+    /// Memory used at 99 %, the `ram-used` rule's critical level.
+    struct FullMemory;
+
+    impl Provider for FullMemory {
+        fn name(&self) -> &'static str {
+            "full-memory"
+        }
+
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            Ok(Inventory {
+                devices: vec![Device {
+                    id: "memory/0".into(),
+                    kind: DeviceKind::Memory,
+                    name: "RAM".into(),
+                    vendor: None,
+                    properties: Default::default(),
+                }],
+                sensors: vec![Sensor::new(
+                    "memory/0",
+                    SensorKind::Load,
+                    "used",
+                    Unit::Percent,
+                    Label::new("memory.load"),
+                    Source::Mock,
+                )],
+            })
+        }
+
+        fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+            Ok(vec![Some(99.0)])
+        }
+    }
+
+    /// Ticks 5.5 s apart for 33 s: `ram-used` (critical after 30 s) enters
+    /// `crit` only if the rules' suspend bound, max(3 x interval, 5 s), is
+    /// above the gap, i.e. only at an interval of 2 s or more.
+    fn crit_after_gapped_ticks(engine: &Arc<Mutex<Engine>>) -> bool {
+        let mut engine = engine.lock().unwrap();
+        let ram = default_rules()
+            .into_iter()
+            .filter(|rule| rule.id == "ram-used")
+            .collect();
+        engine.set_rules(ram);
+        for step in 0..=6u64 {
+            let t = step * 5_500;
+            engine.tick(1_700_000_000_000 + t, t);
+        }
+        engine.health().level == OverallLevel::Crit
+    }
+
+    fn rules_rig(fs: &Arc<FakeFs>, initial: Duration) -> (Arc<SettingsStore>, Arc<Mutex<Engine>>) {
+        let store = Arc::new(open_fast(fs));
+        let engine = Arc::new(Mutex::new(Engine::new(vec![Box::new(FullMemory)], 3_600)));
+        follow_interval(
+            &store,
+            Arc::clone(&engine),
+            IntervalHandle::new(initial),
+            Box::new(|_| {}),
+        );
+        (store, engine)
+    }
+
+    #[test]
+    fn interval_change_reaches_rule_engine() {
+        // The default 1 s: every 5.5 s gap looks like a suspend.
+        let (_, engine) = rules_rig(&FakeFs::new(), Duration::from_millis(1_000));
+        assert!(!crit_after_gapped_ticks(&engine));
+
+        // Started at 2 s from the stored setting: the engine is told at once.
+        let fs = FakeFs::new().with_file(
+            &test_path(),
+            br#"{"version":1,"general":{"intervalMs":2000}}"#,
+        );
+        let (_, engine) = rules_rig(&fs, Duration::from_millis(2_000));
+        assert!(crit_after_gapped_ticks(&engine));
+
+        // Changed to 2 s later on.
+        let (store, engine) = rules_rig(&FakeFs::new(), Duration::from_millis(1_000));
+        store
+            .update(&serde_json::json!({"general": {"intervalMs": 2000}}))
+            .unwrap();
+        assert!(crit_after_gapped_ticks(&engine));
     }
 
     #[test]

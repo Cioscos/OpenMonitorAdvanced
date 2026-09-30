@@ -4,6 +4,7 @@ mod autostart;
 mod commands;
 mod i18n;
 mod interval;
+mod rules;
 mod service;
 mod settings;
 mod tray;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use oma_core::engine::Engine;
 use oma_core::model::Schema;
 use oma_core::provider::Provider;
+use oma_core::rules::HealthReport;
 use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampler};
 use tauri::{Emitter, Manager, RunEvent};
 
@@ -237,6 +239,9 @@ fn main() {
             commands::enable_vendor_libraries,
             commands::get_app_info,
             commands::open_known_path,
+            commands::get_health,
+            commands::get_rule_status,
+            commands::get_health_clock,
             autostart::refresh_autostart,
             service::get_service_status,
             service::set_anti_cheat,
@@ -253,7 +258,11 @@ fn main() {
             // service (final review M2).
             #[cfg(windows)]
             app.state::<ServiceShell>().spawn_link(svc_feed, svc_drives);
-            // From here on, `general.intervalMs` drives history size, sampler and link.
+            // From here on, `rules` drives the rule engine; the stored rules
+            // are installed now, before the first tick.
+            rules::install_rules(app.state::<Arc<SettingsStore>>().inner(), engine.clone());
+            // From here on, `general.intervalMs` drives history size, rule
+            // engine, sampler and link.
             interval::follow_interval(
                 app.state::<Arc<SettingsStore>>().inner(),
                 engine.clone(),
@@ -297,15 +306,22 @@ fn main() {
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
-            // The tray follows every tick, window or not; the schema arrives only
-            // when it changes, so the latest one is kept for the tray.
+            // The tray follows every tick, window or not; the schema and the
+            // health report arrive only when they change, so the latest ones
+            // are kept for the tray.
             let mut tray_schema: Option<Schema> = None;
+            let mut tray_health = HealthReport::default();
+            let clock_engine = engine.clone();
+            let mut clock_pacer = rules::ClockPacer::default();
             let sampler = Sampler::spawn(engine.clone(), interval.clone(), move |out| {
                 if let Some(schema) = &out.schema {
                     tray_schema = Some(schema.clone());
                 }
+                if let Some(health) = &out.health {
+                    tray_health = health.clone();
+                }
                 if let Some(schema) = &tray_schema {
-                    tray.update(schema, &out.snapshot, &store.snapshot());
+                    tray.update(schema, &out.snapshot, &tray_health, &store.snapshot());
                 }
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
@@ -315,6 +331,18 @@ fn main() {
                     let _ = handle.emit(EVENT_SCHEMA, schema);
                 }
                 let _ = handle.emit(EVENT_SNAPSHOT, &out.snapshot);
+                if let Some(health) = &out.health {
+                    let _ = handle.emit(rules::EVENT_HEALTH, health);
+                }
+                // The tick has released the engine; the clock is read under
+                // a short lock of its own.
+                let clock = clock_engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .health_clock();
+                if clock_pacer.take(clock) {
+                    let _ = handle.emit(rules::EVENT_HEALTH_CLOCK, clock);
+                }
                 #[cfg(windows)]
                 {
                     // The status is copied only when it changed.

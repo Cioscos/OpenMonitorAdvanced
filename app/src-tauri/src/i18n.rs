@@ -26,6 +26,39 @@ pub const RUST_KEYS: &[&str] = &[
     "tray.tooltip.cpu",
     "tray.tooltip.gpu",
     "tray.tooltip.ram",
+    "flag.on",
+    "flag.off",
+    "rule.cpu-temp.name",
+    "rule.cpu-temp.message",
+    "rule.cpu-throttle.name",
+    "rule.cpu-throttle.message",
+    "rule.gpu-temp.name",
+    "rule.gpu-temp.message",
+    "rule.gpu-hotspot.name",
+    "rule.gpu-hotspot.message",
+    "rule.gpu-mem-temp.name",
+    "rule.gpu-mem-temp.message",
+    "rule.gpu-throttle.name",
+    "rule.gpu-throttle.message",
+    "rule.disk-temp.name",
+    "rule.disk-temp.message",
+    "rule.disk-wear.name",
+    "rule.disk-wear.message",
+    "rule.disk-critical.name",
+    "rule.disk-critical.message",
+    "rule.volume-used.name",
+    "rule.volume-used.message",
+    "rule.ram-used.name",
+    "rule.ram-used.message",
+    "rule.battery-low.name",
+    "rule.battery-low.message",
+    "rule.custom.above",
+    "rule.custom.below",
+    "rule.custom.flag",
+    "health.problems",
+    "health.allClear",
+    "health.partial",
+    "health.unavailableValue",
 ];
 
 type Catalog = HashMap<String, String>;
@@ -98,10 +131,6 @@ fn interpolate(template: &str, params: &[(&str, &str)]) -> String {
 }
 
 /// The text of a sensor label: catalog key `sensor.<key>` with `{arg}`.
-// No caller yet: the tray shows values only. The M5 spec (§5, strings used by
-// Rust) has the rule toasts (M5b) and the CSV headers (M5c) name sensors
-// through it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn sensor_label(lang: Lang, label: &Label) -> String {
     let key = format!("sensor.{}", label.key);
     match label.arg.as_deref() {
@@ -166,5 +195,24 @@ mod tests {
         // Distinct texts in the two languages prove the Italian catalog is read.
         assert_eq!(t(Lang::It, "tray.viewAdvanced", &[]), "Vista Avanzata");
         assert_eq!(t(Lang::En, "tray.viewSimple", &[]), "Simple view");
+    }
+
+    #[test]
+    fn every_default_rule_has_a_name_and_a_message() {
+        for rule in oma_core::rules::default_rules() {
+            for part in ["name", "message"] {
+                let key = format!("rule.{}.{part}", rule.id);
+                assert!(RUST_KEYS.contains(&key.as_str()), "{key} not in RUST_KEYS");
+            }
+        }
+        let value = [("device", "RTX 4080"), ("value", "92 °C")];
+        assert_eq!(
+            t(Lang::It, "rule.gpu-temp.message", &value),
+            "RTX 4080 surriscaldata (92 °C)"
+        );
+        assert_eq!(
+            t(Lang::En, "rule.gpu-temp.message", &value),
+            "RTX 4080 overheating (92 °C)"
+        );
     }
 }

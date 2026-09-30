@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
 use oma_core::model::Schema;
+use oma_core::rules::{HealthClock, HealthReport, RuleStatus};
 use oma_core::sampler::{unix_ms, IntervalHandle};
 use oma_core::settings::VendorLibraries;
 use oma_core::stats::SensorStats;
@@ -145,6 +146,41 @@ pub fn reset_stats(state: State<'_, AppState>, ids: Vec<String>) {
 pub fn get_session(state: State<'_, AppState>) -> Session {
     let engine = state.engine.lock().unwrap_or_else(PoisonError::into_inner);
     session(&engine, &state.interval)
+}
+
+/// The latest health report, for a window that has just opened; later
+/// changes arrive with `oma:health`.
+#[tauri::command(async)]
+pub fn get_health(state: State<'_, AppState>) -> HealthReport {
+    state
+        .engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .health()
+        .clone()
+}
+
+/// Every rule with its instances as they are now: resolved thresholds,
+/// level and diagnostics, which can change without a new health report.
+#[tauri::command(async)]
+pub fn get_rule_status(state: State<'_, AppState>) -> Vec<RuleStatus> {
+    state
+        .engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .rule_status()
+}
+
+/// How long the overall level has lasted, on the monotonic clock of the
+/// latest tick: the anchor for the window's duration, which
+/// `oma:health-clock` then keeps up to date.
+#[tauri::command(async)]
+pub fn get_health_clock(state: State<'_, AppState>) -> HealthClock {
+    state
+        .engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .health_clock()
 }
 
 /// Why vendor libraries were not loaded at startup (spec §8).

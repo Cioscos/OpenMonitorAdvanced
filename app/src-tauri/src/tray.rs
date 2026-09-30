@@ -1,9 +1,11 @@
-//! Tray icon: the menu (open, views, anti-cheat mode, quit), a dynamic icon and
-//! tooltip refreshed every tick, and the labels' language.
+//! Tray icon: the menu (open, views, anti-cheat mode, quit), a dynamic icon in
+//! the color of the health level and a tooltip led by its verdict, refreshed
+//! every tick, and the labels' language.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use oma_core::model::{DeviceKind, Schema, Snapshot, Unit};
+use oma_core::rules::HealthReport;
 use oma_core::settings::{Language, Settings, ViewKind};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -14,8 +16,8 @@ use crate::i18n::{resolve, t, Lang};
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
 use crate::tray_icon::{
-    icon_content, render, tooltip, IconContent, IconStyle, TooltipItem, ICON_SIZE, NEUTRAL,
-    PRODUCT_NAME,
+    icon_content, render, style_for, tooltip, verdict, IconContent, IconStyle, TooltipItem,
+    ICON_SIZE, PRODUCT_NAME,
 };
 use crate::window;
 
@@ -127,9 +129,18 @@ impl<B: TrayBackend> TrayController<B> {
         }
     }
 
-    /// Called every tick. A snapshot of another schema revision is skipped: the
-    /// next tick brings the matching pair.
-    pub fn update(&self, schema: &Schema, snapshot: &Snapshot, settings: &Settings) {
+    /// Called every tick with the latest health report, whose level colors the
+    /// icon and whose verdict leads the tooltip. The verdict is rebuilt every
+    /// time, so a change of language or units shows at once even while the
+    /// report stays the same. A snapshot of another schema revision is
+    /// skipped: the next tick brings the matching pair.
+    pub fn update(
+        &self,
+        schema: &Schema,
+        snapshot: &Snapshot,
+        health: &HealthReport,
+        settings: &Settings,
+    ) {
         if snapshot.revision != schema.revision {
             return;
         }
@@ -156,7 +167,7 @@ impl<B: TrayBackend> TrayController<B> {
 
         let (value, unit) = reading(icon);
         let content = icon_content(value, unit, temperature);
-        let style = NEUTRAL;
+        let style = style_for(health.level);
         if !state
             .icon
             .as_ref()
@@ -174,8 +185,16 @@ impl<B: TrayBackend> TrayController<B> {
                 unit,
             }
         };
+        let verdict = verdict(
+            state.lang,
+            health,
+            schema,
+            temperature,
+            settings.general.throughput_unit,
+        );
         let text = tooltip(
             state.lang,
+            verdict.as_deref(),
             &[
                 item("tray.tooltip.cpu", cpu),
                 item("tray.tooltip.gpu", gpu),
@@ -364,8 +383,11 @@ mod tests {
     use oma_core::model::{
         Device, DeviceKind, Label, Schema, Sensor, SensorKind, Snapshot, Source, Unit,
     };
+    use oma_core::rules::{Alert, Coverage, Level, OverallLevel};
     use oma_core::settings::{Settings, TemperatureUnit};
     use std::collections::BTreeMap;
+
+    use crate::tray_icon::{CRIT, NEUTRAL, OK, WARN};
     use std::sync::{Arc, Mutex};
 
     fn device(id: &str, kind: DeviceKind, integrated: Option<bool>) -> Device {
@@ -528,8 +550,8 @@ mod tests {
         let values = [(CPU_TEMP, 45.0), (DGPU_TEMP, 62.0), (RAM_LOAD, 48.0)];
 
         let first = snapshot(&schema, &values);
-        tray.update(&schema, &first, &settings);
-        tray.update(&schema, &first, &settings);
+        tray.update(&schema, &first, &HealthReport::default(), &settings);
+        tray.update(&schema, &first, &HealthReport::default(), &settings);
         {
             let calls = backend.0.lock().unwrap();
             assert_eq!(calls.icons.len(), 1);
@@ -548,7 +570,7 @@ mod tests {
             &schema,
             &[(CPU_TEMP, 50.0), (DGPU_TEMP, 62.0), (RAM_LOAD, 48.0)],
         );
-        tray.update(&schema, &second, &settings);
+        tray.update(&schema, &second, &HealthReport::default(), &settings);
         let calls = backend.0.lock().unwrap();
         assert_eq!(calls.icons.len(), 1);
         assert_eq!(calls.tooltips.len(), 2);
@@ -565,10 +587,10 @@ mod tests {
         );
 
         let mut settings = Settings::default();
-        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
         settings.general.temperature_unit = TemperatureUnit::F;
         settings.tray.icon_sensor = Some(RAM_LOAD.to_owned());
-        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
 
         let calls = backend.0.lock().unwrap();
         assert_eq!(
@@ -600,19 +622,29 @@ mod tests {
 
         // The same number 48, first as a temperature, then as a load: a re-send.
         let temperature = values(48.0, 48.0);
-        tray.update(&schema, &temperature, &settings);
-        tray.update(&schema, &temperature, &settings);
+        tray.update(&schema, &temperature, &HealthReport::default(), &settings);
+        tray.update(&schema, &temperature, &HealthReport::default(), &settings);
         assert_eq!(count(), 1);
         settings.tray.icon_sensor = Some(RAM_LOAD.to_owned());
-        tray.update(&schema, &temperature, &settings);
+        tray.update(&schema, &temperature, &HealthReport::default(), &settings);
         assert_eq!(count(), 2);
 
         // A bar re-sends when its level changes, not when the reading does not.
-        tray.update(&schema, &temperature, &settings);
+        tray.update(&schema, &temperature, &HealthReport::default(), &settings);
         assert_eq!(count(), 2);
-        tray.update(&schema, &values(48.0, 49.0), &settings);
+        tray.update(
+            &schema,
+            &values(48.0, 49.0),
+            &HealthReport::default(),
+            &settings,
+        );
         assert_eq!(count(), 3);
-        tray.update(&schema, &values(90.0, 49.4), &settings);
+        tray.update(
+            &schema,
+            &values(90.0, 49.4),
+            &HealthReport::default(),
+            &settings,
+        );
         assert_eq!(count(), 3, "49.4 still rounds to 49");
 
         let calls = backend.0.lock().unwrap();
@@ -626,7 +658,12 @@ mod tests {
         let tray = TrayController::new(backend.clone(), Lang::En);
         let mut snap = snapshot(&schema, &[(CPU_TEMP, 45.0)]);
         snap.revision += 1;
-        tray.update(&schema, &snap, &Settings::default());
+        tray.update(
+            &schema,
+            &snap,
+            &HealthReport::default(),
+            &Settings::default(),
+        );
         let calls = backend.0.lock().unwrap();
         assert!(calls.icons.is_empty() && calls.tooltips.is_empty());
     }
@@ -638,7 +675,7 @@ mod tests {
         let tray = TrayController::new(backend.clone(), Lang::En);
         let settings = Settings::default();
         let snap = snapshot(&schema, &[(CPU_TEMP, 45.0)]);
-        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
 
         tray.relabel(Lang::En);
         assert!(backend.0.lock().unwrap().labels.is_empty());
@@ -647,8 +684,135 @@ mod tests {
         assert_eq!(backend.0.lock().unwrap().labels, [Lang::It]);
 
         // The tooltip is rebuilt in the new language on the next tick.
-        tray.update(&schema, &snap, &settings);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
         assert_eq!(backend.0.lock().unwrap().tooltips.len(), 2);
+    }
+
+    fn health(level: OverallLevel, alerts: Vec<Alert>) -> HealthReport {
+        HealthReport {
+            level,
+            since_ms: 1_000,
+            revision: 2,
+            coverage: Coverage::Complete,
+            unavailable_targets: Vec::new(),
+            alerts,
+        }
+    }
+
+    fn gpu_hot() -> Alert {
+        Alert {
+            rule_id: "gpu-temp".to_owned(),
+            sensor_id: DGPU_TEMP.to_owned(),
+            device_id: "gpu/pci-0000:01:00.0".to_owned(),
+            unit: Unit::Celsius,
+            sensor_label: Label::new("gpu.temperature.core"),
+            level: Level::Crit,
+            value: Some(92.0),
+            threshold: Some(90.0),
+            since_ms: 1_000,
+            valid: true,
+            last_valid_ms: Some(1_000),
+            message_key: "rule.gpu-temp.message".to_owned(),
+            params: BTreeMap::from([("device".to_owned(), "RTX 4080".to_owned())]),
+        }
+    }
+
+    const HOT: [(&str, f64); 3] = [(CPU_TEMP, 45.0), (DGPU_TEMP, 92.0), (RAM_LOAD, 48.0)];
+
+    #[test]
+    fn icon_color_follows_the_health_level() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        let settings = Settings::default();
+        let snap = snapshot(&schema, &HOT);
+        let drawn = |style| render(&IconContent::Text("92".to_owned()), style);
+
+        // Only the level changes between these ticks: each change redraws.
+        for level in [
+            OverallLevel::Ok,
+            OverallLevel::Ok,
+            OverallLevel::Warn,
+            OverallLevel::Crit,
+            OverallLevel::Crit,
+            OverallLevel::Neutral,
+        ] {
+            let alerts = match level {
+                OverallLevel::Warn | OverallLevel::Crit => vec![gpu_hot()],
+                _ => Vec::new(),
+            };
+            tray.update(&schema, &snap, &health(level, alerts), &settings);
+        }
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(
+            calls.icons,
+            [drawn(OK), drawn(WARN), drawn(CRIT), drawn(NEUTRAL)]
+        );
+    }
+
+    #[test]
+    fn tooltip_starts_with_the_verdict() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        let settings = Settings::default();
+        let snap = snapshot(&schema, &HOT);
+
+        tray.update(
+            &schema,
+            &snap,
+            &health(OverallLevel::Ok, Vec::new()),
+            &settings,
+        );
+        let mut warn = gpu_hot();
+        warn.level = Level::Warn;
+        tray.update(
+            &schema,
+            &snap,
+            &health(OverallLevel::Warn, vec![warn]),
+            &settings,
+        );
+        tray.update(
+            &schema,
+            &snap,
+            &health(OverallLevel::Crit, vec![gpu_hot(), gpu_hot()]),
+            &settings,
+        );
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(
+            calls.tooltips,
+            [
+                "CPU 45 °C · GPU 92 °C · RAM 48 %",
+                "RTX 4080 overheating (92 °C) · CPU 45 °C · GPU 92 °C · RAM 48 %",
+                "2 problems · CPU 45 °C · GPU 92 °C · RAM 48 %",
+            ]
+        );
+    }
+
+    #[test]
+    fn language_and_units_refresh_unchanged_verdict() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        let mut settings = Settings::default();
+        let snap = snapshot(&schema, &HOT);
+        // One report for the whole test: only the language and the unit change.
+        let report = health(OverallLevel::Crit, vec![gpu_hot()]);
+
+        tray.update(&schema, &snap, &report, &settings);
+        tray.relabel(Lang::It);
+        tray.update(&schema, &snap, &report, &settings);
+        settings.general.temperature_unit = TemperatureUnit::F;
+        tray.update(&schema, &snap, &report, &settings);
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(
+            calls.tooltips,
+            [
+                "RTX 4080 overheating (92 °C) · CPU 45 °C · GPU 92 °C · RAM 48 %",
+                "RTX 4080 surriscaldata (92 °C) · CPU 45 °C · GPU 92 °C · RAM 48 %",
+                "RTX 4080 surriscaldata (198 °F) · CPU 113 °F · GPU 198 °F · RAM 48 %",
+            ]
+        );
     }
 
     fn text(locale: &str, key: &str) -> String {

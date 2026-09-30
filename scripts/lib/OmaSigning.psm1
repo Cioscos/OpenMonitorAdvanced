@@ -128,6 +128,21 @@ function Assert-OmaRunContext($Manifest, $ExpectedContext) {
     }
 }
 
+# In GitHub Actions every pass is also compared with the run that is actually executing, read from
+# the runner's own variables (inherited by Tauri and makensis), not only with the context that
+# init wrote into the configs.
+function Assert-OmaGitHubContext($Manifest) {
+    if ($env:GITHUB_ACTIONS -ne 'true') { return }
+    foreach ($pair in @(@('commit', 'GITHUB_SHA'), @('runId', 'GITHUB_RUN_ID'), @('runAttempt', 'GITHUB_RUN_ATTEMPT'))) {
+        $actual = [Environment]::GetEnvironmentVariable($pair[1])
+        if (-not $actual) { throw "running in GitHub Actions but $($pair[1]) is not set" }
+        $found = [string]$Manifest[$pair[0]]
+        if ($found -cne $actual) {
+            throw "manifest belongs to another run: $($pair[0]) is '$found', $($pair[1]) is '$actual'"
+        }
+    }
+}
+
 function New-OmaEntry([string]$Role, [string]$Path, [string]$Name, [string]$Sha, [string]$After) {
     [ordered]@{ role = $Role; path = $Path; name = $Name; sha256 = $Sha; after = $After }
 }
@@ -236,8 +251,9 @@ function Initialize-OmaSigningState {
 .SYNOPSIS
   Handles one signCommand call from Tauri or makensis in the collect or apply pass.
 .DESCRIPTION
-  Returns the manifest entry it recorded. With -ExpectedContext, the manifest must belong to
-  that run first.
+  Returns the manifest entry it recorded. The manifest must first belong to -ExpectedContext
+  (required; the generated configs always pass it) and, in GitHub Actions, to the run described
+  by GITHUB_SHA, GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT.
 #>
 function Invoke-OmaSignShim {
     [CmdletBinding()]
@@ -249,7 +265,8 @@ function Invoke-OmaSignShim {
     )
     $state = Resolve-OmaPath $StateRoot
     $m = Read-OmaManifest $state
-    if ($null -ne $ExpectedContext) { Assert-OmaRunContext $m $ExpectedContext }
+    Assert-OmaRunContext $m $ExpectedContext
+    Assert-OmaGitHubContext $m
     if ($Mode -eq 'collect') { Assert-OmaCollectOpen $m }
 
     $p = Resolve-OmaPath $Path
@@ -304,15 +321,19 @@ function Invoke-OmaSignShim {
 <#
 .SYNOPSIS
   Records the payload oma-service.exe (role 'service') in the collect pass and copies it to unsigned/.
+  Same run context checks as Invoke-OmaSignShim.
 #>
 function Register-OmaService {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$StateRoot,
-        [Parameter(Mandatory)] [string]$Path
+        [Parameter(Mandatory)] [string]$Path,
+        [pscustomobject]$ExpectedContext
     )
     $state = Resolve-OmaPath $StateRoot
     $m = Read-OmaManifest $state
+    Assert-OmaRunContext $m $ExpectedContext
+    Assert-OmaGitHubContext $m
     Assert-OmaCollectOpen $m
     $p = Resolve-OmaPath $Path
     if ($p -ine $m['expected']['service']) { throw "unexpected service path: $Path (expected $($m['expected']['service']))" }
@@ -374,26 +395,39 @@ function Import-OmaSignedFiles {
 .SYNOPSIS
   Gate after a bundle: the pass saw exactly the expected calls and the state is consistent.
 .DESCRIPTION
-  The run context comes from the caller (GITHUB_SHA, validated version, run id/attempt), never
-  from the manifest being checked. collect needs one app, uninstaller, setup and service; apply
-  one app, uninstaller and setup. Both need one call for each of the five NSIS plugins, intact.
+  The run context (GITHUB_SHA, validated version, run id/attempt) and the repository root come
+  from the caller, never from the manifest being checked; the manifest's expected paths are
+  rebuilt from them. collect needs one app, uninstaller, setup and service; apply one app,
+  uninstaller and setup. Both need one call for each of the five NSIS plugins, intact.
+  -RepoRoot and -ExpectedContext are required (checked here, so a missing one fails instead of
+  prompting).
 #>
 function Assert-OmaSigningPass {
     [CmdletBinding()]
     param(
+        [string]$RepoRoot,
         [Parameter(Mandatory)] [string]$StateRoot,
         [Parameter(Mandatory)] [ValidateSet('collect', 'apply')] [string]$Pass,
-        [Parameter(Mandatory)] [pscustomobject]$ExpectedContext
+        [pscustomobject]$ExpectedContext
     )
+    if (-not $RepoRoot) { throw 'the repository root is required to check a pass' }
+    $repo = Resolve-OmaPath $RepoRoot
     $state = Resolve-OmaPath $StateRoot
     $m = Read-OmaManifest $state
     Assert-OmaRunContext $m $ExpectedContext
-    $repo = $m['repoRoot']
+    if ([string]$m['repoRoot'] -ine $repo) {
+        throw "manifest belongs to another repository: repoRoot is '$($m['repoRoot'])', expected '$repo'"
+    }
     $exp = $m['expected']
-    if ($exp['app'] -ine (Join-Path $repo 'target\release\oma-app.exe') -or
-        $exp['setupDir'] -ine (Join-Path $repo 'target\release\bundle\nsis') -or
-        $exp['setupName'] -cne "${ProductName}_$($ExpectedContext.Version)_x64-setup.exe") {
-        throw 'the expected paths in the manifest do not match the repository and version'
+    $want = [ordered]@{
+        app       = Join-Path $repo 'target\release\oma-app.exe'
+        setupDir  = Join-Path $repo 'target\release\bundle\nsis'
+        setupName = "${ProductName}_$($ExpectedContext.Version)_x64-setup.exe"
+        service   = Join-Path $repo 'target\installer-payload\service\oma-service.exe'
+    }
+    foreach ($k in $want.Keys) {
+        $same = if ($k -eq 'setupName') { [string]$exp[$k] -ceq $want[$k] } else { [string]$exp[$k] -ieq $want[$k] }
+        if (-not $same) { throw "the manifest's expected.$k is '$($exp[$k])', expected '$($want[$k])'" }
     }
 
     $entries = $m[$Pass]

@@ -19,6 +19,15 @@ BeforeAll {
     $env:TMP = $fakeTemp
     $env:TEMP = $fakeTemp
 
+    # The fake runs must not be compared with the real run when the tests themselves run in
+    # GitHub Actions; the 'GitHub Actions context' tests set these explicitly.
+    $script:githubVars = @('GITHUB_ACTIONS', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')
+    $script:savedGithub = @{}
+    foreach ($n in $githubVars) {
+        $savedGithub[$n] = [Environment]::GetEnvironmentVariable($n)
+        Remove-Item "Env:$n" -ErrorAction SilentlyContinue
+    }
+
     $script:pluginNames = @('NSISdl.dll', 'StartMenu.dll', 'System.dll', 'nsDialogs.dll', 'additional\nsis_tauri_utils.dll')
 
     function Write-Fake([string]$Path, [string]$Text) {
@@ -74,13 +83,13 @@ BeforeAll {
     }
 
     function Invoke-CollectPass($r, [switch]$SkipUninstaller) {
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App
-        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $p }
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $p }
         if (-not $SkipUninstaller) {
-            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller)
+            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
         }
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.SetupArg
-        Register-OmaService -StateRoot $r.State -Path $r.Service
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
+        Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
     }
 
     function New-SignedDir($r, [string[]]$Names = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe')) {
@@ -95,11 +104,11 @@ BeforeAll {
 
     # Second pass: Tauri produces the same app and uninstaller bytes again and a new setup.
     function Invoke-ApplyPass($r) {
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App
-        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $p }
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path (New-Uninstaller)
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $p }
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
         Write-Fake $r.Setup 'setup of the second pass'
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.SetupArg
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
     }
 
     function Read-Manifest($r) {
@@ -120,6 +129,7 @@ BeforeAll {
 AfterAll {
     $env:TMP = $savedTmp
     $env:TEMP = $savedTemp
+    foreach ($n in $githubVars) { [Environment]::SetEnvironmentVariable($n, $savedGithub[$n]) }
 }
 
 Describe 'Initialize-OmaSigningState' {
@@ -233,10 +243,10 @@ Describe 'Invoke-OmaSignShim collect' {
 
     It 'collect_records_role_name_and_hash' {
         $appBefore = Get-OmaSha256 $r.App
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
         $uninst = New-Uninstaller 'the uninstaller'
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $uninst
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.SetupArg
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $uninst
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
 
         $m = Read-Manifest $r
         $c = @($m.collect)
@@ -264,7 +274,7 @@ Describe 'Invoke-OmaSignShim collect' {
     }
 
     It 'register_service_records_role_service' {
-        Register-OmaService -StateRoot $r.State -Path $r.Service
+        Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
         $c = @((Read-Manifest $r).collect)
         $c.Count | Should -Be 1
         $c[0].role | Should -Be 'service'
@@ -272,16 +282,16 @@ Describe 'Invoke-OmaSignShim collect' {
         $c[0].sha256 | Should -BeExactly (Get-Sha 'service unsigned')
         Get-OmaSha256 (Join-Path $r.State 'unsigned\oma-service.exe') | Should -BeExactly (Get-Sha 'service unsigned')
 
-        { Register-OmaService -StateRoot $r.State -Path $r.Service } | Should -Throw -ExpectedMessage 'duplicate service call'
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service } | Should -Throw -ExpectedMessage 'duplicate service call'
         $other = Join-Path $r.Root 'target\release\oma-service.exe'
         Write-Fake $other 'not the payload'
-        { Register-OmaService -StateRoot $r.State -Path $other } | Should -Throw
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $other } | Should -Throw
     }
 
     It 'plugins_are_left_intact' {
         foreach ($p in $r.Plugins) {
             $before = Get-OmaSha256 $p
-            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $p
+            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $p
             Get-OmaSha256 $p | Should -BeExactly $before
         }
         $c = @((Read-Manifest $r).collect)
@@ -291,13 +301,13 @@ Describe 'Invoke-OmaSignShim collect' {
         Get-ChildItem -LiteralPath (Join-Path $r.State 'unsigned') | Should -BeNullOrEmpty
 
         # In apply a plugin must still match what collect saw.
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller)
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.SetupArg
-        Register-OmaService -StateRoot $r.State -Path $r.Service
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
+        Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
         Import-FakeSigned $r
         Write-Fake (Join-Path $r.PluginDir 'System.dll') 'a different System.dll'
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path (Join-Path $r.PluginDir 'System.dll') } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path (Join-Path $r.PluginDir 'System.dll') } |
             Should -Throw -ExpectedMessage '*System.dll*'
     }
 
@@ -315,28 +325,28 @@ Describe 'Invoke-OmaSignShim collect' {
         )
         foreach ($p in $cases) {
             Write-Fake $p 'anything'
-            { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $p } |
+            { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $p } |
                 Should -Throw -ExpectedMessage "unexpected file passed to signCommand: *" -Because $p
         }
         # A trailing newline must not sneak past the \z anchors.
         foreach ($p in ($r.Plugins[2] + "`n"), ((New-Uninstaller) + "`n")) {
-            { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $p } |
+            { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $p } |
                 Should -Throw -ExpectedMessage 'unexpected file passed to signCommand: *'
         }
         # A relative path is refused whatever the current directory.
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path 'oma-app.exe' } | Should -Throw
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path 'oma-app.exe' } | Should -Throw
         @((Read-Manifest $r).collect).Count | Should -Be 0
     }
 
     It 'rejects_a_second_uninstaller' {
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller)
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller) } |
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller) } |
             Should -Throw -ExpectedMessage 'duplicate uninstaller call'
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App } |
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
             Should -Throw -ExpectedMessage 'duplicate app call'
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.SetupArg
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.Setup } |
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Setup } |
             Should -Throw -ExpectedMessage 'duplicate setup call'
     }
 
@@ -344,11 +354,11 @@ Describe 'Invoke-OmaSignShim collect' {
         $other = Join-Path $TestDrive 'tmp-c'
         New-Item -ItemType Directory -Force $other | Out-Null
         $u = New-Uninstaller 'x' $other
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $u } |
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $u } |
             Should -Throw -ExpectedMessage 'unexpected file passed to signCommand: *'
         $env:TMP = $other
         try {
-            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $u
+            Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $u
         } finally {
             $env:TMP = $env:TEMP
         }
@@ -368,8 +378,8 @@ Describe 'Invoke-OmaSignShim apply' {
         $collected = @((Read-Manifest $r).collect)
         Import-FakeSigned $r
         $u = New-Uninstaller
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $u
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $u
 
         Get-OmaSha256 $r.App | Should -BeExactly (Get-Sha 'signed oma-app.exe')
         Get-OmaSha256 $u | Should -BeExactly (Get-Sha 'signed uninstall.exe')
@@ -391,17 +401,17 @@ Describe 'Invoke-OmaSignShim apply' {
         Import-FakeSigned $r
         Write-Fake $r.App 'a different build'
         $received = Get-OmaSha256 $r.App
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
             Should -Throw -ExpectedMessage "hash mismatch for oma-app.exe: collected $unsignedApp, received $received"
         Get-OmaSha256 $r.App | Should -BeExactly $received
     }
 
     It 'apply_fails_when_signed_copy_missing' {
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
             Should -Throw -ExpectedMessage 'signed copy missing for oma-app.exe'
         Import-FakeSigned $r
         Remove-Item -LiteralPath (Join-Path $r.State 'signed\uninstall.exe')
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path (New-Uninstaller) } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller) } |
             Should -Throw -ExpectedMessage 'signed copy missing for uninstall.exe'
         Get-OmaSha256 $r.App | Should -BeExactly $unsignedApp
     }
@@ -409,7 +419,7 @@ Describe 'Invoke-OmaSignShim apply' {
     It 'apply_rejects_tampered_signed_copy' {
         Import-FakeSigned $r
         Write-Fake (Join-Path $r.State 'signed\oma-app.exe') 'swapped after import'
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
             Should -Throw -ExpectedMessage '*signed copy of oma-app.exe*'
         Get-OmaSha256 $r.App | Should -BeExactly $unsignedApp
     }
@@ -418,7 +428,7 @@ Describe 'Invoke-OmaSignShim apply' {
         Import-FakeSigned $r
         Write-Fake $r.Setup 'setup of the second pass'
         $before = Get-OmaSha256 $r.Setup
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.SetupArg
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
         Get-OmaSha256 $r.Setup | Should -BeExactly $before
         $a = @((Read-Manifest $r).apply)
         $a[0].role | Should -Be 'setup'
@@ -428,8 +438,8 @@ Describe 'Invoke-OmaSignShim apply' {
 
     It 'refuses to collect or register once the signed files are imported' {
         Import-FakeSigned $r
-        { Register-OmaService -StateRoot $r.State -Path $r.Service } | Should -Throw
-        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.Plugins[0] } | Should -Throw
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service } | Should -Throw
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Plugins[0] } | Should -Throw
     }
 }
 
@@ -468,54 +478,54 @@ Describe 'Assert-OmaSigningPass' {
 
     It 'check_fails_when_the_uninstaller_was_never_called' {
         Invoke-CollectPass $r -SkipUninstaller
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*uninstaller*'
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller)
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } | Should -Not -Throw
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } | Should -Not -Throw
     }
 
     It 'fails when the service was never registered or a plugin call is missing' {
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App
-        foreach ($p in $r.Plugins | Select-Object -Skip 1) { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $p }
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path (New-Uninstaller)
-        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.SetupArg
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        foreach ($p in $r.Plugins | Select-Object -Skip 1) { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $p }
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
+        Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*service*'
-        Register-OmaService -StateRoot $r.State -Path $r.Service
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+        Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*NSISdl.dll*'
     }
 
     It 'fails when the setup on disk is not the one the shim saw' {
         Invoke-CollectPass $r
         Write-Fake $r.Setup 'a stale setup from an older pass'
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*setup*'
     }
 
     It 'passes a complete apply pass and fails an incomplete one' {
         Invoke-CollectPass $r
         Import-FakeSigned $r
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.App
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass apply -ExpectedContext $r.Context } |
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass apply -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*uninstaller*'
-        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $p }
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path (New-Uninstaller)
+        foreach ($p in $r.Plugins) { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $p }
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path (New-Uninstaller)
         Write-Fake $r.Setup 'setup of the second pass'
-        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.SetupArg
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass apply -ExpectedContext $r.Context } | Should -Not -Throw
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } | Should -Not -Throw
+        Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass apply -ExpectedContext $r.Context } | Should -Not -Throw
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } | Should -Not -Throw
     }
 
     It 'check_fails_on_manifest_of_another_run' {
         Invoke-CollectPass $r
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext (New-Context -RunId '43') } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext (New-Context -RunId '43') } |
             Should -Throw -ExpectedMessage '*runId*'
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext (New-Context -Commit ('b' * 40)) } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext (New-Context -Commit ('b' * 40)) } |
             Should -Throw -ExpectedMessage '*commit*'
         $v = New-Context
         $v.Version = '0.3.1'
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $v } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $v } |
             Should -Throw -ExpectedMessage '*version*'
     }
 
@@ -526,17 +536,113 @@ Describe 'Assert-OmaSigningPass' {
         $m = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
         $m.commit = 'c' * 40
         $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*commit*'
-        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect } | Should -Throw
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect } |
+            Should -Throw -ExpectedMessage '*run context*'
 
         # The shim calls compare the manifest with the context the config passes them, too.
-        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -Path $r.SetupArg -ExpectedContext $r.Context } |
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg } |
+            Should -Throw -ExpectedMessage '*commit*'
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service } |
             Should -Throw -ExpectedMessage '*commit*'
 
         # The script refuses check without an explicit context.
-        $res = Invoke-ShimScript @('-Mode', 'check', '-Pass', 'collect', '-StateRoot', $r.State)
+        $res = Invoke-ShimScript @('-Mode', 'check', '-Pass', 'collect', '-RepoRoot', $r.Root, '-StateRoot', $r.State)
         $res.ExitCode | Should -Not -Be 0
+    }
+
+    It 'outside GitHub Actions the explicit context is mandatory in every pass' {
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -Path $r.App } |
+            Should -Throw -ExpectedMessage '*run context*'
+        { Register-OmaService -StateRoot $r.State -Path $r.Service } |
+            Should -Throw -ExpectedMessage '*run context*'
+        @((Read-Manifest $r).collect).Count | Should -Be 0
+        foreach ($mode in 'collect', 'apply', 'register-service') {
+            $res = Invoke-ShimScript @('-Mode', $mode, '-StateRoot', $r.State, '-Path', $r.App)
+            $res.ExitCode | Should -Not -Be 0
+            $res.Stderr | Should -BeLike '*-Commit*'
+        }
+    }
+
+    It 'check_verifies_repo_root_and_service_independently' {
+        Invoke-CollectPass $r
+        { Assert-OmaSigningPass -RepoRoot $r.Root.ToUpperInvariant() -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Not -Throw
+        $other = Join-Path (Split-Path $r.Root) 'other-repo'
+        New-Item -ItemType Directory -Force $other | Out-Null
+        { Assert-OmaSigningPass -RepoRoot $other -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Throw -ExpectedMessage '*repoRoot*'
+        { Assert-OmaSigningPass -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Throw -ExpectedMessage '*repository root*'
+
+        $path = Join-Path $r.State 'manifest.json'
+        $original = Get-Content -Raw -LiteralPath $path
+        $m = $original | ConvertFrom-Json
+        $m.expected.service = Join-Path $r.Root 'target\release\oma-service.exe'
+        $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Throw -ExpectedMessage '*service*'
+
+        # A manifest moved wholesale to another root (repoRoot and every expected path) is refused too.
+        $m = $original.Replace(($r.Root | ConvertTo-Json).Trim('"'), ($other | ConvertTo-Json).Trim('"')) | ConvertFrom-Json
+        $m.repoRoot | Should -Be $other
+        $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Throw -ExpectedMessage '*repoRoot*'
+    }
+}
+
+Describe 'GitHub Actions context' {
+    BeforeEach {
+        $r = New-FakeRepo
+        Initialize-Fake $r
+        $env:GITHUB_ACTIONS = 'true'
+        $env:GITHUB_SHA = $r.Context.Commit
+        $env:GITHUB_RUN_ID = $r.Context.RunId
+        $env:GITHUB_RUN_ATTEMPT = $r.Context.RunAttempt
+    }
+
+    AfterEach {
+        foreach ($n in $githubVars) { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
+    }
+
+    It 'passes when the manifest matches the GitHub run' {
+        Invoke-CollectPass $r
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } | Should -Not -Throw
+        Import-FakeSigned $r
+        Invoke-ApplyPass $r
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass apply -ExpectedContext $r.Context } | Should -Not -Throw
+    }
+
+    It 'fails every pass when the GitHub run differs from the manifest' -ForEach @(
+        @{ Var = 'GITHUB_SHA'; Value = 'b' * 40 },
+        @{ Var = 'GITHUB_RUN_ID'; Value = '43' },
+        @{ Var = 'GITHUB_RUN_ATTEMPT'; Value = '2' }
+    ) {
+        Set-Item "Env:$Var" $Value
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
+            Should -Throw -ExpectedMessage "*$Var*"
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service } |
+            Should -Throw -ExpectedMessage "*$Var*"
+        { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg } |
+            Should -Throw -ExpectedMessage "*$Var*"
+        @((Read-Manifest $r).collect).Count | Should -Be 0
+        # The same through the script, which inherits the environment like the Tauri/makensis children.
+        $res = Invoke-ShimScript @('-Mode', 'collect', '-StateRoot', $r.State, '-Path', $r.App,
+            '-Commit', $r.Context.Commit, '-Version', '0.3.0', '-RunId', '42', '-RunAttempt', '1')
+        $res.ExitCode | Should -Not -Be 0
+        $res.Stderr | Should -BeLike "*$Var*"
+    }
+
+    It 'fails when a GitHub variable is missing in Actions' -ForEach @(
+        @{ Var = 'GITHUB_SHA' }, @{ Var = 'GITHUB_RUN_ID' }, @{ Var = 'GITHUB_RUN_ATTEMPT' }
+    ) {
+        Remove-Item "Env:$Var"
+        { Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.App } |
+            Should -Throw -ExpectedMessage "*$Var*"
+        { Register-OmaService -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service } |
+            Should -Throw -ExpectedMessage "*$Var*"
     }
 }
 
@@ -558,9 +664,9 @@ Describe 'sign-shim.ps1' {
             $x = Invoke-OmaNative -FilePath $sc.cmd -ArgumentList $a -WorkingDirectory $elsewhere -AllowFailure
             $x.ExitCode | Should -Be 0 -Because "$f -> $($x.Stderr)"
         }
-        $res = Invoke-ShimScript @('-Mode', 'register-service', '-StateRoot', $r.State, '-Path', $r.Service) $elsewhere
+        $res = Invoke-ShimScript (@('-Mode', 'register-service', '-StateRoot', $r.State, '-Path', $r.Service) + $ctxArgs) $elsewhere
         $res.ExitCode | Should -Be 0 -Because $res.Stderr
-        $res = Invoke-ShimScript (@('-Mode', 'check', '-Pass', 'collect', '-StateRoot', $r.State) + $ctxArgs) $elsewhere
+        $res = Invoke-ShimScript (@('-Mode', 'check', '-Pass', 'collect', '-RepoRoot', $r.Root, '-StateRoot', $r.State) + $ctxArgs) $elsewhere
         $res.ExitCode | Should -Be 0 -Because $res.Stderr
 
         $from = New-SignedDir $r
@@ -588,7 +694,7 @@ Describe 'sign-shim.ps1' {
         $res.Stderr | Should -BeLike '*duplicate app call*'
 
         # The pass is incomplete (no uninstaller, setup or service).
-        $res = Invoke-ShimScript (@('-Mode', 'check', '-Pass', 'collect', '-StateRoot', $r.State) + $ctxArgs)
+        $res = Invoke-ShimScript (@('-Mode', 'check', '-Pass', 'collect', '-RepoRoot', $r.Root, '-StateRoot', $r.State) + $ctxArgs)
         $res.ExitCode | Should -Not -Be 0
         $res.Stderr | Should -BeLike '*uninstaller*'
 

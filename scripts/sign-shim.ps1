@@ -13,12 +13,16 @@
 
     pwsh scripts/sign-shim.ps1 -Mode init -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     cd app; pnpm tauri build --bundles nsis --config ../target/signing/tauri.sign.collect.json -v '--' --locked
-    pwsh scripts/sign-shim.ps1 -Mode register-service -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\service\oma-service.exe
+    pwsh scripts/sign-shim.ps1 -Mode register-service -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\service\oma-service.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     pwsh scripts/sign-shim.ps1 -Mode check -Pass collect -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
 
   The run context (-Commit, -Version, -RunId, -RunAttempt) comes from the caller, never from the
-  manifest being checked; collect/apply compare it too when the config passes it. Paths must be
-  absolute: Tauri runs the shim from app\src-tauri, makensis from target\release\nsis\x64.
+  manifest being checked, and every mode but import-signed requires it (the generated configs
+  pass it to collect/apply). In GitHub Actions (GITHUB_ACTIONS=true) collect, apply and
+  register-service also compare the manifest with GITHUB_SHA, GITHUB_RUN_ID and
+  GITHUB_RUN_ATTEMPT, and fail if any is missing. check compares the manifest's repository root
+  with -RepoRoot (default: the repository holding this script). Paths must be absolute: Tauri
+  runs the shim from app\src-tauri, makensis from target\release\nsis\x64.
   Exit code 0 only on success; the error goes to stderr.
 #>
 #Requires -Version 7
@@ -42,9 +46,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Get-RunContext([switch]$Required) {
+function Get-RunContext {
     $given = @($Commit, $Version, $RunId, $RunAttempt | Where-Object { $_ })
-    if ($given.Count -eq 0 -and -not $Required) { return $null }
     if ($given.Count -ne 4) { throw "-Mode $Mode needs -Commit, -Version, -RunId and -RunAttempt" }
     [pscustomobject]@{ Commit = $Commit; Version = $Version; RunId = $RunId; RunAttempt = $RunAttempt }
 }
@@ -58,7 +61,7 @@ try {
     Assert-Given 'StateRoot' $StateRoot
     switch ($Mode) {
         'init' {
-            $ctx = Get-RunContext -Required
+            $ctx = Get-RunContext
             Initialize-OmaSigningState -StateRoot $StateRoot -RepoRoot $RepoRoot -Commit $ctx.Commit `
                 -Version $ctx.Version -RunId $ctx.RunId -RunAttempt $ctx.RunAttempt
             Write-Output "sign-shim init: empty signing state in $StateRoot"
@@ -74,7 +77,7 @@ try {
         }
         'register-service' {
             Assert-Given 'Path' $Path
-            $e = Register-OmaService -StateRoot $StateRoot -Path $Path
+            $e = Register-OmaService -StateRoot $StateRoot -Path $Path -ExpectedContext (Get-RunContext)
             Write-Output "sign-shim register-service: $($e.name) $($e.sha256)"
         }
         'import-signed' {
@@ -84,7 +87,7 @@ try {
         }
         'check' {
             Assert-Given 'Pass' $Pass
-            Assert-OmaSigningPass -StateRoot $StateRoot -Pass $Pass -ExpectedContext (Get-RunContext -Required)
+            Assert-OmaSigningPass -RepoRoot $RepoRoot -StateRoot $StateRoot -Pass $Pass -ExpectedContext (Get-RunContext)
             Write-Output "sign-shim check: $Pass pass complete"
         }
     }

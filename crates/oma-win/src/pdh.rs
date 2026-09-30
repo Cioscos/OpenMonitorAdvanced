@@ -15,12 +15,13 @@ use windows::Win32::System::Performance::{
 /// `PDH_FMT_NOCAP100` (0x8000).
 const FMT_DOUBLE_NOCAP: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);
 /// Returned while a rate counter has fewer than two samples.
-const PDH_INVALID_DATA: u32 = 0xC000_0BBA;
+pub(crate) const PDH_INVALID_DATA: u32 = 0xC000_0BBA;
 /// Returned when a wildcard counter currently has no instances.
 const PDH_NO_DATA: u32 = 0x8000_07D5;
-/// A rate counter's base went backwards between the two samples.
-#[cfg(test)]
-const PDH_CALC_NEGATIVE_DENOMINATOR: u32 = 0x8000_07D6;
+/// A rate counter's base went backwards between the two samples: a 32-bit
+/// base that wrapped, or `_Total` raw data that is inconsistent for one
+/// interval. The next interval is computed from new samples.
+pub(crate) const PDH_CALC_NEGATIVE_DENOMINATOR: u32 = 0x8000_07D6;
 /// Instances can appear between the size query and the read; retry a few times.
 const MAX_ARRAY_ATTEMPTS: usize = 3;
 

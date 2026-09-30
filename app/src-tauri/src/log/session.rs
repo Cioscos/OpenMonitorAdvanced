@@ -491,7 +491,9 @@ impl LogService {
         let (reply, answer) = sync_channel(1);
         self.queue.push_control(make(inner.session, reply)).ok()?;
         inner.busy = true;
-        self.hook(Point::BarrierQueued);
+        drop(inner);
+        // Admission is closed and stays closed while the command waits.
+        self.hook(Point::BarrierReleased);
         Some(answer)
     }
 
@@ -728,7 +730,7 @@ impl LogService {
     #[cfg(not(test))]
     fn hook(&self, _point: Point) {}
 
-    /// Runs `hook` at the test points, with the session lock held.
+    /// Runs `hook` at the test points.
     #[cfg(test)]
     fn set_hook(&self, hook: Hook) {
         *lock(&self.hook) = Some(hook);
@@ -742,13 +744,14 @@ impl Drop for LogService {
     }
 }
 
-/// Points where the tests stop a thread, with the session lock held.
+/// Points where the tests stop a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Point {
-    /// A tick queued its row.
+    /// A tick queued its row (session lock held).
     TickQueued,
-    /// A pause or stop queued its barrier.
-    BarrierQueued,
+    /// A pause or stop queued its barrier and released the session lock;
+    /// it has not started waiting for the writer yet.
+    BarrierReleased,
 }
 
 #[cfg(test)]

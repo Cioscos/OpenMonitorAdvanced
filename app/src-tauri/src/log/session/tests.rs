@@ -1013,19 +1013,25 @@ fn exit_stops_the_session_within_the_bound() {
 
 #[test]
 fn tick_racing_stop_cannot_enqueue_after_barrier() {
-    // The stop holds admission with its barrier queued; the writer is stuck
-    // in the stop's flush, so anything queued now would stay in the queue.
+    // The stop has queued its barrier and released the session lock, and
+    // stays there; the writer is stuck in the stop's flush, so a row queued
+    // now would stay in the queue.
     let mut rig = Rig::new();
     rig.tick(0.0);
     rig.log.start();
     rig.gate.block_flush(true);
     let flushes = rig.gate.flushes();
-    let meet = hook_at(&rig.log, Point::BarrierQueued);
+    let meet = hook_at(&rig.log, Point::BarrierReleased);
     let stop = rig.command(LogService::stop);
     meet.arrived.recv().unwrap();
     rig.gate.wait_flushes(flushes + 1);
     rig.tick_raw(1.0);
     assert_eq!(rig.log.queue.len(), 0, "nothing after the barrier");
+    assert_eq!(
+        rig.status().dropped,
+        0,
+        "refused by the admission, not by lock contention"
+    );
     meet.go.send(()).unwrap();
     rig.gate.block_flush(false);
     assert_eq!(stop.join().unwrap().state, LogState::Idle);
@@ -1064,15 +1070,27 @@ fn tick_racing_pause_is_drained_before_ack() {
     assert_eq!(pause.join().unwrap().state, LogState::Paused);
     assert_eq!(rig.flushed_values(&base()), ["1", "2"]);
 
-    // The pause wins: a tick while it holds admission sends nothing, now or
-    // after the resume.
+    // The pause wins: once it has queued its barrier and released the lock,
+    // a tick sends nothing, now or after the resume. The writer has written
+    // row 3 and waits in the pause's flush, so a row queued now would stay
+    // in the queue.
     rig.log.resume();
     rig.tick(3.0);
-    let meet = hook_at(&rig.log, Point::BarrierQueued);
+    rig.gate.block_flush(true);
+    let flushes = rig.gate.flushes();
+    let meet = hook_at(&rig.log, Point::BarrierReleased);
     let pause = rig.command(LogService::pause);
     meet.arrived.recv().unwrap();
+    rig.gate.wait_flushes(flushes + 1);
     rig.tick_raw(4.0);
+    assert_eq!(rig.log.queue.len(), 0, "nothing after the barrier");
+    assert_eq!(
+        rig.status().dropped,
+        0,
+        "refused by the admission, not by lock contention"
+    );
     meet.go.send(()).unwrap();
+    rig.gate.block_flush(false);
     assert_eq!(pause.join().unwrap().state, LogState::Paused);
     assert_eq!(rig.flushed_values(&base()), ["1", "2", "3"]);
     rig.log.resume();

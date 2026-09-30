@@ -197,6 +197,8 @@ Prima di scrivere le mappature, uno spike su questa macchina (Ryzen con iGPU AMD
 
 L'esito si registra in `docs/superpowers/references/m5/` come per gli spike della M4. Una regola il cui sensore non esiste non ha istanze e non compare nel banner.
 
+**Esito (2026-09-30, nota `docs/superpowers/references/m5/s1-lhm-sensors.md`):** nessun sensore di throttling CPU in LibreHardwareMonitor 0.9.6 (`cpu-throttle` senza istanze); critical warning solo per NVMe, dal byte 0 del log SMART/Health con maschera `0x3D` (il bit della temperatura resta a `disk-temp`); TjMax Intel dal parametro «TjMax [°C]» del sensore «CPU Package»; tabella TjMax AMD con 164 modelli desktop verificati sulla fonte ufficiale, abbinata solo a «Core (Tctl/Tdie)». Decisione dell'utente dopo lo spike: il nucleo non privilegiato legge da sé il log SMART/Health degli NVMe (usura, spare, critical warning), così `disk-wear` e `disk-critical` funzionano sugli NVMe anche senza servizio.
+
 Lo spike su questa macchina non valida Intel o tutti i controller SATA/NVMe. Ogni mapping richiede una fixture e la verifica del significato nel sorgente della dipendenza: una soglia «Critical temperature» non è un flag di critical warning, e un contatore di eventi non è un throttling attualmente attivo. Le regole senza evidenza restano senza mapping, con il limite documentato.
 
 ### 3.2 Modello
@@ -222,15 +224,15 @@ Tipi in `oma-core::rules`.
 
 | Id | Obiettivo | Condizione | Attenzione | Critico | Durata (att. / crit.) | Note |
 |---|---|---|---|---|---|---|
-| `cpu-temp` | temperatura del package CPU (nome definito dallo spike S1) | `above` | `tjMaxC` − 10, ripiego 85 | `tjMaxC`, ripiego 95 | 30 s / 10 s | Richiede il servizio (B7, B8). |
-| `cpu-throttle` | flag di throttling termico CPU | `flagActive` | — | attivo | — / 10 s | Solo se lo spike S1 trova il sensore. |
+| `cpu-temp` | temperatura di controllo della CPU: `cpu/0/temperature/tctl` (AMD), `…/tdie` (AMD con offset), `…/package` (Intel) | `above` | `tjMaxC` − 10, ripiego 85 | `tjMaxC`, ripiego 95 | 30 s / 10 s | Richiede il servizio (B7, B8). |
+| `cpu-throttle` | flag di throttling termico CPU | `flagActive` | — | attivo | — / 10 s | Senza istanze: lo spike S1 non ha trovato il sensore. |
 | `gpu-temp` | temperatura core di ogni GPU | `above` | 83 | 90 | 30 s / 10 s | |
 | `gpu-hotspot` | hotspot di ogni GPU | `above` | 95 | 105 | 30 s / 10 s | Solo se il sensore esiste. |
 | `gpu-mem-temp` | temperatura memoria (junction) di ogni GPU | `above` | 100 | 105 | 30 s / 10 s | |
 | `gpu-throttle` | `…/flag/throttle-thermal` di ogni GPU | `flagActive` | attivo | — | 10 s / — | |
 | `disk-temp` | temperatura di ogni disco (`…/temperature/drive`) | `above` | `tempWarningC`, ripiego 70 | `tempCriticalC`, ripiego 80 | 30 s / 30 s | La spec principale dice "SSD NVMe"; qui vale per ogni disco con il sensore, perché anche i SATA con temperatura hanno WCTEMP/CCTEMP o il ripiego. |
-| `disk-wear` | `…/percent/wear` di ogni disco | `above` | 90 | — | 0 s | Richiede il servizio; con `above` 90 vale "≥ 90" (§3.4). |
-| `disk-critical` | `…/flag/critical-warning` di ogni disco | `flagActive` | — | attivo | — / 0 s | Richiede il servizio e lo spike S1. |
+| `disk-wear` | `…/percent/wear` di ogni disco | `above` | 90 | — | 0 s | NVMe dal nucleo (log SMART/Health), altri dischi solo con il servizio; con `above` 90 vale "≥ 90" (§3.4). |
+| `disk-critical` | `…/flag/critical-warning` di ogni disco | `flagActive` | — | attivo | — / 0 s | Solo NVMe, dal nucleo e dal servizio (spike S1). |
 | `volume-used` | percentuale usata di ogni volume | `above` | 90 | 97 | 0 s / 0 s | B9. |
 | `ram-used` | RAM usata (%) | `above` | 90 | 97 | 60 s / 30 s | |
 | `battery-low` | carica della batteria | `below` | 15 | 5 | 0 s / 0 s | Nessuna istanza finché non c'è un provider batteria. |

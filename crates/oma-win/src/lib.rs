@@ -12,6 +12,7 @@ pub mod network;
 mod pdh;
 pub mod shell_open;
 pub mod storage;
+mod storage_health;
 mod storage_identity;
 mod storage_ioctl;
 mod storage_temperature;

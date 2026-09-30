@@ -284,6 +284,7 @@
   "sensor.storage.life": "Life remaining",
   "sensor.storage.availableSpare": "Available spare",
   "sensor.storage.percentUsed": "Wear",
+  "sensor.storage.criticalWarning": "Critical warning",
   "sensor.storage.hostRead": "Data read",
   "sensor.storage.hostWritten": "Data written",
   "sensor.storage.powerOnHours": "Power-on hours",

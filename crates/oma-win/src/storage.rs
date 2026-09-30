@@ -1,4 +1,5 @@
-//! Physical disk throughput and activity (PDH), disk temperatures and volume usage.
+//! Physical disk throughput and activity (PDH), disk temperatures, the NVMe
+//! health log and volume usage.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -10,6 +11,10 @@ use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use crate::pdh::{Counter, Query};
+use crate::storage_health::{
+    bus_type, health_properties, health_sensors, next_health_refresh, read_health, DiskHealth,
+    HealthRefresh, Stamp,
+};
 use crate::storage_identity::{
     assign_disk_ids, descriptor_texts, disk_identity_candidates, volume_identity,
     DiskIdentityCandidates,
@@ -264,6 +269,8 @@ pub struct StorageProvider {
     volume_ids: HashMap<String, String>,
     /// Every identified disk, including those waiting for temperature support/wake.
     temperatures: HashMap<u32, DiskTemperatures>,
+    /// NVMe disks whose health log is read, including those waiting for a retry.
+    health: HashMap<u32, DiskHealth>,
     /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
     fresh: bool,
 }
@@ -283,6 +290,7 @@ impl StorageProvider {
             disk_ids: HashMap::new(),
             volume_ids: HashMap::new(),
             temperatures: HashMap::new(),
+            health: HashMap::new(),
             fresh: false,
         }
     }
@@ -328,6 +336,7 @@ impl Provider for StorageProvider {
         let mut devices = Vec::new();
         let mut sensors = Vec::new();
         let mut temperatures = HashMap::new();
+        let mut health = HashMap::new();
         let mut drive_entries = Vec::new();
         for disk in &disks {
             // assign_disk_ids has already logged why a disk has no identity.
@@ -339,12 +348,22 @@ impl Provider for StorageProvider {
             // Unknown/asleep disks remain scheduled; a later successful probe
             // requests rediscovery when it reveals undeclared sensor indices.
             let report = read_temperatures(disk.index);
+            // Only an NVMe disk is sent the health log query; a transient
+            // failure keeps it scheduled, and its first successful read
+            // requests the rediscovery that declares the sensors.
+            let bus = bus_type(disk.index);
+            let disk_health = DiskHealth::discover(bus, || read_health(disk.index), Stamp::now());
+            let declared_health = disk_health.as_ref().filter(|h| h.declared());
+            let mut properties = disk_properties(report.as_ref(), &entry);
+            properties.extend(health_properties(
+                declared_health.and_then(DiskHealth::cached),
+            ));
             devices.push(Device {
                 id: id.clone(),
                 kind: DeviceKind::Storage,
                 name: disk_name(disk),
                 vendor: None,
-                properties: disk_properties(report.as_ref(), &entry),
+                properties,
             });
             drive_entries.push(entry);
             sensors.push(Sensor::new(
@@ -381,6 +400,12 @@ impl Provider for StorageProvider {
                     sensor_label(position),
                     Source::Win32,
                 ));
+            }
+            if declared_health.is_some() {
+                sensors.extend(health_sensors(&id, bus));
+            }
+            if let Some(disk_health) = disk_health {
+                health.insert(disk.index, disk_health);
             }
             temperatures.insert(
                 disk.index,
@@ -422,6 +447,7 @@ impl Provider for StorageProvider {
         self.disk_ids = disk_ids;
         self.volume_ids = volume_ids;
         self.temperatures = temperatures;
+        self.health = health;
         self.fresh = true;
         self.drives.publish(drive_entries);
         Ok(Inventory { devices, sensors })
@@ -442,8 +468,10 @@ impl Provider for StorageProvider {
         let idle: HashMap<String, f64> = counters.query.array(counters.idle)?.into_iter().collect();
         let finite =
             |map: &HashMap<String, f64>, key: &str| map.get(key).copied().filter(|v| v.is_finite());
+        let now = Stamp::now();
         let reads = self.temperatures.iter().map(|(&i, t)| (i, t.read_at));
-        if let Some(index) = next_refresh(reads, Instant::now()) {
+        let picked = next_refresh(reads, now.mono);
+        if let Some(index) = picked {
             if let Some(disk) = self.temperatures.get_mut(&index) {
                 let report = read_temperatures(index);
                 if disk.refresh(report.as_ref(), Instant::now()) {
@@ -451,6 +479,26 @@ impl Provider for StorageProvider {
                 }
             }
         }
+        // Same rotation: an NVMe disk's health log is read with its
+        // temperatures, while the disk is awake anyway. Only a poll without a
+        // temperature refresh reads a health log on its own (after a suspend
+        // the monotonic clock did not count), so a poll never queries two disks.
+        let health_pick = match picked {
+            Some(index) => self.health.contains_key(&index).then_some(index),
+            None => next_health_refresh(self.health.iter().map(|(&i, h)| (i, h)), &now),
+        };
+        if let Some(index) = health_pick {
+            if let Some(disk) = self.health.get_mut(&index) {
+                match disk.refresh(read_health(index), Stamp::now()) {
+                    HealthRefresh::Keep => {}
+                    HealthRefresh::Rediscover => return Err(ProviderError::Rediscover),
+                    HealthRefresh::Forget => {
+                        self.health.remove(&index);
+                    }
+                }
+            }
+        }
+        let now = Stamp::now();
 
         let mut values = Vec::new();
         for disk in &self.disks {
@@ -468,6 +516,9 @@ impl Provider for StorageProvider {
             // Not a rate: the last read is valid on the first poll too.
             if let Some(temperatures) = self.temperatures.get(&disk.index) {
                 values.extend(temperatures.values.iter().copied());
+            }
+            if let Some(health) = self.health.get(&disk.index).and_then(|h| h.values(&now)) {
+                values.extend(health);
             }
             for volume in &disk.volumes {
                 let Some(recorded_id) = self.volume_ids.get(volume) else {

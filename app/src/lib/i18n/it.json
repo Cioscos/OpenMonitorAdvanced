@@ -284,6 +284,7 @@
   "sensor.storage.life": "Vita residua",
   "sensor.storage.availableSpare": "Riserva disponibile",
   "sensor.storage.percentUsed": "Usura",
+  "sensor.storage.criticalWarning": "Avviso critico",
   "sensor.storage.hostRead": "Dati letti",
   "sensor.storage.hostWritten": "Dati scritti",
   "sensor.storage.powerOnHours": "Ore di accensione",

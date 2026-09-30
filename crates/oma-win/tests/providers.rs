@@ -159,6 +159,62 @@ fn storage_provider_reports_disks_and_volumes() {
     }
 }
 
+/// The unprivileged core reads the NVMe SMART/Health log itself (spike M5
+/// S1 §2.5): this machine has two NVMe disks and SATA disks.
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn reads_nvme_health_on_this_machine() {
+    const HEALTH: [&str; 3] = [
+        "flag/critical-warning",
+        "percent/wear",
+        "percent/available-spare",
+    ];
+    let mut p = StorageProvider::default();
+    let (inventory, values) = discover_and_poll(&mut p);
+    let mut with_health = 0;
+    for device in &inventory.devices {
+        let found: Vec<(&Sensor, Option<f64>)> = inventory
+            .sensors
+            .iter()
+            .zip(&values)
+            .filter(|(s, _)| {
+                s.device_id == device.id
+                    && HEALTH.iter().any(|h| s.id == format!("{}/{h}", device.id))
+            })
+            .map(|(s, v)| (s, *v))
+            .collect();
+        println!("{}: {found:?}", device.name);
+        if found.is_empty() {
+            assert!(
+                !device.properties.contains_key("availableSpareThresholdPct"),
+                "{}",
+                device.id
+            );
+            continue;
+        }
+        assert_eq!(found.len(), 3, "{}: all three or none", device.id);
+        with_health += 1;
+        for (sensor, value) in found {
+            assert_eq!(sensor.source, Source::Win32);
+            let value = value.unwrap_or_else(|| panic!("{} has a value", sensor.id));
+            match sensor.id.rsplit('/').next() {
+                Some("critical-warning") => assert_eq!(value, 0.0, "healthy disks"),
+                Some("wear") => assert!((0.0..=255.0).contains(&value)),
+                _ => assert!((0.0..=100.0).contains(&value)),
+            }
+        }
+        let threshold: u8 = device.properties["availableSpareThresholdPct"]
+            .parse()
+            .expect("integer %");
+        assert!(threshold <= 100);
+    }
+    assert_eq!(with_health, 2, "the two NVMe disks, never the SATA ones");
+    assert!(
+        inventory.devices.len() > with_health,
+        "SATA disks have none"
+    );
+}
+
 #[test]
 #[ignore = "requires real Windows hardware"]
 fn network_provider_values_align_with_sensors() {

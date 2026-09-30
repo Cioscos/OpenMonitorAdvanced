@@ -3,7 +3,7 @@
 //! needed and no data is ever read or written.
 
 use windows::core::{BOOL, HSTRING};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -99,6 +99,18 @@ impl PhysicalDrive {
         input: Option<&[u8]>,
         capacity: usize,
     ) -> Option<Vec<u8>> {
+        self.ioctl_result(code, input, capacity).ok()
+    }
+
+    /// [`Self::ioctl`], keeping the Win32 error of a failed request: `None`
+    /// inside the error when the failure is not a Win32 error, or when the
+    /// driver claimed more bytes than the buffer holds.
+    pub(crate) fn ioctl_result(
+        &self,
+        code: u32,
+        input: Option<&[u8]>,
+        capacity: usize,
+    ) -> Result<Vec<u8>, Option<WIN32_ERROR>> {
         let mut out = vec![0u8; capacity];
         let mut returned = 0u32;
         // SAFETY: the handle is open; the input slice and the output buffer are
@@ -115,13 +127,13 @@ impl PhysicalDrive {
                 None,
             )
         }
-        .ok()?;
+        .map_err(|error| WIN32_ERROR::from_error(&error))?;
         let returned = returned as usize;
         if returned > out.len() {
-            return None;
+            return Err(None);
         }
         out.truncate(returned);
-        Some(out)
+        Ok(out)
     }
 
     /// `IOCTL_STORAGE_QUERY_PROPERTY` standard query for `property`.

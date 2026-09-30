@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
 use oma_core::model::Schema;
-use oma_core::rules::{HealthClock, HealthReport, RuleStatus};
+use oma_core::rules::{HealthClock, HealthReport, Rule, RuleStatus};
 use oma_core::sampler::{unix_ms, IntervalHandle};
 use oma_core::settings::VendorLibraries;
 use oma_core::stats::SensorStats;
@@ -169,6 +169,13 @@ pub fn get_rule_status(state: State<'_, AppState>) -> Vec<RuleStatus> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .rule_status()
+}
+
+/// The built-in rules as shipped, before any override: the settings screen
+/// compares with them and shows what "Restore" goes back to.
+#[tauri::command]
+pub fn get_default_rules() -> Vec<Rule> {
+    oma_core::rules::default_rules()
 }
 
 /// How long the overall level has lasted, on the monotonic clock of the

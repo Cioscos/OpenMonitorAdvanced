@@ -90,6 +90,22 @@ test('a rejected rule patch puts the error on the rule field', async () => {
   expect(store.state?.settings.rules.custom).toHaveLength(1);
 });
 
+test('an accepted override patch clears every error of that rule', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new SettingsStore();
+  unsubscribe = await store.connect(backend);
+
+  // The critical threshold below the warning one: the error points at `crit`.
+  const low = { threshold: { fixed: 80 }, durationS: 10 };
+  expect(await store.update({ rules: { overrides: { 'gpu-temp': { crit: low } } } })).toBe(false);
+  expect(store.errors).toEqual({ 'rules.overrides.gpu-temp.crit': 'rules.error.order' });
+
+  // Lowering the warning instead makes the whole rule valid, so its error goes too.
+  const warn = { threshold: { fixed: 70 }, durationS: 30 };
+  expect(await store.update({ rules: { overrides: { 'gpu-temp': { warn } } } })).toBe(true);
+  expect(store.errors).toEqual({});
+});
+
 test('resetting a rule override drops its entry and reports an unknown rule', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new SettingsStore();

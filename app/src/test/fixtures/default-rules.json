@@ -1,0 +1,382 @@
+[
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 10,
+      "threshold": {
+        "fallback": 95.0,
+        "offset": 0.0,
+        "property": "tjMaxC"
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "cpu-temp",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "cpu",
+      "names": [
+        "tctl",
+        "tdie",
+        "package"
+      ],
+      "sensorKind": "temperature"
+    },
+    "unit": "celsius",
+    "warn": {
+      "durationS": 30,
+      "threshold": {
+        "fallback": 85.0,
+        "offset": -10.0,
+        "property": "tjMaxC"
+      }
+    }
+  },
+  {
+    "condition": "flagActive",
+    "crit": {
+      "durationS": 10,
+      "threshold": null
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "cpu-throttle",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "cpu",
+      "names": [
+        "throttle-thermal"
+      ],
+      "sensorKind": "flag"
+    },
+    "unit": "boolean",
+    "warn": null
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 10,
+      "threshold": {
+        "fixed": 90.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "gpu-temp",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "gpu",
+      "names": [
+        "core"
+      ],
+      "sensorKind": "temperature"
+    },
+    "unit": "celsius",
+    "warn": {
+      "durationS": 30,
+      "threshold": {
+        "fixed": 83.0
+      }
+    }
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 10,
+      "threshold": {
+        "fixed": 105.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "gpu-hotspot",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "gpu",
+      "names": [
+        "hotspot"
+      ],
+      "sensorKind": "temperature"
+    },
+    "unit": "celsius",
+    "warn": {
+      "durationS": 30,
+      "threshold": {
+        "fixed": 95.0
+      }
+    }
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 10,
+      "threshold": {
+        "fixed": 105.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "gpu-mem-temp",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "gpu",
+      "names": [
+        "memory"
+      ],
+      "sensorKind": "temperature"
+    },
+    "unit": "celsius",
+    "warn": {
+      "durationS": 30,
+      "threshold": {
+        "fixed": 100.0
+      }
+    }
+  },
+  {
+    "condition": "flagActive",
+    "crit": null,
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "gpu-throttle",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "gpu",
+      "names": [
+        "throttle-thermal"
+      ],
+      "sensorKind": "flag"
+    },
+    "unit": "boolean",
+    "warn": {
+      "durationS": 10,
+      "threshold": null
+    }
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 30,
+      "threshold": {
+        "fallback": 80.0,
+        "offset": 0.0,
+        "property": "tempCriticalC"
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "disk-temp",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "storage",
+      "names": [
+        "drive"
+      ],
+      "sensorKind": "temperature"
+    },
+    "unit": "celsius",
+    "warn": {
+      "durationS": 30,
+      "threshold": {
+        "fallback": 70.0,
+        "offset": 0.0,
+        "property": "tempWarningC"
+      }
+    }
+  },
+  {
+    "condition": "above",
+    "crit": null,
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "disk-wear",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "storage",
+      "names": [
+        "wear"
+      ],
+      "sensorKind": "percent"
+    },
+    "unit": "percent",
+    "warn": {
+      "durationS": 0,
+      "threshold": {
+        "fixed": 90.0
+      }
+    }
+  },
+  {
+    "condition": "flagActive",
+    "crit": {
+      "durationS": 0,
+      "threshold": null
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "disk-critical",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "storage",
+      "names": [
+        "critical-warning"
+      ],
+      "sensorKind": "flag"
+    },
+    "unit": "boolean",
+    "warn": null
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 0,
+      "threshold": {
+        "fixed": 97.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "volume-used",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "storage",
+      "names": [
+        "volume-*"
+      ],
+      "sensorKind": "percent"
+    },
+    "unit": "percent",
+    "warn": {
+      "durationS": 0,
+      "threshold": {
+        "fixed": 90.0
+      }
+    }
+  },
+  {
+    "condition": "above",
+    "crit": {
+      "durationS": 30,
+      "threshold": {
+        "fixed": 97.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "ram-used",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "memory",
+      "names": [
+        "used"
+      ],
+      "sensorKind": "load"
+    },
+    "unit": "percent",
+    "warn": {
+      "durationS": 60,
+      "threshold": {
+        "fixed": 90.0
+      }
+    }
+  },
+  {
+    "condition": "below",
+    "crit": {
+      "durationS": 0,
+      "threshold": {
+        "fixed": 5.0
+      }
+    },
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "battery-low",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "battery",
+      "names": [
+        "charge"
+      ],
+      "sensorKind": "percent"
+    },
+    "unit": "percent",
+    "warn": {
+      "durationS": 0,
+      "threshold": {
+        "fixed": 15.0
+      }
+    }
+  }
+]

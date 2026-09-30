@@ -301,6 +301,22 @@ export interface RulesSettings {
   custom: Rule[];
 }
 
+/** One instance of a rule as the engine sees it now (`get_rule_status`); thresholds are resolved, in the base unit. */
+export interface InstanceStatus {
+  sensorId: string;
+  level: 'ok' | 'warn' | 'crit';
+  warn: number | null;
+  crit: number | null;
+  valid: boolean;
+  problem: 'order' | 'unitMismatch' | null;
+}
+
+/** Every effective rule, in order; a disabled rule or one without sensors has no instances. */
+export interface RuleStatus {
+  ruleId: string;
+  instances: InstanceStatus[];
+}
+
 /**
  * What opening the settings file had to fix; `invalidRule` marks a custom rule (`rules.custom.2`) or an
  * override field (`rules.overrides.gpu-temp.warn`) left out, with the i18n key of the reason.

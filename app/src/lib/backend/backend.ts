@@ -16,6 +16,8 @@ import type {
   StartupStatus,
   StatsReply,
   NavigationTarget,
+  Rule,
+  RuleStatus,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -77,6 +79,10 @@ export interface Backend {
   getHealthClock(): Promise<HealthClock>;
   /** At most once a second while the window is open. */
   onHealthClock(cb: (clock: HealthClock) => void): Promise<Unsubscribe>;
+  /** Resolved thresholds, levels and problems of every effective rule; poll it at most once a second. */
+  getRuleStatus(): Promise<RuleStatus[]>;
+  /** The built-in rules as shipped, in display order (`oma_core::rules::default_rules`). */
+  getDefaultRules(): Promise<Rule[]>;
   /** Re-reads the start-up entry as Windows sees it. */
   refreshAutostart(): Promise<AutostartStatus>;
   /** Versions and folders for the About page. */

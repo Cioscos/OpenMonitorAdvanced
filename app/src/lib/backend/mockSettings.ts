@@ -1,8 +1,12 @@
+import defaultRulesFixture from '../../test/fixtures/default-rules.json';
+import { applyOverride } from '../rules';
 import type {
   LegacyWebviewState,
   LevelSpec,
   PatchError,
   Persistence,
+  Rule,
+  RuleOverride,
   Settings,
   SettingsDiagnostic,
   SettingsPatch,
@@ -28,21 +32,9 @@ const NUMBERS: Record<string, readonly number[]> = {
   'advanced.window': WINDOWS,
 };
 
-/** Ids of the built-in rules (`oma_core::rules::default_rules`). */
-const BUILTIN_RULES = [
-  'cpu-temp',
-  'cpu-throttle',
-  'gpu-temp',
-  'gpu-hotspot',
-  'gpu-mem-temp',
-  'gpu-throttle',
-  'disk-temp',
-  'disk-wear',
-  'disk-critical',
-  'volume-used',
-  'ram-used',
-  'battery-low',
-];
+/** The built-in rules, from the fixture that a Rust test keeps equal to `oma_core::rules::default_rules`. */
+const DEFAULT_RULES = defaultRulesFixture as Rule[];
+const BUILTIN_RULES = DEFAULT_RULES.map((rule) => rule.id);
 const MAX_DURATION_S = 600;
 const MAX_CUSTOM_RULES = 256;
 const CUSTOM_ID = /^custom-[0-9a-f-]{36}$/;
@@ -156,6 +148,16 @@ function checkLevels(path: string, rule: { warn?: LevelSpec | null; crit?: Level
 const fixedOf = (level: LevelSpec | null | undefined): number | undefined =>
   level?.threshold && 'fixed' in level.threshold ? level.threshold.fixed : undefined;
 
+/** At least one level, then the levels, then the order of two fixed thresholds (`validate_rule`). */
+function checkRule(path: string, rule: { warn?: LevelSpec | null; crit?: LevelSpec | null; condition?: string; hysteresis?: unknown }): void {
+  if (!rule.warn && !rule.crit) fail(`${path}.levels`, 'rules.error.noLevel');
+  checkLevels(path, rule);
+  const [warn, crit] = [fixedOf(rule.warn), fixedOf(rule.crit)];
+  if (warn !== undefined && crit !== undefined && (rule.condition === 'below' ? crit > warn : crit < warn)) {
+    fail(`${path}.crit`, 'rules.error.order');
+  }
+}
+
 /** A subset of `validate_rules`: enough for the UI to show errors next to the fields. */
 function checkRules(rules: unknown): void {
   if (!isObject(rules)) return fail('rules', 'settings.error.type');
@@ -164,9 +166,11 @@ function checkRules(rules: unknown): void {
   if (!Array.isArray(custom)) fail('rules.custom', 'settings.error.type');
   for (const [id, over] of Object.entries(overrides as Record<string, unknown>)) {
     const path = `rules.overrides.${id}`;
-    if (!BUILTIN_RULES.includes(id)) fail(path, 'rules.error.unknownRule');
+    const builtin = DEFAULT_RULES.find((rule) => rule.id === id);
+    if (!builtin) return fail(path, 'rules.error.unknownRule');
     if (!isObject(over)) fail(path, 'settings.error.type');
-    checkLevels(path, over as Parameters<typeof checkLevels>[1]);
+    // Like `validate_override`: the rule the override produces is checked whole.
+    checkRule(path, applyOverride(builtin, over as RuleOverride));
   }
   const rulesList = custom as unknown[];
   if (rulesList.length > MAX_CUSTOM_RULES) fail('rules.custom', 'rules.error.tooMany');
@@ -175,13 +179,7 @@ function checkRules(rules: unknown): void {
     const path = `rules.custom.${i}`;
     if (!isObject(item) || typeof item.id !== 'string') return fail(path, 'settings.error.type');
     if (!CUSTOM_ID.test(item.id)) fail(`${path}.id`, 'rules.error.customId');
-    const rule = item as { warn?: LevelSpec | null; crit?: LevelSpec | null; condition?: string };
-    if (!rule.warn && !rule.crit) fail(`${path}.levels`, 'rules.error.noLevel');
-    checkLevels(path, rule);
-    const [warn, crit] = [fixedOf(rule.warn), fixedOf(rule.crit)];
-    if (warn !== undefined && crit !== undefined && (rule.condition === 'below' ? crit > warn : crit < warn)) {
-      fail(`${path}.crit`, 'rules.error.order');
-    }
+    checkRule(path, item as Parameters<typeof checkRule>[1]);
     if (seen.has(item.id)) fail(`${path}.id`, 'rules.error.duplicateId');
     seen.add(item.id);
   });

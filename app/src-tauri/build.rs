@@ -22,6 +22,7 @@ fn main() {
             "open_known_path",
             "get_health",
             "get_rule_status",
+            "get_default_rules",
             "get_health_clock",
         ]),
     ))

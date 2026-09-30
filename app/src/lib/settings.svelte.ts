@@ -12,9 +12,14 @@ export const legacySeriesKey = (sectionId: string) => `${LEGACY_SERIES_PREFIX}${
 const isPatchError = (value: unknown): value is PatchError =>
   typeof value === 'object' && value !== null && typeof (value as PatchError).field === 'string' && typeof (value as PatchError).key === 'string';
 
-/** Dotted paths of the fields a patch sets (objects are walked, arrays and scalars are leaves). */
+/**
+ * Dotted paths of the fields a patch sets (objects are walked, arrays and scalars are leaves). A rule
+ * override is a leaf too: the core validates the rule it produces whole, so an accepted patch of it
+ * clears every error of that rule.
+ */
 function patchPaths(patch: unknown, parent = ''): string[] {
   if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return parent ? [parent] : [];
+  if (/^rules\.overrides\.[^.]+$/.test(parent)) return [parent];
   return Object.entries(patch).flatMap(([key, value]) => patchPaths(value, parent ? `${parent}.${key}` : key));
 }
 

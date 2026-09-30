@@ -48,6 +48,10 @@ test('settings commands and events match the Rust shell', async () => {
   expect(invoke).toHaveBeenLastCalledWith('take_pending_view');
   await backend.refreshAutostart();
   expect(invoke).toHaveBeenLastCalledWith('refresh_autostart');
+  await backend.getRuleStatus();
+  expect(invoke).toHaveBeenLastCalledWith('get_rule_status');
+  await backend.getDefaultRules();
+  expect(invoke).toHaveBeenLastCalledWith('get_default_rules');
   await backend.onSettings(() => {});
   expect(listen).toHaveBeenLastCalledWith('oma:settings', expect.any(Function));
   await backend.onNavigate(() => {});

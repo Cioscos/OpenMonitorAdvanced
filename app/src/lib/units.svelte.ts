@@ -28,6 +28,21 @@ export function toDisplayTemperature(celsius: number, unit: TemperatureUnit): nu
   return unit === 'f' ? (celsius * 9) / 5 + 32 : celsius;
 }
 
+/** A number of `unit` degrees as a temperature in °C: the inverse of `toDisplayTemperature`. */
+export function fromDisplayTemperature(value: number, unit: TemperatureUnit): number {
+  return unit === 'f' ? ((value - 32) * 5) / 9 : value;
+}
+
+/** A temperature difference (a hysteresis) in °C as `unit` degrees: scaled, never offset. */
+export function deltaToDisplay(celsiusDelta: number, unit: TemperatureUnit): number {
+  return unit === 'f' ? (celsiusDelta * 9) / 5 : celsiusDelta;
+}
+
+/** A difference of `unit` degrees in °C: the inverse of `deltaToDisplay`. */
+export function deltaFromDisplay(delta: number, unit: TemperatureUnit): number {
+  return unit === 'f' ? (delta * 5) / 9 : delta;
+}
+
 export function temperatureSymbol(unit: TemperatureUnit): '°C' | '°F' {
   return unit === 'f' ? '°F' : '°C';
 }

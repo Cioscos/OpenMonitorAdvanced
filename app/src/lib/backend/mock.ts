@@ -6,6 +6,8 @@ import type {
   HealthReport,
   HistoryWindow,
   Label,
+  Rule,
+  RuleStatus,
   Schema,
   Sensor,
   SensorKind,
@@ -19,6 +21,7 @@ import type {
   Unit,
 } from '../types';
 import type { Backend } from './backend';
+import defaultRulesFixture from '../../test/fixtures/default-rules.json';
 import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
@@ -267,6 +270,27 @@ function mockHealthCycle(now: () => number = Date.now) {
   };
 }
 
+/** The built-in rules, from the fixture that a Rust test keeps equal to `default_rules()`. */
+export const MOCK_DEFAULT_RULES = defaultRulesFixture as Rule[];
+
+/**
+ * What the engine would report for the demonstration: the GPU temperature with its fixed thresholds
+ * (and the level of the health cycle), the mock SSD's volume, every other rule without instances.
+ */
+function mockRuleStatus(level: HealthReport['level']): RuleStatus[] {
+  return MOCK_DEFAULT_RULES.map((rule) => {
+    if (rule.id === 'gpu-temp') {
+      const current = level === 'warn' || level === 'crit' ? level : 'ok';
+      return { ruleId: rule.id, instances: [{ sensorId: `${GPU}/temperature/core`, level: current, warn: 83, crit: 90, valid: true, problem: null }] };
+    }
+    if (rule.id === 'volume-used') {
+      const sensorId = 'storage/device-mock-ssd/percent/volume-mock-guid';
+      return { ruleId: rule.id, instances: [{ sensorId, level: 'ok', warn: 90, crit: 97, valid: true, problem: null }] };
+    }
+    return { ruleId: rule.id, instances: [] };
+  });
+}
+
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
   const initialState = parseServiceState(typeof location === 'undefined' ? '' : location.search);
@@ -380,6 +404,9 @@ export function createMockBackend(intervalMs = 1000): Backend {
     onHealth: async (cb) => watchHealth(healthListeners, cb),
     getHealthClock: async () => cycle.clock(),
     onHealthClock: async (cb) => watchHealth(clockListeners, cb),
+    // The mock does not evaluate rules: the status follows the health cycle, not the settings.
+    getRuleStatus: async () => mockRuleStatus(cycle.report().level),
+    getDefaultRules: async () => structuredClone(MOCK_DEFAULT_RULES),
     refreshAutostart: async () => {
       const configured = settings.state().settings.tray.autostart;
       return { configured, effective: autostart ?? (configured ? 'enabled' : 'notConfigured'), error: null };

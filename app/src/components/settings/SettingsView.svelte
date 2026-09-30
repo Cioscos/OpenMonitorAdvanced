@@ -7,10 +7,11 @@
   import AboutSection from './AboutSection.svelte';
   import GeneralSection from './GeneralSection.svelte';
   import PersistenceNotice from './PersistenceNotice.svelte';
+  import RulesSection from './RulesSection.svelte';
   import SourcesSection from './SourcesSection.svelte';
 
   // The settings screen (spec M5 §2.7): sections on the left, the chosen one on the right. Every
-  // control sends its change at once; there is no Save button. Rules and CSV log arrive with M5b/M5c.
+  // control sends its change at once; there is no Save button. The CSV log arrives with M5c.
   let {
     store,
     backend,
@@ -18,8 +19,8 @@
     onBack,
   }: { store: LiveStore; backend: Backend; service: ServiceStatus | null; onBack: () => void } = $props();
 
-  type Section = 'general' | 'sources' | 'about';
-  const SECTIONS: Section[] = ['general', 'sources', 'about'];
+  type Section = 'general' | 'rules' | 'sources' | 'about';
+  const SECTIONS: Section[] = ['general', 'rules', 'sources', 'about'];
   let section = $state<Section>('general');
 </script>
 
@@ -52,6 +53,8 @@
     {/if}
     {#if section === 'general'}
       <GeneralSection {store} {backend} />
+    {:else if section === 'rules'}
+      <RulesSection {store} {backend} />
     {:else if section === 'sources'}
       <SourcesSection {store} {backend} {service} />
     {:else}

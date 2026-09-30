@@ -20,7 +20,10 @@ import type {
   StartupStatus,
   StatsReply,
   NavigationTarget,
+  Rule,
+  RuleStatus,
 } from '../lib/types';
+import defaultRulesFixture from './fixtures/default-rules.json';
 
 export interface HistoryCall {
   ids: string[];
@@ -73,6 +76,11 @@ export class FakeBackend implements Backend {
   healthCalls: string[] = [];
   /** Set to reject `getHealth` with this error. */
   healthError: string | null = null;
+  /** What `getRuleStatus` returns; `ruleStatusCalls` counts the reads. */
+  ruleStatus: RuleStatus[] = [];
+  ruleStatusCalls = 0;
+  /** Ids passed to `resetRuleOverride`, in order. */
+  resetRuleOverrideCalls: string[] = [];
   autostart: AutostartStatus = { configured: false, effective: 'notConfigured', error: null };
   refreshAutostartCalls = 0;
   appInfo: AppInfo = {
@@ -184,6 +192,7 @@ export class FakeBackend implements Backend {
   }
 
   async resetRuleOverride(ruleId: string): Promise<SettingsState> {
+    this.resetRuleOverrideCalls.push(ruleId);
     return this.settings.resetRuleOverride(ruleId);
   }
 
@@ -243,6 +252,16 @@ export class FakeBackend implements Backend {
   /** Number of live health listeners (report plus clock). */
   get healthListenerCount(): number {
     return this.#healthListeners.size + this.#healthClockListeners.size;
+  }
+
+  async getRuleStatus(): Promise<RuleStatus[]> {
+    this.ruleStatusCalls++;
+    return structuredClone(this.ruleStatus);
+  }
+
+  /** The Rust table, through the fixture its parity test keeps current. */
+  async getDefaultRules(): Promise<Rule[]> {
+    return structuredClone(defaultRulesFixture as Rule[]);
   }
 
   async refreshAutostart(): Promise<AutostartStatus> {

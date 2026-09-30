@@ -2,7 +2,14 @@ import { connectSettings, disconnectSettings } from '../test/settings';
 import { formatTemperature, formatValue } from './format';
 import { translate } from './i18n/index.svelte';
 import { settings } from './settings.svelte';
-import { display, temperatureSymbol, toDisplayTemperature } from './units.svelte';
+import {
+  deltaFromDisplay,
+  deltaToDisplay,
+  display,
+  fromDisplayTemperature,
+  temperatureSymbol,
+  toDisplayTemperature,
+} from './units.svelte';
 
 afterEach(disconnectSettings);
 
@@ -33,4 +40,24 @@ test('display follows the settings store and falls back to the defaults', async 
 
   await settings.update({ general: { temperatureUnit: 'c' } });
   expect(formatValue(100, 'celsius', 'en', tEn)).toBe('100 °C');
+});
+
+test('fahrenheit_threshold_round_trips', () => {
+  // Typed as 185 °F, saved as 85 °C, shown again as 185.
+  const saved = fromDisplayTemperature(185, 'f');
+  expect(saved).toBe(85);
+  expect(toDisplayTemperature(saved, 'f')).toBe(185);
+  expect(fromDisplayTemperature(85, 'c')).toBe(85);
+  expect(fromDisplayTemperature(-40, 'f')).toBe(-40);
+  // An odd value survives the round trip up to the float error.
+  expect(toDisplayTemperature(fromDisplayTemperature(100, 'f'), 'f')).toBeCloseTo(100, 10);
+});
+
+test('hysteresis_converts_as_a_difference', () => {
+  // A difference is scaled by 9/5 without the +32 offset.
+  expect(deltaToDisplay(3, 'f')).toBeCloseTo(5.4, 10);
+  expect(deltaFromDisplay(5.4, 'f')).toBeCloseTo(3, 10);
+  expect(deltaToDisplay(3, 'c')).toBe(3);
+  expect(deltaFromDisplay(3, 'c')).toBe(3);
+  expect(deltaToDisplay(0, 'f')).toBe(0);
 });

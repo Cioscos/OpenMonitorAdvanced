@@ -15,6 +15,8 @@ import type {
   StartupStatus,
   StatsReply,
   NavigationTarget,
+  Rule,
+  RuleStatus,
 } from '../types';
 import type { Backend } from './backend';
 
@@ -49,6 +51,8 @@ export function createTauriBackend(): Backend {
     onHealth: (cb) => listen<HealthReport>('oma:health', (e) => cb(e.payload)),
     getHealthClock: () => invoke<HealthClock>('get_health_clock'),
     onHealthClock: (cb) => listen<HealthClock>('oma:health-clock', (e) => cb(e.payload)),
+    getRuleStatus: () => invoke<RuleStatus[]>('get_rule_status'),
+    getDefaultRules: () => invoke<Rule[]>('get_default_rules'),
     refreshAutostart: () => invoke<AutostartStatus>('refresh_autostart'),
     getAppInfo: () => invoke<AppInfo>('get_app_info'),
     // A unit variant of `KnownPath`: the camelCase string is the whole value.

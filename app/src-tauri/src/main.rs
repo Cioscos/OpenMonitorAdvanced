@@ -240,6 +240,7 @@ fn main() {
             commands::open_known_path,
             commands::get_health,
             commands::get_rule_status,
+            commands::get_default_rules,
             commands::get_health_clock,
             autostart::refresh_autostart,
             service::get_service_status,

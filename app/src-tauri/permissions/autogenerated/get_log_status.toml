@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-log-status"
+description = "Enables the get_log_status command without any pre-configured scope."
+commands.allow = ["get_log_status"]
+
+[[permission]]
+identifier = "deny-get-log-status"
+description = "Denies the get_log_status command without any pre-configured scope."
+commands.deny = ["get_log_status"]

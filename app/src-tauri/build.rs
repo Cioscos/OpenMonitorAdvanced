@@ -24,6 +24,12 @@ fn main() {
             "get_rule_status",
             "get_default_rules",
             "get_health_clock",
+            "log_start",
+            "log_pause",
+            "log_resume",
+            "log_stop",
+            "get_log_status",
+            "open_log_folder",
         ]),
     ))
     .expect("Tauri build")

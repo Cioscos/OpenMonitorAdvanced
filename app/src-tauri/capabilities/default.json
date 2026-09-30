@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: sensor reads, statistics and session, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders.",
+  "description": "Main window: sensor reads, statistics and session, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders, the CSV log commands and opening the log folder.",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
@@ -28,6 +28,12 @@
     "allow-get-health",
     "allow-get-rule-status",
     "allow-get-default-rules",
-    "allow-get-health-clock"
+    "allow-get-health-clock",
+    "allow-log-start",
+    "allow-log-pause",
+    "allow-log-resume",
+    "allow-log-stop",
+    "allow-get-log-status",
+    "allow-open-log-folder"
   ]
 }

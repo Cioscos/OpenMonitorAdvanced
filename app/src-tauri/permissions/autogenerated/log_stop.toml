@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-log-stop"
+description = "Enables the log_stop command without any pre-configured scope."
+commands.allow = ["log_stop"]
+
+[[permission]]
+identifier = "deny-log-stop"
+description = "Denies the log_stop command without any pre-configured scope."
+commands.deny = ["log_stop"]

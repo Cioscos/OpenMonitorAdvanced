@@ -61,6 +61,17 @@ pub const RUST_KEYS: &[&str] = &[
     "health.partial",
     "health.unavailableValue",
     "health.deviceGone",
+    "log.error.diskFull",
+    "log.error.unavailable",
+    "log.error.denied",
+    "log.error.headerTooLarge",
+    "log.error.noColumns",
+    "log.error.tooManyColumns",
+    "log.error.schemaUnavailable",
+    "log.error.closeTimeout",
+    "log.error.folderMissing",
+    "log.error.other",
+    "log.toast.errorTitle",
 ];
 
 type Catalog = HashMap<String, String>;

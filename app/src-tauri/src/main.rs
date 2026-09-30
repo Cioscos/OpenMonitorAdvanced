@@ -251,6 +251,12 @@ fn main() {
             settings::commands::update_settings,
             settings::commands::reset_rule_override,
             settings::commands::import_webview_state,
+            log::commands::log_start,
+            log::commands::log_pause,
+            log::commands::log_resume,
+            log::commands::log_stop,
+            log::commands::get_log_status,
+            log::commands::open_log_folder,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -304,6 +310,20 @@ fn main() {
             // The window stack (tao, WebView2) may have replaced the crash marker filter.
             #[cfg(windows)]
             oma_win::crash::rearm_crash_marker();
+            // One toaster for the rule alerts and the log (L8); the hotkeys
+            // fetch it from the managed state.
+            let toaster = Arc::new(notifier::system_toaster(app.handle()));
+            app.manage(toaster.clone());
+            let log_service = log::LogService::new(
+                store.clone(),
+                Arc::new(log::fs::RealFs),
+                Arc::new(log::commands::TauriEnv::new(
+                    app.handle().clone(),
+                    toaster.clone(),
+                )),
+                log::CLOSE_TIMEOUT,
+            );
+            app.manage(log_service.clone());
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
@@ -311,7 +331,7 @@ fn main() {
             // feed (and one toast cooldown) lives for the whole session; it
             // keeps the latest schema and health report, which arrive only
             // when they change.
-            let mut alerts = notifier::AlertFeed::new(notifier::system_sink(app.handle()));
+            let mut alerts = notifier::AlertFeed::new(toaster);
             let clock_engine = engine.clone();
             let mut clock_pacer = rules::ClockPacer::default();
             let sampler = Sampler::spawn(engine.clone(), interval.clone(), move |out| {
@@ -319,6 +339,8 @@ fn main() {
                 alerts.tick(out, &settings);
                 if let Some(schema) = alerts.schema() {
                     tray.update(schema, &out.snapshot, alerts.health(), &settings);
+                    // The log row, window or not; never waits on the writer.
+                    log_service.on_tick(out, schema, &settings);
                 }
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
@@ -381,6 +403,10 @@ fn main() {
                 {
                     sampler.stop();
                 }
+            }
+            // No tick is running any more: stop the CSV log (bounded, L6).
+            if let Some(log) = app.try_state::<Arc<log::LogService>>() {
+                log.shutdown(log::CLOSE_TIMEOUT);
             }
             // Final save (bounded) before the service link goes away.
             if let Some(store) = app.try_state::<Arc<SettingsStore>>() {

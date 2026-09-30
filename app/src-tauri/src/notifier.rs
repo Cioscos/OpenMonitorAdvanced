@@ -143,11 +143,34 @@ impl<S: ToastSink> AlertFeed<S> {
     }
 }
 
-/// What a toast hands back when clicked: `{"device":"<id>"}`.
+/// A clicked toast of a device: `{"device":"<id>"}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Launch {
+struct DeviceLaunch {
     device: String,
+}
+
+/// A clicked toast that opens a window: `{"open":"main"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenLaunch {
+    open: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Launch {
+    Device(DeviceLaunch),
+    Open(OpenLaunch),
+}
+
+/// Where a clicked toast leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchTarget {
+    /// The Advanced view on this device's page (rule alerts).
+    Device(String),
+    /// The main window (log toasts, L8).
+    Main,
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -155,28 +178,52 @@ pub fn launch_for(device_id: &str) -> String {
     serde_json::json!({ "device": device_id }).to_string()
 }
 
-/// The device of a clicked toast; `None` for anything but a launch string
-/// made by [`launch_for`].
-pub fn device_from_launch(launch: &str) -> Option<String> {
-    serde_json::from_str::<Launch>(launch)
-        .ok()
-        .map(|launch| launch.device)
-        .filter(|device| !device.is_empty())
+/// The launch string of a toast that opens the main window.
+pub fn launch_for_main() -> String {
+    serde_json::json!({ "open": "main" }).to_string()
 }
 
-/// The Windows toaster: a click posts the navigation to the main thread.
+/// The target of a clicked toast; `None` for anything but a launch string
+/// made by [`launch_for`] or [`launch_for_main`].
+pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
+    match serde_json::from_str::<Launch>(launch).ok()? {
+        Launch::Device(DeviceLaunch { device }) if !device.is_empty() => {
+            Some(LaunchTarget::Device(device))
+        }
+        Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
+        _ => None,
+    }
+}
+
+/// A shared toaster (rules and log, L8) is a sink too.
+impl<T: ToastSink + Sync> ToastSink for std::sync::Arc<T> {
+    fn show(&self, title: String, body: String, launch: String) {
+        (**self).show(title, body, launch);
+    }
+}
+
+/// The toaster the app shares between rule alerts and the log.
 #[cfg(windows)]
-pub fn system_sink(app: &tauri::AppHandle) -> oma_win::toast::Toaster {
+pub type SystemToaster = oma_win::toast::Toaster;
+#[cfg(not(windows))]
+pub type SystemToaster = NoToasts;
+
+/// The Windows toaster, created once in `setup`: a click posts the
+/// navigation to the main thread.
+#[cfg(windows)]
+pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
     let app = app.clone();
     oma_win::toast::Toaster::spawn(Box::new(move |launch| {
-        let Some(device) = device_from_launch(&launch) else {
+        let Some(target) = launch_target(&launch) else {
             tracing::warn!("toast activation with an unknown payload: ignored");
             return;
         };
         let handle = app.clone();
-        if let Err(err) =
-            app.run_on_main_thread(move || crate::window::show_device(&handle, &device))
-        {
+        let result = app.run_on_main_thread(move || match target {
+            LaunchTarget::Device(device) => crate::window::show_device(&handle, &device),
+            LaunchTarget::Main => crate::window::show_main(&handle),
+        });
+        if let Err(err) = result {
             tracing::warn!(%err, "cannot open the window for a toast");
         }
     }))
@@ -199,7 +246,7 @@ impl ToastSink for NoToasts {
 }
 
 #[cfg(not(windows))]
-pub fn system_sink(_app: &tauri::AppHandle) -> NoToasts {
+pub fn system_toaster(_app: &tauri::AppHandle) -> SystemToaster {
     NoToasts
 }
 
@@ -529,13 +576,22 @@ mod tests {
     }
 
     #[test]
-    fn launch_string_carries_the_device() {
-        let launch = launch_for("gpu/pci-0000:01:00.0");
-        assert_eq!(launch, r#"{"device":"gpu/pci-0000:01:00.0"}"#);
+    fn launch_targets() {
+        let launch = launch_for("gpu/0");
+        assert_eq!(launch, r#"{"device":"gpu/0"}"#);
         assert_eq!(
-            device_from_launch(&launch).as_deref(),
-            Some("gpu/pci-0000:01:00.0")
+            launch_target(&launch),
+            Some(LaunchTarget::Device("gpu/0".into()))
         );
+        assert_eq!(launch_for_main(), r#"{"open":"main"}"#);
+        assert_eq!(launch_target(&launch_for_main()), Some(LaunchTarget::Main));
+        for unknown in [
+            r#"{"open":"settings"}"#,
+            r#"{"open":"main","device":"gpu/0"}"#,
+            r#"{"close":"main"}"#,
+        ] {
+            assert_eq!(launch_target(unknown), None, "{unknown}");
+        }
     }
 
     #[test]
@@ -546,7 +602,10 @@ mod tests {
             "network/{\"device\":\"x\"}",
             "storage/back\\slash/é/✓",
         ] {
-            assert_eq!(device_from_launch(&launch_for(id)).as_deref(), Some(id));
+            assert_eq!(
+                launch_target(&launch_for(id)),
+                Some(LaunchTarget::Device(id.into()))
+            );
         }
     }
 
@@ -562,7 +621,7 @@ mod tests {
             r#"{"device":"cpu/0","extra":1}"#,
             r#"{"device":"cpu/0""#,
         ] {
-            assert_eq!(device_from_launch(launch), None, "{launch}");
+            assert_eq!(launch_target(launch), None, "{launch}");
         }
     }
 }

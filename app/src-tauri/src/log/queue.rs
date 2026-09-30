@@ -104,6 +104,9 @@ struct State {
     /// last queued item holding it leaves.
     layouts: HashMap<usize, Retained>,
     closed: bool,
+    /// The writer waits in `pop` (tests: a tick then cannot meet it on the lock).
+    #[cfg(test)]
+    parked: bool,
 }
 
 struct Retained {
@@ -193,6 +196,10 @@ impl LogQueue {
             if state.closed {
                 return Popped::Closed;
             }
+            #[cfg(test)]
+            {
+                state.parked = true;
+            }
             state = match deadline {
                 None => self
                     .ready
@@ -209,11 +216,28 @@ impl LogQueue {
                         .0
                 }
             };
+            #[cfg(test)]
+            {
+                state.parked = false;
+            }
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Items (rows and controls) waiting for the writer.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().items.len()
+    }
+
+    /// The writer waits for items and none is queued.
+    #[cfg(test)]
+    pub(crate) fn writer_parked(&self) -> bool {
+        let state = self.lock();
+        state.parked && state.items.is_empty()
     }
 }
 

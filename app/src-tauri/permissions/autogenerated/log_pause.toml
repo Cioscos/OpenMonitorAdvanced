@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-log-pause"
+description = "Enables the log_pause command without any pre-configured scope."
+commands.allow = ["log_pause"]
+
+[[permission]]
+identifier = "deny-log-pause"
+description = "Denies the log_pause command without any pre-configured scope."
+commands.deny = ["log_pause"]

@@ -446,12 +446,12 @@ pub fn open_known_path(app: AppHandle, target: KnownPath) -> Result<(), String> 
 }
 
 #[cfg(windows)]
-fn shell_open(path: &Path) -> std::io::Result<()> {
+pub(crate) fn shell_open(path: &Path) -> std::io::Result<()> {
     oma_win::shell_open::open(path)
 }
 
 #[cfg(not(windows))]
-fn shell_open(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn shell_open(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("not supported on this system"))
 }
 

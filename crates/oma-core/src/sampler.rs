@@ -404,14 +404,21 @@ mod tests {
         sampler.stop();
         // A tick that was already running at the change may still be reported
         // (at the old pace, on its own); from the first tick after the change
-        // on, ticks are at least one new interval apart. Timers never fire
-        // early, so 70 ms leaves 10 ms of slack for clock granularity.
+        // on, ticks follow the new interval. The schedule is anchored, so a
+        // tick reported late (a busy CI runner) is followed by a shorter gap:
+        // check the mean spacing, which timers never make shorter than the
+        // interval (70 ms leaves 10 ms of slack for clock granularity).
         let first_after = ticks.iter().position(|t| *t > changed_at).unwrap();
         let after = &ticks[first_after..];
         assert!(after.len() >= 3, "too few ticks after the change");
+        let gaps = u32::try_from(after.len() - 1).unwrap();
+        let mean = (after[after.len() - 1] - after[0]) / gaps;
+        assert!(
+            mean >= ms(70),
+            "ticks only {mean:?} apart on average after the change"
+        );
         for pair in after.windows(2) {
             let gap = pair[1] - pair[0];
-            assert!(gap >= ms(70), "ticks only {gap:?} apart after the change");
             assert!(gap < ms(1_500), "the new pace never took hold: {gap:?}");
         }
     }

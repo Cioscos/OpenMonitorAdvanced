@@ -4,6 +4,7 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { ServiceStatus } from '../../lib/types';
+  import type { SettingsTarget } from '../../lib/view';
   import AboutSection from './AboutSection.svelte';
   import GeneralSection from './GeneralSection.svelte';
   import PersistenceNotice from './PersistenceNotice.svelte';
@@ -16,12 +17,15 @@
     store,
     backend,
     service,
+    target = null,
     onBack,
-  }: { store: LiveStore; backend: Backend; service: ServiceStatus | null; onBack: () => void } = $props();
+  }: { store: LiveStore; backend: Backend; service: ServiceStatus | null; target?: SettingsTarget | null; onBack: () => void } = $props();
 
   type Section = 'general' | 'rules' | 'sources' | 'about';
   const SECTIONS: Section[] = ['general', 'rules', 'sources', 'about'];
-  let section = $state<Section>('general');
+  // Opened on a target (a sensor row's "Create rule…"), the screen starts on that section.
+  // svelte-ignore state_referenced_locally
+  let section = $state<Section>(target?.section ?? 'general');
 </script>
 
 <div class="settings">
@@ -54,7 +58,7 @@
     {#if section === 'general'}
       <GeneralSection {store} {backend} />
     {:else if section === 'rules'}
-      <RulesSection {store} {backend} />
+      <RulesSection {store} {backend} newRuleSensor={target?.newRuleSensor} />
     {:else if section === 'sources'}
       <SourcesSection {store} {backend} {service} />
     {:else}

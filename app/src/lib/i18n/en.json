@@ -282,6 +282,8 @@
   "advanced.table.min": "Min",
   "advanced.table.max": "Max",
   "advanced.table.avg": "Average",
+  "advanced.table.actions": "Actions",
+  "advanced.table.createRule": "Create rule…",
   "advanced.table.reset": "Reset min/max",
   "advanced.experimental": "Experimental",
   "advanced.category.temperature": "Temperatures",

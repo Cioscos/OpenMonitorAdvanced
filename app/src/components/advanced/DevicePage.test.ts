@@ -100,7 +100,7 @@ test('network page: traffic in bits per second, like the Simple view', async () 
   await vi.waitFor(() => expect(kpiValues()[3]).toBe(formatValue(STATS.max, 'bytes_per_second', 'en', t, { rate: 'bits' })));
   // The label also appears in the KPI row and in the series picker: take the table row.
   const name = [...document.querySelectorAll('.sensors th .name')].find((n) => n.textContent === t('sensor.network.down'))!;
-  const cells = () => [...name.closest('tr')!.querySelectorAll('td')].map((td) => td.textContent!);
+  const cells = () => [...name.closest('tr')!.querySelectorAll('td.num')].map((td) => td.textContent!);
   await vi.waitFor(() => expect(cells().every((c) => c.endsWith('bit/s'))).toBe(true));
 });
 
@@ -113,7 +113,7 @@ test('network pages follow the throughput setting and disks stay in bytes', asyn
   const DISK_ENTRY: SidebarEntry = { id: DISK, kind: 'storage', deviceIds: [DISK], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
   const tableCells = (label: string) => {
     const name = [...document.querySelectorAll('.sensors th .name')].find((n) => n.textContent === label)!;
-    return [...name.closest('tr')!.querySelectorAll('td')].map((td) => td.textContent!);
+    return [...name.closest('tr')!.querySelectorAll('td.num')].map((td) => td.textContent!);
   };
 
   const nic = render(DevicePage, { entry: NIC_ENTRY, store, backend });

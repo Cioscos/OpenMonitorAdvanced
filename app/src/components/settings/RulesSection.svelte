@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { sensorLabel } from '../../lib/advanced/labels';
   import type { Backend } from '../../lib/backend';
   import { i18n, t } from '../../lib/i18n/index.svelte';
@@ -34,7 +34,8 @@
   // Settings › Rules and alerts (spec M5 §3.6). The built-in rules come from the core
   // (`get_default_rules`), their resolved thresholds from `get_rule_status`, read while the section
   // is open. Changes to existing rules are saved at once; a new rule is a draft until "Create".
-  let { store, backend }: { store: LiveStore; backend: Backend } = $props();
+  // `newRuleSensor` opens "New rule" already holding that sensor (from a row of the Advanced view).
+  let { store, backend, newRuleSensor }: { store: LiveStore; backend: Backend; newRuleSensor?: string } = $props();
 
   const STATUS_INTERVAL_MS = 1000;
 
@@ -188,6 +189,18 @@
       draft = { ...draft, sensor, rule: blankRule(sensor), scales, scale: defaultScale(scales, []) };
     }
   }
+
+  // Once the schema is known, the requested sensor fills the draft (once: later edits are the user's).
+  let prefilled = false;
+  $effect(() => {
+    if (prefilled || newRuleSensor === undefined || schema === null) return;
+    prefilled = true;
+    if (!schema.sensors.some((s) => s.id === newRuleSensor)) return;
+    untrack(() => {
+      openDraft();
+      pickSensor(newRuleSensor);
+    });
+  });
 
   function changeDraft(change: (rule: Rule) => Partial<Rule>) {
     if (draft?.rule == null) return false;

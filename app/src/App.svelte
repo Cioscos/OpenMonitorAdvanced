@@ -12,7 +12,7 @@
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
-  import type { View } from './lib/view';
+  import { setSettingsOpener, type SettingsTarget, type View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
   // The first view is chosen once the settings and the tray's request are known (see `start`).
@@ -33,11 +33,14 @@
   let gear = $state<HTMLButtonElement | undefined>();
   /** The device page a clicked toast asked for, until the Advanced view has opened it. */
   let focus = $state<{ deviceId: string } | null>(null);
+  /** The settings section (and rule) that a component asked for; `null` opens the settings on General. */
+  let settingsTarget = $state<SettingsTarget | null>(null);
 
   /** Shows a view and remembers Simple/Advanced as the last one (the settings screen is never saved). */
   function showView(next: View) {
     if (next === 'settings' && view !== 'settings') previous = view;
     view = next;
+    if (next !== 'settings') settingsTarget = null;
     if (next !== 'settings' && settings.state?.settings.view.last !== next) {
       settings.update({ view: { last: next } });
     }
@@ -50,6 +53,10 @@
   }
 
   onMount(() => {
+    setSettingsOpener((target) => {
+      showView('settings');
+      settingsTarget = target;
+    });
     const visibility = () => { visible = !document.hidden; };
     document.addEventListener('visibilitychange', visibility);
     const clock = setInterval(() => { nowMs = Date.now(); }, 1000);
@@ -141,6 +148,7 @@
       if (target !== null) navigate(target);
     }
     return () => {
+      setSettingsOpener(null);
       cancelled = true;
       clearInterval(clock);
       document.removeEventListener('visibilitychange', visibility);
@@ -169,7 +177,10 @@
 
   function toggleSettings() {
     if (view === 'settings') void closeSettings();
-    else showView('settings');
+    else {
+      showView('settings');
+      settingsTarget = null;
+    }
   }
 
   function onKeydown(event: KeyboardEvent) {
@@ -207,7 +218,7 @@
     {:else if view === 'advanced'}
       <AdvancedView {store} {backend} {service} {focus} onFocused={() => (focus = null)} />
     {:else}
-      <SettingsView {store} {backend} {service} onBack={closeSettings} />
+      <SettingsView {store} {backend} {service} target={settingsTarget} onBack={closeSettings} />
     {/if}
   {/if}
 </main>

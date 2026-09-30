@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
 import { StatsPoller } from '../../lib/advanced/statsPoller.svelte';
 import { MOCK_SCHEMA } from '../../lib/backend/mock';
 import { DASH, formatValue } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import type { Sensor } from '../../lib/types';
+import { setSettingsOpener, type SettingsTarget } from '../../lib/view';
 import { FakeBackend } from '../../test/fake-backend';
 import SensorTable from './SensorTable.svelte';
 
@@ -41,7 +42,7 @@ function setup() {
 }
 
 /** Text of the value cells in the row of the sensor labelled `label`. */
-const cells = (label: string) => [...screen.getByText(label).closest('tr')!.querySelectorAll('td')].map((td) => td.textContent);
+const cells = (label: string) => [...screen.getByText(label).closest('tr')!.querySelectorAll('td.num')].map((td) => td.textContent);
 
 test('groups follow the category order', () => {
   setup();
@@ -119,4 +120,24 @@ test('network pages show byte rates in bits, like the Simple view', async () => 
   await stats.poll();
   flushSync();
   expect(cells(t('sensor.network.down'))).toEqual(['48 Mbit/s', '1.0 Mbit/s', '48 Mbit/s', '8.0 Mbit/s']);
+});
+
+test('row_offers_create_rule_on_focus', () => {
+  setup();
+  const row = screen.getByText(t('sensor.gpu.load.core')).closest('tr')!;
+  const button = within(row).getByRole('button', { name: t('advanced.table.createRule') }) as HTMLButtonElement;
+  // Reachable by keyboard whether or not the pointer is over the row.
+  expect(button.disabled).toBe(false);
+  expect(button.tabIndex).toBeGreaterThanOrEqual(0);
+  expect(screen.getAllByRole('button', { name: t('advanced.table.createRule') })).toHaveLength(sensors.length);
+});
+
+test('create_rule_opens_settings_with_the_sensor', async () => {
+  setup();
+  const opened: SettingsTarget[] = [];
+  setSettingsOpener((target) => opened.push(target));
+  const row = screen.getByText(t('sensor.gpu.throttle.power')).closest('tr')!;
+  await fireEvent.click(within(row).getByRole('button', { name: t('advanced.table.createRule') }));
+  expect(opened).toEqual([{ section: 'rules', newRuleSensor: THROTTLE.id }]);
+  setSettingsOpener(null);
 });

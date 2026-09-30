@@ -282,6 +282,8 @@
   "advanced.table.min": "Min",
   "advanced.table.max": "Max",
   "advanced.table.avg": "Media",
+  "advanced.table.actions": "Azioni",
+  "advanced.table.createRule": "Crea regola…",
   "advanced.table.reset": "Azzera min/max",
   "advanced.experimental": "Sperimentale",
   "advanced.category.temperature": "Temperature",

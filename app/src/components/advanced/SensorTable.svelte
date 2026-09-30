@@ -6,6 +6,7 @@
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { ValueOf } from '../../lib/select';
   import type { Sensor } from '../../lib/types';
+  import { openSettings } from '../../lib/view';
 
   let {
     sensors,
@@ -47,12 +48,13 @@
         <th scope="col" class="num">{t('advanced.table.min')}</th>
         <th scope="col" class="num">{t('advanced.table.max')}</th>
         <th scope="col" class="num">{t('advanced.table.avg')}</th>
+        <th scope="col" class="act"><span class="visually-hidden">{t('advanced.table.actions')}</span></th>
       </tr>
     </thead>
     {#each groups as group (group.category)}
       <tbody>
         <tr class="group">
-          <th scope="rowgroup" colspan="5">{categoryLabel(group.category, t)}</th>
+          <th scope="rowgroup" colspan="6">{categoryLabel(group.category, t)}</th>
         </tr>
         {#each group.sensors as sensor (sensor.id)}
           {@const s = stats.statsOf(sensor.id)}
@@ -66,6 +68,19 @@
             <td class="num">{formatValue(s?.min ?? null, sensor.unit, locale, t, opts)}</td>
             <td class="num">{formatValue(s?.max ?? null, sensor.unit, locale, t, opts)}</td>
             <td class="num">{formatAverage(s, sensor.unit, locale, t, opts)}</td>
+            <td class="act">
+              <button
+                type="button"
+                class="rule"
+                aria-label={t('advanced.table.createRule')}
+                title={t('advanced.table.createRule')}
+                onclick={() => openSettings({ section: 'rules', newRuleSensor: sensor.id })}
+              >
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+                  <path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                </svg>
+              </button>
+            </td>
           </tr>
         {/each}
       </tbody>
@@ -152,6 +167,43 @@
   tr:hover .source,
   tr:focus-within .source {
     opacity: 1;
+  }
+  .act {
+    width: 1%;
+    padding-block: 2px;
+    text-align: right;
+  }
+  /* Like the source badge: hidden until the row is hovered or focused, but still in the accessibility tree. */
+  .rule {
+    display: inline-flex;
+    padding: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  tr:hover .rule,
+  tr:focus-within .rule,
+  .rule:focus-visible {
+    opacity: 1;
+  }
+  .rule:hover {
+    color: var(--text);
+    border-color: var(--border);
+  }
+  .rule:focus-visible {
+    outline: 2px solid var(--accent);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--accent);

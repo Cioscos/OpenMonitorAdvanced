@@ -225,3 +225,27 @@ test('sections are reachable from the keyboard and marked as current', async () 
   expect(sources.getAttribute('aria-current')).toBe('page');
   expect(screen.getByRole('region', { name: t('settings.section.sources') })).toBeTruthy();
 });
+
+test('back_returns_to_advanced', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+  await fireEvent.click(await screen.findByRole('tab', { name: t('view.advanced') }));
+  const create = await screen.findAllByRole('button', { name: t('advanced.table.createRule') });
+  await fireEvent.click(create[0]);
+
+  // Settings on Rules, with "New rule" already holding the sensor of that row.
+  expect(screen.getByRole('heading', { name: t('settings.section.rules') })).toBeTruthy();
+  expect(screen.getByRole('group', { name: t('rules.new') })).toBeTruthy();
+  await vi.waitFor(() => expect((screen.getByLabelText(t('rules.editor.sensor')) as HTMLSelectElement).value).not.toBe(''));
+  expect(screen.queryByRole('navigation', { name: t('advanced.sidebar') })).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.back') }));
+  await vi.waitFor(() => expect(screen.getByRole('navigation', { name: t('advanced.sidebar') })).toBeTruthy());
+
+  // Esc does the same, and the gear opens the general section again.
+  await fireEvent.click(screen.getAllByRole('button', { name: t('advanced.table.createRule') })[0]);
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  await vi.waitFor(() => expect(screen.getByRole('navigation', { name: t('advanced.sidebar') })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.title') }));
+  expect(screen.getByRole('heading', { name: t('settings.section.general') })).toBeTruthy();
+});

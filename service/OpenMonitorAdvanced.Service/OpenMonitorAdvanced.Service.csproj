@@ -4,6 +4,12 @@
     <AssemblyName>oma-service</AssemblyName>
     <RootNamespace>OpenMonitorAdvanced.Service</RootNamespace>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Version resource (spec M6a §2, §5.1): SignPath requires the product name and version in
+         every signed file, and scripts/verify-signatures.ps1 checks them. ProductVersion must be
+         exactly X.Y.Z, without the "+<commit>" suffix SourceLink would add; the commit is traced
+         by the build attestation instead. -->
+    <Product>OpenMonitor Advanced</Product>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <!-- SelfContained, PublishSingleFile and trimming are set only in
          Properties/PublishProfiles/Service.pubxml (published with
          -p:PublishProfile=Service), never here: a plain `dotnet build`/

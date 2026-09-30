@@ -1,0 +1,4 @@
+{
+  "release": { "subject": "", "thumbprints": [] },
+  "test": { "subject": "", "thumbprints": [], "rootThumbprints": [], "rootCertificatePath": "" }
+}

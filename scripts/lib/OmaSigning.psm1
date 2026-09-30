@@ -12,6 +12,7 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'OmaCommon.psm1')
+Import-Module (Join-Path $PSScriptRoot 'OmaPawnIoPins.psm1')
 
 $ProductName = 'OpenMonitor Advanced'
 $SignedNames = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe')
@@ -490,5 +491,543 @@ function Assert-OmaSigningPass {
     }
 }
 
+# --- verification (spec §5.1, plan L4/L5) ---------------------------------------------------------
+#
+# Every check returns a list of problems (strings); an empty list means the file passed. Access to
+# signatures, certificate chains, signtool, version resources, 7-Zip and the certificate store goes
+# through injectable providers so the tests use fakes; the defaults are the real ones and
+# scripts/verify-signatures.ps1 exposes no way to replace them.
+
+$script:SignPathFoundationCn = 'SignPath Foundation'
+$script:OwnPayloadNames = @('oma-app.exe', 'oma-service.exe')
+
+$script:DefaultSignatureProvider = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path }
+$script:DefaultEmbeddedSignatureProvider = { param($Path) Get-OmaEmbeddedSignature -Path $Path }
+$script:DefaultChainProvider = { param($Certificate) Get-OmaCertificateChain -Certificate $Certificate }
+$script:DefaultVersionInfoProvider = { param($Path) [Diagnostics.FileVersionInfo]::GetVersionInfo($Path) }
+$script:DefaultExtractor = {
+    param($Setup, $Destination)
+    $r = Invoke-OmaNative -FilePath (Get-Oma7ZipPath) -AllowFailure -ArgumentList @('x', '-y', '-bd', "-o$Destination", '--', $Setup)
+    [pscustomobject]@{ ExitCode = $r.ExitCode; Output = ($r.Stdout + $r.Stderr).Trim() }
+}
+
+# Cert:\LocalMachine\Root, not CurrentUser\Root: adding to the user root store opens a Windows
+# confirmation dialog, which blocks a runner without a desktop (plan L5).
+function Use-OmaRootStore([Security.Cryptography.X509Certificates.OpenFlags]$Flags, [scriptblock]$Action) {
+    $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+    try {
+        $store.Open($Flags)
+        & $Action $store
+    } finally {
+        $store.Dispose()
+    }
+}
+
+$script:DefaultTrustStore = @{
+    IsElevated = {
+        ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    # A single public certificate (DER or PEM); a PFX is refused by the loader.
+    LoadRoot   = { param($Path) [Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadCertificateFromFile($Path) }
+    Contains   = {
+        param($Thumbprint)
+        Use-OmaRootStore 'ReadOnly' { param($s) $s.Certificates.Find('FindByThumbprint', $Thumbprint, $false).Count -gt 0 }
+    }
+    Add        = { param($Certificate) Use-OmaRootStore 'ReadWrite' { param($s) $s.Add($Certificate) } }
+    Remove     = {
+        param($Thumbprint)
+        Use-OmaRootStore 'ReadWrite' {
+            param($s)
+            foreach ($c in @($s.Certificates.Find('FindByThumbprint', $Thumbprint, $false))) { $s.Remove($c) }
+        }
+    }
+}
+
+function Get-OmaProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [Collections.IDictionary]) { return $Object[$Name] }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p) { return $null }
+    $p.Value
+}
+
+<#
+.SYNOPSIS
+  signtool.exe from the newest Windows 10/11 SDK (x64), else from PATH, else $null.
+#>
+function Get-OmaSignToolPath {
+    $kits = if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin' }
+    if ($kits -and (Test-Path -LiteralPath $kits -PathType Container)) {
+        $newest = Get-ChildItem -LiteralPath $kits -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'x64\signtool.exe') -PathType Leaf) } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+        if ($newest) { return Join-Path $newest.FullName 'x64\signtool.exe' }
+    }
+    $cmd = Get-Command 'signtool.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    $null
+}
+
+<#
+.SYNOPSIS
+  7z.exe from the default 7-Zip install directory, else from PATH; throws when missing.
+#>
+function Get-Oma7ZipPath {
+    foreach ($dir in @($env:ProgramFiles, $env:ProgramW6432) | Where-Object { $_ } | Select-Object -Unique) {
+        $exe = Join-Path $dir '7-Zip\7z.exe'
+        if (Test-Path -LiteralPath $exe -PathType Leaf) { return $exe }
+    }
+    $cmd = Get-Command '7z.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    throw '7-Zip not found (expected C:\Program Files\7-Zip\7z.exe or 7z on PATH)'
+}
+
+<#
+.SYNOPSIS
+  Verifies the embedded Authenticode signature of a file with the Windows verifier (signtool).
+.DESCRIPTION
+  Returns @{ Embedded; SignatureValid; TimestampValid; Detail }. No catalog option (/a, /ad, /as,
+  /ag, /c) is passed, so only a signature embedded in the file counts: a catalog-signed Windows
+  file reports "No signature found". /pa uses the Default Authentication Verification Policy and
+  /all checks every signature. The first run gives the cryptographic outcome; the second adds
+  /tw, which turns a missing timestamp into a warning (exit code 2), and requires one verified
+  timestamp per signature. Warnings and errors are never success.
+#>
+function Get-OmaEmbeddedSignature {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$Path)
+    $signtool = Get-OmaSignToolPath
+    if (-not $signtool) { throw 'signtool.exe not found: install the Windows SDK' }
+    $clean = { param($r, [string]$Text) $r.ExitCode -eq 0 -and $Text -match 'Number of errors: 0' -and $Text -match 'Number of warnings: 0' }
+
+    $sig = Invoke-OmaNative -FilePath $signtool -AllowFailure -ArgumentList @('verify', '/pa', '/all', '/v', $Path)
+    $sigText = "$($sig.Stdout)`n$($sig.Stderr)"
+    $embedded = $sigText -notmatch 'No signature found' -and $sigText -notmatch 'file format cannot be verified'
+    $signatureValid = $embedded -and (& $clean $sig $sigText) -and $sigText -match 'Successfully verified'
+
+    $ts = Invoke-OmaNative -FilePath $signtool -AllowFailure -ArgumentList @('verify', '/pa', '/all', '/tw', '/v', $Path)
+    $tsText = "$($ts.Stdout)`n$($ts.Stderr)"
+    $signatures = [regex]::Matches($tsText, 'Signature Index: ').Count
+    $stamped = [regex]::Matches($tsText, 'The signature is timestamped: ').Count
+    $timestampValid = $signatureValid -and (& $clean $ts $tsText) -and $signatures -ge 1 -and $stamped -eq $signatures
+
+    $lines = @(($sigText + "`n" + $tsText) -split '\r?\n' | Where-Object { $_ -match 'SignTool Error|SignTool Warning|Number of (errors|warnings)' } |
+            ForEach-Object Trim | Select-Object -Unique)
+    [pscustomobject]@{
+        Embedded       = $embedded
+        SignatureValid = $signatureValid
+        TimestampValid = $timestampValid
+        Detail         = "signtool exit codes $($sig.ExitCode)/$($ts.ExitCode): $($lines -join '; ')"
+    }
+}
+
+<#
+.SYNOPSIS
+  Thumbprints of the chain built for a certificate, leaf first, and the last one as RootThumbprint.
+  Trust is decided by the Authenticode status; the chain only tells which root it ends at.
+#>
+function Get-OmaCertificateChain {
+    param([Parameter(Mandatory)] $Certificate)
+    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        # Revocation is checked by WinVerifyTrust (Get-AuthenticodeSignature, signtool).
+        $chain.ChainPolicy.RevocationMode = 'NoCheck'
+        [void]$chain.Build($Certificate)
+        $thumbprints = @($chain.ChainElements | ForEach-Object { $_.Certificate.Thumbprint })
+        [pscustomobject]@{ Thumbprints = $thumbprints; RootThumbprint = if ($thumbprints.Count) { $thumbprints[-1] } }
+    } finally {
+        $chain.Dispose()
+    }
+}
+
+# The CN values of a distinguished name, or none if it does not parse.
+function Get-OmaCommonNames([string]$Subject) {
+    try { $dn = [Security.Cryptography.X509Certificates.X500DistinguishedName]::new($Subject) } catch { return @() }
+    @($dn.EnumerateRelativeDistinguishedNames() |
+            Where-Object { -not $_.HasMultipleElements -and $_.GetSingleElementType().Value -eq '2.5.4.3' } |
+            ForEach-Object { $_.GetSingleElementValue() })
+}
+
+# The approved certificates of a policy (plan L4), or a problem. An empty required field fails the
+# policy; so does a malformed thumbprint.
+function Get-OmaPolicyCertificates($Certificates, [string]$Policy) {
+    $none = "no approved certificate configured for policy $Policy"
+    $c = Get-OmaProperty $Certificates $Policy
+    $subject = [string](Get-OmaProperty $c 'subject')
+    $thumbprints = @(Get-OmaProperty $c 'thumbprints' | Where-Object { $_ })
+    $fields = [ordered]@{ subject = $subject; thumbprints = $thumbprints }
+    if ($Policy -eq 'test') {
+        $fields.rootThumbprints = @(Get-OmaProperty $c 'rootThumbprints' | Where-Object { $_ })
+        $fields.rootCertificatePath = [string](Get-OmaProperty $c 'rootCertificatePath')
+    }
+    foreach ($k in $fields.Keys) {
+        if (@($fields[$k] | Where-Object { $_ }).Count -eq 0) { return [pscustomobject]@{ Problem = $none } }
+    }
+    foreach ($k in @('thumbprints', 'rootThumbprints') | Where-Object { $fields.Contains($_) }) {
+        foreach ($t in $fields[$k]) {
+            if ("$t" -notmatch '^[0-9A-Fa-f]{40}$') { return [pscustomobject]@{ Problem = "invalid $Policy.$k entry in .signpath/certificates.json: '$t'" } }
+        }
+        $fields[$k] = @($fields[$k] | ForEach-Object { "$_".ToUpperInvariant() })
+    }
+    if ($Policy -eq 'release' -and @(Get-OmaCommonNames $subject) -cnotcontains $script:SignPathFoundationCn) {
+        return [pscustomobject]@{ Problem = "release.subject in .signpath/certificates.json must be the exact DN with CN=$($script:SignPathFoundationCn): '$subject'" }
+    }
+    if ($Policy -eq 'test' -and -not [IO.Path]::IsPathFullyQualified($fields.rootCertificatePath)) {
+        $fields.rootCertificatePath = Join-Path (Resolve-OmaPath (Join-Path $PSScriptRoot '..\..')) $fields.rootCertificatePath
+    }
+    $fields.Problem = $null
+    [pscustomobject]$fields
+}
+
+# Plan L5 guard: the test root is trusted only on a declared isolated machine, as administrator.
+function Get-OmaIsolationProblem([hashtable]$TrustStore) {
+    $declared = $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -or $env:OMA_ISOLATED_TRUST -eq '1'
+    if (-not $declared) {
+        return 'policy test needs an isolated environment (a GitHub-hosted runner, or OMA_ISOLATED_TRUST=1 in a VM or Windows Sandbox): no test root imported'
+    }
+    if (-not (& $TrustStore.IsElevated)) {
+        return 'policy test must run as administrator to trust its root in Cert:\LocalMachine\Root: no test root imported'
+    }
+    $null
+}
+
+# Trusts the pinned test root for the duration of $Action and removes it afterwards, but only if
+# this call added it: a root that was already trusted stays.
+function Invoke-OmaWithTestRoot($Config, [hashtable]$TrustStore, [scriptblock]$Action) {
+    $root = & $TrustStore.LoadRoot $Config.rootCertificatePath
+    if ($null -eq $root) { throw "cannot load the test root certificate $($Config.rootCertificatePath)" }
+    if ($root.HasPrivateKey) { throw "the test root certificate file must hold a public certificate only: $($Config.rootCertificatePath)" }
+    $thumbprint = "$($root.Thumbprint)".ToUpperInvariant()
+    if ($thumbprint -notin $Config.rootThumbprints) {
+        throw "the test root certificate $($Config.rootCertificatePath) has thumbprint $thumbprint, which is not in test.rootThumbprints"
+    }
+    $added = $false
+    try {
+        if (-not (& $TrustStore.Contains $thumbprint)) {
+            $added = $true
+            & $TrustStore.Add $root
+        }
+        & $Action
+    } finally {
+        if ($added) { & $TrustStore.Remove $thumbprint }
+    }
+}
+
+function Get-OmaSignatureProblems([string]$Path, [string]$Policy, $Config, [scriptblock]$SignatureProvider,
+    [scriptblock]$ChainProvider, [scriptblock]$EmbeddedSignatureProvider) {
+    $name = Split-Path -Leaf $Path
+    $sig = & $SignatureProvider $Path
+    if ($null -eq $sig) { return "${name}: no signature information" }
+    $status = "$(Get-OmaProperty $sig 'Status')"
+    if ($status -cne 'Valid') { "${name}: Authenticode status $status ($(Get-OmaProperty $sig 'StatusMessage'))" }
+    $type = Get-OmaProperty $sig 'SignatureType'
+    if ($null -ne $type -and "$type" -cne 'Authenticode') {
+        "${name}: signature type $type; an embedded Authenticode signature is required, a catalog signature is not accepted"
+    }
+    $cert = Get-OmaProperty $sig 'SignerCertificate'
+    if ($null -eq $cert) {
+        "${name}: no signer certificate"
+    } else {
+        $subject = [string](Get-OmaProperty $cert 'Subject')
+        $thumbprint = "$(Get-OmaProperty $cert 'Thumbprint')".ToUpperInvariant()
+        if ($subject -cne $Config.subject) { "${name}: signer '$subject', expected '$($Config.subject)'" }
+        if ($thumbprint -notin $Config.thumbprints) { "${name}: signer thumbprint $thumbprint is not an approved $Policy certificate" }
+        if ($Policy -eq 'test') {
+            $root = "$(Get-OmaProperty (& $ChainProvider $cert) 'RootThumbprint')".ToUpperInvariant()
+            if ($root -notin $Config.rootThumbprints) { "${name}: the certificate chain ends at $root, not at a pinned test root" }
+        }
+    }
+    if ($null -eq (Get-OmaProperty $sig 'TimeStamperCertificate')) { "${name}: no timestamp (no timestamping certificate)" }
+    $embedded = & $EmbeddedSignatureProvider $Path
+    if (-not (Get-OmaProperty $embedded 'Embedded')) {
+        "${name}: no embedded signature (a catalog signature is not accepted): $(Get-OmaProperty $embedded 'Detail')"
+    } elseif (-not (Get-OmaProperty $embedded 'SignatureValid')) {
+        "${name}: the embedded signature does not verify: $(Get-OmaProperty $embedded 'Detail')"
+    }
+    if (-not (Get-OmaProperty $embedded 'TimestampValid')) {
+        "${name}: the timestamp is missing or does not verify: $(Get-OmaProperty $embedded 'Detail')"
+    }
+}
+
+<#
+.SYNOPSIS
+  Checks the embedded Authenticode signature of one file against a policy; returns the problems.
+.DESCRIPTION
+  release: status Valid with ordinary Windows trust, an embedded (not catalog) signature that the
+  Windows verifier accepts, signer subject equal to release.subject and thumbprint in
+  release.thumbprints, a timestamping certificate and a timestamp verified by signtool.
+  test: the same, against the test certificates, plus a chain ending at a pinned test root. The
+  pinned root is trusted in Cert:\LocalMachine\Root only for this call and only on a declared
+  isolated machine as administrator (plan L5); otherwise the check stops before any import.
+  Provider exceptions become problems. -TrustStore replaces the certificate store (tests).
+#>
+function Test-OmaSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [ValidateSet('release', 'test')] [string]$Policy,
+        [pscustomobject]$Certificates,
+        [scriptblock]$SignatureProvider = $script:DefaultSignatureProvider,
+        [scriptblock]$ChainProvider = $script:DefaultChainProvider,
+        [scriptblock]$EmbeddedSignatureProvider = $script:DefaultEmbeddedSignatureProvider,
+        [hashtable]$TrustStore = $script:DefaultTrustStore
+    )
+    $config = Get-OmaPolicyCertificates $Certificates $Policy
+    if ($config.Problem) { return @($config.Problem) }
+    $name = Split-Path -Leaf $Path
+    try {
+        if ($Policy -eq 'release') {
+            return @(Get-OmaSignatureProblems $Path $Policy $config $SignatureProvider $ChainProvider $EmbeddedSignatureProvider)
+        }
+        $guard = Get-OmaIsolationProblem $TrustStore
+        if ($guard) { return @($guard) }
+        @(Invoke-OmaWithTestRoot $config $TrustStore {
+                Get-OmaSignatureProblems $Path $Policy $config $SignatureProvider $ChainProvider $EmbeddedSignatureProvider
+            })
+    } catch {
+        @("${name}: signature check failed: $($_.Exception.Message)")
+    }
+}
+
+<#
+.SYNOPSIS
+  Checks ProductName, ProductVersion and FileVersion of a file against the current version.
+.DESCRIPTION
+  Formats recorded by the spike: ProductName 'OpenMonitor Advanced' and ProductVersion 'X.Y.Z'
+  everywhere; FileVersion 'X.Y.Z' for the app, the uninstaller and the setup (Tauri/NSIS) and
+  'X.Y.Z.0' for oma-service.exe (.NET). -Name is the file name used in the messages and to
+  recognise the service. Returns the problems.
+#>
+function Test-OmaVersionInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()] $VersionInfo,
+        [Parameter(Mandatory)] [string]$Version,
+        [Parameter(Mandatory)] [string]$Name
+    )
+    if ($null -eq $VersionInfo) { return @("$Name has no version information") }
+    $want = [ordered]@{
+        ProductName    = $ProductName
+        ProductVersion = $Version
+        FileVersion    = if ($Name -eq 'oma-service.exe') { "$Version.0" } else { $Version }
+    }
+    foreach ($field in $want.Keys) {
+        $found = [string](Get-OmaProperty $VersionInfo $field)
+        if ($found -cne $want[$field]) {
+            "$Name has $field '$found'$(if (-not $found) { ' (missing)' }), expected '$($want[$field])'"
+        }
+    }
+}
+
+function Read-OmaManifestFile([string]$Path, [string]$Version) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Problem = "manifest not found: $Path" } }
+    try {
+        $m = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json -AsHashtable
+    } catch {
+        return [pscustomobject]@{ Problem = "manifest is not valid JSON: $Path" }
+    }
+    if ($m -isnot [Collections.IDictionary] -or $m['schema'] -ne 1) { return [pscustomobject]@{ Problem = "unsupported manifest schema in ${Path}" } }
+    if ([string]$m['version'] -cne $Version) {
+        return [pscustomobject]@{ Problem = "the manifest belongs to version '$($m['version'])', not $Version" }
+    }
+    foreach ($k in 'collect', 'apply') { $m[$k] = @($m[$k] | Where-Object { $null -ne $_ }) }
+    if ($null -eq $m['signed']) { $m['signed'] = @{} }
+    [pscustomobject]@{ Problem = $null; Manifest = $m }
+}
+
+# The single collect row of a role, or a problem.
+function Get-OmaSingleEntry($List, [string]$Role, [string]$Pass) {
+    $rows = @(Get-OmaEntries $List $Role)
+    if ($rows.Count -ne 1) { return [pscustomobject]@{ Problem = "the $Pass pass of the manifest must record exactly one $Role, found $($rows.Count)" } }
+    [pscustomobject]@{ Problem = $null; Entry = $rows[0] }
+}
+
+<#
+.SYNOPSIS
+  Verifies a setup against the signing manifest and a policy; returns the problems.
+.DESCRIPTION
+  All policies: non-empty setup, the manifest of this version, 7-Zip extraction (exit code
+  checked), exactly one oma-app.exe, oma-service.exe and PawnIO_setup.exe, PawnIO with the pinned
+  hash, status Valid and pinned signer (OmaPawnIoPins.psm1), and the product metadata of the
+  setup and the payload. release|test: every product file carries a signature accepted by
+  Test-OmaSignature and the extracted payload has the hashes of the imported signed copies;
+  none: the payload has the hashes of the collect pass.
+  uninstall.exe: 7-Zip does not list it (spike, 7-Zip 26.01). If it ever appears it is checked
+  like the payload; otherwise release|test verify the imported signed copy, its hash and its
+  replacement in the apply pass, none verifies the collect pass, and a note (information stream,
+  tag OmaNote) says that the installed uninstaller's signature still needs the manual check.
+#>
+function Test-OmaPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Setup,
+        [Parameter(Mandatory)] [ValidateSet('release', 'test', 'none')] [string]$Policy,
+        [Parameter(Mandatory)] [string]$Manifest,
+        [Parameter(Mandatory)] [string]$Version,
+        [pscustomobject]$Certificates,
+        [scriptblock]$Extractor = $script:DefaultExtractor,
+        [scriptblock]$SignatureProvider = $script:DefaultSignatureProvider,
+        [scriptblock]$ChainProvider = $script:DefaultChainProvider,
+        [scriptblock]$VersionInfoProvider = $script:DefaultVersionInfoProvider,
+        [scriptblock]$EmbeddedSignatureProvider = $script:DefaultEmbeddedSignatureProvider,
+        [hashtable]$TrustStore = $script:DefaultTrustStore,
+        [pscustomobject]$PawnIoPins
+    )
+    Assert-OmaVersionString $Version
+    $signedPolicy = $Policy -ne 'none'
+    $problems = [Collections.Generic.List[string]]::new()
+    $sigArgs = @{
+        Policy = $Policy; Certificates = $Certificates; SignatureProvider = $SignatureProvider
+        ChainProvider = $ChainProvider; EmbeddedSignatureProvider = $EmbeddedSignatureProvider; TrustStore = $TrustStore
+    }
+    $checkFile = {
+        param([string]$Path, [string]$Name)
+        if ($signedPolicy) { foreach ($p in @(Test-OmaSignature -Path $Path @sigArgs)) { $problems.Add($p) } }
+        foreach ($p in @(Test-OmaVersionInfo -VersionInfo (& $VersionInfoProvider $Path) -Version $Version -Name $Name)) { $problems.Add($p) }
+    }
+
+    if (-not (Test-Path -LiteralPath $Setup -PathType Leaf)) { $problems.Add("setup not found: $Setup") }
+    elseif ((Get-Item -LiteralPath $Setup).Length -eq 0) { $problems.Add("the setup is empty: $Setup") }
+    $read = Read-OmaManifestFile $Manifest $Version
+    if ($read.Problem) { $problems.Add($read.Problem) }
+    if ($signedPolicy) {
+        $config = Get-OmaPolicyCertificates $Certificates $Policy
+        if ($config.Problem) { $problems.Add($config.Problem) }
+    }
+    if ($problems.Count -gt 0) { return $problems.ToArray() }
+    $m = $read.Manifest
+    $stateDir = Split-Path -Parent (Resolve-OmaPath $Manifest)
+
+    # What the extracted payload must match: the signed copies, or the collect pass when unsigned.
+    $want = @{}
+    foreach ($pair in @(@('app', 'oma-app.exe'), @('uninstaller', 'uninstall.exe'), @('service', 'oma-service.exe'))) {
+        if ($signedPolicy) {
+            $sha = [string]$m['signed'][$pair[1]]
+            if (-not $sha) { $problems.Add("the manifest has no imported signed copy of $($pair[1])") }
+            $want[$pair[1]] = $sha
+        } else {
+            $c = Get-OmaSingleEntry $m['collect'] $pair[0] 'collect'
+            if ($c.Problem) { $problems.Add($c.Problem); continue }
+            if ($c.Entry['sha256'] -ne $c.Entry['after']) { $problems.Add("$($pair[1]) changed during the collect pass") }
+            $want[$pair[1]] = [string]$c.Entry['sha256']
+        }
+    }
+
+    & $checkFile $Setup (Split-Path -Leaf $Setup)
+
+    $dest = Join-Path ([IO.Path]::GetTempPath()) ('oma-verify-' + [guid]::NewGuid().ToString('N'))
+    try {
+        try {
+            $x = & $Extractor $Setup $dest
+        } catch {
+            $problems.Add("extracting the setup failed: $($_.Exception.Message)")
+            return $problems.ToArray()
+        }
+        if ($x.ExitCode -ne 0) {
+            $problems.Add("extracting the setup with 7-Zip failed: exit code $($x.ExitCode) $($x.Output)")
+            return $problems.ToArray()
+        }
+        $files = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -Force })
+        $found = @{}
+        foreach ($n in @($script:OwnPayloadNames) + 'PawnIO_setup.exe' + 'uninstall.exe') {
+            $found[$n] = @($files | Where-Object { $_.Name -ieq $n })
+            $optional = $n -eq 'uninstall.exe' -and $found[$n].Count -eq 0
+            if ($found[$n].Count -ne 1 -and -not $optional) {
+                $problems.Add("the setup must contain exactly one $n, found $($found[$n].Count)")
+            }
+        }
+
+        foreach ($n in @($script:OwnPayloadNames) + 'uninstall.exe') {
+            if ($found[$n].Count -ne 1) { continue }
+            $path = $found[$n][0].FullName
+            $sha = Get-OmaSha256 $path
+            $source = if ($signedPolicy) { 'the signed copy' } else { 'the collect pass' }
+            if ($sha -ne $want[$n]) { $problems.Add("$n in the setup has SHA-256 $sha, expected $($want[$n]) from $source") }
+            & $checkFile $path $n
+        }
+
+        if ($found['PawnIO_setup.exe'].Count -eq 1) {
+            $pins = if ($PawnIoPins) { $PawnIoPins } else { Get-OmaPawnIoPins }
+            $p = Test-OmaPawnIoSetup -Path $found['PawnIO_setup.exe'][0].FullName -Pins $pins -SignatureProvider $SignatureProvider
+            if ($p) { $problems.Add("PawnIO_setup.exe: $p") }
+        }
+
+        if ($found['uninstall.exe'].Count -eq 0) {
+            $collected = Get-OmaSingleEntry $m['collect'] 'uninstaller' 'collect'
+            if ($collected.Problem) { $problems.Add($collected.Problem) }
+            elseif ($collected.Entry['sha256'] -ne $collected.Entry['after']) { $problems.Add('the uninstaller changed during the collect pass') }
+            if ($signedPolicy) {
+                $copy = Join-Path $stateDir 'signed\uninstall.exe'
+                if (-not (Test-Path -LiteralPath $copy -PathType Leaf)) {
+                    $problems.Add("the imported signed uninstall.exe is missing: $copy")
+                } else {
+                    $sha = Get-OmaSha256 $copy
+                    if ($sha -ne $want['uninstall.exe']) {
+                        $problems.Add("signed copy of uninstall.exe has SHA-256 $sha, not its imported hash $($want['uninstall.exe'])")
+                    }
+                    & $checkFile $copy 'uninstall.exe'
+                }
+                $applied = Get-OmaSingleEntry $m['apply'] 'uninstaller' 'apply'
+                if ($applied.Problem) {
+                    $problems.Add($applied.Problem)
+                } elseif (-not $collected.Problem -and ($applied.Entry['sha256'] -ne $collected.Entry['sha256'] -or $applied.Entry['after'] -ne $want['uninstall.exe'])) {
+                    $problems.Add('the uninstaller was not replaced with its signed copy in the apply pass')
+                }
+            }
+            $checked = if ($signedPolicy) { 'the manifest and the imported signed copy' } else { 'the collect pass in the manifest' }
+            Write-Information -Tags 'OmaNote' -MessageData ("installed uninstaller signature not verified: 7-Zip does not list uninstall.exe, so only $checked " +
+                "were checked; install the setup in Windows Sandbox or a VM and check C:\Program Files\$ProductName\uninstall.exe (spec §8.2)")
+        }
+    } finally {
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $problems.ToArray()
+}
+
+<#
+.SYNOPSIS
+  Verifies the signed files returned by SignPath before they are imported; returns the problems.
+.DESCRIPTION
+  The directory must hold exactly oma-app.exe, uninstall.exe and oma-service.exe. Each must pass
+  Test-OmaSignature and Test-OmaVersionInfo. Hashes are not compared here: the signed copies are
+  not in the manifest until import-signed records them.
+#>
+function Test-OmaSignedFiles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Directory,
+        [Parameter(Mandatory)] [ValidateSet('release', 'test')] [string]$Policy,
+        [Parameter(Mandatory)] [string]$Version,
+        [pscustomobject]$Certificates,
+        [scriptblock]$SignatureProvider = $script:DefaultSignatureProvider,
+        [scriptblock]$ChainProvider = $script:DefaultChainProvider,
+        [scriptblock]$VersionInfoProvider = $script:DefaultVersionInfoProvider,
+        [scriptblock]$EmbeddedSignatureProvider = $script:DefaultEmbeddedSignatureProvider,
+        [hashtable]$TrustStore = $script:DefaultTrustStore
+    )
+    Assert-OmaVersionString $Version
+    $config = Get-OmaPolicyCertificates $Certificates $Policy
+    if ($config.Problem) { return @($config.Problem) }
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return @("signed files directory not found: $Directory") }
+    $problems = [Collections.Generic.List[string]]::new()
+    $items = @(Get-ChildItem -LiteralPath $Directory -Force)
+    $files = @($items | Where-Object { -not $_.PSIsContainer } | ForEach-Object Name)
+    $missing = @($SignedNames | Where-Object { $_ -notin $files })
+    $unexpected = @($items | Where-Object { $_.PSIsContainer -or $_.Name -notin $SignedNames } | ForEach-Object Name)
+    if ($missing.Count -gt 0 -or $unexpected.Count -gt 0) {
+        $problems.Add("the signed files directory must hold exactly $($SignedNames -join ', '); missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')")
+    }
+    foreach ($n in $SignedNames | Where-Object { $_ -in $files }) {
+        $path = Join-Path $Directory $n
+        foreach ($p in @(Test-OmaSignature -Path $path -Policy $Policy -Certificates $Certificates -SignatureProvider $SignatureProvider `
+                    -ChainProvider $ChainProvider -EmbeddedSignatureProvider $EmbeddedSignatureProvider -TrustStore $TrustStore)) { $problems.Add($p) }
+        foreach ($p in @(Test-OmaVersionInfo -VersionInfo (& $VersionInfoProvider $path) -Version $Version -Name $n)) { $problems.Add($p) }
+    }
+    $problems.ToArray()
+}
+
 Export-ModuleMember -Function Initialize-OmaSigningState, Invoke-OmaSignShim, Register-OmaService,
-    Import-OmaSignedFiles, Assert-OmaSigningPass, Get-OmaPluginPathPattern -Variable UninstallerPathPattern
+    Import-OmaSignedFiles, Assert-OmaSigningPass, Get-OmaPluginPathPattern,
+    Assert-OmaVersionString, Test-OmaVersionInfo, Test-OmaSignature, Test-OmaPayload, Test-OmaSignedFiles,
+    Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-Oma7ZipPath -Variable UninstallerPathPattern

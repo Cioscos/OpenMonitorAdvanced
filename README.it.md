@@ -38,7 +38,8 @@ temperature, tensioni, ventole e dati SMART.
   intervallo di campionamento (da 0,5 a 5 s), frequenza di aggiornamento dei grafici (60, 30 o
   15 FPS), vista predefinita, chiusura nel tray, avvio con Windows e sensore mostrato
   dall'icona del tray. La sezione *Regole e avvisi* elenca le regole predefinite e le tue (vedi
-  sotto). La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
+  sotto). La sezione *Log CSV* imposta cartella, sensori, intervallo, limite di dimensione e
+  scorciatoie del log (vedi sotto). La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
   di GPU, la modalità compatibile con gli anti-cheat, ogni modulo del servizio e, disco per
   disco, la lettura SMART, e mostra lo stato di PawnIO. *Informazioni* elenca versioni e
   licenze. Le impostazioni sono salvate in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
@@ -56,6 +57,19 @@ temperature, tensioni, ventole e dati SMART.
   L'ingresso nel livello critico fa partire anche una notifica di Windows (anche il livello di
   attenzione, se lo attivi), al massimo una ogni 5 minuti per regola, dispositivo e livello; il
   clic sulla notifica apre la pagina del dispositivo.
+- **Log CSV.** Un registratore a cassette nella barra in alto apre un pannello con registra,
+  pausa e stop; il menu del tray ha le stesse voci, e un puntino sull'icona del tray compare
+  mentre una registrazione è in corso. Una scorciatoia globale, **Ctrl+Alt+Shift+R** per
+  impostazione predefinita, la avvia e la ferma anche con la finestra chiusa, e una seconda
+  scorciatoia facoltativa mette in pausa e riprende. Il file è UTF-8 con BOM, separato da
+  virgole, con fine riga CRLF: una riga per ogni tick campionato (o ogni 1-60 tick), un
+  timestamp locale con lo scarto dall'UTC e una colonna per sensore, chiamata
+  `Dispositivo / Sensore [unità] {id}`. I file vanno in `Documenti\OpenMonitor Advanced\logs`,
+  salvo un'altra cartella a tua scelta. Una nuova parte (`-part2`, `-part3`, ...) parte quando il file
+  raggiunge il limite di dimensione (100 MiB per impostazione predefinita, da 10 a 2048) o
+  quando cambiano le colonne: lingua, unità o sensori selezionati. *Impostazioni › Log CSV*
+  imposta cartella, sensori, intervallo, limite di dimensione e scorciatoie. Un errore, come una
+  unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -127,7 +141,9 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   incompleti. Il throttling termico della CPU non è disponibile con LibreHardwareMonitor 0.9.6,
   quindi quella regola non ha un sensore. Il critical warning dei dischi c'è solo per gli NVMe. Il
   TjMax del processore è noto per le CPU Intel e per i modelli AMD desktop della tabella
-  integrata; le altre CPU usano le soglie di ripiego (85/95 °C).
+  integrata; le altre CPU usano le soglie di ripiego (85/95 °C). Excel con il punto e virgola come
+  separatore di elenco (molte impostazioni regionali europee) mostra il log CSV in una sola
+  colonna: aprilo con *Dati* → *Da testo/CSV* e scegli la virgola.
 
 ## Compilare dal sorgente
 

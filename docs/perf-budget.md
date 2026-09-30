@@ -261,6 +261,10 @@ misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 | M5b | same machine, Windows 11 Pro 10.0.26300, release build of the branch, service installed, a critical custom rule active (tray icon red) | window (Settings › Rules and alerts) | 0.04 (7 processes; core 0.01) | 20.2 | 6 | 122.6 | yes |
 | M5b | same machine, same conditions | window (a view with charts, first run) | 0.95 (7 processes; core 0.03) | 20.1 | 6 | 123.0 | yes |
 | M5b | same machine, same conditions | tray (red icon) | 0.003 | 17.8 | 0 | 17.8 | yes |
+| M5c | same machine, Windows 11 Pro 10.0.26300, PawnIO 2.2.0, release build of the branch, service installed, all service modules on, CSV log recording every 1 s | tray | 0.04 | 19.1 | 0 | 19.1 | yes |
+| M5c | same machine, same conditions | window (Advanced view, log recording, blinking dot) | 0.91 (7 processes; core 0.06) | 20.7 | 6 | 184.8 | yes |
+| M5c | same machine, same conditions | window (Settings › CSV log, log recording) | 0.15 (7 processes; core 0.06) | 21.1 | 6 | 130.0 | yes |
+| M5c | same machine, same conditions, control run: the same Advanced page, log not recording | window (Advanced view, no log) | 1.01 (7 processes; core 0.08) | 20.7 | 6 | 180.1 | at the limit (see the details) |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
@@ -272,8 +276,75 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 | M5a | same machine, same conditions | tray | 0.01 | 62.9 MB |
 | M5b | same machine, release build of the branch (TjMax, Tdie, NVMe critical warning) | window (Settings › Rules and alerts) | 0.09 | 59.2 MB |
 | M5b | same machine, same conditions | tray | 0.1 | 62.4 MB |
+| M5c | same machine, release build of the branch, log recording every 1 s | tray | 0.03 | 59.2 MB |
+| M5c | same machine, same conditions | window (Advanced view, log recording) | 0.03 | 63.2 MB |
+| M5c | same machine, same conditions | window (Settings › CSV log, log recording) | 0.03 | 66.6 MB |
+| M5c | same machine, same conditions, control run | window (Advanced view, no log) | 0.02 | 62.6 MB |
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M5c measurement details
+
+This is the final M5 measurement (M5a, M5b and M5c together).
+
+Measured 2026-09-30 on the development machine (16 logical processors,
+Windows 11 Pro 10.0.26300, PawnIO 2.2.0) with the release build of the branch
+(`target\release\oma-app.exe`), `scripts/measure-footprint.ps1 -Service
+-WarmupSeconds 60` (`-Minimized` for the tray run), `oma-service` connected,
+all service modules on, no history fill. During the 60 s warm-up the user
+started the log, with the hotkey or the REC button, at the default interval
+(every tick, 1 s); 85 rows were logged during the tray run. The window runs
+used the Advanced view and Settings › CSV log as listed in the table.
+
+```
+Mode              : tray (log recording)
+CorePercentCpu    : 0.04
+TotalAppPercentCpu: 0.04
+AppPrivateMB      : 19.1
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.03 %
+Service Private   : 59.2 MB
+
+Mode              : window (Advanced view, log recording, blinking dot)
+CorePercentCpu    : 0.06
+TotalAppPercentCpu: 0.91 (7 processes)
+AppPrivateMB      : 20.7
+WebView2Processes : 6
+TotalPrivateMB    : 184.8
+Service CPU       : 0.03 %
+Service Private   : 63.2 MB
+
+Mode              : window (Settings › CSV log, log recording)
+CorePercentCpu    : 0.06
+TotalAppPercentCpu: 0.15 (7 processes)
+AppPrivateMB      : 21.1
+WebView2Processes : 6
+TotalPrivateMB    : 130.0
+Service CPU       : 0.03 %
+Service Private   : 66.6 MB
+
+Mode              : window (Advanced view, log NOT recording: control run)
+CorePercentCpu    : 0.08
+TotalAppPercentCpu: 1.01 (7 processes)
+AppPrivateMB      : 20.7
+WebView2Processes : 6
+TotalPrivateMB    : 180.1
+Service CPU       : 0.02 %
+Service Private   : 62.6 MB
+```
+
+The tray, the Settings page and the service are within budget. The total app
+CPU on a page with charts is at the 1 % line: the control run on the same
+Advanced page without recording reads 1.01 %, the same level as M5a (0.96 %)
+and M5b (0.95 %), so it is the WebView2 chart rendering and not the log (0.91 %
+with the log recording and the dot blinking). The core stays under 0.1 %
+in every run (0.04 to 0.08 %). The log costs nothing measurable: 0.04 % in the
+tray with a row written every second, and the service is unaffected (0.02 to
+0.03 %).
+
+Memory on the Advanced page (180.1 MB without the log, 184.8 MB with it) matches
+M5a's Advanced view (186.6 MB); the 123 MB of M5b was a lighter page. All
+memory figures stay under the 200 MB window budget. No limit was widened.
 
 ## M5b measurement details
 

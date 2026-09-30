@@ -35,7 +35,8 @@ SMART data.
 - **Settings view.** Language, temperature in °C or °F, network speed in bit/s or byte/s,
   sampling interval (0.5 to 5 s), chart refresh rate (60, 30 or 15 FPS), default view, closing
   to the tray, starting with Windows and the sensor shown by the tray icon. The *Rules and
-  alerts* section lists the built-in rules and your own (see below). The *Data sources*
+  alerts* section lists the built-in rules and your own (see below). The *CSV log* section sets
+  the log's folder, sensors, interval, size limit and hotkeys (see below). The *Data sources*
   section switches each GPU vendor library, anti-cheat compatible mode, each service module
   and, per disk, SMART reads on or off, and shows the PawnIO status. *About* lists the versions
   and the licences. Settings are stored in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
@@ -52,6 +53,18 @@ SMART data.
   or which problems are active and for how long. Entering the critical level also raises a
   Windows notification (the warning level can do so too, if you switch it on), at most once every
   5 minutes per rule, device and level; clicking it opens that device's page.
+- **CSV log.** A tape recorder in the top bar opens a pop-up deck with record, pause and stop;
+  the tray menu has the same items, and a small dot on the tray icon shows while a recording runs.
+  A global hotkey, **Ctrl+Alt+Shift+R** by default, starts and stops it even with the window
+  closed, and an optional second hotkey pauses and resumes. The file is UTF-8 with a BOM,
+  comma-separated, with CRLF line ends: one row per sampled tick (or every 1 to 60 ticks), a
+  local timestamp with its UTC offset, and one column per sensor, named
+  `Device / Sensor [unit] {id}`. Files go to `Documents\OpenMonitor Advanced\logs` unless you
+  pick another folder. A new part (`-part2`, `-part3`, ...) starts when the file reaches the size limit
+  (100 MiB by default, 10 to 2048) or when the columns change: language, units or the selected
+  sensors. *Settings › CSV log* sets the folder, the sensors, the interval, the size limit and
+  the hotkeys. A failure such as a removed USB drive stops the recording with a notification and
+  the reason in the deck.
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -119,7 +132,9 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   sleeps, the banner can say that some data is incomplete. CPU thermal throttling is not
   available from LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
   warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
-  desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C).
+  desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
+  with a semicolon as the list separator (many European locales) shows the CSV log in one column:
+  open it with *Data* → *From Text/CSV* and choose the comma.
 
 ## Build from source
 

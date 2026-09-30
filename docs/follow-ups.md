@@ -1,13 +1,13 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M5b).
+Updated at the end of every milestone (last update: M5c).
 
 ## Open: code
 
 | Item | Where | Pick up |
 |---|---|---|
-| USB disks and the D6 gate. A USB stick (live check 2026-09-30: SanDisk Extreme, bus 0x07, seek penalty query error 1, ATA pass-through error 50) plugged in when the service starts keeps the D6 gate closed (`keeps storage disabled: power state unknown`), so SMART stays off for all disks until it is unplugged; plugged in at runtime it only skips its own SMART. The per-disk SMART switch (M5a) does not help, because the gate closes before it is read. The fix is the SAT `CHECK POWER MODE` fallback of F1.4 (`docs/superpowers/references/m5/f1-service-reconfiguration.md`), to be planned as a spike, not a switch. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 gate) | M5c spike |
+| USB disks and the D6 gate. A USB stick (live check 2026-09-30: SanDisk Extreme, bus 0x07, seek penalty query error 1, ATA pass-through error 50) plugged in when the service starts keeps the D6 gate closed (`keeps storage disabled: power state unknown`), so SMART stays off for all disks until it is unplugged; plugged in at runtime it only skips its own SMART. The per-disk SMART switch (M5a) does not help, because the gate closes before it is read. The fix is the SAT `CHECK POWER MODE` fallback of F1.4 (`docs/superpowers/references/m5/f1-service-reconfiguration.md`), to be planned as a spike, not a switch. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 gate) | M6 spike |
 | On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
 | DDR5 SPD page stays on whichever page it was left on (e.g. page 4) after the service stops, instead of resetting; stock LHM behaves the same way (found in Task 15, 2026-09-27). Optional bounded reset for parity, otherwise accepted. | `app/src/` (RAM/SPD page) | accepted; revisit if a user reports it |
 | `app/src-tauri/nsis/*.dll` helper (`nsExec.dll`) ships unsigned, so SmartScreen may still warn even after the main binaries are signed. | `app/src-tauri/nsis/` | M6 (SignPath phase) |
@@ -24,10 +24,9 @@ Updated at the end of every milestone (last update: M5b).
 | Intel and other GPUs whose PnP maximum-link read fails show no maximum link at all: `pcieMaxGen`/`pcieMaxWidth` come only from the PnP base layer (device capability, identical in safe mode), because NVML's max-link calls report the device+slot-limited value and IGCL does not read `ctlPciGetProperties`. Not yet exercised on Intel or non-NVIDIA hardware. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
 | Discovery reads every disk's temperature in one tick; with several NVMe drives waking from a low-power state this can exceed the 200 ms tick budget, so the value arrives one tick late. | `crates/oma-win/src/storage.rs` | when touched |
 | `gpu/pnp.rs` `display_interfaces` has no retry on `CR_BUFFER_SMALL`: a GPU hot-plugged between the two calls gets no maximum link on that discovery. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
-| Re-identification at hot-plug. DiskInfoToolkit's hot-plug thread re-identifies the not-yet-identified disks on every `DBT_DEVNODES_CHANGED`, which can wake them (F1.1). | `service/OpenMonitorAdvanced.Service/Sensors/` (storage) | M5c spike |
+| Re-identification at hot-plug. DiskInfoToolkit's hot-plug thread re-identifies the not-yet-identified disks on every `DBT_DEVNODES_CHANGED`, which can wake them (F1.1). | `service/OpenMonitorAdvanced.Service/Sensors/` (storage) | M6 spike |
 | A rapid off/on of the memory module may delay the SMBus through the `~SPDAccessor` finalizers (F2.3). Measure when the module is switched back on quickly. | `service/OpenMonitorAdvanced.Service/Sensors/ModuleApplier.cs` | when touched |
-| A D6 blocker without model or serial leaves `smartBlockedBy` empty (R16): the Sources view shows only the generic limit text and cannot name the disk. Add a flag like `smartGateClosed`: it needs a new field in the `service` block of the `Schema`, so protocol v3 (M5b ruling R10). The same flag would let the rules tell a sleeping disk from a missing value (see the standby limit below). | `service/OpenMonitorAdvanced.Service/`, `crates/oma-ipc/`, `app/src/` | next protocol change (M5c or M6) |
-| `smartSelectable` (R20, a hidden storage device property) is UI plumbing: keep it out of the M5c CSV metadata. | `crates/oma-win/src/storage.rs` | M5c |
+| A D6 blocker without model or serial leaves `smartBlockedBy` empty (R16): the Sources view shows only the generic limit text and cannot name the disk. Add a flag like `smartGateClosed`: it needs a new field in the `service` block of the `Schema`, so protocol v3 (M5b ruling R10). The same flag would let the rules tell a sleeping disk from a missing value (see the standby limit below). | `service/OpenMonitorAdvanced.Service/`, `crates/oma-ipc/`, `app/src/` | M6 (protocol v3; M5c did not change the protocol, plan decision L15) |
 | An unknown module name or message `type` is echoed unbounded in `bad_request` and in the log, and can exceed `MaxFrameBytes`. Truncate. | `service/OpenMonitorAdvanced.Service/Protocol/`, `Sensors/` | when touched |
 | `shell_open` joins the shell thread without a timeout, uses `ShellExecuteW` without `SEE_MASK_NOASYNC`/`FLAG_NO_UI` (use `ShellExecuteExW`), and does not check that a folder exists before opening it. | `app/src-tauri/src/` (shell commands) | when touched |
 | The installer is perMachine, so the uninstaller deletes the HKCU Run value in the elevating admin's hive: a standard user's own Run value survives. The Run value also keeps a stale exe path if the exe moves (compare with the current path at startup and repair). | `app/src-tauri/nsis/oma.nsh`, `app/src-tauri/src/autostart.rs` | M6 |
@@ -59,9 +58,25 @@ Small findings the task reviews accepted and deferred; none of them changes what
 | Shell: the catch-up snapshot read before the `applied` mutex can overwrite a newer change (`rules.rs`, same pattern in `interval.rs`); the Rust formatter drops the sign of -0; an evicted toast (more than 32 live) does nothing when clicked; a lost `Finished` on a full queue keeps the toast until it expires; the notifier's title fallback relies on `t()` returning the key. | `app/src-tauri/src/` | when touched |
 | UI: "0 min" can flash until the clock of a new revision arrives; the default throughput hysteresis (3 B/s) shows as "0"; a failing `getRuleStatus` logs every second; `RuleRow` has its own switch instead of `controls/Toggle`; a stale doc comment in `rules.ts`; a few weak tests (the keyboard test clicks instead of pressing Enter, the Italian switch-label test checks the catalog only, no JSON test of a non-null `ThresholdSource`). | `app/src/` | when touched |
 
+## Open: minor items from the M5c reviews
+
+Small findings the task reviews accepted and deferred. The final fix wave already fixed the HRESULT mapping, `event.repeat`, the unit-change and overflow tests, the phase drift and drop count, the refused start clearing, the `format_number` allocation, the `cfg(test)` helpers, the `SensorTree` roles and the USB error codes. None of the items below changes what the user sees today.
+
+| Item | Where | Pick up |
+|---|---|---|
+| Final review: a duplicate-hotkey error lands under the field the user did not edit (`log.hotkeyPause` is read first, so the `log.hotkeyDuplicate` fallback in `errorOf` is dead); the formula guard for cell values ignores a leading TAB or CR. | `app/src/` (`LogSection.svelte`), `crates/oma-core/src/csv.rs` | when touched |
+| A writer failure does not log the raw OS error code (live check 9 saw only `failure=Unavailable`); log `raw_os_error()` so the next unmapped code is found without a repro. | `app/src-tauri/src/log/` | when touched |
+| Spec M5 §2.3 wants the hotkey effects in `applyStatus`; they travel in `LogStatus.hotkeys` (requested, effective, state, reason), as the plan says (ruling R7). Same information for the UI; add an `applyStatus` entry only if something needs it. | `app/src/`, `app/src-tauri/src/hotkeys.rs` | accepted |
+| Formatter and layout: `same_output` ignores the conversion (Flag and Count share the empty symbol); no rounding-boundary test (0.0005, 1.0005); the `retained_bytes` test bound is loose; no tests for the log-once, the -330 offset and the `checked_*` overflow of the local time; `Win32_System_Time` is out of alphabetical order in the `oma-win` `Cargo.toml`. | `crates/oma-core/src/csv.rs`, `crates/oma-win/` | when touched |
+| Queue and writer: `retained_bytes` is computed twice per push under the lock; an oversized Start answers `Err` by reply with no `Failed` event, and `push_control` returns `Ok` for an unqueued control (document it); Pause/Resume of a session that is not open answers an English `Other` detail; the `pop(Some(timeout))` branch is untested; the paused-flush test name overpromises; a temporary directory leaks on failure in `fs.rs`. | `app/src-tauri/src/log/` (`queue.rs`, `writer.rs`, `fs.rs`) | when touched |
+| Session: a tick meeting the barrier lock counts as dropped (a spurious `dropped` +1 and warning on pause or stop); the blocking `Mutex<OffsetCache>` on the sampler path and the blocking `push_control` of an in-session overflow; a barrier push failure leaves the admission closed (only reachable at exit); `miss_ticks` is off by one if `everyTicks` changes during a contended interval; the layout key uses the configured language, not the resolved one (see the `Language::System` check below); two tests start against a 100 ms real timeout and may flake under load; no tests for a mid-session overflow above 4096 columns, `open_log_folder` `folderMissing` and a shutdown while the serial is held. | `app/src-tauri/src/log/` (`session.rs`, `commands.rs`, `session/tests.rs`) | when touched |
+| Tray and hotkeys: a Pause or Stop click racing an asynchronous writer error can toast twice; the `recording_dot` test loop starts at y=12 (could be 11); `set_menu` sets text on shared items right before the rebuild; a tautological assert after the swap in `hotkeys.rs`; a failed unregister is only logged, so a later re-register could read as `inUse`; `run_press` reads the state and then commands, so a UI or tray race can yield a started or stopped toast the hotkey did not cause (never a success on failure); `LogStatus.hotkeys` shows `unset` before the first apply; no test that an unreadable change keeps the old combination; the capture box shows the status line from before the suspension while it has focus; a double resume on removal (idempotent). | `app/src-tauri/src/tray.rs`, `tray_icon.rs`, `hotkeys.rs` | when touched |
+| UI and mock: the `Settings` doc comment in `types.ts` now sits above `LogEveryTicks`/`LogSettings`, plus a double blank line near line 721; `mockSettings.ts` silences the destructured hotkeys with `void` and reports 10.5 as a range without a comment; the `maxFileMb` `as_f64().unwrap_or` in `decode.rs` is a dead fallback; the mock `logStart` while recording silently opens a new session and pause/resume/stop bump the revision on a no-op; no test for a command in flight during a reconnect. | `app/src/`, `app/src-tauri/src/settings/decode.rs` | when touched |
+| Recorder and pickers: Esc is caught only inside `.recorder` (with focus on the body it closes Settings and leaves the deck open); the keyboard-activation test only fires a click and nothing covers `reducedMotion` or its media change event; tabbing out of the deck leaves it open (approved behaviour); AltGr is reported as Ctrl+Alt; `SensorTree` has no arrow-key navigation (its tree roles were dropped, so it is a plain list of checkboxes); tests are missing for Esc `stopPropagation`, key repeat, the search filter and a rejected `pickLogFolder`; `setAllSensors` sends `[]` when the schema is null. | `app/src/` | when touched |
+
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
-- NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick, when the CSV log needs them (M5c).
+- NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick. The M5c CSV log does not need them (it logs what the tick already has), so they wait for a request.
 - Battery page: appears when a battery provider exists.
 - Per-disk SMART switch and per-module switches are done (M5a); what is left for USB disks is the SAT fallback above.
 - **Not covered yet, despite LibreHardwareMonitor exposing related sensors — do not assume the mapping surfaces them without re-checking `SchemaBuilder.cs`:**
@@ -80,6 +95,12 @@ Small findings the task reviews accepted and deferred; none of them changes what
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
+## Manual checks owed after M5c
+
+- PC suspend and resume, and a daylight-saving change, during a recording (Review Focus 4): the timestamps, the offset and the pause gap. Not live-tested.
+- `Language::System` with the OS language changed in the middle of a recording: the column labels keep the old language until the layout key changes (see the minor items).
+- A real game with anti-cheat and the global hotkey (Ctrl+Alt+Shift+R): it is registered through `RegisterHotKey`, so it should not hook the game, but it was not tried with one.
+
 ## Manual checks owed after M5b
 
 - PC suspend while a rule is maturing: no spurious alarm on resume (deferred by the user on 2026-09-30).
@@ -93,6 +114,12 @@ Small findings the task reviews accepted and deferred; none of them changes what
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M5c
+
+- CSV sensor log (spec M5 §2): the tape recorder in the top bar, the tray items and the recording dot, global hotkeys (toggle and optional pause), Settings › Log CSV with the folder, sensors, interval and size limit, and the writer thread with parts, error states and a clean stop at exit.
+- `smartSelectable` stays out of the CSV: the log metadata never reads it.
+- Live checks (2026-09-30, dev machine, installed build): recording, pause, resume and stop; the file in Excel; the tray items; the hotkey with the window closed; the capture box in Settings; a combination held by another process; the folder dialog; a USB stick pulled while recording (toast, red triangle, reason); a restart after the error; new parts after a unit and a language change; exit from the tray with a complete last row. The HotkeyInput fix `92ad46f` came from the user's check. Budget in `docs/perf-budget.md` (M5c, the final M5 measurement).
 
 ## Closed in M5b
 

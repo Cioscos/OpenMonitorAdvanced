@@ -527,5 +527,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
     openLogFolder: async () => console.info('mock: open log folder'),
     // No native dialog in the browser: pretend the user picked a folder.
     pickLogFolder: async () => 'C:\\Users\\mock\\Documents\\OpenMonitorAdvanced\\logs',
+    // No global hotkeys in the browser.
+    setLogHotkeysSuspended: async () => {},
   };
 }

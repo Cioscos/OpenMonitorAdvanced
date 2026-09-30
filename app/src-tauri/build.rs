@@ -31,6 +31,7 @@ fn main() {
             "get_log_status",
             "open_log_folder",
             "pick_log_folder",
+            "set_log_hotkeys_suspended",
         ]),
     ))
     .expect("Tauri build")

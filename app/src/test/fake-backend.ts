@@ -124,6 +124,8 @@ export class FakeBackend implements Backend {
   openLogFolderError: string | null = null;
   /** What `pickLogFolder` returns. */
   pickedLogFolder: string | null = null;
+  /** Every `setLogHotkeysSuspended` call, in order. */
+  hotkeySuspensions: boolean[] = [];
   #logListeners = new Set<(s: LogStatus) => void>();
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
@@ -341,6 +343,10 @@ export class FakeBackend implements Backend {
   async pickLogFolder(): Promise<string | null> {
     this.logCalls.push('pickLogFolder');
     return this.pickedLogFolder;
+  }
+
+  async setLogHotkeysSuspended(suspended: boolean): Promise<void> {
+    this.hotkeySuspensions.push(suspended);
   }
 
   /** Number of live `oma:log` listeners. */

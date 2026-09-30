@@ -103,4 +103,9 @@ export interface Backend {
   openLogFolder(): Promise<void>;
   /** Folder picker; null when the user cancels. */
   pickLogFolder(): Promise<string | null>;
+  /**
+   * While a hotkey capture box has focus, the log hotkeys are released (so the box receives their
+   * keys) and their presses ignored; false registers them again.
+   */
+  setLogHotkeysSuspended(suspended: boolean): Promise<void>;
 }

@@ -262,6 +262,7 @@ fn main() {
             log::commands::get_log_status,
             log::commands::open_log_folder,
             log::commands::pick_log_folder,
+            hotkeys::set_log_hotkeys_suspended,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

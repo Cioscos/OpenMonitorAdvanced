@@ -66,5 +66,6 @@ export function createTauriBackend(): Backend {
     logStop: () => invoke<LogStatus>('log_stop'),
     openLogFolder: () => invoke<void>('open_log_folder'),
     pickLogFolder: () => invoke<string | null>('pick_log_folder'),
+    setLogHotkeysSuspended: (suspended) => invoke<void>('set_log_hotkeys_suspended', { suspended }),
   };
 }

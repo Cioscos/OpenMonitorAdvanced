@@ -172,6 +172,46 @@ test('hotkey_capture_stores_the_canonical_form', async () => {
   await waitFor(() => expect(patches[2]).toEqual({ log: { hotkeyToggle: null } }));
 });
 
+test('hotkey_capture_suspends_the_global_hotkeys_while_focused', async () => {
+  const { backend } = await setup();
+  const pauseBox = screen.getByRole('textbox', { name: t('settings.log.hotkey.pause') });
+  await fireEvent.focus(toggleBox());
+  expect(backend.hotkeySuspensions).toEqual([true]);
+  await fireEvent.blur(toggleBox());
+  await fireEvent.focus(pauseBox);
+  expect(backend.hotkeySuspensions).toEqual([true, false, true]);
+  await fireEvent.blur(pauseBox);
+  expect(backend.hotkeySuspensions).toEqual([true, false, true, false]);
+});
+
+test('hotkey_capture_destroyed_while_focused_resumes_the_hotkeys', async () => {
+  const { backend } = await setup();
+  await fireEvent.focus(toggleBox());
+  cleanup();
+  expect(backend.hotkeySuspensions).toEqual([true, false]);
+});
+
+test('hotkey_capture_destroyed_unfocused_leaves_the_hotkeys_alone', async () => {
+  const { backend } = await setup();
+  cleanup();
+  expect(backend.hotkeySuspensions).toEqual([]);
+});
+
+test('hotkey_capture_ignores_key_repeat', async () => {
+  const { patches } = await setup({ log: { hotkeyToggle: 'Ctrl+Alt+Shift+R' } });
+  patches.length = 0;
+  await fireEvent.focus(toggleBox());
+  await fireEvent.keyDown(toggleBox(), { code: 'KeyL', key: 'l', ctrlKey: true, shiftKey: true, repeat: true });
+  await fireEvent.keyDown(toggleBox(), { code: 'Delete', key: 'Delete', repeat: true });
+  await fireEvent.keyDown(toggleBox(), { code: 'Backspace', key: 'Backspace', repeat: true });
+  await fireEvent.keyDown(toggleBox(), { code: 'KeyL', key: 'l', ctrlKey: true, repeat: true });
+  expect(patches).toEqual([]);
+  expect(screen.queryByRole('alert')).toBeNull();
+  // The first press of the same keys still counts.
+  await fireEvent.keyDown(toggleBox(), { code: 'KeyL', key: 'l', ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(patches).toEqual([{ log: { hotkeyToggle: 'Ctrl+Shift+L' } }]));
+});
+
 test('hotkey_with_one_modifier_is_refused', async () => {
   const { patches } = await setup();
   patches.length = 0;

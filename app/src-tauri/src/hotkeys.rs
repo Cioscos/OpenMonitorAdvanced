@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oma_core::hotkey::{parse_hotkey, Hotkey, HotkeyKey};
@@ -118,6 +118,8 @@ struct Bindings {
     actions: [Option<Hotkey>; 2],
     /// One filter per bound combination, dropped when it is unbound.
     filters: HashMap<Hotkey, PressFilter>,
+    /// Set while a hotkey capture box in the settings has focus.
+    suspended: bool,
 }
 
 impl Bindings {
@@ -138,16 +140,26 @@ pub struct Dispatch {
 
 impl Dispatch {
     /// One press event of `hotkey`: the action when the filter accepts it.
+    /// Nothing while suspended.
     pub fn press(&self, hotkey: Hotkey, pressed: bool) -> Option<Press> {
         let mut bindings = lock(&self.inner);
+        if bindings.suspended {
+            return None;
+        }
         let action = bindings.action_for(hotkey)?;
         let generation = bindings.generation;
         let accepted = bindings.filters.entry(hotkey).or_default().accept(pressed);
         accepted.then_some(Press { action, generation })
     }
 
+    /// Ignores every press from now on, before the hotkeys thread has
+    /// released the combinations, or accepts them again.
+    pub fn set_suspended(&self, suspended: bool) {
+        lock(&self.inner).suspended = suspended;
+    }
+
     // Presses go through `press`; the lookup alone serves the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn action_for(&self, hotkey: Hotkey) -> Option<HotkeyAction> {
         lock(&self.inner).action_for(hotkey)
     }
@@ -165,12 +177,25 @@ impl Dispatch {
     }
 }
 
+/// What the `oma-hotkeys` thread is asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyRequest {
+    /// The requested combinations changed.
+    Settings(Requested),
+    /// A capture box gained (`true`) or lost focus.
+    Suspend(bool),
+}
+
 /// Owns the registered combinations of both actions.
 pub struct HotkeyManager<R: HotkeyRegistrar> {
     registrar: R,
     /// Registered by us, by [`HotkeyAction::index`]; never the same twice.
     effective: [Option<Hotkey>; 2],
     dispatch: Dispatch,
+    /// The latest [`HotkeyRequest::Settings`].
+    requested: Option<Requested>,
+    /// The latest [`HotkeyRequest::Suspend`].
+    suspended: bool,
 }
 
 impl<R: HotkeyRegistrar> HotkeyManager<R> {
@@ -179,7 +204,35 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
             registrar,
             effective: [None; 2],
             dispatch,
+            requested: None,
+            suspended: false,
         }
+    }
+
+    /// One batch of requests; only the latest of each kind matters. While
+    /// suspended our combinations are released, so the capture box receives
+    /// their keys (`RegisterHotKey` would consume them), and a settings
+    /// change is only remembered; on resume the latest request goes through
+    /// [`Self::apply`]. The statuses to publish, none while suspended (the
+    /// published ones stay as they were).
+    pub fn handle(
+        &mut self,
+        requests: impl IntoIterator<Item = HotkeyRequest>,
+    ) -> Option<HotkeyStatuses> {
+        for request in requests {
+            match request {
+                HotkeyRequest::Settings(requested) => self.requested = Some(requested),
+                HotkeyRequest::Suspend(suspended) => self.suspended = suspended,
+            }
+        }
+        if self.suspended {
+            if self.effective != [None; 2] {
+                self.apply(None, None);
+            }
+            return None;
+        }
+        let (toggle, pause) = self.requested.clone()?;
+        Some(self.apply(toggle.as_deref(), pause.as_deref()))
     }
 
     /// Registers the new combination first, releases the old one only after
@@ -254,7 +307,7 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
     }
 
     /// The action bound to `hotkey` now.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn action_for(&self, hotkey: Hotkey) -> Option<HotkeyAction> {
         self.dispatch.action_for(hotkey)
     }
@@ -420,6 +473,41 @@ fn run_press(app: &AppHandle, store: &SettingsStore, log: &LogService, press: Pr
     }
 }
 
+/// Suspends the log hotkeys while a capture box in the settings has focus
+/// (managed state of [`set_log_hotkeys_suspended`]).
+pub struct HotkeyControl {
+    dispatch: Dispatch,
+    /// Under its lock the flag and the request change in the same order.
+    requests: Mutex<Sender<HotkeyRequest>>,
+}
+
+impl HotkeyControl {
+    fn new(dispatch: Dispatch, requests: Sender<HotkeyRequest>) -> Self {
+        Self {
+            dispatch,
+            requests: Mutex::new(requests),
+        }
+    }
+
+    /// Presses are ignored at once; the hotkeys thread then releases our
+    /// combinations, or registers them again.
+    pub fn set_suspended(&self, suspended: bool) {
+        let requests = lock(&self.requests);
+        self.dispatch.set_suspended(suspended);
+        let _ = requests.send(HotkeyRequest::Suspend(suspended));
+    }
+}
+
+/// Called by the settings with `true` when a hotkey capture box gains focus
+/// and `false` when it loses it, so typing a combination we registered is
+/// captured instead of acted on.
+#[tauri::command]
+pub fn set_log_hotkeys_suspended(app: AppHandle, suspended: bool) {
+    if let Some(control) = app.try_state::<HotkeyControl>() {
+        control.set_suspended(suspended);
+    }
+}
+
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     if let Err(err) = std::thread::Builder::new()
         .name(name.to_owned())
@@ -447,17 +535,16 @@ pub fn install_hotkeys(app: &AppHandle, store: &Arc<SettingsStore>, log: Arc<Log
         app: app.clone(),
         on_event,
     };
-    let mut manager = HotkeyManager::new(registrar, dispatch);
-    let (requests, requested_rx): (_, Receiver<Requested>) = channel();
+    let mut manager = HotkeyManager::new(registrar, dispatch.clone());
+    let (requests, request_rx): (_, Receiver<HotkeyRequest>) = channel();
+    app.manage(HotkeyControl::new(dispatch, requests.clone()));
     let status_log = Arc::clone(&log);
     spawn("oma-hotkeys", move || {
-        while let Ok(mut next) = requested_rx.recv() {
-            // Only the latest request matters.
-            while let Ok(newer) = requested_rx.try_recv() {
-                next = newer;
+        while let Ok(first) = request_rx.recv() {
+            let batch = std::iter::once(first).chain(request_rx.try_iter());
+            if let Some(statuses) = manager.handle(batch) {
+                status_log.set_hotkeys(statuses);
             }
-            let statuses = manager.apply(next.0.as_deref(), next.1.as_deref());
-            status_log.set_hotkeys(statuses);
         }
     });
     let action_app = app.clone();
@@ -468,7 +555,7 @@ pub fn install_hotkeys(app: &AppHandle, store: &Arc<SettingsStore>, log: Arc<Log
         }
     });
     follow_hotkeys(store, move |toggle, pause| {
-        let _ = requests.send((toggle, pause));
+        let _ = requests.send(HotkeyRequest::Settings((toggle, pause)));
     });
 }
 
@@ -731,6 +818,79 @@ mod tests {
         assert!(dispatch.press(r, true).is_none());
         manager.apply(Some("Ctrl+Alt+R"), None);
         assert!(dispatch.press(r, true).is_some());
+    }
+
+    fn settings(toggle: &str, pause: &str) -> HotkeyRequest {
+        HotkeyRequest::Settings((Some(toggle.to_owned()), Some(pause.to_owned())))
+    }
+
+    #[test]
+    fn suspended_presses_do_nothing() {
+        let dispatch = Dispatch::default();
+        let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
+        manager.apply(Some("Ctrl+Alt+R"), None);
+        let r = key("Ctrl+Alt+R");
+        dispatch.set_suspended(true);
+        assert_eq!(dispatch.press(r, true), None);
+        dispatch.press(r, false);
+        dispatch.set_suspended(false);
+        assert_eq!(
+            dispatch.press(r, true).map(|press| press.action),
+            Some(HotkeyAction::Toggle)
+        );
+    }
+
+    #[test]
+    fn suspension_releases_and_resume_registers_again() {
+        let (mut manager, fake) = manager();
+        let statuses = manager.handle([settings("Ctrl+Alt+R", "Ctrl+Alt+P")]);
+        assert_eq!(fake.take(), [reg("Ctrl+Alt+R"), reg("Ctrl+Alt+P")]);
+        assert_eq!(statuses.unwrap().toggle, active("Ctrl+Alt+R"));
+
+        // Suspended: ours are released so the capture box sees them, and
+        // the published statuses stay as they were.
+        assert_eq!(manager.handle([HotkeyRequest::Suspend(true)]), None);
+        assert_eq!(fake.take(), [unreg("Ctrl+Alt+R"), unreg("Ctrl+Alt+P")]);
+        assert_eq!(manager.action_for(key("Ctrl+Alt+R")), None);
+
+        // A change while suspended is only remembered.
+        assert_eq!(manager.handle([settings("Ctrl+Alt+R", "Ctrl+Alt+Q")]), None);
+        assert_eq!(fake.take(), []);
+
+        // Resumed: the latest request is registered.
+        let statuses = manager.handle([HotkeyRequest::Suspend(false)]).unwrap();
+        assert_eq!(fake.take(), [reg("Ctrl+Alt+R"), reg("Ctrl+Alt+Q")]);
+        assert_eq!(statuses.toggle, active("Ctrl+Alt+R"));
+        assert_eq!(statuses.pause, active("Ctrl+Alt+Q"));
+        assert_eq!(
+            manager.action_for(key("Ctrl+Alt+Q")),
+            Some(HotkeyAction::Pause)
+        );
+
+        // Focus moving between two boxes ends suspended; a blur and focus
+        // again in one batch changes nothing.
+        manager.handle([HotkeyRequest::Suspend(false), HotkeyRequest::Suspend(true)]);
+        assert_eq!(fake.take(), [unreg("Ctrl+Alt+R"), unreg("Ctrl+Alt+Q")]);
+        manager.handle([HotkeyRequest::Suspend(false)]);
+        fake.take();
+        manager.handle([HotkeyRequest::Suspend(true), HotkeyRequest::Suspend(false)]);
+        assert_eq!(fake.take(), []);
+    }
+
+    #[test]
+    fn control_suspends_the_dispatch_at_once() {
+        let dispatch = Dispatch::default();
+        let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
+        manager.apply(Some("Ctrl+Alt+R"), None);
+        let (sender, requests) = channel();
+        let control = HotkeyControl::new(dispatch.clone(), sender);
+        control.set_suspended(true);
+        // Before the hotkeys thread has released anything.
+        assert_eq!(dispatch.press(key("Ctrl+Alt+R"), true), None);
+        assert_eq!(requests.try_recv(), Ok(HotkeyRequest::Suspend(true)));
+        control.set_suspended(false);
+        assert_eq!(requests.try_recv(), Ok(HotkeyRequest::Suspend(false)));
+        assert!(dispatch.press(key("Ctrl+Alt+R"), true).is_some());
     }
 
     #[test]

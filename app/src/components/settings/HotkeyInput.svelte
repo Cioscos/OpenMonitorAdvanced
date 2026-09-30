@@ -13,6 +13,7 @@
     status,
     error = null,
     onChange,
+    onCapture,
   }: {
     id: string;
     label: string;
@@ -22,9 +23,22 @@
     /** Already translated. */
     error?: string | null;
     onChange: (next: string | null) => unknown;
+    /** True while the box has focus, so the global hotkeys can step aside; false when it loses it or goes away focused. */
+    onCapture: (capturing: boolean) => unknown;
   } = $props();
 
   let listening = $state(false);
+
+  function setListening(next: boolean) {
+    if (next === listening) return;
+    listening = next;
+    void onCapture(next);
+  }
+
+  $effect(() => () => {
+    // Removed while focused: no blur follows, so resume here.
+    if (listening) void onCapture(false);
+  });
   let refused = $state(false);
   const shownError = $derived(refused ? t('settings.error.hotkey') : error);
 
@@ -32,6 +46,8 @@
     const key = readHotkeyKey(event);
     if (key.kind === 'ignore') return;
     event.preventDefault();
+    // A held key repeats its keydown: only the first press counts (Esc still gives up).
+    if (event.repeat && key.kind !== 'cancel') return;
     if (key.kind === 'cancel') {
       // Only the capture goes; the settings screen keeps Escape for leaving when nothing is captured.
       event.stopPropagation();
@@ -71,9 +87,9 @@
       placeholder={t('settings.log.hotkey.placeholder')}
       aria-invalid={shownError !== null ? 'true' : undefined}
       aria-describedby={[statusText !== null ? `${id}-status` : null, shownError !== null ? `${id}-error` : null].filter(Boolean).join(' ') || undefined}
-      onfocus={() => (listening = true)}
+      onfocus={() => setListening(true)}
       onblur={() => {
-        listening = false;
+        setListening(false);
         refused = false;
       }}
       onkeydown={onKeydown}

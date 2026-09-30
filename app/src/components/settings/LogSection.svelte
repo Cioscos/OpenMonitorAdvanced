@@ -31,6 +31,8 @@
     return key === undefined ? null : t(key);
   };
   const send = (patch: SettingsPatch) => settings.update(patch);
+  /** A failed call leaves the hotkeys as they were: nothing to show for it. */
+  const suspendHotkeys = (suspended: boolean) => backend.setLogHotkeysSuspended(suspended).catch(() => {});
 
   async function chooseFolder() {
     folderError = null;
@@ -133,6 +135,7 @@
       status={hotkeys?.toggle ?? null}
       error={errorOf('log.hotkeyToggle')}
       onChange={(hotkeyToggle) => send({ log: { hotkeyToggle } })}
+      onCapture={suspendHotkeys}
     />
     <HotkeyInput
       id="log-hotkey-pause"
@@ -141,6 +144,7 @@
       status={hotkeys?.pause ?? null}
       error={errorOf('log.hotkeyPause') ?? errorOf('log.hotkeyDuplicate')}
       onChange={(hotkeyPause) => send({ log: { hotkeyPause } })}
+      onCapture={suspendHotkeys}
     />
     <p class="hint">{t('settings.log.hotkey.hint')}</p>
   </Group>

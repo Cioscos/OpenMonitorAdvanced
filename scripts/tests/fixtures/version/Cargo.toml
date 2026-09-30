@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/oma-core", "app/src-tauri"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+oma-core = { path = "crates/oma-core" }
+serde = { version = "1.0", features = ["derive"] }

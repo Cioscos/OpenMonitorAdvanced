@@ -1,0 +1,13 @@
+{
+  "name": "oma-app-ui",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0"
+  }
+}

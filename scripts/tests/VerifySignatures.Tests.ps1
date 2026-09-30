@@ -57,6 +57,7 @@ BeforeAll {
         $script:versionOverride = @{}
         $script:signatureCalls = [Collections.Generic.List[string]]::new()
         $script:chainRoot = $testRoot
+        $script:chainPaths = [Collections.Generic.List[string]]::new()
         $script:store = [Collections.Generic.List[string]]::new()
         $script:storeLog = [Collections.Generic.List[string]]::new()
         $script:elevated = $true
@@ -78,7 +79,8 @@ BeforeAll {
         New-Embedded
     }
     $script:chainProvider = {
-        param($Certificate)
+        param($Certificate, $Path)
+        $script:chainPaths.Add($Path)
         [pscustomobject]@{ Thumbprints = @($Certificate.Thumbprint, $script:chainRoot); RootThumbprint = $script:chainRoot }
     }
     $script:versionProvider = {
@@ -169,17 +171,41 @@ BeforeAll {
         }
         $script:extractorExit = 0
         $script:extractorCalls = 0
+        $script:extraListing = @()
+        $script:listerExit = 0
+        $script:lastDestination = $null
+        $script:lockExtracted = $false
+        $script:lockHandle = $null
         [pscustomobject]@{ Root = $root; State = $state; Manifest = Join-Path $state 'manifest.json'; Setup = $setup; Sha = $sha }
     }
 
     $script:extractor = {
         param($Setup, $Destination)
         $script:extractorCalls++
+        $script:lastDestination = $Destination
         foreach ($rel in $script:extract.Keys) {
             if ($null -ne $script:extract[$rel]) { Write-Fake (Join-Path $Destination $rel) $script:extract[$rel] }
         }
+        if ($script:lockExtracted) {
+            # Held open until the test closes it, so the extraction folder cannot be removed.
+            # A text entry, with retries: antivirus scanners briefly open freshly written files.
+            for ($i = 1; -not $script:lockHandle; $i++) {
+                try { $script:lockHandle = [IO.File]::Open((Join-Path $Destination 'THIRD_PARTY_NOTICES.txt'), 'Open', 'Read', 'None') }
+                catch [IO.IOException] { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
+            }
+        }
         [pscustomobject]@{ ExitCode = $script:extractorExit; Output = 'fake 7z' }
     }
+
+    # The archive listing (7z l -slt): one path per entry, so two entries at the same path show
+    # up twice here even though extracting them leaves one file.
+    $script:lister = {
+        param($Setup)
+        $paths = @($script:extract.Keys | Where-Object { $null -ne $script:extract[$_] }) + @($script:extraListing)
+        [pscustomobject]@{ ExitCode = $script:listerExit; Paths = $paths; Output = 'fake 7z l' }
+    }
+
+    function Get-VerifyLeftovers { @(Get-ChildItem -LiteralPath $fakeTemp -Filter 'oma-verify-*' -Force -ErrorAction SilentlyContinue) }
 
     function Get-FakePins {
         [pscustomobject]@{
@@ -191,7 +217,7 @@ BeforeAll {
 
     function Invoke-Payload($Run, [string]$Policy = 'release', $Pins = (Get-FakePins), [string]$Version = $version) {
         @(Test-OmaPayload -Setup $Run.Setup -Policy $Policy -Manifest $Run.Manifest -Version $Version `
-                -Certificates (New-Certificates) -Extractor $extractor -SignatureProvider $sigProvider `
+                -Certificates (New-Certificates) -Extractor $extractor -Lister $lister -SignatureProvider $sigProvider `
                 -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
                 -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore -PawnIoPins $Pins)
     }
@@ -199,7 +225,12 @@ BeforeAll {
     $script:savedIsolation = @{
         RUNNER_ENVIRONMENT = $env:RUNNER_ENVIRONMENT
         OMA_ISOLATED_TRUST = $env:OMA_ISOLATED_TRUST
+        TMP                = $env:TMP
+        TEMP               = $env:TEMP
     }
+    # Test-OmaPayload extracts under GetTempPath(): keep it inside $TestDrive, where leftovers show.
+    $script:fakeTemp = Join-Path $TestDrive 'temp'
+    New-Item -ItemType Directory -Force $fakeTemp | Out-Null
 }
 
 Describe 'signature and payload verification with fake providers' {
@@ -212,6 +243,8 @@ Describe 'signature and payload verification with fake providers' {
         # Declared isolated by default; the guard tests clear it.
         $env:RUNNER_ENVIRONMENT = $null
         $env:OMA_ISOLATED_TRUST = '1'
+        $env:TMP = $fakeTemp
+        $env:TEMP = $fakeTemp
     }
 
     Describe 'Test-OmaSignature, release policy' {
@@ -270,6 +303,13 @@ Describe 'signature and payload verification with fake providers' {
             ((Invoke-Sig) -join "`n") | Should -BeLike '*embedded*'
         }
 
+        It 'rejects a signature without a signature type' {
+            $sig = New-Sig
+            $sig.PSObject.Properties.Remove('SignatureType')
+            $sigOverride['oma-app.exe'] = $sig
+            ((Invoke-Sig) -join "`n") | Should -BeLike '*signature type*Authenticode*'
+        }
+
         It 'rejects a valid status when the embedded signature does not verify' {
             $embeddedOverride['oma-app.exe'] = New-Embedded -SignatureValid $false
             ((Invoke-Sig) -join "`n") | Should -BeLike '*embedded signature*'
@@ -308,6 +348,11 @@ Describe 'signature and payload verification with fake providers' {
         It 'test rejects <_> after the import' -ForEach @('HashMismatch', 'NotSigned', 'NotTrusted', 'Incompatible') {
             $sigOverride['oma-app.exe'] = New-Sig -Status $_ -Subject $testSubject -Thumb $testThumb
             ((Invoke-Sig -Policy test) -join "`n") | Should -BeLike "*$_*"
+        }
+
+        It 'test passes the signed file to the chain provider, for the certificates embedded in it' {
+            Invoke-Sig -Policy test | Should -BeNullOrEmpty
+            $chainPaths | Should -Be @((Join-Path $TestDrive 'oma-app.exe'))
         }
 
         It 'test_rejects_untrusted_root_of_other_root' {
@@ -412,7 +457,7 @@ Describe 'signature and payload verification with fake providers' {
         It 'accepts a consistent signed setup and notes the installed uninstaller' {
             $run = New-FakeRun
             $p = Test-OmaPayload -Setup $run.Setup -Policy release -Manifest $run.Manifest -Version $version `
-                -Certificates (New-Certificates) -Extractor $extractor -SignatureProvider $sigProvider `
+                -Certificates (New-Certificates) -Extractor $extractor -Lister $lister -SignatureProvider $sigProvider `
                 -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
                 -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore -PawnIoPins (Get-FakePins) `
                 -InformationVariable notes
@@ -450,9 +495,62 @@ Describe 'signature and payload verification with fake providers' {
             ((Invoke-Payload $run) -join "`n") | Should -BeLike '*extract*exit code 2*'
             $run = New-FakeRun
             $throwing = { param($Setup, $Destination) throw '7z not found' }
-            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $throwing `
+            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $throwing -Lister $lister `
                     -SignatureProvider $sigProvider -VersionInfoProvider $versionProvider -PawnIoPins (Get-FakePins))
             ($p -join "`n") | Should -BeLike '*7z not found*'
+        }
+
+        It 'same-path duplicates in the archive listing fail' {
+            # 7z x -y would overwrite the first entry with the second: only the listing sees both.
+            $run = New-FakeRun
+            $script:extraListing = @('oma-app.exe')
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*exactly one oma-app.exe in the archive listing, found 2*'
+            $run = New-FakeRun
+            $script:extraListing = @('service\PawnIO_setup.exe')
+            ((Invoke-Payload $run -Policy none) -join "`n") | Should -BeLike '*exactly one PawnIO_setup.exe in the archive listing, found 2*'
+        }
+
+        It 'a failed archive listing fails before extraction' {
+            $run = New-FakeRun
+            $script:listerExit = 2
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*listing the setup with 7-Zip failed: exit code 2*'
+            $extractorCalls | Should -Be 0
+        }
+
+        It 'removes the extraction folder after success, failure and exception' {
+            $run = New-FakeRun
+            Invoke-Payload $run | Should -BeNullOrEmpty
+            $lastDestination | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $lastDestination | Should -BeFalse
+
+            $run = New-FakeRun
+            $script:extractorExit = 2
+            Invoke-Payload $run | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $lastDestination | Should -BeFalse
+
+            $run = New-FakeRun
+            $throwing = {
+                param($Setup, $Destination)
+                $script:lastDestination = $Destination
+                Write-Fake (Join-Path $Destination 'partial.bin') 'half extracted'
+                throw '7z crashed'
+            }
+            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $throwing -Lister $lister `
+                    -SignatureProvider $sigProvider -VersionInfoProvider $versionProvider -PawnIoPins (Get-FakePins))
+            ($p -join "`n") | Should -BeLike '*7z crashed*'
+            Test-Path -LiteralPath $lastDestination | Should -BeFalse
+            Get-VerifyLeftovers | Should -BeNullOrEmpty
+        }
+
+        It 'reports an extraction folder it cannot remove' {
+            $run = New-FakeRun
+            $script:lockExtracted = $true
+            try {
+                ((Invoke-Payload $run) -join "`n") | Should -BeLike "*cannot remove the temporary extraction folder $lastDestination*"
+            } finally {
+                if ($script:lockHandle) { $script:lockHandle.Dispose(); $script:lockHandle = $null }
+                if ($lastDestination -and (Test-Path -LiteralPath $lastDestination)) { Remove-Item -LiteralPath $lastDestination -Recurse -Force }
+            }
         }
 
         It 'pawnio_hash_and_signature_checked' {
@@ -477,7 +575,7 @@ Describe 'signature and payload verification with fake providers' {
         It 'uses the shared PawnIO pins by default' {
             $run = New-FakeRun
             $pins = Get-OmaPawnIoPins
-            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $extractor `
+            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $extractor -Lister $lister `
                     -SignatureProvider $sigProvider -VersionInfoProvider $versionProvider)
             ($p -join "`n") | Should -BeLike "*PawnIO_setup.exe*expected $($pins.Sha256)*"
         }
@@ -645,6 +743,35 @@ Describe 'signature and payload verification with fake providers' {
             if ($st) { $st | Should -BeLike '*signtool.exe' ; Test-Path -LiteralPath $st | Should -BeTrue }
         }
 
+        It 'the default chain provider uses the certificates embedded in the signature' {
+            $sig = Get-AuthenticodeSignature -LiteralPath $pwshExe
+            if ($sig.SignatureType -ne 'Authenticode') { Set-ItResult -Skipped -Because 'this pwsh.exe carries no embedded signature'; return }
+            $embedded = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+            $embedded.Import($pwshExe)
+            $embedded.Count | Should -BeGreaterThan 1
+            $chain = Get-OmaCertificateChain -Certificate $sig.SignerCertificate -Path $pwshExe
+            foreach ($c in $embedded) { $chain.Thumbprints | Should -Contain $c.Thumbprint }
+            $chain.RootThumbprint | Should -Be $chain.Thumbprints[-1]
+        }
+
+        It 'parses the 7-Zip listing, keeping same-path duplicates and dropping folders' {
+            $text = "Path = oma-app.exe`nSize = 1`nAttributes = `n`nPath = service`nFolder = +`n`n" +
+                "Path = oma-app.exe`nAttributes = A`n`nPath = `$PLUGINSDIR`nAttributes = D`n`nPath = service\oma-service.exe`nAttributes = `n"
+            ConvertFrom-Oma7ZipListing $text | Should -Be @('oma-app.exe', 'oma-app.exe', 'service\oma-service.exe')
+        }
+
+        It 'the default lister reads a real setup (when one was built here)' {
+            $setup = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\..\target\release\bundle\nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue)
+            if ($setup.Count -eq 0) { Set-ItResult -Skipped -Because 'no setup in target/release/bundle/nsis'; return }
+            $lister = InModuleScope OmaSigning { $script:DefaultLister }
+            $r = & $lister $setup[0].FullName
+            $r.ExitCode | Should -Be 0
+            $r.Paths | Should -Contain 'oma-app.exe'
+            $r.Paths | Should -Contain 'service\oma-service.exe'
+            $r.Paths | Should -Contain 'service\PawnIO_setup.exe'
+            @($r.Paths | Where-Object { $_ -like '*uninstall.exe' }) | Should -BeNullOrEmpty
+        }
+
         It 'the default embedded provider rejects a catalog-only Windows file' {
             if (-not (Get-OmaSignToolPath)) { Set-ItResult -Skipped -Because 'no Windows SDK signtool' }
             $where = Join-Path $env:SystemRoot 'System32\where.exe'
@@ -745,7 +872,12 @@ Describe 'real Authenticode verification' -Tag Integration {
         if ($skipReason) { Set-ItResult -Skipped -Because $skipReason; return }
         $p = @(Test-OmaSignature -Path $fixture -Policy test -Certificates $certs)
         $p | Should -Not -BeNullOrEmpty
-        @($p | Where-Object { $_ -notlike '*timestamp*' }) | Should -BeNullOrEmpty
+        # Only the two timestamp messages may remain (no TSA here); anything else, including a
+        # signtool failure whose detail mentions the /tw warning, is a real failure.
+        $name = Split-Path -Leaf $fixture
+        $timestampOnly = @("${name}: no timestamp (no timestamping certificate)", "${name}: the timestamp is missing or does not verify:*")
+        @($p | Where-Object { $_ -ne $timestampOnly[0] -and $_ -notlike $timestampOnly[1] }) | Should -BeNullOrEmpty
+        @($p | Where-Object { $_ -like '*embedded signature does not verify*' }) | Should -BeNullOrEmpty
         if (-not $rootWasTrusted) {
             @(Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -EQ $root.Thumbprint) | Should -BeNullOrEmpty
         }
@@ -771,9 +903,10 @@ Describe 'real Authenticode verification' -Tag Integration {
         $bytes[$offset] = $bytes[$offset] -bxor 0xFF
         $tampered = Join-Path $work 'oma-fixture-tampered.dll'
         [IO.File]::WriteAllBytes($tampered, $bytes)
+        # Inside the trust window both the PowerShell status and the Windows verifier must fail.
         $p = @(Test-OmaSignature -Path $tampered -Policy test -Certificates $certs)
         ($p -join "`n") | Should -BeLike '*HashMismatch*'
-        (Get-OmaEmbeddedSignature -Path $tampered).SignatureValid | Should -BeFalse
+        ($p -join "`n") | Should -BeLike '*embedded signature does not verify*'
         if (-not $rootWasTrusted) {
             @(Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -EQ $root.Thumbprint) | Should -BeNullOrEmpty
         }

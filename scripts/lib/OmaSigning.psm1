@@ -503,12 +503,41 @@ $script:OwnPayloadNames = @('oma-app.exe', 'oma-service.exe')
 
 $script:DefaultSignatureProvider = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path }
 $script:DefaultEmbeddedSignatureProvider = { param($Path) Get-OmaEmbeddedSignature -Path $Path }
-$script:DefaultChainProvider = { param($Certificate) Get-OmaCertificateChain -Certificate $Certificate }
+$script:DefaultChainProvider = { param($Certificate, $Path) Get-OmaCertificateChain -Certificate $Certificate -Path $Path }
 $script:DefaultVersionInfoProvider = { param($Path) [Diagnostics.FileVersionInfo]::GetVersionInfo($Path) }
 $script:DefaultExtractor = {
     param($Setup, $Destination)
     $r = Invoke-OmaNative -FilePath (Get-Oma7ZipPath) -AllowFailure -ArgumentList @('x', '-y', '-bd', "-o$Destination", '--', $Setup)
     [pscustomobject]@{ ExitCode = $r.ExitCode; Output = ($r.Stdout + $r.Stderr).Trim() }
+}
+# Every archive entry, one path each: two entries at the same path stay two here, while `7z x -y`
+# would leave a single file.
+$script:DefaultLister = {
+    param($Setup)
+    $r = Invoke-OmaNative -FilePath (Get-Oma7ZipPath) -AllowFailure -ArgumentList @('l', '-slt', '-ba', '--', $Setup)
+    [pscustomobject]@{ ExitCode = $r.ExitCode; Paths = @(ConvertFrom-Oma7ZipListing $r.Stdout); Output = ($r.Stdout + $r.Stderr).Trim() }
+}
+
+<#
+.SYNOPSIS
+  The file paths of a `7z l -slt -ba` listing: one "Path = " record per entry, folders
+  ("Folder = +" or a D attribute) left out, duplicates kept.
+#>
+function ConvertFrom-Oma7ZipListing {
+    param([AllowEmptyString()] [string]$Text)
+    $paths = [Collections.Generic.List[string]]::new()
+    $current = $null
+    $folder = $false
+    foreach ($line in @($Text -split '\r?\n') + 'Path = ') {
+        if ($line.StartsWith('Path = ')) {
+            if ($null -ne $current -and -not $folder) { $paths.Add($current) }
+            $current = $line.Substring(7)
+            $folder = $false
+        } elseif ($line -ceq 'Folder = +' -or $line -cmatch '^Attributes = \S*D') {
+            $folder = $true
+        }
+    }
+    $paths.ToArray()
 }
 
 # Cert:\LocalMachine\Root, not CurrentUser\Root: adding to the user root store opens a Windows
@@ -625,14 +654,23 @@ function Get-OmaEmbeddedSignature {
 <#
 .SYNOPSIS
   Thumbprints of the chain built for a certificate, leaf first, and the last one as RootThumbprint.
+  With -Path, the certificates embedded in that file's signature are offered to the chain builder.
   Trust is decided by the Authenticode status; the chain only tells which root it ends at.
 #>
 function Get-OmaCertificateChain {
-    param([Parameter(Mandatory)] $Certificate)
+    param([Parameter(Mandatory)] $Certificate, [string]$Path)
     $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
     try {
         # Revocation is checked by WinVerifyTrust (Get-AuthenticodeSignature, signtool).
         $chain.ChainPolicy.RevocationMode = 'NoCheck'
+        if ($Path) {
+            # The certificates embedded in the file's signature (on Windows, Import reads the PKCS #7
+            # of a signed PE), so an intermediate missing from the local stores does not end the
+            # chain early. They only help building it: the root must still be a pinned one.
+            $embedded = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+            $embedded.Import($Path)
+            $chain.ChainPolicy.ExtraStore.AddRange($embedded)
+        }
         [void]$chain.Build($Certificate)
         $thumbprints = @($chain.ChainElements | ForEach-Object { $_.Certificate.Thumbprint })
         [pscustomobject]@{ Thumbprints = $thumbprints; RootThumbprint = if ($thumbprints.Count) { $thumbprints[-1] } }
@@ -722,8 +760,8 @@ function Get-OmaSignatureProblems([string]$Path, [string]$Policy, $Config, [scri
     $status = "$(Get-OmaProperty $sig 'Status')"
     if ($status -cne 'Valid') { "${name}: Authenticode status $status ($(Get-OmaProperty $sig 'StatusMessage'))" }
     $type = Get-OmaProperty $sig 'SignatureType'
-    if ($null -ne $type -and "$type" -cne 'Authenticode') {
-        "${name}: signature type $type; an embedded Authenticode signature is required, a catalog signature is not accepted"
+    if ("$type" -cne 'Authenticode') {
+        "${name}: signature type '$type'; an embedded Authenticode signature is required, a catalog signature is not accepted"
     }
     $cert = Get-OmaProperty $sig 'SignerCertificate'
     if ($null -eq $cert) {
@@ -734,7 +772,7 @@ function Get-OmaSignatureProblems([string]$Path, [string]$Policy, $Config, [scri
         if ($subject -cne $Config.subject) { "${name}: signer '$subject', expected '$($Config.subject)'" }
         if ($thumbprint -notin $Config.thumbprints) { "${name}: signer thumbprint $thumbprint is not an approved $Policy certificate" }
         if ($Policy -eq 'test') {
-            $root = "$(Get-OmaProperty (& $ChainProvider $cert) 'RootThumbprint')".ToUpperInvariant()
+            $root = "$(Get-OmaProperty (& $ChainProvider $cert $Path) 'RootThumbprint')".ToUpperInvariant()
             if ($root -notin $Config.rootThumbprints) { "${name}: the certificate chain ends at $root, not at a pinned test root" }
         }
     }
@@ -847,8 +885,9 @@ function Get-OmaSingleEntry($List, [string]$Role, [string]$Pass) {
 .SYNOPSIS
   Verifies a setup against the signing manifest and a policy; returns the problems.
 .DESCRIPTION
-  All policies: non-empty setup, the manifest of this version, 7-Zip extraction (exit code
-  checked), exactly one oma-app.exe, oma-service.exe and PawnIO_setup.exe, PawnIO with the pinned
+  All policies: non-empty setup, the manifest of this version, the 7-Zip archive listing and
+  extraction (exit codes checked), exactly one oma-app.exe, oma-service.exe and PawnIO_setup.exe
+  among the listed entries (so two entries at the same path fail), PawnIO with the pinned
   hash, status Valid and pinned signer (OmaPawnIoPins.psm1), and the product metadata of the
   setup and the payload. release|test: every product file carries a signature accepted by
   Test-OmaSignature and the extracted payload has the hashes of the imported signed copies;
@@ -857,6 +896,7 @@ function Get-OmaSingleEntry($List, [string]$Role, [string]$Pass) {
   like the payload; otherwise release|test verify the imported signed copy, its hash and its
   replacement in the apply pass, none verifies the collect pass, and a note (information stream,
   tag OmaNote) says that the installed uninstaller's signature still needs the manual check.
+  The temporary extraction folder is always removed; a failed removal is reported as a problem.
 #>
 function Test-OmaPayload {
     [CmdletBinding()]
@@ -872,7 +912,8 @@ function Test-OmaPayload {
         [scriptblock]$VersionInfoProvider = $script:DefaultVersionInfoProvider,
         [scriptblock]$EmbeddedSignatureProvider = $script:DefaultEmbeddedSignatureProvider,
         [hashtable]$TrustStore = $script:DefaultTrustStore,
-        [pscustomobject]$PawnIoPins
+        [pscustomobject]$PawnIoPins,
+        [scriptblock]$Lister = $script:DefaultLister
     )
     Assert-OmaVersionString $Version
     $signedPolicy = $Policy -ne 'none'
@@ -916,30 +957,55 @@ function Test-OmaPayload {
 
     & $checkFile $Setup (Split-Path -Leaf $Setup)
 
-    $dest = Join-Path ([IO.Path]::GetTempPath()) ('oma-verify-' + [guid]::NewGuid().ToString('N'))
+    # The listing counts every archive entry, so two entries at the same path (which `7z x -y`
+    # would collapse into one file) fail the exactly-one rule.
     try {
+        $listing = & $Lister $Setup
+    } catch {
+        $problems.Add("listing the setup failed: $($_.Exception.Message)")
+        return $problems.ToArray()
+    }
+    if ($listing.ExitCode -ne 0) {
+        $problems.Add("listing the setup with 7-Zip failed: exit code $($listing.ExitCode) $($listing.Output)")
+        return $problems.ToArray()
+    }
+    $entryNames = @($listing.Paths | ForEach-Object { ("$_" -split '[\\/]')[-1] })
+    $names = @($script:OwnPayloadNames) + 'PawnIO_setup.exe' + 'uninstall.exe'
+    $listed = @{}
+    foreach ($n in $names) {
+        $listed[$n] = @($entryNames | Where-Object { $_ -ieq $n }).Count
+        $optional = $n -eq 'uninstall.exe' -and $listed[$n] -eq 0
+        if ($listed[$n] -ne 1 -and -not $optional) {
+            $problems.Add("the setup must contain exactly one $n in the archive listing, found $($listed[$n])")
+        }
+    }
+
+    $dest = Join-Path ([IO.Path]::GetTempPath()) ('oma-verify-' + [guid]::NewGuid().ToString('N'))
+    # Runs in a child scope; `return` only leaves the block, so the cleanup below always runs.
+    $inspect = {
         try {
             $x = & $Extractor $Setup $dest
         } catch {
             $problems.Add("extracting the setup failed: $($_.Exception.Message)")
-            return $problems.ToArray()
+            return
         }
         if ($x.ExitCode -ne 0) {
             $problems.Add("extracting the setup with 7-Zip failed: exit code $($x.ExitCode) $($x.Output)")
-            return $problems.ToArray()
+            return
         }
         $files = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -Force })
         $found = @{}
-        foreach ($n in @($script:OwnPayloadNames) + 'PawnIO_setup.exe' + 'uninstall.exe') {
+        foreach ($n in $names) {
             $found[$n] = @($files | Where-Object { $_.Name -ieq $n })
-            $optional = $n -eq 'uninstall.exe' -and $found[$n].Count -eq 0
-            if ($found[$n].Count -ne 1 -and -not $optional) {
-                $problems.Add("the setup must contain exactly one $n, found $($found[$n].Count)")
+            if ($listed[$n] -eq 1 -and $found[$n].Count -ne 1) {
+                $problems.Add("the archive lists one $n but the extraction produced $($found[$n].Count)")
             }
         }
+        # Only files listed and extracted exactly once are inspected further.
+        $single = { param($n) $listed[$n] -eq 1 -and $found[$n].Count -eq 1 }
 
         foreach ($n in @($script:OwnPayloadNames) + 'uninstall.exe') {
-            if ($found[$n].Count -ne 1) { continue }
+            if (-not (& $single $n)) { continue }
             $path = $found[$n][0].FullName
             $sha = Get-OmaSha256 $path
             $source = if ($signedPolicy) { 'the signed copy' } else { 'the collect pass' }
@@ -947,13 +1013,13 @@ function Test-OmaPayload {
             & $checkFile $path $n
         }
 
-        if ($found['PawnIO_setup.exe'].Count -eq 1) {
+        if (& $single 'PawnIO_setup.exe') {
             $pins = if ($PawnIoPins) { $PawnIoPins } else { Get-OmaPawnIoPins }
             $p = Test-OmaPawnIoSetup -Path $found['PawnIO_setup.exe'][0].FullName -Pins $pins -SignatureProvider $SignatureProvider
             if ($p) { $problems.Add("PawnIO_setup.exe: $p") }
         }
 
-        if ($found['uninstall.exe'].Count -eq 0) {
+        if ($listed['uninstall.exe'] -eq 0) {
             $collected = Get-OmaSingleEntry $m['collect'] 'uninstaller' 'collect'
             if ($collected.Problem) { $problems.Add($collected.Problem) }
             elseif ($collected.Entry['sha256'] -ne $collected.Entry['after']) { $problems.Add('the uninstaller changed during the collect pass') }
@@ -976,12 +1042,23 @@ function Test-OmaPayload {
                 }
             }
             $checked = if ($signedPolicy) { 'the manifest and the imported signed copy' } else { 'the collect pass in the manifest' }
-            Write-Information -Tags 'OmaNote' -MessageData ("installed uninstaller signature not verified: 7-Zip does not list uninstall.exe, so only $checked " +
-                "were checked; install the setup in Windows Sandbox or a VM and check C:\Program Files\$ProductName\uninstall.exe (spec §8.2)")
+            Write-Information -Tags 'OmaNote' -MessageData ("installed uninstaller signature not verified: 7-Zip does not list uninstall.exe, so the check covered only $checked; " +
+                "install the setup in Windows Sandbox or a VM and check C:\Program Files\$ProductName\uninstall.exe (spec §8.2)")
         }
-    } finally {
-        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
     }
+    $cleanup = $null
+    try {
+        $null = & $inspect
+    } finally {
+        if (Test-Path -LiteralPath $dest) {
+            try {
+                Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+            } catch {
+                $cleanup = "cannot remove the temporary extraction folder ${dest}: $($_.Exception.Message)"
+            }
+        }
+    }
+    if ($cleanup) { $problems.Add($cleanup) }
     $problems.ToArray()
 }
 
@@ -1030,4 +1107,5 @@ function Test-OmaSignedFiles {
 Export-ModuleMember -Function Initialize-OmaSigningState, Invoke-OmaSignShim, Register-OmaService,
     Import-OmaSignedFiles, Assert-OmaSigningPass, Get-OmaPluginPathPattern,
     Assert-OmaVersionString, Test-OmaVersionInfo, Test-OmaSignature, Test-OmaPayload, Test-OmaSignedFiles,
-    Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-Oma7ZipPath -Variable UninstallerPathPattern
+    Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-OmaCertificateChain, Get-Oma7ZipPath, ConvertFrom-Oma7ZipListing `
+    -Variable UninstallerPathPattern

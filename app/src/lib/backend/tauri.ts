@@ -17,6 +17,7 @@ import type {
   NavigationTarget,
   Rule,
   RuleStatus,
+  LogStatus,
 } from '../types';
 import type { Backend } from './backend';
 
@@ -57,5 +58,13 @@ export function createTauriBackend(): Backend {
     getAppInfo: () => invoke<AppInfo>('get_app_info'),
     // A unit variant of `KnownPath`: the camelCase string is the whole value.
     openKnownPath: (target) => invoke<void>('open_known_path', { target }),
+    getLogStatus: () => invoke<LogStatus>('get_log_status'),
+    onLogStatus: (cb) => listen<LogStatus>('oma:log', (e) => cb(e.payload)),
+    logStart: () => invoke<LogStatus>('log_start'),
+    logPause: () => invoke<LogStatus>('log_pause'),
+    logResume: () => invoke<LogStatus>('log_resume'),
+    logStop: () => invoke<LogStatus>('log_stop'),
+    openLogFolder: () => invoke<void>('open_log_folder'),
+    pickLogFolder: () => invoke<string | null>('pick_log_folder'),
   };
 }

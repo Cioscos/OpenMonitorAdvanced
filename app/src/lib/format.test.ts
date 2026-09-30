@@ -3,6 +3,7 @@ import {
   formatBytes,
   formatClock,
   formatDuration,
+  formatTapeCounter,
   formatPercent,
   formatPower,
   formatRate,
@@ -125,4 +126,12 @@ test('formatValue shows byte rates in bits on request, like the Simple view netw
   expect(formatValue(6_000_000, 'bytes_per_second', 'en', tEn)).toBe('5.7 MB/s');
   // Units other than bytes_per_second ignore the option.
   expect(formatValue(1e9, 'bits_per_second', 'en', tEn, { rate: 'bytes' })).toBe('1.0 Gbit/s');
+});
+
+test('tape_counter_formats', () => {
+  expect(formatTapeCounter(0)).toBe('00:00:00');
+  expect(formatTapeCounter(767_000)).toBe('00:12:47');
+  expect(formatTapeCounter(443_045_000)).toBe('123:04:05');
+  expect(formatTapeCounter(999)).toBe('00:00:00');
+  expect(formatTapeCounter(-5)).toBe('00:00:00');
 });

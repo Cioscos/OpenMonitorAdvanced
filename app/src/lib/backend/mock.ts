@@ -6,6 +6,8 @@ import type {
   HealthReport,
   HistoryWindow,
   Label,
+  LogState,
+  LogStatus,
   Rule,
   RuleStatus,
   Schema,
@@ -291,6 +293,101 @@ function mockRuleStatus(level: HealthReport['level']): RuleStatus[] {
   });
 }
 
+/** Bytes of a fake part before the mock recorder opens the next one. */
+export const MOCK_LOG_PART_BYTES = 50_000;
+
+export function parseLogState(search: string): LogState {
+  const raw = new URLSearchParams(search).get('log');
+  return raw === 'recording' || raw === 'paused' || raw === 'error' ? raw : 'idle';
+}
+
+/**
+ * A fake CSV recorder: one row and ~180 bytes per second while recording, a new part past
+ * `MOCK_LOG_PART_BYTES`, and a revision that grows with every change like the core's.
+ */
+function mockLogRecorder(initial: LogState) {
+  const listeners = new Set<(s: LogStatus) => void>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const noHotkey = { requested: null, effective: null, state: 'unset', reason: null } as const;
+  let current: LogStatus = {
+    revision: 1,
+    state: 'idle',
+    session: 0,
+    path: null,
+    part: 0,
+    partBytes: 0,
+    recordedMs: 0,
+    rows: 0,
+    bytes: 0,
+    dropped: 0,
+    error: null,
+    hotkeys: { toggle: { ...noHotkey }, pause: { ...noHotkey } },
+  };
+  const pathFor = (session: number, part: number) =>
+    `C:\\Users\\mock\\Documents\\OpenMonitorAdvanced\\logs\\oma-mock-${session}-part${part}.csv`;
+  const set = (patch: Partial<LogStatus>): LogStatus => {
+    current = { ...current, ...patch, revision: current.revision + 1 };
+    listeners.forEach((cb) => cb(current));
+    return current;
+  };
+  const sync = () => {
+    const wanted = current.state === 'recording' && listeners.size > 0;
+    if (wanted && timer === undefined) timer = setInterval(tick, 1000);
+    if (!wanted && timer !== undefined) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+  const tick = () => {
+    const partBytes = current.partBytes + 180;
+    const rollover = partBytes > MOCK_LOG_PART_BYTES;
+    set({
+      recordedMs: current.recordedMs + 1000,
+      rows: current.rows + 1,
+      bytes: current.bytes + 180,
+      part: rollover ? current.part + 1 : current.part,
+      partBytes: rollover ? 0 : partBytes,
+      path: rollover ? pathFor(current.session, current.part + 1) : current.path,
+    });
+  };
+  const begin = (state: LogState) => {
+    const session = current.session + 1;
+    current = { ...current, session, state, part: 1, partBytes: 0, recordedMs: 0, rows: 0, bytes: 0, dropped: 0, path: pathFor(session, 1) };
+    if (state === 'error') current.error = { key: 'log.error.diskFull', detail: null };
+    if (state !== 'idle') current.revision++;
+  };
+  if (initial !== 'idle') {
+    begin(initial);
+    current.recordedMs = 767_000;
+    current.rows = 767;
+    current.bytes = 138_060;
+  }
+  const command = (patch: () => Partial<LogStatus>) => {
+    const next = set(patch());
+    sync();
+    return next;
+  };
+  return {
+    get: () => current,
+    subscribe(cb: (s: LogStatus) => void) {
+      listeners.add(cb);
+      sync();
+      return () => {
+        listeners.delete(cb);
+        sync();
+      };
+    },
+    start: async () =>
+      command(() => {
+        begin('recording');
+        return {};
+      }),
+    pause: async () => command(() => ({ state: current.state === 'recording' ? 'paused' : current.state })),
+    resume: async () => command(() => ({ state: current.state === 'paused' ? 'recording' : current.state })),
+    stop: async () => command(() => ({ state: 'idle', error: null })),
+  };
+}
+
 /** Browser-only backend used by `pnpm dev` and component tests. */
 export function createMockBackend(intervalMs = 1000): Backend {
   const initialState = parseServiceState(typeof location === 'undefined' ? '' : location.search);
@@ -311,6 +408,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const settings = new MockSettings(parsePersistence(typeof location === 'undefined' ? '' : location.search));
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
+  const recorder = mockLogRecorder(parseLogState(typeof location === 'undefined' ? '' : location.search));
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -420,5 +518,14 @@ export function createMockBackend(intervalMs = 1000): Backend {
     }),
     // Nothing to open in the browser: the request is only logged.
     openKnownPath: async (target) => console.info('mock: open', target),
+    getLogStatus: async () => recorder.get(),
+    onLogStatus: async (cb) => recorder.subscribe(cb),
+    logStart: () => recorder.start(),
+    logPause: () => recorder.pause(),
+    logResume: () => recorder.resume(),
+    logStop: () => recorder.stop(),
+    openLogFolder: async () => console.info('mock: open log folder'),
+    // No native dialog in the browser: pretend the user picked a folder.
+    pickLogFolder: async () => 'C:\\Users\\mock\\Documents\\OpenMonitorAdvanced\\logs',
   };
 }

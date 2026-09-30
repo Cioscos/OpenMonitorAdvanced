@@ -22,8 +22,30 @@ import type {
   NavigationTarget,
   Rule,
   RuleStatus,
+  LogStatus,
 } from '../lib/types';
 import defaultRulesFixture from './fixtures/default-rules.json';
+
+const NO_HOTKEY = { requested: null, effective: null, state: 'unset', reason: null } as const;
+
+/** A log status for tests: idle, no file, revision 0; override what matters. */
+export function makeLogStatus(over: Partial<LogStatus> = {}): LogStatus {
+  return {
+    revision: 0,
+    state: 'idle',
+    session: 0,
+    path: null,
+    part: 0,
+    partBytes: 0,
+    recordedMs: 0,
+    rows: 0,
+    bytes: 0,
+    dropped: 0,
+    error: null,
+    hotkeys: { toggle: { ...NO_HOTKEY }, pause: { ...NO_HOTKEY } },
+    ...over,
+  };
+}
 
 export interface HistoryCall {
   ids: string[];
@@ -93,6 +115,16 @@ export class FakeBackend implements Backend {
   openKnownPathCalls: KnownPath[] = [];
   /** Set to reject `openKnownPath` with this text instead of resolving. */
   openKnownPathError: string | null = null;
+  /** What `getLogStatus` and the four log commands return; `emitLogStatus` replaces it and notifies listeners. */
+  logStatus: LogStatus = makeLogStatus();
+  /** Every log call in order (`onLogStatus`, `getLogStatus`, `logStart`, ...), to check that the UI subscribes first. */
+  logCalls: string[] = [];
+  /** Set to reject `getLogStatus` and the four commands with this error. */
+  logError: string | null = null;
+  openLogFolderError: string | null = null;
+  /** What `pickLogFolder` returns. */
+  pickedLogFolder: string | null = null;
+  #logListeners = new Set<(s: LogStatus) => void>();
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
@@ -276,6 +308,49 @@ export class FakeBackend implements Backend {
   async openKnownPath(target: KnownPath): Promise<void> {
     this.openKnownPathCalls.push(target);
     if (this.openKnownPathError !== null) throw this.openKnownPathError;
+  }
+
+  async getLogStatus(): Promise<LogStatus> {
+    this.logCalls.push('getLogStatus');
+    if (this.logError !== null) throw new Error(this.logError);
+    return this.logStatus;
+  }
+
+  async onLogStatus(cb: (s: LogStatus) => void): Promise<Unsubscribe> {
+    this.logCalls.push('onLogStatus');
+    this.#logListeners.add(cb);
+    return () => this.#logListeners.delete(cb);
+  }
+
+  async #logCommand(name: string): Promise<LogStatus> {
+    this.logCalls.push(name);
+    if (this.logError !== null) throw new Error(this.logError);
+    return this.logStatus;
+  }
+
+  logStart = () => this.#logCommand('logStart');
+  logPause = () => this.#logCommand('logPause');
+  logResume = () => this.#logCommand('logResume');
+  logStop = () => this.#logCommand('logStop');
+
+  async openLogFolder(): Promise<void> {
+    this.logCalls.push('openLogFolder');
+    if (this.openLogFolderError !== null) throw this.openLogFolderError;
+  }
+
+  async pickLogFolder(): Promise<string | null> {
+    this.logCalls.push('pickLogFolder');
+    return this.pickedLogFolder;
+  }
+
+  /** Number of live `oma:log` listeners. */
+  get logListenerCount(): number {
+    return this.#logListeners.size;
+  }
+
+  emitLogStatus(status: LogStatus): void {
+    this.logStatus = status;
+    this.#logListeners.forEach((cb) => cb(status));
   }
 
   /** Delivers an arbitrary state to the `onSettings` listeners (e.g. a stale one). */

@@ -150,3 +150,10 @@ export function formatDuration(ms: number, t: Translate): string {
   if (minutes < 60) return t('duration.minutes', { n: minutes });
   return t('duration.hoursMinutes', { h: Math.floor(minutes / 60), m: minutes % 60 });
 }
+
+/** Tape-recorder counter of the CSV log: "00:12:47"; the hours keep growing past 99. */
+export function formatTapeCounter(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
+}

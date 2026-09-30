@@ -72,3 +72,24 @@ test('event payloads reach the listeners unwrapped', async () => {
   navigateHandler({ payload: { view: 'advanced', deviceId: 'gpu/0' } });
   expect(onNavigate).toHaveBeenCalledWith({ view: 'advanced', deviceId: 'gpu/0' });
 });
+
+test('log commands and event match the Rust shell', async () => {
+  const { listen } = await import('@tauri-apps/api/event');
+  const backend = createTauriBackend();
+  await backend.getLogStatus();
+  expect(invoke).toHaveBeenLastCalledWith('get_log_status');
+  await backend.logStart();
+  expect(invoke).toHaveBeenLastCalledWith('log_start');
+  await backend.logPause();
+  expect(invoke).toHaveBeenLastCalledWith('log_pause');
+  await backend.logResume();
+  expect(invoke).toHaveBeenLastCalledWith('log_resume');
+  await backend.logStop();
+  expect(invoke).toHaveBeenLastCalledWith('log_stop');
+  await backend.openLogFolder();
+  expect(invoke).toHaveBeenLastCalledWith('open_log_folder');
+  await backend.pickLogFolder();
+  expect(invoke).toHaveBeenLastCalledWith('pick_log_folder');
+  await backend.onLogStatus(vi.fn());
+  expect(listen).toHaveBeenLastCalledWith('oma:log', expect.any(Function));
+});

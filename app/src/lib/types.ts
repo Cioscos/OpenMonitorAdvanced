@@ -459,3 +459,37 @@ export interface HealthClock {
   levelElapsedMs: number;
 }
 
+
+/** State of the CSV log (`oma:log`, `get_log_status`); mirrors `LogStatus` in app/src-tauri/src/log. */
+export type LogState = 'idle' | 'recording' | 'paused' | 'error';
+
+/** Why the log is in `error`: an i18n key and the `{detail}` of `log.error.other`. */
+export interface LogError {
+  key: string;
+  detail: string | null;
+}
+
+/** What became of one global hotkey of the log. */
+export interface HotkeyStatus {
+  requested: string | null;
+  effective: string | null;
+  state: 'active' | 'unset' | 'failed';
+  /** i18n key of the failure. */
+  reason: string | null;
+}
+
+export interface LogStatus {
+  /** Global, grows with every observable change (counters and hotkeys included) and never restarts. */
+  revision: number;
+  state: LogState;
+  session: number;
+  path: string | null;
+  part: number;
+  partBytes: number;
+  recordedMs: number;
+  rows: number;
+  bytes: number;
+  dropped: number;
+  error: LogError | null;
+  hotkeys: { toggle: HotkeyStatus; pause: HotkeyStatus };
+}

@@ -420,3 +420,50 @@ test('mock webview import fills only unset fields and sets the marker once', asy
   expect(again.settings.advanced.section).toBe('gpu/x');
   expect(again.seq).toBe(state.seq);
 });
+
+describe('mock log recorder', () => {
+  afterEach(() => vi.useRealTimers());
+
+  test('mock_recorder_counts_and_stops', async () => {
+    vi.useFakeTimers();
+    const backend = createMockBackend();
+    const seen: number[] = [];
+    const off = await backend.onLogStatus((s) => seen.push(s.revision));
+    expect((await backend.getLogStatus()).state).toBe('idle');
+
+    const started = await backend.logStart();
+    expect(started.state).toBe('recording');
+    expect(started.session).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    const counting = await backend.getLogStatus();
+    expect(counting.recordedMs).toBeGreaterThanOrEqual(3000);
+    expect(counting.rows).toBeGreaterThan(0);
+    expect(counting.revision).toBeGreaterThan(started.revision);
+
+    const paused = await backend.logPause();
+    expect(paused.state).toBe('paused');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await backend.getLogStatus()).rows).toBe(paused.rows);
+    expect((await backend.logResume()).state).toBe('recording');
+
+    // A fake threshold opens a new part.
+    await vi.advanceTimersByTimeAsync(400_000);
+    expect((await backend.getLogStatus()).part).toBeGreaterThan(1);
+
+    const stopped = await backend.logStop();
+    expect(stopped.state).toBe('idle');
+    const before = seen.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(seen.length).toBe(before);
+    expect(seen).toEqual([...seen].sort((a, b) => a - b));
+    off();
+  });
+
+  test('the ?log knob sets the initial state', async () => {
+    for (const state of ['recording', 'paused', 'error'] as const) {
+      history.replaceState(null, '', `/?log=${state}`);
+      expect((await createMockBackend().getLogStatus()).state).toBe(state);
+    }
+    expect((await createMockBackend().getLogStatus()).error).not.toBeNull();
+  });
+});

@@ -18,6 +18,7 @@ import type {
   NavigationTarget,
   Rule,
   RuleStatus,
+  LogStatus,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -89,4 +90,17 @@ export interface Backend {
   getAppInfo(): Promise<AppInfo>;
   /** Opens one of the fixed places with the shell; rejects with the system's text. */
   openKnownPath(target: KnownPath): Promise<void>;
+  /** The CSV log's current status. */
+  getLogStatus(): Promise<LogStatus>;
+  /** Emitted at every change while the window exists. Listeners must drop statuses with an old `revision`. */
+  onLogStatus(cb: (status: LogStatus) => void): Promise<Unsubscribe>;
+  /** The four commands reply with the status they produced; it goes through the same `revision` filter as the events. */
+  logStart(): Promise<LogStatus>;
+  logPause(): Promise<LogStatus>;
+  logResume(): Promise<LogStatus>;
+  logStop(): Promise<LogStatus>;
+  /** Opens the log folder; rejects with the i18n key `log.error.folderMissing` or the system's text. */
+  openLogFolder(): Promise<void>;
+  /** Folder picker; null when the user cancels. */
+  pickLogFolder(): Promise<string | null>;
 }

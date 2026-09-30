@@ -94,7 +94,7 @@ public static partial class CpuIdentity
         bool pendingSpace = false;
         foreach (char c in text)
         {
-            if (c is '�' or '​' or '‌' or '‍' or '⁠' or '﻿')
+            if (c is '\uFFFD' or '\u200B' or '\u200C' or '\u200D' or '\u2060' or '\uFEFF')
             {
                 continue;
             }

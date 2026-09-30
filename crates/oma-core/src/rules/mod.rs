@@ -20,7 +20,8 @@ pub use health::{
     OverallLevel, RuleEngine, RuleStatus, TargetRef,
 };
 pub use instance::{
-    expand, same_semantics, Instance, InstanceKey, InstanceProblem, Level, Resolved, Step,
+    expand, same_semantics, Instance, InstanceKey, InstanceProblem, Level, Resolved, Sources, Step,
+    ThresholdSource,
 };
 pub use notify::{Cooldown, TOAST_COOLDOWN_MS};
 pub(crate) use validate::{nested, validate_override, CustomRules};

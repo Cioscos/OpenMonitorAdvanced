@@ -5,7 +5,7 @@ import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { newCustomRule } from '../../lib/rules';
 import { settings } from '../../lib/settings.svelte';
-import type { Rule, RuleStatus, Schema, Sensor, SettingsDiagnostic, SettingsPatch } from '../../lib/types';
+import type { Rule, RuleStatus, Schema, Sensor, SettingsDiagnostic, SettingsPatch, ThresholdSource } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import defaultRulesFixture from '../../test/fixtures/default-rules.json';
 import { disconnectSettings } from '../../test/settings';
@@ -44,11 +44,13 @@ const SCHEMA: Schema = {
   ],
 };
 
-const instance = (sensorId: string, warn: number | null, crit: number | null) => ({
+const instance = (sensorId: string, warn: number | null, crit: number | null, source: ThresholdSource = 'fixed') => ({
   sensorId,
   level: 'ok' as const,
   warn,
   crit,
+  warnSource: warn === null ? null : source,
+  critSource: crit === null ? null : source,
   valid: true,
   problem: null,
 });
@@ -58,13 +60,13 @@ function status(cpuCrit = 95): RuleStatus[] {
   return DEFAULTS.map((rule) => {
     switch (rule.id) {
       case 'cpu-temp':
-        return { ruleId: rule.id, instances: [instance('cpu/0/temperature/package', cpuCrit - 10, cpuCrit)] };
+        return { ruleId: rule.id, instances: [instance('cpu/0/temperature/package', cpuCrit - 10, cpuCrit, 'property')] };
       case 'gpu-temp':
         return { ruleId: rule.id, instances: [instance(`${GPU}/temperature/core`, 83, 90)] };
       case 'disk-temp':
         return {
           ruleId: rule.id,
-          instances: [instance(`${SSD}/temperature/drive`, 70, 85), instance(`${USB}/temperature/drive`, 75, 85)],
+          instances: [instance(`${SSD}/temperature/drive`, 70, 85, 'property'), instance(`${USB}/temperature/drive`, 75, 85, 'property')],
         };
       default:
         return { ruleId: rule.id, instances: [] };

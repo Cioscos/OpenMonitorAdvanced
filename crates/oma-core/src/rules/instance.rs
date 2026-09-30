@@ -24,6 +24,26 @@ pub struct Resolved {
     pub crit: Option<f64>,
 }
 
+/// Where a resolved threshold came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThresholdSource {
+    /// A fixed number in the rule.
+    Fixed,
+    /// The device property, plus the offset.
+    Property,
+    /// The fallback, because the property is missing or not a number.
+    Fallback,
+}
+
+/// The source of each level of [`Resolved`], `None` where it has no value.
+/// Kept apart from it so that [`same_semantics`] compares values only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sources {
+    pub warn: Option<ThresholdSource>,
+    pub crit: Option<ThresholdSource>,
+}
+
 /// Identity of an instance: one rule on one sensor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InstanceKey {
@@ -72,6 +92,7 @@ pub struct Instance {
     /// Position of the sensor in `schema.sensors`.
     pub sensor_index: usize,
     pub resolved: Resolved,
+    pub sources: Sources,
     pub problem: Option<InstanceProblem>,
     source: Source,
     sensor_unit: Unit,
@@ -109,11 +130,12 @@ fn name_matches(names: &[String], name: &str) -> bool {
     })
 }
 
-/// A threshold for `device`: a property is read as a number plus `offset`,
-/// with `fallback` when it is missing, not a number or not finite.
-fn resolve(threshold: &Threshold, device: Option<&Device>) -> f64 {
+/// A threshold for `device`, with its source: a property is read as a number
+/// plus `offset`, with `fallback` when it is missing, not a number or not
+/// finite.
+fn resolve(threshold: &Threshold, device: Option<&Device>) -> (f64, ThresholdSource) {
     match threshold {
-        Threshold::Fixed { fixed } => *fixed,
+        Threshold::Fixed { fixed } => (*fixed, ThresholdSource::Fixed),
         Threshold::Property {
             property,
             offset,
@@ -123,7 +145,9 @@ fn resolve(threshold: &Threshold, device: Option<&Device>) -> f64 {
             .and_then(|raw| raw.trim().parse::<f64>().ok())
             .map(|value| value + offset)
             .filter(|sum| sum.is_finite())
-            .unwrap_or(*fallback),
+            .map_or((*fallback, ThresholdSource::Fallback), |sum| {
+                (sum, ThresholdSource::Property)
+            }),
     }
 }
 
@@ -134,9 +158,14 @@ fn instance(rule: &Rule, schema: &Schema, sensor_index: usize) -> Instance {
         let threshold = level.as_ref()?.threshold.as_ref()?;
         Some(resolve(threshold, device))
     };
+    let (warn, crit) = (threshold(&rule.warn), threshold(&rule.crit));
     let resolved = Resolved {
-        warn: threshold(&rule.warn),
-        crit: threshold(&rule.crit),
+        warn: warn.map(|(value, _)| value),
+        crit: crit.map(|(value, _)| value),
+    };
+    let sources = Sources {
+        warn: warn.map(|(_, source)| source),
+        crit: crit.map(|(_, source)| source),
     };
     let misordered = match (rule.condition, resolved.warn, resolved.crit) {
         (Condition::Above, Some(warn), Some(crit)) => crit < warn,
@@ -157,6 +186,7 @@ fn instance(rule: &Rule, schema: &Schema, sensor_index: usize) -> Instance {
         },
         sensor_index,
         resolved,
+        sources,
         problem,
         source: sensor.source,
         sensor_unit: sensor.unit,
@@ -725,6 +755,42 @@ mod tests {
         assert_eq!(
             only_instance(&rule, &cpu_schema(&[("tjMaxC", "")])).resolved,
             fallback
+        );
+    }
+
+    #[test]
+    fn resolved_thresholds_record_their_source() {
+        use ThresholdSource::{Fallback, Fixed, Property};
+        let rule = builtin("cpu-temp");
+        let sources = |warn, crit| Sources { warn, crit };
+        assert_eq!(
+            only_instance(&rule, &cpu_schema(&[("tjMaxC", "89")])).sources,
+            sources(Some(Property), Some(Property))
+        );
+        for properties in [&[][..], &[("tjMaxC", "abc")], &[("tjMaxC", "inf")]] {
+            assert_eq!(
+                only_instance(&rule, &cpu_schema(properties)).sources,
+                sources(Some(Fallback), Some(Fallback)),
+                "{properties:?}"
+            );
+        }
+        // A fixed level, and a flag or a missing level without a source.
+        let rule = above(None, Some((90.0, 0)), (3.0, 0));
+        assert_eq!(
+            only_instance(&rule, &gpu_schema()).sources,
+            sources(None, Some(Fixed))
+        );
+        let rule = custom(
+            GPU_FLAG,
+            Unit::Boolean,
+            Condition::FlagActive,
+            Some(flag(0)),
+            None,
+            (0.0, 0),
+        );
+        assert_eq!(
+            only_instance(&rule, &gpu_schema()).sources,
+            sources(None, None)
         );
     }
 

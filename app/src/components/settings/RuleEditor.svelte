@@ -12,7 +12,7 @@
     type DisplayScale,
     type LevelName,
   } from '../../lib/rules';
-  import type { LevelSpec, Rule, RuleCondition, RuleStatus, Schema } from '../../lib/types';
+  import type { LevelSpec, Rule, RuleCondition, RuleStatus } from '../../lib/types';
   import Field from './controls/Field.svelte';
   import NumberInput from './controls/NumberInput.svelte';
   import Segmented from './controls/Segmented.svelte';
@@ -31,7 +31,6 @@
     scales,
     scale,
     status,
-    schema,
     errors,
     onScale,
     onChange,
@@ -47,7 +46,6 @@
     scales: DisplayScale[];
     scale: DisplayScale;
     status: readonly RuleStatus[];
-    schema: Schema | null;
     /** Error keys of this rule, by path below it (`crit`, `warn.durationS`). */
     errors: Record<string, string>;
     onScale: (next: DisplayScale) => void;
@@ -171,7 +169,7 @@
               {#snippet notes()}
                 {#if property}
                   <p class="resolved" id="{field}-resolved">
-                    {thresholdText(rule, level, { status, schema, scale, locale: i18n.locale, t })}
+                    {thresholdText(rule, level, { status, scale, locale: i18n.locale, t })}
                   </p>
                   <p>{t('rules.editor.propertyHint')}</p>
                 {/if}

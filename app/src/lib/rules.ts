@@ -284,15 +284,12 @@ export function resolvedRange(status: readonly RuleStatus[], ruleId: string, lev
   return values.length === 0 ? null : { min: Math.min(...values), max: Math.max(...values) };
 }
 
-/** Whether the instances' devices have the property (`property`), none has it (`fallback`) or some do (`mixed`). */
-function propertySource(status: RuleStatus | undefined, property: string, schema: Schema | null): 'property' | 'fallback' | 'mixed' {
-  const found = (status?.instances ?? []).map((i) => {
-    const sensor = schema?.sensors.find((s) => s.id === i.sensorId);
-    const raw = schema?.devices.find((d) => d.id === sensor?.deviceId)?.properties?.[property];
-    return raw !== undefined && raw.trim() !== '' && Number.isFinite(Number(raw));
-  });
-  if (found.every(Boolean)) return 'property';
-  return found.some(Boolean) ? 'mixed' : 'fallback';
+/** Whether the engine resolved `level` from the property on every instance (`property`), on none (`fallback`) or on some (`mixed`). */
+function propertySource(status: RuleStatus | undefined, level: LevelName): 'property' | 'fallback' | 'mixed' {
+  const sources = (status?.instances ?? []).map((i) => i[`${level}Source`]).filter((s) => s !== null);
+  const property = sources.filter((s) => s === 'property').length;
+  if (property === sources.length) return 'property';
+  return property === 0 ? 'fallback' : 'mixed';
 }
 
 /** A short name of a device property for "95 °C, from TjMax". */
@@ -303,7 +300,6 @@ export function propertyName(property: string, t: Translate): string {
 
 export interface ThresholdContext {
   status: readonly RuleStatus[];
-  schema: Schema | null;
   scale: DisplayScale;
   locale: string;
   t: Translate;
@@ -323,8 +319,7 @@ export function thresholdText(rule: Rule, level: LevelName, ctx: ThresholdContex
   const value = formatRangeIn(range.min, range.max, ctx.scale, ctx.locale);
   const source = propertySource(
     ctx.status.find((s) => s.ruleId === rule.id),
-    threshold.property,
-    ctx.schema,
+    level,
   );
   if (source === 'fallback') return ctx.t('rules.threshold.fallback', { value });
   return ctx.t(source === 'property' ? 'rules.threshold.fromProperty' : 'rules.threshold.mixed', { value, property });

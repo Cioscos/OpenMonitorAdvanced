@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     expand, is_builtin, same_semantics, Condition, Instance, InstanceKey, InstanceProblem, Level,
-    Rule, Step,
+    Rule, Step, ThresholdSource,
 };
 use crate::engine::Quality;
 use crate::model::{Label, Schema, Unit};
@@ -140,6 +140,10 @@ pub struct InstanceStatus {
     /// Resolved thresholds.
     pub warn: Option<f64>,
     pub crit: Option<f64>,
+    /// Where each resolved threshold came from, kept while the instance is
+    /// lost (R2); `None` for a level without a threshold.
+    pub warn_source: Option<ThresholdSource>,
+    pub crit_source: Option<ThresholdSource>,
     pub valid: bool,
     /// `"order"` or `"unitMismatch"`.
     pub problem: Option<String>,
@@ -305,6 +309,8 @@ impl Slot {
             level: self.instance.level(),
             warn: self.instance.resolved.warn,
             crit: self.instance.resolved.crit,
+            warn_source: self.instance.sources.warn,
+            crit_source: self.instance.sources.crit,
             valid: self.available,
             problem: self.instance.problem.map(|problem| {
                 match problem {
@@ -534,6 +540,8 @@ impl RuleEngine {
                 slots.push(match kept {
                     Some(mut slot) => {
                         slot.instance.sensor_index = instance.sensor_index;
+                        // Same numbers, maybe from another source now.
+                        slot.instance.sources = instance.sources;
                         slot.rule = rule_index;
                         slot.present = present;
                         slot
@@ -1265,6 +1273,63 @@ mod tests {
         assert!(!report.alerts[0].valid);
     }
 
+    /// `cpu/0` with `properties` and, with `sensor`, its Tctl temperature.
+    fn cpu_schema(properties: &[(&str, &str)], sensor: bool) -> Schema {
+        let tctl = Sensor::new(
+            "cpu/0",
+            SensorKind::Temperature,
+            "tctl",
+            Unit::Celsius,
+            Label::new("cpu.tctl"),
+            Source::Mock,
+        );
+        schema(
+            vec![device("cpu/0", DeviceKind::Cpu, "CPU", properties)],
+            if sensor { vec![tctl] } else { vec![] },
+        )
+    }
+
+    #[test]
+    fn retained_instance_keeps_threshold_sources() {
+        use ThresholdSource::{Fallback, Property};
+        let sources = |engine: &RuleEngine| {
+            let status = engine.status();
+            let i = &status[0].instances[0];
+            (i.warn, i.crit, i.warn_source, i.crit_source, i.valid)
+        };
+        // The service stops: the sensor and the property go, the thresholds
+        // resolved from the property stay with their source.
+        let mut rig = Rig::new(
+            vec![builtin("cpu-temp")],
+            cpu_schema(&[("tjMaxC", "89")], true),
+        );
+        rig.tick(&[Some(50.0)]);
+        let resolved = (Some(79.0), Some(89.0), Some(Property), Some(Property));
+        assert_eq!(
+            sources(&rig.engine),
+            (resolved.0, resolved.1, resolved.2, resolved.3, true)
+        );
+        rig.set_schema(cpu_schema(&[], false));
+        rig.tick(&[]);
+        assert_eq!(
+            sources(&rig.engine),
+            (resolved.0, resolved.1, resolved.2, resolved.3, false)
+        );
+
+        // Same numbers from the fallback keep the state, but not the source.
+        let mut rig = Rig::new(
+            vec![builtin("cpu-temp")],
+            cpu_schema(&[("tjMaxC", "95")], true),
+        );
+        rig.tick(&[Some(50.0)]);
+        rig.set_schema(cpu_schema(&[], true));
+        rig.tick(&[Some(50.0)]);
+        assert_eq!(
+            sources(&rig.engine),
+            (Some(85.0), Some(95.0), Some(Fallback), Some(Fallback), true)
+        );
+    }
+
     #[test]
     fn lost_ok_instance_is_only_unavailable() {
         let mut rig = Rig::new(vec![instant()], gpus(2));
@@ -1694,15 +1759,30 @@ mod tests {
         rig.set_schema(lost);
         rig.tick(&[Some(50.0), Some(40.0)]);
 
-        let status =
-            |sensor: &str, level, warn, crit, valid, problem: Option<&str>| InstanceStatus {
+        let source = |value: Option<f64>, source| value.map(|_| source);
+        let status = |sensor: &str,
+                      level,
+                      warn: Option<f64>,
+                      crit: Option<f64>,
+                      valid,
+                      problem: Option<&str>| {
+            // Every threshold here is fixed but the disk's, which come from its properties.
+            let from = if sensor.starts_with("storage/") {
+                ThresholdSource::Property
+            } else {
+                ThresholdSource::Fixed
+            };
+            InstanceStatus {
                 sensor_id: sensor.into(),
                 level,
                 warn,
                 crit,
+                warn_source: source(warn, from),
+                crit_source: source(crit, from),
                 valid,
                 problem: problem.map(str::to_owned),
-            };
+            }
+        };
         assert_eq!(
             rig.engine.status(),
             [
@@ -1754,6 +1834,7 @@ mod tests {
             .unwrap(),
             json!({
                 "sensorId": GPU0, "level": "warn", "warn": null, "crit": null,
+                "warnSource": null, "critSource": null,
                 "valid": true, "problem": "unitMismatch"
             })
         );

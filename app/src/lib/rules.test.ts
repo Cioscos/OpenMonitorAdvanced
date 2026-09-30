@@ -161,8 +161,8 @@ test('resolved thresholds span the instances of a rule', () => {
     {
       ruleId: 'disk-temp',
       instances: [
-        { sensorId: 'a', level: 'ok' as const, warn: 70, crit: 85, valid: true, problem: null },
-        { sensorId: 'b', level: 'ok' as const, warn: 75, crit: 80, valid: true, problem: null },
+        { sensorId: 'a', level: 'ok' as const, warn: 70, crit: 85, warnSource: 'property' as const, critSource: 'property' as const, valid: true, problem: null },
+        { sensorId: 'b', level: 'ok' as const, warn: 75, crit: 80, warnSource: 'property' as const, critSource: 'property' as const, valid: true, problem: null },
       ],
     },
     { ruleId: 'gpu-temp', instances: [] },
@@ -189,11 +189,35 @@ test('errors are picked by the path of the rule', () => {
 test('a property threshold without instances shows its property and the fallback', () => {
   const cpu = DEFAULTS.find((r) => r.id === 'cpu-temp')!;
   const scale = defaultScale(scalesFor('celsius', { temperature: 'c', throughput: 'bytes' }), []);
-  const ctx = { status: [], schema: null, scale, locale: 'en', t: tEn };
+  const ctx = { status: [], scale, locale: 'en', t: tEn };
   const text = thresholdText(cpu, 'crit', ctx);
   expect(text).toBe('from TjMax (fallback 95 °C)');
   const none = { ...ctx, status: [{ ruleId: 'cpu-temp', instances: [] }] };
   expect(thresholdText(cpu, 'crit', none)).toBe(text);
+});
+
+test('a resolved threshold reads its source from the engine, also for a retained instance', () => {
+  const cpu = DEFAULTS.find((r) => r.id === 'cpu-temp')!;
+  const scale = defaultScale(scalesFor('celsius', { temperature: 'c', throughput: 'bytes' }), []);
+  type Source = 'property' | 'fallback';
+  const instance = (sensorId: string, warn: number, crit: number, source: Source, valid = true) => ({
+    sensorId,
+    level: 'crit' as const,
+    warn,
+    crit,
+    warnSource: source,
+    critSource: source,
+    valid,
+    problem: null,
+  });
+  const ctx = (...instances: ReturnType<typeof instance>[]) => ({ status: [{ ruleId: 'cpu-temp', instances }], scale, locale: 'en', t: tEn });
+  // The service stopped: the sensor is lost and the schema has no TjMax any more, the thresholds stay from TjMax.
+  const retained = ctx(instance('cpu/0/temperature/tctl', 79, 89, 'property', false));
+  expect(thresholdText(cpu, 'warn', retained)).toBe('79 °C, from TjMax');
+  expect(thresholdText(cpu, 'crit', retained)).toBe('89 °C, from TjMax');
+  expect(thresholdText(cpu, 'crit', ctx(instance('cpu/0/temperature/tctl', 85, 95, 'fallback')))).toBe('95 °C, fallback');
+  const mixed = ctx(instance('cpu/0/temperature/tctl', 79, 89, 'property'), instance('cpu/1/temperature/tctl', 85, 95, 'fallback'));
+  expect(thresholdText(cpu, 'crit', mixed)).toBe('89–95 °C, from TjMax or fallback');
 });
 
 test('an override equal to the shipped rule is not a modification', () => {

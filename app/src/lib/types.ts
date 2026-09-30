@@ -301,12 +301,18 @@ export interface RulesSettings {
   custom: Rule[];
 }
 
+/** A fixed number, the device property plus its offset, or the fallback without the property. */
+export type ThresholdSource = 'fixed' | 'property' | 'fallback';
+
 /** One instance of a rule as the engine sees it now (`get_rule_status`); thresholds are resolved, in the base unit. */
 export interface InstanceStatus {
   sensorId: string;
   level: 'ok' | 'warn' | 'crit';
   warn: number | null;
   crit: number | null;
+  /** Where each resolved threshold came from, kept while the instance is retained; null without a threshold. */
+  warnSource: ThresholdSource | null;
+  critSource: ThresholdSource | null;
   valid: boolean;
   problem: 'order' | 'unitMismatch' | null;
 }

@@ -146,7 +146,7 @@
     closeDraft();
   }
 
-  const context = (scale: DisplayScale): ThresholdContext => ({ status, schema, scale, locale: i18n.locale, t });
+  const context = (scale: DisplayScale): ThresholdContext => ({ status, scale, locale: i18n.locale, t });
   const rowScale = (rule: Rule) => defaultScale(scalesFor(rule.unit, prefs), fixedValues(rule));
 
   // --- New rule ---
@@ -315,7 +315,6 @@
                   scales={editing.scales}
                   scale={editing.scale}
                   {status}
-                  {schema}
                   errors={errorsOf(settings.errors, entry.base)}
                   onScale={(scale) => editing && (editing = { ...editing, scale })}
                   onChange={(change) => changeRule(entry, change)}
@@ -385,7 +384,6 @@
           scales={draft.scales}
           scale={draft.scale}
           {status}
-          {schema}
           errors={errorsOf(settings.errors, draftBase)}
           onScale={(scale) => draft && (draft = { ...draft, scale })}
           onChange={changeDraft}

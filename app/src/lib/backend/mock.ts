@@ -281,11 +281,11 @@ function mockRuleStatus(level: HealthReport['level']): RuleStatus[] {
   return MOCK_DEFAULT_RULES.map((rule) => {
     if (rule.id === 'gpu-temp') {
       const current = level === 'warn' || level === 'crit' ? level : 'ok';
-      return { ruleId: rule.id, instances: [{ sensorId: `${GPU}/temperature/core`, level: current, warn: 83, crit: 90, valid: true, problem: null }] };
+      return { ruleId: rule.id, instances: [{ sensorId: `${GPU}/temperature/core`, level: current, warn: 83, crit: 90, warnSource: 'fixed', critSource: 'fixed', valid: true, problem: null }] };
     }
     if (rule.id === 'volume-used') {
       const sensorId = 'storage/device-mock-ssd/percent/volume-mock-guid';
-      return { ruleId: rule.id, instances: [{ sensorId, level: 'ok', warn: 90, crit: 97, valid: true, problem: null }] };
+      return { ruleId: rule.id, instances: [{ sensorId, level: 'ok', warn: 90, crit: 97, warnSource: 'fixed', critSource: 'fixed', valid: true, problem: null }] };
     }
     return { ruleId: rule.id, instances: [] };
   });

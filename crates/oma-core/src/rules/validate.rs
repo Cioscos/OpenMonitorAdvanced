@@ -37,7 +37,11 @@ fn is_sensor_id(id: &str) -> bool {
 fn validate_target(target: &Target) -> Result<(), RuleError> {
     let valid = match target {
         Target::Sensor { sensor } => is_sensor_id(sensor),
-        Target::Selector { names, .. } => names.iter().all(|n| !n.is_empty() && !n.contains('/')),
+        // A `*` is allowed only at the end, as a prefix match (R8).
+        Target::Selector { names, .. } => names.iter().all(|n| {
+            let body = n.strip_suffix('*').unwrap_or(n);
+            !n.is_empty() && !n.contains('/') && !body.contains('*')
+        }),
     };
     if valid {
         Ok(())
@@ -441,7 +445,12 @@ mod tests {
             ..base()
         };
         assert_eq!(validate_rule(&device_with_slashes), Ok(()));
-        for names in [vec![String::new()], vec!["a/b".to_owned()]] {
+        for names in [
+            vec![String::new()],
+            vec!["a/b".to_owned()],
+            vec!["a*b".to_owned()],
+            vec!["**".to_owned()],
+        ] {
             let rule = Rule {
                 target: Target::Selector {
                     device_kind: DeviceKind::Gpu,

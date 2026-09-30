@@ -1,8 +1,9 @@
 //! Alert rules: the rule model, the built-in rules and their validation.
 //!
-//! Only the model lives here. Instances (a rule expanded over the sensors it
-//! matches) and the evaluation state machine build on these types.
+//! Instances (a rule expanded over the sensors it matches) and their level
+//! state machine live in `instance`.
 
+mod instance;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -11,6 +12,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{DeviceKind, SensorKind, Unit};
 
+pub use instance::{
+    expand, same_semantics, Instance, InstanceKey, InstanceProblem, Level, Resolved, Step,
+};
 pub(crate) use validate::{nested, validate_override, CustomRules};
 pub use validate::{validate_rule, validate_rules, RuleError};
 
@@ -44,6 +48,7 @@ pub enum Target {
     Selector {
         device_kind: DeviceKind,
         sensor_kind: SensorKind,
+        /// An entry ending with `*` matches the names starting with the rest.
         names: Vec<String>,
     },
 }

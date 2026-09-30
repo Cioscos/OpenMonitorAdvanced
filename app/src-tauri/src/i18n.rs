@@ -76,6 +76,10 @@ pub const RUST_KEYS: &[&str] = &[
     "log.error.folderMissing",
     "log.error.other",
     "log.toast.errorTitle",
+    "log.toast.started",
+    "log.toast.stopped",
+    "log.hotkey.inUse",
+    "log.hotkey.failed",
 ];
 
 type Catalog = HashMap<String, String>;

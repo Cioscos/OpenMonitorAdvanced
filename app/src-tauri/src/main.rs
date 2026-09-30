@@ -2,6 +2,7 @@
 
 mod autostart;
 mod commands;
+mod hotkeys;
 mod i18n;
 mod interval;
 mod log;
@@ -218,6 +219,8 @@ fn main() {
                 window::show_main(app);
             }
         }))
+        // Rust side only: no `global-shortcut:*` permission reaches the UI.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(window::NavState::default())
         .manage(AppState {
             engine: engine.clone(),
@@ -324,6 +327,8 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            // `log.hotkeyToggle` and `log.hotkeyPause` drive the global hotkeys.
+            hotkeys::install_hotkeys(app.handle(), &store, log_service.clone());
             // Listeners run on whichever thread changed the state; the tray
             // posts its own work to the main thread.
             let log_tray = tray.clone();

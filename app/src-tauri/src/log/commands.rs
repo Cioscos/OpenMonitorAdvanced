@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::session::{LogEnv, LogService, LogStatus, EVENT_LOG};
+use super::session::{LogEnv, LogService, LogState, LogStatus, EVENT_LOG};
+use crate::i18n::{t, Lang};
 use crate::notifier::{launch_for_main, SystemToaster};
 use crate::window::MAIN;
 
@@ -79,6 +80,20 @@ fn open_folder(log: &LogService) -> Result<(), String> {
 /// A toast of the log: a click opens the main window (L8).
 pub fn toast_log(toaster: &SystemToaster, title: String, body: String) {
     toaster.show(title, body, launch_for_main());
+}
+
+/// Title and body of the toast for a command that ended in `error`: the
+/// translated reason (with `{detail}` for `log.error.other`).
+pub fn failure_toast(lang: Lang, status: &LogStatus) -> Option<(String, String)> {
+    if status.state != LogState::Error {
+        return None;
+    }
+    let error = status.error.as_ref()?;
+    let detail = error.detail.as_deref().unwrap_or("");
+    Some((
+        t(lang, "log.toast.errorTitle", &[]),
+        t(lang, &error.key, &[("detail", detail)]),
+    ))
 }
 
 /// The app side of [`LogEnv`].

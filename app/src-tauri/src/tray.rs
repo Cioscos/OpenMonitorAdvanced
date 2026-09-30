@@ -86,15 +86,10 @@ pub fn log_menu(state: LogState) -> &'static [LogMenuItem] {
 /// when no window is open to show it (the coordinator toasts only errors of
 /// its own, R6).
 fn error_toast(lang: Lang, window_open: bool, status: &LogStatus) -> Option<(String, String)> {
-    if window_open || status.state != LogState::Error {
+    if window_open {
         return None;
     }
-    let error = status.error.as_ref()?;
-    let detail = error.detail.as_deref().unwrap_or("");
-    Some((
-        t(lang, "log.toast.errorTitle", &[]),
-        t(lang, &error.key, &[("detail", detail)]),
-    ))
+    crate::log::commands::failure_toast(lang, status)
 }
 
 fn index_of(schema: &Schema, id: &str) -> Option<usize> {

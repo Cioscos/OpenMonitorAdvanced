@@ -183,8 +183,7 @@ impl LogService {
         lock(&self.listeners).push(Arc::from(listener));
     }
 
-    // Used by the hotkey manager (Task 7).
-    #[allow(dead_code)]
+    /// The state of the global hotkeys, from the hotkey manager.
     pub fn set_hotkeys(&self, hotkeys: HotkeyStatuses) {
         let mut fx = Effects::default();
         {

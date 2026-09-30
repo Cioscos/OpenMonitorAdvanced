@@ -13,7 +13,7 @@ pub mod writer;
 pub use session::{LogService, CLOSE_TIMEOUT};
 
 /// What became of one global hotkey of the log (filled by the hotkey
-/// manager; until then both are unset).
+/// manager, `hotkeys.rs`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyStatus {
@@ -40,12 +40,8 @@ impl Default for HotkeyStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HotkeyState {
-    // Built by the hotkey manager (Task 7).
-    #[allow(dead_code)]
     Active,
     Unset,
-    // Built by the hotkey manager (Task 7).
-    #[allow(dead_code)]
     Failed,
 }
 

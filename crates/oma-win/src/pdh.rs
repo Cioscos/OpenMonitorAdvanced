@@ -18,6 +18,9 @@ const FMT_DOUBLE_NOCAP: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);
 const PDH_INVALID_DATA: u32 = 0xC000_0BBA;
 /// Returned when a wildcard counter currently has no instances.
 const PDH_NO_DATA: u32 = 0x8000_07D5;
+/// A rate counter's base went backwards between the two samples.
+#[cfg(test)]
+const PDH_CALC_NEGATIVE_DENOMINATOR: u32 = 0x8000_07D6;
 /// Instances can appear between the size query and the read; retry a few times.
 const MAX_ARRAY_ATTEMPTS: usize = 3;
 
@@ -57,6 +60,18 @@ fn valid_status(status: u32) -> bool {
     matches!(status, PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA)
 }
 
+/// A formatted value, or the PDH status that made it unavailable: the call's
+/// own status when it failed, otherwise the value's `CStatus`.
+fn formatted(status: u32, value_status: u32, value: f64) -> Result<f64, u32> {
+    if status != 0 {
+        Err(status)
+    } else if valid_status(value_status) {
+        Ok(value)
+    } else {
+        Err(value_status)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +80,24 @@ mod tests {
         assert!(valid_status(PDH_CSTATUS_VALID_DATA));
         assert!(valid_status(PDH_CSTATUS_NEW_DATA));
         assert!(!valid_status(PDH_INVALID_DATA));
+    }
+
+    #[test]
+    fn formatted_value_keeps_the_status_that_made_it_unavailable() {
+        assert_eq!(formatted(0, PDH_CSTATUS_VALID_DATA, 104.5), Ok(104.5));
+        assert_eq!(formatted(0, PDH_CSTATUS_NEW_DATA, 3.0), Ok(3.0));
+        // The call itself fails: its status wins over the (unset) value status.
+        assert_eq!(
+            formatted(
+                PDH_CALC_NEGATIVE_DENOMINATOR,
+                PDH_CALC_NEGATIVE_DENOMINATOR,
+                0.0
+            ),
+            Err(PDH_CALC_NEGATIVE_DENOMINATOR)
+        );
+        assert_eq!(formatted(PDH_INVALID_DATA, 0, 0.0), Err(PDH_INVALID_DATA));
+        // The call succeeds but PDH marks the value itself invalid.
+        assert_eq!(formatted(0, PDH_INVALID_DATA, 0.0), Err(PDH_INVALID_DATA));
     }
 }
 
@@ -110,19 +143,19 @@ impl Query {
         })
     }
 
-    /// Formatted value of a single-instance counter; `None` until two samples
-    /// exist or when PDH marks the value invalid.
-    pub fn value(&self, counter: Counter) -> Option<f64> {
+    /// Formatted value of a single-instance counter, or the PDH status that
+    /// made it unavailable: until two samples exist, or when PDH cannot
+    /// compute the rate of this interval.
+    pub fn value(&self, counter: Counter) -> Result<f64, u32> {
         let mut value = PDH_FMT_COUNTERVALUE::default();
         // SAFETY: the counter belongs to this query; the out-pointer is valid.
         let status =
             unsafe { PdhGetFormattedCounterValue(counter.0, FMT_DOUBLE_NOCAP, None, &mut value) };
-        // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member.
-        if status == 0 && valid_status(value.CStatus) {
-            Some(unsafe { value.Anonymous.doubleValue })
-        } else {
-            None
-        }
+        // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member, and any
+        // bit pattern is a valid f64; `formatted` keeps it only when valid.
+        formatted(status, value.CStatus, unsafe {
+            value.Anonymous.doubleValue
+        })
     }
 
     /// Formatted values of a wildcard counter as `(instance, value)`. Empty

@@ -1,6 +1,7 @@
 //! CPU load and effective clock from PDH "Processor Information" counters.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
@@ -16,6 +17,8 @@ const TIME: &str = r"\Processor Information(*)\% Processor Time";
 const PERFORMANCE: &str = r"\Processor Information(_Total)\% Processor Performance";
 const FREQUENCY: &str = r"\Processor Information(_Total)\Processor Frequency";
 const TOTAL_INSTANCE: &str = "_Total";
+/// A poll without the effective clock is logged at most this often.
+const CLOCK_LOG_INTERVAL: Duration = Duration::from_secs(3_600);
 
 /// A "Processor Information" instance such as "0,7" (group 0, processor 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,6 +49,26 @@ fn add_load_counter<T, E>(mut add: impl FnMut(&str) -> Result<T, E>) -> Result<T
 /// Task Manager's estimated clock: nominal frequency × % performance.
 pub(crate) fn effective_clock_mhz(nominal_mhz: f64, performance_pct: f64) -> f64 {
     nominal_mhz * performance_pct / 100.0
+}
+
+/// The effective clock from its two counters: `Ok(None)` when one of them
+/// could not be added (`discover` already warned), `Err` with the PDH status
+/// when PDH has no value for this poll. `% Processor Performance` (_Total)
+/// does that now and then for one poll, with `PDH_CALC_NEGATIVE_DENOMINATOR`,
+/// because its raw base goes backwards (seen live on the development machine).
+pub(crate) fn effective_clock(
+    frequency: Option<Result<f64, u32>>,
+    performance: Option<Result<f64, u32>>,
+) -> Result<Option<f64>, u32> {
+    match (frequency, performance) {
+        (Some(nominal), Some(performance)) => Ok(Some(effective_clock_mhz(nominal?, performance?))),
+        _ => Ok(None),
+    }
+}
+
+/// True when a poll without the effective clock may be logged at `now`.
+fn clock_log_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= CLOCK_LOG_INTERVAL)
 }
 
 /// Processor Utility exceeds 100 % while boosting; Task Manager caps it and so do we.
@@ -93,6 +116,8 @@ pub struct CpuProvider {
     processors: Vec<LogicalProcessor>,
     /// Set by `discover`; consumed by the next `poll`. See `take_fresh`.
     fresh: bool,
+    /// When a poll without the effective clock was last logged.
+    clock_logged_at: Option<Instant>,
 }
 
 /// `true` only for the first call after a discover: PDH rate counters were
@@ -207,14 +232,22 @@ impl Provider for CpuProvider {
                 .copied()
                 .and_then(load_pct)
         }));
-        let clock = match (
-            counters.frequency.and_then(|c| counters.query.value(c)),
-            counters.performance.and_then(|c| counters.query.value(c)),
-        ) {
-            (Some(nominal), Some(performance)) => Some(effective_clock_mhz(nominal, performance)),
-            _ => None,
-        };
-        values.push(clock);
+        let clock = effective_clock(
+            counters.frequency.map(|c| counters.query.value(c)),
+            counters.performance.map(|c| counters.query.value(c)),
+        );
+        values.push(clock.unwrap_or_else(|status| {
+            // The chart shows the missing sample as a gap; say why, rarely.
+            let now = Instant::now();
+            if clock_log_due(self.clock_logged_at, now) {
+                self.clock_logged_at = Some(now);
+                tracing::info!(
+                    status = format_args!("{status:#010x}"),
+                    "no effective clock for this poll: PDH has no processor performance value"
+                );
+            }
+            None
+        }));
         Ok(values)
     }
 }
@@ -274,6 +307,37 @@ mod tests {
     fn effective_clock_scales_nominal_frequency() {
         let mhz = effective_clock_mhz(4201.0, 104.35);
         assert!((mhz - 4383.74).abs() < 0.01, "{mhz}");
+    }
+
+    #[test]
+    fn clock_is_missing_without_its_counters_and_reports_a_pdh_status() {
+        assert_eq!(
+            effective_clock(Some(Ok(4201.0)), Some(Ok(100.0))),
+            Ok(Some(4201.0))
+        );
+        // A counter that could not be added was already reported by `discover`.
+        assert_eq!(effective_clock(None, Some(Ok(100.0))), Ok(None));
+        assert_eq!(effective_clock(Some(Ok(4201.0)), None), Ok(None));
+        // `% Processor Performance` (_Total) whose raw base went backwards (seen live).
+        assert_eq!(
+            effective_clock(Some(Ok(4201.0)), Some(Err(0x8000_07D6))),
+            Err(0x8000_07D6)
+        );
+        assert_eq!(
+            effective_clock(Some(Err(0xC000_0BBA)), Some(Ok(100.0))),
+            Err(0xC000_0BBA)
+        );
+    }
+
+    #[test]
+    fn a_missing_clock_is_logged_at_most_once_an_hour() {
+        let start = Instant::now();
+        assert!(clock_log_due(None, start));
+        assert!(!clock_log_due(
+            Some(start),
+            start + Duration::from_secs(3_599)
+        ));
+        assert!(clock_log_due(Some(start), start + CLOCK_LOG_INTERVAL));
     }
 
     #[test]

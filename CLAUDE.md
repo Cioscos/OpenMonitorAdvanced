@@ -34,7 +34,7 @@ cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio 
 
 ## Tecniche e convenzioni
 
-- **Flusso di lavoro:** skill superpowers. Brainstorming, poi spec, poi un piano per milestone, poi esecuzione subagent-driven: ogni task ha un implementer e una revisione dedicata, e alla fine una revisione dell'intero branch. Si lavora su un branch `feat/<milestone>` e si fa il merge in `main` in locale; non c'è un remote.
+- **Flusso di lavoro:** skill superpowers. Brainstorming, poi spec, poi un piano per milestone, poi esecuzione subagent-driven: ogni task ha un implementer e una revisione dedicata, e alla fine una revisione dell'intero branch. Si lavora su un branch `feat/<milestone>` e si fa il merge in `main` in locale. Il remote è `origin` (github.com/Cioscos/OpenMonitorAdvanced, pubblico): si fa push solo su richiesta dell'utente.
 - **TDD:** prima i test che falliscono, poi l'implementazione. Dal codice FFI si estraggono helper puri, testabili senza hardware. I test hardware sono marcati `#[ignore = "requires real Windows hardware"]`.
 - **FFI:** binding scritti a mano. Un commento `// SAFETY:` su ogni blocco `unsafe`; un assert di dimensione a compile time per ogni struct FFI. Le DLL dei vendor si caricano solo da System32 (`dynlib::Library`) e non si scaricano mai.
 - **Licenze:** nessun header proprietario (NVML, ADL, IGCL) e nessun testo copiato da essi. Le attribuzioni vanno in `THIRD_PARTY_NOTICES.md`; nei nostri sorgenti niente tag SPDX di terzi.

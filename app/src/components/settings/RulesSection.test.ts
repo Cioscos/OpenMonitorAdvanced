@@ -395,3 +395,26 @@ test('rules left out of the settings file are listed', async () => {
   expect(list.textContent).toContain('rules.custom.2');
   expect(list.textContent).toContain(t('rules.error.order'));
 });
+
+test('enabling a rule again drops its now-empty override', async () => {
+  const { backend } = await setup();
+  const name = t('rule.gpu-temp.name');
+  const toggle = () => within(row(name)).getByRole('switch', { name: t('rules.enabledFor', { name }) });
+  await fireEvent.click(toggle());
+  await vi.waitFor(() => expect(within(row(name)).getByText(t('rules.modified'))).toBeTruthy());
+  await fireEvent.click(toggle());
+  await vi.waitFor(() => expect(within(row(name)).queryByText(t('rules.modified'))).toBeNull());
+  // Nothing left to keep: the entry goes, as with "Restore".
+  expect(backend.resetRuleOverrideCalls).toEqual(['gpu-temp']);
+  expect(settings.state!.settings.rules.overrides).toEqual({});
+});
+
+test('the out-of-order summary agrees with the count', async () => {
+  const problem = (sensorId: string) => ({ ...instance(sensorId, 90, 80), valid: false, problem: 'order' as const });
+  const { backend } = await setup();
+  backend.ruleStatus = status().map((s) =>
+    s.ruleId === 'disk-temp' ? { ...s, instances: [problem(`${SSD}/temperature/drive`)] } : s.ruleId === 'gpu-temp' ? { ...s, instances: [problem('a'), problem('b')] } : s,
+  );
+  await vi.waitFor(() => expect(row(t('rule.disk-temp.name')).textContent).toContain('out of order on 1 sensor:'));
+  expect(row(t('rule.gpu-temp.name')).textContent).toContain('out of order on 2 sensors:');
+});

@@ -12,6 +12,7 @@
     fixedValues,
     isModified,
     newCustomRule,
+    overrideIsRedundant,
     overrideOf,
     overridePatch,
     ruleEntries,
@@ -108,7 +109,14 @@
       if (entry.builtin) {
         const shipped = defaults?.find((r) => r.id === id);
         if (!shipped) return false;
-        return settings.update(overridePatch(id, overrideOf(change(applyOverride(shipped, current.overrides[id])))));
+        const over = overrideOf(change(applyOverride(shipped, current.overrides[id])));
+        // A patch replaces whole fields but cannot delete one (R5). When nothing differs from the
+        // shipped rule any more the entry is dropped whole, as by "Restore"; a partly redundant
+        // entry stays and `isModified` ignores its redundant fields.
+        if (overrideIsRedundant({ ...current.overrides[id], ...over }, shipped)) {
+          return id in current.overrides ? settings.resetRuleOverride(id) : true;
+        }
+        return settings.update(overridePatch(id, over));
       }
       if (!current.custom.some((r) => r.id === id)) return false;
       return settings.update(customPatch(current.custom.map((r) => (r.id === id ? { ...r, ...change(r) } : r))));
@@ -274,7 +282,7 @@
             target={targetLabel(rule, schema, t)}
             status={status.find((s) => s.ruleId === rule.id)}
             context={context(rowScale(rule))}
-            modified={entry.builtin && isModified(rule.id, rules)}
+            modified={entry.builtin && isModified(rule.id, rules, defaults?.find((r) => r.id === rule.id))}
             expanded={open}
             {editorId}
             onEdit={() => toggleEditor(entry)}

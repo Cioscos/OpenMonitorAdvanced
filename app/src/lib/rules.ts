@@ -31,10 +31,31 @@ export function defaultRuleIds(defaults: readonly Rule[]): string[] {
   return defaults.map((rule) => rule.id);
 }
 
-/** Whether the override of `ruleId` changes anything: an entry without fields does not. */
-export function isModified(ruleId: string, rules: RulesSettings): boolean {
+/** Structural equality of two JSON values (object key order does not matter). */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => key in right && sameJson(left[key], right[key]));
+}
+
+/** Whether every field `over` sets already equals the shipped rule's, so the override changes nothing. */
+export function overrideIsRedundant(over: RuleOverride, shipped: Rule): boolean {
+  return OVERRIDE_FIELDS.every((field) => over[field] === undefined || sameJson(over[field], shipped[field]));
+}
+
+/**
+ * Whether the override of `ruleId` changes anything: an entry without fields does not. With the
+ * shipped rule, fields equal to its own do not count either (a rule switched off and on again).
+ */
+export function isModified(ruleId: string, rules: RulesSettings, shipped?: Rule): boolean {
   const over = rules.overrides[ruleId];
-  return over !== undefined && OVERRIDE_FIELDS.some((field) => over[field] !== undefined);
+  if (over === undefined) return false;
+  return OVERRIDE_FIELDS.some(
+    (field) => over[field] !== undefined && (shipped === undefined || !sameJson(over[field], shipped[field])),
+  );
 }
 
 /** `rule` with the fields `over` sets replacing its own, like `Rule::with_override`. */
@@ -296,9 +317,10 @@ export function thresholdText(rule: Rule, level: LevelName, ctx: ThresholdContex
   if (threshold === null) return ctx.t('rules.threshold.flag');
   if ('fixed' in threshold) return formatIn(threshold.fixed, ctx.scale, ctx.locale);
   const range = resolvedRange(ctx.status, rule.id, level);
-  if (range === null) return ctx.t('rules.threshold.fallback', { value: formatIn(threshold.fallback, ctx.scale, ctx.locale) });
-  const value = formatRangeIn(range.min, range.max, ctx.scale, ctx.locale);
   const property = propertyName(threshold.property, ctx.t);
+  // Nothing resolved (rule off, no sensor here, status not loaded): the property, with what it falls back to.
+  if (range === null) return ctx.t('rules.threshold.pending', { property, value: formatIn(threshold.fallback, ctx.scale, ctx.locale) });
+  const value = formatRangeIn(range.min, range.max, ctx.scale, ctx.locale);
   const source = propertySource(
     ctx.status.find((s) => s.ruleId === rule.id),
     threshold.property,

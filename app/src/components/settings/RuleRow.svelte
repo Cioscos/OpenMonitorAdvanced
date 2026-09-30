@@ -45,7 +45,10 @@
     if (status !== undefined && instances.length === 0) return { text: t('rules.status.none'), problem: false };
     for (const problem of ['order', 'unitMismatch'] as const) {
       const count = instances.filter((i) => i.problem === problem).length;
-      if (count > 0) return { text: t(`rules.status.problem.${problem}`, { count }), problem: true };
+      if (count > 0) {
+        const key = problem === 'order' && count === 1 ? 'rules.status.problem.order.one' : `rules.status.problem.${problem}`;
+        return { text: t(key, { count }), problem: true };
+      }
     }
     if (instances.length === 0) return { text: '', problem: false };
     return { text: instances.length === 1 ? t('rules.status.one') : t('rules.status.count', { count: instances.length }), problem: false };

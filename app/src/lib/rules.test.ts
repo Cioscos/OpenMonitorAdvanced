@@ -19,6 +19,7 @@ import {
   resolvedRange,
   scalesFor,
   targetLabel,
+  thresholdText,
   toDisplay,
 } from './rules';
 import type { LevelSpec, Rule, RulesSettings, Sensor } from './types';
@@ -183,4 +184,23 @@ test('errors are picked by the path of the rule', () => {
   expect(errorsOf(errors, 'rules.overrides.gpu-temp')).toEqual({ crit: 'rules.error.order', 'warn.durationS': 'rules.error.duration' });
   expect(errorsOf(errors, 'rules.custom.1')).toEqual({ levels: 'rules.error.noLevel' });
   expect(errorsOf(errors, 'rules.custom.0')).toEqual({});
+});
+
+test('a property threshold without instances shows its property and the fallback', () => {
+  const cpu = DEFAULTS.find((r) => r.id === 'cpu-temp')!;
+  const scale = defaultScale(scalesFor('celsius', { temperature: 'c', throughput: 'bytes' }), []);
+  const ctx = { status: [], schema: null, scale, locale: 'en', t: tEn };
+  const text = thresholdText(cpu, 'crit', ctx);
+  expect(text).toBe('from TjMax (fallback 95 °C)');
+  const none = { ...ctx, status: [{ ruleId: 'cpu-temp', instances: [] }] };
+  expect(thresholdText(cpu, 'crit', none)).toBe(text);
+});
+
+test('an override equal to the shipped rule is not a modification', () => {
+  const shipped = DEFAULTS.find((r) => r.id === 'gpu-temp')!;
+  const same = rules({ 'gpu-temp': { enabled: true, notify: shipped.notify, warn: shipped.warn } });
+  expect(isModified('gpu-temp', same)).toBe(true);
+  expect(isModified('gpu-temp', same, shipped)).toBe(false);
+  expect(isModified('gpu-temp', rules({ 'gpu-temp': { enabled: false } }), shipped)).toBe(true);
+  expect(isModified('gpu-temp', rules({ 'gpu-temp': { hysteresis: { amount: 5, durationS: 10 } } }), shipped)).toBe(true);
 });

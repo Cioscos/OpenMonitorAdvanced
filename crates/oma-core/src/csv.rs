@@ -239,16 +239,16 @@ pub fn format_number(value: f64, out: &mut String) {
     if !value.is_finite() {
         return;
     }
-    let mut text = format!("{value:.3}");
-    if text.contains('.') {
-        let trimmed = text.trim_end_matches('0').trim_end_matches('.').len();
-        text.truncate(trimmed);
+    // Written straight into the line and trimmed there: no allocation.
+    let start = out.len();
+    let _ = write!(out, "{value:.3}");
+    // `{:.3}` always writes a `.` and three decimals for a finite value.
+    let trimmed = out.trim_end_matches('0').trim_end_matches('.').len();
+    out.truncate(trimmed);
+    if &out[start..] == "-0" {
+        out.truncate(start);
+        out.push('0');
     }
-    if text == "-0" {
-        text.clear();
-        text.push('0');
-    }
-    out.push_str(&text);
 }
 
 /// Text field: a leading `=`, `+`, `-` or `@` gets an apostrophe in front
@@ -483,6 +483,29 @@ mod tests {
         assert_eq!(num(-5.0), "-5");
         assert_eq!(num(100.0), "100");
         assert_eq!(num(12_345_678_901.0), "12345678901");
+        // Rounding boundaries follow `{:.3}` on the binary value: 0.0005 is
+        // just above the half, 1.0005 just below it.
+        assert_eq!(format!("{:.3}", 0.0005), "0.001");
+        assert_eq!(num(0.0005), "0.001");
+        assert_eq!(format!("{:.3}", 1.0005), "1.000");
+        assert_eq!(num(1.0005), "1");
+        assert_eq!(num(-0.0005), "-0.001");
+        assert_eq!(num(0.9995), "1");
+    }
+
+    #[test]
+    fn numbers_append_without_touching_the_line() {
+        for (prefix, value, expected) in [
+            ("0.0,", 100.0, "0.0,100"),
+            ("1.,", 2.5, "1.,2.5"),
+            ("x,", -0.0004, "x,0"),
+            ("-", -0.0, "-0"),
+            ("7.10", 3.0, "7.103"),
+        ] {
+            let mut s = String::from(prefix);
+            format_number(value, &mut s);
+            assert_eq!(s, expected, "{prefix} {value}");
+        }
     }
 
     #[test]

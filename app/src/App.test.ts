@@ -293,11 +293,17 @@ test('a navigate event that arrives before the initial view is chosen wins', asy
   const backend = new FakeBackend(MOCK_SCHEMA);
   await backend.settings.update({ general: { defaultView: 'simple' } });
   // The shell emitted `oma:navigate` before the page was listening.
-  backend.beforeTakePendingView = () => backend.emitNavigate({ view: 'advanced' });
+  // One-shot: the acknowledging read must not emit it again.
+  backend.beforeTakePendingView = () => {
+    backend.beforeTakePendingView = null;
+    backend.emitNavigate({ view: 'advanced' });
+  };
   render(App, { backend, store: new LiveStore() });
 
   await vi.waitFor(() => expect(pageTitle()).toBe('CPU'));
   expect(backend.navigateSubscribedBeforePendingRead).toBe(true);
+  // The first read and the acknowledging one; the event came once, so nothing loops.
+  expect(backend.takePendingViewCalls).toBe(2);
 });
 
 test('a navigate event that arrives while the pending read is in flight is acknowledged', async () => {

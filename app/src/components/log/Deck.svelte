@@ -4,7 +4,16 @@
   import { canDo, log } from '../../lib/log.svelte';
   import { folderErrorText, logErrorText } from '../../lib/log/messages';
 
-  let { id, openFolder }: { id: string; openFolder: () => Promise<void> } = $props();
+  let {
+    id,
+    openFolder,
+    recordedMs,
+  }: {
+    id: string;
+    openFolder: () => Promise<void>;
+    /** The tape counter, which the recorder runs on between the core's statuses. */
+    recordedMs: number;
+  } = $props();
 
   const status = $derived(log.status);
   const logState = $derived(status?.state ?? 'idle');
@@ -68,7 +77,7 @@
   <div class="display">
     <div class="readout">
       <span class="state">{t(`log.deck.state.${logState}`)}</span>
-      <span class="time">{formatTapeCounter(status?.recordedMs ?? 0)}</span>
+      <span class="time">{formatTapeCounter(recordedMs)}</span>
     </div>
     <dl class="stats">
       <div><dt>{t('log.deck.rows')}</dt><dd>{rows}</dd></div>

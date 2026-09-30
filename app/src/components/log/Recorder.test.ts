@@ -99,6 +99,31 @@ test('recording_blinks_at_one_hertz', async () => {
   expect(container.querySelectorAll('.reel.spin')).toHaveLength(2);
 });
 
+test('counter_advances_every_second_between_paced_statuses', async () => {
+  vi.useFakeTimers();
+  const { backend, button } = await setup({ state: 'recording', recordedMs: 0 });
+  const counter = () => button.querySelector('.counter')!.textContent;
+  // The statuses of the recording of 20:26:21 (M5c) as the core's pacer emitted them: ticks
+  // 0.986–1.012 s apart, a status at most once a second, so the ticks at +3.01 s, +5.01 s and
+  // +7.01 s were not emitted. The first tick adds nothing to the recorded time.
+  const emitted = [0, 1_007, 2_012, 4_011, 6_009, 8_015];
+  let revision = 1;
+  let now = 0;
+  const seen: string[] = [];
+  for (let second = 0; second < 9; second++) {
+    for (const at of emitted.filter((ms) => ms >= now && ms < second * 1000 + 500)) {
+      vi.advanceTimersByTime(at - now);
+      now = at;
+      backend.emitLogStatus(makeLogStatus({ revision: ++revision, session: 1, part: 2, path: PATH, state: 'recording', recordedMs: at }));
+    }
+    vi.advanceTimersByTime(second * 1000 + 500 - now);
+    now = second * 1000 + 500;
+    flushSync();
+    seen.push(counter()!);
+  }
+  expect(seen).toEqual(['00:00:00', '00:00:01', '00:00:02', '00:00:03', '00:00:04', '00:00:05', '00:00:06', '00:00:07', '00:00:08']);
+});
+
 test('blink_stops_when_hidden', async () => {
   vi.useFakeTimers();
   const { container } = await setup({ state: 'recording' });

@@ -4,7 +4,9 @@
   import { t } from '../../lib/i18n/index.svelte';
   import { createBlink } from '../../lib/log/blink.svelte';
   import { logErrorText } from '../../lib/log/messages';
+  import { createTapeClock } from '../../lib/log/tapeClock.svelte';
   import { log } from '../../lib/log.svelte';
+  import { settings } from '../../lib/settings.svelte';
   import Deck from './Deck.svelte';
 
   let { openFolder }: { openFolder: () => Promise<void> } = $props();
@@ -14,8 +16,14 @@
   let root = $state<HTMLDivElement | undefined>();
   let button = $state<HTMLButtonElement | undefined>();
 
+  // The counter runs on between the core's statuses; one instance feeds the recorder and the deck.
+  // It never runs past the L3 gap threshold, max(3 × interval, 5 s), beyond the last status.
+  const tape = createTapeClock({ maxGapMs: () => Math.max(3 * (settings.state?.settings.general.intervalMs ?? 1000), 5000) });
+  $effect(() => tape.update(log.status));
+  onDestroy(() => tape.destroy());
+
   const logState = $derived(log.status?.state ?? 'idle');
-  const time = $derived(formatTapeCounter(log.status?.recordedMs ?? 0));
+  const time = $derived(formatTapeCounter(tape.recordedMs));
   const label = $derived(
     logState === 'error'
       ? t('log.recorder.error', { reason: logErrorText(log.status?.error, t) })
@@ -85,7 +93,7 @@
     {/if}
   </button>
   {#if open}
-    <Deck id={deckId} {openFolder} />
+    <Deck id={deckId} {openFolder} recordedMs={tape.recordedMs} />
   {/if}
 </div>
 

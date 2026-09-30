@@ -523,3 +523,85 @@ fn gpu_provider_honours_per_library_switches() {
     assert_ne!(temperature.source, Source::Nvml);
     p.poll().expect("poll with NVML off again");
 }
+
+/// Where the recorded schema lives: next to the rules tests that read it.
+const SCHEMA_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../oma-core/tests/fixtures/this-machine-schema.json"
+);
+
+/// Runs the default providers with the sensor service linked, as the app
+/// does, and (with `OMA_WRITE_FIXTURES=1`, single-threaded) records the merged
+/// schema for `oma-core`'s `default_rules_fixture` test. The link starts the
+/// installed service if it is stopped; without it there would be no `tctl`.
+/// Disk ids are already hashes and the recorded properties hold models only,
+/// never serial numbers.
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn records_this_machine_schema() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use oma_core::engine::Engine;
+    use oma_core::sampler::unix_ms;
+    use oma_ipc::ServiceState;
+    use oma_win::svc::{
+        pipe_connector, LinkSettings, ServiceLink, ServiceStatusTable, WindowsScm, SERVICE_NAME,
+    };
+    use oma_win::ServiceHandles;
+
+    let _serial = GPU_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let handles = ServiceHandles::default();
+    let status = ServiceStatusTable::default();
+    let link = ServiceLink::spawn(
+        Arc::new(WindowsScm::new(SERVICE_NAME)),
+        pipe_connector(),
+        LinkSettings {
+            drives: handles.drives.clone(),
+            ..LinkSettings::new(oma_ipc::PIPE_NAME, 1_000)
+        },
+        false,
+        status.clone(),
+        handles.feed.clone(),
+    );
+
+    // Opening LibreHardwareMonitor alone takes a few seconds after the start.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while status.get().1.state != ServiceState::Connected {
+        assert!(
+            Instant::now() < deadline,
+            "the sensor service did not connect: {:?}",
+            status.get().1
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let providers = oma_win::default_providers(
+        VendorSwitch::new(true, VendorMask::ALL),
+        GpuProcessTable::new(),
+        handles,
+    );
+    let mut engine = Engine::new(providers, 16);
+    let start = Instant::now();
+    for _ in 0..8 {
+        engine.tick(unix_ms(), start.elapsed().as_millis() as u64);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    link.shutdown();
+
+    let schema = engine.schema();
+    let lhm = schema
+        .sensors
+        .iter()
+        .filter(|s| s.source == Source::Lhm)
+        .count();
+    assert!(lhm > 0, "the merged schema has sensors from the service");
+
+    if std::env::var_os("OMA_WRITE_FIXTURES").is_some_and(|v| v == "1") {
+        let mut json = serde_json::to_string_pretty(schema).expect("schema serialises");
+        json.push('\n');
+        std::fs::create_dir_all(std::path::Path::new(SCHEMA_FIXTURE).parent().unwrap())
+            .expect("fixtures folder");
+        std::fs::write(SCHEMA_FIXTURE, json).expect("write the fixture");
+    }
+}

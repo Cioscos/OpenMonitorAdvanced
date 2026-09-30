@@ -1,0 +1,2064 @@
+{
+  "revision": 3,
+  "devices": [
+    {
+      "id": "cpu/0",
+      "kind": "cpu",
+      "name": "AMD Ryzen 7 7800X3D 8-Core Processor"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0",
+      "kind": "gpu",
+      "name": "NVIDIA GeForce RTX 4080",
+      "vendor": "NVIDIA",
+      "properties": {
+        "integrated": "false",
+        "pciAddress": "0000:01:00.0",
+        "pcieMaxGen": "4",
+        "pcieMaxWidth": "16",
+        "powerLimitDefaultW": "320",
+        "powerLimitMaxW": "370",
+        "powerLimitMinW": "150",
+        "tempMaxC": "90",
+        "tempShutdownC": "99",
+        "tempSlowdownC": "94"
+      }
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0",
+      "kind": "gpu",
+      "name": "AMD Radeon(TM) Graphics",
+      "vendor": "AMD",
+      "properties": {
+        "integrated": "true",
+        "pciAddress": "0000:11:00.0",
+        "pcieMaxGen": "4",
+        "pcieMaxWidth": "16"
+      }
+    },
+    {
+      "id": "memory/0",
+      "kind": "memory",
+      "name": "RAM"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "storage",
+      "name": "Disk 0 (D:)",
+      "properties": {
+        "smartSelectable": "true",
+        "tempWarningC": "60"
+      }
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "storage",
+      "name": "Disk 1 (E:)",
+      "properties": {
+        "smartSelectable": "true"
+      }
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "storage",
+      "name": "Disk 2 (C:)",
+      "properties": {
+        "availableSpareThresholdPct": "1",
+        "smartSelectable": "true",
+        "tempCriticalC": "95",
+        "tempWarningC": "90"
+      }
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "storage",
+      "name": "Disk 3 (F:)",
+      "properties": {
+        "availableSpareThresholdPct": "10",
+        "smartSelectable": "true",
+        "tempCriticalC": "87",
+        "tempWarningC": "86"
+      }
+    },
+    {
+      "id": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1",
+      "kind": "network",
+      "name": "Ethernet"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "motherboard",
+      "name": "ITE IT8689E"
+    }
+  ],
+  "sensors": [
+    {
+      "id": "cpu/0/load/total",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.total"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-0",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "0"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-1",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "1"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-2",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "2"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-3",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "3"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-4",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "4"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-5",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "5"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-6",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "6"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-7",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "7"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-8",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "8"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-9",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "9"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-10",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "10"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-11",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "11"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-12",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "12"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-13",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "13"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-14",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "14"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/load/thread-0-15",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.thread",
+        "arg": "15"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "cpu/0/clock/effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.effective"
+      },
+      "source": "pdh",
+      "category": "clock"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/core",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.core"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/3d",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.3d"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/copy",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.copy"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/video-decode",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.videoDecode"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/video-encode",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.videoEncode"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/encoder",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.encoder"
+      },
+      "source": "nvml",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/load/decoder",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.decoder"
+      },
+      "source": "nvml",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/data/memory-dedicated-used",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "gpu.memory.dedicatedUsed"
+      },
+      "source": "nvml",
+      "category": "data"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/data/memory-dedicated-total",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "gpu.memory.dedicatedTotal"
+      },
+      "source": "nvml",
+      "category": "data"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/data/memory-shared-used",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "gpu.memory.sharedUsed"
+      },
+      "source": "pdh",
+      "category": "data"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/temperature/core",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "gpu.temperature.core"
+      },
+      "source": "nvml",
+      "category": "temperature"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/temperature/hotspot",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "gpu.temperature.hotspot"
+      },
+      "source": "nvapi",
+      "category": "temperature",
+      "experimental": true
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/temperature/memory",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "gpu.temperature.memory"
+      },
+      "source": "nvapi",
+      "category": "temperature",
+      "experimental": true
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/clock/core",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "gpu.clock.core"
+      },
+      "source": "nvml",
+      "category": "clock"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/clock/memory",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "gpu.clock.memory"
+      },
+      "source": "nvml",
+      "category": "clock"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/power/board",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "gpu.power.board"
+      },
+      "source": "nvml",
+      "category": "power"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/power/limit",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "gpu.power.limit"
+      },
+      "source": "nvml",
+      "category": "power"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/percent/power-limit",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.power.limitPercent"
+      },
+      "source": "nvml",
+      "category": "percent"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/fan/percent",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "fan",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.fan.percent"
+      },
+      "source": "nvml",
+      "category": "fan"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/fan/rpm",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "gpu.fan.rpm"
+      },
+      "source": "nvml",
+      "category": "fan"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/voltage/core",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "gpu.voltage.core"
+      },
+      "source": "nvapi",
+      "category": "voltage",
+      "experimental": true
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/flag/throttle-power",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "flag",
+      "unit": "boolean",
+      "label": {
+        "key": "gpu.throttle.power"
+      },
+      "source": "nvml",
+      "category": "flag"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/flag/throttle-thermal",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "flag",
+      "unit": "boolean",
+      "label": {
+        "key": "gpu.throttle.thermal"
+      },
+      "source": "nvml",
+      "category": "flag"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/link/pcie-gen",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "link",
+      "unit": "pcie_generation",
+      "label": {
+        "key": "gpu.pcie.gen"
+      },
+      "source": "nvml",
+      "category": "link"
+    },
+    {
+      "id": "gpu/pci-0000:01:00.0/link/pcie-width",
+      "deviceId": "gpu/pci-0000:01:00.0",
+      "kind": "link",
+      "unit": "lanes",
+      "label": {
+        "key": "gpu.pcie.width"
+      },
+      "source": "nvml",
+      "category": "link"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/load/core",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.core"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/load/3d",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.3d"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/load/compute",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.compute"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/load/copy",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.copy"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/load/video-decode",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "gpu.load.videoDecode"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/data/memory-dedicated-used",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "gpu.memory.dedicatedUsed"
+      },
+      "source": "pdh",
+      "category": "data"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/data/memory-shared-used",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "gpu.memory.sharedUsed"
+      },
+      "source": "pdh",
+      "category": "data"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/temperature/core",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "gpu.temperature.core"
+      },
+      "source": "adl",
+      "category": "temperature"
+    },
+    {
+      "id": "gpu/pci-0000:11:00.0/clock/core",
+      "deviceId": "gpu/pci-0000:11:00.0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "gpu.clock.core"
+      },
+      "source": "adl",
+      "category": "clock"
+    },
+    {
+      "id": "memory/0/load/used",
+      "deviceId": "memory/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "memory.load"
+      },
+      "source": "win32",
+      "category": "load"
+    },
+    {
+      "id": "memory/0/data/used",
+      "deviceId": "memory/0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "memory.used"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "memory/0/data/total",
+      "deviceId": "memory/0",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "memory.total"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/throughput/read",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.read"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/throughput/write",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.write"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/load/active",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "storage.active"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/temperature/drive",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperature"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/percent/volume-554c1a5c-9152-4622-bad6-8be5edec200a",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.volumeUsed",
+        "arg": "D:"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/data/volume-554c1a5c-9152-4622-bad6-8be5edec200a-free",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.volumeFree",
+        "arg": "D:"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/throughput/read",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.read"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/throughput/write",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.write"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/load/active",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "storage.active"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/percent/volume-7d24bc84-909a-42dd-a7b3-804cc284a93b",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.volumeUsed",
+        "arg": "E:"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/data/volume-7d24bc84-909a-42dd-a7b3-804cc284a93b-free",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.volumeFree",
+        "arg": "E:"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/throughput/read",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.read"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/throughput/write",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.write"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/load/active",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "storage.active"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/temperature/drive",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperature"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/temperature/sensor-1",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperatureSensor",
+        "arg": "1"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/temperature/sensor-2",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperatureSensor",
+        "arg": "2"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/flag/critical-warning",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "flag",
+      "unit": "boolean",
+      "label": {
+        "key": "storage.criticalWarning"
+      },
+      "source": "win32",
+      "category": "flag"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/percent/wear",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.percentUsed"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/percent/available-spare",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.availableSpare"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/percent/volume-47934c96-304f-4eb4-874d-b1d7b593658e",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.volumeUsed",
+        "arg": "C:"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/data/volume-47934c96-304f-4eb4-874d-b1d7b593658e-free",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.volumeFree",
+        "arg": "C:"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/throughput/read",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.read"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/throughput/write",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "storage.write"
+      },
+      "source": "pdh",
+      "category": "throughput"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/load/active",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "storage.active"
+      },
+      "source": "pdh",
+      "category": "load"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/temperature/drive",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperature"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/temperature/sensor-1",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperatureSensor",
+        "arg": "1"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/temperature/sensor-2",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperatureSensor",
+        "arg": "2"
+      },
+      "source": "win32",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/flag/critical-warning",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "flag",
+      "unit": "boolean",
+      "label": {
+        "key": "storage.criticalWarning"
+      },
+      "source": "win32",
+      "category": "flag"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/percent/wear",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.percentUsed"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/percent/available-spare",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.availableSpare"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/percent/volume-9b70b82b-e243-4359-8fe2-f683a013005a",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.volumeUsed",
+        "arg": "F:"
+      },
+      "source": "win32",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/data/volume-9b70b82b-e243-4359-8fe2-f683a013005a-free",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.volumeFree",
+        "arg": "F:"
+      },
+      "source": "win32",
+      "category": "data"
+    },
+    {
+      "id": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1/throughput/down",
+      "deviceId": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "network.down"
+      },
+      "source": "ip_helper",
+      "category": "throughput"
+    },
+    {
+      "id": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1/throughput/up",
+      "deviceId": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1",
+      "kind": "throughput",
+      "unit": "bytes_per_second",
+      "label": {
+        "key": "network.up"
+      },
+      "source": "ip_helper",
+      "category": "throughput"
+    },
+    {
+      "id": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1/throughput/link-speed",
+      "deviceId": "network/220524c7-96cf-4fb6-8ff8-dc0c34b044f1",
+      "kind": "throughput",
+      "unit": "bits_per_second",
+      "label": {
+        "key": "network.linkSpeed"
+      },
+      "source": "ip_helper",
+      "category": "throughput"
+    },
+    {
+      "id": "memory/0/temperature/dimm-1",
+      "deviceId": "memory/0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "memory.temperature.dimm",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "memory/0/temperature/dimm-3",
+      "deviceId": "memory/0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "memory.temperature.dimm",
+        "arg": "3"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/percent/life",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.life"
+      },
+      "source": "lhm",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/counter/power-cycles",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "counter",
+      "unit": "count",
+      "label": {
+        "key": "storage.powerCycles"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/counter/power-on-hours",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "counter",
+      "unit": "hours",
+      "label": {
+        "key": "storage.powerOnHours"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/data/host-read",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostRead"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8/data/host-written",
+      "deviceId": "storage/device-5cc5e7d292f76a66edee6a88863b851604f93b728f32b671fb3320c98e50afd8",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostWritten"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/percent/life",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.life"
+      },
+      "source": "lhm",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/counter/power-cycles",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "counter",
+      "unit": "count",
+      "label": {
+        "key": "storage.powerCycles"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/counter/power-on-hours",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "counter",
+      "unit": "hours",
+      "label": {
+        "key": "storage.powerOnHours"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/data/host-read",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostRead"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6/data/host-written",
+      "deviceId": "storage/device-adb2aadfecfd398c321f8de48ac5392a8cda1be8b3cd02fbb8f2b2b0ceaf91a6",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostWritten"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/counter/power-cycles",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "counter",
+      "unit": "count",
+      "label": {
+        "key": "storage.powerCycles"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99/counter/power-on-hours",
+      "deviceId": "storage/device-0de243dbc0eebff0c53e9090ce83d05c4651bd912d1538a9faeee8ca7d304f99",
+      "kind": "counter",
+      "unit": "hours",
+      "label": {
+        "key": "storage.powerOnHours"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/temperature/drive",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "storage.temperature"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/percent/life",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "percent",
+      "unit": "percent",
+      "label": {
+        "key": "storage.life"
+      },
+      "source": "lhm",
+      "category": "percent"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/counter/power-cycles",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "counter",
+      "unit": "count",
+      "label": {
+        "key": "storage.powerCycles"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/counter/power-on-hours",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "counter",
+      "unit": "hours",
+      "label": {
+        "key": "storage.powerOnHours"
+      },
+      "source": "lhm",
+      "category": "counter"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/data/host-read",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostRead"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11/data/host-written",
+      "deviceId": "storage/device-f50b6027d36904fc2fad0296362bf008e78d8434fb266cb571b3f5f3913b8d11",
+      "kind": "data",
+      "unit": "bytes",
+      "label": {
+        "key": "storage.hostWritten"
+      },
+      "source": "lhm",
+      "category": "data"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-0",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "Vcore"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-1",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "+3.3V"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-2",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "+12V"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-3",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "+5V"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-4",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "Vcore SoC"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-5",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "Vcore Misc"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-6",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "Dual DDR5 5V"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-7",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "+3V Standby"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-8",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "CMOS Battery"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/voltage/lhm-voltage-9",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "AVCC3"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-0",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "System"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-1",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "PCH"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-2",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "CPU"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-3",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "PCIe x16"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-4",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "VRM MOS"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/temperature/lhm-temperature-5",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "VSoC MOS"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/fan/lhm-fan-0",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "CPU Fan"
+      },
+      "source": "lhm",
+      "category": "fan"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/fan/lhm-fan-1",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "System Fan #1"
+      },
+      "source": "lhm",
+      "category": "fan"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/fan/lhm-fan-2",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "System Fan #2"
+      },
+      "source": "lhm",
+      "category": "fan"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/fan/lhm-fan-3",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "System Fan #3"
+      },
+      "source": "lhm",
+      "category": "fan"
+    },
+    {
+      "id": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d/fan/lhm-fan-4",
+      "deviceId": "motherboard/lhm-0ba440da5e2fd3c2f8041bdfe8682d8e7e39999aae8cd0fa730193edeb2f9e2d",
+      "kind": "fan",
+      "unit": "rpm",
+      "label": {
+        "key": "lhm.raw",
+        "arg": "System Fan #4 / Pump"
+      },
+      "source": "lhm",
+      "category": "fan"
+    },
+    {
+      "id": "cpu/0/voltage/core-1-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-2-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "2"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-3-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "3"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-4-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "4"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-5-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "5"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-6-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "6"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-7-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "7"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/voltage/core-8-vid",
+      "deviceId": "cpu/0",
+      "kind": "voltage",
+      "unit": "volt",
+      "label": {
+        "key": "cpu.voltage.coreVid",
+        "arg": "8"
+      },
+      "source": "lhm",
+      "category": "voltage"
+    },
+    {
+      "id": "cpu/0/power/package",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.package"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-1",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-2",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "2"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-3",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "3"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-4",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "4"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-5",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "5"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-6",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "6"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-7",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "7"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/power/core-8",
+      "deviceId": "cpu/0",
+      "kind": "power",
+      "unit": "watt",
+      "label": {
+        "key": "cpu.power.core",
+        "arg": "8"
+      },
+      "source": "lhm",
+      "category": "power"
+    },
+    {
+      "id": "cpu/0/clock/bus",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.bus"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/average",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.average"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/average-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.averageEffective"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-1",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-1-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-2",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "2"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-2-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "2"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-3",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "3"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-3-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "3"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-4",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "4"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-4-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "4"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-5",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "5"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-5-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "5"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-6",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "6"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-6-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "6"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-7",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "7"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-7-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "7"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-8",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.core",
+        "arg": "8"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/clock/core-8-effective",
+      "deviceId": "cpu/0",
+      "kind": "clock",
+      "unit": "megahertz",
+      "label": {
+        "key": "cpu.clock.coreEffective",
+        "arg": "8"
+      },
+      "source": "lhm",
+      "category": "clock"
+    },
+    {
+      "id": "cpu/0/temperature/tctl",
+      "deviceId": "cpu/0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "cpu.temperature.tctl"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "cpu/0/temperature/ccd-1",
+      "deviceId": "cpu/0",
+      "kind": "temperature",
+      "unit": "celsius",
+      "label": {
+        "key": "cpu.temperature.ccd",
+        "arg": "1"
+      },
+      "source": "lhm",
+      "category": "temperature"
+    },
+    {
+      "id": "cpu/0/load/core-max",
+      "deviceId": "cpu/0",
+      "kind": "load",
+      "unit": "percent",
+      "label": {
+        "key": "cpu.load.coreMax"
+      },
+      "source": "lhm",
+      "category": "load"
+    }
+  ]
+}

@@ -1107,5 +1107,6 @@ function Test-OmaSignedFiles {
 Export-ModuleMember -Function Initialize-OmaSigningState, Invoke-OmaSignShim, Register-OmaService,
     Import-OmaSignedFiles, Assert-OmaSigningPass, Get-OmaPluginPathPattern,
     Assert-OmaVersionString, Test-OmaVersionInfo, Test-OmaSignature, Test-OmaPayload, Test-OmaSignedFiles,
-    Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-OmaCertificateChain, Get-Oma7ZipPath, ConvertFrom-Oma7ZipListing `
+    Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-OmaCertificateChain, Get-Oma7ZipPath, ConvertFrom-Oma7ZipListing,
+    Get-OmaPolicyCertificates `
     -Variable UninstallerPathPattern

@@ -1,9 +1,12 @@
 //! Alert rules: the rule model, the built-in rules and their validation.
 //!
 //! Instances (a rule expanded over the sensors it matches) and their level
-//! state machine live in `instance`.
+//! state machine live in `instance`; the engine that evaluates them and its
+//! health report in `health`; the toast cooldown in `notify`.
 
+mod health;
 mod instance;
+mod notify;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -12,9 +15,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{DeviceKind, SensorKind, Unit};
 
+pub use health::{
+    Alert, Coverage, Evaluation, HealthClock, HealthReport, InstanceStatus, LevelEntry,
+    OverallLevel, RuleEngine, RuleStatus, TargetRef,
+};
 pub use instance::{
     expand, same_semantics, Instance, InstanceKey, InstanceProblem, Level, Resolved, Step,
 };
+pub use notify::{Cooldown, TOAST_COOLDOWN_MS};
 pub(crate) use validate::{nested, validate_override, CustomRules};
 pub use validate::{validate_rule, validate_rules, RuleError};
 

@@ -77,8 +77,8 @@ pub struct Instance {
     sensor_unit: Unit,
     warn: LevelState,
     crit: LevelState,
-    /// Time of the previous Fresh valid tick; timers only accumulate the
-    /// time between two such consecutive ticks.
+    /// Time of the last Fresh valid tick, kept across held values and
+    /// cleared by absent ones; a Fresh valid tick adds the time since it.
     anchor_ms: Option<u64>,
 }
 
@@ -282,10 +282,13 @@ impl Instance {
     /// `rule` is the rule this instance was expanded from.
     ///
     /// Both levels keep independent entry and exit timers, also while the
-    /// other one is latched. An absent value resets the running timers and a
-    /// held one freezes them (R1): timers only accumulate the time between
-    /// two consecutive Fresh valid ticks, so neither held nor unobserved time
-    /// counts. Levels change only on Fresh valid values. Does not allocate.
+    /// other one is latched. An absent value resets the running timers and
+    /// the anchor. A held value (R1) neither enters, exits, matures nor
+    /// resets anything, and leaves the anchor at the last Fresh valid tick:
+    /// the next Fresh valid value counts the time since that tick and may
+    /// then mature. Held stretches are bounded upstream (a timed-out or
+    /// stale source turns absent) and suspend gaps reset the timers. Levels
+    /// change only on Fresh valid values. Does not allocate.
     pub fn step(&mut self, rule: &Rule, value: Option<f64>, quality: Quality, now_ms: u64) -> Step {
         if self.problem.is_some() {
             return Step::Stay;
@@ -295,7 +298,6 @@ impl Instance {
             return Step::Stay;
         };
         if quality == Quality::Held {
-            self.anchor_ms = None;
             return Step::Stay;
         }
         let delta_ms = self
@@ -1015,15 +1017,16 @@ mod tests {
     fn held_values_neither_mature_nor_reset() {
         let rule = above(Some((83.0, 10)), None, (3.0, 10));
         let mut instance = only_instance(&rule, &gpu_schema());
-        // 5 s of Fresh, then 25 s of Held (above, then below the band), then
-        // Fresh again: 5 more valid seconds are needed.
+        // 5 s of Fresh, then 30 s of Held: the duration passes on a Held
+        // tick, which does not enter, and the Held values below the band do
+        // not reset the timer. The next Fresh value enters.
         let steps = feed(&mut instance, &rule, 0, 60, |s| match s {
             0..=5 => (Some(95.0), Fresh),
             6..=30 => (Some(95.0), Held),
             31..=35 => (Some(70.0), Held),
             _ => (Some(95.0), Fresh),
         });
-        assert_eq!(steps, [(41_000, Step::Entered(Warn))]);
+        assert_eq!(steps, [(36_000, Step::Entered(Warn))]);
 
         // Same for the exit timer.
         let steps = feed(&mut instance, &rule, 100, 160, |s| match s {
@@ -1032,7 +1035,111 @@ mod tests {
             131..=135 => (Some(95.0), Held),
             _ => (Some(70.0), Fresh),
         });
-        assert_eq!(steps, [(142_000, left(Warn, Ok))]);
+        assert_eq!(steps, [(136_000, left(Warn, Ok))]);
+    }
+
+    /// Steps at the given `(ms, value, quality)` ticks; returns every step.
+    fn steps_at(
+        instance: &mut Instance,
+        rule: &Rule,
+        ticks: &[(u64, f64, Quality)],
+    ) -> Vec<(u64, Step)> {
+        ticks
+            .iter()
+            .map(|&(ms, value, quality)| (ms, instance.step(rule, Some(value), quality, ms)))
+            .collect()
+    }
+
+    #[test]
+    fn next_fresh_after_held_counts_since_the_last_fresh() {
+        let rule = above(Some((83.0, 3)), None, (3.0, 3));
+
+        // The Held tick keeps the anchor at 1000; the Fresh at 3000 counts
+        // the 2 s since then and enters.
+        let mut instance = only_instance(&rule, &gpu_schema());
+        assert_eq!(
+            steps_at(
+                &mut instance,
+                &rule,
+                &[
+                    (0, 95.0, Fresh),
+                    (1000, 95.0, Fresh),
+                    (2000, 95.0, Held),
+                    (3000, 95.0, Fresh),
+                ]
+            ),
+            [
+                (0, Step::Stay),
+                (1000, Step::Stay),
+                (2000, Step::Stay),
+                (3000, Step::Entered(Warn)),
+            ]
+        );
+        assert_eq!(
+            steps_at(
+                &mut instance,
+                &rule,
+                &[
+                    (10_000, 70.0, Fresh),
+                    (11_000, 70.0, Fresh),
+                    (12_000, 70.0, Held),
+                    (13_000, 70.0, Fresh),
+                ]
+            ),
+            [
+                (10_000, Step::Stay),
+                (11_000, Step::Stay),
+                (12_000, Step::Stay),
+                (13_000, left(Warn, Ok)),
+            ]
+        );
+
+        // The duration is reached on a Held tick: nothing matures until the
+        // next Fresh value.
+        let mut instance = only_instance(&rule, &gpu_schema());
+        assert_eq!(
+            steps_at(
+                &mut instance,
+                &rule,
+                &[(0, 95.0, Fresh), (3000, 95.0, Held), (3500, 95.0, Fresh)]
+            ),
+            [
+                (0, Step::Stay),
+                (3000, Step::Stay),
+                (3500, Step::Entered(Warn)),
+            ]
+        );
+        assert_eq!(
+            steps_at(
+                &mut instance,
+                &rule,
+                &[
+                    (20_000, 70.0, Fresh),
+                    (23_000, 70.0, Held),
+                    (23_500, 70.0, Fresh)
+                ]
+            ),
+            [
+                (20_000, Step::Stay),
+                (23_000, Step::Stay),
+                (23_500, left(Warn, Ok)),
+            ]
+        );
+    }
+
+    #[test]
+    fn alternating_fresh_and_held_still_accrues() {
+        let rule = above(Some((83.0, 10)), None, (3.0, 10));
+        let mut instance = only_instance(&rule, &gpu_schema());
+        let quality = |s: u64| if s % 2 == 0 { Fresh } else { Held };
+        assert_eq!(
+            feed(&mut instance, &rule, 0, 30, |s| (Some(95.0), quality(s))),
+            [(10_000, Step::Entered(Warn))]
+        );
+        assert_eq!(
+            feed(&mut instance, &rule, 40, 70, |s| (Some(70.0), quality(s))),
+            [(50_000, left(Warn, Ok))]
+        );
     }
 
     #[test]
@@ -1055,18 +1162,6 @@ mod tests {
             _ => (Some(70.0), Fresh),
         });
         assert_eq!(steps, [(107_000, left(Warn, Ok))]);
-    }
-
-    #[test]
-    fn held_time_is_not_counted_on_next_fresh() {
-        let rule = above(Some((83.0, 3)), None, (3.0, 3));
-        let mut instance = only_instance(&rule, &gpu_schema());
-        let quality = |s: u64| if s == 2 || s == 12 { Held } else { Fresh };
-        let steps = feed(&mut instance, &rule, 0, 5, |s| (Some(95.0), quality(s)));
-        assert_eq!(steps, [(5_000, Step::Entered(Warn))]);
-
-        let steps = feed(&mut instance, &rule, 10, 15, |s| (Some(70.0), quality(s)));
-        assert_eq!(steps, [(15_000, left(Warn, Ok))]);
     }
 
     #[test]

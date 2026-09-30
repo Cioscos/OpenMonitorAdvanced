@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- copy of the active SignPath configuration; keep in sync (docs/release.md) -->
+<!--
+  Artifact configuration slug: setup (second signing request of .github/workflows/release.yml).
+  The artifact is the ZIP that actions/upload-artifact makes of the single setup copied to
+  target/signing/setup/, under the name Tauri gives it: "OpenMonitor Advanced_X.Y.Z_x64-setup.exe".
+  The name is built from the version parameter (X.Y.Z), never from a PE version: the setup is
+  renamed to OpenMonitor.Advanced_X.Y.Z_x64-setup.exe only after signing, in release.yml.
+  Metadata constraints, as measured in the M6a spike: ProductName "OpenMonitor Advanced",
+  ProductVersion X.Y.Z and FileVersion X.Y.Z.
+  SignPath adds the RFC 3161 timestamp itself: no timestamp settings here.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" description="Product version X.Y.Z (app/src-tauri/tauri.conf.json)" />
+  </parameters>
+  <zip-file>
+    <pe-file path="OpenMonitor Advanced_${version}_x64-setup.exe" product-name="OpenMonitor Advanced" product-version="${version}" file-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

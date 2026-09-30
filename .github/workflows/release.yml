@@ -1,0 +1,470 @@
+name: Release
+
+# Tag push vX.Y.Z: real release (SignPath policy release-signing), ending in a draft release.
+# workflow_dispatch from main: rehearsal (policy test-signing), setup uploaded as a run artifact.
+# Operator guide: docs/release.md. Spec: docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md.
+#
+# Security rules for this file: every external action is pinned to a full commit SHA; context
+# values reach `run:` scripts only through `env:` (never `${{ }}` inside the script text); the
+# GitHub token goes only to the steps that call gh, the SignPath token only to the two signing
+# requests.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    environment: release
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Slug of the SignPath project approved for OpenMonitor Advanced (docs/release.md). The
+      # preflight refuses an empty or placeholder slug when signing is enabled.
+      SIGNPATH_PROJECT_SLUG: OpenMonitorAdvanced
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: check-version.ps1 checks that a tag is reachable from origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Run ref, signing mode (both SignPath credentials or none; REQUIRE_SIGNING=true forbids
+      # none), certificates of the selected policy, green CI on this commit and, for a tag, no
+      # published release. Outputs: signing, signpath-policy, verify-policy.
+      - name: Release preflight
+        id: pre
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # 'true' or 'false': the secret itself never reaches the script.
+          HAS_SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          REQUIRE_SIGNING: ${{ vars.REQUIRE_SIGNING }}
+        run: |
+          $tag = @{}
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag.Tag = $env:GITHUB_REF_NAME }
+          ./scripts/release-preflight.ps1 -EventName $env:GITHUB_EVENT_NAME -Ref $env:GITHUB_REF -Sha $env:GITHUB_SHA `
+            -Repo $env:GITHUB_REPOSITORY -HasToken $env:HAS_SIGNPATH_TOKEN -OrganizationId $env:SIGNPATH_ORGANIZATION_ID `
+            -RequireSigning $env:REQUIRE_SIGNING -SignPathProjectSlug $env:SIGNPATH_PROJECT_SLUG @tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Before any cargo or dotnet command (check-version runs cargo metadata --locked).
+      - uses: ./.github/actions/setup-toolchain
+
+      - name: Check the version
+        run: |
+          $tag = @{}
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag.Tag = $env:GITHUB_REF_NAME }
+          ./scripts/check-version.ps1 -ExpectedSha $env:GITHUB_SHA @tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The five version fields agree (previous step): read X.Y.Z once for every later step.
+      - name: Read the version
+        id: version
+        run: |
+          Import-Module ./scripts/lib/OmaVersion.psm1
+          $version = (Get-OmaVersionSources -RepoRoot $env:GITHUB_WORKSPACE |
+              Where-Object File -ceq 'app/src-tauri/tauri.conf.json').Version
+          $null = ConvertTo-OmaVersion $version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and "v$version" -cne $env:GITHUB_REF_NAME) {
+            throw "tag $env:GITHUB_REF_NAME does not match version $version"
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          Write-Output "version $version"
+
+      - name: Install UI dependencies
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Publishes oma-service (trim gate) and fetches the pinned, signature-checked PawnIO setup.
+      - name: Build installer payload
+        run: |
+          ./scripts/build-installer-payload.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Recreates target/signing empty (never cached, never reused) and records the payload
+      # service. The run context comes from GitHub, not from the manifest being checked.
+      - name: Initialise the signing state
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $state = Join-Path $env:GITHUB_WORKSPACE 'target\signing'
+          $context = @{ Commit = $env:GITHUB_SHA; Version = $env:VERSION; RunId = $env:GITHUB_RUN_ID; RunAttempt = $env:GITHUB_RUN_ATTEMPT }
+          ./scripts/sign-shim.ps1 -Mode init -StateRoot $state @context
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $service = Join-Path $env:GITHUB_WORKSPACE 'target\installer-payload\service\oma-service.exe'
+          ./scripts/sign-shim.ps1 -Mode register-service -StateRoot $state -Path $service @context
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # First pass (plan L8): the shim collects the patched oma-app.exe and the uninstaller. From
+      # pwsh a bare -- is eaten by pnpm.ps1, so it is quoted; the -v log must show that cargo
+      # really got --locked. A failed makensis leaves the previous setup in place, so the output
+      # folder is emptied first and the setup must be new afterwards.
+      - name: Build the installer (collect pass)
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle\nsis'
+          if (Test-Path -LiteralPath $bundleDir) {
+            Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File | Remove-Item -Force
+          }
+          $log = Join-Path $env:RUNNER_TEMP 'tauri-collect.log'
+          $started = [DateTime]::UtcNow
+          pnpm tauri build --bundles nsis --config ../target/signing/tauri.sign.collect.json -v '--' --locked *>&1 |
+            Tee-Object -LiteralPath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "pnpm tauri build failed with exit code $code" }
+          if (-not (Select-String -LiteralPath $log -SimpleMatch -Quiet -Pattern 'cargo build --locked')) {
+            throw 'the build log has no "cargo build --locked": refusing an unlocked Rust build'
+          }
+          $setup = Join-Path $bundleDir "OpenMonitor Advanced_$($env:VERSION)_x64-setup.exe"
+          $found = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($found.Count -ne 1 -or $found[0].FullName -ne $setup) { throw "expected exactly $setup, found: $($found.FullName -join ', ')" }
+          if ($found[0].LastWriteTimeUtc -lt $started) { throw "$setup is older than this pass" }
+
+      - name: Check the collect pass
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/sign-shim.ps1 -Mode check -Pass collect -StateRoot (Join-Path $env:GITHUB_WORKSPACE 'target\signing') `
+            -Commit $env:GITHUB_SHA -Version $env:VERSION -RunId $env:GITHUB_RUN_ID -RunAttempt $env:GITHUB_RUN_ATTEMPT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ---- Signed path: only with both SignPath credentials (preflight output signing). ----
+
+      # Absolute, empty directories for the files SignPath returns.
+      - name: Prepare the SignPath output directories
+        id: dirs
+        if: steps.pre.outputs.signing == 'enabled'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'signpath'
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          $binaries = New-Item -ItemType Directory -Path (Join-Path $root 'returned-binaries')
+          $setup = New-Item -ItemType Directory -Path (Join-Path $root 'returned-setup')
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "returned-binaries=$($binaries.FullName)", "returned-setup=$($setup.FullName)"
+
+      # Flat ZIP: the three files share one folder, so they sit at the root of the artifact.
+      - name: Upload the binaries to sign
+        id: upload-binaries
+        if: steps.pre.outputs.signing == 'enabled'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/signing/unsigned/oma-app.exe
+            target/signing/unsigned/uninstall.exe
+            target/signing/unsigned/oma-service.exe
+          if-no-files-found: error
+
+      # Same inputs as sign-setup except the artifact id, the configuration and the output folder.
+      - name: Sign the binaries (SignPath)
+        id: sign-binaries
+        if: steps.pre.outputs.signing == 'enabled'
+        timeout-minutes: 100
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.pre.outputs.signpath-policy }}
+          artifact-configuration-slug: binaries
+          github-artifact-id: ${{ steps.upload-binaries.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 5400
+          output-artifact-directory: ${{ steps.dirs.outputs.returned-binaries }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+
+      # Before anything uses them: exactly the three files, each signed with the approved
+      # certificate of the policy, timestamped, with the expected product metadata.
+      - name: Verify the signed binaries
+        if: steps.pre.outputs.signing == 'enabled'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VERIFY_POLICY: ${{ steps.pre.outputs.verify-policy }}
+          RETURNED_BINARIES: ${{ steps.dirs.outputs.returned-binaries }}
+        run: |
+          ./scripts/verify-signatures.ps1 -Files $env:RETURNED_BINARIES -Version $env:VERSION -Policy $env:VERIFY_POLICY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Import the signed binaries
+        if: steps.pre.outputs.signing == 'enabled'
+        env:
+          RETURNED_BINARIES: ${{ steps.dirs.outputs.returned-binaries }}
+        run: |
+          ./scripts/sign-shim.ps1 -Mode import-signed -StateRoot (Join-Path $env:GITHUB_WORKSPACE 'target\signing') -From $env:RETURNED_BINARIES
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # oma-service.exe does not pass through Tauri: the NSIS script takes it from the payload.
+      - name: Put the signed service into the payload
+        if: steps.pre.outputs.signing == 'enabled'
+        run: |
+          Import-Module ./scripts/lib/OmaCommon.psm1
+          $state = Join-Path $env:GITHUB_WORKSPACE 'target\signing'
+          $signed = Join-Path $state 'signed\oma-service.exe'
+          $payload = Join-Path $env:GITHUB_WORKSPACE 'target\installer-payload\service\oma-service.exe'
+          $want = (Get-Content -Raw -LiteralPath (Join-Path $state 'manifest.json') | ConvertFrom-Json -AsHashtable)['signed']['oma-service.exe']
+          if (-not $want) { throw 'the manifest has no imported signed oma-service.exe' }
+          Copy-Item -LiteralPath $signed -Destination $payload -Force
+          $got = Get-OmaSha256 $payload
+          if ($got -ne $want) { throw "payload oma-service.exe has SHA-256 $got, expected the signed $want" }
+
+      # Second pass: no recompilation; the shim checks that the app and the uninstaller are the
+      # collected ones, byte for byte, and swaps in the signed copies.
+      - name: Build the installer (apply pass)
+        if: steps.pre.outputs.signing == 'enabled'
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle\nsis'
+          Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File | Remove-Item -Force
+          $started = [DateTime]::UtcNow
+          pnpm tauri bundle --bundles nsis --config ../target/signing/tauri.sign.apply.json -v
+          if ($LASTEXITCODE -ne 0) { throw "pnpm tauri bundle failed with exit code $LASTEXITCODE" }
+          $setup = Join-Path $bundleDir "OpenMonitor Advanced_$($env:VERSION)_x64-setup.exe"
+          $found = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($found.Count -ne 1 -or $found[0].FullName -ne $setup) { throw "expected exactly $setup, found: $($found.FullName -join ', ')" }
+          if ($found[0].LastWriteTimeUtc -lt $started) { throw "$setup is older than this pass" }
+
+      - name: Check the apply pass
+        if: steps.pre.outputs.signing == 'enabled'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/sign-shim.ps1 -Mode check -Pass apply -StateRoot (Join-Path $env:GITHUB_WORKSPACE 'target\signing') `
+            -Commit $env:GITHUB_SHA -Version $env:VERSION -RunId $env:GITHUB_RUN_ID -RunAttempt $env:GITHUB_RUN_ATTEMPT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The setup of the apply pass, alone in its own folder, is the only file of the artifact.
+      - name: Stage the setup to sign
+        id: stage-setup
+        if: steps.pre.outputs.signing == 'enabled'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          Import-Module ./scripts/lib/OmaCommon.psm1
+          $name = "OpenMonitor Advanced_$($env:VERSION)_x64-setup.exe"
+          $source = Join-Path $env:GITHUB_WORKSPACE "target\release\bundle\nsis\$name"
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'target\signing\setup'
+          if (Test-Path -LiteralPath $dir) { throw "$dir already exists: the signing state was not recreated" }
+          $null = New-Item -ItemType Directory -Path $dir
+          $staged = Join-Path $dir $name
+          Copy-Item -LiteralPath $source -Destination $staged
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'target\signing\manifest.json') | ConvertFrom-Json -AsHashtable
+          $applied = @($manifest['apply'] | Where-Object { $_['role'] -eq 'setup' })
+          if ($applied.Count -ne 1 -or (Get-OmaSha256 $staged) -ne $applied[0]['sha256']) { throw "$staged is not the setup of the apply pass" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "path=$staged"
+
+      - name: Upload the setup to sign
+        id: upload-setup
+        if: steps.pre.outputs.signing == 'enabled'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: setup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.stage-setup.outputs.path }}
+          if-no-files-found: error
+
+      # Same inputs as sign-binaries except the artifact id, the configuration and the output folder.
+      - name: Sign the setup (SignPath)
+        id: sign-setup
+        if: steps.pre.outputs.signing == 'enabled'
+        timeout-minutes: 100
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.pre.outputs.signpath-policy }}
+          artifact-configuration-slug: setup
+          github-artifact-id: ${{ steps.upload-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 5400
+          output-artifact-directory: ${{ steps.dirs.outputs.returned-setup }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+
+      # ---- Both paths from here on. ----
+
+      # Signed: the single expected file SignPath returned. Unsigned: the setup of the collect
+      # pass, at the path recorded in the manifest. Never a glob; later steps use these outputs.
+      - name: Select the final setup
+        id: final
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNING: ${{ steps.pre.outputs.signing }}
+          RETURNED_SETUP: ${{ steps.dirs.outputs.returned-setup }}
+        run: |
+          Import-Module ./scripts/lib/OmaCommon.psm1
+          Import-Module ./scripts/lib/OmaRelease.psm1
+          $state = Join-Path $env:GITHUB_WORKSPACE 'target\signing'
+          $tauriName = "OpenMonitor Advanced_$($env:VERSION)_x64-setup.exe"
+          switch -CaseSensitive ($env:SIGNING) {
+            'enabled' {
+              $items = @(Get-ChildItem -LiteralPath $env:RETURNED_SETUP -Force)
+              if ($items.Count -ne 1 -or $items[0].PSIsContainer -or $items[0].Name -cne $tauriName) {
+                throw "SignPath must return exactly $tauriName, got: $($items.Name -join ', ')"
+              }
+              $source = $items[0].FullName
+            }
+            'disabled' {
+              $manifest = Get-Content -Raw -LiteralPath (Join-Path $state 'manifest.json') | ConvertFrom-Json -AsHashtable
+              $collected = @($manifest['collect'] | Where-Object { $_['role'] -eq 'setup' })
+              if ($collected.Count -ne 1) { throw "the manifest must record exactly one collect setup, found $($collected.Count)" }
+              $source = $collected[0]['path']
+              if ((Get-OmaSha256 $source) -ne $collected[0]['sha256']) { throw "$source is not the setup of the collect pass" }
+            }
+            default { throw "unknown signing mode '$env:SIGNING'" }
+          }
+          $dir = Join-Path $state 'final'
+          if (Test-Path -LiteralPath $dir) { throw "$dir already exists: the signing state was not recreated" }
+          $null = New-Item -ItemType Directory -Path $dir
+          $name = Get-OmaFinalSetupName -Version $env:VERSION
+          $setup = Join-Path $dir $name
+          Copy-Item -LiteralPath $source -Destination $setup
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "setup-path=$setup", "setup-name=$name", "sums-path=$(Join-Path $dir 'SHA256SUMS.txt')"
+          Write-Output "final setup: $setup (from $source)"
+
+      - name: Verify the final setup
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VERIFY_POLICY: ${{ steps.pre.outputs.verify-policy }}
+          SETUP: ${{ steps.final.outputs.setup-path }}
+        run: |
+          ./scripts/verify-signatures.ps1 -Setup $env:SETUP -Manifest (Join-Path $env:GITHUB_WORKSPACE 'target\signing\manifest.json') `
+            -Version $env:VERSION -Policy $env:VERIFY_POLICY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Write SHA256SUMS.txt
+        id: sums
+        env:
+          SETUP: ${{ steps.final.outputs.setup-path }}
+          SUMS: ${{ steps.final.outputs.sums-path }}
+        run: |
+          Import-Module ./scripts/lib/OmaCommon.psm1
+          Import-Module ./scripts/lib/OmaRelease.psm1
+          Write-OmaSha256Sums -Setup $env:SETUP -Out $env:SUMS
+          Get-Content -LiteralPath $env:SUMS
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$(Get-OmaSha256 $env:SETUP)"
+
+      - name: Attest the build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.final.outputs.setup-path }}
+
+      - name: Verify the attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SETUP: ${{ steps.final.outputs.setup-path }}
+        run: |
+          gh attestation verify $env:SETUP --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create or update the draft release
+        id: publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNING: ${{ steps.pre.outputs.signing }}
+          SETUP: ${{ steps.final.outputs.setup-path }}
+          SUMS: ${{ steps.final.outputs.sums-path }}
+        run: |
+          $signed = if ($env:SIGNING -ceq 'enabled') { 'true' } elseif ($env:SIGNING -ceq 'disabled') { 'false' } else { throw "unknown signing mode '$env:SIGNING'" }
+          ./scripts/publish-draft.ps1 -Repo $env:GITHUB_REPOSITORY -Tag $env:GITHUB_REF_NAME -Version $env:VERSION `
+            -Setup $env:SETUP -Sums $env:SUMS -Signed $signed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the rehearsal setup
+        id: upload-rehearsal
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.final.outputs.setup-path }}
+            ${{ steps.final.outputs.sums-path }}
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SIGNING: ${{ steps.pre.outputs.signing }}
+          SIGNPATH_POLICY: ${{ steps.pre.outputs.signpath-policy }}
+          VERIFY_POLICY: ${{ steps.pre.outputs.verify-policy }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SETUP_NAME: ${{ steps.final.outputs.setup-name }}
+          SETUP_SHA256: ${{ steps.sums.outputs.sha256 }}
+          SUMS_OUTCOME: ${{ steps.sums.outcome }}
+          BINARIES_OUTCOME: ${{ steps.sign-binaries.outcome }}
+          BINARIES_REQUEST_ID: ${{ steps.sign-binaries.outputs.signing-request-id }}
+          BINARIES_REQUEST_URL: ${{ steps.sign-binaries.outputs.signing-request-web-url }}
+          SETUP_OUTCOME: ${{ steps.sign-setup.outcome }}
+          SETUP_REQUEST_ID: ${{ steps.sign-setup.outputs.signing-request-id }}
+          SETUP_REQUEST_URL: ${{ steps.sign-setup.outputs.signing-request-web-url }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          REHEARSAL_OUTCOME: ${{ steps.upload-rehearsal.outcome }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $none = '(none)'
+          function Show([string]$Value) { if ($Value) { $Value } else { $none } }
+          $lines = [Collections.Generic.List[string]]::new()
+          $lines.Add("## Release $(Show $env:VERSION) ($env:GITHUB_EVENT_NAME, $env:GITHUB_REF_NAME)")
+          $lines.Add('')
+          $lines.Add("- Result: **$env:JOB_STATUS**")
+          if ($env:SIGNING -eq 'enabled') {
+            $lines.Add("- Signing: enabled; SignPath policy $(Show $env:SIGNPATH_POLICY); verification policy $(Show $env:VERIFY_POLICY)")
+          } else {
+            $lines.Add("- Signing: $(Show $env:SIGNING) (no SignPath request); verification policy $(Show $env:VERIFY_POLICY)")
+          }
+          foreach ($r in @(
+              @{ Name = 'binaries'; Outcome = $env:BINARIES_OUTCOME; Id = $env:BINARIES_REQUEST_ID; Url = $env:BINARIES_REQUEST_URL },
+              @{ Name = 'setup'; Outcome = $env:SETUP_OUTCOME; Id = $env:SETUP_REQUEST_ID; Url = $env:SETUP_REQUEST_URL })) {
+            if (-not $r.Outcome -or $r.Outcome -eq 'skipped') { continue }
+            $lines.Add("- SignPath request ($($r.Name)): $($r.Outcome); id $(Show $r.Id); $(Show $r.Url)")
+            if ($r.Outcome -ne 'success') {
+              $lines.Add("  - The request may still be pending on SignPath: cancel it there before re-running all jobs.")
+            }
+          }
+          if ($env:SUMS_OUTCOME -eq 'success' -and $env:SETUP_SHA256) {
+            $lines.Add("- Final setup: ``$env:SETUP_NAME``, SHA-256 ``$env:SETUP_SHA256`` (verified with policy $env:VERIFY_POLICY)")
+          } else {
+            $lines.Add('- Final setup: not produced or not verified; no installer from this run is ready.')
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            switch ($env:PUBLISH_OUTCOME) {
+              'success' { $lines.Add("- Draft release $($env:GITHUB_REF_NAME): created or updated, remote assets verified. Review it, then publish it by hand.") }
+              'failure' { $lines.Add("- Draft release $($env:GITHUB_REF_NAME): **the upload failed or is partial. Do not publish it**; re-run the workflow.") }
+              default { $lines.Add("- Draft release $($env:GITHUB_REF_NAME): not created or updated by this run.") }
+            }
+          } elseif ($env:REHEARSAL_OUTCOME -eq 'success') {
+            $lines.Add("- Rehearsal artifact release-$env:GITHUB_RUN_ID-$($env:GITHUB_RUN_ATTEMPT): setup and SHA256SUMS.txt uploaded (no release created).")
+          } else {
+            $lines.Add('- Rehearsal artifact: not uploaded.')
+          }
+          $lines.Add('')
+          $lines.Add('Still manual:')
+          $lines.Add('- The signature of the **installed** uninstaller: 7-Zip does not list uninstall.exe, so install the setup in Windows Sandbox or a VM and check `C:\Program Files\OpenMonitor Advanced\uninstall.exe` (docs/release.md).')
+          if ($env:SIGNING -ne 'enabled') { $lines.Add('- This build is **not code-signed**.') }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $lines

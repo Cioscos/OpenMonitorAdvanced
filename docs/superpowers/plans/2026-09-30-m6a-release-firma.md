@@ -621,7 +621,110 @@ La prova reale di questo task avviene su GitHub nel Task 10, dopo il push dell'u
 
 ## Esito dello spike
 
-*(Da compilare nel Task 1.)*
+Eseguito il 2026-09-30 sul PC di sviluppo (processo non elevato), branch `feat/m6a-release-firma` a `79070a2`. Script e log in `target/spike/` (ignorata da git: `.gitignore:2:/target/`), non committati.
+
+**Decisione: procedi.** Il meccanismo a due passate del §3 della spec è confermato: determinismo, sostituzione e quoting reggono; nessun fallback necessario. Restano i vincoli operativi elencati sotto (quoting di `--`, ripristino dopo un errore, setup vecchio in uscita) e la verifica manuale dell'uninstaller installato.
+
+**Toolchain:** tauri-cli 2.11.5 (via `pnpm tauri`), MakeNSIS v3.11 (`%LOCALAPPDATA%\tauri\NSIS\makensis.exe`), nsis_tauri_utils 0.5.3, rustc/cargo 1.90.0, Node v22.18.0, pnpm 10.15.0, .NET SDK 10.0.303, PowerShell 7.6.6, 7-Zip 26.01 (x64) in `C:\Program Files\7-Zip\7z.exe`. `signtool` non serve allo spike.
+
+**Comandi** (da `app/`, con `pwsh`):
+
+1. `pwsh scripts/build-installer-payload.ps1` (exit 0), poi passata A: `pnpm tauri build --bundles nsis --config ../target/spike/sign-log.json -v '--' --locked` (exit 0, 105 s, di cui 76 s di cargo).
+2. Passata B: servizio del payload sostituito con l'originale più 1 MiB di `0x00`, poi `pnpm tauri bundle --bundles nsis --config ../target/spike/sign-replace-B.json -v` (exit 0, 20 s).
+3. Passata C: 130 s dopo B, `TEMP`/`TMP` su `target\spike\tmp-c` (percorso assoluto), stesso comando con `sign-replace-C.json` e gli stessi payload marcati (exit 0, 17 s). In `finally`: ambiente, template, servizio originale ed exe dell'app ripristinati e verificati per hash.
+
+**Forma di `signCommand` che funziona** (strutturata, percorsi assoluti, `%1` come argomento a sé):
+
+```json
+{"bundle":{"windows":{"signCommand":{"cmd":"pwsh","args":["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File","C:\\…\\target\\spike\\log-shim.ps1","-Mode","record","-Out","C:\\…\\target\\spike\\A","-Label","pass A (space test)","-Path","%1"]}}}}
+```
+
+- Tauri chiama il comando direttamente (directory corrente `app\src-tauri`) per app, plugin e setup.
+- Per l'uninstaller lo rende con il `Debug` di Rust dentro `!define UNINSTALLERSIGNCOMMAND "$\"pwsh$\" … $\"-Path$\" $\"%1$\""`: le barre dei percorsi risultano raddoppiate (`C:\\Users\\…`) e funzionano. makensis lo esegue con directory corrente `target\release\nsis\x64`.
+- L'argomento con spazi e parentesi (`pass A (space test)`) arriva intatto in tutte le 8 chiamate, compresa quella dell'uninstaller.
+- Vincolo: il comando finisce tra apici singoli in `!uninstfinalize '…'` e gli argomenti passano per una stringa NSIS, quindi niente `'` né `$` negli argomenti né nei percorsi. Le regex restano dentro lo shim, non sulla riga di comando.
+
+**Chiamate registrate** (8 per passata, in quest'ordine, identiche in A, B e C salvo il nome del temporaneo):
+
+| n | Ruolo | Percorso ricevuto | Dimensione | SHA-256 (A) |
+|---|---|---|---|---|
+| 1 | app | `<repo>\target\release\oma-app.exe` | 14 875 648 | `D1D9315D…A21C6DA` |
+| 2–6 | plugin | `<repo>\target\release\nsis\x64\Plugins\x86-unicode\` + `NSISdl.dll`, `StartMenu.dll`, `System.dll`, `nsDialogs.dll`, `additional/nsis_tauri_utils.dll` | — | invariati in A/B/C |
+| 7 | uninstaller | `%TEMP%\nst2A98.tmp` (A), `%TEMP%\nst60FB.tmp` (B), `<repo>\target\spike\tmp-c\nstAA3F.tmp` (C) | 85 936 | `6A849324…7A2B3FD` |
+| 8 | setup | `<repo>\target\release\bundle/nsis/OpenMonitor Advanced_0.2.0_x64-setup.exe` | — | `742ABA21…F97E1A17` (A) |
+
+- L'uninstaller è un PE con estensione **`.tmp`**, non `.exe`: correggere il §3.2 della spec.
+- Il nome è `nst` più 4 cifre esadecimali, nella directory restituita da `GetTempPath` (segue `TMP`/`TEMP`).
+- Setup e plugin arrivano con separatori misti (`bundle/nsis/…`, `additional/…`), quindi i percorsi vanno sempre normalizzati con `[IO.Path]::GetFullPath`.
+- La cartella delle copie dei plugin è `target\release\nsis\x64\Plugins\x86-unicode`, ricreata a ogni bundle. Il setup contiene anche `nsExec.dll`, che Tauri non passa al comando di firma: è codice di terzi e non si firma.
+
+**Regex di L9** (costanti di `OmaSigning.psm1`, sul percorso normalizzato; convalidate in B e C in modalità stretta, cioè senza la scoperta permissiva di A):
+
+```powershell
+$UninstallerPathPattern = '(?i)^(?<dir>.+)\\nst[0-9a-f]{1,4}\.tmp$'   # e $Matches['dir'] -ieq [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+$PluginPathPattern = '(?i)^' + [regex]::Escape($RepoRoot) + '\\target\\release\\nsis\\x64\\Plugins\\x86-unicode\\(?:NSISdl|StartMenu|System|nsDialogs|additional\\nsis_tauri_utils)\.dll$'
+```
+
+- Il controllo sulla directory è parte del riconoscimento: in C, con `TEMP` diverso, ha riconosciuto `tmp-c\nstAA3F.tmp`.
+- Le regex rifiutano `…\additional\evil.dll`, `System.dll.bak`, `nst2A98.exe` e `nstZZ.tmp`.
+- App e setup si confrontano per uguaglianza con `<repo>\target\release\oma-app.exe` e `<repo>\target\release\bundle\nsis\OpenMonitor Advanced_<versione>_x64-setup.exe`.
+- Le regex valgono per tauri-cli 2.11.5 con NSIS 3.11: un aggiornamento richiede di ripetere lo spike.
+
+**Determinismo: sì.**
+
+- `oma-app.exe` modificato (`D1D9315D…`) e uninstaller (`6A849324…`) ricevuti in B e C hanno lo stesso SHA-256 della passata A.
+- Questo vale nonostante il servizio del payload più grande di 1 MiB (`E73C0FD5…`, 19 201 909 byte), i 130 s d'intervallo e il `TEMP` diverso.
+- In B e C lo shim li ha sostituiti con la copia registrata più 4096 byte `0x4F`: app marcata `F5C7E723…37D37E65B`, uninstaller marcato `2AE8939B…4402B2E68`.
+- `tauri bundle` non ha ricompilato né ripubblicato nulla:
+  - nessuna riga cargo, `beforeBuildCommand`, vite o dotnet nei log (esegue solo `beforeBundleCommand`, che non abbiamo);
+  - hash invariati prima e dopo B e C per `oma-app.exe` originale (`34DC8B42…`, ripristinato da Tauri), servizio marcato, `PawnIO_setup.exe`, i tre asset di `app/dist` e le cinque copie dei plugin.
+- Gli hash dei setup differiscono (B `2149183C…`, C `D9DBCE29…`): nessuno lo richiede, probabilmente cambiano gli mtime dei file inclusi.
+
+**Contenuto del setup (7-Zip, exit 0 per `l -slt` e `x`):**
+
+- 7-Zip vede `oma-app.exe`, `service\oma-service.exe`, `service\PawnIO_setup.exe`, `THIRD_PARTY_NOTICES.txt` e i plugin in `$PLUGINSDIR`. **`uninstall.exe` non è visibile.**
+- Nel setup B i file estratti hanno gli hash delle copie "firmate": `oma-app.exe` = `F5C7E723…` (marcata), `oma-service.exe` = `E73C0FD5…` (marcato). Nel setup A sono le copie non marcate (`D1D9315D…`, `B79DF72A…`).
+- Prova statica aggiuntiva senza installare (`target/spike/find-uninstaller.py`, decompressione del flusso LZMA solido): il setup A contiene l'uninstaller registrato (85 936 byte); B e C contengono, come blocco dati esatto, l'uninstaller **marcato** (90 032 byte, `2AE8939B…`).
+- Poiché l'uninstaller non è visibile a 7-Zip, il suo controllo automatico nel §5.1 non si può fare con 7-Zip: resta tra le verifiche manuali (installazione) e nella prova con SignPath del Task 10.
+- In CI 7-Zip va cercato in `C:\Program Files\7-Zip\7z.exe` (o con `Get-Command 7z`), controllando l'exit code.
+
+**Prova negativa (Step 6, `-FailOn uninstaller`):**
+
+- Riga 101 originale: makensis stampa `UninstFinalize command returned 1` e prosegue; `pnpm tauri bundle` esce con 0 e produce un setup (`56E681C2…`).
+- Con `!uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0 ; OMA`: `UninstFinalize command returned 1, aborting`, `Error - aborting creation process`, `pnpm tauri bundle` esce con 1. Riga ripristinata; la modifica definitiva spetta al Task 2.
+- Due effetti collaterali che il workflow deve gestire:
+  - dopo un bundle fallito Tauri **non** ripristina `target\release\oma-app.exe`, che resta modificato (`D1D9315D…`);
+  - il setup della passata precedente resta nel percorso di output, perché il `rename` non avviene. Prima di ogni passata va rimosso il setup in uscita, e dopo va controllato che sia nuovo.
+- makensis interrotto lascia anche il suo `nst*.tmp` in `%TEMP%`.
+
+**Metadati (Step 7, `VersionInfo`):**
+
+| File | ProductName | ProductVersion | FileVersion |
+|---|---|---|---|
+| `oma-app.exe` (A) | OpenMonitor Advanced | 0.2.0 | 0.2.0 |
+| uninstaller (A) | OpenMonitor Advanced | 0.2.0 | 0.2.0 |
+| `oma-service.exe` | oma-service | `0.2.0+79070a2fc6b88a4c61d9b51ac4a417644dd1d84c` | 0.2.0.0 |
+
+Il servizio conferma il §3.4 punto 5: manca `Product`. In più `ProductVersion` include `+<commit>` (versione informativa di SourceLink): chi confronta la versione deve togliere il suffisso `+…`, oppure il progetto deve impostare `IncludeSourceRevisionInInformationalVersion=false`.
+
+**`-- --locked` (L8): arriva a cargo, con una condizione sulla shell.**
+
+- Con `-v` il log mostra `Command \`cargo build --locked --bins --features tauri/custom-protocol --release\``, confermato anche da un runner finto.
+- In PowerShell, però, `pnpm` si risolve in `pnpm.ps1`, e PowerShell consuma un `--` nudo. Tauri riceve `--locked` come argomento proprio e si ferma con `error: unexpected argument '--locked' found` (exit 2): nessuna build sbloccata, ma la build fallisce.
+- Funzionano:
+  - in `pwsh`, `'--'` tra apici;
+  - `pnpm.cmd … -- --locked`;
+  - la stessa riga in bash.
+- Il workflow deve usare una di queste forme e verificare nel log di `-v` la riga `cargo build --locked`.
+
+**Step 8 (uninstaller installato): da verificare (verifica manuale dovuta).** 7-Zip non vede `uninstall.exe`. La prova statica mostra che il setup B contiene l'uninstaller marcato, ma non che `WriteUninstaller` lo scriva invariato in `$INSTDIR`. Serve l'installazione del setup B (`target/spike/B/setup-B.exe`) in Windows Sandbox o in una VM, poi `Get-FileHash 'C:\Program Files\OpenMonitor Advanced\uninstall.exe'`; atteso `2AE8939B5D09B3C39FAD95633E7D751485C97529621D3815D48F4844402B2E68`. Non blocca: la ripete il Task 10 con la firma reale.
+
+**Hash completi** (SHA-256): app registrata `D1D9315D9A39EBC1DA54E3423D4C2A2D7F9192B583FD35932936924DDA21C6DA`, app marcata `F5C7E72356CE471E4AC3D1CB82464B97EE43E5138FC90B6004C611437D37E65B`, app originale `34DC8B4289307D24F87838FF40B28B68058289713F9CAED93CDD5C848E9EA3AF`, uninstaller registrato `6A8493244FB39D33B4DDAB4FD5A16E5F2973DA827796D5AF097650EF47A2B3FD`, uninstaller marcato `2AE8939B5D09B3C39FAD95633E7D751485C97529621D3815D48F4844402B2E68`, servizio originale `B79DF72A8344513FFCFBA36580F3BDE413271F6D9AED209016531B788745B655`, servizio marcato `E73C0FD51D0CEC8015DB10D64F60A05A78BFDDCE5DBECA8A6673548744BE4563`, setup A `742ABA21393F00E5630C65EEF4CA869C30434C8E074077031F269CCEF97E1A17`, setup B `2149183C4EA5E7AF0FB9F6B8629A487E205BB3AFD0D999472BD312A1EBA70112`, setup C `D9DBCE29B25F684CB7BE82D3C241F5AC3408F6F952A052DED92C74F58AE36599`.
+
+**Note per i task successivi:**
+
+- Lo shim reale, in `apply`, deve scrivere la copia firmata con un solo `Copy`/`Move` e con retry su `IOException`. Il primo tentativo dello spike, `Copy-Item` seguito da un'apertura in append, ha ricevuto un errore di condivisione sull'exe appena scritto (verosimilmente l'antivirus).
+- Dopo quel fallimento l'exe dell'app era rimasto modificato. È stato ricostruito riportando il token `__TAURI_BUNDLE_TYPE_VAR_NSS` a `…_UNK` (hash originale ritrovato) e poi ripristinato da copia a ogni uscita.
 
 ## Esito dell'esecuzione
 

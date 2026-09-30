@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oma_core::hotkey::{parse_hotkey, Hotkey, HotkeyKey};
 use oma_core::settings::Settings;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Manager, WindowEvent, Wry};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcut, Modifiers, Shortcut, ShortcutState};
 
 use crate::i18n::{t, Lang};
@@ -508,6 +508,24 @@ pub fn set_log_hotkeys_suspended(app: AppHandle, suspended: bool) {
     }
 }
 
+/// Whether a main window event means no capture box can hold focus any more:
+/// the window lost focus or went away (closed, or its page with it), when
+/// the page's own blur or teardown may never arrive.
+pub fn window_event_resumes(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed)
+}
+
+/// Resumes the log hotkeys after [`window_event_resumes`] events of the main
+/// window; the page suspends them again when a focused capture box regains
+/// focus.
+pub fn resume_on_window_event(app: &AppHandle, event: &WindowEvent) {
+    if window_event_resumes(event) {
+        if let Some(control) = app.try_state::<HotkeyControl>() {
+            control.set_suspended(false);
+        }
+    }
+}
+
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     if let Err(err) = std::thread::Builder::new()
         .name(name.to_owned())
@@ -875,6 +893,17 @@ mod tests {
         fake.take();
         manager.handle([HotkeyRequest::Suspend(true), HotkeyRequest::Suspend(false)]);
         assert_eq!(fake.take(), []);
+    }
+
+    #[test]
+    fn main_window_leaving_resumes_the_hotkeys() {
+        use tauri::WindowEvent;
+        assert!(window_event_resumes(&WindowEvent::Focused(false)));
+        assert!(window_event_resumes(&WindowEvent::Destroyed));
+        assert!(!window_event_resumes(&WindowEvent::Focused(true)));
+        assert!(!window_event_resumes(&WindowEvent::Resized(
+            tauri::PhysicalSize::new(800, 600)
+        )));
     }
 
     #[test]

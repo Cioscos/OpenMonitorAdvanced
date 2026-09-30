@@ -28,6 +28,15 @@
   } = $props();
 
   let listening = $state(false);
+  let box: HTMLInputElement | undefined = $state();
+
+  /** The shell resumes the hotkeys when the window loses focus, and the page may see no blur. */
+  function onWindowFocus() {
+    if (box !== undefined && document.activeElement === box) {
+      listening = true;
+      void onCapture(true);
+    }
+  }
 
   function setListening(next: boolean) {
     if (next === listening) return;
@@ -73,9 +82,12 @@
   });
 </script>
 
+<svelte:window onfocus={onWindowFocus} />
+
 <Field {id} {label} labelFor={id} error={shownError}>
   {#snippet control()}
     <input
+      bind:this={box}
       {id}
       type="text"
       readonly

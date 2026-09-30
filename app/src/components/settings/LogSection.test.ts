@@ -189,6 +189,20 @@ test('hotkey_capture_suspends_the_global_hotkeys_while_focused', async () => {
   expect(backend.hotkeySuspensions).toEqual([true, false, true, false]);
 });
 
+test('hotkey_capture_suspends_again_when_the_window_regains_focus', async () => {
+  const { backend } = await setup();
+  // The shell resumes the hotkeys when the window loses focus; the page may see no blur.
+  await fireEvent.focus(window);
+  expect(backend.hotkeySuspensions).toEqual([]);
+  toggleBox().focus();
+  expect(backend.hotkeySuspensions).toEqual([true]);
+  await fireEvent.focus(window);
+  expect(backend.hotkeySuspensions).toEqual([true, true]);
+  toggleBox().blur();
+  await fireEvent.focus(window);
+  expect(backend.hotkeySuspensions).toEqual([true, true, false]);
+});
+
 test('hotkey_capture_destroyed_while_focused_resumes_the_hotkeys', async () => {
   const { backend } = await setup();
   await fireEvent.focus(toggleBox());

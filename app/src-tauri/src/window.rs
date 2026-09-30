@@ -76,8 +76,15 @@ pub fn show_main(app: &AppHandle) {
         .inner_size(1100.0, 720.0)
         .min_inner_size(900.0, 600.0)
         .build();
-    if let Err(err) = result {
-        tracing::error!(%err, "cannot create the main window");
+    match result {
+        Ok(window) => {
+            // A capture box that had focus cannot keep the hotkeys suspended.
+            let app = app.clone();
+            window.on_window_event(move |event| {
+                crate::hotkeys::resume_on_window_event(&app, event);
+            });
+        }
+        Err(err) => tracing::error!(%err, "cannot create the main window"),
     }
 }
 

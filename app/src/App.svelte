@@ -9,6 +9,7 @@
   import { createBackend, type Backend } from './lib/backend';
   import { health } from './lib/health.svelte';
   import { LiveStore, connect } from './lib/live.svelte';
+  import { log } from './lib/log.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
@@ -65,6 +66,7 @@
     let offNavigate: (() => void) | undefined;
     let offService: (() => void) | undefined;
     let offHealth: (() => void) | undefined;
+    let offLog: (() => void) | undefined;
     let cancelled = false;
     // Ordering race (spec §6): a late `getServiceStatus` reply must never overwrite a status
     // already delivered by `oma:service`, so the event subscription is set up first and this
@@ -87,6 +89,13 @@
         else offHealth = unsubscribe;
       })
       .catch((error) => console.error('health unavailable', error));
+    log
+      .connect(backend)
+      .then((unsubscribe) => {
+        if (cancelled) unsubscribe();
+        else offLog = unsubscribe;
+      })
+      .catch((error) => console.error('log status unavailable', error));
     backend
       .onServiceStatus((status) => {
         serviceEventSeen = true;
@@ -154,6 +163,7 @@
       document.removeEventListener('visibilitychange', visibility);
       off?.();
       offHealth?.();
+      offLog?.();
       offService?.();
       offSettings?.();
       offNavigate?.();
@@ -206,6 +216,7 @@
   {service}
   onLeaveAntiCheat={() => backend.setAntiCheat(false)}
   onStartService={() => backend.startService()}
+  onOpenLogFolder={() => backend.openLogFolder()}
   {stale}
 />
 <main>

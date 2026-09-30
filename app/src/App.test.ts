@@ -8,7 +8,7 @@ import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
 import { settings } from './lib/settings.svelte';
 import type { Schema } from './lib/types';
-import { FakeBackend } from './test/fake-backend';
+import { FakeBackend, makeLogStatus } from './test/fake-backend';
 
 const IGPU = 'gpu/pci-0000:11:00.0';
 
@@ -137,6 +137,27 @@ test('the health banner shows the core clock, not a difference of system times',
   await vi.waitFor(() => expect(screen.getByText('for 2 h 5 min')).toBeTruthy());
   backend.emitHealthClock({ revision: 0, levelElapsedMs: 126 * 60_000 });
   await vi.waitFor(() => expect(screen.getByText('for 2 h 6 min')).toBeTruthy());
+});
+
+test('the recorder follows the log and Esc in its deck leaves the settings open', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.logStatus = makeLogStatus({ revision: 3, session: 1, state: 'recording', recordedMs: 767_000 });
+  const store = new LiveStore();
+  render(App, { backend, store });
+  const recorder = (await screen.findByRole('button', { name: 'Recording, 00:12:47' })) as HTMLButtonElement;
+  backend.emitLogStatus(makeLogStatus({ revision: 4, session: 1, state: 'paused', recordedMs: 768_000 }));
+  await vi.waitFor(() => expect(recorder.getAttribute('aria-label')).toBe('Recording paused, 00:12:48'));
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy());
+  await fireEvent.click(recorder);
+  await fireEvent.keyDown(recorder, { key: 'Escape' });
+  expect(recorder.getAttribute('aria-expanded')).toBe('false');
+  expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy();
+
+  await fireEvent.click(recorder);
+  await fireEvent.click(screen.getByRole('button', { name: 'Open folder' }));
+  expect(backend.logCalls).toContain('openLogFolder');
 });
 
 test('without a clock the banner starts from zero', async () => {

@@ -13,13 +13,13 @@ const NOT_CONNECTED: ServiceState[] = ['notInstalled', 'antiCheat', 'starting', 
 function setup(service: ServiceStatus | null, overrides: Partial<{ onLeaveAntiCheat: () => Promise<unknown>; onStartService: () => Promise<unknown> }> = {}) {
   const onLeaveAntiCheat = overrides.onLeaveAntiCheat ?? vi.fn().mockResolvedValue(undefined);
   const onStartService = overrides.onStartService ?? vi.fn().mockResolvedValue(undefined);
-  render(TopBar, { view: 'simple', onViewChange: () => {}, onSettings: () => {}, service, onLeaveAntiCheat, onStartService });
+  render(TopBar, { view: 'simple', onViewChange: () => {}, onSettings: () => {}, service, onLeaveAntiCheat, onStartService, onOpenLogFolder: async () => {} });
   return { onLeaveAntiCheat, onStartService };
 }
 
 test('the gear opens the settings and shows when they are open', async () => {
   const onSettings = vi.fn();
-  const props = { onViewChange: () => {}, onSettings, service: null, onLeaveAntiCheat: vi.fn(), onStartService: vi.fn() };
+  const props = { onViewChange: () => {}, onSettings, service: null, onLeaveAntiCheat: vi.fn(), onStartService: vi.fn(), onOpenLogFolder: vi.fn() };
   const { rerender } = render(TopBar, { view: 'simple', ...props });
   const gear = screen.getByRole('button', { name: t('settings.title') }) as HTMLButtonElement;
   expect(gear.disabled).toBe(false);

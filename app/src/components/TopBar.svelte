@@ -2,6 +2,7 @@
   import { t } from '../lib/i18n/index.svelte';
   import type { ServiceStatus } from '../lib/types';
   import type { View } from '../lib/view';
+  import Recorder from './log/Recorder.svelte';
   import ServiceExplainer from './ServiceExplainer.svelte';
 
   let {
@@ -11,6 +12,7 @@
     service,
     onLeaveAntiCheat,
     onStartService,
+    onOpenLogFolder,
     stale = false,
     gear = $bindable(),
   }: {
@@ -21,6 +23,8 @@
     service: ServiceStatus | null;
     onLeaveAntiCheat: () => Promise<unknown>;
     onStartService: () => Promise<unknown>;
+    /** The deck's "Open folder": rejects with a `log.error.*` key or the system's text. */
+    onOpenLogFolder: () => Promise<void>;
     stale?: boolean;
     /** The gear button, so focus can return to it when the settings close. */
     gear?: HTMLButtonElement;
@@ -56,6 +60,7 @@
     {#if stale}
       <span class="stale" role="status">{t('status.stale')}</span>
     {/if}
+    <Recorder openFolder={onOpenLogFolder} />
     {#if showBadge && service}
       <details class="badge" bind:open>
         <summary>{pawnIoProblem ? t('settings.sources.pawnIo') : t('service.baseMode')}</summary>

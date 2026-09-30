@@ -15,7 +15,7 @@ CPU, RAM, dischi, rete e GPU (NVIDIA, AMD, Intel) si leggono **senza privilegi d
 amministratore**. Un servizio Windows facoltativo aggiunge i sensori che li richiedono:
 temperature, tensioni, ventole e dati SMART.
 
-> **Stato:** sviluppo iniziale (versione 0.1.0). Aspettati imperfezioni e cambiamenti
+> **Stato:** sviluppo iniziale (versione 0.2.0). Aspettati imperfezioni e cambiamenti
 > incompatibili tra una versione e l'altra.
 
 ## Funzionalità

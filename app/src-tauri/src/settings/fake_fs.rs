@@ -50,6 +50,11 @@ impl FakeFs {
         self
     }
 
+    /// Deletes `path` behind the store's back (no op is recorded).
+    pub(crate) fn delete_file(&self, path: &Path) {
+        self.lock().files.remove(path);
+    }
+
     pub(crate) fn file(&self, path: &Path) -> Option<Vec<u8>> {
         self.lock().files.get(path).cloned()
     }

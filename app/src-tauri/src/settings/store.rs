@@ -216,12 +216,15 @@ impl Loaded {
     }
 }
 
-/// Whether decoding left rules out, so the file holds more than a save keeps.
+/// Whether decoding left rules out, so the file holds more than a save keeps:
+/// an invalid rule, or any other deviation inside the rules section (a
+/// wrongly typed `rules`, `rules.custom` or `rules.overrides` drops them all).
 fn drops_rules(decoded: &Decoded) -> bool {
-    decoded
-        .diagnostics
-        .iter()
-        .any(|d| matches!(d.kind, DiagnosticKind::InvalidRule { .. }))
+    decoded.diagnostics.iter().any(|d| {
+        matches!(d.kind, DiagnosticKind::InvalidRule { .. })
+            || d.path == "rules"
+            || d.path.starts_with("rules.")
+    })
 }
 
 fn unix_secs() -> u64 {
@@ -1066,6 +1069,33 @@ mod tests {
     }
 
     #[test]
+    fn wrongly_typed_rules_back_up_the_file_before_writing() {
+        for rules in [
+            json!(3),
+            json!({"custom": {"id": "custom-00000000-0000-4000-8000-000000000001"}}),
+            json!({"overrides": []}),
+        ] {
+            let original = serde_json::to_vec(&json!({
+                "version": 1,
+                "general": {"intervalMs": 2000},
+                "rules": rules,
+            }))
+            .unwrap();
+            let fs = FakeFs::new().with_file(&test_path(), &original);
+            let store = open_fast(&fs);
+            store
+                .update(&json!({"general": {"intervalMs": 3000}}))
+                .unwrap();
+            store.flush_now(LONG).unwrap();
+            assert_eq!(fs.ops(), ["read", "remove", "copy", "write"], "{rules}");
+            let kept = backups(&fs);
+            assert_eq!(kept.len(), 1, "{rules}");
+            assert_eq!(fs.file(&kept[0]).unwrap(), original, "{rules}");
+            store.shutdown(LONG).unwrap();
+        }
+    }
+
+    #[test]
     fn backup_collision_never_overwrites() {
         let original = file_with_invalid_rule();
         let fs = FakeFs::new().with_file(&test_path(), &original);
@@ -1113,6 +1143,29 @@ mod tests {
         assert_eq!(fs.file(&test_path()).unwrap(), original);
         assert!(backups(&fs).is_empty());
         assert_eq!(store.settings().general.interval_ms, 3500);
+    }
+
+    #[test]
+    fn backup_of_a_deleted_file_is_skipped() {
+        let fs = FakeFs::new().with_file(&test_path(), &file_with_invalid_rule());
+        let store = open_fast(&fs);
+        // The file vanishes after loading: there is nothing left to preserve.
+        fs.delete_file(&test_path());
+        store
+            .update(&json!({"general": {"intervalMs": 3000}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "remove", "copy", "write"]);
+        assert!(backups(&fs).is_empty());
+        assert_eq!(stored_json(&fs)["general"]["intervalMs"], 3000);
+        assert_eq!(store.state().persistence, Persistence::Ok);
+        // The pending backup is gone: the next save copies nothing.
+        store
+            .update(&json!({"general": {"intervalMs": 3500}}))
+            .unwrap();
+        store.flush_now(LONG).unwrap();
+        assert_eq!(fs.ops(), ["read", "remove", "copy", "write", "write"]);
+        store.shutdown(LONG).unwrap();
     }
 
     #[test]

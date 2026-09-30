@@ -94,6 +94,13 @@ impl Inner {
                         tracing::warn!(kept = %kept.display(), "settings file with invalid rules kept before saving");
                         core.backup_pending = false;
                     }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // The file is gone since loading: nothing to preserve.
+                        tracing::warn!(
+                            "settings file with invalid rules vanished before its backup; saving"
+                        );
+                        core.backup_pending = false;
+                    }
                     Err(err) => {
                         tracing::error!(%err, "cannot back up the settings file with invalid rules; changes will not be saved");
                         let reason = format!("backup: {err}");

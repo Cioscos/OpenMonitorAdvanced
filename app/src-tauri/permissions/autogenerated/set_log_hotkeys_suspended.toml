@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-log-hotkeys-suspended"
+description = "Enables the set_log_hotkeys_suspended command without any pre-configured scope."
+commands.allow = ["set_log_hotkeys_suspended"]
+
+[[permission]]
+identifier = "deny-set-log-hotkeys-suspended"
+description = "Denies the set_log_hotkeys_suspended command without any pre-configured scope."
+commands.deny = ["set_log_hotkeys_suspended"]

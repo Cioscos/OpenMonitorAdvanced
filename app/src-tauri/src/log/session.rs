@@ -9,8 +9,8 @@
 //! - `tick`: the sampler's own layout cache, never taken by anyone else;
 //! - `inner`: the session state and the admission of rows, held briefly and
 //!   never while waiting for the writer, emitting, toasting or calling a
-//!   state listener. The sampler only `try_lock`s it: contention drops the
-//!   row (counted) instead of waiting;
+//!   state listener. The sampler only `try_lock`s it: contention skips the
+//!   tick (its row counted as dropped) instead of waiting;
 //! - the queue's lock, taken under `inner` to queue a row or a barrier; the
 //!   writer thread never holds it while it reports back, so there is no path
 //!   from the queue to `inner`.
@@ -127,9 +127,9 @@ pub struct LogService {
     writer: Mutex<Option<JoinHandle<()>>>,
     serial: Serial,
     inner: Mutex<Inner>,
-    /// The session admitting rows, 0 for none: the sampler's check without a
-    /// lock, so an idle tick costs almost nothing. `inner.admitting` is the
-    /// authority.
+    /// The open admission (`inner.admission`), 0 for none: the sampler's
+    /// check without a lock, so an idle tick costs almost nothing.
+    /// `inner.admitting` is the authority.
     admitting: AtomicU64,
     shut: AtomicBool,
     tick: Mutex<TickState>,
@@ -339,7 +339,7 @@ impl LogService {
             Arc::new(schema.clone())
         });
         let admitting = self.admitting.load(Ordering::Acquire);
-        if fresh.is_none() && admitting == 0 && tick.drops.is_none() {
+        if fresh.is_none() && admitting == 0 && tick.missed.is_none() {
             return;
         }
         // Built outside the session lock; the cache rebuilds only on a new key.
@@ -354,8 +354,10 @@ impl LogService {
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => {
                 if admitting != 0 {
-                    tick.drops = Some(match tick.drops {
-                        Some((session, count)) if session == admitting => (session, count + 1),
+                    tick.missed = Some(match tick.missed {
+                        Some((admission, count)) if admission == admitting => {
+                            (admission, count + 1)
+                        }
                         _ => (admitting, 1),
                     });
                 }
@@ -372,9 +374,11 @@ impl LogService {
         if let Some(schema) = fresh {
             inner.schema = Some(schema);
         }
-        if let Some((session, count)) = tick.drops.take() {
-            if session == inner.session {
-                inner.note_drops(count, now);
+        if let Some((admission, count)) = tick.missed.take() {
+            // Only while the admission they met is still open: once a barrier
+            // has closed it their rows would have been refused anyway.
+            if inner.admitting && admission == inner.admission {
+                inner.miss_ticks(count, now);
             }
         }
         if let (true, Some(((layout, overflow), offset))) = (inner.admitting, prepared) {
@@ -544,11 +548,19 @@ impl LogService {
         status
     }
 
-    /// A start refused before any file: `error` with `error`.
+    /// A start refused before any file: `error` with `error`, without the
+    /// file and counters of the previous session.
     fn refuse(&self, error: LogError) -> LogStatus {
         let mut fx = Effects::default();
         let status = {
             let mut inner = lock(&self.inner);
+            inner.path = None;
+            inner.part = 0;
+            inner.part_bytes = 0;
+            inner.rows = 0;
+            inner.bytes = 0;
+            inner.recorded_ms = 0;
+            inner.dropped = 0;
             inner.error = Some(error);
             inner.set_state(LogState::Error, &mut fx);
             inner.publish(&mut fx);
@@ -606,7 +618,8 @@ impl LogService {
             return;
         }
         inner.admitting = true;
-        self.admitting.store(inner.session, Ordering::Release);
+        inner.admission += 1;
+        self.admitting.store(inner.admission, Ordering::Release);
     }
 
     fn close_admission(&self, inner: &mut Inner) {
@@ -916,6 +929,9 @@ struct Inner {
     session_dir: Option<PathBuf>,
     /// Rows of `session` are accepted.
     admitting: bool,
+    /// Grows with every opened admission (never 0 once opened), so ticks
+    /// that met a busy lock are counted only against the admission they met.
+    admission: u64,
     /// A command waits for the writer's answer about `session`.
     busy: bool,
     /// A failure reported while a command waited, for that command.
@@ -953,6 +969,19 @@ impl Inner {
     fn publish(&mut self, fx: &mut Effects) {
         self.dirty = false;
         fx.status = Some(self.status());
+    }
+
+    /// `count` ticks that met a busy lock: each takes its turn in the
+    /// every-N phase, and only those whose turn records a row are dropped.
+    fn miss_ticks(&mut self, count: u64, now_ms: u64) {
+        let every = u64::from(self.every_ticks.max(1));
+        let phase = u64::from(self.phase);
+        // Recording turns are the multiples of `every` in [phase, phase + count).
+        let dropped = (phase + count).div_ceil(every) - phase.div_ceil(every);
+        self.phase = ((phase + count) % every) as u32;
+        if dropped > 0 {
+            self.note_drops(dropped, now_ms);
+        }
     }
 
     /// Counts rows the queue refused (or a busy lock dropped); logged at
@@ -999,9 +1028,9 @@ struct TickState {
     revision: Option<u64>,
     key: Option<LayoutKey>,
     layout: Option<(Arc<Layout>, bool)>,
-    /// Rows dropped on a busy session lock: `(session, count)`, counted on
+    /// Ticks that met a busy session lock: `(admission, count)`, settled by
     /// the next tick that gets the lock.
-    drops: Option<(u64, u64)>,
+    missed: Option<(u64, u64)>,
 }
 
 struct LayoutKey {

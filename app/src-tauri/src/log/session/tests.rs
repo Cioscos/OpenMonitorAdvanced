@@ -520,6 +520,49 @@ fn start_without_columns_fails() {
 }
 
 #[test]
+fn refused_start_clears_the_previous_session() {
+    let mut rig = Rig::new();
+    rig.tick(0.0);
+    rig.log.start();
+    rig.tick(1.0);
+    rig.tick(2.0);
+    let stopped = rig.log.stop();
+    assert!(stopped.path.is_some() && stopped.rows == 2 && stopped.recorded_ms > 0);
+
+    type Case = (&'static str, fn(&mut Rig));
+    let cases: [Case; 2] = [
+        ("log.error.noColumns", |rig| {
+            rig.set(|s| s.log.sensors = Some(vec!["gpu/0/load/nope".into()]))
+        }),
+        ("log.error.tooManyColumns", |rig| {
+            rig.set(|s| s.log.sensors = None);
+            rig.schema = wide(2, 4097);
+            rig.tick(3.0);
+        }),
+    ];
+    for (key, setup) in cases {
+        setup(&mut rig);
+        let status = rig.log.start();
+        assert_eq!(status.state, LogState::Error);
+        assert_eq!(key_of(&status), Some(key));
+        assert_eq!(status.path, None, "{key}");
+        assert_eq!(
+            (
+                status.part,
+                status.part_bytes,
+                status.rows,
+                status.bytes,
+                status.recorded_ms,
+                status.dropped
+            ),
+            (0, 0, 0, 0, 0, 0),
+            "{key}"
+        );
+        assert_eq!(rig.env.emits().last(), Some(&status));
+    }
+}
+
+#[test]
 fn start_needs_a_schema() {
     let rig = Rig::new();
     let status = rig.log.start();
@@ -696,6 +739,66 @@ fn every_ticks_change_resets_the_phase() {
     }
     rig.log.stop();
     assert_eq!(rig.values(&base()), ["1", "4", "6", "8"]);
+}
+
+impl Rig {
+    /// A tick that meets the session lock taken.
+    fn contended_tick(&mut self, value: f64) {
+        let out = self.next(value);
+        let log = self.log.clone();
+        let guard = lock(&log.inner);
+        log.on_tick(&out, &self.schema, &self.store.snapshot());
+        drop(guard);
+    }
+}
+
+#[test]
+fn busy_lock_ticks_keep_the_every_n_spacing() {
+    let mut rig = Rig::new();
+    rig.set(|s| s.log.every_ticks = 2);
+    rig.tick(0.0);
+    rig.log.start();
+    rig.tick(1.0);
+    // Its turn would not record a row: nothing is lost.
+    rig.contended_tick(2.0);
+    rig.tick(3.0);
+    assert_eq!(rig.status().dropped, 0);
+    rig.tick(4.0);
+    // Its turn records: one row lost, and the phase still moves on.
+    rig.contended_tick(5.0);
+    rig.tick(6.0);
+    assert_eq!(rig.status().dropped, 1);
+    rig.tick(7.0);
+    let stopped = rig.log.stop();
+    assert_eq!(rig.values(&base()), ["1", "3", "7"]);
+    assert_eq!(stopped.dropped, 1);
+}
+
+#[test]
+fn busy_lock_ticks_before_a_barrier_are_not_dropped() {
+    let mut rig = Rig::new();
+    rig.tick(0.0);
+    rig.log.start();
+    rig.tick(1.0);
+    // Met the lock, then the pause closed the admission it was for.
+    rig.contended_tick(2.0);
+    assert_eq!(rig.log.pause().state, LogState::Paused);
+    rig.tick(3.0);
+    assert_eq!(rig.status().dropped, 0);
+    // Also when a resume has opened another admission since.
+    rig.log.resume();
+    rig.tick(4.0);
+    rig.contended_tick(5.0);
+    rig.log.pause();
+    rig.log.resume();
+    rig.tick(6.0);
+    assert_eq!(rig.status().dropped, 0);
+    // And after a stop.
+    rig.contended_tick(7.0);
+    assert_eq!(rig.log.stop().dropped, 0);
+    rig.tick(8.0);
+    assert_eq!(rig.status().dropped, 0);
+    assert_eq!(rig.values(&base()), ["1", "4", "6"]);
 }
 
 #[test]

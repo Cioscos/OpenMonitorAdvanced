@@ -198,24 +198,10 @@ pub type Listener = Box<dyn Fn(&Settings, &SettingsState) + Send + Sync>;
 
 /// `AAAAMMGG-hhmmss` (UTC) of a Unix time.
 pub(crate) fn format_stamp(unix_secs: u64) -> String {
-    let days = (unix_secs / 86_400) as i64;
-    let rest = unix_secs % 86_400;
-    // Civil date from days since 1970-01-01 (proleptic Gregorian calendar).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let t = oma_core::csv::local_time(unix_secs.saturating_mul(1_000), 0);
     format!(
-        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
     )
 }
 

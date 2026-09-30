@@ -255,3 +255,34 @@ test('hotkey_status_in_use_shows_the_effective_one', async () => {
   expect(text).toContain(t('settings.log.hotkey.keepsActive', { hotkey: 'Ctrl+Alt+Shift+R' }));
   expect(text).toContain(t('settings.log.hotkey.unset'));
 });
+
+test('hotkey_capture_shows_the_saved_value_at_once', async () => {
+  const { backend } = await setup();
+  toggleBox().focus();
+  await waitFor(() => expect((toggleBox() as HTMLInputElement).value).toBe(t('settings.log.hotkey.listening')));
+  await fireEvent.keyDown(toggleBox(), { code: 'KeyL', key: 'l', ctrlKey: true, shiftKey: true });
+  expect(document.activeElement).not.toBe(toggleBox());
+  await waitFor(() => expect((toggleBox() as HTMLInputElement).value).toBe('Ctrl+Shift+L'));
+  expect(backend.hotkeySuspensions).toEqual([true, false]);
+  // Clicking the box again starts a new capture.
+  toggleBox().focus();
+  await waitFor(() => expect((toggleBox() as HTMLInputElement).value).toBe(t('settings.log.hotkey.listening')));
+});
+
+test('hotkey_clear_leaves_the_box', async () => {
+  const { backend } = await setup({ log: { hotkeyToggle: 'Ctrl+Alt+Shift+R' } });
+  toggleBox().focus();
+  await fireEvent.keyDown(toggleBox(), { code: 'Delete', key: 'Delete' });
+  expect(document.activeElement).not.toBe(toggleBox());
+  await waitFor(() => expect((toggleBox() as HTMLInputElement).value).toBe(''));
+  expect(backend.hotkeySuspensions).toEqual([true, false]);
+});
+
+test('hotkey_refused_keeps_listening', async () => {
+  await setup();
+  toggleBox().focus();
+  await fireEvent.keyDown(toggleBox(), { code: 'KeyL', key: 'l', ctrlKey: true });
+  expect(document.activeElement).toBe(toggleBox());
+  expect((toggleBox() as HTMLInputElement).value).toBe(t('settings.log.hotkey.listening'));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+});

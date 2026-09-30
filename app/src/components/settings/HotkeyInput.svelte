@@ -55,21 +55,25 @@
     const key = readHotkeyKey(event);
     if (key.kind === 'ignore') return;
     event.preventDefault();
+    const target = event.currentTarget;
     // A held key repeats its keydown: only the first press counts (Esc still gives up).
     if (event.repeat && key.kind !== 'cancel') return;
     if (key.kind === 'cancel') {
       // Only the capture goes; the settings screen keeps Escape for leaving when nothing is captured.
       event.stopPropagation();
       refused = false;
-      event.currentTarget instanceof HTMLElement && event.currentTarget.blur();
+      target instanceof HTMLElement && target.blur();
     } else if (key.kind === 'clear') {
       refused = false;
       void onChange(null);
+      // Leave the box so it shows the saved value instead of the listening text.
+      target instanceof HTMLElement && target.blur();
     } else if (key.kind === 'refused') {
       refused = true;
     } else {
       refused = false;
       void onChange(key.hotkey);
+      target instanceof HTMLElement && target.blur();
     }
   }
 

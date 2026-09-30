@@ -236,6 +236,7 @@ export const PROPERTY_ORDER = [
   'tempMaxC',
   'tempWarningC',
   'tempCriticalC',
+  'tjMaxC',
 ];
 
 /**
@@ -254,6 +255,7 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   tempMaxC: 'celsius',
   tempWarningC: 'celsius',
   tempCriticalC: 'celsius',
+  tjMaxC: 'celsius',
 };
 
 /** Properties meant for other screens: `smartSelectable` feeds the Settings' SMART switches. */

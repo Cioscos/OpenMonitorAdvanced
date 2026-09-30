@@ -185,6 +185,13 @@ public sealed class SchemaBuilderTests
                 Sensor("/amdcpu/0/clock/2", SensorType.Clock, "Cores (Average Effective)", 2),
                 Sensor("/amdcpu/0/clock/3", SensorType.Clock, "Core #1", 3),
                 Sensor("/amdcpu/0/clock/4", SensorType.Clock, "Core #1 (Effective)", 4),
+                Sensor("/amdcpu/0/temperature/6", SensorType.Temperature, "Core (Tdie)", 6),
+                Sensor("/amdcpu/0/temperature/7", SensorType.Temperature, "P-Core #1", 7),
+                Sensor("/amdcpu/0/temperature/8", SensorType.Temperature, "E-Core #1", 8),
+                Sensor("/amdcpu/0/temperature/9", SensorType.Temperature, "Core Max", 9),
+                Sensor("/amdcpu/0/temperature/10", SensorType.Temperature, "Core Average", 10),
+                Sensor("/amdcpu/0/clock/5", SensorType.Clock, "P-Core #1", 5),
+                Sensor("/amdcpu/0/clock/6", SensorType.Clock, "E-Core #1", 6),
             ],
             []);
         var ram = new HardwareNode(
@@ -285,6 +292,180 @@ public sealed class SchemaBuilderTests
         Assert.Equal("1", coreEffective.LabelArg);
 
         Assert.DoesNotContain(schema.Schema.Sensors, s => s.LabelKey == "lhm.raw");
+    }
+
+    [Fact]
+    public void Amd7800X3dPublishesTctlAndTjMax()
+    {
+        // This machine (s1-lhm-sensors.md, "Per il piano M5b" point 6): no offset, one Tctl/Tdie sensor.
+        var cpu = new HardwareNode(
+            "/amdcpu/0",
+            HardwareType.Cpu,
+            "AMD Ryzen 7 7800X3D",
+            [
+                Sensor("/amdcpu/0/temperature/2", SensorType.Temperature, "Core (Tctl/Tdie)", 2),
+                Sensor("/amdcpu/0/temperature/3", SensorType.Temperature, "CCD1 (Tdie)", 3),
+            ],
+            [],
+            Cpu: new CpuInfo("AMD", "AMD Ryzen 7 7800X3D 8-Core Processor", 0x19, 0x61, null));
+
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Equal("89", device.Properties["tjMaxC"]);
+        Find(schema, device.Id, "temperature", "tctl");
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Name == "tdie");
+    }
+
+    [Fact]
+    public void AmdOffsetPartMapsTdieWithoutTjMax()
+    {
+        // 1800X: LHM applies an offset, so it publishes Tctl and Tdie separately and no "Core (Tctl/Tdie)".
+        var cpu = new HardwareNode(
+            "/amdcpu/0",
+            HardwareType.Cpu,
+            "AMD Ryzen 7 1800X",
+            [
+                Sensor("/amdcpu/0/temperature/0", SensorType.Temperature, "Core (Tctl)", 0),
+                Sensor("/amdcpu/0/temperature/1", SensorType.Temperature, "Core (Tdie)", 1),
+            ],
+            [],
+            Cpu: new CpuInfo("AMD", "AMD Ryzen 7 1800X Eight-Core Processor", 0x17, 0x01, null));
+
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.False(device.Properties.ContainsKey("tjMaxC"));
+        WireSensor tdie = Find(schema, device.Id, "temperature", "tdie");
+        Assert.Equal("cpu.temperature.tdie", tdie.LabelKey);
+        Assert.Equal("/amdcpu/0/temperature/1", schema.Bindings[schema.Schema.Sensors.ToList().IndexOf(tdie)].LhmIdentifier);
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Name == "tctl");
+
+        // The raw Tctl (with its offset) is never the physical temperature: it stays in the fallback.
+        WireSensor raw = Assert.Single(schema.Schema.Sensors, s => s.LabelKey == "lhm.raw");
+        Assert.Equal("Core (Tctl)", raw.LabelArg);
+    }
+
+    [Fact]
+    public void IntelDesktopMapsPackageCoresAndTjMax()
+    {
+        // i7-9700K, 8 cores, indices in the order LHM creates them (s1-lhm-sensors.md, point 6).
+        var sensors = new List<SensorNode>
+        {
+            Sensor("/intelcpu/0/temperature/0", SensorType.Temperature, "Core Max", 0),
+            Sensor("/intelcpu/0/temperature/1", SensorType.Temperature, "Core Average", 1),
+        };
+        for (int k = 1; k <= 8; k++)
+        {
+            sensors.Add(Sensor($"/intelcpu/0/temperature/{k + 1}", SensorType.Temperature, $"CPU Core #{k}", k + 1));
+        }
+
+        sensors.Add(Sensor("/intelcpu/0/temperature/10", SensorType.Temperature, "CPU Package", 10));
+        for (int k = 1; k <= 8; k++)
+        {
+            sensors.Add(Sensor($"/intelcpu/0/temperature/{k + 10}", SensorType.Temperature, $"CPU Core #{k} Distance to TjMax", k + 10));
+        }
+
+        sensors.Add(Sensor("/intelcpu/0/clock/0", SensorType.Clock, "Bus Speed", 0));
+        sensors.Add(Sensor("/intelcpu/0/clock/1", SensorType.Clock, "CPU Core #1", 1));
+        sensors.Add(Sensor("/intelcpu/0/clock/2", SensorType.Clock, "CPU Core #2", 2));
+        sensors.Add(Sensor("/intelcpu/0/load/1", SensorType.Load, "CPU Core #1", 1));
+        var cpu = new HardwareNode(
+            "/intelcpu/0",
+            HardwareType.Cpu,
+            "Intel Core i7-9700K",
+            sensors,
+            [],
+            Cpu: new CpuInfo("Intel", "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz", 6, 0x9E, 100.0));
+
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Equal("100", device.Properties["tjMaxC"]);
+        Assert.Equal("cpu.temperature.package", Find(schema, device.Id, "temperature", "package").LabelKey);
+        Assert.Equal("cpu.temperature.coreMax", Find(schema, device.Id, "temperature", "core-max").LabelKey);
+        Assert.Equal("cpu.temperature.coreAverage", Find(schema, device.Id, "temperature", "core-average").LabelKey);
+        for (int k = 1; k <= 8; k++)
+        {
+            WireSensor core = Find(schema, device.Id, "temperature", $"core-{k}");
+            Assert.Equal("cpu.temperature.core", core.LabelKey);
+            Assert.Equal(k.ToString(System.Globalization.CultureInfo.InvariantCulture), core.LabelArg);
+        }
+
+        Assert.Equal(11, schema.Schema.Sensors.Count(s => s.Kind == "temperature")); // no distances, no fallback
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.LabelKey == "lhm.raw");
+        WireSensor clock = Find(schema, device.Id, "clock", "core-2");
+        Assert.Equal("cpu.clock.core", clock.LabelKey);
+        Assert.Equal("2", clock.LabelArg);
+        Find(schema, device.Id, "clock", "bus");
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "load"); // per-core loads stay dropped
+    }
+
+    [Fact]
+    public void IntelHybridMapsPAndECores()
+    {
+        // i5-12600K: 6 P-cores and 4 E-cores, each with its distance sensor and its clock.
+        var sensors = new List<SensorNode>
+        {
+            Sensor("/intelcpu/0/temperature/0", SensorType.Temperature, "Core Max", 0),
+            Sensor("/intelcpu/0/temperature/1", SensorType.Temperature, "Core Average", 1),
+        };
+        int i = 2;
+        foreach (string prefix in new[] { "P-Core", "E-Core" })
+        {
+            int count = prefix == "P-Core" ? 6 : 4;
+            for (int k = 1; k <= count; k++)
+            {
+                sensors.Add(Sensor($"/intelcpu/0/temperature/{i}", SensorType.Temperature, $"{prefix} #{k}", i));
+                sensors.Add(Sensor($"/intelcpu/0/temperature/{i + 100}", SensorType.Temperature, $"{prefix} #{k} Distance to TjMax", i + 100));
+                sensors.Add(Sensor($"/intelcpu/0/clock/{i}", SensorType.Clock, $"{prefix} #{k}", i));
+                i++;
+            }
+        }
+
+        sensors.Add(Sensor("/intelcpu/0/temperature/99", SensorType.Temperature, "CPU Package", 99));
+        var cpu = new HardwareNode(
+            "/intelcpu/0",
+            HardwareType.Cpu,
+            "12th Gen Intel Core i5-12600K",
+            sensors,
+            [],
+            Cpu: new CpuInfo("Intel", "12th Gen Intel(R) Core(TM) i5-12600K", 6, 0x97, 100.0));
+
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Equal("100", device.Properties["tjMaxC"]);
+        WireSensor p3 = Find(schema, device.Id, "temperature", "p-core-3");
+        Assert.Equal("cpu.temperature.pCore", p3.LabelKey);
+        Assert.Equal("3", p3.LabelArg);
+        WireSensor e4 = Find(schema, device.Id, "temperature", "e-core-4");
+        Assert.Equal("cpu.temperature.eCore", e4.LabelKey);
+        Assert.Equal("4", e4.LabelArg);
+        WireSensor pClock = Find(schema, device.Id, "clock", "p-core-6");
+        Assert.Equal("cpu.clock.pCore", pClock.LabelKey);
+        Assert.Equal("6", pClock.LabelArg);
+        Assert.Equal("cpu.clock.eCore", Find(schema, device.Id, "clock", "e-core-1").LabelKey);
+        Find(schema, device.Id, "temperature", "package");
+        Assert.Equal(13, schema.Schema.Sensors.Count(s => s.Kind == "temperature")); // 10 cores + max + average + package
+        Assert.DoesNotContain(schema.Schema.Sensors, s => s.LabelKey == "lhm.raw");
+    }
+
+    [Fact]
+    public void CpuWithoutIdentityHasNoTjMax()
+    {
+        var cpu = new HardwareNode(
+            "/amdcpu/0",
+            HardwareType.Cpu,
+            "AMD Ryzen 7 7800X3D",
+            [Sensor("/amdcpu/0/temperature/2", SensorType.Temperature, "Core (Tctl/Tdie)", 2)],
+            []);
+
+        BuiltSchema schema = Build([cpu], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Empty(device.Properties);
+        Find(schema, device.Id, "temperature", "tctl");
     }
 
     [Fact]

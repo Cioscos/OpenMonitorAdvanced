@@ -41,8 +41,12 @@ public static partial class SchemaBuilder
     private static readonly IReadOnlyDictionary<string, string> UnitByKind =
         FallbackByType.Values.GroupBy(v => v.Kind).ToDictionary(g => g.Key, g => g.First().Unit);
 
-    [GeneratedRegex(@"^CPU Core #\d+")]
+    [GeneratedRegex(@"^(CPU Core|P-Core|E-Core) #\d+")]
     private static partial Regex CpuCorePattern();
+
+    // The core sensors of an Intel CPU: "CPU Core #k", or "P-Core #k" / "E-Core #k" on a hybrid one.
+    [GeneratedRegex(@"^(CPU Core|P-Core|E-Core) #(\d+)$")]
+    private static partial Regex IntelCoreNumberPattern();
 
     [GeneratedRegex(@"^CCD(\d+) \(Tdie\)$")]
     private static partial Regex CcdPattern();
@@ -126,8 +130,22 @@ public static partial class SchemaBuilder
     private static void BuildCpuDevice(HardwareNode cpu, Output output)
     {
         uint index = ParseTrailingIndex(cpu.Identifier);
-        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", cpu.Name, new CpuHint(index), s => Resolve(MatchCpuSensor, s), output);
+        IReadOnlyDictionary<string, string> properties = EmptyProperties;
+        if (cpu.Cpu is not null && CpuIdentity.TjMaxC(cpu.Cpu) is int tjMaxC)
+        {
+            properties = new Dictionary<string, string> { ["tjMaxC"] = tjMaxC.ToString(CultureInfo.InvariantCulture) };
+        }
+
+        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", cpu.Name, new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties);
     }
+
+    /// <summary>Kind prefix and label key of an Intel core sensor, by the LHM name prefix of its core type.</summary>
+    private static (string Prefix, string TemperatureLabel, string ClockLabel) IntelCoreKind(string lhmPrefix) => lhmPrefix switch
+    {
+        "P-Core" => ("p-core", "cpu.temperature.pCore", "cpu.clock.pCore"),
+        "E-Core" => ("e-core", "cpu.temperature.eCore", "cpu.clock.eCore"),
+        _ => ("core", "cpu.temperature.core", "cpu.clock.core"),
+    };
 
     private static SensorMatch MatchCpuSensor(SensorNode s)
     {
@@ -157,6 +175,29 @@ public static partial class SchemaBuilder
                     return Include("temperature", "tctl", "cpu.temperature.tctl");
                 }
 
+                // Only present when LHM applies a Tctl offset; the raw "Core (Tctl)" next to it
+                // is never the physical temperature and stays in the fallback.
+                if (s.Name == "Core (Tdie)")
+                {
+                    return Include("temperature", "tdie", "cpu.temperature.tdie");
+                }
+
+                // The per-core "... Distance to TjMax" (Intel) is TjMax minus the core temperature.
+                if (s.Name.EndsWith(" Distance to TjMax", StringComparison.Ordinal))
+                {
+                    return Discard();
+                }
+
+                if (s.Name == "Core Max")
+                {
+                    return Include("temperature", "core-max", "cpu.temperature.coreMax");
+                }
+
+                if (s.Name == "Core Average")
+                {
+                    return Include("temperature", "core-average", "cpu.temperature.coreAverage");
+                }
+
                 Match ccd = CcdPattern().Match(s.Name);
                 if (ccd.Success)
                 {
@@ -172,6 +213,13 @@ public static partial class SchemaBuilder
                 if (coreTemp.Success)
                 {
                     return Include("temperature", $"core-{coreTemp.Groups[1].Value}", "cpu.temperature.core", coreTemp.Groups[1].Value);
+                }
+
+                Match intelTemp = IntelCoreNumberPattern().Match(s.Name);
+                if (intelTemp.Success)
+                {
+                    (string prefix, string label, _) = IntelCoreKind(intelTemp.Groups[1].Value);
+                    return Include("temperature", $"{prefix}-{intelTemp.Groups[2].Value}", label, intelTemp.Groups[2].Value);
                 }
 
                 return NoMatch();
@@ -235,6 +283,13 @@ public static partial class SchemaBuilder
                 if (clock.Success)
                 {
                     return Include("clock", $"core-{clock.Groups[1].Value}", "cpu.clock.core", clock.Groups[1].Value);
+                }
+
+                Match intelClock = IntelCoreNumberPattern().Match(s.Name);
+                if (intelClock.Success)
+                {
+                    (string prefix, _, string label) = IntelCoreKind(intelClock.Groups[1].Value);
+                    return Include("clock", $"{prefix}-{intelClock.Groups[2].Value}", label, intelClock.Groups[2].Value);
                 }
 
                 return NoMatch();
@@ -599,7 +654,8 @@ public static partial class SchemaBuilder
         string name,
         IdentityHint? hint,
         Func<SensorNode, SensorMatch> resolve,
-        Output output)
+        Output output,
+        IReadOnlyDictionary<string, string>? properties = null)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();
@@ -623,7 +679,7 @@ public static partial class SchemaBuilder
             return;
         }
 
-        output.TryAdd(node.Identifier, new WireDevice(deviceId, kind, name, Vendor: null, EmptyProperties, hint), local, localBindings);
+        output.TryAdd(node.Identifier, new WireDevice(deviceId, kind, name, Vendor: null, properties ?? EmptyProperties, hint), local, localBindings);
     }
 
     /// <summary>

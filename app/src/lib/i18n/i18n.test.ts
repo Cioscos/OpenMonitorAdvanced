@@ -47,7 +47,7 @@ test('every sensor source has a badge name', () => {
   }
 });
 
-// Device property keys produced by oma-win (GPU layers and storage).
+// Device property keys produced by oma-win (GPU layers, storage and the CPU).
 const PROPERTIES = [
   'pciAddress',
   'integrated',
@@ -61,6 +61,7 @@ const PROPERTIES = [
   'tempMaxC',
   'tempWarningC',
   'tempCriticalC',
+  'tjMaxC',
 ];
 
 test('every device property has a label', () => {

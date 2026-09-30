@@ -1,4 +1,5 @@
 using LibreHardwareMonitor.Hardware;
+using LibreHardwareMonitor.Hardware.Cpu;
 using LibreHardwareMonitor.Hardware.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -439,7 +440,31 @@ public sealed class LhmTree : IHardwareTree
         }
 
         HardwareNode[] children = [.. hardware.SubHardware.Select(sub => BuildNode(sub, null, sensors))];
-        return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, storage);
+        return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, storage, ReadCpuInfo(hardware, active));
+    }
+
+    /// <summary>
+    /// The CPUID identity of a CPU (raw brand string, family, model) and, for an Intel CPU, the
+    /// "TjMax [°C]" parameter of its "CPU Package" sensor. Members are read directly (no
+    /// reflection), so the trimmer keeps them.
+    /// </summary>
+    private static CpuInfo? ReadCpuInfo(IHardware hardware, ISensor[] sensors)
+    {
+        if (hardware is not GenericCpu cpu || cpu.CpuId.Length == 0 || cpu.CpuId[0].Length == 0)
+        {
+            return null;
+        }
+
+        CpuId id = cpu.CpuId[0][0];
+        double? intelTjMaxC = null;
+        if (id.Vendor == Vendor.Intel)
+        {
+            ISensor? package = sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Name == "CPU Package");
+            IParameter? tjMax = package?.Parameters.FirstOrDefault(p => p.Name == "TjMax [°C]");
+            intelTjMaxC = tjMax?.Value;
+        }
+
+        return new CpuInfo(id.Vendor.ToString(), id.BrandString ?? string.Empty, (int)id.Family, (int)id.Model, intelTjMaxC);
     }
 
     private sealed record Composition(HardwareNode[] Roots, Dictionary<string, Entry> Entries, Dictionary<string, ISensor> Sensors)

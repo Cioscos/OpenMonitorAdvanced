@@ -8,7 +8,8 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <c>Motherboard</c>, <c>Cpu</c>, <c>Memory</c>, <c>Storage</c>, <c>SuperIO</c>,
 /// <c>Cooler</c> or <c>Psu</c> hardware), so <see cref="SchemaBuilder"/> is testable
 /// without LHM itself or administrator rights. <paramref name="Children"/> holds
-/// sub-hardware such as a Super I/O chip under a motherboard.
+/// sub-hardware such as a Super I/O chip under a motherboard; <paramref name="Storage"/> and
+/// <paramref name="Cpu"/> carry the identity inputs of a <c>Storage</c> or <c>Cpu</c> node.
 /// </summary>
 public sealed record HardwareNode(
     string Identifier,
@@ -16,7 +17,8 @@ public sealed record HardwareNode(
     string Name,
     IReadOnlyList<SensorNode> Sensors,
     IReadOnlyList<HardwareNode> Children,
-    StorageInfo? Storage = null);
+    StorageInfo? Storage = null,
+    CpuInfo? Cpu = null);
 
 /// <summary>
 /// A read-only view of one LHM sensor. <paramref name="Value"/> is populated only

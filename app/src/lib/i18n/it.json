@@ -167,7 +167,7 @@
   "rule.disk-critical.name": "Avviso critico del disco",
   "rule.disk-critical.message": "{device} segnala un avviso critico",
   "rule.volume-used.name": "Spazio usato del volume",
-  "rule.volume-used.message": "{sensor} quasi pieno ({value})",
+  "rule.volume-used.message": "Volume {volume} quasi pieno ({value})",
   "rule.ram-used.name": "RAM usata",
   "rule.ram-used.message": "Memoria quasi piena ({value})",
   "rule.battery-low.name": "Batteria scarica",

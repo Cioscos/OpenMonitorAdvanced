@@ -332,7 +332,8 @@ fn utf16_len(text: &str) -> usize {
 
 /// The text of one alert, shared by the tooltip verdict and the toast: its
 /// `messageKey` with `{device}` (and the other report params), `{sensor}`
-/// (the translated label), `{threshold}` and `{value}` in the chosen units;
+/// (the translated label), `{volume}` (the label's own name, such as "C:",
+/// else the translated label), `{threshold}` and `{value}` in the chosen units;
 /// `{value}` is "—" while the sensor has no value. Values read like the
 /// tooltip's (`92 %`), so the verdict matches the values after it.
 pub fn alert_text(
@@ -350,9 +351,11 @@ pub fn alert_text(
     };
     let threshold = alert_value(lang, alert.threshold, alert.unit, temperature, rate);
     let sensor = sensor_label(lang, &alert.sensor_label);
+    let volume = alert.sensor_label.arg.as_deref().unwrap_or(&sensor);
     // The computed params come first: `t` uses the first one with a name.
     let params: Vec<(&str, &str)> = [
         ("sensor", sensor.as_str()),
+        ("volume", volume),
         ("threshold", threshold.as_str()),
         ("value", value.as_str()),
     ]
@@ -1028,9 +1031,16 @@ mod tests {
     fn volume_messages_name_the_volume() {
         let mut volume = alert("volume-used", "storage/0", Unit::Percent, Level::Warn, 95.0);
         volume.sensor_label = Label::with_arg("storage.volumeUsed", "C:");
-        let text = |lang| alert_text(lang, &volume, &schema(), C, B);
-        assert_eq!(text(Lang::En), "Volume C: used almost full (95 %)");
-        assert_eq!(text(Lang::It), "Volume C: occupato quasi pieno (95 %)");
+        let text = |lang, volume: &Alert| alert_text(lang, volume, &schema(), C, B);
+        assert_eq!(text(Lang::En, &volume), "Volume C: almost full (95 %)");
+        assert_eq!(text(Lang::It, &volume), "Volume C: quasi pieno (95 %)");
+        // Without the volume's own name, the whole label stands in for it.
+        volume.sensor_label = Label::new("memory.load");
+        let label = sensor_label(Lang::En, &volume.sensor_label);
+        assert_eq!(
+            text(Lang::En, &volume),
+            format!("Volume {label} almost full (95 %)")
+        );
     }
 
     #[test]

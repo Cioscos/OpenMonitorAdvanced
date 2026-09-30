@@ -237,6 +237,9 @@ test('volume_used_message_names_the_volume', () => {
     params: { device: 'Disk 0 (C:)' },
   });
   const r = report({ level: 'warn', alerts: [volume] });
-  expect(text(r).title).toBe('Volume C: used almost full (95%)');
-  expect(text(r, { t: tIt, locale: 'it' }).title).toBe('Volume C: occupato quasi pieno (95%)');
+  expect(text(r).title).toBe('Volume C: almost full (95%)');
+  expect(text(r, { t: tIt, locale: 'it' }).title).toBe('Volume C: quasi pieno (95%)');
+  // Without the volume's own name, the whole label stands in for it.
+  const unnamed = report({ level: 'warn', alerts: [{ ...volume, sensorLabel: { key: 'memory.load' } }] });
+  expect(text(unnamed).title).toBe(`Volume ${tEn('sensor.memory.load')} almost full (95%)`);
 });

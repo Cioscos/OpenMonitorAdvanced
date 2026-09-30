@@ -95,13 +95,16 @@ function alertMessage(alert: Alert, schema: Schema | null, t: Translate, locale:
   const rate = rateFor(schema, alert.deviceId, throughput);
   const format = (value: number | null) => formatAlertValue(value, alert.unit, locale, t, temperature, rate);
   const device = alert.params.device ?? schema?.devices.find((d) => d.id === alert.deviceId)?.name ?? alert.deviceId;
+  const sensor = t(`sensor.${alert.sensorLabel.key}`, alert.sensorLabel.arg === undefined ? {} : { arg: alert.sensorLabel.arg });
   return t(alert.messageKey, {
     ...alert.params,
     device,
     // The value only counts while the sensor still reports; a retained alert says so.
     value: alert.valid && alert.value !== null ? format(alert.value) : t('health.unavailableValue'),
     threshold: alert.threshold === null ? DASH : format(alert.threshold),
-    sensor: t(`sensor.${alert.sensorLabel.key}`, alert.sensorLabel.arg === undefined ? {} : { arg: alert.sensorLabel.arg }),
+    sensor,
+    // The volume's own name ("C:"), else the whole label.
+    volume: alert.sensorLabel.arg ?? sensor,
   });
 }
 

@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { i18n } from '../../../lib/i18n/index.svelte';
   import { formatNumber, parseNumber } from '../../../lib/rules';
 
   // A number typed as text. While typing the text is only a local draft: an empty field, a lone sign
   // or a separator without digits is never sent. Enter or leaving the field commits a complete number;
   // anything else goes back to the value in effect, and so does Escape. A refused number stays in the
-  // field so it can be corrected next to its error.
+  // field so it can be corrected next to its error, until that error clears.
   let {
     id,
     value,
@@ -34,6 +35,17 @@
   const shown = $derived(formatNumber(value, i18n.locale));
   /** The text being typed; null while the field shows the value in effect. */
   let draft = $state<string | null>(null);
+  /** The refused text kept in the field, so it goes once its error clears. */
+  let refused: string | null = null;
+  // svelte-ignore state_referenced_locally
+  let wasInvalid = invalid;
+  $effect(() => {
+    const now = invalid;
+    if (wasInvalid && !now) untrack(() => {
+      if (refused !== null && draft === refused) draft = null;
+    });
+    wasInvalid = now;
+  });
   const described = $derived([describedBy, unit ? `${id}-unit` : undefined].filter(Boolean).join(' ') || undefined);
 
   async function commit() {
@@ -43,7 +55,7 @@
     const next = parseNumber(typed, integer);
     if (next === null || (Number.isFinite(value) && formatNumber(next, i18n.locale) === shown)) return;
     const taken = await onCommit(next);
-    if (taken === false && draft === null) draft = typed;
+    if (taken === false && draft === null) draft = refused = typed;
   }
 
   function onKeydown(event: KeyboardEvent) {
@@ -70,7 +82,10 @@
     {disabled}
     aria-invalid={invalid ? 'true' : undefined}
     aria-describedby={described}
-    oninput={(event) => (draft = event.currentTarget.value)}
+    oninput={(event) => {
+      draft = event.currentTarget.value;
+      refused = null;
+    }}
     onkeydown={onKeydown}
     onblur={() => void commit()}
   />

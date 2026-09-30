@@ -182,6 +182,14 @@ pub(crate) fn load_values(
     Ok((hold.fresh(loads), None))
 }
 
+/// True when a reading with this PDH status and presence repeats a held
+/// value: `PDH_CALC_NEGATIVE_DENOMINATOR` within the [`Hold`] bound. The
+/// poll then reports `repeated`, so the engine marks its row
+/// `Quality::Held` and rules do not count a repeat as a new measurement.
+pub(crate) fn repeats_held(status: Option<u32>, present: bool) -> bool {
+    status == Some(PDH_CALC_NEGATIVE_DENOMINATOR) && present
+}
+
 /// At most one line per [`LOG_INTERVAL`], with the count of the events it
 /// kept quiet since the last one.
 #[derive(Debug, Default)]
@@ -258,6 +266,8 @@ pub struct CpuProvider {
     clock_hold: Hold<f64>,
     load_log: HourlyLog,
     clock_log: HourlyLog,
+    /// The last poll repeated a held load or clock (`Provider::repeated`).
+    repeated: bool,
 }
 
 /// `true` only for the first call after a discover: PDH rate counters were
@@ -346,6 +356,7 @@ impl Provider for CpuProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
+        self.repeated = false;
         let fresh = take_fresh(&mut self.fresh);
         let counters = self.counters.as_mut().ok_or(ProviderError::Rediscover)?;
         counters.query.collect()?;
@@ -385,8 +396,15 @@ impl Provider for CpuProvider {
                 );
             }
         }
+        // Conservative: one held reading marks the whole row held.
+        self.repeated = repeats_held(load_status, values.iter().any(Option::is_some))
+            || repeats_held(clock_status, clock.is_some());
         values.push(clock);
         Ok(values)
+    }
+
+    fn repeated(&self) -> bool {
+        self.repeated
     }
 }
 
@@ -593,7 +611,44 @@ mod tests {
             Ok((vec![None; 2], Some(PDH_CALC_NEGATIVE_DENOMINATOR)))
         );
         // A different processor count still asks for a rediscovery.
-        assert!(poll(utility(&[("_Total", 5.0), ("0,0", 5.0), ("0,1", 5.0)])).is_err());
+        assert_eq!(
+            poll(utility(&[("_Total", 5.0), ("0,0", 5.0), ("0,1", 5.0)])),
+            Err(ProviderError::Rediscover.to_string())
+        );
+    }
+
+    #[test]
+    fn a_poll_that_repeats_a_held_value_is_marked_repeated() {
+        // A held load or clock: the engine then marks the row `Quality::Held`.
+        assert!(repeats_held(Some(PDH_CALC_NEGATIVE_DENOMINATOR), true));
+        // Past the bound nothing is repeated: the values are absent, not held.
+        assert!(!repeats_held(Some(PDH_CALC_NEGATIVE_DENOMINATOR), false));
+        // Other statuses never hold, and a measured value is fresh.
+        assert!(!repeats_held(Some(PDH_INVALID_DATA), false));
+        assert!(!repeats_held(None, true));
+        assert!(!repeats_held(None, false));
+
+        // The wrap sequence: a valid poll, 3 held polls, then an absent one.
+        let processors = [lp(0, 0)];
+        let mut hold = Hold::default();
+        let mut repeated = Vec::new();
+        let mut poll = |result| {
+            let (loads, status) = load_values(result, &processors, &mut hold).unwrap();
+            repeated.push(repeats_held(status, loads.iter().any(Option::is_some)));
+        };
+        poll(utility(&[("_Total", 5.0), ("0,0", 5.0)]));
+        for _ in 0..=MAX_HELD_POLLS {
+            poll(array_error(PDH_CALC_NEGATIVE_DENOMINATOR));
+        }
+        poll(utility(&[("_Total", 6.0), ("0,0", 6.0)]));
+        assert_eq!(repeated, [false, true, true, true, false, false]);
+
+        // The clock alone: the same decision on its own reading.
+        let mut hold = Hold::default();
+        let (clock, status) = clock_value(Ok(Some(4500.0)), &mut hold);
+        assert!(!repeats_held(status, clock.is_some()));
+        let (clock, status) = clock_value(Err(PDH_CALC_NEGATIVE_DENOMINATOR), &mut hold);
+        assert!(repeats_held(status, clock.is_some()));
     }
 
     #[test]

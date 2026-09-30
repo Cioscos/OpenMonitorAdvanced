@@ -1,6 +1,6 @@
-//! Tray icon: the menu (open, views, anti-cheat mode, quit), a dynamic icon in
-//! the color of the health level and a tooltip led by its verdict, refreshed
-//! every tick, and the labels' language.
+//! Tray icon: the menu (open, views, log, anti-cheat mode, quit), a dynamic icon
+//! in the color of the health level (with a red dot while the log records) and
+//! a tooltip led by its verdict, refreshed every tick, and the labels' language.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -8,11 +8,14 @@ use oma_core::model::{DeviceKind, Schema, Snapshot, Unit};
 use oma_core::rules::HealthReport;
 use oma_core::settings::{Language, Settings, ViewKind};
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::i18n::{resolve, t, Lang};
+use crate::log::session::{LogState, LogStatus};
+use crate::log::LogService;
+use crate::notifier::SystemToaster;
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
 use crate::tray_icon::{
@@ -31,8 +34,67 @@ pub trait TrayBackend: Send + Sync {
     /// A 32x32 RGBA image.
     fn set_icon(&self, rgba: Vec<u8>);
     fn set_tooltip(&self, text: String);
-    /// Rewrites the menu labels in `lang`.
-    fn set_labels(&self, lang: Lang);
+    /// Rebuilds the menu in `lang`, with the log items of `log`.
+    fn set_menu(&self, lang: Lang, log: LogState);
+}
+
+/// The log items of the tray menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogMenuItem {
+    Start,
+    Pause,
+    Resume,
+    Stop,
+}
+
+impl LogMenuItem {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Start => "log_start",
+            Self::Pause => "log_pause",
+            Self::Resume => "log_resume",
+            Self::Stop => "log_stop",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [Self::Start, Self::Pause, Self::Resume, Self::Stop]
+            .into_iter()
+            .find(|item| item.id() == id)
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Start => "tray.log.start",
+            Self::Pause => "tray.log.pause",
+            Self::Resume => "tray.log.resume",
+            Self::Stop => "tray.log.stop",
+        }
+    }
+}
+
+/// The log items to show while the log is in `state`.
+pub fn log_menu(state: LogState) -> &'static [LogMenuItem] {
+    match state {
+        LogState::Idle | LogState::Error => &[LogMenuItem::Start],
+        LogState::Recording => &[LogMenuItem::Pause, LogMenuItem::Stop],
+        LogState::Paused => &[LogMenuItem::Resume, LogMenuItem::Stop],
+    }
+}
+
+/// The toast for a log command started from the tray that ended in `error`,
+/// when no window is open to show it (the coordinator toasts only errors of
+/// its own, R6).
+fn error_toast(lang: Lang, window_open: bool, status: &LogStatus) -> Option<(String, String)> {
+    if window_open || status.state != LogState::Error {
+        return None;
+    }
+    let error = status.error.as_ref()?;
+    let detail = error.detail.as_deref().unwrap_or("");
+    Some((
+        t(lang, "log.toast.errorTitle", &[]),
+        t(lang, &error.key, &[("detail", detail)]),
+    ))
 }
 
 fn index_of(schema: &Schema, id: &str) -> Option<usize> {
@@ -104,8 +166,9 @@ impl Resolved {
 struct State {
     lang: Lang,
     resolved: Option<Resolved>,
-    /// What the icon last sent shows, and its style.
-    icon: Option<(IconContent, IconStyle)>,
+    log: LogState,
+    /// What the icon last sent shows, its style and whether it has the dot.
+    icon: Option<(IconContent, IconStyle, bool)>,
     tooltip: Option<String>,
 }
 
@@ -122,6 +185,7 @@ impl<B: TrayBackend> TrayController<B> {
             backend,
             state: Mutex::new(State {
                 lang,
+                log: LogState::Idle,
                 resolved: None,
                 icon: None,
                 tooltip: None,
@@ -168,13 +232,12 @@ impl<B: TrayBackend> TrayController<B> {
         let (value, unit) = reading(icon);
         let content = icon_content(value, unit, temperature);
         let style = style_for(health.level);
-        if !state
-            .icon
-            .as_ref()
-            .is_some_and(|(sent, sent_style)| *sent == content && *sent_style == style)
-        {
-            self.backend.set_icon(render(&content, style));
-            state.icon = Some((content, style));
+        let recording = state.log == LogState::Recording;
+        if !state.icon.as_ref().is_some_and(|(sent, sent_style, dot)| {
+            *sent == content && *sent_style == style && *dot == recording
+        }) {
+            self.backend.set_icon(render(&content, style, recording));
+            state.icon = Some((content, style, recording));
         }
 
         let item = |label_key, index| {
@@ -217,7 +280,25 @@ impl<B: TrayBackend> TrayController<B> {
         state.lang = lang;
         // The tooltip words change with the language: rebuild it on the next tick.
         state.tooltip = None;
-        self.backend.set_labels(lang);
+        self.backend.set_menu(lang, state.log);
+    }
+
+    /// Follows the log: rebuilds the menu, and redraws the icon when the dot
+    /// appears or goes. A no-op when the state is unchanged.
+    pub fn set_log_state(&self, log: LogState) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.log == log {
+            return;
+        }
+        state.log = log;
+        self.backend.set_menu(state.lang, log);
+        let recording = log == LogState::Recording;
+        if let Some((content, style, dot)) = state.icon.take() {
+            if dot != recording {
+                self.backend.set_icon(render(&content, style, recording));
+            }
+            state.icon = Some((content, style, recording));
+        }
     }
 }
 
@@ -233,6 +314,41 @@ struct MenuItems {
     advanced: MenuItem<Wry>,
     anti_cheat: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
+}
+
+impl MenuItems {
+    /// A menu of the shared items and fresh log items for `log`. The shared
+    /// items keep their handles (the anti-cheat checkbox follows the settings
+    /// store through one), and may sit in the old and the new menu at once.
+    fn menu(&self, app: &AppHandle, lang: Lang, log: LogState) -> tauri::Result<Menu<Wry>> {
+        let log_items = log_menu(log)
+            .iter()
+            .map(|item| {
+                MenuItem::with_id(
+                    app,
+                    item.id(),
+                    t(lang, item.label_key(), &[]),
+                    true,
+                    None::<&str>,
+                )
+            })
+            .collect::<tauri::Result<Vec<_>>>()?;
+        let separators = [
+            PredefinedMenuItem::separator(app)?,
+            PredefinedMenuItem::separator(app)?,
+            PredefinedMenuItem::separator(app)?,
+        ];
+        let mut entries: Vec<&dyn IsMenuItem<Wry>> =
+            vec![&self.open, &self.simple, &self.advanced, &separators[0]];
+        entries.extend(log_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
+        entries.extend([
+            &separators[1] as &dyn IsMenuItem<Wry>,
+            &self.anti_cheat,
+            &separators[2],
+            &self.quit,
+        ]);
+        Menu::with_items(app, &entries)
+    }
 }
 
 /// The real tray. Every change is posted to the main thread instead of being
@@ -258,14 +374,17 @@ impl TrayBackend for TauriBackend {
         });
     }
 
-    fn set_labels(&self, lang: Lang) {
-        let items = self.items.clone();
+    fn set_menu(&self, lang: Lang, log: LogState) {
+        let (app, tray, items) = (self.app.clone(), self.tray.clone(), self.items.clone());
         let _ = self.app.run_on_main_thread(move || {
             let _ = items.open.set_text(t(lang, "tray.open", &[]));
             let _ = items.simple.set_text(t(lang, "tray.viewSimple", &[]));
             let _ = items.advanced.set_text(t(lang, "tray.viewAdvanced", &[]));
             let _ = items.anti_cheat.set_text(t(lang, "tray.antiCheat", &[]));
             let _ = items.quit.set_text(t(lang, "tray.quit", &[]));
+            if let Ok(menu) = items.menu(&app, lang, log) {
+                let _ = tray.set_menu(Some(menu));
+            }
         });
     }
 }
@@ -277,6 +396,35 @@ fn open_view(app: &AppHandle, view: ViewKind) {
     window::show_main_on(app, view);
     app.state::<Arc<SettingsStore>>()
         .update_with(|settings| settings.view.last = Some(view));
+}
+
+/// Runs a log command of the menu on a worker thread (they wait for the
+/// writer). A failure with no window open is toasted here, since the
+/// coordinator does not toast what a command returns.
+fn run_log_command(app: &AppHandle, item: LogMenuItem) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Some(log) = app.try_state::<Arc<LogService>>() else {
+            return;
+        };
+        let status = match item {
+            LogMenuItem::Start => log.start(),
+            LogMenuItem::Pause => log.pause(),
+            LogMenuItem::Resume => log.resume(),
+            LogMenuItem::Stop => log.stop(),
+        };
+        let window_open = app.get_webview_window(window::MAIN).is_some();
+        let lang = language_for(
+            app.state::<Arc<SettingsStore>>()
+                .settings()
+                .general
+                .language,
+        );
+        if let Some((title, body)) = error_toast(lang, window_open, &status) {
+            let toaster = app.state::<Arc<SystemToaster>>();
+            crate::log::commands::toast_log(&toaster, title, body);
+        }
+    });
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
@@ -312,23 +460,20 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", t(lang, "tray.quit", &[]), true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open,
-            &simple,
-            &advanced,
-            &PredefinedMenuItem::separator(app)?,
-            &anti_cheat,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
-    )?;
+    let items = MenuItems {
+        open,
+        simple,
+        advanced,
+        anti_cheat,
+        quit,
+    };
+    let menu = items.menu(app, lang, LogState::Idle)?;
     // The checkbox follows the settings store (see `ToggleState`), whichever
     // way `sources.antiCheat` changes: this item, the `set_anti_cheat`
     // command or the settings view.
-    app.state::<ServiceShell>()
-        .set_tray_item(Arc::new(anti_cheat.clone()) as Arc<dyn crate::service::ToggleIndicator>);
+    app.state::<ServiceShell>().set_tray_item(
+        Arc::new(items.anti_cheat.clone()) as Arc<dyn crate::service::ToggleIndicator>
+    );
     let tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("bundle icon").clone())
         .tooltip(PRODUCT_NAME)
@@ -350,7 +495,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
                 let _ = shell.set_anti_cheat(enabled);
             }
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(item) = LogMenuItem::from_id(id) {
+                    run_log_command(app, item);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -366,13 +515,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
     let backend = TauriBackend {
         app: app.clone(),
         tray,
-        items: MenuItems {
-            open,
-            simple,
-            advanced,
-            anti_cheat,
-            quit,
-        },
+        items,
     };
     Ok(Arc::new(TrayController::new(backend, lang)))
 }
@@ -387,6 +530,7 @@ mod tests {
     use oma_core::settings::{Settings, TemperatureUnit};
     use std::collections::BTreeMap;
 
+    use crate::log::session::LogError;
     use crate::tray_icon::{CRIT, NEUTRAL, OK, WARN};
     use std::sync::{Arc, Mutex};
 
@@ -523,7 +667,7 @@ mod tests {
     struct Calls {
         icons: Vec<Vec<u8>>,
         tooltips: Vec<String>,
-        labels: Vec<Lang>,
+        menus: Vec<(Lang, LogState)>,
     }
 
     #[derive(Clone, Default)]
@@ -536,8 +680,8 @@ mod tests {
         fn set_tooltip(&self, text: String) {
             self.0.lock().unwrap().tooltips.push(text);
         }
-        fn set_labels(&self, lang: Lang) {
-            self.0.lock().unwrap().labels.push(lang);
+        fn set_menu(&self, lang: Lang, log: LogState) {
+            self.0.lock().unwrap().menus.push((lang, log));
         }
     }
 
@@ -561,7 +705,7 @@ mod tests {
             );
             assert_eq!(
                 calls.icons[0],
-                render(&IconContent::Text("62".to_owned()), NEUTRAL)
+                render(&IconContent::Text("62".to_owned()), NEUTRAL, false)
             );
         }
 
@@ -596,8 +740,8 @@ mod tests {
         assert_eq!(
             calls.icons,
             [
-                render(&IconContent::Text("62".to_owned()), NEUTRAL),
-                render(&IconContent::Bar(48), NEUTRAL)
+                render(&IconContent::Text("62".to_owned()), NEUTRAL, false),
+                render(&IconContent::Bar(48), NEUTRAL, false)
             ]
         );
         assert_eq!(
@@ -648,7 +792,10 @@ mod tests {
         assert_eq!(count(), 3, "49.4 still rounds to 49");
 
         let calls = backend.0.lock().unwrap();
-        assert_eq!(calls.icons[2], render(&IconContent::Bar(49), NEUTRAL));
+        assert_eq!(
+            calls.icons[2],
+            render(&IconContent::Bar(49), NEUTRAL, false)
+        );
     }
 
     #[test]
@@ -678,14 +825,131 @@ mod tests {
         tray.update(&schema, &snap, &HealthReport::default(), &settings);
 
         tray.relabel(Lang::En);
-        assert!(backend.0.lock().unwrap().labels.is_empty());
+        assert!(backend.0.lock().unwrap().menus.is_empty());
         tray.relabel(Lang::It);
         tray.relabel(Lang::It);
-        assert_eq!(backend.0.lock().unwrap().labels, [Lang::It]);
+        assert_eq!(
+            backend.0.lock().unwrap().menus,
+            [(Lang::It, LogState::Idle)]
+        );
 
         // The tooltip is rebuilt in the new language on the next tick.
         tray.update(&schema, &snap, &HealthReport::default(), &settings);
         assert_eq!(backend.0.lock().unwrap().tooltips.len(), 2);
+    }
+
+    #[test]
+    fn log_menu_follows_the_state() {
+        use LogMenuItem::*;
+        assert_eq!(log_menu(LogState::Idle), [Start]);
+        assert_eq!(log_menu(LogState::Error), [Start]);
+        assert_eq!(log_menu(LogState::Recording), [Pause, Stop]);
+        assert_eq!(log_menu(LogState::Paused), [Resume, Stop]);
+        for item in [Start, Pause, Resume, Stop] {
+            assert_eq!(LogMenuItem::from_id(item.id()), Some(item));
+        }
+        assert_eq!(LogMenuItem::from_id("quit"), None);
+        assert_eq!(Start.id(), "log_start");
+        assert_eq!(Stop.label_key(), "tray.log.stop");
+    }
+
+    #[test]
+    fn menu_is_rebuilt_on_state_change_and_on_language_change() {
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        tray.set_log_state(LogState::Idle);
+        assert!(backend.0.lock().unwrap().menus.is_empty(), "no change");
+        tray.set_log_state(LogState::Recording);
+        tray.set_log_state(LogState::Recording);
+        tray.set_log_state(LogState::Paused);
+        // A new language rebuilds the menu for the state the log is in.
+        tray.relabel(Lang::It);
+        tray.relabel(Lang::It);
+        assert_eq!(
+            backend.0.lock().unwrap().menus,
+            [
+                (Lang::En, LogState::Recording),
+                (Lang::En, LogState::Paused),
+                (Lang::It, LogState::Paused),
+            ]
+        );
+    }
+
+    #[test]
+    fn icon_redraws_when_recording_flips() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        let settings = Settings::default();
+        let snap = snapshot(&schema, &HOT);
+        let icon = IconContent::Text("92".to_owned());
+        let count = || backend.0.lock().unwrap().icons.len();
+
+        // Before any reading there is nothing to redraw.
+        tray.set_log_state(LogState::Recording);
+        assert_eq!(count(), 0);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
+        assert_eq!(count(), 1);
+        // Paused: the dot goes; recording again: it comes back; an error
+        // after idle keeps it off.
+        tray.set_log_state(LogState::Paused);
+        assert_eq!(count(), 2);
+        tray.set_log_state(LogState::Idle);
+        assert_eq!(count(), 2, "paused and idle look the same");
+        tray.set_log_state(LogState::Recording);
+        assert_eq!(count(), 3);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
+        assert_eq!(count(), 3, "unchanged content, style and dot");
+        tray.set_log_state(LogState::Error);
+        assert_eq!(count(), 4);
+
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(calls.icons[0], render(&icon, NEUTRAL, true));
+        assert_eq!(calls.icons[1], render(&icon, NEUTRAL, false));
+        assert_eq!(calls.icons[2], render(&icon, NEUTRAL, true));
+        assert_eq!(calls.icons[3], render(&icon, NEUTRAL, false));
+    }
+
+    fn status(state: LogState, error: Option<LogError>) -> LogStatus {
+        LogStatus {
+            revision: 1,
+            state,
+            session: 1,
+            path: None,
+            part: 1,
+            part_bytes: 0,
+            recorded_ms: 0,
+            rows: 0,
+            bytes: 0,
+            dropped: 0,
+            error,
+            hotkeys: Default::default(),
+        }
+    }
+
+    fn errored(key: &str, detail: Option<&str>) -> LogStatus {
+        let error = LogError {
+            key: key.to_owned(),
+            detail: detail.map(str::to_owned),
+        };
+        status(LogState::Error, Some(error))
+    }
+
+    #[test]
+    fn a_failed_tray_command_toasts_only_without_a_window() {
+        let disk = errored("log.error.diskFull", None);
+        assert_eq!(
+            error_toast(Lang::En, false, &disk),
+            Some(("Recording stopped".to_owned(), "Disk full".to_owned()))
+        );
+        assert_eq!(error_toast(Lang::En, true, &disk), None);
+        assert_eq!(
+            error_toast(Lang::It, false, &errored("log.error.other", Some("boom")))
+                .map(|(_, body)| body),
+            Some("Errore di scrittura: boom".to_owned())
+        );
+        let fine = status(LogState::Recording, None);
+        assert_eq!(error_toast(Lang::En, false, &fine), None);
     }
 
     fn health(level: OverallLevel, alerts: Vec<Alert>) -> HealthReport {
@@ -726,7 +990,7 @@ mod tests {
         let tray = TrayController::new(backend.clone(), Lang::En);
         let settings = Settings::default();
         let snap = snapshot(&schema, &HOT);
-        let drawn = |style| render(&IconContent::Text("92".to_owned()), style);
+        let drawn = |style| render(&IconContent::Text("92".to_owned()), style, false);
 
         // Only the level changes between these ticks: each change redraws.
         for level in [

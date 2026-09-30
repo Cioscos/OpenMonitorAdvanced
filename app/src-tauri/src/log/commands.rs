@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::session::{LogEnv, LogService, LogStatus, EVENT_LOG};
-use crate::notifier::{launch_for_main, SystemToaster, ToastSink};
+use crate::notifier::{launch_for_main, SystemToaster};
 use crate::window::MAIN;
 
 /// Runs `call` on the blocking pool; a panic there answers the current status.
@@ -76,6 +76,11 @@ fn open_folder(log: &LogService) -> Result<(), String> {
     })
 }
 
+/// A toast of the log: a click opens the main window (L8).
+pub fn toast_log(toaster: &SystemToaster, title: String, body: String) {
+    toaster.show(title, body, launch_for_main());
+}
+
 /// The app side of [`LogEnv`].
 pub struct TauriEnv {
     app: AppHandle,
@@ -136,7 +141,7 @@ impl LogEnv for TauriEnv {
     }
 
     fn toast(&self, title: String, body: String) {
-        self.toaster.show(title, body, launch_for_main());
+        toast_log(&self.toaster, title, body);
     }
 
     fn emit(&self, status: &LogStatus) {

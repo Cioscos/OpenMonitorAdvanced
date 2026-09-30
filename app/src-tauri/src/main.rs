@@ -324,6 +324,10 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            // Listeners run on whichever thread changed the state; the tray
+            // posts its own work to the main thread.
+            let log_tray = tray.clone();
+            log_service.on_state_change(Box::new(move |state| log_tray.set_log_state(state)));
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;

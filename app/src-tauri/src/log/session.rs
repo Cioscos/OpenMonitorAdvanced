@@ -179,8 +179,6 @@ impl LogService {
 
     /// `listener` hears every state change, on the thread that made it (a
     /// command's, the sampler's or the writer's); it must not block.
-    // Used by the tray (Task 6).
-    #[allow(dead_code)]
     pub fn on_state_change(&self, listener: Box<dyn Fn(LogState) + Send + Sync>) {
         lock(&self.listeners).push(Arc::from(listener));
     }

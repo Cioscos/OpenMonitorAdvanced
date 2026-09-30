@@ -37,13 +37,25 @@ temperature, tensioni, ventole e dati SMART.
 - **Vista Impostazioni.** Lingua, temperatura in °C o °F, velocità di rete in bit/s o byte/s,
   intervallo di campionamento (da 0,5 a 5 s), frequenza di aggiornamento dei grafici (60, 30 o
   15 FPS), vista predefinita, chiusura nel tray, avvio con Windows e sensore mostrato
-  dall'icona del tray. La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
+  dall'icona del tray. La sezione *Regole e avvisi* elenca le regole predefinite e le tue (vedi
+  sotto). La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
   di GPU, la modalità compatibile con gli anti-cheat, ogni modulo del servizio e, disco per
   disco, la lettura SMART, e mostra lo stato di PawnIO. *Informazioni* elenca versioni e
   licenze. Le impostazioni sono salvate in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
 - **Icona nel tray.** L'icona mostra dal vivo il sensore scelto: una temperatura come numero,
-  un carico come barra verticale. Il suggerimento mostra CPU, GPU e RAM, e il menu apre
+  un carico come barra verticale. Diventa ambra o rossa quando una regola è in attenzione o in
+  critico, e allora il suggerimento comincia con il problema prima di CPU, GPU e RAM. Il menu apre
   direttamente la vista Semplificata o Avanzata.
+- **Regole e avvisi.** Le regole predefinite controllano le temperature di CPU, GPU e dischi, il
+  throttling della GPU, l'uso della RAM, i volumi pieni, l'usura e il critical warning degli NVMe.
+  Le soglie della CPU seguono il TjMax del processore, quando è noto. Ogni regola ha un livello di
+  attenzione e uno critico, ciascuno con una soglia e il tempo per cui il valore deve superarla,
+  più un'isteresi. Puoi modificarle, spegnerle, ripristinarle o aggiungere una regola tua su
+  qualsiasi sensore, anche con *Crea regola…* da un sensore della vista Avanzata. Il banner della
+  vista Semplificata dice se è tutto in ordine, oppure quali problemi sono attivi e da quanto.
+  L'ingresso nel livello critico fa partire anche una notifica di Windows (anche il livello di
+  attenzione, se lo attivi), al massimo una ogni 5 minuti per regola, dispositivo e livello; il
+  clic sulla notifica apre la pagina del dispositivo.
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -111,7 +123,11 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   tutti. Un disco che Windows segnala in standby non viene interrogato, quindi non mostra dati di
   salute mentre dorme. Se un disco collegato non conferma il proprio stato di alimentazione
   all'avvio del servizio (per esempio una chiavetta USB), la lettura SMART resta spenta per tutti
-  i dischi finché non viene scollegato.
+  i dischi finché non viene scollegato. Mentre un disco dorme, il banner può segnalare dati
+  incompleti. Il throttling termico della CPU non è disponibile con LibreHardwareMonitor 0.9.6,
+  quindi quella regola non ha un sensore. Il critical warning dei dischi c'è solo per gli NVMe. Il
+  TjMax del processore è noto per le CPU Intel e per i modelli AMD desktop della tabella
+  integrata; le altre CPU usano le soglie di ripiego (85/95 °C).
 
 ## Compilare dal sorgente
 

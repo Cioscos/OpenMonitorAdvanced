@@ -1,13 +1,13 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M5a).
+Updated at the end of every milestone (last update: M5b).
 
 ## Open: code
 
 | Item | Where | Pick up |
 |---|---|---|
-| USB disks and the D6 gate. A USB stick (live check 2026-09-30: SanDisk Extreme, bus 0x07, seek penalty query error 1, ATA pass-through error 50) plugged in when the service starts keeps the D6 gate closed (`keeps storage disabled: power state unknown`), so SMART stays off for all disks until it is unplugged; plugged in at runtime it only skips its own SMART. The per-disk SMART switch (M5a) does not help, because the gate closes before it is read. The fix is the SAT `CHECK POWER MODE` fallback of F1.4 (`docs/superpowers/references/m5/f1-service-reconfiguration.md`), to be planned as a spike, not a switch. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 gate) | M5b/M5c spike |
+| USB disks and the D6 gate. A USB stick (live check 2026-09-30: SanDisk Extreme, bus 0x07, seek penalty query error 1, ATA pass-through error 50) plugged in when the service starts keeps the D6 gate closed (`keeps storage disabled: power state unknown`), so SMART stays off for all disks until it is unplugged; plugged in at runtime it only skips its own SMART. The per-disk SMART switch (M5a) does not help, because the gate closes before it is read. The fix is the SAT `CHECK POWER MODE` fallback of F1.4 (`docs/superpowers/references/m5/f1-service-reconfiguration.md`), to be planned as a spike, not a switch. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 gate) | M5c spike |
 | On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
 | DDR5 SPD page stays on whichever page it was left on (e.g. page 4) after the service stops, instead of resetting; stock LHM behaves the same way (found in Task 15, 2026-09-27). Optional bounded reset for parity, otherwise accepted. | `app/src/` (RAM/SPD page) | accepted; revisit if a user reports it |
 | `app/src-tauri/nsis/*.dll` helper (`nsExec.dll`) ships unsigned, so SmartScreen may still warn even after the main binaries are signed. | `app/src-tauri/nsis/` | M6 (SignPath phase) |
@@ -19,17 +19,15 @@ Updated at the end of every milestone (last update: M5a).
 | The label-key test keeps a hand-written list: only GPU keys are cross-checked against the code (`GpuField` self-test); CPU, memory, storage and network keys are not. | `crates/oma-win/tests/labels.rs` | when touched |
 | The CSP has no `devCsp` with `ws://localhost:1420`, so Vite hot reload inside `pnpm tauri dev` may be blocked. | `app/src-tauri/tauri.conf.json` | when touched |
 | NVML is not initialised again after the NVIDIA driver is updated or unloaded while the app runs; its fields fall back to D3DKMT until a restart (README, "Known limits"). | `crates/oma-win/src/gpu/nvml.rs` | M6 |
-| Disk temperature probes retry every 30 s, including disks asleep at startup; new driver sensor indices request rediscovery without waking a sleeping disk. Verify real standby/wake behavior before using these readings in rules. | `crates/oma-win/src/storage.rs` | M5 (disk rules; retry and index identity already covered in M3) |
+| Disk temperature probes retry every 30 s, including disks asleep at startup; new driver sensor indices request rediscovery without waking a sleeping disk. Verify real standby/wake behavior before using these readings in rules. | `crates/oma-win/src/storage.rs` | HDD standby live check (see "Manual checks owed after M5b") |
 | A disk identified only by its PnP instance id (no serial, no unique GPT or MBR id) gets a new id when it is moved to another port: its history and statistics restart. | `crates/oma-win/src/storage_identity.rs` | accepted |
 | Intel and other GPUs whose PnP maximum-link read fails show no maximum link at all: `pcieMaxGen`/`pcieMaxWidth` come only from the PnP base layer (device capability, identical in safe mode), because NVML's max-link calls report the device+slot-limited value and IGCL does not read `ctlPciGetProperties`. Not yet exercised on Intel or non-NVIDIA hardware. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
-| Discovery reads every disk's temperature in one tick; with several NVMe drives waking from a low-power state this can exceed the 200 ms tick budget, so the value arrives one tick late. | `crates/oma-win/src/storage.rs` | M5 (disk rules) |
+| Discovery reads every disk's temperature in one tick; with several NVMe drives waking from a low-power state this can exceed the 200 ms tick budget, so the value arrives one tick late. | `crates/oma-win/src/storage.rs` | when touched |
 | `gpu/pnp.rs` `display_interfaces` has no retry on `CR_BUFFER_SMALL`: a GPU hot-plugged between the two calls gets no maximum link on that discovery. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
-| Re-identification at hot-plug. DiskInfoToolkit's hot-plug thread re-identifies the not-yet-identified disks on every `DBT_DEVNODES_CHANGED`, which can wake them (F1.1). | `service/OpenMonitorAdvanced.Service/Sensors/` (storage) | M5b spike |
+| Re-identification at hot-plug. DiskInfoToolkit's hot-plug thread re-identifies the not-yet-identified disks on every `DBT_DEVNODES_CHANGED`, which can wake them (F1.1). | `service/OpenMonitorAdvanced.Service/Sensors/` (storage) | M5c spike |
 | A rapid off/on of the memory module may delay the SMBus through the `~SPDAccessor` finalizers (F2.3). Measure when the module is switched back on quickly. | `service/OpenMonitorAdvanced.Service/Sensors/ModuleApplier.cs` | when touched |
-| A D6 blocker without model or serial leaves `smartBlockedBy` empty (R16): the Sources view shows only the generic limit text and cannot name the disk. Add a flag like `smartGateClosed`. | `service/OpenMonitorAdvanced.Service/`, `app/src/` | M5b |
+| A D6 blocker without model or serial leaves `smartBlockedBy` empty (R16): the Sources view shows only the generic limit text and cannot name the disk. Add a flag like `smartGateClosed`: it needs a new field in the `service` block of the `Schema`, so protocol v3 (M5b ruling R10). The same flag would let the rules tell a sleeping disk from a missing value (see the standby limit below). | `service/OpenMonitorAdvanced.Service/`, `crates/oma-ipc/`, `app/src/` | next protocol change (M5c or M6) |
 | `smartSelectable` (R20, a hidden storage device property) is UI plumbing: keep it out of the M5c CSV metadata. | `crates/oma-win/src/storage.rs` | M5c |
-| A leftover `settings.json.tmp` is not recovered at load (a failed save can leave defaults on the next start), and no test ties the field names of `encode`, `decode_lenient` and the patch schema together (patch `encode(everything_changed())` minus the read-only keys). Both before M5b types `rules`. | `app/src-tauri/src/settings/` | M5b (first task) |
-| `Settings` is cloned on every tick; add a narrow accessor before M5b's rules read it. | `app/src-tauri/src/settings/` | M5b |
 | An unknown module name or message `type` is echoed unbounded in `bad_request` and in the log, and can exceed `MaxFrameBytes`. Truncate. | `service/OpenMonitorAdvanced.Service/Protocol/`, `Sensors/` | when touched |
 | `shell_open` joins the shell thread without a timeout, uses `ShellExecuteW` without `SEE_MASK_NOASYNC`/`FLAG_NO_UI` (use `ShellExecuteExW`), and does not check that a folder exists before opening it. | `app/src-tauri/src/` (shell commands) | when touched |
 | The installer is perMachine, so the uninstaller deletes the HKCU Run value in the elevating admin's hive: a standard user's own Run value survives. The Run value also keeps a stale exe path if the exe moves (compare with the current path at startup and repair). | `app/src-tauri/nsis/oma.nsh`, `app/src-tauri/src/autostart.rs` | M6 |
@@ -40,16 +38,35 @@ Updated at the end of every milestone (last update: M5a).
 | Pipe listener: after a failed connect, the replacement instance is created after the old one is disposed and without `FILE_FLAG_FIRST_PIPE_INSTANCE`, a brief zero-instance gap (the client-side PID check protects the app). Cheap hardening: create it with `first: Volatile.Read(ref _busy) == 0`, so a squatter makes it fail loudly (R20) instead of being joined. | `service/OpenMonitorAdvanced.Service/Pipe/PipeListener.cs` | when touched |
 | The service's logs live in `$INSTDIR\service\logs` (ruling R30). Any future service-owned path (settings, rules) must stay under a folder no user can create first, with the same service-side check (`LogDirectoryGuard`), never under `%ProgramData%`. | `service/OpenMonitorAdvanced.Service/Logging/LogDirectoryGuard.cs`, `app/src-tauri/nsis/oma.nsh` | M5 (settings) |
 | `Mono.Posix.NETStandard` 1.0.0 (a LibreHardwareMonitor dependency, now referenced directly to drop its native assets) has its licence only behind a Microsoft fwlink: confirm the terms when the licences are reviewed. | `THIRD_PARTY_NOTICES.md` | M6 (licences) |
+| Rules: a disk in standby has no value, so its rules have no data and the coverage is partial: the banner says "incomplete data" instead of "all fine" while the HDD sleeps (ruling R-D). The `smartGateClosed` flag above would let the engine count a sleeping disk as covered. | `crates/oma-core/src/rules/health.rs` | with `smartGateClosed` (protocol v3) |
+| CPU thermal throttling has no sensor in LibreHardwareMonitor 0.9.6 (S1 §1), so `cpu-throttle` has no instances. On Intel the service could read bit 0 of `IA32_PACKAGE_THERM_STATUS` itself through the public `LibreHardwareMonitor.PawnIo.IntelMsr`: new code, Intel only, not testable on this PC. | `service/OpenMonitorAdvanced.Service/Sensors/` | when Intel hardware is available |
+| TjMax: the AMD table (`AmdTjMaxTable.cs`, 164 entries) covers desktop Ryzen only. Mobile and Ryzen AI (in the same AMD table, e.g. 7840HS at 100 °C), Threadripper, Zen/Zen+ with the offset Tctl, engineering samples and the Ryzen 3 3100/3300X (no published value) use the 85/95 °C fallback. The entries were checked against AMD's specifications table only (31 also against the product page). | `service/OpenMonitorAdvanced.Service/Sensors/AmdTjMaxTable.cs` | M6 (hardware matrix) |
+| Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
+| The disk critical warning exists only for NVMe (the DIT `CriticalWarning` attribute and the core's NVMe health log). A SATA rule from `SmartInfo.DiskStatus == Bad` (a CrystalDiskInfo-style heuristic, S1 §2) would be a separate rule, to be discussed. | `service/OpenMonitorAdvanced.Service/Sensors/` | to discuss |
+| The machine schema fixture `crates/oma-core/tests/fixtures/this-machine-schema.json` holds this PC's Windows volume GUIDs and network adapter GUID (no serials or MACs). Regenerate it with hashed ids before the repository is pushed. | `crates/oma-core/tests/fixtures/` | before any push |
+
+## Open: minor items from the M5b reviews
+
+Small findings the task reviews accepted and deferred; none of them changes what the user sees today.
+
+| Item | Where | Pick up |
+|---|---|---|
+| Settings store: one test swallows the shutdown error in all three cases; two negative assertions rely on a 100 ms sleep; the adopted `.tmp` test does not assert its removal after the save; repeated crashes before the first save accumulate `settings.json.tmp.bad-*` copies; `encode` of `rules` falls back to `{}` instead of failing loudly; one diagnostic per surplus custom rule (unbounded); non-rule load diagnostics stay after the user fixes the field. | `app/src-tauri/src/settings/` | when touched |
+| Rule model: `Rule`, `RuleOverride` and `RulesSettings` lack `deny_unknown_fields` (a mistyped key in a hand-edited file or a patch is silently ignored); the trailing-`*` prefix meaning of `Selector.names` is undocumented; `validate.rs` checks the sensor kind through a `serde_json::Value`; untagged `Target`/`Threshold` give opaque errors; `resolve()` accepts `+8.9e1`. | `crates/oma-core/src/rules/` | when touched |
+| Engine: the `bits_per_second` display key includes the byte component (invisible revision bumps); `health.rs` is long and its display-key formatter could be its own module; shrinking the interval can trigger one spurious suspend reset; `health_clock` before the first tick evaluates at monotonic 0; the zero-allocation guard does not cover a retained alarm in the Held/None steady state. Missing tests: a coverage-only change, below-equality with hysteresis 0, Held→Fresh slot recovery. | `crates/oma-core/src/rules/` | when touched |
+| NVMe health log: `ERROR_INVALID_DEVICE_REQUEST` and similar are classified transient (retry every 30 s forever); the parser does not check the echoed protocol and data type; the `health_pick` wiring is untested; a duplicate `StorageDeviceProperty` query at discovery. | `crates/oma-win/src/storage_health.rs` | when touched |
+| Service: `CpuCorePattern` also matches P-/E-core loads (harmless); a single-core Intel "CPU Core" is not mapped; no regression test for a stable device id when the NVMe flags appear; `HasCriticalWarning` is fixed at rebuild. | `service/OpenMonitorAdvanced.Service/Sensors/` | when touched |
+| Shell: the catch-up snapshot read before the `applied` mutex can overwrite a newer change (`rules.rs`, same pattern in `interval.rs`); the Rust formatter drops the sign of -0; an evicted toast (more than 32 live) does nothing when clicked; a lost `Finished` on a full queue keeps the toast until it expires; the notifier's title fallback relies on `t()` returning the key. | `app/src-tauri/src/` | when touched |
+| UI: "0 min" can flash until the clock of a new revision arrives; the default throughput hysteresis (3 B/s) shows as "0"; a failing `getRuleStatus` logs every second; `RuleRow` has its own switch instead of `controls/Toggle`; a stale doc comment in `rules.ts`; a few weak tests (the keyboard test clicks instead of pressing Enter, the Italian switch-label test checks the catalog only, no JSON test of a non-null `ThresholdSource`). | `app/src/` | when touched |
 
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
-- NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick, when the CSV log or the rules need them (M5).
+- NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick, when the CSV log needs them (M5c).
 - Battery page: appears when a battery provider exists.
 - Per-disk SMART switch and per-module switches are done (M5a); what is left for USB disks is the SAT fallback above.
 - **Not covered yet, despite LibreHardwareMonitor exposing related sensors — do not assume the mapping surfaces them without re-checking `SchemaBuilder.cs`:**
-  - **CPU throttling / distance to TjMax:** `MatchCpuSensor` (`service/OpenMonitorAdvanced.Service/Sensors/SchemaBuilder.cs`) maps load, temperature and power/voltage sensors only; no throttle-reason or "Distance to TjMax" sensor is matched. To check availability, dump `SensorNode` names/types for the `Cpu` hardware (the S1 spike's `LhmDump` tool, or a `SchemaBuilderTests` fixture) on Intel and AMD CPUs and look for a temperature/factor sensor named along those lines before adding a match.
   - **RAM SPD timings:** `SchemaBuilder.cs` (around the DIMM temperature match, see the comment there) explicitly discards the SPD timing and capacity sensors RAMSPDToolkit exposes on each DIMM. To check availability, enable PawnIO and dump a DIMM's `SensorNode`s: the timing values are present but currently thrown away, not absent from LHM.
-  - **SMART critical warning:** `MatchStorageSensor` discards any sensor whose name starts with `"Warning"` or `"Critical"` (temperature limits and NVMe/SMART warning sensors alike). To check availability, dump a drive's `SensorNode`s and confirm which of those discarded sensors carry an actual critical/warning boolean or threshold worth mapping as a `flag` sensor before an M5 rule tries to consume it.
+- CPU throttling and the disk critical warning were settled in M5b: see the limits in "Open: code" (throttling has no LHM sensor; the critical warning is NVMe only).
 
 ## Manual checks owed by a human
 
@@ -63,11 +80,27 @@ Updated at the end of every milestone (last update: M5a).
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
+## Manual checks owed after M5b
+
+- PC suspend while a rule is maturing: no spurious alarm on resume (deferred by the user on 2026-09-30).
+- HDD standby over 5–10 minutes: the banner and the coverage while the disk sleeps (known limit R-D above), together with the M5a spin-down check.
+- A USB volume removed while its `volume-used` rule is active: the coverage and the retained alert.
+- Toast click while the window is loading and from the notification centre, and the fallback for a removed device (the window-open and window-closed cases passed on 2026-09-30, with the right AUMID).
+- TjMax on an Intel CPU and on AMD models other than this 7800X3D; the NVMe critical warning with a real warning bit set.
+
 ## Manual checks owed after M5a
 
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M5b
+
+- A leftover `settings.json.tmp` is recovered at load, and a test ties `encode`, `decode_lenient` and the patch schema together (Task 1).
+- `Settings` is no longer deep-cloned on every tick: `snapshot()` shares it as an `Arc` (Task 1).
+- Rules engine (spec M5 §3): default and custom rules and overrides with validation and a backup of an invalid file, the health report and the banner, the coloured tray icon with the verdict in its tooltip, and Windows toasts with a 5-minute cooldown whose click opens the device page.
+- CPU TjMax (Intel, AMD desktop table), Tdie and Intel core names in the service; NVMe wear, spare and critical warning read by the core without privileges, and the critical warning also from the service.
+- Live checks (2026-09-30, dev machine, installed build): `cpu-temp` at 79/89 °C "from TjMax", also with the service stopped; the "all fine" banner; a custom rule taking banner, tray and tooltip to critical with a toast titled "<device> · <sensor>" and "less than a minute" in the banner; toast click with the window open and closed; one toast in 5 minutes; service stopped during a CPU temperature alarm (alert retained as "data unavailable", no second toast when it returns); °F thresholds and hysteresis round trip; "Create rule…" from the Advanced view; NVMe wear and critical warning with the service stopped. Budget in `docs/perf-budget.md` (M5b).
 
 ## Closed in M5a
 

@@ -34,13 +34,24 @@ SMART data.
   - for GPUs, the processes using the GPU, with their load and memory.
 - **Settings view.** Language, temperature in °C or °F, network speed in bit/s or byte/s,
   sampling interval (0.5 to 5 s), chart refresh rate (60, 30 or 15 FPS), default view, closing
-  to the tray, starting with Windows and the sensor shown by the tray icon. The *Data sources*
+  to the tray, starting with Windows and the sensor shown by the tray icon. The *Rules and
+  alerts* section lists the built-in rules and your own (see below). The *Data sources*
   section switches each GPU vendor library, anti-cheat compatible mode, each service module
   and, per disk, SMART reads on or off, and shows the PawnIO status. *About* lists the versions
   and the licences. Settings are stored in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
 - **Tray icon.** The icon shows the chosen sensor live: a temperature as a number, a load as a
-  vertical bar. The tooltip lists CPU, GPU and RAM, and the menu opens the Simple or the
+  vertical bar. It turns amber or red while a rule is in warning or critical, and the tooltip
+  then starts with the problem before listing CPU, GPU and RAM. The menu opens the Simple or the
   Advanced view directly.
+- **Rules and alerts.** Built-in rules watch CPU, GPU and disk temperatures, GPU throttling, RAM
+  use, full volumes, NVMe wear and the NVMe critical warning. The CPU thresholds follow the
+  processor's own TjMax when it is known. Each rule has a warning and a critical level, each with
+  a threshold and how long the value must stay past it, plus a hysteresis. You can change them,
+  switch them off, restore them, or add your own rule on any sensor, also with *Create rule…*
+  from a sensor in the Advanced view. The Simple view's banner says whether everything is fine,
+  or which problems are active and for how long. Entering the critical level also raises a
+  Windows notification (the warning level can do so too, if you switch it on), at most once every
+  5 minutes per rule, device and level; clicking it opens that device's page.
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -104,7 +115,11 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
 - **Known limits.** On a PC with several signed-in users, any of them can stop the service for
   everyone. A disk that Windows reports in standby is not queried, so it shows no health data while
   asleep. If a connected disk cannot confirm its power state when the service starts (a USB
-  stick, for example), SMART reads stay off for all disks until it is unplugged.
+  stick, for example), SMART reads stay off for all disks until it is unplugged. While a disk
+  sleeps, the banner can say that some data is incomplete. CPU thermal throttling is not
+  available from LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
+  warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
+  desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C).
 
 ## Build from source
 

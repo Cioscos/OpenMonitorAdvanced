@@ -258,6 +258,9 @@ misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 | M4 | same machine, same conditions | tray | 0.07 | 17.3 | 0 | 17.3 | yes |
 | M5a | same machine, PawnIO 2.2.0, release build of the branch, service installed, dynamic tray icon active | window (Advanced view, `oma-service` connected) | 0.96 (7 processes; core 0.04) | 20.5 | 6 | 186.6 | yes |
 | M5a | same machine, same conditions | tray | 0.04 | 17.3 | 0 | 17.3 | yes |
+| M5b | same machine, Windows 11 Pro 10.0.26300, release build of the branch, service installed, a critical custom rule active (tray icon red) | window (Settings › Rules and alerts) | 0.04 (7 processes; core 0.01) | 20.2 | 6 | 122.6 | yes |
+| M5b | same machine, same conditions | window (a view with charts, first run) | 0.95 (7 processes; core 0.03) | 20.1 | 6 | 123.0 | yes |
+| M5b | same machine, same conditions | tray (red icon) | 0.003 | 17.8 | 0 | 17.8 | yes |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
@@ -267,8 +270,53 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 | M4 | same machine, same conditions | tray | 0.04 | 52.7 MB |
 | M5a | same machine, release build of the branch | window | 0.01 | 63.2 MB |
 | M5a | same machine, same conditions | tray | 0.01 | 62.9 MB |
+| M5b | same machine, release build of the branch (TjMax, Tdie, NVMe critical warning) | window (Settings › Rules and alerts) | 0.09 | 59.2 MB |
+| M5b | same machine, same conditions | tray | 0.1 | 62.4 MB |
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M5b measurement details
+
+Measured 2026-09-30 on the development machine (16 logical processors,
+Windows 11 Pro 10.0.26300, PawnIO 2.2.0) with the release build of the branch
+(`target\release\oma-app.exe`, the same binary as the installer built the
+same day), `scripts/measure-footprint.ps1 -Service`, `oma-service` connected,
+no history fill. A custom rule "RAM used above 10 %" (critical, notification
+off) was active throughout, so the tray icon was red and the tooltip started
+with the verdict. The window runs used `-WarmupSeconds 45` and `60`, so the
+user could open the page to measure before sampling started.
+
+```
+Mode              : tray (red icon)
+CorePercentCpu    : 0
+TotalAppPercentCpu: 0.003
+AppPrivateMB      : 17.8
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.1 %
+Service Private   : 62.4 MB
+
+Mode              : window (Settings › Rules and alerts)
+CorePercentCpu    : 0.01
+TotalAppPercentCpu: 0.04 (7 processes)
+AppPrivateMB      : 20.2
+WebView2Processes : 6
+TotalPrivateMB    : 122.6
+Service CPU       : 0.09 %
+Service Private   : 59.2 MB
+```
+
+All budget items are met. In a first window run the window stayed on a view
+with charts instead of Settings (confirmed by the user): 0.95 % across the seven
+processes, 123.0 MB, in line with the Advanced view at M5a (0.96 %). The rules
+page itself, which polls the rule status every second, costs almost nothing
+(0.04 %); the WebView2 chart rendering remains the item closest to the 1 %
+limit.
+
+The rules engine is evaluated inside the core tick. Task 7 measured `evaluate`
+on this machine in a release build (`crates/oma-core/tests/rules_alloc.rs`: a
+2000-sensor schema, the 12 default rules plus 200 custom ones): 2.1 µs per
+evaluation with every rule `ok` and 16.4 µs with more than 200 alerts active,
+with 0 heap allocations in both steady states.
 
 ## M5a measurement details
 

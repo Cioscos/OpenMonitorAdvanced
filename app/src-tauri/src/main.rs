@@ -4,6 +4,7 @@ mod autostart;
 mod commands;
 mod i18n;
 mod interval;
+mod log;
 mod notifier;
 mod rules;
 mod service;

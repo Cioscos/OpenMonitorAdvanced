@@ -15,7 +15,7 @@ use oma_core::engine::TickOutput;
 use oma_core::model::{
     Device, DeviceKind, Label, Schema, Sensor, SensorKind, Snapshot, Source, Unit,
 };
-use oma_core::settings::{Language, Settings};
+use oma_core::settings::{Language, Settings, TemperatureUnit, ThroughputUnit};
 
 use super::*;
 use crate::i18n::{t, Lang};
@@ -547,6 +547,68 @@ fn schema_over_limit_fails_without_truncating() {
     assert_eq!(rig.log.start().state, LogState::Recording);
 }
 
+/// Records two rows on 10 columns, then the schema grows to 4097 (L12).
+fn overflow_while_recording(window_open: bool) -> Rig {
+    let mut rig = Rig::new();
+    rig.env.window.store(window_open, Ordering::SeqCst);
+    rig.schema = wide(1, 10);
+    rig.tick(0.0);
+    assert_eq!(rig.log.start().state, LogState::Recording);
+    rig.tick(1.0);
+    rig.tick(2.0);
+    rig.env.clear();
+    rig.schema = wide(2, 4097);
+    rig.tick(3.0);
+    rig
+}
+
+#[test]
+fn schema_growing_past_the_limit_fails_the_session() {
+    let mut rig = overflow_while_recording(true);
+    let status = rig.status();
+    assert_eq!(status.state, LogState::Error);
+    assert_eq!(key_of(&status), Some("log.error.tooManyColumns"));
+    assert_eq!(rig.env.states(), [LogState::Error]);
+    assert!(rig.env.toasts().is_empty(), "the window is open");
+
+    // Rows stop, nothing truncated: the file keeps the rows before it.
+    rig.tick(4.0);
+    rig.tick(5.0);
+    assert_eq!(rig.mem.files(), [base()]);
+    // The writer got its Stop: everything is flushed and the file closed.
+    wait_until("the writer's stop", || {
+        rig.mem.flushed(&base()) == rig.mem.content(&base())
+    });
+    assert_eq!(rig.values(&base()), ["1", "2"]);
+    assert_eq!(rig.lines(&base())[0].matches('{').count(), 10);
+
+    // The writer is free: a new start takes a selection within the limit.
+    let chosen: Vec<String> = rig.schema.sensors[..3]
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    rig.set(|s| s.log.sensors = Some(chosen));
+    let status = rig.log.start();
+    assert_eq!(status.state, LogState::Recording);
+    assert_eq!(status.session, 2);
+    rig.tick(6.0);
+    assert_eq!(rig.log.stop().state, LogState::Idle);
+    assert_eq!(rig.values(&file(&format!("{STEM}-2.csv"))), ["6"]);
+}
+
+#[test]
+fn schema_overflow_toasts_only_with_the_window_closed() {
+    let closed = overflow_while_recording(false);
+    assert_eq!(closed.status().state, LogState::Error);
+    assert_eq!(
+        closed.env.toasts(),
+        [(
+            t(Lang::En, "log.toast.errorTitle", &[]),
+            t(Lang::En, "log.error.tooManyColumns", &[]),
+        )]
+    );
+}
+
 #[test]
 fn start_without_ticks_leaves_a_valid_csv() {
     let mut rig = Rig::new();
@@ -716,6 +778,70 @@ fn language_change_opens_a_new_part() {
     assert!(rig.lines(&part2())[0].contains(&italian));
     assert_eq!(rig.values(&base()), ["1"]);
     assert_eq!(rig.values(&part2()), ["2"]);
+}
+
+/// A CPU temperature and a network download rate.
+fn temperature_and_network(revision: u64) -> Schema {
+    let mut schema = schema_of(
+        revision,
+        vec![
+            Sensor::new(
+                "cpu/0",
+                SensorKind::Temperature,
+                "package",
+                Unit::Celsius,
+                Label::new("cpu.temperature.package"),
+                Source::Mock,
+            ),
+            Sensor::new(
+                "net/0",
+                SensorKind::Throughput,
+                "down",
+                Unit::BytesPerSecond,
+                Label::new("network.down"),
+                Source::Mock,
+            ),
+        ],
+    );
+    schema.devices.push(Device {
+        id: "net/0".into(),
+        kind: DeviceKind::Network,
+        name: "Ethernet".into(),
+        vendor: None,
+        properties: Default::default(),
+    });
+    schema
+}
+
+#[test]
+fn unit_change_opens_a_new_part_with_converted_values() {
+    let mut rig = Rig::new();
+    // Bits is the default: start from bytes.
+    rig.set(|s| s.general.throughput_unit = ThroughputUnit::Bytes);
+    rig.schema = temperature_and_network(1);
+    rig.tick(0.0);
+    rig.log.start();
+    rig.tick(50.0);
+    rig.set(|s| s.general.temperature_unit = TemperatureUnit::F);
+    rig.tick(50.0);
+    rig.set(|s| s.general.throughput_unit = ThroughputUnit::Bits);
+    rig.tick(50.0);
+    let status = rig.log.stop();
+    let part3 = file(&format!("{STEM}-part3.csv"));
+    assert_eq!(rig.mem.files(), [part2(), part3.clone(), base()]);
+    assert_eq!(status.part, 3);
+
+    let header = |path: &Path| rig.lines(path)[0].clone();
+    let row = |path: &Path| rig.lines(path)[1].split_once(',').unwrap().1.to_owned();
+    assert!(header(&base()).contains("[°C]") && header(&base()).contains("[B/s]"));
+    assert_eq!(row(&base()), "50,50");
+    // °C → °F: a new part, the temperature converted.
+    assert!(header(&part2()).contains("Ryzen 7 / Package [°F]"));
+    assert!(header(&part2()).contains("[B/s]"));
+    assert_eq!(row(&part2()), "122,50");
+    // Bytes → bits on the network column: another part.
+    assert!(header(&part3).contains("Ethernet / Download [bit/s]"));
+    assert_eq!(row(&part3), "122,400");
 }
 
 #[test]

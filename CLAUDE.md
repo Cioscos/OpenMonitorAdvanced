@@ -3,7 +3,7 @@
 Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplificata e vista Avanzata, palette Synthwave, nessun privilegio amministrativo per CPU/RAM/dischi/rete/GPU.
 
 - **Spec (fonte di verità):** `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`
-- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; poi M6 rifinitura)
+- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; M6 rifinitura in tre piani: M6a release e firma (implementata, ammissione e collaudo della firma pendenti), poi M6b dischi e protocollo v3, M6c report e aggiornamenti)
 - **Budget prestazioni:** `docs/perf-budget.md` (nucleo a riposo < 1% CPU, tray < 30 MB, finestra < 200 MB WebView2 compresa); si misura a ogni milestone con `scripts/measure-footprint.ps1`
 
 ## Struttura
@@ -29,6 +29,9 @@ cd app && pnpm tauri dev                     # app in sviluppo; pnpm dev = solo 
 dotnet test service/OpenMonitorAdvanced.slnx # test del servizio, dalla radice del repository
 pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in staging il setup di PawnIO
 pwsh scripts/check-trim-warnings.ps1         # confronta gli avvisi di trimming del servizio con service/trim-allowlist.txt
+pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] # le cinque versioni e Cargo.lock coincidono (con -Tag: il tag è vX.Y.Z, su HEAD e in main)
+pwsh scripts/bump-version.ps1 X.Y.Z          # aggiorna le cinque versioni e Cargo.lock; non fa commit né tag, stampa i comandi
+Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester -Path scripts/tests -ExcludeTagFilter Integration -CI   # test degli script (Pester 5.7.1)
 cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio e PawnIO
 ```
 
@@ -42,6 +45,7 @@ cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio 
 - **Protocollo IPC (`crates/oma-ipc`, `service/OpenMonitorAdvanced.Service/Protocol/`):** mai `skip_serializing_if` sui tipi del protocollo, perché le chiavi devono essere sempre presenti (`nil` per gli assenti, §6 della spec); le fixture di `protocol/fixtures/` si rigenerano solo con `OMA_WRITE_FIXTURES=1`, a thread singolo.
 - **Stile:** codice, commenti e commit in inglese (conventional commits); documentazione e prosa dei piani in italiano con gli accenti corretti.
 - Fine riga LF ovunque (`.gitattributes`).
+- **Release e firma (M6a):** guida in `docs/release.md`, politica pubblica in `CODE_SIGNING.md`, design in `docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md`. Flusso: `bump-version.ps1 X.Y.Z`, commit, tag `vX.Y.Z`, push (su richiesta dell'utente); il tag avvia `.github/workflows/release.yml`, che crea una **bozza** da rivedere e pubblicare a mano, mai durante il run. Senza SignPath la release è non firmata; l'ammissione alla Foundation non è ancora stata chiesta. I test Pester `Integration` modificano gli store dei certificati: solo su un runner GitHub o in una VM/Sandbox con `OMA_ISOLATED_TRUST=1`, mai su questo PC.
 - **Verifiche dal vivo:** mai clic sintetici o UI Automation sul desktop, perché l'utente usa il PC mentre gli agenti lavorano. Le azioni su tray e finestre si chiedono all'utente.
 - **Ricerche nel filesystem:** mai una ricerca a tutto il disco (`find /`, `Get-ChildItem C:\ -Recurse`): può restare bloccata per ore. Restringere sempre l'ambito: pacchetti NuGet in `$USERPROFILE/.nuget/packages/<id>/<versione>/`, crate Rust in `$USERPROFILE/.cargo/registry/src/`, il repository o `node_modules`.
 

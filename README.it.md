@@ -92,6 +92,22 @@ Windows 11). I privilegi di amministratore servono solo durante l'installazione.
 Per le installazioni automatiche, `/S` avvia l'installer in modalità silenziosa e `/NOSENSORS`
 esclude il componente Sensori avanzati.
 
+## Verifica il download
+
+Ogni release elenca lo SHA-256 dell'installer in `SHA256SUMS.txt`, e GitHub attesta che l'installer
+è stato costruito da questo repository dal workflow di release.
+
+```powershell
+# Confronta questo hash con quello in SHA256SUMS.txt
+Get-FileHash -Algorithm SHA256 .\OpenMonitor.Advanced_<versione>_x64-setup.exe
+
+# Controlla la provenienza della build (serve la GitHub CLI)
+gh attestation verify .\OpenMonitor.Advanced_<versione>_x64-setup.exe --repo Cioscos/OpenMonitorAdvanced
+```
+
+La firma del codice è prevista ma non ancora attiva: la politica e ciò che coprirà sono in
+[CODE_SIGNING.md](CODE_SIGNING.md).
+
 ## Supporto GPU
 
 I dati delle GPU non richiedono mai i privilegi di amministratore. Ogni GPU ha il carico per

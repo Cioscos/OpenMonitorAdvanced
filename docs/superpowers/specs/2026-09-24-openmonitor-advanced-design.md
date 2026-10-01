@@ -466,7 +466,7 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - nessun modulo proprio nella v1;
   - niente WinRing0 né inpoutx64.
 - **Aggiornamenti nella v1 (dalla M6):** solo un controllo opzionale delle nuove release su GitHub, con link al download, senza installazione automatica.
-- **Firma dei binari:** da valutare con SignPath.io (firma gratuita per progetti open source), per ridurre gli avvisi di SmartScreen. È un punto aperto (§13).
+- **Firma dei binari:** decisa con SignPath.io (firma gratuita per progetti open source), per ridurre gli avvisi di SmartScreen; il design è nella spec M6a (`docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md`). Ammissione alla Foundation e collaudo della firma pendenti (§13).
 
 ## 10. Installazione e distribuzione
 
@@ -526,7 +526,7 @@ docs/
 4. **Driver Intel e Qualcomm e `ADAPTERPERFDATA`:** lo popolano? **In parte risolto in M2:** i driver NVIDIA e AMD lo popolano, anche per l'iGPU AMD (temperatura a passi di 1 °C, potenza in % del limite, frequenza della DRAM). Intel e Qualcomm restano da verificare, perché non c'era hardware disponibile. Se un driver non lo popola (temperatura 0), quei sensori semplicemente non compaiono.
 5. **Licenza di ADL (legacy):** va verificata prima di usarne i binding; in alternativa si resta sul livello base per AMD. **Risolto in M2:** si usano binding scritti a mano dalla documentazione pubblica e `atiadlxx.dll` si carica a runtime da `System32`. Gli header di AMD non si includono e non si scaricano, perché la loro EULA esclude le licenze come la GPL. ADLX resta escluso.
 6. **NVMe via `IOCTL_STORAGE_QUERY_PROPERTY` senza privilegi:** funziona? **Risolto in M3:** sì. `StorageDeviceTemperatureProperty` su `\\.\PhysicalDriveN` aperto con accesso 0 funziona da utente normale su Windows 11 (build 26200), sia per NVMe sia per SATA. Il supporto dipende dal disco: un SSD SATA risponde `ERROR_INVALID_FUNCTION` (non supportato, non un problema di permessi). Vedi §5.1.
-7. **Firma del codice:** va verificata l'idoneità a SignPath.io.
+7. **Firma del codice:** il design è nella spec M6a (`docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md`); ammissione a SignPath.io e collaudo della firma pendenti fino alla verifica reale.
 
 ## 14. Milestone
 

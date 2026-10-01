@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M5c).
+Updated at the end of every milestone (last update: M6a).
 
 ## Open: code
 
@@ -10,7 +10,8 @@ Updated at the end of every milestone (last update: M5c).
 | USB disks and the D6 gate. A USB stick (live check 2026-09-30: SanDisk Extreme, bus 0x07, seek penalty query error 1, ATA pass-through error 50) plugged in when the service starts keeps the D6 gate closed (`keeps storage disabled: power state unknown`), so SMART stays off for all disks until it is unplugged; plugged in at runtime it only skips its own SMART. The per-disk SMART switch (M5a) does not help, because the gate closes before it is read. The fix is the SAT `CHECK POWER MODE` fallback of F1.4 (`docs/superpowers/references/m5/f1-service-reconfiguration.md`), to be planned as a spike, not a switch. | `service/OpenMonitorAdvanced.Service/Sensors/` (D6 gate) | M6 spike |
 | On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
 | DDR5 SPD page stays on whichever page it was left on (e.g. page 4) after the service stops, instead of resetting; stock LHM behaves the same way (found in Task 15, 2026-09-27). Optional bounded reset for parity, otherwise accepted. | `app/src/` (RAM/SPD page) | accepted; revisit if a user reports it |
-| `app/src-tauri/nsis/*.dll` helper (`nsExec.dll`) ships unsigned, so SmartScreen may still warn even after the main binaries are signed. | `app/src-tauri/nsis/` | M6 (SignPath phase) |
+| Privacy statement for the update check. The update check (M6c) will be the first network request of the app, to GitHub: review `CODE_SIGNING.md` (Privacy), the behavior and the opt-out that the SignPath Foundation terms require before it ships. | `CODE_SIGNING.md`, `docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md` §7 | M6c |
+| Confirm on the first real SignPath request: whether the `file-version` constraint of the artifact configurations matches the string `X.Y.Z` or the fixed `0.2.0.0` resource of the NSIS files; that the Integration Pester tests actually run (not skip) in the CI `scripts` job; the 8.3 short `TEMP` path of the runner against the uninstaller directory check of `sign-shim.ps1`; the English line `The signature is timestamped:` of signtool with SignPath's RFC 3161 timestamps. | `.signpath/`, `scripts/verify-signatures.ps1`, `scripts/sign-shim.ps1`, `.github/workflows/ci.yml` | first signed release |
 | A third-party folder inside `Program Files` that grants `Users` Modify rights passes the Advanced-sensors-component install-path check, which only verifies the path is under `Program Files` and free of reparse points, not its ACL. | `app/src-tauri/nsis/oma.nsh` (install-path check) | accepted; verify/document |
 | A silent install refused for a reason other than the path check (for example a missing `/NOSENSORS` outside `Program Files`) may still have created an empty `$INSTDIR` and installed the WebView2 runtime before refusing. | `app/src-tauri/nsis/installer.nsi` | accepted; verify/document |
 | Redistributing the official PawnIO setup is common practice (LibreHardwareMonitor and FanControl both do it), but the PawnIO author has not been asked to confirm it for this project. | `THIRD_PARTY_NOTICES.md`, `scripts/build-installer-payload.ps1` | before 1.0 |
@@ -97,6 +98,17 @@ Small findings the task reviews accepted and deferred. The final fix wave alread
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
+## Manual checks owed after M6a
+
+Owed after the SignPath Foundation approves the project (spec M6a §8.2); the application has not been submitted yet. None of this runs on the dev PC: use Windows Sandbox or a VM, started by the user.
+
+- `workflow_dispatch` rehearsal with `test-signing`, including `verify-signatures.ps1 -Policy test` on the hosted runner.
+- One release with `release-signing`, with `REQUIRE_SIGNING=true` set before the first signed publication (`docs/release.md`).
+- Install the signed setup and check the signatures of `oma-app.exe`, `oma-service.exe` and `uninstall.exe` in `$INSTDIR`, plus the publisher in the UAC prompts of the install and of the uninstall.
+- SmartScreen behavior on a downloaded signed setup; the README line stays as is until then.
+- Installed uninstaller, left open by the spike (7-Zip cannot see `uninstall.exe` inside the setup): install `target/spike/B/setup-B.exe` in Windows Sandbox and confirm that `C:\Program Files\OpenMonitor Advanced\uninstall.exe` has SHA-256 `2AE8939B5D09B3C39FAD95633E7D751485C97529621D3815D48F4844402B2E68`, the marked copy that proves makensis embeds the replaced uninstaller.
+- First real unsigned release with the new flow (bump, tag, draft, manual publication), and a `workflow_dispatch` run without secrets that ends in the artifact, verified with `verify-signatures.ps1 -Policy none`.
+
 ## Manual checks owed after M5c
 
 - PC suspend and resume, and a daylight-saving change, during a recording (Review Focus 4): the timestamps, the offset and the pause gap. Not live-tested.
@@ -116,6 +128,11 @@ Small findings the task reviews accepted and deferred. The final fix wave alread
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M6a
+
+- `nsExec.dll` and the other NSIS plugins ship unsigned: closed as third-party code that we must not sign (SignPath terms; design decision D5). `PawnIO_setup.exe` keeps its author's signature. Only the installer, `oma-app.exe`, `oma-service.exe` and `uninstall.exe` are to be signed.
+- Release pipeline, signing shim and verification scripts are implemented and covered by Pester; the signed path stays conditional on the Foundation's approval (see the owed checks above).
 
 ## Closed in M5c
 

@@ -87,6 +87,22 @@ Windows 11). Administrator rights are needed only during setup.
 For unattended installs, `/S` runs the installer silently and `/NOSENSORS` leaves out the
 Advanced sensors component.
 
+## Verify your download
+
+Each release lists the installer's SHA-256 in `SHA256SUMS.txt`, and GitHub attests that the
+installer was built from this repository by the release workflow.
+
+```powershell
+# Compare this hash with the one in SHA256SUMS.txt
+Get-FileHash -Algorithm SHA256 .\OpenMonitor.Advanced_<version>_x64-setup.exe
+
+# Check the build provenance (needs the GitHub CLI)
+gh attestation verify .\OpenMonitor.Advanced_<version>_x64-setup.exe --repo Cioscos/OpenMonitorAdvanced
+```
+
+Code signing is planned but not active yet; see [CODE_SIGNING.md](CODE_SIGNING.md) for the policy
+and for what it will cover.
+
 ## GPU support
 
 GPU data never needs administrator rights. Every GPU gets per-engine load and dedicated/shared

@@ -332,6 +332,7 @@ function Assert-OmaRemoteAssets {
     if (($remoteNames -join '|') -cne ($expectedNames -join '|')) {
         $problems.Add("remote assets are [$($remoteNames -join ', ')], expected exactly [$($expectedNames -join ', ')]")
     }
+    $unexpected = @($remoteNames | Where-Object { $expected.Keys -cnotcontains $_ })
     $toDownload = [Collections.Generic.List[string]]::new()
     foreach ($name in $expected.Keys) {
         $local = $expected[$name]
@@ -368,7 +369,13 @@ function Assert-OmaRemoteAssets {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    if ($problems.Count -gt 0) { throw "$($script:Mismatch): $($problems -join '; ')" }
+    if ($problems.Count -gt 0) {
+        $hint = ''
+        if ($unexpected.Count -gt 0) {
+            $hint = "; remove the unexpected assets from the draft by hand, then re-run the workflow (re-running alone fails the same way)"
+        }
+        throw "$($script:Mismatch): $($problems -join '; ')$hint"
+    }
 }
 
 <#

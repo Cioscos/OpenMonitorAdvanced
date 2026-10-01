@@ -94,7 +94,7 @@ esclude il componente Sensori avanzati.
 
 ## Verifica il download
 
-Ogni release elenca lo SHA-256 dell'installer in `SHA256SUMS.txt`, e GitHub attesta che l'installer
+Dalla 0.3.0 in poi, ogni release elenca lo SHA-256 dell'installer in `SHA256SUMS.txt`, e GitHub attesta che l'installer
 è stato costruito da questo repository dal workflow di release.
 
 ```powershell

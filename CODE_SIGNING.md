@@ -96,7 +96,5 @@ updated before the release.
 
 ## Attribution
 
-This line will appear here and in the release notes only once the Foundation has approved the
-project and releases are actually signed:
-
-> Free code signing provided by SignPath.io, certificate by SignPath Foundation
+The attribution required by the SignPath Foundation will be added here and to the release notes
+when signing becomes active.

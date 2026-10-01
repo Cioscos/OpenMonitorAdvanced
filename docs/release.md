@@ -154,14 +154,18 @@ si rilascia, poi si toglie il vecchio.
    ```
    git commit -am "chore: release 0.3.0"
    git tag v0.3.0
-   git push origin main v0.3.0
+   git push origin main
+   # aspetta che ci.yml su main sia verde per questo commit (tutti e cinque i job), poi:
+   git push origin v0.3.0
    ```
 
-   Il push è una tua decisione. Per controllare in qualsiasi momento che le versioni siano
+   Non spingere `main` e il tag insieme: il tag avvia subito `release.yml`, il cui gate CI
+   fallirebbe perché la CI di quel commit è ancora in corso. Il push è una tua decisione. Per controllare in qualsiasi momento che le versioni siano
    allineate: `pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] [-ExpectedSha <sha>]` elenca tutte le
    incongruenze.
-2. Aspetta che la CI di `main` sia verde **per lo stesso commit** del tag (vedi sotto).
-3. Il tag avvia `release.yml`. Il preflight (`scripts/release-preflight.ps1`) controlla ref,
+2. Prima di spingere il tag, aspetta che la CI di `main` sia verde **per lo stesso commit** (vedi
+   sotto).
+3. Il push del tag avvia `release.yml`. Il preflight (`scripts/release-preflight.ps1`) controlla ref,
    credenziali, certificati, CI verde e release non ancora pubblicata, prima di qualsiasi
    richiesta di firma.
 4. Con la firma attiva, approva le due richieste su SignPath.
@@ -173,7 +177,8 @@ si rilascia, poi si toglie il vecchio.
 Il preflight richiede l'ultimo run di `ci.yml` per un push su `main` **sullo stesso SHA**, all'ultimo
 tentativo, con i job `checks`, `service`, `installer`, `scripts` e `actionlint` tutti riusciti.
 Se qualcuno ha usato *Re-run failed jobs*, il gate può segnalare job mancanti: usa **Re-run all
-jobs** sul run di `ci.yml`.
+jobs** sul run di `ci.yml`. Se un run di release si ferma comunque al gate perché la CI era
+ancora in corso, aspetta che diventi verde e usa **Re-run all jobs** sul run di release.
 
 ### Non pubblicare la bozza durante il run
 

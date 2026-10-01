@@ -31,5 +31,7 @@ try {
 Write-Output "Version bumped to $Version. Next:"
 Write-Output "  git commit -am `"chore: release $Version`""
 Write-Output "  git tag v$Version"
-Write-Output "  git push origin main v$Version"
+Write-Output "  git push origin main"
+Write-Output "  # wait until the CI run of ci.yml on main is green for this commit, then:"
+Write-Output "  git push origin v$Version"
 exit 0

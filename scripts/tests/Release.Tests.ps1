@@ -514,6 +514,7 @@ Describe 'Publish-OmaDraft' {
         $rel = New-FakeRelease -Exists $true -Body $body
         $rel.Assets['OpenMonitor Advanced_1.2.3_x64-setup.exe'] = @{ Bytes = $utf8.GetBytes('x'); State = 'uploaded' }
         { Publish $rel (New-Setup) } | Should -Throw "*$mismatch*"
+        { Publish $rel (New-Setup) } | Should -Throw '*remove the unexpected assets from the draft by hand, then re-run the workflow*'
         (Get-Verbs $rel) | Should -Not -Contain 'delete-asset'
 
         # A remote asset not yet in state uploaded.

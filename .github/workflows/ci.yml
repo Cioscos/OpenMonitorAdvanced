@@ -99,7 +99,16 @@ jobs:
       - name: Install Pester 5.7.1
         run: |
           if (-not (Get-Module -ListAvailable Pester | Where-Object Version -eq '5.7.1')) {
-            Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
+            try {
+              Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -ErrorAction Stop
+            } catch {
+              if ($_.Exception.Message -notmatch 'publisher') { throw }
+              Write-Warning "Publisher check failed, retrying with -SkipPublisherCheck: $($_.Exception.Message)"
+              Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+            }
+          }
+          if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version -eq [version]'5.7.1' })) {
+            throw 'Pester 5.7.1 is not installed'
           }
 
       - name: Script tests
@@ -122,8 +131,8 @@ jobs:
           # Skipped tests must not look green: without elevation or the
           # isolated environment the Integration tests skip, leaving no real
           # crypto coverage.
-          if ($result.PassedCount -eq 0 -or $result.SkippedCount -gt 0 -or $result.FailedCount -gt 0) {
-            throw "Integration run not clean: passed=$($result.PassedCount) skipped=$($result.SkippedCount) failed=$($result.FailedCount)"
+          if ($result.Result -ne 'Passed' -or $result.PassedCount -eq 0 -or $result.SkippedCount -gt 0 -or $result.FailedCount -gt 0) {
+            throw "Integration run not clean: result=$($result.Result) passed=$($result.PassedCount) skipped=$($result.SkippedCount) failed=$($result.FailedCount)"
           }
 
   actionlint:

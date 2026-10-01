@@ -245,7 +245,7 @@ Le versioni usano tre componenti canoniche senza zeri iniziali, ciascuna tra 0 e
 - aggiorna i cinque file (solo la riga o il campo della versione, conservando fine riga LF e formattazione) e `Cargo.lock` (`cargo update --workspace --offline`);
 - esegue `check-version.ps1` come controllo finale;
 - prima di scrivere verifica tutti i campi attesi e l'allineamento corrente; prepara backup dei cinque file e di `Cargo.lock` e li ripristina byte per byte se l'aggiornamento Cargo o il controllo finale falliscono. Il confronto delle versioni è numerico, non lessicografico; nessun aggiornamento di dipendenze estraneo al bump è accettato;
-- **non** crea commit e **non** fa tag: stampa i comandi successivi (`git commit -am "chore: release X.Y.Z"`, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`). Il push resta una decisione dell'utente.
+- **non** crea commit e **non** fa tag: stampa i comandi successivi (`git commit -am "chore: release X.Y.Z"`, `git tag vX.Y.Z`, `git push origin main`, poi, a CI di `main` verde su quel commit, `git push origin vX.Y.Z`). Il push resta una decisione dell'utente.
 
 ### 6.3 Flusso di una release
 

@@ -89,7 +89,7 @@ Advanced sensors component.
 
 ## Verify your download
 
-Each release lists the installer's SHA-256 in `SHA256SUMS.txt`, and GitHub attests that the
+From 0.3.0 on, each release lists the installer's SHA-256 in `SHA256SUMS.txt`, and GitHub attests that the
 installer was built from this repository by the release workflow.
 
 ```powershell

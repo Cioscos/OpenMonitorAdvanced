@@ -116,7 +116,8 @@ function Test-OmaVersionConsistency {
     }
 
     try {
-        $r = & $Cargo @('metadata', '--locked', '--format-version', '1', '--no-deps') $RepoRoot
+        # No --no-deps: with it cargo skips the resolution and accepts a stale Cargo.lock.
+        $r = & $Cargo @('metadata', '--locked', '--format-version', '1') $RepoRoot
         if ($r.ExitCode -ne 0) {
             $problems.Add("Cargo.lock is not aligned with the manifests (cargo metadata --locked failed: $(Get-FirstLine $r.Stderr))")
         }

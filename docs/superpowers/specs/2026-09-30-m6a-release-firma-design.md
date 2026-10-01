@@ -233,7 +233,7 @@ Il servizio la riceve da `tauri.conf.json` in `build-installer-payload.ps1`.
 Lo script fallisce, elencando **tutte** le incongruenze e non solo la prima, se:
 
 - i cinque file non hanno la stessa versione, o un file non contiene il campo atteso;
-- `Cargo.lock` non è allineato (`cargo metadata --locked --format-version 1 --no-deps` fallisce);
+- `Cargo.lock` non è allineato (`cargo metadata --locked --format-version 1` fallisce; senza `--no-deps`, che salterebbe la risoluzione e accetterebbe un lockfile obsoleto);
 - con `-Tag`: il tag non è `v` più la versione, oppure il commit del tag non è raggiungibile da `origin/main` (`git merge-base --is-ancestor`).
 
 Le versioni usano tre componenti canoniche senza zeri iniziali, ciascuna tra 0 e 65535; la versione PE normalizzata è `X.Y.Z.0`. La lettura dei README distingue `Status/version` da `Stato/versione`. In CI si aggiorna esplicitamente `origin/main`, si risolve il tag con `^{commit}` (anche annotato) e si richiede che coincida con `HEAD`/SHA del run. `cargo metadata` si esegue dalla radice del workspace. La verifica d'ascendenza non sostituisce il gate CI del §4.2.

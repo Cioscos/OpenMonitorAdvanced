@@ -253,7 +253,7 @@ Gli script dello spike vivono in `target/spike/`, che non si committa. Il risult
   - **`bump-version.ps1 X.Y.Z`:** esce con 0 e stampa i tre comandi git della spec §6.2.
 - **Regole di `Test-OmaVersionConsistency`:**
   - versioni diverse o campi mancanti: una riga per file;
-  - `cargo metadata --locked --format-version 1 --no-deps` eseguito dalla radice e fallito;
+  - `cargo metadata --locked --format-version 1` eseguito dalla radice e fallito;
   - con `-Tag`:
     - il tag non corrisponde alla regex `^v…$` della spec o non è `v` più la versione;
     - `git fetch origin +refs/heads/main:refs/remotes/origin/main` fallisce (aggiornamento esplicito del ref usato dall'ascendenza);

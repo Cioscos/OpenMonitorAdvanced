@@ -180,7 +180,27 @@ Describe 'Test-OmaVersionConsistency' {
         $p = @(Test-OmaVersionConsistency -RepoRoot $root -Cargo $cargo.Block -Git $git.Block)
         $p.Count | Should -Be 1
         $p[0] | Should -BeLike '*Cargo.lock*'
-        $cargo.Calls[0] | Should -Be 'metadata --locked --format-version 1 --no-deps'
+        $cargo.Calls[0] | Should -Be 'metadata --locked --format-version 1'
+    }
+
+    It 'stale_lockfile_is_reported_by_real_cargo' {
+        # Real cargo on a dependency-free workspace (no network): with --no-deps cargo skips the
+        # resolution and accepts a stale Cargo.lock, so the fake above cannot prove this.
+        $toml = "[workspace]`nresolver = `"2`"`nmembers = [`"crates/oma-core`"]`n`n[workspace.package]`nversion = `"0.2.0`"`nedition = `"2021`"`n"
+        [IO.File]::WriteAllBytes((Join-Path $root 'Cargo.toml'), $utf8.GetBytes($toml))
+        $crate = Join-Path $root 'crates/oma-core'
+        $null = New-Item -ItemType Directory -Path (Join-Path $crate 'src')
+        [IO.File]::WriteAllBytes((Join-Path $crate 'Cargo.toml'), $utf8.GetBytes("[package]`nname = `"oma-core`"`nversion.workspace = true`nedition.workspace = true`n"))
+        [IO.File]::WriteAllBytes((Join-Path $crate 'src/lib.rs'), [byte[]]@())
+        Remove-Item (Join-Path $root 'Cargo.lock')
+        $null = Invoke-OmaNative -FilePath 'cargo' -ArgumentList @('generate-lockfile', '--offline') -WorkingDirectory $root
+
+        @(Test-OmaVersionConsistency -RepoRoot $root -Git $git.Block).Count | Should -Be 0
+
+        Edit-File $root 'Cargo.lock' 'version = "0.2.0"' 'version = "0.1.0"'
+        $p = @(Test-OmaVersionConsistency -RepoRoot $root -Git $git.Block)
+        $p.Count | Should -Be 1
+        $p[0] | Should -BeLike '*Cargo.lock*'
     }
 
     It 'metadata failure does not hide a version mismatch' {

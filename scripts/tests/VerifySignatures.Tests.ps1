@@ -844,7 +844,9 @@ Describe 'real Authenticode verification' -Tag Integration {
         $script:pfxPassword = [guid]::NewGuid().ToString('N')
         $chain = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
         [void]$chain.Add($leaf)
-        [void]$chain.Add($root)
+        # Root without its private key: with two keyed certificates in the PFX signtool refuses to
+        # choose ("Multiple certificates were found that meet all the given criteria").
+        [void]$chain.Add([Security.Cryptography.X509Certificates.X509Certificate2]::new($root.RawData))
         [IO.File]::WriteAllBytes($pfx, $chain.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $pfxPassword))
         Invoke-OmaNative -FilePath $signtool -ArgumentList @('sign', '/fd', 'SHA256', '/f', $pfx, '/p', $pfxPassword, $fixture) | Out-Null
         Remove-Item -LiteralPath $pfx -Force

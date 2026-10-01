@@ -149,7 +149,7 @@ si rilascia, poi si toglie il vecchio.
 ### Release vera
 
 1. Aggiorna la versione con `pwsh scripts/bump-version.ps1 0.3.0`. Lo script aggiorna i cinque
-   file e `Cargo.lock`, non crea commit né tag e stampa i tre comandi successivi:
+   file e `Cargo.lock`, non crea commit né tag e stampa i quattro comandi successivi:
 
    ```
    git commit -am "chore: release 0.3.0"
@@ -160,9 +160,9 @@ si rilascia, poi si toglie il vecchio.
    ```
 
    Non spingere `main` e il tag insieme: il tag avvia subito `release.yml`, il cui gate CI
-   fallirebbe perché la CI di quel commit è ancora in corso. Il push è una tua decisione. Per controllare in qualsiasi momento che le versioni siano
-   allineate: `pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] [-ExpectedSha <sha>]` elenca tutte le
-   incongruenze.
+   fallirebbe perché la CI di quel commit è ancora in corso. Il push è una tua decisione. Per
+   controllare in qualsiasi momento che le versioni siano allineate:
+   `pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] [-ExpectedSha <sha>]` elenca tutte le incongruenze.
 2. Prima di spingere il tag, aspetta che la CI di `main` sia verde **per lo stesso commit** (vedi
    sotto).
 3. Il push del tag avvia `release.yml`. Il preflight (`scripts/release-preflight.ps1`) controlla ref,

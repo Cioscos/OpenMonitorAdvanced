@@ -185,8 +185,10 @@ internal static class DiskActivity
     /// Windows reports it off, so it is in standby and nothing is sent; recent activity, so it is
     /// asked (it is working: resetting its idle timer changes nothing); otherwise idle, and
     /// nothing is sent, since the question alone would keep Windows from ever turning it off.
+    /// In the <paramref name="first"/> round of a storage episode a disk that is on is asked
+    /// once without activity: a spinning but quiet disk would otherwise never show a value.
     /// </summary>
-    internal static DriveCheck Check(DriveFacts drive, DriveActivity seen, Func<DriveFacts, bool?> isSpunDown)
+    internal static DriveCheck Check(DriveFacts drive, DriveActivity seen, bool first, Func<DriveFacts, bool?> isSpunDown)
     {
         var unasked = new DriveCheck(drive, Asked: false, SpunDown: null);
         if (seen.PoweredOff)
@@ -194,7 +196,7 @@ internal static class DiskActivity
             return unasked with { PoweredOff = true };
         }
 
-        return seen.Recent ? unasked with { Asked = true, SpunDown = isSpunDown(drive) } : unasked with { Idle = true };
+        return seen.Recent || first ? unasked with { Asked = true, SpunDown = isSpunDown(drive) } : unasked with { Idle = true };
     }
 }
 
@@ -204,17 +206,16 @@ internal static class DiskActivity
 /// at the round's start, before any command is sent. A baseline serves one round, and only for
 /// the drive it was read from: a drive with a <see cref="DriveKey"/>, in a drive list that has
 /// not changed since the round before (a new identity at its number, or a hot-plug, which
-/// renumbers drives), in the same <c>epoch</c> (the hub passes the published round, replaced
-/// when storage is switched off or the last client leaves) and no more than the window plus
-/// <see cref="DiskActivity.Tolerance"/> old (a suspension, a late round). Anything else is "no
-/// recent activity".
+/// renumbers drives), and no more than the window plus <see cref="DiskActivity.Tolerance"/> old
+/// (a suspension, a late round). Anything else is "no recent activity". No baseline is read
+/// while storage is off or nobody is subscribed; the round that follows either is the first of
+/// a storage episode, which asks without one.
 /// </summary>
 internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
 {
     private readonly Dictionary<int, DiskCounters?> _baseline = [];
     private IReadOnlyList<DriveFacts> _listed = [];
     private int[] _watched = [];
-    private object? _epoch;
     private long _takenAt;
     private bool _taken;
 
@@ -222,7 +223,7 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     internal bool BaselineDue => !_taken && _watched.Length > 0;
 
     /// <summary>Reads the counters of the drives the round before watched.</summary>
-    internal void TakeBaseline(object epoch)
+    internal void TakeBaseline()
     {
         _baseline.Clear();
         foreach (int drive in _watched)
@@ -230,7 +231,6 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
             _baseline[drive] = probe.Read(drive);
         }
 
-        _epoch = epoch;
         _takenAt = time.GetTimestamp();
         _taken = true;
     }
@@ -240,10 +240,9 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     /// The counters of a drive without a <see cref="DriveKey"/> are not read: nothing proves
     /// whose they are. Consumes the baseline.
     /// </summary>
-    internal IReadOnlyDictionary<int, DriveActivity> Sample(IReadOnlyList<DriveFacts> drives, Func<DriveFacts, bool> watched, object epoch)
+    internal IReadOnlyDictionary<int, DriveActivity> Sample(IReadOnlyList<DriveFacts> drives, Func<DriveFacts, bool> watched)
     {
         bool usable = _taken
-            && ReferenceEquals(_epoch, epoch)
             && time.GetElapsedTime(_takenAt) <= DiskActivity.Window + DiskActivity.Tolerance
             && drives.SequenceEqual(_listed);
         var seen = new Dictionary<int, DriveActivity>();
@@ -283,7 +282,6 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     private void Forget()
     {
         _baseline.Clear();
-        _epoch = null;
         _taken = false;
     }
 }

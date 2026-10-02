@@ -51,8 +51,11 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// Windows reports it on and its read/write counters grew in the ten seconds before the round;
 /// otherwise nothing is sent to it: it is <c>standby</c> when Windows turned it off and
 /// <c>idle</c> when it is on without recent activity (which may hide a standby the disk chose
-/// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). The round that
-/// opens the gate goes on with the gate's answers; the one after it already needs activity.
+/// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). The one
+/// exception is the first round of a storage episode, which asks every such disk Windows
+/// reports on once, so a spinning but quiet disk shows its values: the round that opens the
+/// gate (it goes on with the gate's answers), the first one after storage is switched on again
+/// and the first one after the hub was idle. From the second round on it takes activity.
 /// </para>
 /// <para>
 /// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk that rests
@@ -732,9 +735,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>
     /// The baseline of the next storage round: the counters of the drives the round before
-    /// watched (access 0, no command). It belongs to the published round it was taken under.
+    /// watched (access 0, no command).
     /// </summary>
-    internal void BaselineOnce() => _watch.TakeBaseline(_round);
+    internal void BaselineOnce() => _watch.TakeBaseline();
 
     /// <summary>
     /// One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber,
@@ -1133,10 +1136,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         _gate ??= new GateEpisode(_time, _log);
         IReadOnlyList<DriveCheck> checks = _gate.Round(listed.Drives, listed.Activity, AskPowerMode);
-        if (checks.Any(c => c.Blocks))
+        if (!_gate.Opens)
         {
+            // A drive blocks, or an earlier attempt to enable the group failed and is not due again.
             PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
-            if (!_storageGateLogged)
+            if (!_storageGateLogged && checks.Any(c => c.Blocks))
             {
                 _storageGateLogged = true;
                 _log.LogInformation("Storage stays disabled: a rotational disk is in standby or its state is unknown (asked again when it shows activity)");
@@ -1151,9 +1155,10 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
         catch (Exception e)
         {
-            LogRateLimited("storage-enable", e, "Enabling storage failed");
+            LogRateLimited("storage-enable", e, "Enabling storage failed; tried again in {Minutes} minutes", GateEpisode.BlindRetry.TotalMinutes);
+            _gate.EnableFailed();
 
-            // No drive blocks: the list says so, and the next round tries again.
+            // No drive blocks: the list says so. The gate keeps its answers until the next attempt.
             PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             return null;
         }
@@ -1168,9 +1173,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// Storage worker, once the gate is open: every drive of a fresh enumeration (access 0),
     /// whether LHM exposes it or not. A drive whose power mode matters and whose SMART is on is
     /// asked only by the rule of <see cref="DiskActivity.Check"/>: not when Windows turned it
-    /// off, and not without recent activity. A drive whose SMART is off is not even sampled:
-    /// nothing is sent to it periodically. <see langword="null"/> when the drives cannot be
-    /// listed: no disk is updated blind.
+    /// off, and not without recent activity, except in the first round of a storage episode
+    /// (the published round has no values: storage was just switched on again, or the hub was
+    /// idle). A drive whose SMART is off is not even sampled: nothing is sent to it
+    /// periodically. <see langword="null"/> when the drives cannot be listed: no disk is
+    /// updated blind.
     /// </summary>
     private IReadOnlyList<DriveCheck>? CheckPowerStates(EffectiveConfig config)
     {
@@ -1179,6 +1186,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return null;
         }
 
+        bool first = _round.Timestamp == long.MinValue;
         var checks = new List<DriveCheck>(listed.Drives.Count);
         foreach (DriveFacts drive in listed.Drives)
         {
@@ -1188,7 +1196,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             checks.Add(listed.Activity.TryGetValue(drive.DriveNumber, out DriveActivity seen)
-                ? DiskActivity.Check(drive, seen, AskPowerMode)
+                ? DiskActivity.Check(drive, seen, first, AskPowerMode)
                 : new DriveCheck(drive, Asked: false, SpunDown: null));
         }
 
@@ -1205,7 +1213,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         try
         {
             IReadOnlyList<DriveFacts> drives = _disks.Enumerate();
-            return (drives, _watch.Sample(drives, watched, _round));
+            return (drives, _watch.Sample(drives, watched));
         }
         catch (Exception e)
         {

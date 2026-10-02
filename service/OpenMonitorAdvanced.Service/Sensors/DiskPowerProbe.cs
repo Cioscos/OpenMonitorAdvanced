@@ -684,17 +684,26 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
 /// it; one whose counters cannot be read, at most every <see cref="BlindRetry"/>. An "active"
 /// answer is kept as it is.</item>
 /// <item>When no drive blocks any more, every drive not asked in this very round is asked once
-/// more, so that the gate opens on answers of one round; a standby found then keeps it closed.</item>
+/// more, so that the gate opens on answers of one round; a standby found then keeps it closed.
+/// After a failed attempt to enable the group (<see cref="EnableFailed"/>) that check, and the
+/// next attempt, wait <see cref="BlindRetry"/>: the answers are kept meanwhile.</item>
 /// </list>
-/// The gate is open when no <see cref="DriveCheck"/> of a round <see cref="DriveCheck.Blocks"/>.
+/// The gate may be opened after a round when <see cref="Opens"/>.
 /// </summary>
 internal sealed class GateEpisode(TimeProvider time, ILogger log)
 {
-    /// <summary>How long a blocker whose counters cannot be read is left alone.</summary>
+    /// <summary>How long a blocker whose counters cannot be read is left alone, and how long a failed enable is not tried again.</summary>
     internal static readonly TimeSpan BlindRetry = TimeSpan.FromMinutes(5);
 
     private readonly Dictionary<int, Known> _known = [];
     private string? _lastBlockers;
+    private long? _enableFailedAt;
+
+    /// <summary>Whether the last round allows enabling the storage group: no drive blocks, on answers of that very round.</summary>
+    internal bool Opens { get; private set; }
+
+    /// <summary>Enabling the storage group failed after a round that <see cref="Opens"/>.</summary>
+    internal void EnableFailed() => _enableFailedAt = time.GetTimestamp();
 
     /// <summary>
     /// One gate round over a fresh enumeration: one <see cref="DriveCheck"/> per drive, in the
@@ -741,7 +750,8 @@ internal sealed class GateEpisode(TimeProvider time, ILogger log)
             }
         }
 
-        if (!checks.Any(c => c.Blocks))
+        bool waits = _enableFailedAt is long failedAt && time.GetElapsedTime(failedAt, now) < BlindRetry;
+        if (!waits && !checks.Any(c => c.Blocks))
         {
             for (int i = 0; i < drives.Count; i++)
             {
@@ -761,6 +771,7 @@ internal sealed class GateEpisode(TimeProvider time, ILogger log)
             }
         }
 
+        Opens = !waits && !checks.Any(c => c.Blocks);
         LogBlockersOnChange([.. checks.Where(c => c.Blocks)]);
         return checks;
 

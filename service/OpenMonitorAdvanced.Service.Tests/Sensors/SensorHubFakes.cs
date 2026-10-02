@@ -47,6 +47,9 @@ internal sealed class FakeTree : IHardwareTree
     /// <summary>Runs at the start of <see cref="SetModules"/>, on the calling thread.</summary>
     public Action<ServiceModules>? BeforeSetModules { get; set; }
 
+    /// <summary><see cref="EnableStorage"/> throws while set (the attempt is still counted).</summary>
+    public volatile bool FailEnableStorage;
+
     /// <summary>Every <see cref="Roots"/> read throws while set (a schema rebuild that keeps failing).</summary>
     public volatile bool ThrowOnRoots;
 
@@ -156,6 +159,11 @@ internal sealed class FakeTree : IHardwareTree
     public void EnableStorage()
     {
         Interlocked.Increment(ref _enableStorageCount);
+        if (FailEnableStorage)
+        {
+            throw new InvalidOperationException("the storage group failed to load");
+        }
+
         lock (_gate)
         {
             _roots.AddRange(Storage);

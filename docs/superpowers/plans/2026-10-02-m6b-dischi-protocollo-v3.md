@@ -615,7 +615,7 @@ Obbligatorio (riscritto il 2026-10-02 dopo le misure del Task 0, spec §2 e §4.
   2. attività recente → `IsSpunDown` e, se attivo, `Update`, come oggi;
   3. altrimenti → `idle`, nessun `IsSpunDown`, nessun `Update`, valori conservati come `held` con le stesse regole di identità e di finestra del Task 9.
   `PoweredOn == null` vale acceso. SSD, NVMe e virtuali: cadenza di 30 s invariata, nessun campionamento.
-- **Campionamento:** il worker si sveglia 10 s prima di ogni giro per la baseline e campiona di nuovo all'inizio del giro, prima di ogni comando. La baseline appartiene a numero fisico e chiave verificata invariati e dista al più 10 s; si azzera a sospensione/gap, hot-plug, storage spento e assenza di sottoscrittori. Primo giro senza baseline: nessuna attività.
+- **Campionamento** (sostituito dal Task 16: baseline alla fine del giro precedente): nella prima stesura il worker si sveglia 10 s prima di ogni giro per la baseline e campiona di nuovo all'inizio del giro, prima di ogni comando. La baseline appartiene a numero fisico e chiave verificata invariati e dista al più 10 s; si azzera a sospensione/gap, hot-plug, storage spento e assenza di sottoscrittori. Primo giro senza baseline: nessuna attività.
 - **Gate D6:**
   1. primo giro di un episodio: `IsSpunDown` una volta per ogni disco con `RequiresPowerCheck` che non risulta spento da Windows; un disco con `PoweredOn == false` è `standby` e blocca senza comandi;
   2. gate chiuso: si richiede solo ai dischi bloccanti, e solo con attività recente su di loro; un bloccante senza contatore leggibile (`Read == null`) al più ogni 5 minuti; le risposte "attivo" dell'episodio si conservano senza rinnovarle;
@@ -814,6 +814,27 @@ Obbligatorio (riscritto il 2026-10-02 dopo le misure del Task 0, spec §2 e §4.
 - [ ] **Step 3: implementazione.** Un valore presente con qualità `Suspended` usa `color: var(--text-muted)` e «Ultima lettura» in tabella e KPI; `Held` non cambia l'aspetto; con valore assente si mostra il trattino, senza fingere una lettura. L'etichetta di stato usa `.tag` accanto all'intestazione della pagina del disco, solo nella vista Avanzata: la vista Semplificata non nomina i singoli dischi e resta com'è (decisione dell'utente, 2026-10-02). La UI legge lo stato corrente dal `LiveStore`, mai da proprietà di discovery. `setSmart` scrive atomicamente entrambi gli elenchi disgiunti: accendere USB aggiunge enabled e rimuove disabled; spegnere rimuove enabled e aggiunge disabled. Rimuovere `smartBlockedBy`/`smart_blocked_by` da Rust, TypeScript, mock e test.
 - [ ] **Step 4:** `cd app && pnpm test && pnpm check && pnpm build` e `cargo test --workspace` → PASS.
 - [ ] **Step 5: commit** `feat(ui): show disk power state, last readings and the drives that block SMART`.
+
+---
+
+### Task 16: finestra di attività del servizio estesa all'intero intervallo
+
+Aggiunto il 2026-10-02 dopo la revisione finale, su decisione dell'utente. Si esegue prima del Task 15.
+
+**Files:**
+- Modify: `service/OpenMonitorAdvanced.Service/Sensors/DiskActivityProbe.cs` (`ActivityWatch`, `DiskActivity`), `Sensors/SensorHub.cs` (storage worker: `RunStorageDue`, `StorageOnce`)
+- Test: `DiskActivityTests.cs`, `SensorHubTests.cs`
+
+**Interfaces:**
+- Il riferimento (baseline) non si prende più 10 s prima del giro: si prende **alla fine di ogni giro**, dopo l'ultimo `IsSpunDown` e l'ultimo `Update` di quel giro e prima della pubblicazione. Il worker torna a un solo risveglio per giro (30 s).
+- Attività recente = contatori cresciuti tra quel riferimento e il campione all'inizio del giro successivo. Il riferimento vale se appartiene alla stessa identità, se l'elenco dei dischi non è cambiato e se non è più vecchio di `StorageInterval` + 2 s; le invalidazioni restano quelle del Task 10 (sospensione/gap, hot-plug, storage spento, assenza di sottoscrittori). Un giro fallito prima della fine non lascia riferimento.
+- `DiskActivity.Window` (10 s) sparisce dal servizio; resta invariata la finestra di 10 s del nucleo (`storage_gate::ACTIVITY_WINDOW`).
+- Tutte le altre regole del Task 10 e le decisioni R11–R13 e I3 restano invariate.
+
+- [ ] **Step 1: test che falliscono:** `TheBaselineIsTakenAtTheEndOfARound` (dopo un giro `RunStorageDue()` restituisce 30 s, nessun risveglio intermedio), `IoAnywhereBetweenTwoRoundsIsActivity` (contatori cresciuti 1 s dopo la fine del giro: il giro successivo chiede e aggiorna), `TheServicesOwnQueriesAreNotActivity` (contatori cresciuti durante il giro, prima del riferimento: il giro successivo è `idle`), `ABaselineOlderThanOneIntervalIsNotUsed`, `AFailedRoundLeavesNoBaseline`; adattare `TheWorkerWakesTenSecondsBeforeARound`, `ALateBaselineDoesNotAuthorizeSmart` e gli altri test che presuppongono il risveglio a −10 s, conservando ciò che dimostravano.
+- [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter "FullyQualifiedName~DiskActivity|FullyQualifiedName~SensorHub"` → falliscono.
+- [ ] **Step 3: implementazione**; `dotnet test service/OpenMonitorAdvanced.slnx` e `pwsh scripts/check-trim-warnings.ps1` → PASS.
+- [ ] **Step 4: commit** `fix(service): watch disk activity across the whole interval between two rounds`.
 
 ---
 

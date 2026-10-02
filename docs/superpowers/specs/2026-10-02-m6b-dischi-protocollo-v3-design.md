@@ -160,7 +160,7 @@ Le misure del §2 mostrano che il servizio non può interrogare un disco rotazio
 **Fonti passive**, entrambe su un handle ad accesso 0 e misurate innocue:
 
 - `GetDevicePowerState`: dice se Windows ha spento il disco. Una chiamata fallita vale "acceso" (si applicano le regole sull'attività).
-- `IOCTL_DISK_PERFORMANCE`: contatori di letture e scritture del driver. C'è **attività recente** quando, tra due campioni della stessa identità distanti al più 10 s, entrambi i contatori non sono diminuiti e almeno uno è cresciuto. Campione mancante, baseline iniziale, contatore tornato indietro, sospensione o cambio d'identità non sono attività.
+- `IOCTL_DISK_PERFORMANCE`: contatori di letture e scritture del driver. C'è **attività recente** quando, tra il campione di riferimento e quello preso all'inizio del giro, entrambi della stessa identità, i contatori non sono diminuiti e almeno uno è cresciuto. Il riferimento si prende **alla fine del giro precedente**, dopo i comandi e le letture SMART del servizio, così la finestra copre quasi tutto l'intervallo tra due giri senza includere il traffico del servizio stesso (decisione dell'utente del 2026-10-02; la prima stesura osservava solo gli ultimi 10 s, e un accesso breve fuori da quella finestra non veniva visto). Un riferimento più vecchio di un intervallo più la tolleranza di 2 s non vale. Campione mancante, riferimento iniziale, contatore tornato indietro, sospensione o cambio d'identità non sono attività. Che le letture SMART non muovano questi contatori resta da confermare dal vivo (§9.2): se li muovessero, il riferimento a fine giro le esclude comunque.
 
 **A ogni giro, per un disco con `RequiresPowerCheck` e SMART acceso**, nell'ordine:
 

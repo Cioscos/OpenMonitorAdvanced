@@ -93,3 +93,12 @@ test('log commands and event match the Rust shell', async () => {
   await backend.onLogStatus(vi.fn());
   expect(listen).toHaveBeenLastCalledWith('oma:log', expect.any(Function));
 });
+
+test('the disk state command and event match the Rust shell', async () => {
+  const { listen } = await import('@tauri-apps/api/event');
+  const backend = createTauriBackend();
+  await backend.getDiskStates();
+  expect(invoke).toHaveBeenLastCalledWith('get_disk_states');
+  await backend.onDiskStates(vi.fn());
+  expect(listen).toHaveBeenLastCalledWith('oma:disk-states', expect.any(Function));
+});

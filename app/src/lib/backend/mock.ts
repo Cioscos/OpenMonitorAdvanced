@@ -18,6 +18,7 @@ import type {
   ServiceState,
   ServiceStatus,
   Snapshot,
+  DiskStateEntry,
   Source,
   StartupStatus,
   Unit,
@@ -87,6 +88,10 @@ export const MOCK_SCHEMA: Schema = {
   ],
 };
 
+/** A hard disk in standby: it keeps its last temperature (quality 2) and its history. */
+const MOCK_HDD = 'storage/device-mock-hdd';
+const MOCK_HDD_SENSOR = `${MOCK_HDD}/temperature/main`;
+
 /**
  * Sensors added only while the sensor service is connected (spec §6): CPU temperature and
  * power straight from the driver, plus a motherboard device with LHM's raw fan and voltage
@@ -98,6 +103,8 @@ const SERVICE_SENSORS: Sensor[] = [
   sensor(`${SERVICE_DEVICE}/fan/fan-1`, SERVICE_DEVICE, 'fan', 'rpm', { key: 'lhm.raw', arg: 'Fan #1' }, 'lhm'),
   sensor(`${SERVICE_DEVICE}/fan/fan-2`, SERVICE_DEVICE, 'fan', 'rpm', { key: 'lhm.raw', arg: 'Fan #2' }, 'lhm'),
   sensor(`${SERVICE_DEVICE}/voltage/vin3`, SERVICE_DEVICE, 'voltage', 'volt', { key: 'lhm.raw', arg: 'VIN3' }, 'lhm'),
+  // Last: its value is the disk's last reading while the disk sleeps (`MOCK_HDD_SENSOR`).
+  sensor(MOCK_HDD_SENSOR, MOCK_HDD, 'temperature', 'celsius', { key: 'storage.temperature' }, 'lhm'),
 ];
 
 /** `MOCK_SCHEMA` plus the sensor-service devices and sensors above. */
@@ -107,6 +114,7 @@ export const SERVICE_MOCK_SCHEMA: Schema = {
     ...MOCK_SCHEMA.devices,
     { id: SERVICE_DEVICE, kind: 'motherboard', name: 'Mock Motherboard' },
     // A USB disk whose bridge hides the serial: its SMART cannot be switched off on its own.
+    { id: MOCK_HDD, kind: 'storage', name: 'Disk 2 (HDD)', properties: { smartSelectable: 'true' } },
     { id: 'storage/device-mock-usb', kind: 'storage', name: 'Disk 1 (USB)', properties: { smartSelectable: 'false' } },
   ],
   sensors: [...MOCK_SCHEMA.sensors, ...SERVICE_SENSORS],
@@ -115,7 +123,7 @@ export const SERVICE_MOCK_SCHEMA: Schema = {
 /** Deterministic plausible values for `SERVICE_SENSORS`, same tick as `mockValues`. */
 function serviceMockValues(t: number): number[] {
   const wave = (period: number, phase = 0) => (Math.sin((t + phase) / period) + 1) / 2;
-  return [40 + 20 * wave(13), 30 + 40 * wave(9, 1), 800 + 200 * wave(15), 750 + 150 * wave(17, 2), 12 + 0.2 * wave(21)];
+  return [40 + 20 * wave(13), 30 + 40 * wave(9, 1), 800 + 200 * wave(15), 750 + 150 * wave(17, 2), 12 + 0.2 * wave(21), 36 + 2 * wave(25)];
 }
 
 /** Deterministic plausible values for tick `t`, in MOCK_SCHEMA sensor order. */
@@ -404,6 +412,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
       ? { state, detail: null, pawnIo, sources: mockSources() }
       : { state, detail: null, pawnIo: null, sources: null };
   let serviceStatus: ServiceStatus = statusFor(initialState);
+  const diskStates: DiskStateEntry[] =
+    schema === SERVICE_MOCK_SCHEMA ? [{ deviceId: MOCK_HDD, power: 'standby' }] : [];
   const stats = new StatsAccumulator();
   const settings = new MockSettings(parsePersistence(typeof location === 'undefined' ? '' : location.search));
   const listeners = new Set<(s: Snapshot) => void>();
@@ -431,6 +441,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const emit = () => {
     seq++;
     const snapshot: Snapshot = { revision: schema.revision, seq, timestampMs: Date.now(), values: valuesFor(schema, seq) };
+    // Only the service mock carries qualities: the sleeping disk's reading is suspended.
+    if (schema === SERVICE_MOCK_SCHEMA) snapshot.quality = ids.map((id) => (id === MOCK_HDD_SENSOR ? 2 : 0));
     startedAtMs ??= snapshot.timestampMs;
     stats.push(ids, snapshot.values);
     listeners.forEach((cb) => cb(snapshot));
@@ -455,6 +467,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
       return { revision: schema.revision, seq, ...window };
     },
     onSchema: async () => () => {},
+    getDiskStates: async () => diskStates,
+    onDiskStates: async () => () => {},
     getStartupStatus: async () => startup,
     enableVendorLibraries: async () => {
       startup = { ...startup, safeMode: false };

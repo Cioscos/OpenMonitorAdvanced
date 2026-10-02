@@ -10,6 +10,7 @@ import {
   parseServiceState,
   sortGpuProcesses,
 } from './mock';
+import type { Snapshot } from '../types';
 
 const GPU = 'gpu/pci-0000:01:00.0';
 const CPU_LOAD = 'cpu/0/load/total';
@@ -466,4 +467,34 @@ describe('mock log recorder', () => {
     }
     expect((await createMockBackend().getLogStatus()).error).not.toBeNull();
   });
+});
+
+test('the mock with the service exposes a standby disk whose temperature is suspended', async () => {
+  history.replaceState(null, '', '?service=connected');
+  const backend = createMockBackend();
+  expect(await backend.getDiskStates()).toEqual([{ deviceId: 'storage/device-mock-hdd', power: 'standby' }]);
+  const schema = await backend.getSchema();
+  const id = 'storage/device-mock-hdd/temperature/main';
+  const index = schema.sensors.findIndex((s) => s.id === id);
+  expect(index).toBeGreaterThanOrEqual(0);
+  const history_ = await backend.getHistory([id], 5);
+  expect(history_.series[0].every((v) => typeof v === 'number')).toBe(true);
+  const seen: Snapshot[] = [];
+  const off = await backend.onSnapshot((s) => seen.push(s));
+  await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
+  off();
+  expect(seen[0].quality).toHaveLength(schema.sensors.length);
+  expect(seen[0].quality?.[index]).toBe(2);
+  expect(seen[0].quality?.filter((q) => q !== 0)).toHaveLength(1);
+});
+
+test('the mock without the service has no disk states and no quality', async () => {
+  history.replaceState(null, '', '?service=unreachable');
+  const backend = createMockBackend();
+  expect(await backend.getDiskStates()).toEqual([]);
+  const seen: Snapshot[] = [];
+  const off = await backend.onSnapshot((s) => seen.push(s));
+  await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
+  off();
+  expect(seen[0].quality).toBeUndefined();
 });

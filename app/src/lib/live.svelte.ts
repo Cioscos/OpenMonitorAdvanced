@@ -1,15 +1,24 @@
 import type { Backend, Unsubscribe } from './backend/backend';
 import { SeriesBuffer } from './series';
-import type { HistorySeed, Schema, Snapshot } from './types';
+import type { DiskPower, DiskStateEntry, HistorySeed, Schema, Snapshot } from './types';
 
 /** Five minutes at the default 1 s interval. */
 export const SPARKLINE_POINTS = 300;
+
+/** A snapshot's quality codes when they fit its schema; `null` reads as all fresh. */
+function validQuality(quality: number[] | undefined, count: number): number[] | null {
+  if (!Array.isArray(quality) || quality.length !== count) return null;
+  return quality.every((code) => code === 0 || code === 1 || code === 2) ? quality : null;
+}
 
 /** Latest values plus a short in-UI history per sensor, for sparklines. */
 export class LiveStore {
   readonly capacity: number;
   schema = $state.raw<Schema | null>(null);
   values = $state.raw<(number | null)[]>([]);
+  /** Quality code of each value of `values` (0 fresh, 1 held, 2 suspended); empty reads as all fresh. */
+  #quality = $state.raw<number[]>([]);
+  #diskPower = $state.raw<ReadonlyMap<string, DiskPower>>(new Map());
   timestampMs = $state(0);
   firstTimestampMs = $state(0);
   /** Local clock (Date.now()) when the last new snapshot arrived; drives the stale badge. */
@@ -41,6 +50,7 @@ export class LiveStore {
       }
     }
     this.values = schema.sensors.map(() => null);
+    this.#quality = [];
     this.#tick++;
   }
 
@@ -59,6 +69,7 @@ export class LiveStore {
     this.#lastSeq = snapshot.seq;
     this.lastReceivedAtMs = Date.now();
     this.values = snapshot.values;
+    this.#quality = validQuality(snapshot.quality, schema.sensors.length) ?? [];
     schema.sensors.forEach((s, i) => this.#series.get(s.id)?.push(snapshot.values[i]));
     this.#seriesTimestamps.push(snapshot.timestampMs);
     this.timestampMs = snapshot.timestampMs;
@@ -83,6 +94,7 @@ export class LiveStore {
       this.timestampMs = last;
       this.values = ids.map((_, i) => history.series[i]?.at(-1) ?? null);
     }
+    this.#quality = [];
     const first = history.timestampsMs[0];
     if (first !== undefined && (this.firstTimestampMs === 0 || first < this.firstTimestampMs)) {
       this.firstTimestampMs = first;
@@ -93,6 +105,21 @@ export class LiveStore {
   value(id: string): number | null {
     const i = this.#index.get(id);
     return i === undefined ? null : (this.values[i] ?? null);
+  }
+
+  /** 0 fresh, 1 held, 2 suspended; fresh for an unknown id or when the snapshot had no valid codes. */
+  quality(id: string): 0 | 1 | 2 {
+    const i = this.#index.get(id);
+    return i === undefined ? 0 : ((this.#quality[i] ?? 0) as 0 | 1 | 2);
+  }
+
+  /** Replaces every disk power state; an empty list clears them. */
+  setDiskStates(states: DiskStateEntry[]): void {
+    this.#diskPower = new Map(states.map((s) => [s.deviceId, s.power]));
+  }
+
+  diskPower(deviceId: string): DiskPower | undefined {
+    return this.#diskPower.get(deviceId);
   }
 
   seriesTimestampsMs(): number[] {
@@ -113,6 +140,7 @@ export async function connect(store: LiveStore, backend: Backend): Promise<Unsub
   let initializing = true;
   let requestedRevision = 0;
   let queue: Snapshot[] = [];
+  let diskEvents = 0;
   const off: Unsubscribe[] = [];
   const stop = () => { stopped = true; off.splice(0).forEach((fn) => fn()); queue = []; };
   const refresh = (): Promise<void> => {
@@ -155,7 +183,22 @@ export async function connect(store: LiveStore, backend: Backend): Promise<Unsub
         if (!initializing) recover();
       } else if (!store.applySnapshot(snapshot)) recover();
     }));
+    // Registered before the query, so no change falls between the two.
+    off.push(await backend.onDiskStates((states) => {
+      if (stopped) return;
+      diskEvents++;
+      store.setDiskStates(states);
+    }));
+    const eventsBeforeQuery = diskEvents;
+    const diskQuery = backend.getDiskStates().then(
+      (states) => {
+        // An event is newer than any answer that was still on its way.
+        if (!stopped && diskEvents === eventsBeforeQuery) store.setDiskStates(states);
+      },
+      (error) => { console.error('disk states query failed', error); },
+    );
     await refresh();
+    await diskQuery;
     return stop;
   } catch (error) {
     stop();

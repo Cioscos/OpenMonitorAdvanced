@@ -209,3 +209,111 @@ test('applySnapshot records the local arrival time of new snapshots only', () =>
     now.mockRestore();
   }
 });
+
+const withQuality = (seq: number, quality?: number[], revision = 1) => ({ ...snapshot(seq, revision), quality });
+const sensorCount = MOCK_SCHEMA.sensors.length;
+const ID = MOCK_SCHEMA.sensors[0].id;
+const ID2 = MOCK_SCHEMA.sensors[1].id;
+
+test('quality defaults to fresh when the payload has none', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(snapshot(1));
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(2, [1, 2]));
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(3, Array.from({ length: sensorCount }, () => 7)));
+  expect(store.quality(ID)).toBe(0);
+  expect(store.quality('no/such/sensor')).toBe(0);
+});
+
+test('quality follows the snapshot', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  const codes = Array.from({ length: sensorCount }, () => 0);
+  codes[0] = 1;
+  codes[1] = 2;
+  store.applySnapshot(withQuality(1, codes));
+  expect(store.quality(ID)).toBe(1);
+  expect(store.quality(ID2)).toBe(2);
+  store.applySnapshot(snapshot(2));
+  expect(store.quality(ID)).toBe(0);
+  expect(store.quality(ID2)).toBe(0);
+});
+
+test('a rejected snapshot cannot overwrite quality', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  const held = Array.from({ length: sensorCount }, () => 1);
+  store.applySnapshot(withQuality(5, held));
+  const fresh = Array.from({ length: sensorCount }, () => 0);
+  expect(store.applySnapshot(withQuality(6, fresh, 2))).toBe(false); // Other revision.
+  expect(store.applySnapshot(withQuality(4, fresh))).toBe(true); // Out of order.
+  expect(store.quality(ID)).toBe(1);
+  expect(store.applySnapshot({ ...withQuality(7, fresh), values: [] })).toBe(false); // Wrong length.
+  expect(store.quality(ID)).toBe(1);
+});
+
+test('quality resets when the schema changes or the history is seeded', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(withQuality(1, Array.from({ length: sensorCount }, () => 2)));
+  const ids = MOCK_SCHEMA.sensors.map((s) => s.id);
+  store.seedHistory(ids, { revision: 1, seq: 2, timestampsMs: [10], series: ids.map(() => [1]) });
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(3, Array.from({ length: sensorCount }, () => 2)));
+  store.applySchema({ ...MOCK_SCHEMA, revision: 2 });
+  expect(store.quality(ID)).toBe(0);
+});
+
+test('disk power comes from the backend and updates on the event', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
+  const store = new LiveStore();
+  const off = await connect(store, backend);
+  expect(store.diskPower('storage/a')).toBe('standby');
+  expect(store.diskPower('storage/b')).toBeUndefined();
+  backend.emitDiskStates([
+    { deviceId: 'storage/a', power: 'active' },
+    { deviceId: 'storage/b', power: 'idle' },
+  ]);
+  expect(store.diskPower('storage/a')).toBe('active');
+  expect(store.diskPower('storage/b')).toBe('idle');
+  off();
+});
+
+test('an empty disk event clears old power states', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
+  const store = new LiveStore();
+  const off = await connect(store, backend);
+  backend.emitDiskStates([]);
+  expect(store.diskPower('storage/a')).toBeUndefined();
+  off();
+});
+
+test('an event received during bootstrap wins over the initial disk query', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  let answer!: (states: import('./types').DiskStateEntry[]) => void;
+  backend.getDiskStates = () => new Promise((done) => { answer = done; });
+  const store = new LiveStore();
+  const connecting = connect(store, backend);
+  await vi.waitFor(() => expect(answer).toBeDefined());
+  backend.emitDiskStates([{ deviceId: 'storage/a', power: 'active' }]);
+  answer([{ deviceId: 'storage/a', power: 'standby' }]);
+  const off = await connecting;
+  expect(store.diskPower('storage/a')).toBe('active');
+  off();
+});
+
+test('disconnect removes the disk listener', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  const off = await connect(store, backend);
+  expect(backend.diskStateListeners).toBe(1);
+  off();
+  expect(backend.diskStateListeners).toBe(0);
+  backend.emitDiskStates([{ deviceId: 'storage/a', power: 'active' }]);
+  expect(store.diskPower('storage/a')).toBeUndefined();
+});

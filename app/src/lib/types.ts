@@ -95,6 +95,16 @@ export interface Snapshot {
   seq: number;
   timestampMs: number;
   values: (number | null)[];
+  /** One code per value: 0 fresh, 1 held, 2 suspended. Absent or malformed reads as all fresh. */
+  quality?: number[];
+}
+
+/** What a disk is doing, as far as the core can tell without touching it. */
+export type DiskPower = 'active' | 'idle' | 'standby' | 'unknown';
+
+export interface DiskStateEntry {
+  deviceId: string;
+  power: DiskPower;
 }
 
 export interface HistoryWindow {

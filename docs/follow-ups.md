@@ -100,14 +100,22 @@ Small findings the task reviews accepted and deferred. The final fix wave alread
 
 ## Manual checks owed after M6a
 
-Owed after the SignPath Foundation approves the project (spec M6a §8.2); the application has not been submitted yet. None of this runs on the dev PC: use Windows Sandbox or a VM, started by the user.
+Owed after the SignPath Foundation approves the project (spec M6a §8.2). The application is deferred (2026-10-01): the form requires proof that the project is widely used, and the repository had been public for two days. None of this runs on the dev PC: use Windows Sandbox or a VM, started by the user.
 
 - `workflow_dispatch` rehearsal with `test-signing`, including `verify-signatures.ps1 -Policy test` on the hosted runner.
 - One release with `release-signing`, with `REQUIRE_SIGNING=true` set before the first signed publication (`docs/release.md`).
 - Install the signed setup and check the signatures of `oma-app.exe`, `oma-service.exe` and `uninstall.exe` in `$INSTDIR`, plus the publisher in the UAC prompts of the install and of the uninstall.
 - SmartScreen behavior on a downloaded signed setup; the README line stays as is until then.
-- Installed uninstaller, left open by the spike (7-Zip cannot see `uninstall.exe` inside the setup): install `target/spike/B/setup-B.exe` in Windows Sandbox and confirm that `C:\Program Files\OpenMonitor Advanced\uninstall.exe` has SHA-256 `2AE8939B5D09B3C39FAD95633E7D751485C97529621D3815D48F4844402B2E68`, the marked copy that proves makensis embeds the replaced uninstaller.
-- First real unsigned release with the new flow (bump, tag, draft, manual publication), and a `workflow_dispatch` run without secrets that ends in the artifact, verified with `verify-signatures.ps1 -Policy none`.
+- SmartScreen and UAC on a downloaded **unsigned** 0.3.0 setup on a normal Windows (the Sandbox check could not show them: no Mark of the Web and no UAC prompt there).
+
+To settle on the first signed run (deferred from the M6a reviews):
+
+- bind the binaries returned by SignPath to the submitted ones through the Authenticode PE digest (today SignPath is the only trust anchor for that step);
+- the `timeout-minutes: 100` of the two SignPath steps against the action's own worst case (about 105 minutes) and the 240-minute job budget;
+- the semantics of `file-version` in the SignPath artifact configurations;
+- the uninstaller directory match when the runner's `TEMP` is a short 8.3 path (`RUNNER~1`);
+- the signtool line "The signature is timestamped:" that the timestamp count relies on, on a SignPath-signed file with an RFC 3161 timestamp;
+- `retention-days` of the unsigned `binaries-*`/`setup-*` run artifacts (90 days by default).
 
 ## Manual checks owed after M5c
 
@@ -131,6 +139,10 @@ Owed after the SignPath Foundation approves the project (spec M6a §8.2); the ap
 
 ## Closed in M6a
 
+- Installed uninstaller (2026-10-01, Windows Sandbox, by the user): the `uninstall.exe` installed by `target/spike/B/setup-B.exe` has SHA-256 `2AE8939B5D09B3C39FAD95633E7D751485C97529621D3815D48F4844402B2E68`, the marked copy, so makensis embeds the replaced uninstaller.
+- First hosted run of the `scripts` job with the Integration tests and of `actionlint` (2026-10-01): green on `eb18e07`, which fixed the test PFX.
+- `workflow_dispatch` rehearsal without secrets (run 36842561268, `eb18e07`): setup and `SHA256SUMS.txt` as a run artifact, checksum checked by hand, no release created.
+- First unsigned release with the new flow: 0.3.0, tag `v0.3.0` on `70bda0b` (run 36844320817), draft checked (checksum, build provenance attestation) and published by the user on 2026-10-02.
 - `nsExec.dll` and the other NSIS plugins ship unsigned: closed as third-party code that we must not sign (SignPath terms; design decision D5). `PawnIO_setup.exe` keeps its author's signature. Only the installer, `oma-app.exe`, `oma-service.exe` and `uninstall.exe` are to be signed.
 - Release pipeline, signing shim and verification scripts are implemented and covered by Pester; the signed path stays conditional on the Foundation's approval (see the owed checks above).
 

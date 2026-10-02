@@ -733,7 +733,28 @@ Il servizio conferma il §3.4 punto 5: manca `Product`. In più `ProductVersion`
 
 ## Esito dell'esecuzione
 
-*(Da compilare nel Task 10.)*
+Eseguito tra il 2026-09-30 e il 2026-10-02 in modalità subagent-driven: un implementer e una revisione per ciascun task, poi una revisione dell'intero branch e un controllo indipendente di un secondo agente.
+
+**Esito: pipeline di release in produzione, percorso firmato non collaudato.** La 0.3.0 è la prima release prodotta dal nuovo flusso, non firmata, con `SHA256SUMS.txt` e attestazione di provenienza.
+
+| Passo | Esito |
+|---|---|
+| Task 1-9 | Completati sul branch `feat/m6a-release-firma` (base `79070a2`), ciascuno rivisto. |
+| Revisione finale | «Con correzioni»: il flusso spingeva `main` e il tag insieme, quindi il gate CI avrebbe sempre fatto fallire il primo run; ora i due push sono separati (`0101a7b`). |
+| Controllo indipendente | Un rilievo: `cargo metadata --locked --no-deps` accettava un `Cargo.lock` obsoleto. Tolto `--no-deps`, aggiunto un test con Cargo reale (`ddf18bf`). |
+| Merge | Fast-forward in `main` in locale, poi push su richiesta dell'utente (2026-10-01). |
+| Uninstaller installato | Verificato dall'utente in Windows Sandbox: l'hash coincide con quello intercettato dallo shim. |
+| Prima CI reale | Rossa sul solo job `scripts`: il PFX dei test Integration conteneva due certificati con chiave privata e `signtool` rifiutava di scegliere. Corretto in `eb18e07`, poi tutti e cinque i job verdi. |
+| Prova senza firma | `workflow_dispatch` da `main`, run 36842561268: verde, artifact con setup e checksum coerente, nessuna release creata. |
+| Release 0.3.0 | Tag `v0.3.0` su `70bda0b`, run 36844320817: bozza creata, checksum e attestazione verificati, pubblicata a mano dall'utente il 2026-10-02. |
+
+**Decisioni prese durante il collaudo:**
+
+- **Domanda a SignPath Foundation rinviata.** Il modulo ha un campo obbligatorio «Reputation» (prove che il progetto è diffuso); il repository era pubblico da due giorni, con 3 stelle e 3 download. Si ripresenta quando ci saranno numeri da citare. Lo step 3b (collaudo della firma) resta quindi aperto.
+- **Niente zip attorno all'installer.** Esplora file propaga il Mark of the Web ai file estratti, quindi SmartScreen scatterebbe comunque.
+- **winget in valutazione** come canale senza firma: winget marca come attendibile l'installer del catalogo ufficiale dopo il controllo dell'hash, quindi non passa da SmartScreen; il prompt UAC resta con editore sconosciuto. Da progettare a parte (candidato per M6c), decidendo se installare con `/NOSENSORS`.
+
+**Non verificato:** tutto il percorso firmato (richieste a SignPath, seconda passata, verifica con policy `release` e `test`), SmartScreen e UAC su un setup scaricato. I punti rinviati sono in `docs/follow-ups.md`, «Manual checks owed after M6a».
 
 ## Esito della revisione del piano (2026-09-30)
 

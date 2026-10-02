@@ -194,12 +194,11 @@ internal sealed class FakeTree : IHardwareTree
 /// <summary>
 /// Scripted <see cref="IDiskPowerProbe"/>. The enumeration lists drive 0 and every drive of
 /// <see cref="Facts"/>, each as <see cref="Describe"/> answers it (a <see langword="null"/> fact
-/// is a drive that does not exist); the gate asks <see cref="IsSpunDown"/> like the real probe.
+/// is a drive that does not exist).
 /// </summary>
 internal sealed class FakeDisks : IDiskPowerProbe
 {
     private int _spunDownQueries;
-    private int _gateQueries;
     private int _enumerateCalls;
     private int _describeCalls;
     private readonly ConcurrentDictionary<int, int> _spunDownQueriesOf = new();
@@ -209,9 +208,6 @@ internal sealed class FakeDisks : IDiskPowerProbe
     public ConcurrentDictionary<int, bool?> SpunDown { get; } = new();
 
     public int SpunDownQueries => Volatile.Read(ref _spunDownQueries);
-
-    /// <summary><see cref="CheckGate"/> calls.</summary>
-    public int GateQueries => Volatile.Read(ref _gateQueries);
 
     /// <summary><see cref="Enumerate"/> calls.</summary>
     public int EnumerateCalls => Volatile.Read(ref _enumerateCalls);
@@ -246,12 +242,6 @@ internal sealed class FakeDisks : IDiskPowerProbe
         return SpunDown.TryGetValue(driveNumber, out bool? v) ? v : false;
     }
 
-    public IReadOnlyList<DriveCheck> CheckGate()
-    {
-        Interlocked.Increment(ref _gateQueries);
-        return DiskPowerProbe.CheckDrives(Listed(), drive => IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
-    }
-
     public IReadOnlyList<DriveFacts> Enumerate()
     {
         Interlocked.Increment(ref _enumerateCalls);
@@ -264,6 +254,45 @@ internal sealed class FakeDisks : IDiskPowerProbe
 
     private List<DriveFacts> Listed() =>
         [.. Facts.Keys.Append(0).Distinct().Order().Select(FactsOf).OfType<DriveFacts>()];
+}
+
+/// <summary>
+/// Scripted <see cref="IDiskActivityProbe"/>. A drive is powered on unless <see cref="Powered"/>
+/// says otherwise; its counters are those of <see cref="Counters"/>, and a drive not listed there
+/// is busy: its counters grow at every read.
+/// </summary>
+internal sealed class FakeActivity : IDiskActivityProbe
+{
+    private readonly ConcurrentDictionary<int, int> _reads = new();
+    private readonly ConcurrentDictionary<int, int> _powerQueries = new();
+
+    /// <summary>Per-drive counters; <see langword="null"/> is a drive whose counters cannot be read.</summary>
+    public ConcurrentDictionary<int, DiskCounters?> Counters { get; } = new();
+
+    /// <summary>Per-drive answers of Windows; <see langword="null"/> is a failed call.</summary>
+    public ConcurrentDictionary<int, bool?> Powered { get; } = new();
+
+    public int Reads => _reads.Values.Sum();
+
+    public int PowerQueries => _powerQueries.Values.Sum();
+
+    public int ReadsOf(int drive) => _reads.GetValueOrDefault(drive);
+
+    /// <summary>One more read and one more write on that drive.</summary>
+    public void Work(int drive) =>
+        Counters[drive] = Counters.TryGetValue(drive, out DiskCounters? c) && c is { } at ? new DiskCounters(at.ReadCount + 1, at.WriteCount + 1) : new DiskCounters(1, 1);
+
+    public DiskCounters? Read(int driveNumber)
+    {
+        int n = _reads.AddOrUpdate(driveNumber, 1, (_, count) => count + 1);
+        return Counters.TryGetValue(driveNumber, out DiskCounters? counters) ? counters : new DiskCounters(n, n);
+    }
+
+    public bool? PoweredOn(int driveNumber)
+    {
+        _powerQueries.AddOrUpdate(driveNumber, 1, (_, count) => count + 1);
+        return Powered.TryGetValue(driveNumber, out bool? on) ? on : true;
+    }
 }
 
 /// <summary>Builds <see cref="FeedRequest"/>s for tests.</summary>

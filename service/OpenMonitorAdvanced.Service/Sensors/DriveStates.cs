@@ -10,18 +10,21 @@ internal static class DriveStates
 {
     internal const string Active = "active";
     internal const string Standby = "standby";
+    internal const string Idle = "idle";
     internal const string Unknown = "unknown";
     internal const string SmartOff = "smartOff";
     internal const string NoMedia = "noMedia";
 
     /// <summary>
-    /// Precedence: <c>noMedia</c>, <c>smartOff</c>, then the power answer
-    /// (<c>standby</c>/<c>active</c>/<c>unknown</c>). A drive that was not asked is <c>active</c>
-    /// only when <see cref="DriveFacts.RequiresPowerCheck"/> is false; otherwise it is <c>unknown</c>.
+    /// Precedence: <c>noMedia</c>, <c>smartOff</c>, <c>standby</c> (Windows reports the disk off,
+    /// or the disk answered standby), <c>idle</c> (it needs a power check and was not asked in
+    /// this round, for lack of recent activity), then <c>active</c>/<c>unknown</c>: a drive that
+    /// was not asked is <c>active</c> only when <see cref="DriveFacts.RequiresPowerCheck"/> is
+    /// false; otherwise it is <c>unknown</c>.
     /// </summary>
-    internal static string Of(DriveFacts facts, bool smartOff, bool asked, bool? spunDown)
+    internal static string Of(DriveCheck check, bool smartOff)
     {
-        if (facts.Availability == DriveAvailability.NoMedia)
+        if (check.Drive.Availability == DriveAvailability.NoMedia)
         {
             return NoMedia;
         }
@@ -31,12 +34,22 @@ internal static class DriveStates
             return SmartOff;
         }
 
-        if (!asked)
+        if (check.PoweredOff)
         {
-            return facts.RequiresPowerCheck ? Unknown : Active;
+            return Standby;
         }
 
-        return spunDown switch
+        if (check.Idle)
+        {
+            return Idle;
+        }
+
+        if (!check.Asked)
+        {
+            return check.Drive.RequiresPowerCheck ? Unknown : Active;
+        }
+
+        return check.SpunDown switch
         {
             true => Standby,
             false => Active,
@@ -66,7 +79,7 @@ internal static class DriveStates
                 (uint)c.Drive.DriveNumber,
                 c.Key,
                 c.Drive.Model,
-                Of(c.Drive, IsSmartOff(c.Drive, c.Key, config), c.Asked, c.SpunDown),
+                Of(c, IsSmartOff(c.Drive, c.Key, config)),
                 BlocksSmart: !gateOpen && c.Blocks)),
     ];
 

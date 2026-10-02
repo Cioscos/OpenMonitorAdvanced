@@ -40,14 +40,39 @@ public sealed class DriveStatesTests
     [InlineData(DriveAvailability.Present, false, false, null, "unknown")]
     [InlineData(DriveAvailability.Unreadable, false, false, null, "unknown")]
     public void TheStateOfADriveThatNeedsAPowerCheckFollowsThePrecedence(DriveAvailability availability, bool smartOff, bool asked, bool? spunDown, string expected) =>
-        Assert.Equal(expected, DriveStates.Of(Hdd(availability), smartOff, asked, spunDown));
+        Assert.Equal(expected, DriveStates.Of(new DriveCheck(Hdd(availability), asked, spunDown), smartOff));
+
+    [Theory]
+    // Windows turned the disk off: standby, without asking it.
+    [InlineData(DriveAvailability.Present, false, true, false, "standby")]
+    // On, and not asked for lack of recent activity.
+    [InlineData(DriveAvailability.Present, false, false, true, "idle")]
+    // No media and SMART off still come first.
+    [InlineData(DriveAvailability.NoMedia, false, true, false, "noMedia")]
+    [InlineData(DriveAvailability.NoMedia, false, false, true, "noMedia")]
+    [InlineData(DriveAvailability.Present, true, true, false, "smartOff")]
+    [InlineData(DriveAvailability.Present, true, false, true, "smartOff")]
+    public void ADriveThatIsLeftAloneIsStandbyWhenWindowsTurnedItOffAndIdleOtherwise(DriveAvailability availability, bool smartOff, bool poweredOff, bool idle, string expected) =>
+        Assert.Equal(expected, DriveStates.Of(new DriveCheck(Hdd(availability), Asked: false, SpunDown: null) { PoweredOff = poweredOff, Idle = idle }, smartOff));
+
+    [Fact]
+    public void OnlyADriveKnownToBeActiveDoesNotBlockAndOnlyALeftAloneOrSleepingOneRests()
+    {
+        var unasked = new DriveCheck(Hdd(), Asked: false, SpunDown: null);
+        Assert.Equal((false, false), (unasked.Blocks, unasked.Rests));
+        Assert.Equal((true, true), ((unasked with { PoweredOff = true }).Blocks, (unasked with { PoweredOff = true }).Rests));
+        Assert.Equal((true, true), ((unasked with { Idle = true }).Blocks, (unasked with { Idle = true }).Rests));
+        Assert.Equal((true, true), (new DriveCheck(Hdd(), Asked: true, SpunDown: true).Blocks, new DriveCheck(Hdd(), Asked: true, SpunDown: true).Rests));
+        Assert.Equal((true, false), (new DriveCheck(Hdd(), Asked: true, SpunDown: null).Blocks, new DriveCheck(Hdd(), Asked: true, SpunDown: null).Rests));
+        Assert.Equal((false, false), (new DriveCheck(Hdd(), Asked: true, SpunDown: false).Blocks, new DriveCheck(Hdd(), Asked: true, SpunDown: false).Rests));
+    }
 
     [Fact]
     public void ADriveThatNeedsNoPowerCheckIsActiveWithoutBeingAsked()
     {
         Assert.False(Nvme().RequiresPowerCheck);
-        Assert.Equal("active", DriveStates.Of(Nvme(), smartOff: false, asked: false, spunDown: null));
-        Assert.Equal("smartOff", DriveStates.Of(Nvme(), smartOff: true, asked: false, spunDown: null));
+        Assert.Equal("active", DriveStates.Of(new DriveCheck(Nvme(), Asked: false, SpunDown: null), smartOff: false));
+        Assert.Equal("smartOff", DriveStates.Of(new DriveCheck(Nvme(), Asked: false, SpunDown: null), smartOff: true));
     }
 
     [Fact]

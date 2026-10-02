@@ -19,10 +19,10 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// read/write access: the service runs as LocalSystem). A drive whose driver rejects it (a USB
 /// bridge) is asked the same command as <c>ATA PASS-THROUGH(16)</c> through
 /// <c>IOCTL_SCSI_PASS_THROUGH</c>; the route that answered is remembered per drive;</item>
-/// <item><see cref="CheckGate"/>: the gate of controller ruling R17 over those
-/// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="CheckDrives"/>);
-/// <see cref="Enumerate"/> lists the drives alone, with no power command.</item>
+/// <item><see cref="Enumerate"/>: every drive as <see cref="Describe"/> sees it, with no power
+/// command.</item>
 /// </list>
+/// <see cref="GateEpisode"/> is the gate of controller ruling R17 over those facts and answers.
 /// The IOCTLs need an elevated process and a real disk (verified in Task 15); the decision
 /// logic, the register interpretation, the error logging and the struct layouts are unit-tested.
 /// </summary>
@@ -55,8 +55,6 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     private readonly Win32ErrorLog _errors;
     private readonly object _routeLock = new();
     private readonly Dictionary<int, RouteMemory> _routes = [];
-    private readonly object _gateLogLock = new();
-    private string? _lastBlockers;
 
     public DiskPowerProbe(ILogger<DiskPowerProbe> log)
     {
@@ -157,38 +155,11 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     public DriveFacts? Describe(int driveNumber) => driveNumber < 0 ? null : _describe(driveNumber);
 
     /// <inheritdoc />
-    public IReadOnlyList<DriveCheck> CheckGate()
-    {
-        IReadOnlyList<DriveCheck> checks = CheckDrives(Enumerate(), drive => IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
-        LogBlockersOnChange([.. checks.Where(c => c.Blocks)]);
-        return checks;
-    }
-
-    /// <inheritdoc />
     public IReadOnlyList<DriveFacts> Enumerate()
     {
         IReadOnlyList<DriveFacts> drives = _enumerateDrives();
         ReconcileRoutes(drives);
         return drives;
-    }
-
-    /// <summary>Whether the D6 gate is open: no drive of <see cref="CheckGate"/> blocks.</summary>
-    public bool AllRotationalDisksActive() => !CheckGate().Any(c => c.Blocks);
-
-    /// <summary>
-    /// Controller ruling R17, drive by drive: one whose <see cref="DriveFacts.RequiresPowerCheck"/>
-    /// is false is not asked (and never blocks); every other drive is asked through
-    /// <paramref name="isSpunDown"/> and blocks unless it answers <see langword="false"/>.
-    /// </summary>
-    internal static IReadOnlyList<DriveCheck> CheckDrives(IEnumerable<DriveFacts> drives, Func<DriveFacts, bool?> isSpunDown)
-    {
-        var checks = new List<DriveCheck>();
-        foreach (DriveFacts drive in drives)
-        {
-            checks.Add(drive.RequiresPowerCheck ? new DriveCheck(drive, Asked: true, isSpunDown(drive)) : new DriveCheck(drive, Asked: false, SpunDown: null));
-        }
-
-        return checks;
     }
 
     /// <summary>
@@ -265,7 +236,7 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
 
     private static bool IsNoMedia(int error) => error is NativeMethods.ErrorNotReady or NativeMethods.ErrorNoMediaInDrive;
 
-    private static string DrivePath(int drive) => @"\\.\PhysicalDrive" + drive.ToString(CultureInfo.InvariantCulture);
+    internal static string DrivePath(int drive) => @"\\.\PhysicalDrive" + drive.ToString(CultureInfo.InvariantCulture);
 
     private bool? Ask(PowerRoute route, int drive) => route == PowerRoute.Sat ? _satCheck(drive) : _nativeCheck(drive);
 
@@ -285,36 +256,6 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
                     _routes.Remove(number);
                 }
             }
-        }
-    }
-
-    private void LogBlockersOnChange(IReadOnlyList<DriveCheck> blockers)
-    {
-        string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{b.SpunDown}"));
-        lock (_gateLogLock)
-        {
-            if (key == _lastBlockers)
-            {
-                return;
-            }
-
-            _lastBlockers = key;
-        }
-
-        if (blockers.Count == 0)
-        {
-            _log.LogInformation("No drive keeps storage disabled any more");
-            return;
-        }
-
-        foreach (DriveCheck blocker in blockers)
-        {
-            _log.LogInformation(
-                "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
-                blocker.Drive.DriveNumber,
-                blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
-                blocker.Drive.Model ?? "unknown",
-                blocker.SpunDown == true ? "in standby" : "power state unknown");
         }
     }
 
@@ -728,4 +669,144 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
     }
+}
+
+/// <summary>
+/// The D6 gate (controller ruling R17, design M6b §4.4) from its first round until LHM's storage
+/// group is enabled: the storage worker's memory of what each drive answered, so that a closed
+/// gate does not ask every drive at every round (each question resets Windows' idle timer of
+/// that disk, and powers up a disk Windows turned off).
+/// <list type="number">
+/// <item>The first time it meets a drive whose <see cref="DriveFacts.RequiresPowerCheck"/> holds
+/// it asks it once, unless Windows reports it off: that drive is in standby and blocks, with no
+/// command.</item>
+/// <item>Afterwards only a drive that blocks is asked again, and only after recent activity on
+/// it; one whose counters cannot be read, at most every <see cref="BlindRetry"/>. An "active"
+/// answer is kept as it is.</item>
+/// <item>When no drive blocks any more, every drive not asked in this very round is asked once
+/// more, so that the gate opens on answers of one round; a standby found then keeps it closed.</item>
+/// </list>
+/// The gate is open when no <see cref="DriveCheck"/> of a round <see cref="DriveCheck.Blocks"/>.
+/// </summary>
+internal sealed class GateEpisode(TimeProvider time, ILogger log)
+{
+    /// <summary>How long a blocker whose counters cannot be read is left alone.</summary>
+    internal static readonly TimeSpan BlindRetry = TimeSpan.FromMinutes(5);
+
+    private readonly Dictionary<int, Known> _known = [];
+    private string? _lastBlockers;
+
+    /// <summary>
+    /// One gate round over a fresh enumeration: one <see cref="DriveCheck"/> per drive, in the
+    /// order of <paramref name="drives"/>. <paramref name="activity"/> is what the passive
+    /// sources say about each drive that needs a power check.
+    /// </summary>
+    internal IReadOnlyList<DriveCheck> Round(
+        IReadOnlyList<DriveFacts> drives,
+        IReadOnlyDictionary<int, DriveActivity> activity,
+        Func<DriveFacts, bool?> isSpunDown)
+    {
+        long now = time.GetTimestamp();
+        var checks = new DriveCheck[drives.Count];
+        var askedAt = new long?[drives.Count];
+        var askedNow = new bool[drives.Count];
+        for (int i = 0; i < drives.Count; i++)
+        {
+            DriveFacts drive = drives[i];
+            checks[i] = new DriveCheck(drive, Asked: false, SpunDown: null);
+            if (!drive.RequiresPowerCheck)
+            {
+                continue;
+            }
+
+            // Only for the disk it was learnt from: a drive number is reused by whatever is plugged in next.
+            Known? known = _known.TryGetValue(drive.DriveNumber, out Known? met) && met.Check.Drive.Model == drive.Model && met.Check.Drive.Serial == drive.Serial ? met : null;
+            askedAt[i] = known?.AskedAt;
+            activity.TryGetValue(drive.DriveNumber, out DriveActivity seen);
+            if (seen.PoweredOff)
+            {
+                checks[i] = checks[i] with { PoweredOff = true };
+            }
+            else if (known is null || (known.Check.Blocks && IsDue(seen, known.AskedAt, now)))
+            {
+                Ask(i);
+            }
+            else if (known.Check.Asked)
+            {
+                checks[i] = known.Check with { Drive = drive };
+            }
+            else
+            {
+                checks[i] = checks[i] with { Idle = true }; // on again, never asked, and nothing shows that it works
+            }
+        }
+
+        if (!checks.Any(c => c.Blocks))
+        {
+            for (int i = 0; i < drives.Count; i++)
+            {
+                if (drives[i].RequiresPowerCheck && !askedNow[i])
+                {
+                    Ask(i);
+                }
+            }
+        }
+
+        _known.Clear();
+        for (int i = 0; i < drives.Count; i++)
+        {
+            if (drives[i].RequiresPowerCheck)
+            {
+                _known[drives[i].DriveNumber] = new Known(checks[i], askedAt[i]);
+            }
+        }
+
+        LogBlockersOnChange([.. checks.Where(c => c.Blocks)]);
+        return checks;
+
+        void Ask(int i)
+        {
+            checks[i] = new DriveCheck(drives[i], Asked: true, isSpunDown(drives[i]));
+            askedAt[i] = now;
+            askedNow[i] = true;
+        }
+    }
+
+    private bool IsDue(DriveActivity seen, long? askedAt, long now) =>
+        seen.Recent || (!seen.Readable && (askedAt is not long at || time.GetElapsedTime(at, now) >= BlindRetry));
+
+    private void LogBlockersOnChange(IReadOnlyList<DriveCheck> blockers)
+    {
+        string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{State(b)}"));
+        if (key == _lastBlockers)
+        {
+            return;
+        }
+
+        _lastBlockers = key;
+        if (blockers.Count == 0)
+        {
+            log.LogInformation("No drive keeps storage disabled any more");
+            return;
+        }
+
+        foreach (DriveCheck blocker in blockers)
+        {
+            log.LogInformation(
+                "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
+                blocker.Drive.DriveNumber,
+                blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
+                blocker.Drive.Model ?? "unknown",
+                State(blocker));
+        }
+
+        static string State(DriveCheck blocker) =>
+            blocker.PoweredOff ? "turned off by Windows"
+            : blocker.Idle ? "not asked, no recent activity"
+            : blocker.SpunDown == true ? "in standby"
+            : "power state unknown";
+    }
+
+    /// <summary>What a drive last answered, and when (monotonic) it was last asked; <see langword="null"/> if never.</summary>
+    private sealed record Known(DriveCheck Check, long? AskedAt);
 }

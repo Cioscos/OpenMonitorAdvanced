@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using OpenMonitorAdvanced.Service.Sensors;
 using Xunit;
@@ -8,7 +9,8 @@ namespace OpenMonitorAdvanced.Service.Tests.Sensors;
 
 /// <summary>
 /// The pure parts of <see cref="DiskPowerProbe"/>: the ATA CHECK POWER MODE interpretation,
-/// the D6 "every rotational disk is active" rule and the marshalled size of every FFI struct
+/// the D6 "every rotational disk is active" rule (the first round of a <see cref="GateEpisode"/>;
+/// its later rounds are covered through the hub) and the marshalled size of every FFI struct
 /// (x64, this project's only <c>RuntimeIdentifier</c>). The IOCTLs themselves need an elevated
 /// process and a real disk: they are exercised in Task 15.
 /// </summary>
@@ -54,7 +56,7 @@ public sealed class DiskPowerProbeTests
     private static (IReadOnlyList<DriveCheck> Blockers, List<int> Asked) Gate(params DriveFacts[] drives)
     {
         var asked = new List<int>();
-        IReadOnlyList<DriveCheck> checks = DiskPowerProbe.CheckDrives(drives, drive =>
+        IReadOnlyList<DriveCheck> checks = FirstGateRound(drives, drive =>
         {
             asked.Add(drive.DriveNumber);
             return null;
@@ -67,6 +69,17 @@ public sealed class DiskPowerProbeTests
     }
 
     private static IReadOnlyList<DriveCheck> Blockers(IEnumerable<DriveCheck> checks) => [.. checks.Where(c => c.Blocks)];
+
+    /// <summary>
+    /// The first round of a gate episode over those drives, with Windows reporting each one on:
+    /// every drive that needs a power check is asked once.
+    /// </summary>
+    private static IReadOnlyList<DriveCheck> FirstGateRound(IReadOnlyList<DriveFacts> drives, Func<DriveFacts, bool?> isSpunDown) =>
+        new GateEpisode(TimeProvider.System, NullLogger.Instance).Round(drives, new Dictionary<int, DriveActivity>(), isSpunDown);
+
+    /// <summary>The probe's enumeration, then its power check for every drive that needs one: what a first gate round does with it.</summary>
+    private static IReadOnlyList<DriveCheck> AskAll(DiskPowerProbe probe) =>
+        FirstGateRound(probe.Enumerate(), drive => probe.IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
 
     [Fact]
     public void ADriveWithoutMediaDoesNotBlockTheGate()
@@ -111,10 +124,10 @@ public sealed class DiskPowerProbeTests
 
         foreach (DriveFacts drive in new[] { hdd, unknown, unreadable })
         {
-            Assert.Equal([new DriveCheck(drive, Asked: true, SpunDown: false)], DiskPowerProbe.CheckDrives([drive], _ => false));
-            DriveCheck standby = Assert.Single(Blockers(DiskPowerProbe.CheckDrives([drive], _ => true)));
+            Assert.Equal([new DriveCheck(drive, Asked: true, SpunDown: false)], FirstGateRound([drive], _ => false));
+            DriveCheck standby = Assert.Single(Blockers(FirstGateRound([drive], _ => true)));
             Assert.Equal((drive, (bool?)true), (standby.Drive, standby.SpunDown));
-            DriveCheck unanswered = Assert.Single(Blockers(DiskPowerProbe.CheckDrives([drive], _ => null)));
+            DriveCheck unanswered = Assert.Single(Blockers(FirstGateRound([drive], _ => null)));
             Assert.Null(unanswered.SpunDown);
         }
     }
@@ -131,7 +144,7 @@ public sealed class DiskPowerProbeTests
                 return false;
             });
 
-        Assert.True(probe.AllRotationalDisksActive());
+        Assert.Empty(Blockers(AskAll(probe)));
         Assert.Equal([0], asked);
     }
 
@@ -157,9 +170,8 @@ public sealed class DiskPowerProbeTests
                 new DriveCheck(drives[1], Asked: false, SpunDown: null), // NVMe: nothing to wake
                 new DriveCheck(drives[2], Asked: true, SpunDown: null), // a USB disk is asked too: the first identification touches it
             ],
-            probe.CheckGate());
+            AskAll(probe));
         Assert.Equal([0, 4], asked);
-        Assert.False(probe.AllRotationalDisksActive());
     }
 
     [Fact]
@@ -189,11 +201,12 @@ public sealed class DiskPowerProbeTests
     {
         var log = new ListLogger<DiskPowerProbe>();
         var drives = new List<DriveFacts> { Drive(0, 0x0B, true, model: "ST2000DM008-2FR102") };
-        var probe = new DiskPowerProbe(() => drives, _ => true, log);
+        var gate = new GateEpisode(TimeProvider.System, log);
+        var none = new Dictionary<int, DriveActivity>();
 
         for (int i = 0; i < 3; i++)
         {
-            Assert.False(probe.AllRotationalDisksActive());
+            Assert.Single(Blockers(gate.Round([.. drives], none, _ => true)));
         }
 
         LogEntry first = Assert.Single(log.Entries, e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive0", StringComparison.Ordinal));
@@ -201,8 +214,8 @@ public sealed class DiskPowerProbeTests
         Assert.Contains("0x0B", first.Message, StringComparison.Ordinal);
 
         drives.Add(Drive(3, 0x07, null, model: "USB Stick"));
-        Assert.False(probe.AllRotationalDisksActive());
-        Assert.False(probe.AllRotationalDisksActive());
+        Assert.Equal(2, Blockers(gate.Round([.. drives], none, _ => true)).Count);
+        Assert.Equal(2, Blockers(gate.Round([.. drives], none, _ => true)).Count);
 
         Assert.Single(log.Entries, e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive3", StringComparison.Ordinal));
         Assert.Equal(2, log.Entries.Count(e => e.Level == LogLevel.Information && e.Message.Contains("PhysicalDrive0", StringComparison.Ordinal)));
@@ -389,7 +402,7 @@ public sealed class DiskPowerProbeTests
 
         // The same when the enumeration sees the new identity first.
         routes.Drives.Add(UsbStick(model: "Ultra", serial: "1111"));
-        Assert.Empty(Blockers(probe.CheckGate()));
+        Assert.Empty(Blockers(AskAll(probe)));
         Assert.Equal(4, routes.NativeAsked.Count);
     }
 
@@ -399,14 +412,14 @@ public sealed class DiskPowerProbeTests
         var routes = new Routes { Native = null, Sat = false };
         routes.Drives.Add(UsbStick());
         DiskPowerProbe probe = routes.Probe();
-        Assert.Empty(Blockers(probe.CheckGate()));
-        Assert.Empty(Blockers(probe.CheckGate()));
+        Assert.Empty(Blockers(AskAll(probe)));
+        Assert.Empty(Blockers(AskAll(probe)));
         Assert.Single(routes.NativeAsked);
 
         routes.Drives.Clear();
-        Assert.Empty(Blockers(probe.CheckGate()));
+        Assert.Empty(Blockers(AskAll(probe)));
         routes.Drives.Add(UsbStick());
-        Assert.Empty(Blockers(probe.CheckGate()));
+        Assert.Empty(Blockers(AskAll(probe)));
         Assert.Equal(2, routes.NativeAsked.Count);
     }
 
@@ -419,8 +432,8 @@ public sealed class DiskPowerProbeTests
             routes.Drives.Add(unidentified);
             DiskPowerProbe probe = routes.Probe();
 
-            Assert.Empty(Blockers(probe.CheckGate()));
-            Assert.Empty(Blockers(probe.CheckGate()));
+            Assert.Empty(Blockers(AskAll(probe)));
+            Assert.Empty(Blockers(AskAll(probe)));
             Assert.Equal(2, routes.NativeAsked.Count);
         }
 
@@ -428,8 +441,8 @@ public sealed class DiskPowerProbeTests
         var dead = new Routes { Native = null, Sat = null };
         dead.Drives.Add(UsbStick(serial: null));
         DiskPowerProbe deadProbe = dead.Probe();
-        Assert.Single(Blockers(deadProbe.CheckGate()));
-        Assert.Single(Blockers(deadProbe.CheckGate()));
+        Assert.Single(Blockers(AskAll(deadProbe)));
+        Assert.Single(Blockers(AskAll(deadProbe)));
         Assert.Equal((2, 2), (dead.NativeAsked.Count, dead.SatAsked.Count));
 
         // And not between enumerations either (the hub asks without enumerating).

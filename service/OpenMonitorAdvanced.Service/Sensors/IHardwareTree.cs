@@ -62,7 +62,12 @@ public interface IHardwareTree : IDisposable
     void EnableStorage();
 }
 
-/// <summary>Disk power state checks for decision D6, without LHM and without waking a disk.</summary>
+/// <summary>
+/// Disk power state checks for decision D6, without LHM and without waking a disk. The power
+/// command is not free, though: every one resets Windows' idle timer of that disk, and it powers
+/// up a disk Windows turned off (design M6b §2), so the hub sends it only by the rules of
+/// <see cref="GateEpisode"/> and <see cref="DiskActivity.Check"/>.
+/// </summary>
 public interface IDiskPowerProbe
 {
     /// <summary>
@@ -72,14 +77,6 @@ public interface IDiskPowerProbe
     /// taken the drive number, so nothing it remembers about how to ask is carried over.
     /// </summary>
     bool? IsSpunDown(int driveNumber, string? model, string? serial);
-
-    /// <summary>
-    /// The D6 gate (controller ruling R17) over a fresh enumeration: one <see cref="DriveCheck"/>
-    /// per <c>PhysicalDriveN</c>, asked for its power mode only when
-    /// <see cref="DriveFacts.RequiresPowerCheck"/> holds. The gate is open when none
-    /// <see cref="DriveCheck.Blocks"/>.
-    /// </summary>
-    IReadOnlyList<DriveCheck> CheckGate();
 
     /// <summary>
     /// Every <c>PhysicalDriveN</c> as <see cref="Describe"/> sees it (access 0): no power command,
@@ -94,6 +91,22 @@ public interface IDiskPowerProbe
     /// </summary>
     DriveFacts? Describe(int driveNumber);
 }
+
+/// <summary>
+/// The two passive sources about a <c>PhysicalDriveN</c> (design M6b §4.4), both on a handle
+/// opened with access 0: neither wakes a disk, powers one up or resets Windows' disk idle timer.
+/// </summary>
+public interface IDiskActivityProbe
+{
+    /// <summary>The driver's read and write counters (<c>IOCTL_DISK_PERFORMANCE</c>); <see langword="null"/> when they cannot be read.</summary>
+    DiskCounters? Read(int driveNumber);
+
+    /// <summary>Whether Windows has the disk powered (<c>GetDevicePowerState</c>); <see langword="null"/> when the call fails.</summary>
+    bool? PoweredOn(int driveNumber);
+}
+
+/// <summary>How many reads and writes a disk's driver has completed.</summary>
+public readonly record struct DiskCounters(long ReadCount, long WriteCount);
 
 /// <summary>Whether a <c>PhysicalDriveN</c> could be described.</summary>
 public enum DriveAvailability
@@ -149,13 +162,22 @@ public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability,
 }
 
 /// <summary>
-/// A drive as the D6 gate saw it: whether it was <paramref name="Asked"/> for its power mode
+/// A drive as a storage round saw it: whether it was <paramref name="Asked"/> for its power mode
 /// and what it answered (<see langword="true"/> in standby, <see langword="null"/> unknown or not asked).
 /// </summary>
 public sealed record DriveCheck(DriveFacts Drive, bool Asked, bool? SpunDown)
 {
-    /// <summary>Whether it keeps the gate closed: asked, and not known to be active.</summary>
-    public bool Blocks => Asked && SpunDown != false;
+    /// <summary>Windows reports the disk off: it is in standby, and nothing is sent to it.</summary>
+    public bool PoweredOff { get; init; }
+
+    /// <summary>Its power mode matters, Windows reports it on and nothing was sent to it, for lack of recent activity.</summary>
+    public bool Idle { get; init; }
+
+    /// <summary>Whether it keeps the gate closed: its power mode matters and it is not known to be active.</summary>
+    public bool Blocks => PoweredOff || Idle || (Asked && SpunDown != false);
+
+    /// <summary>Whether its values of the round before stay, as held: left alone (off or idle) or in confirmed standby.</summary>
+    public bool Rests => PoweredOff || Idle || (Asked && SpunDown == true);
 
     /// <summary>Its <see cref="DriveKey"/> from the descriptor model and serial; <see langword="null"/> when either is missing.</summary>
     public string? Key => DriveKey.Compute(Drive.Model, Drive.Serial);

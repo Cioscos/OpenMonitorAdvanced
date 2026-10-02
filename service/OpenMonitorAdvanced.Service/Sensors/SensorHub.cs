@@ -23,7 +23,9 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <c>oma-storage</c> owns every disk access: every 30 s (only while someone is subscribed) it
 /// applies the D6 gate, lists the drives, resolves each new disk's identity
 /// (<see cref="IDiskPowerProbe.Describe"/>), updates each disk that is known to be spinning and
-/// publishes the outcome as one immutable <see cref="StorageRound"/>: the state of every drive,
+/// publishes the outcome as one immutable <see cref="StorageRound"/>; ten seconds before a
+/// round it wakes once more, only to read the counters of the disks that round may ask
+/// (<see cref="ActivityWatch"/>). A round is: the state of every drive,
 /// the resolved disks, the storage part of the request it applied and the raw values keyed by LHM
 /// sensor identifier, which the sampler only looks up (values older than two rounds, or from
 /// before an idle period, count as absent). A
@@ -35,25 +37,35 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// </para>
 /// <para>
 /// <b>D6.</b> The tree is opened without storage. <see cref="IHardwareTree.EnableStorage"/> is
-/// called only when <see cref="IDiskPowerProbe.CheckGate"/> says every drive that needs it
-/// (controller ruling R17) is spinning, re-checked on every storage round until it succeeds (the
-/// drives that block are flagged in the schema's <c>drives</c>). Afterwards nothing blocks: every
-/// round lists the drives again (<see cref="IDiskPowerProbe.Enumerate"/>) and asks each one whose
+/// called only when a <see cref="GateEpisode"/> round says every drive that needs it (controller
+/// ruling R17) is spinning, tried on every storage round until it succeeds (the drives that
+/// block are flagged in the schema's <c>drives</c>). Afterwards nothing blocks: every round
+/// lists the drives again (<see cref="IDiskPowerProbe.Enumerate"/>) and checks each one whose
 /// <see cref="DriveFacts.RequiresPowerCheck"/> holds and whose SMART is on
-/// (<see cref="DriveStates.IsSmartOff"/>) for its power mode once, whether LHM exposes it or
-/// not; a disk is updated only when that answer is "active", otherwise its values are absent.
+/// (<see cref="DriveStates.IsSmartOff"/>), whether LHM exposes it or not; a disk is updated
+/// only when it answers "active".
 /// </para>
 /// <para>
-/// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk whose standby is
-/// confirmed keeps the values of the round before, flagged as held, round after round while it
-/// sleeps: only for the disk they were measured on (same <see cref="DriveKey"/> in the earlier
-/// round, in the resolved disk and in this round's enumeration), and only from a round that is
-/// itself still current: one that started within the two-round limit above and that nothing
-/// replaced while this round ran (the idle drop). So a late round loses the value until the
-/// disk is read again, instead of bringing an expired one back. An unknown state, "no media",
-/// a failed update or SMART off keep nothing. In a snapshot a storage value is held when its round
-/// kept it, or when that round's values went out in an earlier snapshot already (30 s rounds
-/// against faster sampling); an absent value and a value from another source never are.
+/// <b>Asking costs</b> (design M6b §4.4). CHECK POWER MODE resets Windows' idle timer of the
+/// disk and powers up a disk Windows turned off, so a disk is asked (and then read) only when
+/// Windows reports it on and its read/write counters grew in the ten seconds before the round;
+/// otherwise nothing is sent to it: it is <c>standby</c> when Windows turned it off and
+/// <c>idle</c> when it is on without recent activity (which may hide a standby the disk chose
+/// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). The round that
+/// opens the gate goes on with the gate's answers; the one after it already needs activity.
+/// </para>
+/// <para>
+/// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk that rests
+/// (confirmed standby, turned off by Windows, or idle) keeps the values of the round before,
+/// flagged as held, round after round while it rests: only for the disk they were measured on
+/// (same <see cref="DriveKey"/> in the earlier round, in the resolved disk and in this round's
+/// enumeration), and only from a round that is itself still current: one that started within
+/// the two-round limit above and that nothing replaced while this round ran (the idle drop).
+/// So a late round loses the value until the disk is read again, instead of bringing an expired
+/// one back. An unknown state, "no media", a failed update or SMART off keep nothing. In a
+/// snapshot a storage value is held when its round kept it, or when that round's values went
+/// out in an earlier snapshot already (30 s rounds against faster sampling); an absent value
+/// and a value from another source never are.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The tree is never closed while the hub lives: without subscribers sampling
@@ -153,6 +165,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private bool _storageGateLogged;
     private readonly Dictionary<string, bool?> _diskStates = new(StringComparer.Ordinal);
     private readonly HashSet<string> _undescribedLogged = new(StringComparer.Ordinal);
+    private readonly ActivityWatch _watch;
+    private GateEpisode? _gate; // while the D6 gate is closed
 
     // Shared, published by reference swap.
     private volatile DesiredConfig? _desired; // written under _subLock
@@ -176,10 +190,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly ManualResetEventSlim _samplerWake = new();
     private readonly ManualResetEventSlim _storageWake = new();
 
-    public SensorHub(IHardwareTree tree, IDiskPowerProbe disks, Func<bool> pawnIoAvailable, TimeProvider time, ILogger<SensorHub> log)
+    public SensorHub(IHardwareTree tree, IDiskPowerProbe disks, IDiskActivityProbe activity, Func<bool> pawnIoAvailable, TimeProvider time, ILogger<SensorHub> log)
     {
         _tree = tree;
         _disks = disks;
+        _watch = new ActivityWatch(activity, time);
         _pawnIoAvailable = pawnIoAvailable;
         _time = time;
         _log = log;
@@ -552,16 +567,28 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
             if (info.Rotational)
             {
-                // A drive the round did not ask (gone from the enumeration, say) is unknown.
-                bool? spunDown = answers.TryGetValue(info.DriveNumber, out DriveCheck? answer) && answer.Asked ? answer.SpunDown : null;
-                LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown);
-                if (spunDown != false)
+                // A drive the round did not check (gone from the enumeration, say) is unknown.
+                answers.TryGetValue(info.DriveNumber, out DriveCheck? answer);
+                bool idle = answer is { Idle: true };
+                bool? spunDown = answer switch
                 {
-                    // Standby or unknown: no SMART read. Only a confirmed standby keeps the
-                    // values of the round before; an unknown state leaves them absent.
-                    if (spunDown == true && keepable)
+                    { PoweredOff: true } => true,
+                    { Asked: true } => answer.SpunDown,
+                    _ => null,
+                };
+                if (!idle)
+                {
+                    LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown); // idle comes and goes with the disk's work: not logged
+                }
+
+                if (idle || spunDown != false)
+                {
+                    // Left alone, asleep or unknown: no SMART read. A disk that rests (Windows
+                    // turned it off, it is idle, or it confirmed its standby) keeps the values
+                    // of the round before; an unknown state leaves them absent.
+                    if (answer is { Rests: true } && keepable)
                     {
-                        KeepValues(root, resolution, answer!, before, cache, held);
+                        KeepValues(root, resolution, answer, before, cache, held);
                     }
 
                     continue;
@@ -589,7 +616,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// A sleeping disk's values of the round before, carried into this one as held (the caller
+    /// A resting disk's values of the round before, carried into this one as held (the caller
     /// has checked that round is still current, <see cref="IsCurrent"/>). Only those
     /// measured on this very disk: the earlier round's disk, the resolved one and the drive this
     /// round enumerated at its number must share one <see cref="DriveKey"/> (the same LHM
@@ -703,7 +730,17 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         while (Interlocked.CompareExchange(ref _round, current with { Applied = applied }, current) != current);
     }
 
-    /// <summary>One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber, only once open). Returns the delay until the next round.</summary>
+    /// <summary>
+    /// The baseline of the next storage round: the counters of the drives the round before
+    /// watched (access 0, no command). It belongs to the published round it was taken under.
+    /// </summary>
+    internal void BaselineOnce() => _watch.TakeBaseline(_round);
+
+    /// <summary>
+    /// One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber,
+    /// only once open) or, <see cref="DiskActivity.Window"/> before it, its baseline when there
+    /// are drives to watch. Returns the delay until the next wake.
+    /// </summary>
     internal TimeSpan RunStorageDue()
     {
         if (IsDisposed)
@@ -727,6 +764,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         long now = _time.GetTimestamp();
+        long due;
         lock (_subLock)
         {
             if (!_opened || _subscribers.Count == 0)
@@ -734,19 +772,32 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 return Timeout.InfiniteTimeSpan;
             }
 
-            if (now < _nextStorageDue)
+            due = _nextStorageDue;
+        }
+
+        if (now >= due)
+        {
+            StorageOnce();
+            lock (_subLock)
             {
-                return TicksUntil(_nextStorageDue);
+                due = _nextStorageDue = now + SecondsToTicks(StorageInterval);
             }
         }
 
-        StorageOnce();
-
-        lock (_subLock)
+        // No lock from here on: the baseline is disk I/O (passive, but I/O).
+        if (!_watch.BaselineDue)
         {
-            _nextStorageDue = now + SecondsToTicks(StorageInterval);
-            return TicksUntil(_nextStorageDue);
+            return TicksUntil(due); // nothing to watch, or the baseline of this round is taken
         }
+
+        long baselineAt = due - SecondsToTicks(DiskActivity.Window);
+        if (_time.GetTimestamp() < baselineAt)
+        {
+            return TicksUntil(baselineAt);
+        }
+
+        BaselineOnce();
+        return TicksUntil(due);
     }
 
     /// <summary>
@@ -1068,34 +1119,27 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         round.Timestamp != long.MinValue && now - round.Timestamp <= 2 * SecondsToTicks(StorageInterval);
 
     /// <summary>
-    /// The D6 gate, asked on every storage round until LHM's storage group is enabled. Returns the
-    /// gate's checks once it is: the round goes on with those answers, asking no drive twice.
-    /// Otherwise <see langword="null"/>, after publishing the drive list the gate saw.
+    /// The D6 gate, on every storage round until LHM's storage group is enabled: one
+    /// <see cref="GateEpisode"/> round over a fresh enumeration. Returns the gate's checks once
+    /// it is open: the round goes on with those answers, asking no drive twice. Otherwise
+    /// <see langword="null"/>, after publishing the drive list the gate saw.
     /// </summary>
     private IReadOnlyList<DriveCheck>? TryEnableStorage(EffectiveConfig config, long roundStart)
     {
-        IReadOnlyList<DriveCheck>? checks;
-        try
+        if (ListDrives(drive => drive.RequiresPowerCheck) is not { } listed)
         {
-            checks = _disks.CheckGate();
-        }
-        catch (Exception e)
-        {
-            LogRateLimited("storage-gate", e, "Checking the disks' power state failed; storage stays disabled");
-            checks = null;
+            return null;
         }
 
-        if (checks is null || checks.Any(c => c.Blocks))
+        _gate ??= new GateEpisode(_time, _log);
+        IReadOnlyList<DriveCheck> checks = _gate.Round(listed.Drives, listed.Activity, AskPowerMode);
+        if (checks.Any(c => c.Blocks))
         {
-            if (checks is not null)
-            {
-                PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
-            }
-
+            PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             if (!_storageGateLogged)
             {
                 _storageGateLogged = true;
-                _log.LogInformation("Storage stays disabled: a rotational disk is in standby or its state is unknown (re-checked every {Seconds} s)", StorageInterval.TotalSeconds);
+                _log.LogInformation("Storage stays disabled: a rotational disk is in standby or its state is unknown (asked again when it shows activity)");
             }
 
             return null;
@@ -1115,65 +1159,79 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         _storageEnabled = true;
+        _gate = null;
         _log.LogInformation("Every rotational disk is active: storage enabled");
         return checks;
     }
 
     /// <summary>
-    /// Storage worker, once the gate is open: every drive of a fresh enumeration (access 0), with
-    /// one power check for each that needs it and whose SMART is on, whether LHM exposes it or
-    /// not. A drive whose SMART is off is not asked: nothing is sent to it periodically.
-    /// <see langword="null"/> when the drives cannot be listed: no disk is updated blind.
+    /// Storage worker, once the gate is open: every drive of a fresh enumeration (access 0),
+    /// whether LHM exposes it or not. A drive whose power mode matters and whose SMART is on is
+    /// asked only by the rule of <see cref="DiskActivity.Check"/>: not when Windows turned it
+    /// off, and not without recent activity. A drive whose SMART is off is not even sampled:
+    /// nothing is sent to it periodically. <see langword="null"/> when the drives cannot be
+    /// listed: no disk is updated blind.
     /// </summary>
     private IReadOnlyList<DriveCheck>? CheckPowerStates(EffectiveConfig config)
     {
-        IReadOnlyList<DriveFacts> drives;
-        try
+        if (ListDrives(drive => drive.RequiresPowerCheck && !DriveStates.IsSmartOff(drive, DriveKey.Compute(drive.Model, drive.Serial), config)) is not { } listed)
         {
-            drives = _disks.Enumerate();
-        }
-        catch (Exception e)
-        {
-            LogRateLimited("storage-enumerate", e, "Listing the drives failed; no disk is updated in this storage round");
             return null;
         }
 
-        var checks = new List<DriveCheck>(drives.Count);
-        foreach (DriveFacts drive in drives)
+        var checks = new List<DriveCheck>(listed.Drives.Count);
+        foreach (DriveFacts drive in listed.Drives)
         {
             if (_stop.IsCancellationRequested)
             {
                 return null;
             }
 
-            var unasked = new DriveCheck(drive, Asked: false, SpunDown: null);
-            if (!drive.RequiresPowerCheck || DriveStates.IsSmartOff(drive, unasked.Key, config))
-            {
-                checks.Add(unasked);
-                continue;
-            }
-
-            bool? spunDown;
-            try
-            {
-                spunDown = _disks.IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial);
-            }
-            catch (Exception e)
-            {
-                LogRateLimited("power:" + drive.DriveNumber, e, "Checking the power mode of PhysicalDrive{Drive} failed", drive.DriveNumber);
-                spunDown = null;
-            }
-
-            checks.Add(unasked with { Asked = true, SpunDown = spunDown });
+            checks.Add(listed.Activity.TryGetValue(drive.DriveNumber, out DriveActivity seen)
+                ? DiskActivity.Check(drive, seen, AskPowerMode)
+                : new DriveCheck(drive, Asked: false, SpunDown: null));
         }
 
         return checks;
     }
 
     /// <summary>
+    /// A fresh enumeration (access 0) with what the passive sources say about each drive
+    /// <paramref name="watched"/> selects, sampled before any command is sent.
+    /// <see langword="null"/> when the drives cannot be listed.
+    /// </summary>
+    private (IReadOnlyList<DriveFacts> Drives, IReadOnlyDictionary<int, DriveActivity> Activity)? ListDrives(Func<DriveFacts, bool> watched)
+    {
+        try
+        {
+            IReadOnlyList<DriveFacts> drives = _disks.Enumerate();
+            return (drives, _watch.Sample(drives, watched, _round));
+        }
+        catch (Exception e)
+        {
+            LogRateLimited("storage-enumerate", e, "Listing the drives failed; no disk is touched in this storage round");
+            return null;
+        }
+    }
+
+    /// <summary>CHECK POWER MODE for that drive; a failure is an unknown state, for that drive only.</summary>
+    private bool? AskPowerMode(DriveFacts drive)
+    {
+        try
+        {
+            return _disks.IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial);
+        }
+        catch (Exception e)
+        {
+            LogRateLimited("power:" + drive.DriveNumber, e, "Checking the power mode of PhysicalDrive{Drive} failed", drive.DriveNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Storage worker: takes the storage part of a new request. Switched off (P10), the values
     /// (kept ones too) and the resolved disks are dropped at once and the last drive list stays,
-    /// every entry <c>smartOff</c>, with no I/O and the LHM group left open; switched on, or with
+    /// every entry <c>smartOff</c>, with no I/O (no baseline either) and the LHM group left open; switched on, or with
     /// another SMART selection, a round runs at once and publishes the request as applied.
     /// </summary>
     private void SyncStorageConfig()
@@ -1194,6 +1252,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         _storageApplied = part;
         if (!part.Enabled.HasFlag(ServiceModules.Storage))
         {
+            _watch.Clear();
             PublishRound(long.MinValue, DriveStates.AllOff(_round.Drives), StorageRound.Empty.Resolved, StorageRound.Empty.Values, StorageRound.Empty.Held, part);
         }
         else

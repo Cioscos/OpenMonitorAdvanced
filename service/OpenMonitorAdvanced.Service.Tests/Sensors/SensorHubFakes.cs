@@ -235,7 +235,7 @@ internal sealed class FakeDisks : IDiskPowerProbe
             : new DriveFacts(driveNumber, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true);
     }
 
-    public bool? IsSpunDown(int driveNumber)
+    public bool? IsSpunDown(int driveNumber, string? model, string? serial)
     {
         Interlocked.Increment(ref _spunDownQueries);
         _spunDownQueriesOf.AddOrUpdate(driveNumber, 1, (_, n) => n + 1);

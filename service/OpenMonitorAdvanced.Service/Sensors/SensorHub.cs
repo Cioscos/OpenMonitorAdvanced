@@ -508,7 +508,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 bool? spunDown;
                 try
                 {
-                    spunDown = _disks.IsSpunDown(info.DriveNumber);
+                    spunDown = _disks.IsSpunDown(info.DriveNumber, info.DescriptorModel, info.DescriptorSerial);
                 }
                 catch (Exception e)
                 {

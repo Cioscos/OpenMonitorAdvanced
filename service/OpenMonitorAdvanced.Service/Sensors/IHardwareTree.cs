@@ -65,8 +65,13 @@ public interface IHardwareTree : IDisposable
 /// <summary>Disk power state checks for decision D6, without LHM and without waking a disk.</summary>
 public interface IDiskPowerProbe
 {
-    /// <summary>ATA CHECK POWER MODE on <c>\\.\PhysicalDriveN</c>: <see langword="true"/> in standby, <see langword="null"/> when unknown.</summary>
-    bool? IsSpunDown(int driveNumber);
+    /// <summary>
+    /// ATA CHECK POWER MODE on <c>\\.\PhysicalDriveN</c>: <see langword="true"/> in standby,
+    /// <see langword="null"/> when unknown. <paramref name="model"/> and <paramref name="serial"/>
+    /// are the drive's descriptor identity: they tell the implementation when another disk has
+    /// taken the drive number, so nothing it remembers about how to ask is carried over.
+    /// </summary>
+    bool? IsSpunDown(int driveNumber, string? model, string? serial);
 
     /// <summary>
     /// The D6 gate (controller ruling R17): the <c>PhysicalDriveN</c>s whose

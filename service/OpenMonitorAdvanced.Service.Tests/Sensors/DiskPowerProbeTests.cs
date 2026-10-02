@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Time.Testing;
 using OpenMonitorAdvanced.Service.Sensors;
 using Xunit;
 
@@ -53,9 +54,9 @@ public sealed class DiskPowerProbeTests
     private static (IReadOnlyList<DriveBlocker> Blockers, List<int> Asked) Gate(params DriveFacts[] drives)
     {
         var asked = new List<int>();
-        IReadOnlyList<DriveBlocker> blockers = DiskPowerProbe.FindGateBlockers(drives, n =>
+        IReadOnlyList<DriveBlocker> blockers = DiskPowerProbe.FindGateBlockers(drives, drive =>
         {
-            asked.Add(n);
+            asked.Add(drive.DriveNumber);
             return null;
         });
         return (blockers, asked);
@@ -192,10 +193,277 @@ public sealed class DiskPowerProbeTests
     public void ANegativeDriveNumberIsUnknown()
     {
         var probe = new DiskPowerProbe(() => [Drive(0, 0x0B, true)], _ => false);
-        Assert.Null(probe.IsSpunDown(-1));
+        Assert.Null(probe.IsSpunDown(-1, "Model", null));
         Assert.Null(probe.Describe(-1));
         Assert.Equal(Drive(0, 0x0B, true), probe.Describe(0));
         Assert.Null(probe.Describe(9));
+    }
+
+    /// <summary>A probe over scripted answers of the two routes, recording which drive each one was asked for.</summary>
+    private sealed class Routes
+    {
+        public bool? Native { get; set; }
+
+        public bool? Sat { get; set; }
+
+        public List<int> NativeAsked { get; } = [];
+
+        public List<int> SatAsked { get; } = [];
+
+        public List<DriveFacts> Drives { get; } = [];
+
+        public FakeTimeProvider Time { get; } = new();
+
+        public DiskPowerProbe Probe() => new(
+            () => [.. Drives],
+            n =>
+            {
+                NativeAsked.Add(n);
+                return Native;
+            },
+            n =>
+            {
+                SatAsked.Add(n);
+                return Sat;
+            },
+            Time);
+    }
+
+    private static DriveFacts UsbStick(string? model = "Extreme", string? serial = "4C53") =>
+        new(4, DriveAvailability.Present, model, serial, BusType: 0x07, SeekPenalty: null);
+
+    [Fact]
+    public void SatIsTriedWhenTheNativeCommandGivesNoAnswer()
+    {
+        var routes = new Routes { Native = null, Sat = false };
+
+        Assert.False(routes.Probe().IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal([4], routes.NativeAsked);
+        Assert.Equal([4], routes.SatAsked);
+    }
+
+    [Fact]
+    public void ANativeStandbyAnswerDoesNotTryTheFallback()
+    {
+        var routes = new Routes { Native = true, Sat = false };
+
+        Assert.True(routes.Probe().IsSpunDown(0, "ST2000DM008-2FR102", "ZFL0"));
+        Assert.Equal([0], routes.NativeAsked);
+        Assert.Empty(routes.SatAsked);
+    }
+
+    [Fact]
+    public void TheWorkingRouteIsRememberedPerDrive()
+    {
+        var routes = new Routes { Native = null, Sat = false };
+        DiskPowerProbe probe = routes.Probe();
+
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal([4], routes.NativeAsked);
+        Assert.Equal([4, 4], routes.SatAsked);
+
+        // Another drive starts from the native command again.
+        Assert.False(probe.IsSpunDown(5, "Other", "77"));
+        Assert.Equal([4, 5], routes.NativeAsked);
+
+        // The answer itself is never remembered: only the route.
+        routes.Sat = true;
+        Assert.True(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal([4, 5], routes.NativeAsked);
+    }
+
+    [Fact]
+    public void WhenTheRememberedRouteStopsAnsweringTheOtherIsTried()
+    {
+        var routes = new Routes { Native = null, Sat = false };
+        DiskPowerProbe probe = routes.Probe();
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+
+        (routes.Native, routes.Sat) = (true, null);
+        Assert.True(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal([4, 4], routes.SatAsked); // the remembered route first
+        Assert.Equal([4, 4], routes.NativeAsked);
+
+        // The native route is the remembered one now.
+        Assert.True(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal([4, 4], routes.SatAsked);
+        Assert.Equal([4, 4, 4], routes.NativeAsked);
+    }
+
+    [Fact]
+    public void ADeadRouteIsRetriedOnlyAfterFiveMinutes()
+    {
+        var routes = new Routes { Native = null, Sat = null };
+        DiskPowerProbe probe = routes.Probe();
+        Assert.Null(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal((1, 1), (routes.NativeAsked.Count, routes.SatAsked.Count));
+
+        // Both routes would answer now, but nothing is sent and nothing is assumed.
+        (routes.Native, routes.Sat) = (false, false);
+        routes.Time.Advance(TimeSpan.FromSeconds(299));
+        Assert.Null(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal((1, 1), (routes.NativeAsked.Count, routes.SatAsked.Count));
+
+        (routes.Native, routes.Sat) = (null, null);
+        routes.Time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Null(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal((2, 2), (routes.NativeAsked.Count, routes.SatAsked.Count));
+
+        // The retry failed too: another five minutes.
+        routes.Time.Advance(TimeSpan.FromSeconds(299));
+        Assert.Null(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal((2, 2), (routes.NativeAsked.Count, routes.SatAsked.Count));
+    }
+
+    [Fact]
+    public void ANewModelOrSerialForgetsTheRoute()
+    {
+        var routes = new Routes { Native = null, Sat = false };
+        DiskPowerProbe probe = routes.Probe();
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Single(routes.NativeAsked);
+
+        Assert.False(probe.IsSpunDown(4, "Extreme", "0000")); // another serial
+        Assert.Equal(2, routes.NativeAsked.Count);
+        Assert.False(probe.IsSpunDown(4, "Ultra", "0000")); // another model
+        Assert.Equal(3, routes.NativeAsked.Count);
+        Assert.False(probe.IsSpunDown(4, "Ultra", "0000"));
+        Assert.Equal(3, routes.NativeAsked.Count);
+
+        // The same when the enumeration sees the new identity first.
+        routes.Drives.Add(UsbStick(model: "Ultra", serial: "1111"));
+        Assert.Empty(probe.GateBlockers());
+        Assert.Equal(4, routes.NativeAsked.Count);
+    }
+
+    [Fact]
+    public void RemovingAndReaddingTheSameIdentityForgetsTheRoute()
+    {
+        var routes = new Routes { Native = null, Sat = false };
+        routes.Drives.Add(UsbStick());
+        DiskPowerProbe probe = routes.Probe();
+        Assert.Empty(probe.GateBlockers());
+        Assert.Empty(probe.GateBlockers());
+        Assert.Single(routes.NativeAsked);
+
+        routes.Drives.Clear();
+        Assert.Empty(probe.GateBlockers());
+        routes.Drives.Add(UsbStick());
+        Assert.Empty(probe.GateBlockers());
+        Assert.Equal(2, routes.NativeAsked.Count);
+    }
+
+    [Fact]
+    public void AMissingIdentityDoesNotKeepARouteAcrossEnumeration()
+    {
+        foreach (DriveFacts unidentified in new[] { UsbStick(serial: null), UsbStick(model: null), UsbStick(serial: "") })
+        {
+            var routes = new Routes { Native = null, Sat = false };
+            routes.Drives.Add(unidentified);
+            DiskPowerProbe probe = routes.Probe();
+
+            Assert.Empty(probe.GateBlockers());
+            Assert.Empty(probe.GateBlockers());
+            Assert.Equal(2, routes.NativeAsked.Count);
+        }
+
+        // Not even the "no route" memory: a drive that cannot be told apart is asked every round.
+        var dead = new Routes { Native = null, Sat = null };
+        dead.Drives.Add(UsbStick(serial: null));
+        DiskPowerProbe deadProbe = dead.Probe();
+        Assert.Single(deadProbe.GateBlockers());
+        Assert.Single(deadProbe.GateBlockers());
+        Assert.Equal((2, 2), (dead.NativeAsked.Count, dead.SatAsked.Count));
+
+        // And not between enumerations either (the hub asks without enumerating).
+        Assert.Null(deadProbe.IsSpunDown(4, "Extreme", null));
+        Assert.Null(deadProbe.IsSpunDown(4, "Extreme", null));
+        Assert.Equal((4, 4), (dead.NativeAsked.Count, dead.SatAsked.Count));
+    }
+
+    [Fact]
+    public void ASuccessfulIoctlWithUnknownRegistersTriesSat()
+    {
+        // The native IOCTL succeeded but its registers say nothing (aborted, or a sector count
+        // outside the CHECK POWER MODE values): the native route reports that as "no answer".
+        foreach (bool? unknown in new[] { DiskPowerProbe.InterpretAtaResult(status: 0x51, sectorCount: 0x00), DiskPowerProbe.InterpretAtaResult(status: 0x50, sectorCount: 0x12) })
+        {
+            var routes = new Routes { Native = unknown, Sat = true };
+
+            Assert.True(routes.Probe().IsSpunDown(0, "ST2000DM008-2FR102", "ZFL0"));
+            Assert.Equal([0], routes.SatAsked);
+        }
+    }
+
+    private static DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense SatReply(byte scsiStatus, string senseHex)
+    {
+        byte[] sense = new byte[32];
+        Convert.FromHexString(senseHex).CopyTo(sense, 0);
+        return new DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense
+        {
+            Spt = new DiskPowerProbe.NativeMethods.ScsiPassThrough { ScsiStatus = scsiStatus, SenseInfoLength = 32, SenseInfoOffset = 56 },
+            Sense = sense,
+        };
+    }
+
+    [Fact]
+    public void DescriptorSenseIsAcceptedWithScsiStatusZero()
+    {
+        // What the SATA HDD of the spike answers: SCSI status GOOD, registers in the sense data anyway.
+        Assert.False(DiskPowerProbe.InterpretSatReply(SatReply(0x00, "720000000000000E090C000000FF00FF00000000E050"), returned: 88));
+        Assert.True(DiskPowerProbe.InterpretSatReply(SatReply(0x00, "720000000000000E090C00000000000000000000E050"), returned: 88));
+
+        // The USB stick: CHECK CONDITION, fixed format.
+        Assert.False(DiskPowerProbe.InterpretSatReply(SatReply(0x02, "F00001005000FF0A00000000001D00000000"), returned: 88));
+    }
+
+    [Fact]
+    public void OnlyTheSenseBytesActuallyReturnedAreRead()
+    {
+        DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense reply = SatReply(0x00, "720000000000000E090C000000FF00FF00000000E050");
+
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 0));
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 56)); // the header alone: no sense came back
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 56 + 21)); // one byte short of the 22 declared
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 56 + 22));
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 4096)); // never past the sense buffer
+
+        reply.Sense = null!; // a reply the marshaller left without its array
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+    }
+
+    [Fact]
+    public void ScsiPassThroughIsFiftySixBytesOnX64()
+    {
+        // USHORT Length (0), UCHAR ScsiStatus/PathId/TargetId/Lun/CdbLength/SenseInfoLength/DataIn (2-8),
+        // 3 bytes padding, ULONG DataTransferLength (12), ULONG TimeOutValue (16), 4 bytes padding,
+        // ULONG_PTR DataBufferOffset (24), ULONG SenseInfoOffset (32), UCHAR Cdb[16] (36), padded
+        // to 8 = 56 bytes on x64; then our 32 sense bytes.
+        Assert.Equal(56, Marshal.SizeOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>());
+        Assert.Equal(2, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThrough.ScsiStatus)));
+        Assert.Equal(8, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThrough.DataIn)));
+        Assert.Equal(24, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThrough.DataBufferOffset)));
+        Assert.Equal(32, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThrough.SenseInfoOffset)));
+        Assert.Equal(36, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThrough>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThrough.Cdb)));
+
+        Assert.Equal(88, Marshal.SizeOf<DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense>());
+        Assert.Equal(56, (int)Marshal.OffsetOf<DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense>(nameof(DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense.Sense)));
+    }
+
+    [Fact]
+    public void TheSatRequestIsCheckPowerModeAsAtaPassThrough16()
+    {
+        DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense request = DiskPowerProbe.SatCheckPowerModeRequest();
+
+        // ATA PASS-THROUGH(16), protocol non-data, CK_COND set, command 0xE5: nothing else is ever sent.
+        Assert.Equal(Convert.FromHexString("8506200000000000000000000000E500"), request.Spt.Cdb);
+        Assert.Equal((56, 16, 32, 56u), (request.Spt.Length, request.Spt.CdbLength, request.Spt.SenseInfoLength, request.Spt.SenseInfoOffset));
+        Assert.Equal(2, request.Spt.DataIn); // SCSI_IOCTL_DATA_UNSPECIFIED
+        Assert.Equal((0u, (nuint)0, 5u), (request.Spt.DataTransferLength, request.Spt.DataBufferOffset, request.Spt.TimeOutValue));
+        Assert.Equal(32, request.Sense.Length);
+        Assert.Equal(0x0004D004u, DiskPowerProbe.NativeMethods.IoctlScsiPassThrough);
     }
 
     [Fact]

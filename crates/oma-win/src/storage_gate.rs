@@ -179,6 +179,29 @@ fn decide(
     }
 }
 
+/// What a local query of a disk may refresh on this poll. It is the only
+/// authorization to query: a disk whose answer is `Nothing` is not touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalRead {
+    /// Every temperature of the disk.
+    All,
+    /// The additional sensors only: the main temperature is the service's.
+    Additional,
+    Nothing,
+}
+
+/// `recent` is [`Activity::recent`]; `additional` says whether the disk has
+/// temperature sensors besides the main one. Those are the core's alone: on
+/// a disk whose main temperature the service measures they follow the local
+/// activity rule on their own. A disk that waits is never asked.
+pub fn local_read(plan: Plan, recent: bool, additional: bool) -> LocalRead {
+    match plan {
+        Plan::Local => LocalRead::All,
+        Plan::Service(_) if recent && additional => LocalRead::Additional,
+        Plan::Service(_) | Plan::Wait => LocalRead::Nothing,
+    }
+}
+
 /// Where the temperature of a disk comes from on this poll.
 pub fn plan(
     class: DiskClass,
@@ -385,6 +408,28 @@ mod tests {
             ),
             (Plan::Wait, DiskPower::Standby)
         );
+    }
+
+    #[test]
+    fn a_local_read_needs_a_local_plan_or_additional_sensors_with_activity() {
+        // The core's own read refreshes everything, whatever else is known:
+        // `plan` already weighed the activity.
+        for recent in [false, true] {
+            for additional in [false, true] {
+                assert_eq!(local_read(Plan::Local, recent, additional), LocalRead::All);
+                assert_eq!(
+                    local_read(Plan::Wait, recent, additional),
+                    LocalRead::Nothing
+                );
+            }
+        }
+        // The service measures the main temperature: the disk is asked only
+        // for sensors the service does not have, and only while it works.
+        let service = Plan::Service(TEMPERATURE);
+        assert_eq!(local_read(service, true, true), LocalRead::Additional);
+        assert_eq!(local_read(service, false, true), LocalRead::Nothing);
+        assert_eq!(local_read(service, true, false), LocalRead::Nothing);
+        assert_eq!(local_read(service, false, false), LocalRead::Nothing);
     }
 
     #[test]

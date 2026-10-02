@@ -14,7 +14,8 @@ use windows::Win32::Storage::FileSystem::{BusTypeUsb, GetDiskFreeSpaceExW};
 use crate::pdh::{Counter, Query};
 pub use crate::storage_gate::DiskPower;
 use crate::storage_gate::{
-    disk_class, plan, power, Activity, DiskClass, Plan, ServiceDisk, ServiceTemperature,
+    disk_class, local_read, plan, power, Activity, DiskClass, LocalRead, Plan, ServiceDisk,
+    ServiceTemperature,
 };
 use crate::storage_health::{
     bus_type, health_properties, health_sensors, next_health_refresh, read_health, DiskHealth,
@@ -162,6 +163,18 @@ impl DiskTemperatures {
             .any(|i| !self.positions.contains(i))
     }
 
+    /// The refresh of a disk whose main temperature is the service's: only
+    /// the additional sensors take the disk's answer.
+    fn refresh_additional(&mut self, report: Option<&TemperatureReport>, now: Instant) -> bool {
+        let main = self.positions.iter().position(|&p| p == MAIN_POSITION);
+        let kept = main.map(|slot| self.values[slot]);
+        let rediscover = self.refresh(report, now);
+        if let (Some(slot), Some(kept)) = (main, kept) {
+            self.values[slot] = kept;
+        }
+        rediscover
+    }
+
     /// The state a discovery that does not query the disk starts from: the
     /// sensors already declared keep their values, the indices the last
     /// answer revealed are declared with the values it carried, and a
@@ -177,7 +190,7 @@ impl DiskTemperatures {
             }
         }
         if let Some(imported) = &self.imported {
-            sensors.entry(MAIN).or_insert(Some(imported.value));
+            sensors.entry(MAIN_POSITION).or_insert(Some(imported.value));
         }
         (self.positions, self.values) = sensors.into_iter().unzip();
         self
@@ -200,7 +213,7 @@ impl DiskTemperatures {
                 unpublished: true,
             });
         }
-        match self.positions.iter().position(|&p| p == MAIN) {
+        match self.positions.iter().position(|&p| p == MAIN_POSITION) {
             Some(slot) => {
                 self.values[slot] = Some(temperature.value);
                 false
@@ -228,15 +241,17 @@ impl DiskTemperatures {
 }
 
 /// The driver index of a disk's main temperature (`temperature/drive`).
-const MAIN: usize = 0;
+const MAIN_POSITION: usize = 0;
 
-/// One snapshot of the service: the generation of the feed and the `seq`
-/// within it.
-type SnapshotId = (u64, u64);
+/// One snapshot of the service: when it was received and its `seq`. A
+/// restarted service may count from the same number, but not at the same
+/// instant; the feed's generation is no part of it, because it also moves
+/// when the user's request changes under the same snapshot.
+type SnapshotId = (Instant, u64);
 
 fn snapshot_id(view: &FeedView) -> Option<SnapshotId> {
-    let (_, snapshot) = view.snapshot.as_ref()?;
-    Some((view.generation, snapshot.seq))
+    let (received, snapshot) = view.snapshot.as_ref()?;
+    Some((*received, snapshot.seq))
 }
 
 /// What the gate knows about one disk. It follows the disk across
@@ -248,6 +263,8 @@ struct DiskGate {
     /// The decision of the last poll.
     plan: Plan,
     power: DiskPower,
+    /// The disk worked recently, as of the last poll.
+    recent: bool,
 }
 
 impl DiskGate {
@@ -285,7 +302,44 @@ impl DiskGate {
             temperatures,
             plan: Plan::Wait,
             power,
+            recent: false,
         }
+    }
+
+    /// One poll of this disk: decides where its temperature comes from, out
+    /// of this poll's PDH rates (`None` on the warm-up poll after a
+    /// discovery, whose rates are no sample) and of what the service's feed
+    /// says about the disk `entry`, then takes the service's temperature.
+    /// Returns whether the main sensor is still to be declared, by a
+    /// rediscovery.
+    fn step(
+        &mut self,
+        rates: Option<(Option<f64>, Option<f64>)>,
+        powered_on: Option<bool>,
+        entry: Option<&DriveEntry>,
+        drives: &DriveIds,
+        view: &FeedView,
+        now: &Stamp,
+    ) -> bool {
+        let service = entry.map_or(ServiceDisk::Absent, |entry| {
+            service_disk(entry, drives, view, now.mono)
+        });
+        match rates {
+            Some((read, write)) => self.observe(read, write, powered_on, &service, now),
+            None => self.warm_up(powered_on, &service, now),
+        }
+        let key = entry.and_then(|entry| entry.key.as_deref());
+        self.adopt(&service, key, snapshot_id(view))
+    }
+
+    /// What a local query of this disk may refresh, as of the last poll.
+    fn local_read(&self) -> LocalRead {
+        let additional = self
+            .temperatures
+            .positions
+            .iter()
+            .any(|&position| position != MAIN_POSITION);
+        local_read(self.plan, self.recent, additional)
     }
 
     /// Takes this poll's PDH rates (`None` when missing) and decides where
@@ -312,6 +366,7 @@ impl DiskGate {
         let recent = self.activity.recent(now);
         self.plan = plan(self.class, powered_on, service, recent);
         self.power = power(self.class, powered_on, service, recent);
+        self.recent = recent;
     }
 
     /// After this poll's decision: takes the main temperature the service
@@ -362,8 +417,10 @@ impl DiskGate {
     /// The service's measure is the main temperature: `Fresh` on the first
     /// poll that takes a new one, `Held` when the service itself kept it or
     /// the same snapshot is read again. The additional sensors are the
-    /// core's alone and nobody reads them meanwhile: last readings.
+    /// core's alone and follow the local rule: read while the disk works
+    /// (`Fresh`, then `Held` until the next read), last readings otherwise.
     fn published(&mut self) -> Vec<(Option<f64>, Quality)> {
+        let read_locally = self.local_read() != LocalRead::Nothing;
         let measured = std::mem::take(&mut self.temperatures.unpublished);
         let adopted = self
             .temperatures
@@ -373,6 +430,10 @@ impl DiskGate {
         let last_reading = |value: Option<f64>| match value {
             Some(_) => (value, Quality::Suspended),
             None => (None, Quality::Fresh),
+        };
+        let local = |value: Option<f64>| match value {
+            Some(_) if !measured => (value, Quality::Held),
+            _ => (value, Quality::Fresh),
         };
         let positions = self.temperatures.positions.iter().copied();
         let values = self.temperatures.values.iter().copied();
@@ -384,7 +445,9 @@ impl DiskGate {
             (Plan::Service(temperature), _) => positions
                 .zip(values)
                 .map(|(position, value)| {
-                    if position != MAIN {
+                    if position != MAIN_POSITION && read_locally {
+                        local(value)
+                    } else if position != MAIN_POSITION {
                         last_reading(value)
                     } else if temperature.held || !adopted {
                         (Some(temperature.value), Quality::Held)
@@ -393,12 +456,7 @@ impl DiskGate {
                     }
                 })
                 .collect(),
-            (Plan::Local, _) => values
-                .map(|value| match value {
-                    Some(_) if !measured => (value, Quality::Held),
-                    _ => (value, Quality::Fresh),
-                })
-                .collect(),
+            (Plan::Local, _) => values.map(local).collect(),
         }
     }
 }
@@ -430,10 +488,11 @@ fn gates_by_id(
         .collect()
 }
 
-/// Reads the temperatures of at most one disk: among those whose plan is a
-/// local read, the one never read (lowest index first), else the oldest due
-/// read. A disk that waits is skipped without renewing its deadline, so it
-/// stays due and does not hold back the others. Returns the disk read and
+/// Reads the temperatures of at most one disk: among those authorized for a
+/// local read ([`LocalRead`]), the one never read (lowest index first), else
+/// the oldest due read. A disk that waits is skipped without renewing its
+/// deadline, so it stays due and does not hold back the others. A disk whose
+/// main temperature is the service's keeps it. Returns the disk read and
 /// whether its answer asks for a rediscovery.
 fn refresh_one(
     gates: &mut HashMap<u32, DiskGate>,
@@ -443,7 +502,7 @@ fn refresh_one(
     let authorized = || {
         gates
             .iter()
-            .filter(|(_, gate)| gate.plan == Plan::Local)
+            .filter(|(_, gate)| gate.local_read() != LocalRead::Nothing)
             .map(|(&index, gate)| (index, gate.temperatures.read_at))
     };
     let never_read = authorized()
@@ -457,8 +516,13 @@ fn refresh_one(
     let Some(gate) = picked.and_then(|index| gates.get_mut(&index)) else {
         return (None, false);
     };
+    let scope = gate.local_read();
     let report = picked.and_then(read);
-    (picked, gate.temperatures.refresh(report.as_ref(), now))
+    let rediscover = match scope {
+        LocalRead::Additional => gate.temperatures.refresh_additional(report.as_ref(), now),
+        LocalRead::All | LocalRead::Nothing => gate.temperatures.refresh(report.as_ref(), now),
+    };
+    (picked, rediscover)
 }
 
 /// The values of a poll with the quality of each.
@@ -924,7 +988,6 @@ impl Provider for StorageProvider {
         // One view of the feed for the whole poll, whatever `svc` reads on
         // its own tick.
         let view = self.feed.view();
-        let snapshot = snapshot_id(&view);
         let drives = self.drives.get();
         // The gate: what the service says and this poll's I/O decide which
         // disks may be read at all. The rates of the first poll after a
@@ -935,23 +998,13 @@ impl Provider for StorageProvider {
                 continue;
             };
             let entry = drives.drives.iter().find(|e| e.index == disk.index);
-            let service = entry.map_or(ServiceDisk::Absent, |entry| {
-                service_disk(entry, &drives, &view, now.mono)
-            });
-            let powered_on = powered_on(disk.index);
-            if fresh {
-                gate.warm_up(powered_on, &service, &now);
-            } else {
-                gate.observe(
+            let rates = (!fresh).then(|| {
+                (
                     finite(&read, &disk.instance),
                     finite(&write, &disk.instance),
-                    powered_on,
-                    &service,
-                    &now,
-                );
-            }
-            let key = entry.and_then(|entry| entry.key.as_deref());
-            undeclared |= gate.adopt(&service, key, snapshot);
+                )
+            });
+            undeclared |= gate.step(rates, powered_on(disk.index), entry, &drives, &view, &now);
         }
         self.disk_states
             .publish(disk_states(&self.disks, &self.disk_ids, &self.gates));
@@ -1179,6 +1232,7 @@ mod tests {
             },
             plan: Plan::Wait,
             power: DiskPower::Unknown,
+            recent: false,
         }
     }
 
@@ -1867,10 +1921,9 @@ mod tests {
         )
     }
 
-    /// One poll of disk 0 as the provider runs it: the gate decides from this
-    /// poll's rates (`None` on the warm-up poll after a discovery) and from
-    /// what `view` says about the disk, then takes the service's temperature.
-    /// Returns whether that asks for a rediscovery.
+    /// One poll of disk 0, the step the provider runs for every disk, with
+    /// Windows reporting the disk on. `rates` is `None` on the warm-up poll
+    /// after a discovery. Returns whether it asks for a rediscovery.
     fn poll_disk(
         gates: &mut HashMap<u32, DiskGate>,
         rates: Option<(Option<f64>, Option<f64>)>,
@@ -1878,14 +1931,19 @@ mod tests {
         view: &FeedView,
         now: &Stamp,
     ) -> bool {
-        let entry = &drives.drives[0];
-        let service = service_disk(entry, drives, view, now.mono);
+        let entry = drives.drives.first();
         let gate = gates.get_mut(&0).unwrap();
-        match rates {
-            Some((read, write)) => gate.observe(read, write, Some(true), &service, now),
-            None => gate.warm_up(Some(true), &service, now),
-        }
-        gate.adopt(&service, entry.key.as_deref(), snapshot_id(view))
+        gate.step(rates, Some(true), entry, drives, view, now)
+    }
+
+    /// A disk with the main temperature (35) and an additional sensor (30),
+    /// both read locally at `read_at`.
+    fn two_sensors(read_at: Instant) -> DiskGate {
+        let mut disk = gate(RotationalOrUnknown, 35.0, read_at);
+        disk.temperatures.positions = vec![0, 2];
+        disk.temperatures.values = vec![Some(35.0), Some(30.0)];
+        disk.temperatures.report = Some(report(&[(0, 35.0), (2, 30.0)]));
+        disk
     }
 
     /// The rediscovery a poll asked for: no class asked, no disk queried.
@@ -2033,34 +2091,270 @@ mod tests {
     fn the_service_gives_only_the_main_temperature() {
         let start = Instant::now();
         let drives = table();
-        // A disk with an additional sensor of its own, read locally before.
-        let mut disk = gate(RotationalOrUnknown, 35.0, start);
-        disk.temperatures.positions = vec![0, 2];
-        disk.temperatures.values = vec![Some(35.0), Some(30.0)];
-        let mut gates = HashMap::from([(0, disk)]);
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
         let now = stamp(start, 31);
         let view = wire("active", Some(41.0)).view(now.mono);
-        assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+        assert!(!poll_disk(&mut gates, Some(QUIET), &drives, &view, &now));
         assert_eq!(refresh_one(&mut gates, now.mono, never), (None, false));
-        // Nobody reads the additional sensor meanwhile: a last reading.
-        assert_eq!(
-            published(&mut gates),
-            vec![
-                (Some(41.0), Quality::Fresh),
-                (Some(30.0), Quality::Suspended)
-            ]
-        );
+        // The additional sensor stays the core's own.
         assert_eq!(gates[&0].temperatures.positions, vec![0, 2]);
+        assert_eq!(gates[&0].temperatures.values, vec![Some(41.0), Some(30.0)]);
 
         // A disk that declared only an additional sensor gets the main one.
         let mut disk = gate(RotationalOrUnknown, 30.0, start);
         disk.temperatures.positions = vec![2];
         disk.temperatures.report = None;
         let mut gates = HashMap::from([(0, disk)]);
-        assert!(poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+        assert!(poll_disk(&mut gates, Some(QUIET), &drives, &view, &now));
         let gates = rediscover(gates, now.mono);
         assert_eq!(gates[&0].temperatures.positions, vec![0, 2]);
         assert_eq!(gates[&0].temperatures.values, vec![Some(41.0), Some(30.0)]);
+    }
+
+    #[test]
+    fn additional_sensors_of_a_service_disk_are_read_locally_only_with_recent_activity() {
+        let start = Instant::now();
+        let drives = table();
+        let active = |second: u64| {
+            Wire {
+                seq: second,
+                ..wire("active", Some(41.0))
+            }
+            .view(stamp(start, second).mono)
+        };
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        // Due, but the disk does not work: not asked.
+        let quiet = stamp(start, 31);
+        assert!(!poll_disk(
+            &mut gates,
+            Some(QUIET),
+            &drives,
+            &active(31),
+            &quiet
+        ));
+        assert_eq!(state(&gates), (measured(41.0, false), DiskPower::Active));
+        assert_eq!(refresh_one(&mut gates, quiet.mono, never), (None, false));
+        assert_eq!(gates[&0].temperatures.read_at, Some(start), "still due");
+
+        // It works: the overdue read starts, for the additional sensor.
+        let busy = stamp(start, 32);
+        assert!(!poll_disk(
+            &mut gates,
+            Some(BUSY),
+            &drives,
+            &active(32),
+            &busy
+        ));
+        let outcome = refresh_one(&mut gates, busy.mono, |index| {
+            assert_eq!(index, 0);
+            Some(report(&[(0, 99.0), (2, 31.0)]))
+        });
+        assert_eq!(outcome, (Some(0), false));
+        assert_eq!(gates[&0].temperatures.values[1], Some(31.0));
+        assert_eq!(gates[&0].temperatures.read_at, Some(busy.mono));
+        // Not due again before a period, however busy.
+        let next = stamp(start, 33);
+        assert!(!poll_disk(
+            &mut gates,
+            Some(BUSY),
+            &drives,
+            &active(33),
+            &next
+        ));
+        assert_eq!(refresh_one(&mut gates, next.mono, never), (None, false));
+
+        // In every other state of the service nothing is read, due and busy.
+        for (wire_state, blocks_smart) in [
+            ("standby", false),
+            ("idle", false),
+            ("noMedia", false),
+            ("active", true),
+            ("unknown", true),
+        ] {
+            let mut gates = HashMap::from([(0, two_sensors(start))]);
+            let view = Wire {
+                blocks_smart,
+                ..wire(wire_state, Some(41.0))
+            }
+            .view(busy.mono);
+            assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &busy));
+            assert_eq!(state(&gates).0, Plan::Wait, "{wire_state}");
+            assert_eq!(refresh_one(&mut gates, busy.mono, never), (None, false));
+        }
+        // Nor when Windows switched the disk off.
+        let mut off = two_sensors(start);
+        let entry = drives.drives.first();
+        assert!(!off.step(Some(BUSY), Some(false), entry, &drives, &active(32), &busy));
+        let mut gates = HashMap::from([(0, off)]);
+        assert_eq!(state(&gates), (Plan::Wait, DiskPower::Standby));
+        assert_eq!(refresh_one(&mut gates, busy.mono, never), (None, false));
+    }
+
+    #[test]
+    fn additional_sensors_are_held_between_reads_and_suspended_when_idle() {
+        let start = Instant::now();
+        let drives = table();
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        let mut poll = |second: u64, rates, read: Option<f64>| {
+            let now = stamp(start, second);
+            let view = Wire {
+                seq: second,
+                ..wire("active", Some(41.0))
+            }
+            .view(now.mono);
+            assert!(!poll_disk(&mut gates, Some(rates), &drives, &view, &now));
+            let outcome = refresh_one(&mut gates, now.mono, |_| {
+                let celsius = read.expect("disk queried");
+                Some(report(&[(0, 99.0), (2, celsius)]))
+            });
+            assert_eq!(outcome, (read.map(|_| 0), false), "second {second}");
+            published(&mut gates)
+        };
+        use Quality::{Fresh, Held, Suspended};
+        // The disk works and its read is not due: the value of the last one.
+        assert_eq!(
+            poll(25, BUSY, None),
+            vec![(Some(41.0), Fresh), (Some(30.0), Held)]
+        );
+        // The read, then the same value again until the next one.
+        assert_eq!(
+            poll(30, BUSY, Some(31.0)),
+            vec![(Some(41.0), Fresh), (Some(31.0), Fresh)]
+        );
+        for second in [31, 40, 49] {
+            assert_eq!(
+                poll(second, BUSY, None),
+                vec![(Some(41.0), Fresh), (Some(31.0), Held)],
+                "second {second}"
+            );
+        }
+        // No activity for longer than the window: a last reading, also once
+        // the read is due.
+        for second in [60, 61, 70, 80, 90] {
+            assert_eq!(
+                poll(second, QUIET, None),
+                vec![(Some(41.0), Fresh), (Some(31.0), Suspended)],
+                "second {second}"
+            );
+        }
+        // Work again: the overdue read, fresh.
+        assert_eq!(
+            poll(91, BUSY, Some(33.0)),
+            vec![(Some(41.0), Fresh), (Some(33.0), Fresh)]
+        );
+    }
+
+    #[test]
+    fn a_service_disk_without_additional_sensors_is_never_queried() {
+        let start = Instant::now();
+        let drives = table();
+        // Busy all along, and its local read due from the first poll on.
+        let mut gates = HashMap::from([(0, gate(RotationalOrUnknown, 35.0, start))]);
+        for second in [31, 32, 40, 61, 62, 95] {
+            let now = stamp(start, second);
+            let view = Wire {
+                seq: second,
+                ..wire("active", Some(41.0))
+            }
+            .view(now.mono);
+            assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+            assert_eq!(gates[&0].local_read(), LocalRead::Nothing);
+            assert_eq!(refresh_one(&mut gates, now.mono, never), (None, false));
+            assert_eq!(published(&mut gates), vec![(Some(41.0), Quality::Fresh)]);
+        }
+        assert_eq!(gates[&0].temperatures.read_at, Some(start));
+    }
+
+    #[test]
+    fn the_main_temperature_stays_the_services_after_a_local_read_of_the_additional_ones() {
+        let start = Instant::now();
+        let drives = table();
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        let now = stamp(start, 31);
+        let view = wire("active", Some(41.0)).view(now.mono);
+        assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+        assert_eq!(gates[&0].local_read(), LocalRead::Additional);
+        // The disk answers with a main temperature of its own: not taken.
+        let outcome = refresh_one(&mut gates, now.mono, |_| {
+            Some(report(&[(0, 99.0), (2, 31.0)]))
+        });
+        assert_eq!(outcome, (Some(0), false));
+        assert_eq!(gates[&0].temperatures.values, vec![Some(41.0), Some(31.0)]);
+        assert_eq!(
+            published(&mut gates),
+            vec![(Some(41.0), Quality::Fresh), (Some(31.0), Quality::Fresh)]
+        );
+        // The same snapshot read again: the main one is held as before, and
+        // the local read did not make it fresh.
+        let again = stamp(start, 32);
+        assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &again));
+        assert_eq!(refresh_one(&mut gates, again.mono, never), (None, false));
+        assert_eq!(
+            published(&mut gates),
+            vec![(Some(41.0), Quality::Held), (Some(31.0), Quality::Held)]
+        );
+        // A failed read loses the additional value only.
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+        assert_eq!(
+            refresh_one(&mut gates, now.mono, |_| None),
+            (Some(0), false)
+        );
+        assert_eq!(
+            published(&mut gates),
+            vec![(Some(41.0), Quality::Fresh), (None, Quality::Fresh)]
+        );
+        // The service gone and the disk idle: the service's value is the
+        // last reading of the main sensor, not the disk's 99.
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        assert!(!poll_disk(&mut gates, Some(BUSY), &drives, &view, &now));
+        let read = |_| Some(report(&[(0, 99.0), (2, 31.0)]));
+        assert_eq!(refresh_one(&mut gates, now.mono, read), (Some(0), false));
+        let lost = stamp(start, 50);
+        assert!(!poll_disk(
+            &mut gates,
+            Some(QUIET),
+            &drives,
+            &disconnected(),
+            &lost
+        ));
+        assert_eq!(
+            published(&mut gates),
+            vec![
+                (Some(41.0), Quality::Suspended),
+                (Some(31.0), Quality::Suspended)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_changed_request_does_not_make_the_same_measure_fresh_again() {
+        let start = Instant::now();
+        let drives = table();
+        let mut gates = HashMap::from([(0, gate(RotationalOrUnknown, 35.0, start))]);
+        let first = stamp(start, 1);
+        let view = wire("active", Some(41.0)).view(first.mono);
+        assert!(!poll_disk(&mut gates, Some(QUIET), &drives, &view, &first));
+        assert_eq!(published(&mut gates), vec![(Some(41.0), Quality::Fresh)]);
+        // The user switches another disk off: the feed's generation moves,
+        // the snapshot is the same one.
+        let changed = FeedView {
+            generation: view.generation + 1,
+            request: Arc::new(SourceRequest {
+                smart_disabled_drives: vec!["storage/another".to_owned()],
+                ..SourceRequest::default()
+            }),
+            ..view.clone()
+        };
+        let next = stamp(start, 2);
+        assert!(!poll_disk(
+            &mut gates,
+            Some(QUIET),
+            &drives,
+            &changed,
+            &next
+        ));
+        assert_eq!(published(&mut gates), vec![(Some(41.0), Quality::Held)]);
     }
 
     #[test]
@@ -2180,8 +2474,8 @@ mod tests {
             vec![(Some(33.0), Quality::Suspended)]
         );
 
-        // A disk with a local reading takes the service's, more recent one;
-        // without one from the service it keeps its own.
+        // A disk with a local reading shows the one the service kept, when
+        // there is one; without it, its own.
         let mut gates = HashMap::from([(0, gate(RotationalOrUnknown, 35.0, start))]);
         let unmeasured = wire("standby", None).view(first.mono);
         assert!(!poll_disk(
@@ -2553,6 +2847,12 @@ mod tests {
             schema.service.drives.push(twin);
             view
         };
+        let hint = (Some("Model".to_owned()), Some("SN0".to_owned()));
+        assert_eq!(
+            crate::svc::drives::storage_binding(&hint.0, &hint.1, 0, &drives),
+            Some(&drives.drives[0]),
+            "the premise: the hint of that view binds"
+        );
         assert_eq!(
             service_disk(&drives.drives[0], &drives, &duplicated(start), start),
             ServiceDisk::Absent
@@ -2579,6 +2879,7 @@ mod tests {
         assert!(!poll_disk(&mut gates, None, &drives, &view, &after));
         assert_eq!(published(&mut gates), vec![(Some(39.0), Quality::Fresh)]);
     }
+
     #[test]
     fn a_drive_entry_carries_the_descriptor_key() {
         let disk = entry(3);

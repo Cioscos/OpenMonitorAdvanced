@@ -86,8 +86,9 @@ present on the wire; the .NET decoder requires them, like the Rust one.
   (`reconfiguration` is `"applied"`, `"pending"` or `"failed"`). *v3*: `drives` replaces the v2
   `smart_blocked_by`; each entry is `{physical_drive, key, model, state, blocks_smart}`, in
   `physical_drive` order, with `key` and `model` possibly `nil` and `state` one of `"active"`,
-  `"standby"`, `"unknown"`, `"smartOff"`, `"noMedia"` (a client treats any other value as
-  `"unknown"`). The fixture has two:
+  `"idle"`, `"standby"`, `"unknown"`, `"smartOff"`, `"noMedia"` (a client treats any other value as
+  `"unknown"`). `"idle"` is a drive that needs a power check, that Windows reports on and that
+  showed no recent activity: the service sends it nothing. The fixture has two:
   1. `{physical_drive: 0, key: Some(KEY_A), model: Some("Samsung SSD 990 PRO 2TB"), state: "smartOff", blocks_smart: false}`.
   2. `{physical_drive: 1, key: None, model: Some("ST2000DM008-2UB102"), state: "standby", blocks_smart: true}`.
 - **`snapshot.msgpack`**: `WireSnapshot { seq: 4294967301, timestamp_ms: 1790000000000, values: [Some(45.0), None, Some(-12.5), Some(0.0)], held: [false, false, true, false] }`.

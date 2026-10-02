@@ -56,6 +56,20 @@ Macchina: PC di sviluppo. Disco 0: HDD SATA Seagate ST2000DM008, volume `D:`. Di
 | Windows, timeout disco 60 s, app chiusa, nessuna attività | spegne il disco (`on=False`) |
 | Lo stesso con l'app aperta, 10 minuti senza attività | il disco resta acceso |
 
+**Misure durante l'esecuzione (2026-10-02, stesso PC, timeout disco 60 s).** Ogni riga è un'osservazione passiva di 10 minuti di `GetDevicePowerState`, senza accessi a `D:`:
+
+| Cosa gira | Windows spegne il disco? |
+|---|---|
+| niente (controllo) | sì, dopo 3 min 44 s |
+| app con il filtro locale del §5.2, senza servizio | sì, dopo circa 5 minuti |
+| `IOCTL_DISK_PERFORMANCE` su handle ad accesso 0, ogni 15 s | sì, dopo 5 minuti; interrogato a disco spento risponde in 4 ms e il disco resta spento |
+| `CHECK POWER MODE` nativo, da solo, ogni 30 s | **no**; il primo comando, a disco spento da Windows, ha impiegato 3084 ms e lo ha riacceso |
+| `CHECK POWER MODE` via SAT a 16 byte, da solo, ogni 30 s | **no** |
+| servizio 0.3.0 da solo con un sottoscrittore, gate D6 chiuso (nessuna lettura SMART) | **no** |
+| app con il filtro locale, standby forzato, sonda SAT ogni 30 s | il disco resta in standby per 10 minuti; contatori di lettura/scrittura fermi |
+
+Ne seguono due fatti che lo spike non aveva misurato: `CHECK POWER MODE` non sveglia uno standby deciso dal disco, ma **azzera il timer di inattività di Windows** a ogni invio, e **riaccende un disco spento da Windows**, perché il sistema lo riporta in funzione per consegnargli il comando. Il valore `0x82` letto durante le prove è lo stato EPC «Idle_b». Ricerca di supporto, con fonti: `target/spike/m6b/research-disk-idle.md` (non tracciato).
+
 **Causa.** `read_temperatures` (`crates/oma-win/src/storage.rs`) interroga la temperatura alla discovery e poi ogni 30 s (`TEMPERATURE_PERIOD`), protetta solo da `GetDevicePowerState`. Su un HDD SATA quella query arriva al disco: lo sveglia se dorme e, a disco sveglio, azzera il timer di inattività di Windows.
 
 **Byte catturati**, da usare come vettori di test (sense data di `IOCTL_SCSI_PASS_THROUGH`):
@@ -94,6 +108,7 @@ service: {
   | `smartOff` | il servizio non interroga questo disco: storage spento, disco in `smartDisabledDrives`, oppure disco spento di default e non abilitato (§4.2) |
   | `standby` | `CHECK POWER MODE` risponde standby |
   | `active` | risponde attivo, oppure il disco non richiede il controllo (`RequiresPowerCheck` falso: NVMe, SSD, virtuali) |
+  | `idle` | il disco richiede il controllo, Windows lo riporta acceso e non c'è attività recente: il servizio non gli invia nulla (§4.4). Può nascondere uno standby deciso dal disco |
   | `unknown` | richiede il controllo e nessuna via risponde |
 
 - `state` descrive la disponibilità del percorso SMART, non la freschezza di una temperatura. `smartOff` può nascondere una risposta di standby usata dal gate: non autorizza una lettura del nucleo.
@@ -131,20 +146,39 @@ Si aggiunge allo snapshot v3 `held: [bool]`, con la stessa lunghezza e lo stesso
 
 - Un disco con bus USB (`BusType` 0x07) è **spento di default**: dopo l'identificazione iniziale non riceve SMART né controlli di stato periodici, ed esce dall'elenco dei dispositivi/sensori SMART come un disco in `smartDisabledDrives`; resta nella tabella diagnostica `service.drives`.
 - Diventa acceso se almeno un sottoscrittore con lo storage attivo lo elenca in `smartEnabledDrives`. Un disco senza `key` non si può accendere.
-- **Gate D6.** Anche i dischi disabilitati esplicitamente partecipano al gate prima dell'identificazione, perché la prima identificazione di LibreHardwareMonitor tocca tutti i dischi (F1.1). Si controllano solo quelli con `RequiresPowerCheck = true`: standby o risposta sconosciuta bloccano, anche con `state = "smartOff"`; una risposta valida di attività sblocca. Per quelli senza power check non si invia il comando. Con il fallback SAT la chiavetta dello spike risponde e non blocca più. Il gate non viene riaperto a ogni successivo standby né a una riattivazione soft di storage già identificato.
+- **Gate D6.** Anche i dischi disabilitati esplicitamente partecipano al gate prima dell'identificazione, perché la prima identificazione di LibreHardwareMonitor tocca tutti i dischi (F1.1). Si controllano solo quelli con `RequiresPowerCheck = true`: standby o risposta sconosciuta bloccano, anche con `state = "smartOff"`; una risposta valida di attività sblocca. Per quelli senza power check non si invia il comando. Con il fallback SAT la chiavetta dello spike risponde e non blocca più. Il gate non viene riaperto a ogni successivo standby né a una riattivazione soft di storage già identificato. Mentre resta chiuso i controlli non si ripetono su tutti i dischi a ogni giro: valgono le regole del §4.4.
 - `EffectiveConfig.Compute` (pura) estende l'aggregazione: lo SMART di un disco spento di default è acceso se almeno una richiesta con lo storage attivo lo abilita; per gli altri dischi resta la regola di oggi.
 
 ### 4.3 Elenco `drives`
 
 Lo compila lo storage worker a ogni giro (30 s) con storage attivo, dai `DriveFacts` e dalle risposte che ha già, compresi i dischi assenti dalle radici LHM. L'enumerazione accesso 0 necessaria a mantenere l'elenco non deve eseguire SMART né identificazione LHM. Con il gate chiuso conserva gli esiti di tutti i controlli, non solo l'elenco restituito da `FindGateBlockers`, per non interrogare due volte lo stesso disco. Stati, schema e cache dei valori si pubblicano come una vista coerente; nessun lock condiviso resta acquisito durante I/O. Con storage spento vale il §3.1.
 
-### 4.4 Lettura SMART e timer di inattività di Windows (condizionale)
+### 4.4 Controlli di stato, SMART e timer di inattività di Windows
 
-Lo spike non ha misurato se la lettura SMART del servizio, ogni 30 s su un HDD attivo, impedisce a Windows di spegnerlo. V3 (§9.2) è un gate obbligatorio di accettazione: un fallimento non si archivia come limite. Il piano prevede prima una prova del servizio isolato per decidere il ramo, poi V3 sull'app completa per verificarlo.
+Le misure del §2 mostrano che il servizio non può interrogare un disco rotazionale a ogni giro: `CHECK POWER MODE` azzera il timer di inattività di Windows e riaccende un disco che Windows ha spento. Il servizio 0.3.0, da solo, impedisce lo spegnimento anche senza leggere lo SMART. V3 (§9.2) resta un gate obbligatorio di accettazione.
 
-**Se la lettura del servizio impedisce lo spegnimento**, si aggiunge una misura passiva dell'attività per disco nel worker. Il codice del servizio oggi non legge direttamente `IOCTL_DISK_PERFORMANCE`: l'eventuale probe, la baseline e la sua innocuità sono lavoro da pianificare, non infrastruttura già disponibile. Una misura mancante, una baseline iniziale o un contatore resettato non dimostrano attività. L'autorizzazione usa una finestra recente e limitata, come i 10 s del §5.2, e contatori che non includano le nostre query; il solo delta accumulato negli ultimi 30 s non basta. La cadenza di osservazione deve permettere questa distinzione senza eseguire `Update` per ottenere i contatori. `Update` di un disco rotazionale o ignoto richiede sia stato attivo confermato sia attività recente; altrimenti i valori precedenti sono `held` (§3.4). Se la prova isolata passa, non si aggiunge questo filtro, ma V3 resta obbligatoria. Un risultato inconcludente lascia aperto il gate di accettazione.
+**Fonti passive**, entrambe su un handle ad accesso 0 e misurate innocue:
 
-In entrambi i rami lo standby confermato conserva l'ultima temperatura valida come `held`, senza fingere una nuova misura. `unknown`, `noMedia`, un errore di lettura o una fonte disabilitata non sono una sospensione normale: i dati SMART correnti restano assenti. La cache conservata per lo standby è distinta dalla cache di trasporto con scadenza (`FreshStorageValues`, oggi 60 s); non si estende la validità di una connessione guasta.
+- `GetDevicePowerState`: dice se Windows ha spento il disco. Una chiamata fallita vale "acceso" (si applicano le regole sull'attività).
+- `IOCTL_DISK_PERFORMANCE`: contatori di letture e scritture del driver. C'è **attività recente** quando, tra due campioni della stessa identità distanti al più 10 s, entrambi i contatori non sono diminuiti e almeno uno è cresciuto. Campione mancante, baseline iniziale, contatore tornato indietro, sospensione o cambio d'identità non sono attività.
+
+**A ogni giro, per un disco con `RequiresPowerCheck` e SMART acceso**, nell'ordine:
+
+1. Windows lo riporta spento: stato `standby`, nessun comando; gli ultimi valori restano `held` (§3.4), come per lo standby confermato.
+2. Attività recente: `CHECK POWER MODE` e, se risponde attivo, aggiornamento SMART, come prima. Il disco sta lavorando: azzerare il timer non cambia nulla.
+3. Nessuna attività recente: nessun comando. Stato `idle`; gli ultimi valori restano `held`. Vale anche per il primo giro dopo l'apertura del gate, quando manca la baseline.
+
+Gli SSD, gli NVMe e i dischi virtuali mantengono la cadenza di 30 s.
+
+**Gate D6**, prima della prima identificazione:
+
+1. Al primo giro di un episodio si chiede lo stato una volta a ogni disco con `RequiresPowerCheck` che Windows riporta acceso; un disco che Windows riporta spento è `standby` e blocca, senza comandi.
+2. Finché il gate resta chiuso si richiede solo ai dischi che lo bloccano, e solo dopo attività recente su di loro. Un disco bloccante senza contatore leggibile si richiede al più ogni 5 minuti. Le risposte "attivo" già ottenute nell'episodio non si rinnovano a ogni giro.
+3. Quando nessun disco blocca più, un ultimo controllo completo, una sola volta, precede l'abilitazione di LHM storage: uno standby sopraggiunto nel frattempo richiude il gate.
+
+L'enumerazione dei dischi a ogni giro usa solo query di proprietà già misurate innocue (descrittore); non deve inviare comandi che arrivano al disco (capacità, verifica del supporto, versione SMART).
+
+In tutti i casi `unknown`, `noMedia`, un errore di lettura o una fonte disabilitata non sono una sospensione normale: i dati SMART correnti restano assenti. La cache conservata per standby e inattività è distinta dalla cache di trasporto con scadenza (`FreshStorageValues`, 60 s) e non estende la validità di un worker bloccato o di una connessione guasta.
 
 ## 5. Nucleo dell'app (`crates/oma-win`)
 
@@ -164,6 +198,7 @@ La decisione è una funzione pura, usata sia alla discovery sia nel refresh ogni
 | qualsiasi | `noMedia` oppure `GetDevicePowerState = false` | non legge |
 | non rotazionale / virtuale | qualsiasi altro stato | legge, come oggi |
 | rotazionale o ignoto | `standby` | non legge, anche se manca una temperatura SMART |
+| rotazionale o ignoto | `idle` | non legge; stato «Inattivo»; l'eventuale temperatura del servizio si mostra come storica (`Suspended`) |
 | rotazionale o ignoto | `active`, temperatura del servizio disponibile e fonte accettata dal client | usa il servizio, non interroga la temperatura locale |
 | rotazionale o ignoto | `active` senza temperatura utilizzabile, `smartOff`, `unknown` o servizio non collegato | legge solo con attività recente, salvo il veto del gate |
 
@@ -217,6 +252,8 @@ Da scrivere in `docs/follow-ups.md` e, quelli visibili all'utente, nel README ("
 - il comportamento di un hard disk USB in standby dietro un bridge non è stato verificato: per questo lo SMART dei dischi USB è spento di default;
 - la ri-identificazione all'hot-plug di DiskInfoToolkit può svegliare un disco che la libreria non riesce a identificare, se viene collegato dopo l'accensione dello SMART; va segnalata all'autore;
 - senza servizio, la temperatura di un HDD inattivo non si aggiorna;
+- uno standby deciso dal disco per conto suo (timer del firmware, APM), che Windows non conosce, appare come «Inattivo» e non come «In standby» finché il disco non lavora: nessun segnale passivo lo distingue, e chiederlo al disco impedirebbe a Windows di spegnerlo;
+- con il servizio, come senza, la temperatura e lo SMART di un HDD inattivo non si aggiornano finché il disco non lavora;
 - nello spike, con TR-VISION HOME aperto e richieste `DISPLAY`/`SYSTEM` presenti, Windows non ha spento il disco; non è stata dimostrata una relazione causale. Documentare l'interferenza osservata, senza attribuire a ogni richiesta `SYSTEM` questo effetto.
 
 ## 9. Verifiche

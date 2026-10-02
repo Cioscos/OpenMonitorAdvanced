@@ -54,7 +54,7 @@
 
 I percorsi abbreviati `Sensors/...` e `Protocol/...` sono relativi a `service/OpenMonitorAdvanced.Service/`; i test .NET sono in `service/OpenMonitorAdvanced.Service.Tests/Sensors/` o `Protocol/`. I numeri di riga sono riferimenti al checkout iniziale, non vincoli dopo i task precedenti.
 
-**Ordine e gate:** Task 0 prima della decisione sul filtro del servizio; Task 1–3 e 4 per il percorso locale; Task 5–9 per protocollo e servizio; Task 10 solo dopo l'isolamento della causa; Task 11–14 per integrazione e UI; Task 15 per l'accettazione. Le verifiche dal vivo non concluse restano aperte: non impediscono di preparare i task indipendenti, ma impediscono di dichiarare M6b completata.
+**Ordine e gate:** Task 0 prima della decisione sul filtro del servizio; Task 1–3 e 4 per il percorso locale; Task 5–9 per protocollo e servizio; Task 10 dopo il Task 9 (obbligatorio dopo le misure del Task 0); Task 11–14 per integrazione e UI; Task 15 per l'accettazione. Le verifiche dal vivo non concluse restano aperte: non impediscono di preparare i task indipendenti, ma impediscono di dichiarare M6b completata.
 
 ---
 
@@ -579,35 +579,55 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 
 ---
 
-### Task 10 (condizionale): filtro dell'attività nel servizio
+### Task 10: controlli di stato e SMART solo dopo attività, nel servizio
 
-Si esegue **solo se** la prova isolata del Task 0 attribuisce il mancato spegnimento alla lettura SMART del servizio; un fallimento del Task 4 richiede prima quell'isolamento. Se si salta, scrivere nell'esito le prove che giustificano la scelta. Esito inconcludente: gate aperto, nessuna chiusura della M6b.
+Obbligatorio (riscritto il 2026-10-02 dopo le misure del Task 0, spec §2 e §4.4): `CHECK POWER MODE` azzera da solo il timer di inattività di Windows e riaccende un disco spento da Windows. Si esegue dopo il Task 9; la parte Rust (stato `idle`) entra nel Task 12.
 
 **Files:**
 - Create: `service/OpenMonitorAdvanced.Service/Sensors/DiskActivityProbe.cs`
-- Modify: `Sensors/IHardwareTree.cs`, `Sensors/SensorHub.cs` (storage worker), `ServiceHost.cs:118`
-- Test: `DiskActivityTests.cs` (nuovo), `SensorHubTests.cs`, `SensorHubFakes.cs`
+- Modify: `Sensors/IHardwareTree.cs`, `Sensors/DiskPowerProbe.cs` (gate), `Sensors/DriveStates.cs`, `Sensors/SensorHub.cs` (storage worker), `ServiceHost.cs:118`
+- Test: `DiskActivityTests.cs` (nuovo), `DriveStatesTests.cs`, `DiskPowerProbeTests.cs`, `SensorHubTests.cs`, `SensorHubFakes.cs`
 
 **Interfaces:**
 - Produces:
   ```csharp
-  public interface IDiskActivityProbe { DiskCounters? Read(int driveNumber); }   // IOCTL_DISK_PERFORMANCE, access 0
+  public interface IDiskActivityProbe
+  {
+      DiskCounters? Read(int driveNumber);     // IOCTL_DISK_PERFORMANCE (0x00070020), access 0
+      bool? PoweredOn(int driveNumber);        // GetDevicePowerState, access 0; null when the call fails
+  }
   public readonly record struct DiskCounters(long ReadCount, long WriteCount);
   internal static class DiskActivity
   {
       internal static readonly TimeSpan Window = TimeSpan.FromSeconds(10);
-      /// True only when both samples exist and a counter grew; a missing sample or a counter going back is not activity.
+      /// True only when both samples exist, no counter went back and at least one grew.
       internal static bool Between(DiskCounters? earlier, DiskCounters? later);
   }
+  // DriveStates
+  internal const string Idle = "idle";
+  /// Precedence: noMedia, smartOff, standby (Windows reports the disk off, or the disk answered standby),
+  /// idle (needs a power check, not asked this round because there was no recent activity),
+  /// then active / unknown as before.
   ```
-- Lo storage worker prende una baseline 10 s prima di ogni giro e un campione all'inizio del giro, prima di power check e SMART. `Between` richiede entrambi i contatori non decrescenti e almeno uno cresciuto; il reset di uno invalida l'intera coppia. La baseline appartiene a numero fisico e chiave verificata invariati, con distanza temporale non superiore a 10 s; si azzera a sospensione/gap, hot-plug, storage off e assenza di sottoscrittori. Primo giro senza baseline: nessun `Update` rotazionale.
-- `Update` rotazionale/ignoto richiede stato attivo confermato **e** attività recente. Solo `active` senza attività o `standby` conservano valori identici come `held`; `unknown`, `noMedia`, fonte disabilitata o errore danno valori assenti, come nel Task 9. SSD/virtuali mantengono la cadenza di 30 s. Le query del giro precedente devono essere esterne alla finestra campionata; la prova dal vivo verifica che non si autoalimentino.
+- `DISK_PERFORMANCE` è di 88 byte: `ReadCount` (u32) all'offset 40, `WriteCount` (u32) all'offset 44; assert di layout nei test.
+- **Worker a regime** (gate aperto), per un disco con `RequiresPowerCheck` e SMART acceso, nell'ordine:
+  1. `PoweredOn == false` → `standby`, nessun comando, valori del giro precedente conservati come `held` (regole del Task 9);
+  2. attività recente → `IsSpunDown` e, se attivo, `Update`, come oggi;
+  3. altrimenti → `idle`, nessun `IsSpunDown`, nessun `Update`, valori conservati come `held` con le stesse regole di identità e di finestra del Task 9.
+  `PoweredOn == null` vale acceso. SSD, NVMe e virtuali: cadenza di 30 s invariata, nessun campionamento.
+- **Campionamento:** il worker si sveglia 10 s prima di ogni giro per la baseline e campiona di nuovo all'inizio del giro, prima di ogni comando. La baseline appartiene a numero fisico e chiave verificata invariati e dista al più 10 s; si azzera a sospensione/gap, hot-plug, storage spento e assenza di sottoscrittori. Primo giro senza baseline: nessuna attività.
+- **Gate D6:**
+  1. primo giro di un episodio: `IsSpunDown` una volta per ogni disco con `RequiresPowerCheck` che non risulta spento da Windows; un disco con `PoweredOn == false` è `standby` e blocca senza comandi;
+  2. gate chiuso: si richiede solo ai dischi bloccanti, e solo con attività recente su di loro; un bloccante senza contatore leggibile (`Read == null`) al più ogni 5 minuti; le risposte "attivo" dell'episodio si conservano senza rinnovarle;
+  3. quando nessuno blocca più: un controllo completo, una sola volta, prima di `EnableStorage`; se trova uno standby il gate resta chiuso e l'episodio continua dal punto 2.
+- L'enumerazione per giro (`Enumerate`, `Describe`) usa solo la query del descrittore; verificare leggendo il codice che non invii `IOCTL_DISK_GET_LENGTH_INFO`, `IOCTL_STORAGE_CHECK_VERIFY`, `SMART_GET_VERSION` o altre richieste che arrivano al disco, e riportarlo nel report.
 
-- [ ] **Step 1: test che falliscono:** `ACounterThatGrewIsActivity`, `AMissingBaselineIsNotActivity`, `ACounterThatWentBackIsNotActivity` (anche un contatore cresciuto mentre l'altro cala); in `SensorHubTests`: `AnActiveButIdleHddIsNotUpdatedAndKeepsHeldValues`, `AnHddWithRecentIoIsUpdated`, `SolidStateDisksAreUpdatedEveryRound`, `TheWorkerWakesTenSecondsBeforeARound` (dopo un giro `RunStorageDue()` restituisce 20 s, alla baseline 10 s), `ABaselineFromAnotherIdentityOrBeforeSuspendIsNotUsed`, `ALateBaselineDoesNotAuthorizeSmart`, `UnknownPowerDoesNotKeepIdleValues`, `StorageOffAndNoSubscribersPerformNoActivityIo`.
-- [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter "FullyQualifiedName~DiskActivity|FullyQualifiedName~SensorHub"` → falliscono.
-- [ ] **Step 3: implementazione**, con assert di layout per `DISK_PERFORMANCE` (88 byte). Collegare il probe a `ServiceHost` e alla seam di test di `SensorHub`; usare `TimeProvider` per baseline e schedule. `dotnet test service/OpenMonitorAdvanced.slnx` e `pwsh scripts/check-trim-warnings.ps1` → PASS, nessun avviso nuovo.
-- [ ] **Step 4 (utente):** ripetere servizio isolato del Task 0 e Step 4 del Task 4 con servizio collegato; verificare innocuità del probe e mancata attività autogenerata. Se un controllo di stato azzera da solo il timer, il filtro SMART non risolve il gate: correggere la causa e ripetere V1–V3 e V8.
-- [ ] **Step 5: commit** `feat(service): update an HDD's SMART only after recent disk activity`.
+- [ ] **Step 1: test che falliscono.** `DiskActivityTests`: `ACounterThatGrewIsActivity`, `AMissingBaselineIsNotActivity`, `ACounterThatWentBackIsNotActivity` (anche un contatore cresciuto mentre l'altro cala), `DiskPerformanceIsEightyEightBytes`. `DriveStatesTests`: righe nuove per `idle` e per `standby` da `PoweredOn == false`. `SensorHubTests`:
+  `ADiskThatWindowsTurnedOffIsStandbyWithoutAnyCommand` (SpunDownQueries e Updates invariati, valore `held`), `AnIdleHddIsNeitherAskedNorUpdatedAndKeepsHeldValues` (stato `"idle"`), `AnHddWithRecentIoIsAskedAndUpdated`, `SolidStateDisksAreUpdatedEveryRound`, `TheWorkerWakesTenSecondsBeforeARound` (dopo un giro `RunStorageDue()` restituisce 20 s, alla baseline 10 s), `ABaselineFromAnotherIdentityOrBeforeSuspendIsNotUsed`, `ALateBaselineDoesNotAuthorizeSmart`, `TheFirstRoundAfterTheGateOpensDoesNotAskAgain`, `AnIdleDiskAfterAStallKeepsNothing` (finestra del Task 9), `StorageOffAndNoSubscribersPerformNoActivityIo`, `TheClosedGateAsksEachDriveOnceThenOnlyBlockersWithActivity`, `ABlockerWithoutCountersIsRetriedEveryFiveMinutes`, `ADriveThatWindowsTurnedOffBlocksTheGateWithoutACommand`, `TheGateRunsOneFullCheckBeforeOpening`, `AStandbyFoundByTheFinalCheckKeepsTheGateClosed`, `AFailedPowerStateCallCountsAsOn`.
+- [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter "FullyQualifiedName~DiskActivity|FullyQualifiedName~DriveStates|FullyQualifiedName~SensorHub"` → falliscono.
+- [ ] **Step 3: implementazione.** Collegare il probe a `ServiceHost` e alla seam di test di `SensorHub`; `TimeProvider` per baseline, schedule e ritentativo dei 5 minuti. Nessun lock durante I/O; lo stato dell'episodio del gate vive nel worker. `dotnet test service/OpenMonitorAdvanced.slnx` e `pwsh scripts/check-trim-warnings.ps1` → PASS, nessun avviso nuovo.
+- [ ] **Step 4 (utente):** con la build del Task 15: servizio da solo con il sottoscrittore v3 e poi app completa collegata; osservazione passiva di 10 minuti ciascuna. Atteso: `on=False`. Se fallisce, isolare e ripetere V1–V3 e V8.
+- [ ] **Step 5: commit** `fix(service): ask a disk its power mode and SMART only after recent activity`.
 
 ---
 
@@ -691,6 +711,7 @@ Si esegue **solo se** la prova isolata del Task 0 attribuisce il mancato spegnim
   ```
 - La temperatura del servizio è il sensore `temperature`/`drive` del dispositivo associato; `temperature` è `Some` solo con valore presente e `source_accepted`.
 - Con `Plan::Service(t)`: il valore principale è `t.value`; qualità `Held` se `t.held` **o** se storage sta rileggendo lo stesso snapshot della stessa generazione del feed; `Fresh` solo alla prima adozione di una nuova misura. Nessuna query locale. Valutare il feed a ogni poll, indipendentemente dalla scadenza locale di 30 s: una nuova misura del servizio deve essere adottata senza attendere quel termine e senza consumare il budget di query locali. Se manca il sensore principale, la prima misura lo dichiara con `Rediscover`; discovery conserva cache e posizioni per identità, senza rifare la query locale.
+- **Stato `idle` del servizio (spec §3.1, §4.4, aggiunto il 2026-10-02):** `oma_ipc::DriveState` guadagna `Idle` (filo `"idle"`, JSON `"idle"`; test `an_idle_drive_state_round_trips` in `status.rs`). In `storage_gate::decide`, subito dopo la riga del servizio `Standby`: servizio `Idle` → `Plan::Wait`, `DiskPower::Idle`, anche con `recent` vero (il servizio possiede la fonte: nessuna query locale); righe corrispondenti in `the_decision_table_matches_the_spec`. La temperatura del servizio di un disco `idle` si importa come storica, con qualità `Suspended`, come per lo standby. Test: `an_idle_service_disk_is_not_queried_and_shows_its_last_reading`.
 - Con `Plan::Wait` in standby confermato, conservare e importare l'eventuale temperatura storica del servizio, con qualità `Suspended`; non richiedere `state == active` per recuperare la cache standby. `noMedia` e veto ignoto non importano valori. I sensori locali aggiuntivi restano distinti e seguono il gate locale; un valore importato dal servizio dichiara solo la posizione principale, non inventa `sensor-N`.
 - Alla scadenza o allo scollegamento: il sensore resta dichiarato con l'ultimo valore, e vale la riga locale della tabella (attività recente → lettura; altrimenti `Idle` e `Suspended`).
 
@@ -828,7 +849,20 @@ La release 0.4.0 (spec D6) segue il flusso di `docs/release.md` dopo il merge, s
 
 ## Esito del punto di controllo (Task 0 e Task 4)
 
-Da compilare.
+Prove del 2026-10-02 sul PC di sviluppo: disco 0 = HDD SATA ST2000DM008 (`D:`), piano Prestazioni eccellenti, timeout disco 60 s (CA), TR-VISION HOME chiuso, servizio installato 0.3.0 (protocollo v2). Osservazioni passive di 10 minuti con `target/spike/m6b/watch-power.ps1` (accesso 0); log in `target/spike/m6b/` (non tracciati).
+
+| Prova | Esito |
+|---|---|
+| Controllo: app, servizio e TR-VISION chiusi | `on=False` dopo 3 min 44 s |
+| Task 0, servizio da solo con sottoscrittore (chiavetta collegata, gate chiuso, nessuna lettura SMART) | **mai spento** in 10 minuti |
+| `CHECK POWER MODE` nativo da solo, ogni 30 s | **mai spento**; il primo comando, a disco spento da Windows, 3084 ms |
+| `CHECK POWER MODE` via SAT16 da solo, ogni 30 s | **mai spento** |
+| `IOCTL_DISK_PERFORMANCE` (accesso 0) ogni 15 s | `on=False` dopo 5 minuti; a disco spento risponde in 4 ms senza riaccenderlo |
+| Task 4, bisezione `storage,poll-storage` (binari di `b5e69a1`) | `still in standby after 50 s` su entrambe |
+| Task 4, app di prova da sola, senza sonde | `on=False` dopo circa 5 minuti, poi spento fino alla fine |
+| Task 4, app di prova, standby forzato, SAT16 ogni 30 s | prima esecuzione: `STANDBY` per 4 minuti, poi attivo alle 17:58 (non riprodotto, causa ignota); seconda: `STANDBY` su 20 righe, contatori fermi |
+
+**Decisione.** Il percorso locale (Task 3) è confermato in modalità anti-cheat. Il mancato spegnimento con il servizio non dipende dalla lettura SMART ma dal controllo di stato: il Task 10 è obbligatorio ed è stato riscritto (spec §4.4, approvato dall'utente il 2026-10-02). La modalità con servizio collegato si verifica con la build v3 nel Task 15.
 
 ## Esito dell'esecuzione
 

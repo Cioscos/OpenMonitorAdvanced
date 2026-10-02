@@ -87,6 +87,10 @@ pub struct Engine {
     history: History,
     /// Min/max/average since start, same retention rule as `history`.
     stats: Stats,
+    /// The tick's values as `history` and `stats` take them: a suspended
+    /// value is a last reading, not a measurement, so it is absent here.
+    /// Kept between ticks to reuse its buffer.
+    measured: Vec<Option<f64>>,
     /// Unix time of the first tick: when monitoring started (not the window).
     started_at_ms: Option<u64>,
     /// Rate limit of the "discarding implausible value" debug line.
@@ -114,6 +118,7 @@ impl Engine {
             schema: Schema::default(),
             history: History::new(history_capacity),
             stats: Stats::new(),
+            measured: Vec::new(),
             started_at_ms: None,
             discards: DiscardLog::default(),
             rules: RuleEngine::new(),
@@ -251,6 +256,8 @@ impl Engine {
             self.discards.retain(&ids);
         }
         let discards = &mut self.discards;
+        let measured = &mut self.measured;
+        measured.clear();
         let mut values = Vec::with_capacity(self.schema.sensors.len());
         let mut quality = Vec::with_capacity(self.schema.sensors.len());
         let kept_values = self.slots.iter().flat_map(|slot| {
@@ -278,14 +285,15 @@ impl Engine {
                 }
             }
             values.push(clean);
+            measured.push(clean.filter(|_| slot_quality != Quality::Suspended));
             quality.push(match slot_quality {
                 Quality::Suspended => Quality::Suspended,
                 Quality::Held if clean.is_some() => Quality::Held,
                 _ => Quality::Fresh,
             });
         }
-        self.history.push(timestamp_ms, &values);
-        self.stats.push(&values);
+        self.history.push(timestamp_ms, &self.measured);
+        self.stats.push(&self.measured);
         self.seq += 1;
         self.last_monotonic_ms = monotonic_ms;
         // The rules see the sanitized values; a new merged schema is flagged
@@ -1091,6 +1099,119 @@ mod tests {
         let out = e.tick(0, 0);
         assert_eq!(out.snapshot.values, vec![None]);
         assert_eq!(out.quality, vec![Quality::Suspended]);
+    }
+
+    /// Ticks once per `(values, quality)` pair, one second apart from 1 s.
+    fn tick_with_quality(
+        e: &mut Engine,
+        script: &Arc<Mutex<Script>>,
+        ticks: &[(&[Option<f64>], &[Quality])],
+    ) -> Vec<TickOutput> {
+        (1u64..)
+            .zip(ticks)
+            .map(|(second, (values, quality))| {
+                {
+                    let mut s = script.lock().unwrap();
+                    s.polls.push_back(Ok(values.to_vec()));
+                    s.quality = Some(quality.to_vec());
+                }
+                e.tick(second * 1_000, second * 1_000)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_suspended_value_enters_the_history_as_absent() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        let outs = tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(40.0)], &[Fresh]),
+                (&[Some(40.0)], &[Suspended]),
+                // Suspended before any reading: absent as well.
+                (&[None], &[Suspended]),
+            ],
+        );
+        // The current value is still the last reading, with its quality.
+        assert_eq!(outs[1].snapshot.values, vec![Some(40.0)]);
+        assert_eq!(outs[1].quality, vec![Suspended]);
+        let w = e.history().window(&ids(&["d/load/a"]), 0);
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000]);
+        assert_eq!(w.series, vec![vec![Some(40.0), None, None]]);
+    }
+
+    #[test]
+    fn a_held_value_enters_the_history_unchanged() {
+        use Quality::{Fresh, Held};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        let outs = tick_with_quality(
+            &mut e,
+            &script,
+            &[(&[Some(40.0)], &[Fresh]), (&[Some(40.0)], &[Held])],
+        );
+        assert_eq!(outs[1].quality, vec![Held]);
+        let id = ids(&["d/load/a"]);
+        assert_eq!(
+            e.history().window(&id, 0).series,
+            vec![vec![Some(40.0), Some(40.0)]]
+        );
+        assert_eq!(e.stats().get(&id)[0].map(|s| s.count), Some(2));
+    }
+
+    #[test]
+    fn statistics_ignore_suspended_ticks() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        // The suspended ticks carry a value that would move every statistic.
+        tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(10.0)], &[Fresh]),
+                (&[Some(30.0)], &[Fresh]),
+                (&[Some(90.0)], &[Suspended]),
+                (&[Some(90.0)], &[Suspended]),
+                (&[Some(20.0)], &[Fresh]),
+            ],
+        );
+        let stats = e.stats().get(&ids(&["d/load/a"]))[0].expect("three measurements");
+        // `max` is also the peak KPI of the device pages.
+        assert_eq!(
+            (stats.min, stats.max, stats.avg, stats.count),
+            (10.0, 30.0, 20.0, 3)
+        );
+    }
+
+    #[test]
+    fn the_history_window_has_a_gap_while_a_sensor_is_suspended() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a", "b"]));
+        let mut e = Engine::new(vec![p], 10);
+        tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(1.0), Some(35.0)], &[Fresh, Fresh]),
+                (&[Some(2.0), Some(35.0)], &[Fresh, Suspended]),
+                (&[Some(3.0), Some(35.0)], &[Fresh, Suspended]),
+                (&[Some(4.0), Some(36.0)], &[Fresh, Fresh]),
+            ],
+        );
+        let w = e.history().window(&ids(&["d/load/a", "d/load/b"]), 0);
+        // Every tick keeps its row: only the suspended sensor has the gap.
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000, 4_000]);
+        assert_eq!(
+            w.series,
+            vec![
+                vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+                vec![Some(35.0), None, None, Some(36.0)],
+            ]
+        );
     }
 
     #[test]

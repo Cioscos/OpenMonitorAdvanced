@@ -59,8 +59,10 @@ SMART data.
   closed, and an optional second hotkey pauses and resumes. The file is UTF-8 with a BOM,
   comma-separated, with CRLF line ends: one row per sampled tick (or every 1 to 60 ticks), a
   local timestamp with its UTC offset, and one column per sensor, named
-  `Device / Sensor [unit] {id}`. Files go to `Documents\OpenMonitor Advanced\logs` unless you
-  pick another folder. A new part (`-part2`, `-part3`, ...) starts when the file reaches the size limit
+  `Device / Sensor [unit] {id}`. A cell is empty when the sensor has no value, and holds the
+  word `suspended` (in every language) while a reading is on hold because the disk is asleep
+  or idle. Files go to `Documents\OpenMonitor Advanced\logs` unless you pick another folder.
+  A new part (`-part2`, `-part3`, ...) starts when the file reaches the size limit
   (100 MiB by default, 10 to 2048) or when the columns change: language, units or the selected
   sensors. *Settings › CSV log* sets the folder, the sensors, the interval, the size limit and
   the hotkeys. A failure such as a removed USB drive stops the recording with a notification and

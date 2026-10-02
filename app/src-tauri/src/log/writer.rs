@@ -576,7 +576,7 @@ mod tests {
     use super::*;
     use crate::log::fs::fake::{Fault, MemFs};
     use crate::log::queue::{Control, Reply, Row, MAX_QUEUE_BYTES, MAX_ROWS};
-    use oma_core::csv::{self, Column, Conversion, Layout, BOM};
+    use oma_core::csv::{self, Cell, Column, Conversion, Layout, BOM};
     use std::sync::mpsc::{sync_channel, Receiver};
     use std::sync::Mutex;
 
@@ -635,7 +635,7 @@ mod tests {
     }
 
     fn line(layout: &Layout, n: u64) -> Vec<u8> {
-        let values = vec![Some(n as f64); layout.columns.len()];
+        let values = vec![Cell::Value(n as f64); layout.columns.len()];
         let mut out = String::new();
         csv::row_line(layout, T0 + n * 1000, OFFSET, &values, &mut out);
         out.into_bytes()
@@ -647,7 +647,7 @@ mod tests {
             layout: layout.clone(),
             timestamp_ms: T0 + n * 1000,
             offset_minutes: OFFSET,
-            values: vec![Some(n as f64); layout.columns.len()].into_boxed_slice(),
+            values: vec![Cell::Value(n as f64); layout.columns.len()].into_boxed_slice(),
         }
     }
 

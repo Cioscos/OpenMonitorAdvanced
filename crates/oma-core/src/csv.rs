@@ -7,12 +7,29 @@ use std::fmt::Write as _;
 use std::mem::size_of;
 
 use crate::model::{DeviceKind, Schema, Sensor, Unit};
+use crate::provider::Quality;
 use crate::settings::{TemperatureUnit, ThroughputUnit};
 
 /// UTF-8 byte order mark written at the start of every file part.
 pub const BOM: &[u8] = b"\xEF\xBB\xBF";
 /// Title of the first column.
 pub const TIMESTAMP_TITLE: &str = "Timestamp";
+
+/// Cell of a suspended reading: data, not a label, so the same in every
+/// language; it needs neither quoting nor the formula guard.
+pub const SUSPENDED: &str = "suspended";
+
+/// One value cell of a row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cell {
+    /// A raw sensor value; a non-finite one is written as an empty cell.
+    Value(f64),
+    /// No value: an empty cell.
+    Absent,
+    /// The reading is suspended (a sleeping disk): the word [`SUSPENDED`],
+    /// whatever last reading came with it.
+    Suspended,
+}
 
 /// Display units the log follows (same settings as the UI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,11 +130,21 @@ impl Layout {
             })
     }
 
-    /// Raw values in column order; a value missing from `values` is `None`.
-    pub fn extract(&self, values: &[Option<f64>]) -> Box<[Option<f64>]> {
+    /// Cells in column order, from a tick's values and their quality (same
+    /// order; a missing quality reads as fresh). A value missing from
+    /// `values` is absent.
+    pub fn extract(&self, values: &[Option<f64>], quality: &[Quality]) -> Box<[Cell]> {
         self.columns
             .iter()
-            .map(|column| values.get(column.index).copied().flatten())
+            .map(|column| {
+                if quality.get(column.index) == Some(&Quality::Suspended) {
+                    return Cell::Suspended;
+                }
+                match values.get(column.index).copied().flatten() {
+                    Some(value) => Cell::Value(value),
+                    None => Cell::Absent,
+                }
+            })
             .collect()
     }
 
@@ -186,21 +213,26 @@ pub fn header_line(layout: &Layout, out: &mut String) {
     out.push_str("\r\n");
 }
 
-/// Writes one CRLF-terminated row. `values` are raw values in column order
-/// (see [`Layout::extract`]); conversions are applied here. Missing and
-/// non-finite values are empty cells.
+/// Writes one CRLF-terminated row. `cells` are in column order (see
+/// [`Layout::extract`]); conversions are applied here. Missing and
+/// non-finite values are empty cells, a suspended reading is [`SUSPENDED`].
 pub fn row_line(
     layout: &Layout,
     timestamp_ms: u64,
     offset_minutes: i32,
-    values: &[Option<f64>],
+    cells: &[Cell],
     out: &mut String,
 ) {
     format_timestamp(timestamp_ms, offset_minutes, out);
     for (i, column) in layout.columns.iter().enumerate() {
         out.push(',');
-        let Some(value) = values.get(i).copied().flatten().filter(|v| v.is_finite()) else {
-            continue;
+        let value = match cells.get(i) {
+            Some(&Cell::Value(value)) if value.is_finite() => value,
+            Some(Cell::Suspended) => {
+                out.push_str(SUSPENDED);
+                continue;
+            }
+            _ => continue,
         };
         let converted = match column.conversion {
             Conversion::None => value,
@@ -466,8 +498,8 @@ mod tests {
         let (b, _) = Layout::build(&s, None, cb(), &lab, 10);
         assert!(a.same_output(&b));
         let (mut r1, mut r2) = (String::new(), String::new());
-        row_line(&a, T0, 120, &[Some(1.0)], &mut r1);
-        row_line(&a, T0, 60, &[Some(1.0)], &mut r2);
+        row_line(&a, T0, 120, &[Cell::Value(1.0)], &mut r1);
+        row_line(&a, T0, 60, &[Cell::Value(1.0)], &mut r2);
         assert_eq!(r1, "2026-09-29T14:03:12.000+02:00,1\r\n");
         assert_eq!(r2, "2026-09-29T13:03:12.000+01:00,1\r\n");
     }
@@ -512,15 +544,103 @@ mod tests {
     fn missing_and_non_finite_are_empty() {
         let l = single(device("d", DeviceKind::Cpu, "CPU"), Unit::Percent, cb());
         for v in [
-            None,
-            Some(f64::NAN),
-            Some(f64::INFINITY),
-            Some(f64::NEG_INFINITY),
+            Cell::Absent,
+            Cell::Value(f64::NAN),
+            Cell::Value(f64::INFINITY),
+            Cell::Value(f64::NEG_INFINITY),
         ] {
             let mut s = String::new();
             row_line(&l, T0, 0, &[v], &mut s);
             assert_eq!(s, "2026-09-29T12:03:12.000+00:00,\r\n");
         }
+    }
+
+    /// One row of a three-column layout, through `extract` and `row_line`.
+    fn row_of(values: &[Option<f64>], quality: &[Quality]) -> String {
+        let s = schema(
+            vec![device("d", DeviceKind::Storage, "HDD")],
+            vec![
+                sensor("d", "a", Unit::Celsius),
+                sensor("d", "b", Unit::Celsius),
+                sensor("d", "c", Unit::Celsius),
+            ],
+        );
+        let (l, _) = Layout::build(&s, None, cb(), &lab, 10);
+        let mut row = String::new();
+        row_line(&l, T0, 0, &l.extract(values, quality), &mut row);
+        row
+    }
+
+    #[test]
+    fn a_suspended_value_is_written_as_the_word_suspended() {
+        use Quality::{Fresh, Suspended};
+        // With its last reading, without any reading, and with a value the
+        // row would otherwise leave empty.
+        assert_eq!(
+            row_of(
+                &[Some(35.0), None, Some(f64::NAN)],
+                &[Suspended, Suspended, Suspended]
+            ),
+            "2026-09-29T12:03:12.000+00:00,suspended,suspended,suspended\r\n"
+        );
+        assert_eq!(SUSPENDED, "suspended");
+        // Only the suspended sensor: its neighbours keep their numbers.
+        assert_eq!(
+            row_of(
+                &[Some(1.5), Some(35.0), Some(2.0)],
+                &[Fresh, Suspended, Fresh]
+            ),
+            "2026-09-29T12:03:12.000+00:00,1.5,suspended,2\r\n"
+        );
+        // The token is not converted with the column's unit.
+        let f = units(TemperatureUnit::F, ThroughputUnit::Bytes);
+        let l = single(device("d", DeviceKind::Storage, "HDD"), Unit::Celsius, f);
+        let mut row = String::new();
+        row_line(&l, T0, 0, &l.extract(&[Some(35.0)], &[Suspended]), &mut row);
+        assert!(row.ends_with(",suspended\r\n"), "{row}");
+    }
+
+    #[test]
+    fn an_absent_value_is_still_an_empty_cell() {
+        use Quality::{Fresh, Held, Suspended};
+        assert_eq!(
+            row_of(&[None, None, Some(f64::NAN)], &[Fresh, Held, Fresh]),
+            "2026-09-29T12:03:12.000+00:00,,,\r\n"
+        );
+        // Next to a suspended one, and with no quality at all.
+        assert_eq!(
+            row_of(&[None, Some(35.0), None], &[Fresh, Suspended, Fresh]),
+            "2026-09-29T12:03:12.000+00:00,,suspended,\r\n"
+        );
+        assert_eq!(
+            row_of(&[None, Some(35.0)], &[]),
+            "2026-09-29T12:03:12.000+00:00,,35,\r\n"
+        );
+    }
+
+    #[test]
+    fn a_held_value_is_written_as_a_number() {
+        use Quality::{Fresh, Held};
+        assert_eq!(
+            row_of(&[Some(35.0), Some(36.25), Some(37.0)], &[Held, Fresh, Held]),
+            "2026-09-29T12:03:12.000+00:00,35,36.25,37\r\n"
+        );
+    }
+
+    #[test]
+    fn a_suspended_cell_needs_no_quoting_under_either_separator() {
+        use Quality::{Fresh, Suspended};
+        let row = row_of(
+            &[Some(1.0), Some(35.0), Some(2.0)],
+            &[Fresh, Suspended, Fresh],
+        );
+        // The file's comma, and the semicolon a spreadsheet may split on:
+        // the cell is one bare field under both, never quoted or guarded.
+        let fields: Vec<&str> = row.trim_end_matches("\r\n").split(',').collect();
+        assert_eq!(fields.len(), 4, "{row}");
+        assert_eq!(fields[2], "suspended");
+        assert!(!row.contains([';', '"', '\'']), "{row}");
+        assert_eq!(esc(fields[2]), "suspended");
     }
 
     #[test]
@@ -529,7 +649,7 @@ mod tests {
         let l = single(device("d", DeviceKind::Cpu, "CPU"), Unit::Celsius, f);
         assert_eq!(l.columns[0].unit, "°F");
         let mut s = String::new();
-        row_line(&l, T0, 0, &[Some(60.0)], &mut s);
+        row_line(&l, T0, 0, &[Cell::Value(60.0)], &mut s);
         assert!(s.ends_with(",140\r\n"), "{s}");
 
         let net = single(
@@ -539,7 +659,7 @@ mod tests {
         );
         assert_eq!(net.columns[0].unit, "bit/s");
         let mut s = String::new();
-        row_line(&net, T0, 0, &[Some(1000.0)], &mut s);
+        row_line(&net, T0, 0, &[Cell::Value(1000.0)], &mut s);
         assert!(s.ends_with(",8000\r\n"), "{s}");
 
         let disk = single(
@@ -549,7 +669,7 @@ mod tests {
         );
         assert_eq!(disk.columns[0].unit, "B/s");
         let mut s = String::new();
-        row_line(&disk, T0, 0, &[Some(1000.0)], &mut s);
+        row_line(&disk, T0, 0, &[Cell::Value(1000.0)], &mut s);
         assert!(s.ends_with(",1000\r\n"), "{s}");
 
         // Network with bytes selected stays in B/s.
@@ -590,7 +710,7 @@ mod tests {
         assert_eq!(l.columns[0].unit, "");
         for (v, want) in [(0.0, ",0\r\n"), (2.0, ",1\r\n"), (1.0, ",1\r\n")] {
             let mut s = String::new();
-            row_line(&l, T0, 0, &[Some(v)], &mut s);
+            row_line(&l, T0, 0, &[Cell::Value(v)], &mut s);
             assert!(s.ends_with(want), "{s}");
         }
     }
@@ -628,7 +748,7 @@ mod tests {
     fn negative_numbers_are_not_guarded() {
         let l = single(device("d", DeviceKind::Cpu, "CPU"), Unit::Percent, cb());
         let mut s = String::new();
-        row_line(&l, T0, 0, &[Some(-5.0)], &mut s);
+        row_line(&l, T0, 0, &[Cell::Value(-5.0)], &mut s);
         assert!(s.ends_with(",-5\r\n"), "{s}");
     }
 
@@ -637,7 +757,7 @@ mod tests {
         let l = single(device("d", DeviceKind::Cpu, "CPU"), Unit::Percent, cb());
         let (mut h, mut r) = (String::new(), String::new());
         header_line(&l, &mut h);
-        row_line(&l, T0, 0, &[Some(1.0)], &mut r);
+        row_line(&l, T0, 0, &[Cell::Value(1.0)], &mut r);
         assert!(h.ends_with("\r\n") && !h[..h.len() - 2].contains('\n'));
         assert!(r.ends_with("\r\n") && !r[..r.len() - 2].contains('\n'));
         assert!(!h.starts_with('\u{feff}'));
@@ -659,9 +779,12 @@ mod tests {
         let ids: Vec<_> = l.columns.iter().map(|c| c.sensor_id.as_str()).collect();
         assert_eq!(ids, ["d/x/a", "d/x/c"]);
         assert_eq!(l.columns[1].index, 2);
-        let vals = l.extract(&[Some(1.0), Some(2.0), Some(3.0)]);
-        assert_eq!(&*vals, &[Some(1.0), Some(3.0)]);
-        assert_eq!(&*l.extract(&[Some(1.0)]), &[Some(1.0), None]);
+        let vals = l.extract(&[Some(1.0), Some(2.0), Some(3.0)], &[]);
+        assert_eq!(&*vals, &[Cell::Value(1.0), Cell::Value(3.0)]);
+        assert_eq!(
+            &*l.extract(&[Some(1.0)], &[]),
+            &[Cell::Value(1.0), Cell::Absent]
+        );
         let (all, _) = Layout::build(&s, None, cb(), &lab, 10);
         assert_eq!(all.columns.len(), 3);
     }

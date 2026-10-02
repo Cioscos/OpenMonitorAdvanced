@@ -1895,6 +1895,8 @@ mod tests {
             }];
             FeedView {
                 generation: self.generation,
+                drives_generation: 0,
+                carried: None,
                 schema: Some(Arc::new(schema)),
                 snapshot: Some((
                     received,
@@ -1915,6 +1917,8 @@ mod tests {
     fn disconnected() -> FeedView {
         FeedView {
             generation: 99,
+            drives_generation: 0,
+            carried: None,
             schema: None,
             snapshot: None,
             interval: INTERVAL,
@@ -2370,6 +2374,62 @@ mod tests {
             &next
         ));
         assert_eq!(published(&mut gates), vec![(Some(41.0), Quality::Held)]);
+    }
+
+    #[test]
+    fn a_change_of_the_services_drive_table_asks_for_no_rediscovery() {
+        let start = Instant::now();
+        let drives = table();
+        let mut gates = HashMap::from([(0, two_sensors(start))]);
+        let first = stamp(start, 1);
+        let view = wire("active", Some(41.0)).view(first.mono);
+        assert!(!poll_disk(&mut gates, Some(QUIET), &drives, &view, &first));
+        assert_eq!(state(&gates), (measured(41.0, false), DiskPower::Active));
+        published(&mut gates);
+
+        // The service's table changes (this disk went idle): until the next
+        // snapshot the feed carries the old values without authority.
+        let changed = FeedView {
+            drives_generation: view.drives_generation + 1,
+            snapshot: None,
+            carried: view.snapshot.clone(),
+            ..wire("idle", Some(41.0)).view(first.mono)
+        };
+        let between = stamp(start, 2);
+        assert_eq!(
+            service_disk(&drives.drives[0], &drives, &changed, between.mono),
+            ServiceDisk::Absent,
+            "a carried snapshot gives no state and no temperature"
+        );
+        assert!(
+            !poll_disk(&mut gates, Some(QUIET), &drives, &changed, &between),
+            "no rediscovery"
+        );
+        // Nothing is queried, the sensors stay declared and keep their
+        // values as last readings.
+        assert_eq!(state(&gates), (Plan::Wait, DiskPower::Idle));
+        assert_eq!(refresh_one(&mut gates, between.mono, never), (None, false));
+        assert_eq!(gates[&0].temperatures.positions, vec![0, 2]);
+        assert_eq!(
+            published(&mut gates),
+            vec![
+                (Some(41.0), Quality::Suspended),
+                (Some(30.0), Quality::Suspended)
+            ]
+        );
+
+        // The next snapshot gives the new table its authority.
+        let after = stamp(start, 3);
+        let idle = Wire {
+            seq: 2,
+            held: true,
+            ..wire("idle", Some(41.0))
+        }
+        .view(after.mono);
+        assert!(!poll_disk(&mut gates, Some(QUIET), &drives, &idle, &after));
+        assert_eq!(state(&gates), (Plan::Wait, DiskPower::Idle));
+        assert_eq!(refresh_one(&mut gates, after.mono, never), (None, false));
+        assert_eq!(gates[&0].temperatures.positions, vec![0, 2]);
     }
 
     #[test]

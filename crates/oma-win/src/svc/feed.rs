@@ -4,6 +4,11 @@
 //! The schema and the snapshot change under one lock: a new schema drops
 //! the old snapshot in the same step, so a reader never pairs a snapshot
 //! with a schema it was not indexed by.
+//!
+//! Two generations: `generation` moves when what the provider declares may
+//! change (devices, sensors, the user's request, a cleared feed), and the
+//! provider rediscovers; `drives_generation` moves when only the service's
+//! drive table does, which changes no sensor and costs no rediscovery.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -17,12 +22,24 @@ const DEFAULT_INTERVAL: Duration = Duration::from_millis(1000);
 /// What the provider reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeedView {
-    /// Changes whenever the schema changes or the feed is cleared: the
-    /// provider rediscovers when it differs from the one it bound.
+    /// Changes whenever the schema's devices or sensors change, the request
+    /// changes or the feed is cleared: the provider rediscovers when it
+    /// differs from the one it bound. A change of the drive table alone does
+    /// not move it.
     pub generation: u64,
+    /// Changes whenever the service's drive table (`service.drives`) changes
+    /// under the same devices and sensors: the drive states are to be read
+    /// again from `schema`, and nothing is rediscovered.
+    pub drives_generation: u64,
     pub schema: Option<Arc<WireSchema>>,
-    /// The last snapshot for `schema`, with the time it was received.
+    /// The last snapshot for `schema`, drive table included, with the time
+    /// it was received. Only this one gives the drive states authority.
     pub snapshot: Option<(Instant, WireSnapshot)>,
+    /// The snapshot a change of the drive table alone dropped, until the
+    /// next one arrives: indexed by the same sensors, so its values are
+    /// still the last measurement, but taken under another drive table. It
+    /// says nothing about the state of any drive.
+    pub carried: Option<(Instant, WireSnapshot)>,
     /// The subscribed sampling interval.
     pub interval: Duration,
     /// The sources the user turned off; a change bumps `generation`.
@@ -31,9 +48,11 @@ pub struct FeedView {
 
 struct Inner {
     generation: u64,
+    drives_generation: u64,
     request: Arc<SourceRequest>,
     schema: Option<Arc<WireSchema>>,
     snapshot: Option<(Instant, WireSnapshot)>,
+    carried: Option<(Instant, WireSnapshot)>,
     interval: Duration,
 }
 
@@ -41,9 +60,11 @@ impl Default for Inner {
     fn default() -> Self {
         Self {
             generation: 0,
+            drives_generation: 0,
             request: Arc::default(),
             schema: None,
             snapshot: None,
+            carried: None,
             interval: DEFAULT_INTERVAL,
         }
     }
@@ -70,18 +91,27 @@ impl SvcFeed {
     /// when a reconfiguration finishes. A schema that differs only there
     /// replaces the stored one and leaves the snapshot and the generation
     /// alone. The drive table (`service.drives`) is the exception: a change
-    /// there drops the previous snapshot and bumps the generation even with
-    /// devices and sensors unchanged, so a drive state never pairs with a
-    /// snapshot taken under another table; only the next snapshot of the
-    /// same connection gives the new states their authority back.
+    /// there drops the previous snapshot even with devices and sensors
+    /// unchanged, so a drive state never pairs with a snapshot taken under
+    /// another table; only the next snapshot of the same connection gives
+    /// the new states their authority back. Such a change declares no other
+    /// sensor, so it moves the drive-table generation instead of the
+    /// generation (a hard disk goes idle and works again all the time: the
+    /// provider must not rediscover for it), and the dropped snapshot stays
+    /// readable as `carried`, for its values only.
     pub fn set_schema(&self, schema: WireSchema) {
         let mut inner = self.lock();
         if let Some(current) = inner.schema.as_deref() {
-            if current.devices == schema.devices
-                && current.sensors == schema.sensors
-                && current.service.drives == schema.service.drives
-            {
-                if current.service != schema.service {
+            if current.devices == schema.devices && current.sensors == schema.sensors {
+                if current.service.drives != schema.service.drives {
+                    inner.schema = Some(Arc::new(schema));
+                    // A table changing twice before a snapshot keeps the
+                    // one already carried.
+                    if let Some(dropped) = inner.snapshot.take() {
+                        inner.carried = Some(dropped);
+                    }
+                    inner.drives_generation += 1;
+                } else if current.service != schema.service {
                     inner.schema = Some(Arc::new(schema));
                 }
                 return;
@@ -89,12 +119,15 @@ impl SvcFeed {
         }
         inner.schema = Some(Arc::new(schema));
         inner.snapshot = None;
+        inner.carried = None;
         inner.generation += 1;
     }
 
     /// Stores the snapshot for the current schema, received at `received`.
     pub fn set_snapshot(&self, snapshot: WireSnapshot, received: Instant) {
-        self.lock().snapshot = Some((received, snapshot));
+        let mut inner = self.lock();
+        inner.snapshot = Some((received, snapshot));
+        inner.carried = None;
     }
 
     pub fn set_interval(&self, interval: Duration) {
@@ -118,9 +151,10 @@ impl SvcFeed {
     /// rediscover every 5 s).
     pub fn clear(&self) {
         let mut inner = self.lock();
-        if inner.schema.is_some() || inner.snapshot.is_some() {
+        if inner.schema.is_some() || inner.snapshot.is_some() || inner.carried.is_some() {
             inner.schema = None;
             inner.snapshot = None;
+            inner.carried = None;
             inner.generation += 1;
         }
     }
@@ -129,8 +163,10 @@ impl SvcFeed {
         let inner = self.lock();
         FeedView {
             generation: inner.generation,
+            drives_generation: inner.drives_generation,
             schema: inner.schema.clone(),
             snapshot: inner.snapshot.clone(),
+            carried: inner.carried.clone(),
             interval: inner.interval,
             request: Arc::clone(&inner.request),
         }
@@ -197,8 +233,10 @@ mod tests {
     fn a_new_feed_is_empty() {
         let view = SvcFeed::default().view();
         assert_eq!(view.generation, 0);
+        assert_eq!(view.drives_generation, 0);
         assert!(view.schema.is_none());
         assert!(view.snapshot.is_none());
+        assert!(view.carried.is_none());
         assert_eq!(view.interval, DEFAULT_INTERVAL);
     }
 
@@ -300,16 +338,57 @@ mod tests {
         let changed = schema_with_drives(vec![drive(0, "standby")]);
         feed.set_schema(changed.clone());
         let after = feed.view();
-        assert!(after.generation > before.generation);
+        // No sensor changed: the drive-table generation moves, not the one
+        // the provider rediscovers for.
+        assert_eq!(after.generation, before.generation);
+        assert!(after.drives_generation > before.drives_generation);
         assert!(
             after.snapshot.is_none(),
             "the old snapshot must not survive"
         );
         assert_eq!(after.schema.as_deref(), Some(&changed));
+        // Its values stay readable, apart from the snapshot with authority.
+        assert_eq!(after.carried, before.snapshot);
+
+        // A second change before any snapshot keeps the carried values.
+        feed.set_schema(schema_with_drives(vec![drive(0, "idle")]));
+        let twice = feed.view();
+        assert!(twice.drives_generation > after.drives_generation);
+        assert!(twice.snapshot.is_none());
+        assert_eq!(twice.carried, before.snapshot);
 
         // The next snapshot of the same connection restores authority.
         feed.set_snapshot(snapshot(2, 2), Instant::now());
-        assert_eq!(feed.view().snapshot.map(|(_, s)| s.seq), Some(2));
+        let restored = feed.view();
+        assert_eq!(restored.snapshot.map(|(_, s)| s.seq), Some(2));
+        assert!(restored.carried.is_none());
+    }
+
+    #[test]
+    fn carried_values_do_not_survive_a_new_schema_or_a_clear() {
+        let carrying = || {
+            let feed = SvcFeed::default();
+            feed.set_schema(schema_with_drives(vec![drive(0, "active")]));
+            feed.set_snapshot(snapshot(1, 2), Instant::now());
+            feed.set_schema(schema_with_drives(vec![drive(0, "standby")]));
+            assert!(feed.view().carried.is_some());
+            feed
+        };
+
+        // Other sensors: the carried snapshot is not indexed by them.
+        let feed = carrying();
+        let generation = feed.view().generation;
+        feed.set_schema(schema(3));
+        let view = feed.view();
+        assert!(view.generation > generation);
+        assert!(view.snapshot.is_none() && view.carried.is_none());
+
+        let feed = carrying();
+        let generation = feed.view().generation;
+        feed.clear();
+        let view = feed.view();
+        assert!(view.generation > generation);
+        assert!(view.snapshot.is_none() && view.carried.is_none());
     }
 
     #[test]
@@ -325,6 +404,7 @@ mod tests {
         feed.set_schema(same_drives.clone());
         let view = feed.view();
         assert_eq!(view.generation, generation);
+        assert_eq!(view.drives_generation, 0);
         assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
         assert_eq!(view.schema.as_deref(), Some(&same_drives));
     }

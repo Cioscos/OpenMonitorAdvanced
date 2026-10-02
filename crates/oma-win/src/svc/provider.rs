@@ -261,6 +261,10 @@ pub struct SvcProvider {
     /// requests a rediscovery when either has since changed.
     bound_generation: u64,
     bound_drives_generation: u64,
+    /// The feed's drive-table generation `standby` was computed for; `poll`
+    /// computes it again when the service's drive table has since changed,
+    /// without a rediscovery: the table declares no sensor.
+    bound_table_generation: u64,
     /// Wire indices of the sensors kept by the last `discover`, in
     /// `Inventory::sensors` order.
     kept: Vec<usize>,
@@ -284,6 +288,7 @@ impl SvcProvider {
             drives,
             bound_generation: 0,
             bound_drives_generation: 0,
+            bound_table_generation: 0,
             kept: Vec::new(),
             standby: Vec::new(),
             interval: Duration::default(),
@@ -304,6 +309,7 @@ impl Provider for SvcProvider {
         let drives = self.drives.get();
         self.bound_generation = view.generation;
         self.bound_drives_generation = drives.generation;
+        self.bound_table_generation = view.drives_generation;
         self.interval = view.interval;
         self.last_seq = None;
         self.repeated = false;
@@ -330,12 +336,28 @@ impl Provider for SvcProvider {
             self.last_seq = None;
             return Err(ProviderError::Rediscover);
         }
+        // The service's drive table changed under the same sensors: the
+        // drive states are read again, and nothing else moves.
+        if view.drives_generation != self.bound_table_generation {
+            self.bound_table_generation = view.drives_generation;
+            self.standby = match &view.schema {
+                Some(schema) => standby_sensors(schema, &drives, &self.kept),
+                None => vec![false; self.kept.len()],
+            };
+        }
         // Without a current snapshot the drive states have no authority
         // either: the values are absent, not suspended.
         self.quality = Some(vec![Quality::Fresh; self.kept.len()]);
-        let Some((received, snapshot)) = view.snapshot else {
-            self.last_seq = None;
-            return Ok(vec![None; self.kept.len()]);
+        // A snapshot taken under the drive table before this one still holds
+        // the last measurement of every sensor, so no value goes missing for
+        // a tick; it suspends nothing, whatever either table says.
+        let (received, snapshot, authority) = match (view.snapshot, view.carried) {
+            (Some((received, snapshot)), _) => (received, snapshot, true),
+            (None, Some((received, snapshot))) => (received, snapshot, false),
+            (None, None) => {
+                self.last_seq = None;
+                return Ok(vec![None; self.kept.len()]);
+            }
         };
         if received.elapsed() > view.interval * 3 {
             return Ok(vec![None; self.kept.len()]);
@@ -357,7 +379,7 @@ impl Provider for SvcProvider {
             .zip(&values)
             .map(|((&i, &standby), value)| {
                 let held = repeated || snapshot.held.get(i).copied().unwrap_or(false);
-                if standby {
+                if standby && authority {
                     Quality::Suspended
                 } else if held && value.is_some() {
                     Quality::Held
@@ -1312,6 +1334,67 @@ mod tests {
                 "{state}"
             );
         }
+    }
+
+    #[test]
+    fn a_drive_state_change_does_not_rediscover_the_service_sensors() {
+        // A hard disk goes idle and works again: the CPU's sensors (and every
+        // other one) must not lose a tick for it.
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "active");
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        let values = vec![Some(12.0), Some(0.0), None, Some(97.0)];
+        assert_eq!(p.poll().expect("poll"), values);
+
+        let mut seq = 1;
+        for state in ["idle", "active"] {
+            feed.set_schema(disk_state_schema(state));
+            // The tick between the new table and its first snapshot.
+            assert_eq!(p.poll().expect("no rediscovery"), values, "{state}");
+            assert!(p.repeated(), "the same measurement read again");
+            seq += 1;
+            feed.set_snapshot(disk_snapshot(seq), Instant::now());
+            assert_eq!(p.poll().expect("poll"), values, "{state}");
+            assert!(!p.repeated());
+        }
+    }
+
+    #[test]
+    fn a_drive_state_change_updates_the_suspended_set_without_rediscovery() {
+        use Quality::{Fresh, Held, Suspended};
+
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "active");
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Fresh, Held]));
+
+        // The disk goes to standby. Until a snapshot arrives under the new
+        // table no state has authority: nothing is suspended yet.
+        feed.set_schema(disk_state_schema("standby"));
+        p.poll().expect("no rediscovery");
+        assert_eq!(p.quality(), Some(vec![Held, Held, Fresh, Held]));
+        feed.set_snapshot(disk_snapshot(2), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Suspended, Suspended]));
+
+        // It wakes up: the standby of the table before suspends nothing,
+        // on the tick without a snapshot either.
+        feed.set_schema(disk_state_schema("active"));
+        p.poll().expect("no rediscovery");
+        assert_eq!(p.quality(), Some(vec![Held, Held, Fresh, Held]));
+        feed.set_snapshot(disk_snapshot(3), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Fresh, Held]));
+
+        // The values carried over a table change age like any snapshot.
+        feed.set_snapshot(
+            disk_snapshot(4),
+            Instant::now() - Duration::from_millis(400),
+        );
+        feed.set_schema(disk_state_schema("standby"));
+        assert_eq!(p.poll().expect("poll"), vec![None; 4]);
+        assert_eq!(p.quality(), Some(vec![Fresh; 4]));
     }
 
     #[test]

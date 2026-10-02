@@ -90,7 +90,7 @@ export const MOCK_SCHEMA: Schema = {
 
 /** A hard disk in standby: it keeps its last temperature (quality 2) and its history. */
 const MOCK_HDD = 'storage/device-mock-hdd';
-const MOCK_HDD_SENSOR = `${MOCK_HDD}/temperature/main`;
+const MOCK_HDD_SENSOR = `${MOCK_HDD}/temperature/drive`;
 
 /**
  * Sensors added only while the sensor service is connected (spec §6): CPU temperature and
@@ -113,8 +113,8 @@ export const SERVICE_MOCK_SCHEMA: Schema = {
   devices: [
     ...MOCK_SCHEMA.devices,
     { id: SERVICE_DEVICE, kind: 'motherboard', name: 'Mock Motherboard' },
-    // A USB disk whose bridge hides the serial: its SMART cannot be switched off on its own.
     { id: MOCK_HDD, kind: 'storage', name: 'Disk 2 (HDD)', properties: { smartSelectable: 'true' } },
+    // A USB disk whose bridge hides the serial: its SMART cannot be switched off on its own.
     { id: 'storage/device-mock-usb', kind: 'storage', name: 'Disk 1 (USB)', properties: { smartSelectable: 'false' } },
   ],
   sensors: [...MOCK_SCHEMA.sensors, ...SERVICE_SENSORS],
@@ -467,7 +467,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
       return { revision: schema.revision, seq, ...window };
     },
     onSchema: async () => () => {},
-    getDiskStates: async () => diskStates,
+    getDiskStates: async () => [...diskStates],
     onDiskStates: async () => () => {},
     getStartupStatus: async () => startup,
     enableVendorLibraries: async () => {

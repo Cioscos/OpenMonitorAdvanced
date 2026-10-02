@@ -40,6 +40,13 @@ pub struct AppState {
     pub disk_states: DiskStateTable,
 }
 
+/// Whether `generation` differs from the last one seen, which it then becomes.
+fn generation_changed(last: &mut u64, generation: u64) -> bool {
+    let changed = generation != *last;
+    *last = generation;
+    changed
+}
+
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
@@ -377,8 +384,7 @@ fn main() {
                 );
                 // Always the full list: an empty one revokes the earlier states.
                 let (generation, states) = disk_states.get();
-                if generation != last_disk_generation {
-                    last_disk_generation = generation;
+                if generation_changed(&mut last_disk_generation, generation) {
                     let _ = handle.emit(EVENT_DISK_STATES, &commands::disk_state_entries(states));
                 }
                 if let Some(health) = &out.health {
@@ -458,6 +464,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_changed_reports_each_new_generation_once() {
+        let mut last = 0;
+        assert!(!generation_changed(&mut last, 0));
+        assert!(generation_changed(&mut last, 1));
+        assert!(!generation_changed(&mut last, 1));
+        assert!(generation_changed(&mut last, 2));
+        assert_eq!(last, 2);
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()

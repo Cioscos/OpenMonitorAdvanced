@@ -142,7 +142,7 @@ export async function connect(store: LiveStore, backend: Backend): Promise<Unsub
   let queue: Snapshot[] = [];
   let diskEvents = 0;
   const off: Unsubscribe[] = [];
-  const stop = () => { stopped = true; off.splice(0).forEach((fn) => fn()); queue = []; };
+  const stop = () => { stopped = true; off.splice(0).forEach((fn) => fn()); queue = []; store.setDiskStates([]); };
   const refresh = (): Promise<void> => {
     refreshing ??= (async () => {
       do {
@@ -195,7 +195,10 @@ export async function connect(store: LiveStore, backend: Backend): Promise<Unsub
         // An event is newer than any answer that was still on its way.
         if (!stopped && diskEvents === eventsBeforeQuery) store.setDiskStates(states);
       },
-      (error) => { console.error('disk states query failed', error); },
+      (error) => {
+        console.error('disk states query failed', error);
+        if (!stopped && diskEvents === eventsBeforeQuery) store.setDiskStates([]);
+      },
     );
     await refresh();
     await diskQuery;

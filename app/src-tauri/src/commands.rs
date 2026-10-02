@@ -1055,6 +1055,7 @@ mod tests {
         assert!(quality_codes(&[]).is_empty());
     }
 
+    #[cfg(windows)]
     #[test]
     fn disk_state_entries_serialize_in_camel_case() {
         let entries = disk_state_entries(vec![

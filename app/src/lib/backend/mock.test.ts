@@ -472,9 +472,12 @@ describe('mock log recorder', () => {
 test('the mock with the service exposes a standby disk whose temperature is suspended', async () => {
   history.replaceState(null, '', '?service=connected');
   const backend = createMockBackend();
-  expect(await backend.getDiskStates()).toEqual([{ deviceId: 'storage/device-mock-hdd', power: 'standby' }]);
+  const states = await backend.getDiskStates();
+  expect(states).toEqual([{ deviceId: 'storage/device-mock-hdd', power: 'standby' }]);
+  states.pop();
+  expect(await backend.getDiskStates()).toHaveLength(1); // A copy, not the shared array.
   const schema = await backend.getSchema();
-  const id = 'storage/device-mock-hdd/temperature/main';
+  const id = 'storage/device-mock-hdd/temperature/drive';
   const index = schema.sensors.findIndex((s) => s.id === id);
   expect(index).toBeGreaterThanOrEqual(0);
   const history_ = await backend.getHistory([id], 5);
@@ -489,12 +492,14 @@ test('the mock with the service exposes a standby disk whose temperature is susp
 });
 
 test('the mock without the service has no disk states and no quality', async () => {
-  history.replaceState(null, '', '?service=unreachable');
-  const backend = createMockBackend();
-  expect(await backend.getDiskStates()).toEqual([]);
-  const seen: Snapshot[] = [];
-  const off = await backend.onSnapshot((s) => seen.push(s));
-  await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
-  off();
-  expect(seen[0].quality).toBeUndefined();
+  for (const state of ['unreachable', 'notInstalled', 'antiCheat']) {
+    history.replaceState(null, '', `?service=${state}`);
+    const backend = createMockBackend();
+    expect(await backend.getDiskStates()).toEqual([]);
+    const seen: Snapshot[] = [];
+    const off = await backend.onSnapshot((s) => seen.push(s));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
+    off();
+    expect(seen[0].quality).toBeUndefined();
+  }
 });

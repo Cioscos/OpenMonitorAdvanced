@@ -310,10 +310,26 @@ test('an event received during bootstrap wins over the initial disk query', asyn
 test('disconnect removes the disk listener', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new LiveStore();
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
   const off = await connect(store, backend);
   expect(backend.diskStateListeners).toBe(1);
+  expect(store.diskPower('storage/a')).toBe('standby');
   off();
   expect(backend.diskStateListeners).toBe(0);
-  backend.emitDiskStates([{ deviceId: 'storage/a', power: 'active' }]);
   expect(store.diskPower('storage/a')).toBeUndefined();
+  backend.emitDiskStates([{ deviceId: 'storage/b', power: 'active' }]);
+  expect(store.diskPower('storage/b')).toBeUndefined();
+});
+
+test('a failing initial disk query clears stale power states and still connects', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.getDiskStates = async () => { throw new Error('offline'); };
+  const store = new LiveStore();
+  store.setDiskStates([{ deviceId: 'storage/a', power: 'standby' }]);
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const off = await connect(store, backend);
+  expect(errorSpy).toHaveBeenCalledWith('disk states query failed', expect.any(Error));
+  expect(store.diskPower('storage/a')).toBeUndefined();
+  off();
+  errorSpy.mockRestore();
 });

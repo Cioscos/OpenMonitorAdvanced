@@ -94,7 +94,6 @@ pub enum DiskPower {
 }
 
 /// The main temperature of a disk as the service measured it.
-#[allow(dead_code)] // read by the provider once the service feed is wired
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ServiceTemperature {
     pub value: f64,
@@ -102,7 +101,6 @@ pub struct ServiceTemperature {
 }
 
 /// What the service says about a disk bound to a core disk.
-#[allow(dead_code)] // `Present` is built by the service feed, wired in a later task
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ServiceDisk {
     /// Not connected, or no entry bound to this disk.
@@ -164,6 +162,11 @@ fn decide(
         }
         if standby {
             return (Plan::Wait, DiskPower::Standby);
+        }
+        if state == DriveState::Idle {
+            // The service owns the source and sends this disk nothing while
+            // it sees no activity: the core does not query it either.
+            return (Plan::Wait, DiskPower::Idle);
         }
         if let (DriveState::Active, Some(temperature)) = (state, temperature) {
             return (Plan::Service(temperature), DiskPower::Active);
@@ -283,6 +286,7 @@ mod tests {
             DriveState::Unknown,
             DriveState::SmartOff,
             DriveState::Active,
+            DriveState::Idle,
         ] {
             assert_eq!(
                 decide(
@@ -306,6 +310,21 @@ mod tests {
                 ),
                 (Plan::Wait, DiskPower::Standby)
             );
+        }
+        // An idle disk is the service's to read, and the service sends it
+        // nothing: no local query either, even while the disk works.
+        for temperature in [None, Some(TEMPERATURE)] {
+            for recent in [false, true] {
+                assert_eq!(
+                    decide(
+                        RotationalOrUnknown,
+                        Some(true),
+                        &present(DriveState::Idle, false, temperature),
+                        recent
+                    ),
+                    (Plan::Wait, DiskPower::Idle)
+                );
+            }
         }
         // The service's temperature of an active disk replaces the local query.
         for recent in [false, true] {

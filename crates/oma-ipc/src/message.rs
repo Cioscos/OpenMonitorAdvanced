@@ -80,7 +80,7 @@ pub struct WireDrive {
     /// The drive's [`crate::drive_key`], `nil` when it has no model or no serial.
     pub key: Option<String>,
     pub model: Option<String>,
-    /// `"active"`, `"standby"`, `"unknown"`, `"smartOff"` or `"noMedia"`.
+    /// `"active"`, `"standby"`, `"idle"`, `"unknown"`, `"smartOff"` or `"noMedia"`.
     pub state: String,
     /// Whether this drive keeps the SMART gate closed for all drives.
     pub blocks_smart: bool,

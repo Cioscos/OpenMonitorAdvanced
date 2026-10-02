@@ -13,7 +13,7 @@ use serde::de::value::{Error as DeError, StrDeserializer};
 use serde::Deserialize;
 
 use crate::storage::{DriveIdTable, DriveIds};
-use crate::svc::drives::{source_accepted, storage_binding, wire_drive_for};
+use crate::svc::drives::{source_accepted, storage_binding, wire_drive_for, MAIN};
 use crate::svc::feed::{SourceRequest, SvcFeed};
 
 /// Parses a wire string (already snake_case, matching `oma_core::model`'s
@@ -65,7 +65,7 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
 /// one main temperature. An unbound disk keeps it, and the additional
 /// `sensor-N` temperatures are never duplicates.
 fn is_main_disk_temperature(kind: &str, name: &str) -> bool {
-    (kind, name) == ("temperature", "drive")
+    (kind, name) == MAIN
 }
 
 /// Binds `schema`'s devices onto core ids and builds the resulting
@@ -1224,7 +1224,9 @@ mod tests {
         assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Suspended, Suspended]));
 
         // Any other state leaves the service's own flags: an idle disk's
-        // kept value is held, its missing one is simply absent.
+        // kept value is held, its missing one is simply absent. Idle is a
+        // state of its own, and only a confirmed standby suspends SMART.
+        assert_eq!(DriveState::from_wire("idle"), DriveState::Idle);
         for state in ["idle", "active", "unknown", "smartOff"] {
             let feed = SvcFeed::default();
             let mut p = disk_provider(&feed, state);

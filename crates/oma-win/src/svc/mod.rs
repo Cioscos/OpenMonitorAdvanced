@@ -4,7 +4,7 @@
 //! service status ([`status`]) and the latest schema and snapshot ([`feed`]).
 //! `drives` holds the rules that tell a service disk and a core disk apart.
 
-mod drives;
+pub(crate) mod drives;
 #[cfg(test)]
 mod fake_server;
 pub mod feed;

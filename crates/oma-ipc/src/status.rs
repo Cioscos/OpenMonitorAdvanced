@@ -83,6 +83,9 @@ pub enum DriveState {
     Active,
     /// `CHECK POWER MODE` answers standby.
     Standby,
+    /// The drive needs a power check, Windows reports it on and it has no recent activity: the
+    /// service sends it nothing. It may hide a standby the drive decided on its own.
+    Idle,
     /// The drive needs a power check and no path answers.
     Unknown,
     /// The service does not query this drive.
@@ -98,6 +101,7 @@ impl DriveState {
         match value {
             "active" => Self::Active,
             "standby" => Self::Standby,
+            "idle" => Self::Idle,
             "smartOff" => Self::SmartOff,
             "noMedia" => Self::NoMedia,
             _ => Self::Unknown,
@@ -299,6 +303,17 @@ mod tests {
                 serde_json::json!(wire)
             );
         }
+    }
+
+    #[test]
+    fn an_idle_drive_state_round_trips() {
+        assert_eq!(DriveState::from_wire("idle"), DriveState::Idle);
+        let json = serde_json::to_value(DriveState::Idle).unwrap();
+        assert_eq!(json, serde_json::json!("idle"));
+        assert_eq!(
+            serde_json::from_value::<DriveState>(json).unwrap(),
+            DriveState::Idle
+        );
     }
 
     #[test]

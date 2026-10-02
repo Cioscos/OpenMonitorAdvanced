@@ -2,10 +2,19 @@
 //! disk, and which of them this client takes from the service (spec M6b §3.3,
 //! §4.2, §7). Pure: no disk is touched here.
 
-use oma_ipc::{WireDrive, WireServiceState, MAX_DRIVE_KEYS};
+use std::time::Instant;
+
+use oma_ipc::{
+    DriveState, IdentityHint, WireDrive, WireSchema, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS,
+};
 
 use crate::storage::{drive_keys_for, DriveEntry, DriveIds};
-use crate::svc::feed::SourceRequest;
+use crate::storage_gate::{ServiceDisk, ServiceTemperature};
+use crate::svc::feed::{FeedView, SourceRequest};
+
+/// Wire kind and name of a disk's main temperature: the storage provider owns it for every
+/// disk the service binds onto (spec M6b §5.3).
+pub(crate) const MAIN: (&str, &str) = ("temperature", "drive");
 
 /// A non-empty string, trimmed; `None` for missing, all-whitespace or absent
 /// input. `None == None` is never a proof of identity (D3): callers must
@@ -82,6 +91,64 @@ pub(crate) fn source_accepted(entry: &DriveEntry, request: &SourceRequest) -> bo
     let switched_off = request.smart_disabled_drives.contains(&entry.device_id);
     let switched_on = request.smart_enabled_drives.contains(&entry.device_id);
     !storage_off && !switched_off && (!entry.smart_default_off || switched_on)
+}
+
+/// What the service says about one core disk, from an immutable view of the feed.
+/// `Absent` when the schema or the snapshot is missing, the snapshot is older than three
+/// intervals, or the disk is not associated.
+///
+/// The temperature is the `temperature`/`drive` sensor of the service device bound onto the
+/// disk, and only when this client accepts the service as a source for it
+/// ([`source_accepted`]) and the snapshot has a value.
+pub(crate) fn service_disk(
+    entry: &DriveEntry,
+    drives: &DriveIds,
+    view: &FeedView,
+    now: Instant,
+) -> ServiceDisk {
+    let (Some(schema), Some((received, snapshot))) = (&view.schema, &view.snapshot) else {
+        return ServiceDisk::Absent;
+    };
+    if now.saturating_duration_since(*received) > view.interval * 3 {
+        return ServiceDisk::Absent;
+    }
+    let Some(wire) = wire_drive_for(entry, drives, &schema.service) else {
+        return ServiceDisk::Absent;
+    };
+    let temperature = source_accepted(entry, &view.request)
+        .then(|| main_temperature(entry, drives, schema, snapshot))
+        .flatten();
+    ServiceDisk::Present {
+        state: DriveState::from_wire(&wire.state),
+        blocks_smart: wire.blocks_smart,
+        temperature,
+    }
+}
+
+/// The main temperature in `snapshot` of the one service device bound onto `entry`.
+fn main_temperature(
+    entry: &DriveEntry,
+    drives: &DriveIds,
+    schema: &WireSchema,
+    snapshot: &WireSnapshot,
+) -> Option<ServiceTemperature> {
+    let mut bound = schema.devices.iter().filter(|device| match &device.hint {
+        Some(IdentityHint::Storage {
+            physical_drive,
+            model,
+            serial,
+        }) => storage_binding(model, serial, *physical_drive, drives) == Some(entry),
+        _ => false,
+    });
+    let device = bound.next().filter(|_| bound.next().is_none())?;
+    let index = schema.sensors.iter().position(|sensor| {
+        sensor.device_id == device.id && (sensor.kind.as_str(), sensor.name.as_str()) == MAIN
+    })?;
+    let value = snapshot.values.get(index).copied().flatten()?;
+    value.is_finite().then(|| ServiceTemperature {
+        value,
+        held: snapshot.held.get(index).copied().unwrap_or(false),
+    })
 }
 
 /// The drive keys of `request`, switched off and switched on, translated with `drives`: each

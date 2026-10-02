@@ -228,6 +228,11 @@ test('a usb disk starts with smart off and shows the warning', async () => {
   expect(ssd.closest('.field')?.textContent).not.toContain(t('settings.sources.smart.usbWarning'));
 });
 
+test('a usb disk in both lists reads as off: switched off wins, as in the backend', async () => {
+  await setup(connected(), { sources: { smartEnabledDrives: [EXT], smartDisabledDrives: [EXT] } });
+  expect(toggle('External USB').getAttribute('aria-checked')).toBe('false');
+});
+
 test('turning a usb disk on adds it to smartEnabledDrives', async () => {
   const { patches } = await setup(connected());
   await fireEvent.click(toggle('External USB'));

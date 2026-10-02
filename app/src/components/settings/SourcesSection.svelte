@@ -43,10 +43,11 @@
 
   // USB disks start with SMART off: the user switches them on, which is not the same as "not off".
   const startsOff = (disk: Device) => disk.properties?.smartDefault === 'off';
-  const smartOn = (disk: Device) =>
-    startsOff(disk)
-      ? (current?.sources.smartEnabledDrives ?? []).includes(disk.id)
-      : !(current?.sources.smartDisabledDrives ?? []).includes(disk.id);
+  // Switched off wins over switched on, as in the backend, should a disk be in both lists.
+  const smartOn = (disk: Device) => {
+    const off = (current?.sources.smartDisabledDrives ?? []).includes(disk.id);
+    return startsOff(disk) ? (current?.sources.smartEnabledDrives ?? []).includes(disk.id) && !off : !off;
+  };
 
   function setSmart(disk: Device, on: boolean) {
     const id = disk.id;

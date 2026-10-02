@@ -604,3 +604,34 @@ describe('oma.nsh failure paths', () => {
     expect(hook).toEqual(['!macro OMA_ONINSTSUCCESS', '${If} ${RebootFlag}', 'SetErrorLevel 3010', '${EndIf}', '!macroend']);
   });
 });
+
+// Tauri's own Italian.nsh (tauri-cli 2.11.5) has malformed product-name placeholders
+// (`{product_name}}`, `{product_name}`), which CheckIfAppIsRunning leaves in the message.
+// We ship a corrected copy through bundle.windows.nsis.customLanguageFiles.
+describe('custom Italian language file', () => {
+  const file = resolve(nsisDir, 'Italian.nsh');
+
+  it('is wired in tauri.conf.json', () => {
+    const conf = JSON.parse(read(resolve(appDir, 'src-tauri/tauri.conf.json')));
+    expect(conf.bundle.windows.nsis.customLanguageFiles).toEqual({ Italian: 'nsis/Italian.nsh' });
+  });
+
+  it('writes every product-name placeholder as {{product_name}}', () => {
+    // Only the strings: the header comment quotes the malformed upstream forms.
+    const text = read(file)
+      .split('\n')
+      .filter((l) => l.startsWith('LangString '))
+      .join('\n');
+    const placeholders = text.match(/\{*product_name\}*/g) ?? [];
+    expect(placeholders.length).toBeGreaterThan(0);
+    for (const p of placeholders) expect(p).toBe('{{product_name}}');
+  });
+
+  it('defines only Italian strings, including the three running-app messages', () => {
+    const lines = read(file).split('\n').filter((l) => l.startsWith('LangString '));
+    for (const l of lines) expect(l).toMatch(/^LangString \w+ \$\{LANG_ITALIAN\} ".*"$/);
+    const keys = lines.map((l) => l.split(' ')[1]);
+    expect(keys).toEqual(expect.arrayContaining(['appRunning', 'appRunningOkKill', 'failedToKillApp']));
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+});

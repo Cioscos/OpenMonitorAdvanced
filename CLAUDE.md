@@ -12,7 +12,7 @@ Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplif
 - `crates/oma-win`: provider Windows (PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete). Tutto il codice specifico di Windows sta qui.
 - `crates/oma-ipc`: tipi del protocollo, codifica MessagePack e framing verso `oma-service`; portabile, senza codice Windows.
 - `app/src-tauri` (crate `oma-app`): shell Tauri 2.11 (comandi, tray, finestra, modalità sicura).
-- `app/src-tauri/nsis`: template NSIS proprio (`installer.nsi`, copiato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5 e modificato solo sulle righe marcate `; OMA`), i nostri hook e le sezioni dei sensori avanzati in `oma.nsh`, e lo SHA-256 fissato di PawnIO (`pawnio.sha256`).
+- `app/src-tauri/nsis`: template NSIS proprio (`installer.nsi`, copiato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5 e modificato solo sulle righe marcate `; OMA`), i nostri hook e le sezioni dei sensori avanzati in `oma.nsh`, i testi italiani dell'installer in `Italian.nsh` (copia corretta di quello di Tauri, da confrontare a ogni aggiornamento di tauri-cli), e lo SHA-256 fissato di PawnIO (`pawnio.sha256`).
 - `app/`: UI Svelte 5 + TypeScript 6, test Vitest, i18n `en.json`/`it.json` con le stesse chiavi.
 - `service/`: servizio Windows `oma-service` (.NET 10) con LibreHardwareMonitorLib e i suoi test (`OpenMonitorAdvanced.Service`, `OpenMonitorAdvanced.Service.Tests`).
 - `protocol/fixtures/`: messaggi MessagePack di riferimento condivisi tra i test Rust e .NET del protocollo.

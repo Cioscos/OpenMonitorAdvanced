@@ -26,7 +26,8 @@
         "template": "nsis/installer.nsi",
         "installerHooks": "nsis/oma.nsh",
         "installMode": "perMachine",
-        "languages": ["English", "Italian"]
+        "languages": ["English", "Italian"],
+        "customLanguageFiles": { "Italian": "nsis/Italian.nsh" }
       }
     }
   }

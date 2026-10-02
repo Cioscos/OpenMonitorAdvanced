@@ -445,7 +445,9 @@ impl RuleEngine {
                     },
                 });
             }
-            slot.available = slot.instance.problem.is_none() && value.is_some();
+            // A suspended sensor is covered even without a value.
+            slot.available = slot.instance.problem.is_none()
+                && (value.is_some() || quality == Quality::Suspended);
             if value.is_some() && quality == Quality::Fresh {
                 slot.value = value;
                 slot.last_valid_ms = Some(timestamp_ms);
@@ -810,7 +812,7 @@ mod tests {
         default_rules, Condition, Hysteresis, LevelSpec, Notify, Target, Threshold,
     };
     use serde_json::json;
-    use Quality::{Fresh, Held};
+    use Quality::{Fresh, Held, Suspended};
 
     const WALL0: u64 = 1_700_000_000_000;
     const GPU0: &str = "gpu/0/temperature/core";
@@ -1526,6 +1528,158 @@ mod tests {
         let report = rig.tick(&[None]).report.unwrap();
         assert_eq!(report.alerts[0].value, Some(91.8));
         assert_eq!(report.alerts[0].last_valid_ms, Some(WALL0 + 1000));
+    }
+
+    // --- suspended sensors (M6b D7) ----------------------------------------
+
+    const DISK_TEMP: &str = "storage/0/temperature/drive";
+
+    /// One disk with a sensor per `(kind, name, unit)`.
+    fn disk(sensors: &[(SensorKind, &str, Unit)]) -> Schema {
+        schema(
+            vec![device("storage/0", DeviceKind::Storage, "Disk", &[])],
+            sensors
+                .iter()
+                .map(|&(kind, name, unit)| {
+                    Sensor::new("storage/0", kind, name, unit, Label::new("x"), Source::Mock)
+                })
+                .collect(),
+        )
+    }
+
+    fn disk_temperature() -> Schema {
+        disk(&[(SensorKind::Temperature, "drive", Unit::Celsius)])
+    }
+
+    /// Temperature, SMART (wear, critical warning) and volume sensors.
+    fn full_disk() -> Schema {
+        disk(&[
+            (SensorKind::Temperature, "drive", Unit::Celsius),
+            (SensorKind::Percent, "wear", Unit::Percent),
+            (SensorKind::Flag, "critical-warning", Unit::Boolean),
+            (SensorKind::Percent, "volume-c", Unit::Percent),
+        ])
+    }
+
+    #[test]
+    fn a_suspended_disk_temperature_keeps_the_coverage_complete() {
+        let mut rig = Rig::new(vec![builtin("disk-temp")], disk_temperature());
+        rig.tick_with(&[None], &[Suspended]);
+        assert_eq!(rig.report().coverage, Coverage::Complete);
+        assert!(rig.report().unavailable_targets.is_empty());
+    }
+
+    #[test]
+    fn a_suspended_value_does_not_refresh_last_valid() {
+        let mut rig = Rig::new(vec![instant()], gpus(1));
+        rig.tick(&[Some(91.6)]);
+        // A value that comes with a suspended quality is not a measurement.
+        rig.tick_with(&[Some(99.0)], &[Suspended]);
+        let alert = &rig.report().alerts[0];
+        assert_eq!(alert.value, Some(91.6));
+        assert_eq!(alert.last_valid_ms, Some(WALL0));
+        assert!(alert.valid);
+    }
+
+    #[test]
+    fn an_active_alert_survives_suspension() {
+        let mut rig = Rig::new(vec![builtin("disk-temp")], disk_temperature());
+        for _ in 0..=30 {
+            rig.tick(&[Some(85.0)]);
+        }
+        assert_eq!(
+            keys(rig.report()),
+            [key("disk-temp", DISK_TEMP, Level::Crit)]
+        );
+        for _ in 0..60 {
+            rig.tick_with(&[None], &[Suspended]);
+        }
+        assert_eq!(
+            keys(rig.report()),
+            [key("disk-temp", DISK_TEMP, Level::Crit)]
+        );
+        let alert = &rig.report().alerts[0];
+        assert!(alert.valid);
+        assert_eq!(alert.value, Some(85.0));
+        assert_eq!(rig.report().coverage, Coverage::Complete);
+    }
+
+    #[test]
+    fn an_absent_value_that_is_not_suspended_still_degrades_coverage() {
+        let mut rig = Rig::new(vec![builtin("disk-temp")], disk_temperature());
+        rig.tick_with(&[None], &[Fresh]);
+        assert_eq!(rig.report().coverage, Coverage::Unavailable);
+        rig.tick_with(&[None], &[Held]);
+        assert_eq!(rig.report().coverage, Coverage::Unavailable);
+        assert_eq!(
+            rig.report().unavailable_targets,
+            [target("disk-temp", DISK_TEMP)]
+        );
+    }
+
+    #[test]
+    fn suspended_does_not_cover_a_configuration_error() {
+        // Thresholds in the wrong order: the instance has a problem, and a
+        // suspended quality does not make it available.
+        let schema = schema(
+            vec![device(
+                "storage/0",
+                DeviceKind::Storage,
+                "SSD",
+                &[("tempWarningC", "90"), ("tempCriticalC", "80")],
+            )],
+            vec![Sensor::new(
+                "storage/0",
+                SensorKind::Temperature,
+                "drive",
+                Unit::Celsius,
+                Label::new("x"),
+                Source::Mock,
+            )],
+        );
+        let mut rig = Rig::new(vec![builtin("disk-temp")], schema);
+        rig.tick_with(&[None], &[Suspended]);
+        assert_eq!(rig.report().coverage, Coverage::Unavailable);
+        assert_eq!(
+            rig.report().unavailable_targets,
+            [target("disk-temp", DISK_TEMP)]
+        );
+    }
+
+    #[test]
+    fn standby_suspends_temperature_and_smart_but_not_volume_or_io() {
+        // The rules only see qualities: temperature and SMART are Suspended,
+        // the volume (and the I/O sensors, which no rule targets) are absent
+        // and Fresh, so only the volume degrades the coverage.
+        let mut rig = Rig::new(default_rules(), full_disk());
+        rig.tick_with(
+            &[None, None, None, None],
+            &[Suspended, Suspended, Suspended, Fresh],
+        );
+        assert_eq!(rig.report().coverage, Coverage::Partial);
+        assert_eq!(
+            rig.report().unavailable_targets,
+            [target("volume-used", "storage/0/percent/volume-c")]
+        );
+    }
+
+    #[test]
+    fn idle_suspends_only_temperature() {
+        // Only the temperature is Suspended: the SMART sensors, absent and
+        // Fresh, remain unavailable.
+        let mut rig = Rig::new(default_rules(), full_disk());
+        rig.tick_with(
+            &[None, None, None, Some(40.0)],
+            &[Suspended, Fresh, Fresh, Fresh],
+        );
+        assert_eq!(rig.report().coverage, Coverage::Partial);
+        assert_eq!(
+            rig.report().unavailable_targets,
+            [
+                target("disk-critical", "storage/0/flag/critical-warning"),
+                target("disk-wear", "storage/0/percent/wear"),
+            ]
+        );
     }
 
     #[test]

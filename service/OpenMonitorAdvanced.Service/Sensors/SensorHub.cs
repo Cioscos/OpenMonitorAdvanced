@@ -47,9 +47,11 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk whose standby is
 /// confirmed keeps the values of the round before, flagged as held, round after round while it
 /// sleeps: only for the disk they were measured on (same <see cref="DriveKey"/> in the earlier
-/// round, in the resolved disk and in this round's enumeration), and only while rounds keep
-/// ending, since the two-round limit above applies to them too. An unknown state, "no media", a
-/// failed update or SMART off keep nothing. In a snapshot a storage value is held when its round
+/// round, in the resolved disk and in this round's enumeration), and only from a round that is
+/// itself still current: one that started within the two-round limit above and that nothing
+/// replaced while this round ran (the idle drop). So a late round loses the value until the
+/// disk is read again, instead of bringing an expired one back. An unknown state, "no media",
+/// a failed update or SMART off keep nothing. In a snapshot a storage value is held when its round
 /// kept it, or when that round's values went out in an earlier snapshot already (30 s rounds
 /// against faster sampling); an absent value and a value from another source never are.
 /// </para>
@@ -491,6 +493,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         StorageRound before = _round;
+        bool keepable = IsCurrent(before, roundStart); // an expired round has nothing to carry over
         IReadOnlyDictionary<string, DiskResolution> previous = before.Resolved;
         var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
@@ -556,7 +559,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 {
                     // Standby or unknown: no SMART read. Only a confirmed standby keeps the
                     // values of the round before; an unknown state leaves them absent.
-                    if (spunDown == true)
+                    if (spunDown == true && keepable)
                     {
                         KeepValues(root, resolution, answer!, before, cache, held);
                     }
@@ -582,11 +585,12 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         // Never mutated after publication: the sampler only looks them up.
-        PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache, held, config);
+        PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache, held, config, keptFrom: before);
     }
 
     /// <summary>
-    /// A sleeping disk's values of the round before, carried into this one as held. Only those
+    /// A sleeping disk's values of the round before, carried into this one as held (the caller
+    /// has checked that round is still current, <see cref="IsCurrent"/>). Only those
     /// measured on this very disk: the earlier round's disk, the resolved one and the drive this
     /// round enumerated at its number must share one <see cref="DriveKey"/> (the same LHM
     /// identifier or drive number alone proves nothing). Absent and non-finite values are not kept.
@@ -643,6 +647,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// is a new <see cref="StorageRound.Generation"/>, also when it measured the same values again.
     /// <paramref name="applied"/> is the storage part the round was made with
     /// (<see langword="null"/> keeps it), so it reaches the sampler together with the round.
+    /// <paramref name="keptFrom"/> is the round the <paramref name="held"/> values were taken
+    /// from: if it is no longer the published one (the values were dropped meanwhile, when the
+    /// last client left), they are not published.
     /// </summary>
     private void PublishRound(
         long timestamp,
@@ -650,13 +657,20 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         IReadOnlyDictionary<string, DiskResolution>? resolved,
         IReadOnlyDictionary<string, double?> values,
         IReadOnlySet<string> held,
-        EffectiveConfig? applied)
+        EffectiveConfig? applied,
+        StorageRound? keptFrom = null)
     {
         StorageRound current;
         StorageRound next;
         do
         {
             current = _round;
+            if (held.Count > 0 && !ReferenceEquals(current, keptFrom))
+            {
+                values = values.Where(pair => !held.Contains(pair.Key)).ToDictionary(StringComparer.Ordinal);
+                held = StorageRound.Empty.Held;
+            }
+
             next = new StorageRound(
                 current.Generation + 1,
                 timestamp,
@@ -1042,12 +1056,16 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>Sampler: the values of the tick's storage round, unless they are too old to be current.</summary>
-    private IReadOnlyDictionary<string, double?> FreshStorageValues(long now)
-    {
-        StorageRound round = _view;
-        bool fresh = round.Timestamp != long.MinValue && now - round.Timestamp <= 2 * SecondsToTicks(StorageInterval);
-        return fresh ? round.Values : StorageRound.Empty.Values;
-    }
+    private IReadOnlyDictionary<string, double?> FreshStorageValues(long now) =>
+        IsCurrent(_view, now) ? _view.Values : StorageRound.Empty.Values;
+
+    /// <summary>
+    /// Whether <paramref name="round"/> has values that still count at <paramref name="now"/>:
+    /// it started at most two rounds ago. The one limit for what the sampler publishes and for
+    /// what the next round may keep for a sleeping disk.
+    /// </summary>
+    private bool IsCurrent(StorageRound round, long now) =>
+        round.Timestamp != long.MinValue && now - round.Timestamp <= 2 * SecondsToTicks(StorageInterval);
 
     /// <summary>
     /// The D6 gate, asked on every storage round until LHM's storage group is enabled. Returns the

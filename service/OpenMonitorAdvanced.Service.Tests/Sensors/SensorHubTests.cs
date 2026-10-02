@@ -664,6 +664,185 @@ public sealed class SensorHubTests
     }
 
     [Fact]
+    public void AStandbyRoundAfterAStallDoesNotBringExpiredValuesBack()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 34;
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+        h.Disks.SpunDown[0] = true;
+        h.Advance(30_000);
+        h.Hub.StorageOnce();
+        h.Hub.TickOnce();
+        Assert.Equal(34, ValueOf(a, a.Count - 1, "temperature", "drive"));
+        Assert.True(HeldOf(a, a.Count - 1, "temperature", "drive"));
+
+        // No round for more than 60 s: the measurement expired, and the standby rounds that end
+        // afterwards have nothing current to keep. It stays absent until the disk is read again.
+        h.Advance(61_000);
+        for (int round = 0; round < 2; round++)
+        {
+            h.Hub.StorageOnce();
+            h.Hub.TickOnce();
+            Assert.Equal([HddDrive("standby")], Drives(a));
+            Assert.Null(ValueOf(a, a.Count - 1, "temperature", "drive"));
+            Assert.False(HeldOf(a, a.Count - 1, "temperature", "drive"));
+            h.Advance(30_000);
+        }
+
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+    }
+
+    [Fact]
+    public void AStandbyRoundThatTookTooLongIsNotKeptFromByTheNextOne()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(Wdc());
+        h.Tree.Values[HddTemp] = 34;
+        h.Tree.Values[WdcTemp] = 35;
+        h.Disks.Facts[1] = WdcFacts();
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce();
+
+        // The round that keeps the sleeping disk's value is stuck in the other disk's update for
+        // more than 60 s: it is published already expired (a round's time is its start).
+        h.Disks.SpunDown[0] = true;
+        h.Advance(30_000);
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Identifier == "/hdd/1")
+            {
+                h.Advance(61_000);
+            }
+        };
+        h.Hub.StorageOnce();
+        h.Tree.BeforeUpdate = null;
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal([HddDrive("standby"), WdcDrive("active")], Drives(a));
+        Assert.Null(DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+
+        // The next round does not take the expired value over as if it were current.
+        h.Hub.StorageOnce();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal([HddDrive("standby"), WdcDrive("active")], Drives(a));
+        Assert.Null(DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+        Assert.Equal(35, DriveTemperature(a, 1));
+        Assert.False(DriveHeld(a, 1));
+    }
+
+    [Fact]
+    public void ARoundInFlightWhenTheHubGoesIdleKeepsNothing()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Storage.Add(Wdc());
+        h.Tree.Values[HddTemp] = 34;
+        h.Tree.Values[WdcTemp] = 35;
+        h.Disks.Facts[1] = WdcFacts();
+        List<FeedUpdate> a = h.Subscribe(1000, out IFeedSubscription first);
+        h.Hub.TickOnce();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal(34, DriveTemperature(a, 0));
+
+        // The last client leaves while a round is running, after that round took the sleeping
+        // disk's value over from the round before.
+        h.Disks.SpunDown[0] = true;
+        h.Advance(30_000);
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Identifier == "/hdd/1")
+            {
+                first.Dispose();
+            }
+        };
+        h.Hub.RunStorageDue();
+        h.Tree.BeforeUpdate = null;
+        Assert.Equal(2, h.Tree.Updates("/hdd/1")); // the round did run to its end
+
+        // A client comes back at once, the disk still asleep: neither the round that was in
+        // flight nor the one that runs now has a value from before the idle period.
+        h.Advance(5_000);
+        List<FeedUpdate> b = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        Assert.Null(DriveTemperature(b, 0));
+        Assert.False(DriveHeld(b, 0));
+
+        for (int round = 0; round < 2; round++)
+        {
+            h.Hub.RunStorageDue();
+            h.Advance(1000);
+            h.Hub.TickOnce();
+            Assert.Equal([HddDrive("standby"), WdcDrive("active")], Drives(b));
+            Assert.Null(DriveTemperature(b, 0));
+            Assert.False(DriveHeld(b, 0));
+            h.Advance(30_000);
+        }
+
+        Assert.Equal(1, h.Tree.Updates("/hdd/0"));
+    }
+
+    [Fact]
+    public void AKeptValueArrivesTogetherWithItsStandbyState()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 34;
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        h.Hub.StorageOnce(); // round 1: active, measured, not published yet
+
+        // The sampler is stopped inside its tick, after it took round 1.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Type == HardwareType.Cpu)
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(30), ct);
+            }
+        };
+        h.Advance(1000);
+        var sampler = new Thread(() => h.Hub.TickOnce()) { IsBackground = true, Name = "test-sampler" };
+        sampler.Start();
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10), ct), "the tick never reached the CPU update");
+
+        // Meanwhile round 2 is published: the disk sleeps, its value is kept.
+        h.Disks.SpunDown[0] = true;
+        h.Hub.StorageOnce();
+        release.Set();
+        Assert.True(sampler.Join(TimeSpan.FromSeconds(10)));
+        h.Tree.BeforeUpdate = null;
+
+        // That tick is round 1 throughout: an active disk and a measurement.
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(34, DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+
+        // The next one is round 2 throughout: standby and the held flag, in its first publication.
+        h.Advance(1000);
+        h.Hub.TickOnce();
+        Assert.Equal([HddDrive("standby")], a[^1].Schema!.Service.Drives);
+        Assert.Equal(34, DriveTemperature(a, 0));
+        Assert.True(DriveHeld(a, 0));
+    }
+
+    [Fact]
     public void AnAppliedStorageRequestArrivesTogetherWithItsDriveList()
     {
         using var h = new Harness();

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.90 (`oma-core`, `oma-ipc`, `oma-win`, shell Tauri 2.11), .NET 10 (`oma-service`, xUnit v3), Svelte 5 + TypeScript 6 (Vitest), MessagePack.
 
-**Spec:** `docs/superpowers/specs/2026-10-02-m6b-dischi-protocollo-v3-design.md` (commit `c9b67d7`). Riferimento: `docs/superpowers/references/m5/f1-service-reconfiguration.md`.
+**Spec:** `docs/superpowers/specs/2026-10-02-m6b-dischi-protocollo-v3-design.md` (commit `04c1aa0`). Riferimento: `docs/superpowers/references/m5/f1-service-reconfiguration.md`.
 
 **Branch:** `feat/m6b-dischi-protocollo-v3`, aperto da `main` con `superpowers:using-git-worktrees`.
 
@@ -19,7 +19,7 @@
 - FFI Rust: `// SAFETY:` su ogni `unsafe`, assert di dimensione per ogni struct FFI. P/Invoke .NET: assert di layout nei test (`Marshal.SizeOf`, `Marshal.OffsetOf`).
 - Protocollo: mai `skip_serializing_if`; chiavi sempre presenti, `nil` per gli assenti; fixture solo con `OMA_WRITE_FIXTURES=1` a thread singolo (`protocol/fixtures/README.md`). `PROTOCOL_VERSION = 3` sui due lati; `PIPE_NAME` invariato.
 - Nessun comando verso un disco oltre a quelli elencati nella spec: accesso 0 per le query di proprietà; `CHECK POWER MODE` solo nel servizio.
-- Mai eseguire sul PC di sviluppo: test Pester `Integration`, installer, input sintetico. Le verifiche dal vivo le esegue l'utente; gli agenti preparano i comandi.
+- Mai eseguire sul PC di sviluppo: test Pester `Integration`, installer, input sintetico. Le prove che cambiano alimentazione, avviano sottoscrittori hardware o forzano standby le esegue l'utente; gli agenti preparano build e comandi. I test hardware ignorati li eseguono gli agenti come nelle milestone precedenti, tranne `reads_disk_temperatures_on_this_machine`, che interroga i dischi: quello lo esegue l'utente, a dischi svegli e lontano dalle prove di standby.
 - Push e scritture su GitHub solo su richiesta dell'utente.
 - Orientamento nel codice: `graphify query "<domanda>"`, `graphify explain "<simbolo>"` prima di grep; dopo modifiche al codice `PYTHONHASHSEED=0 graphify update .`.
 - Valori fissati dalla spec: finestra di attività 10 s; periodo della temperatura 30 s; via SAT "nessuna" riprovata al più ogni 5 minuti; timeout del pass-through 5 s; 32 byte di sense; al massimo 64 chiavi per elenco.
@@ -51,6 +51,21 @@
 | `service/.../Sensors/DriveStates.cs` (nuovo), `SensorHub.cs`, `FeedRequest.cs`, `IHardwareTree.cs` | elenco `drives`, USB spento di default, valori `held` |
 | `app/src-tauri/src/main.rs`, `service.rs`, `commands.rs` | qualità e stati verso l'interfaccia |
 | `app/src/lib/`, `app/src/components/` | etichette di stato, «Ultima lettura», vista Fonti, interruttore USB |
+
+I percorsi abbreviati `Sensors/...` e `Protocol/...` sono relativi a `service/OpenMonitorAdvanced.Service/`; i test .NET sono in `service/OpenMonitorAdvanced.Service.Tests/Sensors/` o `Protocol/`. I numeri di riga sono riferimenti al checkout iniziale, non vincoli dopo i task precedenti.
+
+**Ordine e gate:** Task 0 prima della decisione sul filtro del servizio; Task 1–3 e 4 per il percorso locale; Task 5–9 per protocollo e servizio; Task 10 solo dopo l'isolamento della causa; Task 11–14 per integrazione e UI; Task 15 per l'accettazione. Le verifiche dal vivo non concluse restano aperte: non impediscono di preparare i task indipendenti, ma impediscono di dichiarare M6b completata.
+
+---
+
+### Task 0: Prova isolata del servizio e scelta del ramo
+
+Nessuna modifica al prodotto. Registrare versione del servizio, protocollo, timeout disco, richieste di alimentazione e log in «Esito del punto di controllo».
+
+- [ ] **Step 1: preparare il sottoscrittore isolato.** Creare in `target/spike/m6b/service-only/` un progetto Rust temporaneo con `[workspace]` proprio e dipendenza path da `crates/oma-ipc`. Aprire `\\.\pipe\{PIPE_NAME}` in lettura/scrittura con `std::fs::OpenOptions`, usare `encode_frame` e `FrameDecoder` per Hello/Subscribe (1000 ms, moduli non-storage disabilitati, nessun disco disabilitato) e leggere continuamente schema e snapshot per 10 minuti. Non istanziare provider né interrogare dischi. Compilare con `cargo build --manifest-path target/spike/m6b/service-only/Cargo.toml --release` e stampare il comando di avvio per l'utente. Usare il protocollo del servizio testato: prima del Task 5 sul v2; se il servizio v2 non è disponibile, ripetere sul v3 dopo il Task 9, prima di decidere il Task 10. Il progetto temporaneo non si aggiunge al repository.
+- [ ] **Step 2 (utente): controllo senza monitoraggio.** App chiusa, servizio fermo, TR-VISION HOME chiuso; annotare `powercfg /requests`, impostare timeout disco a 60 s e osservare passivamente `GetDevicePowerState` per 10 minuti senza toccare `D:`. Atteso: `on=False`. Annotare e poi ripristinare le impostazioni di alimentazione iniziali.
+- [ ] **Step 3 (utente): servizio da solo con sottoscrittore.** Stesse condizioni, avviare solo servizio e sottoscrittore del punto 1, aspettare l'identificazione storage e i primi valori SMART; poi ripetere l'osservazione. Se il gate non apre, la prova è inconcludente. Nessuna query di temperatura usata come osservatore.
+- [ ] **Step 4: isolare un eventuale fallimento.** Confrontare controllo e servizio isolato; preparare una build diagnostica temporanea del servizio con `Update` SMART escluso ma stessi `CHECK POWER MODE`, da far avviare all'utente. Se anche questa impedisce lo spegnimento, isolare i controlli di stato e le interferenze esterne prima di prescrivere il filtro. Registrare quale I/O mantiene il disco acceso. Il Task 10 è richiesto quando la causa è la lettura SMART; se la prova passa si salta, se è inconcludente la decisione resta aperta. V3 sull'app completa resta obbligatoria in entrambi i rami.
 
 ---
 
@@ -104,6 +119,8 @@ fn a_timed_out_slot_holds_its_values_and_keeps_suspended() {
     // first tick: values [Some(1.0), Some(2.0)], quality [Fresh, Suspended]; second tick: the provider blocks
     assert_eq!(out.quality, vec![Quality::Held, Quality::Suspended]);
 }
+#[test] fn a_second_timeout_clears_values_and_suspended_quality() {} // second hung tick: values None, quality Fresh, coverage unavailable
+#[test] fn merged_quality_follows_the_winning_sensor_indices() {} // duplicate sensor removed: values and qualities use the same slot.keep mask
 ```
 
 - [ ] **Step 2:** `cargo test -p oma-core engine` → i quattro test falliscono (non compilano).
@@ -161,12 +178,18 @@ fn an_absent_value_that_is_not_suspended_still_degrades_coverage() {
 #[test]
 fn suspended_without_a_value_neither_resets_nor_matures() {
     // 20 s above the threshold, 60 s of step(rule, None, Suspended, ..) == Step::Stay,
-    // then 10 more seconds above: the instance enters (30 s reached)
+    // the first fresh tick only establishes a new anchor;
+    // then 10 measured seconds above: the instance enters (30 s reached)
 }
+#[test] fn held_without_a_value_still_resets_timers() {} // transport loss is not an intentional suspension
+#[test] fn slow_fresh_measurements_separated_by_held_ticks_still_mature() {} // preserve M5 R1 for a real fresh measure every 30 s
+#[test] fn suspended_does_not_cover_a_configuration_error() {} // invalid rule target stays unavailable
+#[test] fn standby_suspends_temperature_and_smart_but_not_volume_or_io() {} // mixed qualities, missing volume/I/O still degrades coverage
+#[test] fn idle_suspends_only_temperature() {} // missing SMART remains unavailable
 ```
 
 - [ ] **Step 2:** `cargo test -p oma-core rules` → falliscono.
-- [ ] **Step 3: implementazione.** In `Instance::step` il controllo `quality != Quality::Fresh => Step::Stay` precede il ramo del valore assente. In `health.rs:448`: `slot.available = slot.instance.problem.is_none() && (value.is_some() || quality == Quality::Suspended)`.
+- [ ] **Step 3: implementazione.** In `Instance::step`, solo `Suspended` precede il ramo del valore assente: conserva timer accumulati e livelli, svuota il solo `anchor_ms` e ritorna `Step::Stay`. La prima misura fresca stabilisce il nuovo anchor senza conteggiare il tempo sospeso; non usare `reset_timers`, che perderebbe il tempo accumulato. `Held` conserva il contratto M5 R1: il tick conservato non matura né resetta, e le misure fresche successive restano valutabili alla loro cadenza; `Held` senza valore resta un dato assente. In `health.rs:448`: `slot.available = slot.instance.problem.is_none() && (value.is_some() || quality == Quality::Suspended)`; un errore di configurazione resta scoperto.
 - [ ] **Step 4:** `cargo test -p oma-core` e `cargo test -p oma-core --test rules_alloc` → PASS.
 - [ ] **Step 5: commit** `feat(rules): treat a suspended sensor as covered`.
 
@@ -176,7 +199,8 @@ fn suspended_without_a_value_neither_resets_nor_matures() {
 
 **Files:**
 - Create: `crates/oma-win/src/storage_gate.rs`
-- Modify: `crates/oma-win/src/lib.rs` (modulo, `ServiceHandles`), `crates/oma-win/src/storage_ioctl.rs` (seek penalty), `crates/oma-win/src/storage.rs:103-125,264-300,313-481`, `app/src-tauri/src/main.rs:157,197-200`
+- Modify: `crates/oma-win/src/lib.rs` (modulo, `ServiceHandles`, `default_providers`), `crates/oma-win/src/storage_ioctl.rs` (seek penalty), `crates/oma-win/src/storage.rs:103-125,264-300,313-481`, `app/src-tauri/src/main.rs:157,197-200`
+- Modify (compatibilità del costruttore, senza aggiungerlo a git): `crates/oma-win/examples/m6b_wake.rs`; aggiornare anche i call site nei test e negli esempi tracciati
 - Test: `storage_gate.rs` (`mod tests`), `storage.rs` (`mod tests`)
 
 **Interfaces:**
@@ -217,7 +241,7 @@ fn suspended_without_a_value_neither_resets_nor_matures() {
   // storage_ioctl.rs
   impl PhysicalDrive { pub(crate) fn seek_penalty(&self) -> Option<bool>; }  // StorageDeviceSeekPenaltyProperty, byte 8
   ```
-  `ServiceHandles` guadagna `pub disk_states: storage::DiskStateTable`; `StorageProvider::new(drives: DriveIdTable, disk_states: DiskStateTable)`. `oma_ipc::DriveState` arriva nel Task 5: in questo task `ServiceDisk` si definisce con un enum locale provvisorio `DriveState { Active, Standby, Unknown, SmartOff, NoMedia }` nel modulo, sostituito nel Task 5.
+  `storage.rs` riesporta `DiskPower` con `pub use crate::storage_gate::DiskPower`, perché il modulo del gate resta privato e la shell deve nominare il tipo. `ServiceHandles` guadagna `pub disk_states: storage::DiskStateTable`; `StorageProvider::new(drives: DriveIdTable, disk_states: DiskStateTable)`. `oma_ipc::DriveState` arriva nel Task 5: in questo task `ServiceDisk` si definisce con un enum locale provvisorio `DriveState { Active, Standby, Unknown, SmartOff, NoMedia }` nel modulo, sostituito nel Task 5.
 - In questo task il servizio è sempre `ServiceDisk::Absent`.
 
 **Tabella di `plan` (spec §5.2), nell'ordine di valutazione:**
@@ -244,43 +268,46 @@ fn suspended_without_a_value_neither_resets_nor_matures() {
 #[test] fn activity_needs_a_positive_finite_rate_within_ten_seconds() { /* observe(Some(0.0), Some(4096.0)) at t; recent at t+10s is true, at t+11s false */ }
 #[test] fn a_warm_up_or_missing_counter_is_not_activity() { /* observe(None, None), observe(Some(f64::NAN), None), observe(Some(0.0), Some(0.0)) -> never recent */ }
 #[test] fn activity_before_a_suspend_does_not_count() { /* observe active at wall t; next observe(Some(0.0), Some(0.0)) with wall t+3600s and mono t+2s -> recent is false */ }
+#[test] fn a_sampling_gap_invalidates_the_activity_window() { /* gap > 10 s or missing current counters clears earlier activity; the first post-gap sample is warm-up, only a subsequent valid positive sample authorizes a read */ }
 ```
 
   e in `storage.rs`:
 
 ```rust
 #[test] fn an_idle_hdd_is_not_picked_and_does_not_starve_other_disks() { /* two due disks, the older one Plan::Wait: the other is refreshed */ }
-#[test] fn a_waiting_disk_keeps_its_last_values_and_stays_due() { /* values unchanged, read_at unchanged */ }
+#[test] fn an_idle_or_standby_disk_keeps_its_last_values_and_stays_due() { /* values unchanged, read_at unchanged; Wait/Unknown or Wait/NoMedia instead exposes None */ }
 #[test] fn a_failed_authorized_read_gives_absent_values() { /* Plan::Local with report None -> values None, read_at = now */ }
 #[test] fn a_new_device_id_starts_without_cache() { /* carry-over keyed by device id: another id on the same index gets empty positions and a default Activity */ }
 #[test] fn suspended_quality_covers_only_the_temperature_sensors() { /* disk with read, write, active, drive temp, volume: only the temperature slot is Suspended when power is Idle or Standby */ }
+#[test] fn cached_temperature_between_reads_is_held_while_io_is_fresh() { /* read at t, next poll at t+1s with recent I/O: temperature Held, throughput Fresh; actual read at t+30s: temperature Fresh */ }
 ```
 
 - [ ] **Step 2:** `cargo test -p oma-win storage` → falliscono.
 - [ ] **Step 3: implementazione.**
   - `discover`: classe del disco da `bus_type` e `seek_penalty`; per `RotationalOrUnknown` nessuna `read_temperatures` alla discovery; `temperatures` e `Activity` si conservano per i dischi con lo **stesso id di dispositivo**, non si ricreano. Per `NonRotational` resta la lettura di oggi.
-  - `poll`: `activity.observe(read, write, &now)` per ogni disco (con `fresh` → `None, None`); i candidati al refresh sono i dischi scaduti il cui `plan` non è `Wait`; `Wait` non tocca `values` né `read_at`. Con `plan == Wait` e `power == Unknown` i valori di temperatura del disco diventano assenti.
-  - `Provider::quality`: `Suspended` per i sensori di temperatura di un disco con `plan == Wait` e `power` `Idle` o `Standby`; `Fresh` per tutto il resto.
+  - `poll`: `activity.observe(read, write, &now)` per ogni disco (con `fresh` → `None, None`); i candidati al refresh sono i dischi scaduti il cui `plan` non è `Wait`; `Wait` non rinnova `read_at`. `Wait/Idle` e `Wait/Standby` conservano i valori; `Wait/Unknown` o `NoMedia` espongono valori assenti, senza spacciarli per sospensione prevista.
+  - Il gap si rileva dai tempi monotono e wall di `Stamp`: un intervallo superiore a `ACTIVITY_WINDOW` in uno dei due, o una loro divergenza che indica sospensione/cambio dell'orologio, invalida l'attività precedente; anche il campione al rientro dal gap non autorizza I/O. Con campione mancante/non valido si azzera l'autorizzazione corrente; zero valido non rinnova la finestra ma conserva un campione positivo ancora entro 10 s.
+  - `Provider::quality`: `Suspended` per le temperature con `plan == Wait` e `power` `Idle` o `Standby`; `Held` per temperature già misurate ripubblicate tra due letture autorizzate, `Fresh` solo per una nuova misura o un dato assente non sospeso. I/O, carico e spazio restano `Fresh`. Nella UI solo `Suspended` cambia l'aspetto del valore («Ultima lettura», Task 14): `Held` tra due letture regolari resta visivamente normale, altrimenti ogni temperatura sarebbe in grigio per 29 secondi su 30.
   - `disk_states.publish(...)` a ogni poll.
   - `main.rs`: creare la tabella accanto a `svc_feed`/`svc_drives` e passarla in `ServiceHandles`.
-- [ ] **Step 4:** `cargo test -p oma-win` → PASS. `cargo test -p oma-win -- --include-ignored reads_disk_temperatures_on_this_machine` → PASS.
+- [ ] **Step 4:** `cargo test -p oma-win` → PASS. `cargo test -p oma-win -- --include-ignored --skip reads_disk_temperatures_on_this_machine` → PASS. Preparare per l'utente `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored`: eseguirlo solo a disco già sveglio, separato dalle prove di standby.
 - [ ] **Step 5: commit** `fix(storage): read an HDD's temperature only after recent activity`.
 
 ---
 
 ### Task 4: Punto di controllo dal vivo (utente)
 
-Nessun codice di prodotto. Serve a decidere il ramo del §4.4 della spec prima di toccare il servizio.
+Nessun codice di prodotto. Verifica il filtro locale; la decisione del §4.4 richiede anche la prova isolata del Task 0, non la sola app completa.
 
 - [ ] **Step 1:** `cargo build -p oma-win --example m6b_wake --release` e `cd app && pnpm tauri build --no-bundle` (produce `target/release/oma-app.exe`; il servizio installato resta il 0.3.0, protocollo v2: compatibile fino al Task 5).
-- [ ] **Step 2 (utente, PowerShell amministratore, app installata chiusa):**
+- [ ] **Step 2 (utente, PowerShell amministratore, app installata chiusa):** verificare che `target/spike/m6b/sat-probe.ps1` esista e che `-Bisect` supporti `storage,poll-storage`; sono strumenti locali non tracciati, quindi se mancano ricrearli prima del checkpoint e documentarne i comandi. Eseguire:
   `pwsh -File target\spike\m6b\sat-probe.ps1 -Drive 0 -Bisect storage,poll-storage`
   Atteso: `still in standby after 50 s` su entrambe le righe.
 - [ ] **Step 3 (utente):** avviare `target\release\oma-app.exe`, TR-VISION HOME chiuso, timeout disco di Windows a 60 s. Due prove, una in modalità anti-cheat e una con il servizio collegato:
   `pwsh -File target\spike\m6b\sat-probe.ps1 -Drive 0 -Standby -Method sat16 -Count 10 -IntervalSeconds 30`
   Atteso: `STANDBY` su tutte le righe.
 - [ ] **Step 4 (agente, senza privilegi, mentre l'utente non tocca `D:`):** per ognuna delle due modalità osservare per 10 minuti `GetDevicePowerState` del disco 0 e il contatore `\Disco fisico(0 D:)\Trasferimenti disco/sec` (comando usato nello spike). Atteso: `on=False` entro pochi minuti.
-- [ ] **Step 5:** scrivere l'esito in fondo a questo piano ("Esito del punto di controllo"). **Se con il servizio collegato Windows non spegne il disco**, il Task 10 si esegue; altrimenti si salta e lo si annota. Un esito inconcludente tiene aperto il Task 10. Se la build di sviluppo non riesce a collegarsi al servizio installato, annotarlo e ripetere gli Step 3-4 dopo il Task 12, lasciando il Task 10 aperto fino ad allora.
+- [ ] **Step 5:** scrivere l'esito in fondo a questo piano ("Esito del punto di controllo"), insieme al controllo a app/servizio chiusi e alle richieste di alimentazione del Task 0. Se la modalità anti-cheat fallisce, correggere il percorso locale e ripetere la prova. Se fallisce solo il servizio collegato, confrontare con il Task 0 e isolare la causa prima di scegliere il Task 10. Un esito inconcludente tiene aperto il gate. Se la build non si collega al servizio installato, ripetere gli Step 3-4 dopo il Task 12; la decisione condizionale non si considera acquisita.
 
 ---
 
@@ -288,7 +315,8 @@ Nessun codice di prodotto. Serve a decidere il ramo del §4.4 della spec prima d
 
 **Files:**
 - Modify: `crates/oma-ipc/src/lib.rs:14-24`, `message.rs:45-84,124-129`, `frame.rs:301-315` (e i test a `:416`, `:878-907`), `status.rs:104-135,189-222`, `crates/oma-ipc/tests/fixtures.rs`, `protocol/fixtures/*.msgpack`, `protocol/fixtures/README.md`
-- Modify (solo per compilare): `crates/oma-win/src/svc/link.rs:617-672`, `svc/status.rs:185`, `svc/provider.rs` e `svc/feed.rs` (letterali di `WireSnapshot`), `app/src-tauri/src/service.rs:755`, `crates/oma-win/src/storage_gate.rs` (usa `oma_ipc::DriveState`)
+- Modify: `crates/oma-win/src/svc/feed.rs` (coerenza di schema e snapshot), `crates/oma-win/src/svc/link.rs:617-672` (richieste e stato)
+- Modify (compatibilità dei tipi): `crates/oma-win/src/svc/status.rs:185`, `svc/provider.rs` (letterali di `WireSnapshot`), `app/src-tauri/src/service.rs:755`, `crates/oma-win/src/storage_gate.rs` (usa `oma_ipc::DriveState`)
 
 **Interfaces:**
 - Produces:
@@ -314,6 +342,7 @@ Nessun codice di prodotto. Serve a decidere il ramo del §4.4 della spec prima d
   ```
 - `ServiceSources.smart_blocked_by` resta fino al Task 14, ricavato da `drives` (id core dei dischi con `blocks_smart` e `device_id`), per non rompere l'interfaccia a metà piano.
 - `decode_payload` rifiuta (errore di messaggio non valido già esistente) uno snapshot con `held.len() != values.len()` o con `held[i]` vero e `values[i]` assente; la correzione dei valori non finiti azzera anche il loro `held`.
+- `SvcFeed::set_schema`: una variazione di `service.drives` invalida lo snapshot precedente e incrementa `generation`, anche con dispositivi e sensori invariati; solo il successivo snapshot della stessa connessione restituisce autorità ai nuovi stati. Un cambio del solo `reconfiguration` senza cambi di dischi/sensori conserva il comportamento attuale. Test in `svc/feed.rs`: `a_drive_state_change_drops_the_previous_snapshot`, `an_equal_drive_table_keeps_the_snapshot`, `clearing_the_feed_revokes_drive_authority`.
 
 **Valori delle fixture** (`reference` in `tests/fixtures.rs`):
 - hello: `protocol_version: PROTOCOL_VERSION`;
@@ -323,7 +352,7 @@ Nessun codice di prodotto. Serve a decidere il ramo del §4.4 della spec prima d
 
 - [ ] **Step 1: test che falliscono.** In `tests/fixtures.rs`: `protocol_constants_are_v3` (`assert_eq!(PROTOCOL_VERSION, 3)`), `subscribe_v3_keeps_every_key` (chiavi `["disabled_modules", "interval_ms", "smart_disabled_drives", "smart_enabled_drives"]`). In `frame.rs`: `a_snapshot_whose_held_length_differs_is_rejected`, `held_without_a_value_is_rejected`, `a_non_finite_value_loses_its_held_flag`. In `status.rs`: `an_unknown_drive_state_reads_as_unknown` (`DriveState::from_wire("spinning") == DriveState::Unknown`), e `service_status_serializes_with_pawn_io_and_sources` esteso con `"drives":[{"physicalDrive":1,"deviceId":null,"model":"ST2000DM008-2UB102","state":"standby","blocksSmart":true}]`.
 - [ ] **Step 2:** `cargo test -p oma-ipc` → falliscono.
-- [ ] **Step 3: implementazione** dei tipi e della validazione; `link.rs::refresh_sources` costruisce `drives` (`device_id` con `core_id_for_key`) e `smart_blocked_by`; `subscribe_message` traduce e tronca a `MAX_DRIVE_KEYS` anche `smart_enabled_drives`, e `on_drives_changed` confronta entrambi gli elenchi.
+- [ ] **Step 3: implementazione** dei tipi e della validazione; provvisoriamente `link.rs::refresh_sources` costruisce `drives` (`device_id` con `core_id_for_key`) e `smart_blocked_by`; il Task 11 sostituisce questa associazione con numero e chiave univoci. `subscribe_message` traduce e tronca a `MAX_DRIVE_KEYS` anche `smart_enabled_drives`, e `on_drives_changed` confronta entrambi gli elenchi.
 - [ ] **Step 4: rigenerare le fixture:**
   ```
   $env:OMA_WRITE_FIXTURES = '1'; cargo test -p oma-ipc --test fixtures -- --test-threads=1
@@ -361,6 +390,7 @@ Nessun codice di prodotto. Serve a decidere il ramo del §4.4 della spec prima d
   ```
 - [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter FullyQualifiedName~Protocol` → falliscono.
 - [ ] **Step 3: implementazione.** Scrittori e lettori nel codec (serve uno scrittore di array di `bool`); `PublishGateBlockers` conserva i `DriveBlocker`, non le sole chiavi, così anche un disco senza chiave compare; `SchemaComparer.SameServiceState` confronta `Drives`.
+  Aggiungere test della validazione di `smart_enabled_drives`: 64 chiavi valide accettate, 65 rifiutate, caratteri maiuscoli/non esadecimali o lunghezza diversa da 64 rifiutati. Conservare la decodifica di Hello v2 necessaria a segnalare `Incompatible`; aggiungere entrambe le direzioni 2/3 ai test di handshake.
 - [ ] **Step 4:** `dotnet test service/OpenMonitorAdvanced.slnx` → PASS. `cargo test -p oma-ipc` → PASS.
 - [ ] **Step 5: revisione di parità** con l'agente `protocol-parity-reviewer` sul diff dei Task 5 e 6; correggere quanto trova.
 - [ ] **Step 6: commit** `feat(service): protocol v3 codec`.
@@ -415,11 +445,16 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 [Fact] public void WhenTheRememberedRouteStopsAnsweringTheOtherIsTried()
 [Fact] public void ADeadRouteIsRetriedOnlyAfterFiveMinutes()             // FakeTimeProvider: 4 min 59 s -> no calls, null; 5 min -> both tried
 [Fact] public void ANewModelOrSerialForgetsTheRoute()
+[Fact] public void RemovingAndReaddingTheSameIdentityForgetsTheRoute()
+[Fact] public void AMissingIdentityDoesNotKeepARouteAcrossEnumeration()
+[Fact] public void ASuccessfulIoctlWithUnknownRegistersTriesSat()
+[Fact] public void DescriptorSenseIsAcceptedWithScsiStatusZero()
 [Fact] public void ScsiPassThroughIsFiftySixBytesOnX64()                 // SizeOf == 56; OffsetOf(SenseInfoOffset) == 32; OffsetOf(Cdb) == 36
 ```
 
 - [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter "FullyQualifiedName~SatSense|FullyQualifiedName~DiskPowerProbe"` → falliscono.
 - [ ] **Step 3: implementazione.** `SatSense` maschera il bit VALID (`sense[0] & 0x7F`), rispetta la lunghezza restituita e quella dichiarata (`8 + sense[7]`) e controlla i limiti di ogni descrittore. Il fallback parte quando la via nativa non dà una risposta interpretabile, anche se l'IOCTL è riuscita. Il ricordo della via è per numero di disco, con modello e seriale di quando è stato scritto. Gli errori Win32 della via SAT usano `Win32ErrorLog` con una propria etichetta.
+  La cache conserva la via, mai una vecchia risposta di stato: tra i retry della via «nessuna» ritorna `null`. Riconciliare le identità a ogni enumerazione e rimuovere le vie dei dischi scomparsi; senza modello/seriale verificabili non conservarle attraverso rediscovery. La slice di sense deriva dai byte realmente restituiti da `DeviceIoControl`, limitata all'offset/buffer di sense e alla sua lunghezza, non dai 32 byte allocati a prescindere.
 - [ ] **Step 4:** `dotnet test service/OpenMonitorAdvanced.slnx` → PASS; `pwsh scripts/check-trim-warnings.ps1` → nessun avviso nuovo.
 - [ ] **Step 5: commit** `feat(service): ask the power mode through SAT when ATA pass-through fails`.
 
@@ -456,13 +491,17 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
   internal static class DriveStates
   {
       internal const string Active = "active", Standby = "standby", Unknown = "unknown", SmartOff = "smartOff", NoMedia = "noMedia";
-      /// Precedence: noMedia, smartOff, then the power answer (standby/active/unknown), active when no check is required.
+      /// Precedence: noMedia, smartOff, then the power answer (standby/active/unknown).
+      /// Active without a check only when RequiresPowerCheck is false; otherwise unasked is unknown.
       internal static string Of(DriveFacts facts, bool smartOff, bool asked, bool? spunDown);
       internal static bool IsSmartOff(DriveFacts facts, string? key, EffectiveConfig config);
   }
   ```
 - `SmartEnabledDrives` effettivo: unione degli elenchi delle richieste con lo storage attivo. `SmartDisabledDrives` resta l'intersezione di oggi.
+- Aggiornare anche `EffectiveConfig.AllOn` (abilitati vuoti: USB resta spento), `StoragePart`, `Equals` e `GetHashCode` per entrambi gli insiemi. Senza sottoscrittori `Compute` continua a restituire `null`, conservando l'ultima configurazione effettiva.
 - `IsSmartOff`: storage spento, oppure chiave in `SmartDisabledDrives`, oppure `SmartOffByDefault` e chiave assente da `SmartEnabledDrives` (un disco senza chiave non si accende).
+- Dopo l'apertura del gate, enumerare tutte le `DriveFacts` e controllare una volta per giro ogni disco che richiede power check e non è SMART off, anche se LHM non lo espone. Riutilizzare quella risposta per aggiornamento e `drives`. Nessun power check periodico per USB/default-off o dischi disabilitati; `CheckGate` li controlla comunque prima della prima identificazione.
+- Pubblicazione coerente: sostituire `_drives`, `_resolvedDisks` e `_storageCache` separati con un unico riferimento immutabile `StorageRound(long Generation, long Timestamp, IReadOnlyList<WireDrive> Drives, IReadOnlyDictionary<string, DiskResolution> Resolved, IReadOnlyDictionary<string, double?> Values)`. Lo storage worker lo sostituisce una sola volta al termine del giro. Il sampler cattura un riferimento per tick e usa quello per `UpdateServiceState`, ricostruzione dello schema e valori; non può accoppiare standby nuovo a valori appena misurati del giro precedente. Il Task 9 aggiunge `Held` a questo record. Nessun lock condiviso durante I/O.
 
 - [ ] **Step 1: test che falliscono.**
 
@@ -471,10 +510,13 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 [Theory] /* (availability, smartOff, asked, spunDown) -> state */
 // NoMedia,any,any,any -> "noMedia"; Present,true,true,true -> "smartOff"; Present,false,true,true -> "standby";
 // Present,false,true,false -> "active"; Present,false,true,null -> "unknown"; Present,false,false,null (NVMe) -> "active"
+// Unreadable,false,false,null -> "unknown"; rotational Present,false,false,null -> "unknown"
 
 // EffectiveConfigTests
 [Fact] public void ADefaultOffDriveIsEnabledIfAnyStorageSubscriberEnablesIt()
 [Fact] public void EnabledDrivesOfASubscriberWithStorageOffAreIgnored()
+[Fact] public void EnabledSetsParticipateInEqualityAndStoragePart()
+[Fact] public void NoSubscribersKeepThePreviousConfiguration()
 
 // SensorHubTests (UsbStick(): DriveFacts with BusType 0x07, SeekPenalty null, model "SanDisk Extreme")
 [Fact] public void AnActiveUsbDiskDoesNotBlockTheGateAndIsSmartOff()
@@ -487,10 +529,13 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 [Fact] public void StorageNeverEnabledPublishesNoDrives()
 [Fact] public void ADriveStateChangeBumpsTheSchemaRevision()
 [Fact] public void GateChecksAreNotRepeatedForTheDriveList()             // SpunDownQueriesOf(n) == 1 per gate round
+[Fact] public void AnOffUsbDiskReceivesNoPeriodicPowerChecksOrUpdates()
+[Fact] public void AnEnabledDiskAbsentFromLhmStillHasACurrentPowerState()
+[Fact] public void AConcurrentRoundCannotMixDriveStateAndSnapshotValues() // pause sampler after capture, publish next round, assert one captured round throughout
 ```
 
 - [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter FullyQualifiedName~Sensors` → falliscono.
-- [ ] **Step 3: implementazione.** Lo storage worker pubblica `_drives` (riferimento immutabile, volatile) insieme a `_storageCache`: con il gate chiuso dagli esiti di `CheckGate`; con il gate aperto da `Enumerate()` più le risposte già ottenute nel giro; con lo storage spento dall'ultimo elenco, senza I/O. `DiskResolution` conserva i `DriveFacts`. I punti che oggi leggono `SmartDisabledDrives` (`:491`, `:777`, `:831`) usano `DriveStates.IsSmartOff`. `FeedRequest.From` legge `SmartEnabledDrives`. `UpdateServiceState` usa `_drives`. Nessun lock tenuto durante l'I/O.
+- [ ] **Step 3: implementazione.** Pubblicare `StorageRound` secondo il contratto sopra: gate chiuso dagli esiti di `CheckGate`, gate aperto da `Enumerate()` più le risposte del giro, storage spento dall'ultimo elenco senza I/O e con valori vuoti. `DiskResolution` conserva i `DriveFacts`; i punti che leggono `SmartDisabledDrives` (`:491`, `:777`, `:831`) usano `DriveStates.IsSmartOff`. `FeedRequest.From` legge `SmartEnabledDrives`. Schema e snapshot pubblicati nello stesso tick usano la stessa vista; un cambio di `drives` fa incrementare la revisione anche senza variazione dei sensori.
 - [ ] **Step 4:** `dotnet test service/OpenMonitorAdvanced.slnx` → PASS (adattati `ASmartDisabledDiskStillHoldsTheD6Gate` e gli altri test del gate alla nuova interfaccia).
 - [ ] **Step 5: commit** `feat(service): publish per-drive state and keep USB disks' SMART off by default`.
 
@@ -504,7 +549,7 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 
 **Interfaces:**
 - Consumes: `SnapshotMessage.Held` (Task 6).
-- Produces: `StorageCache(long Timestamp, IReadOnlyDictionary<string, double?> Values, IReadOnlySet<string> Held)`.
+- Produces: il `StorageRound` del Task 8 esteso con `IReadOnlySet<string> Held`. Per riconoscere la ripubblicazione, il sampler ricorda l'ultima `Generation` pubblicata; timestamp o nuovo `seq` da soli non indicano una nuova misura.
 - Regole:
   - disco con standby **confermato** (`IsSpunDown == true`): i suoi valori del giro precedente passano al giro nuovo, in `Held`;
   - stato ignoto, `noMedia`, errore di lettura, disco spento: nessun valore conservato;
@@ -521,11 +566,14 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 [Fact] public void ANewRoundPublishesFreshValuesAgain()
 [Fact] public void NonStorageValuesAreNeverHeld()
 [Fact] public void KeptValuesDoNotSurviveAnIdleHub()                     // extends StorageValuesDoNotSurviveAnIdlePeriod
+[Fact] public void UnknownNoMediaDisabledAndReadErrorsPublishMissingNotHeld()
+[Fact] public void AReplacementDiskDoesNotInheritHeldValues()            // same LHM id or number, changed verified key
+[Fact] public void AStalledStorageWorkerExpiresEvenPreviouslyKeptValues() // beyond 60 s, missing and held false
 ```
 
   `ASpunDownHddIsSkippedAndReadsAsMissing` (`:250`) si divide nei primi due test.
 - [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter FullyQualifiedName~SensorHub` → falliscono.
-- [ ] **Step 3: implementazione.** La finestra di `FreshStorageValues` (due giri) resta com'è: i valori conservati entrano nella cache del giro nuovo, quindi non la allungano.
+- [ ] **Step 3: implementazione.** Copiare solo valori non null del disco con identità verificata e invariata, non per solo numero o identificatore LHM. La finestra di trasporto di `FreshStorageValues` (due giri, 60 s) si applica al `StorageRound` catturato dal sampler: un giro standby concluso rinnova il timestamp e conserva la misura; un worker bloccato non lo rinnova e scade. Quindi la conservazione può durare ore solo con giri regolarmente conclusi e standby ancora confermato. Un dato non finito/assente ha sempre `held = false`; spegnimento storage, idle del hub, rimozione o cambio d'identità eliminano la cache corrispondente.
 - [ ] **Step 4:** `dotnet test service/OpenMonitorAdvanced.slnx` → PASS.
 - [ ] **Step 5: commit** `feat(service): keep a sleeping disk's last values and flag them as held`.
 
@@ -533,7 +581,7 @@ private static readonly byte[] UsbActive   = Convert.FromHexString("F00001005000
 
 ### Task 10 (condizionale): filtro dell'attività nel servizio
 
-Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il servizio collegato, Windows non spegne il disco. Se si salta, scriverlo nell'esito.
+Si esegue **solo se** la prova isolata del Task 0 attribuisce il mancato spegnimento alla lettura SMART del servizio; un fallimento del Task 4 richiede prima quell'isolamento. Se si salta, scrivere nell'esito le prove che giustificano la scelta. Esito inconcludente: gate aperto, nessuna chiusura della M6b.
 
 **Files:**
 - Create: `service/OpenMonitorAdvanced.Service/Sensors/DiskActivityProbe.cs`
@@ -552,12 +600,13 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
       internal static bool Between(DiskCounters? earlier, DiskCounters? later);
   }
   ```
-- Lo storage worker prende un campione 10 s prima di ogni giro e uno all'inizio del giro. `Update` di un disco rotazionale o ignoto richiede stato attivo confermato **e** `DiskActivity.Between` vero; altrimenti i valori del giro precedente restano, `held`.
+- Lo storage worker prende una baseline 10 s prima di ogni giro e un campione all'inizio del giro, prima di power check e SMART. `Between` richiede entrambi i contatori non decrescenti e almeno uno cresciuto; il reset di uno invalida l'intera coppia. La baseline appartiene a numero fisico e chiave verificata invariati, con distanza temporale non superiore a 10 s; si azzera a sospensione/gap, hot-plug, storage off e assenza di sottoscrittori. Primo giro senza baseline: nessun `Update` rotazionale.
+- `Update` rotazionale/ignoto richiede stato attivo confermato **e** attività recente. Solo `active` senza attività o `standby` conservano valori identici come `held`; `unknown`, `noMedia`, fonte disabilitata o errore danno valori assenti, come nel Task 9. SSD/virtuali mantengono la cadenza di 30 s. Le query del giro precedente devono essere esterne alla finestra campionata; la prova dal vivo verifica che non si autoalimentino.
 
-- [ ] **Step 1: test che falliscono:** `ACounterThatGrewIsActivity`, `AMissingBaselineIsNotActivity`, `ACounterThatWentBackIsNotActivity`; in `SensorHubTests`: `AnActiveButIdleHddIsNotUpdatedAndKeepsHeldValues`, `AnHddWithRecentIoIsUpdated`, `SolidStateDisksAreUpdatedEveryRound`, `TheWorkerWakesTenSecondsBeforeARound` (`RunStorageDue()` restituisce 20 s, poi 10 s).
-- [ ] **Step 2:** eseguirli → falliscono.
-- [ ] **Step 3: implementazione**, con assert di layout per `DISK_PERFORMANCE` (88 byte).
-- [ ] **Step 4 (utente):** ripetere lo Step 4 del Task 4 con il servizio collegato e verificare che le letture dei contatori non impediscano lo spegnimento.
+- [ ] **Step 1: test che falliscono:** `ACounterThatGrewIsActivity`, `AMissingBaselineIsNotActivity`, `ACounterThatWentBackIsNotActivity` (anche un contatore cresciuto mentre l'altro cala); in `SensorHubTests`: `AnActiveButIdleHddIsNotUpdatedAndKeepsHeldValues`, `AnHddWithRecentIoIsUpdated`, `SolidStateDisksAreUpdatedEveryRound`, `TheWorkerWakesTenSecondsBeforeARound` (dopo un giro `RunStorageDue()` restituisce 20 s, alla baseline 10 s), `ABaselineFromAnotherIdentityOrBeforeSuspendIsNotUsed`, `ALateBaselineDoesNotAuthorizeSmart`, `UnknownPowerDoesNotKeepIdleValues`, `StorageOffAndNoSubscribersPerformNoActivityIo`.
+- [ ] **Step 2:** `dotnet test service/OpenMonitorAdvanced.slnx --filter "FullyQualifiedName~DiskActivity|FullyQualifiedName~SensorHub"` → falliscono.
+- [ ] **Step 3: implementazione**, con assert di layout per `DISK_PERFORMANCE` (88 byte). Collegare il probe a `ServiceHost` e alla seam di test di `SensorHub`; usare `TimeProvider` per baseline e schedule. `dotnet test service/OpenMonitorAdvanced.slnx` e `pwsh scripts/check-trim-warnings.ps1` → PASS, nessun avviso nuovo.
+- [ ] **Step 4 (utente):** ripetere servizio isolato del Task 0 e Step 4 del Task 4 con servizio collegato; verificare innocuità del probe e mancata attività autogenerata. Se un controllo di stato azzera da solo il timer, il filtro SMART non risolve il gate: correggere la causa e ripetere V1–V3 e V8.
 - [ ] **Step 5: commit** `feat(service): update an HDD's SMART only after recent disk activity`.
 
 ---
@@ -566,7 +615,7 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 
 **Files:**
 - Create: `crates/oma-win/src/svc/drives.rs`
-- Modify: `crates/oma-core/src/settings/mod.rs:223-232,332`, `decode.rs:156-158`, `patch.rs:95`; `app/src-tauri/src/service.rs:212-222`; `crates/oma-win/src/storage.rs:142-190` (`DriveEntry`, `disk_properties`); `crates/oma-win/src/svc/provider.rs:37-61,119-200,242-330`; `crates/oma-win/src/svc/mod.rs`
+- Modify: `crates/oma-core/src/settings/mod.rs:223-232,332`, `decode.rs:156-158`, `patch.rs:95`; `app/src-tauri/src/service.rs:212-222`; `crates/oma-win/src/storage.rs:142-190` (`DriveEntry`, `disk_properties`); `crates/oma-win/src/svc/provider.rs:37-61,119-200,242-330`, `svc/link.rs` (associazione e traduzione delle richieste); `crates/oma-win/src/svc/mod.rs`
 - Test: gli stessi file
 
 **Interfaces:**
@@ -584,9 +633,10 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
   pub(crate) fn source_accepted(entry: &DriveEntry, request: &SourceRequest) -> bool;
   ```
 - `request_of(settings)`: `smart_enabled_drives` = impostazione meno gli id presenti in `smart_disabled_drives`.
+- `source_accepted` è falso se storage è disabilitato, l'id core è esplicitamente disabilitato o il disco default-off non è esplicitamente abilitato. `refresh_sources` associa `SourceDrive.device_id` con numero **e** chiave univoci, usando `wire_drive_for`, non il solo `core_id_for_key`. In `subscribe_message`, tradurre entrambi gli elenchi in chiavi con deduplicazione e limite 64; la precedenza del disabled va applicata anche dopo la traduzione, così id diversi non producono la stessa chiave nei due elenchi.
 - `SvcProvider`:
   - `bind` scarta, per un disco associato, il sensore `temperature`/`drive` (lo possiede `storage`, Task 12) e l'intero dispositivo se `!source_accepted`;
-  - `quality()`: `Suspended` per ogni sensore di un disco associato il cui `WireDrive.state` è `"standby"`; altrimenti `Held` se `snapshot.held[i]` o se il `seq` è ripetuto; altrimenti `Fresh`.
+  - `quality()`: `Suspended` per i sensori SMART di un disco associato in `"standby"` solo con feed corrente, anche con valore assente, non per I/O o spazio del core. Altrimenti `Held` con valore se `snapshot.held[i]` o `seq` ripetuto; `Fresh` negli altri casi. Snapshot mancante/scaduto revoca subito l'eccezione standby: valori assenti, qualità `Fresh`, nessuna copertura concessa dal vecchio stato.
 
 - [ ] **Step 1: test che falliscono.**
 
@@ -609,6 +659,8 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 #[test] fn an_unbound_disk_keeps_its_main_temperature() {}
 #[test] fn a_usb_disk_enabled_by_another_client_is_filtered_locally() {}
 #[test] fn sensors_of_a_disk_in_standby_are_suspended() {}
+#[test] fn a_stale_or_cleared_feed_does_not_suspend_smart_rules() {}
+#[test] fn translated_keys_are_unique_disjoint_and_bounded() {}
 #[test] fn held_flags_become_held_quality() {}            // snapshot held [false, true] -> [Fresh, Held]
 // storage.rs
 #[test] fn disk_properties_mark_a_usb_disk_as_default_off() {}
@@ -624,7 +676,7 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 ### Task 12: Il provider `storage` usa il servizio
 
 **Files:**
-- Modify: `crates/oma-win/src/storage.rs`, `crates/oma-win/src/lib.rs:42-53`
+- Modify: `crates/oma-win/src/storage.rs`, `crates/oma-win/src/lib.rs:42-53`; aggiornare costruttori nei test/esempi e nel programma temporaneo `m6b_wake.rs` (non aggiungerlo a git)
 - Test: `crates/oma-win/src/storage.rs` (`mod tests`)
 
 **Interfaces:**
@@ -638,7 +690,8 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
   pub(crate) fn service_disk(entry: &DriveEntry, drives: &DriveIds, view: &FeedView, now: Instant) -> ServiceDisk;
   ```
 - La temperatura del servizio è il sensore `temperature`/`drive` del dispositivo associato; `temperature` è `Some` solo con valore presente e `source_accepted`.
-- Con `Plan::Service(t)`: il valore del sensore principale è `t.value`; qualità `Held` se `t.held`, altrimenti `Fresh`; nessuna query locale. Se il disco non ha ancora il sensore principale, la prima misura del servizio lo dichiara con `Rediscover`.
+- Con `Plan::Service(t)`: il valore principale è `t.value`; qualità `Held` se `t.held` **o** se storage sta rileggendo lo stesso snapshot della stessa generazione del feed; `Fresh` solo alla prima adozione di una nuova misura. Nessuna query locale. Valutare il feed a ogni poll, indipendentemente dalla scadenza locale di 30 s: una nuova misura del servizio deve essere adottata senza attendere quel termine e senza consumare il budget di query locali. Se manca il sensore principale, la prima misura lo dichiara con `Rediscover`; discovery conserva cache e posizioni per identità, senza rifare la query locale.
+- Con `Plan::Wait` in standby confermato, conservare e importare l'eventuale temperatura storica del servizio, con qualità `Suspended`; non richiedere `state == active` per recuperare la cache standby. `noMedia` e veto ignoto non importano valori. I sensori locali aggiuntivi restano distinti e seguono il gate locale; un valore importato dal servizio dichiara solo la posizione principale, non inventa `sensor-N`.
 - Alla scadenza o allo scollegamento: il sensore resta dichiarato con l'ultimo valore, e vale la riga locale della tabella (attività recente → lettura; altrimenti `Idle` e `Suspended`).
 
 - [ ] **Step 1: test che falliscono** (puri: `FeedView` costruita a mano, lettore di temperatura passato come closure):
@@ -649,10 +702,15 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 #[test] fn the_first_service_measure_declares_the_sensor_without_a_local_query() {}
 #[test] fn the_service_temperature_replaces_the_local_read() {} // Present{Active, false, Some{41.0, held: false}} -> value 41.0, Fresh, reader not called
 #[test] fn a_held_service_temperature_is_held() {}
+#[test] fn rereading_the_same_service_snapshot_is_held() {}
+#[test] fn a_new_service_measure_is_adopted_before_the_local_deadline() {}
+#[test] fn a_standby_service_value_is_historical_and_suspended() {}
+#[test] fn rediscovery_keeps_the_imported_temperature_without_a_local_query() {}
 #[test] fn a_refused_source_falls_back_to_the_activity_rule() {} // disk in smart_disabled_drives: temperature None -> Plan::Local only when recent
 #[test] fn a_blocking_drive_is_never_queried_locally() {}
 #[test] fn losing_the_service_keeps_the_sensor_and_its_last_value() {} // next poll, idle: value 41.0, Suspended, reader not called
 #[test] fn standby_from_the_service_is_not_kept_after_a_disconnect() {} // power becomes Idle, not Standby
+#[test] fn reconnecting_with_another_key_drops_the_old_measure() {}
 ```
 
 - [ ] **Step 2:** `cargo test -p oma-win storage` → falliscono.
@@ -679,21 +737,24 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
   pub const EVENT_DISK_STATES: &str = "oma:disk-states";
   #[derive(Serialize)] #[serde(rename_all = "camelCase")]
   pub(crate) struct DiskStateEntry { pub device_id: String, pub power: DiskPower }
-  #[tauri::command] fn get_disk_states(..) -> Vec<DiskStateEntry>;
+  #[tauri::command]
+  pub(crate) fn get_disk_states(state: tauri::State<'_, crate::AppState>) -> Vec<DiskStateEntry>;
   ```
   `oma:disk-states` si emette nel callback del tick quando cambia la generazione di `DiskStateTable`.
+  Conservare la stessa tabella in `AppState`, registrare il comando in `generate_handler!` e predisporre il ramo non-Windows che restituisce `[]`, senza importare tipi dal crate Windows. L'evento è sempre l'elenco completo: un elenco vuoto revoca gli stati precedenti. `DiskStateTable::publish` elimina i dischi rimossi e incrementa la generazione anche in questo caso.
 - Produces (TypeScript):
   ```ts
   export interface Snapshot { revision: number; seq: number; timestampMs: number; values: (number | null)[]; quality?: number[]; }
   export type DiskPower = 'active' | 'idle' | 'standby' | 'unknown';
   export interface DiskStateEntry { deviceId: string; power: DiskPower; }
-  // Backend: getDiskStates(): Promise<DiskStateEntry[]>; onDiskStates(cb): Unlisten
+  // Backend: getDiskStates(): Promise<DiskStateEntry[]>;
+  // onDiskStates(cb: (states: DiskStateEntry[]) => void): Promise<Unsubscribe>
   // LiveStore: quality(id: string): 0 | 1 | 2;  diskPower(deviceId: string): DiskPower | undefined
   ```
 
-- [ ] **Step 1: test che falliscono.** Rust: `snapshot_event_serializes_quality_next_to_the_values` (JSON con `"values":[1.0,null]` e `"quality":[1,2]`), `quality_codes_map_the_three_states`. Vitest: `quality defaults to fresh when the payload has none`, `quality follows the snapshot`, `disk power comes from the backend and updates on the event`.
+- [ ] **Step 1: test che falliscono.** Rust: `snapshot_event_serializes_quality_next_to_the_values` (JSON con `"values":[1.0,null]` e `"quality":[1,2]`), `quality_codes_map_the_three_states`. Vitest: `quality defaults to fresh when the payload has none`, `quality follows the snapshot`, `disk power comes from the backend and updates on the event`, `a rejected snapshot cannot overwrite quality`, `an empty disk event clears old power states`, `an event received during bootstrap wins over the initial disk query`, `disconnect removes the disk listener`.
 - [ ] **Step 2:** `cargo test -p oma-app` e `cd app && pnpm test` → falliscono.
-- [ ] **Step 3: implementazione.** Il mock e il fake backend restituiscono un elenco vuoto di stati e nessuna `quality` di default; il mock con servizio espone un HDD in `standby` per lo sviluppo dell'interfaccia.
+- [ ] **Step 3: implementazione.** `LiveStore` accetta qualità solo insieme a uno snapshot accettato per revisione/seq; vettore assente, di lunghezza sbagliata o codici invalidi → fallback `Fresh`. Reset della qualità a cambio schema/history seed, senza conservare indici del vecchio schema. In `connect`, registrare il listener dischi prima della query iniziale, contando gli eventi per evitare che una risposta iniziale tardiva sovrascriva uno stato più recente; rilasciarlo con gli altri listener. Il mock e il fake backend restituiscono stati vuoti e nessuna qualità di default; il mock con servizio espone un HDD in standby e temperature storiche, per verificare la UI.
 - [ ] **Step 4:** `cargo test --workspace` e `cd app && pnpm test && pnpm check` → PASS.
 - [ ] **Step 5: commit** `feat(app): send value quality and disk power state to the UI`.
 
@@ -702,13 +763,14 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 ### Task 14: Interfaccia
 
 **Files:**
-- Modify: `app/src/components/advanced/SensorTable.svelte:64-67,146-159`, `KpiRow.svelte:29-31`, `DevicePage.svelte:43-58`, `app/src/lib/advanced/pages.ts:178,262`, `app/src/components/settings/SourcesSection.svelte:22-47,131-157`, `app/src/lib/settingsView.ts:36-49`, `app/src/lib/types.ts:156-173,259-264`, `app/src/lib/backend/mock.ts:210-218`, `mockSettings.ts:55-60,256-261`, `app/src/lib/i18n/en.json`, `it.json`
+- Modify: `app/src/components/advanced/SensorTable.svelte:64-67,146-159`, `app/src/components/advanced/KpiRow.svelte:29-31`, `app/src/components/advanced/DevicePage.svelte:43-58`, `app/src/lib/advanced/pages.ts:178,262`, `app/src/components/settings/SourcesSection.svelte:22-47,131-157`, `app/src/lib/settingsView.ts:36-49`, `app/src/lib/types.ts:156-173,259-264`, `app/src/lib/backend/mock.ts:210-218`, `mockSettings.ts:55-60,256-261`, `app/src/lib/i18n/en.json`, `it.json`
 - Modify (rimozione di `smartBlockedBy`): `crates/oma-ipc/src/status.rs`, `crates/oma-win/src/svc/link.rs`, `svc/status.rs`, `app/src-tauri/src/service.rs`
-- Test: `SensorTable.test.ts`, `DevicePage.test.ts`, `pages.test.ts`, `SourcesSection.test.ts`, `mock.test.ts`, `i18n.test.ts`
+- Test: `app/src/components/advanced/SensorTable.test.ts`, `DevicePage.test.ts` (stessa directory), `KpiRow.test.ts` (nuovo), `app/src/lib/advanced/pages.test.ts`, `app/src/components/settings/SourcesSection.test.ts`, test mock e i18n esistenti
 
 **Interfaces:**
 - Consumes: `LiveStore.quality`, `LiveStore.diskPower` (Task 13); `ServiceSources.drives` (Task 5); proprietà `smartDefault` (Task 11).
 - Produces: `blockingDiskNames(drives: SourceDrive[], schema: Schema | null, t): string[]` — nome del dispositivo dello schema se `deviceId` lo trova, altrimenti `model`, altrimenti `settings.sources.smart.diskNumber`.
+- Estendere `KpiDef` con `sensorId?: string` per i KPI di misura diretta e passare a `KpiRow` `qualityOf: (id: string) => 0 | 1 | 2`. Il KPI può così leggere la qualità del sensore effettivo (il suo `id` è un nome di KPI, non un id sensore); non usare `secondary` chiusa su una qualità ottenuta alla discovery. Conservare `secondary` esistente per le altre informazioni e comporla con «Ultima lettura» nel rendering quando c'è un valore storico. Il KPI del picco resta una statistica storica, non una nuova misura.
 
 **Testi (chiavi nuove, stesse chiavi nei due cataloghi):**
 
@@ -723,12 +785,12 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 `settings.sources.smart.unknownDisk` si elimina.
 
 - [ ] **Step 1: test che falliscono.**
-  - `SensorTable.test.ts`: `a suspended value is muted and labelled as the last reading`; `a held value looks like a fresh one`; `a suspended sensor without a value shows no reading`.
-  - `DevicePage.test.ts`: `a disk in standby shows its state`; `an idle disk shows "Inattivo"`; `an active disk shows no state label`.
+  - `SensorTable.test.ts`: `a suspended value is muted and labelled as the last reading`; `a held value looks like a fresh one`; `a suspended sensor without a value shows no reading`. `KpiRow.test.ts`: stesse verifiche sulla temperatura principale, inclusa la transizione dinamica `Fresh → Held → Suspended → Fresh` (grigio solo in `Suspended`).
+  - `DevicePage.test.ts`: `a disk in standby shows its state`; `an idle disk shows "Inattivo"`; `an active disk shows no state label`; `an unknown or removed disk keeps no state label`.
   - `SourcesSection.test.ts`: `a closed smart gate names the disk by device, model or number` (tre dischi bloccanti: uno nello schema, uno con solo `model`, uno senza nulla → "Disco 4"); `a usb disk starts with smart off and shows the warning`; `turning a usb disk on adds it to smartEnabledDrives` (patch `{ sources: { smartEnabledDrives: ['storage/usb'], smartDisabledDrives: [] } }`); `turning a normal disk off removes it from smartEnabledDrives`.
   - `pages.test.ts`: `smartDefault` è nascosta come `smartSelectable`.
 - [ ] **Step 2:** `cd app && pnpm test` → falliscono.
-- [ ] **Step 3: implementazione.** Il valore `Suspended` usa `color: var(--text-muted)` e la riga secondaria «Ultima lettura» (in `KpiRow` attraverso `KpiDef.secondary`); l'etichetta di stato usa lo stile `.tag` esistente, accanto all'intestazione della pagina del disco. `setSmart` scrive sempre entrambi gli elenchi, disgiunti. Rimuovere `smartBlockedBy`/`smart_blocked_by` da Rust, TypeScript, mock e test.
+- [ ] **Step 3: implementazione.** Un valore presente con qualità `Suspended` usa `color: var(--text-muted)` e «Ultima lettura» in tabella e KPI; `Held` non cambia l'aspetto; con valore assente si mostra il trattino, senza fingere una lettura. L'etichetta di stato usa `.tag` accanto all'intestazione della pagina del disco, solo nella vista Avanzata: la vista Semplificata non nomina i singoli dischi e resta com'è (decisione dell'utente, 2026-10-02). La UI legge lo stato corrente dal `LiveStore`, mai da proprietà di discovery. `setSmart` scrive atomicamente entrambi gli elenchi disgiunti: accendere USB aggiunge enabled e rimuove disabled; spegnere rimuove enabled e aggiunge disabled. Rimuovere `smartBlockedBy`/`smart_blocked_by` da Rust, TypeScript, mock e test.
 - [ ] **Step 4:** `cd app && pnpm test && pnpm check && pnpm build` e `cargo test --workspace` → PASS.
 - [ ] **Step 5: commit** `feat(ui): show disk power state, last readings and the drives that block SMART`.
 
@@ -738,31 +800,33 @@ Si esegue **solo se** il punto di controllo del Task 4 mostra che, con il serviz
 
 **Files:**
 - Modify: `docs/follow-ups.md`, `README.md`, `README.it.md`, `CLAUDE.md`, `docs/perf-budget.md`, questo piano ("Esito dell'esecuzione")
-- Delete: `crates/oma-win/examples/m6b_wake.rs` (non tracciato), dopo le verifiche
+- Remove from the working tree after verification: `crates/oma-win/examples/m6b_wake.rs` (programma temporaneo non tracciato; non includerlo in alcun commit). Archiviare prima in `target/spike/m6b/` se contiene modifiche locali da conservare; non eliminare altri file non tracciati
 
 - [ ] **Step 1: build per l'utente.** `pwsh scripts/build-installer-payload.ps1`, poi `cd app && pnpm tauri build --bundles nsis`. L'installer lo esegue l'utente.
 - [ ] **Step 2: verifiche V1–V9 della spec §9.2, con l'utente**, una per volta, con `sat-probe.ps1` e l'osservazione di `GetDevicePowerState`. V3 su entrambe le modalità è obbligatoria per chiudere la M6b: un fallimento si isola (query del nucleo, `CHECK POWER MODE`, SMART, programma esterno), si corregge e si ripetono V1–V3 e V8. V6: cercare nel log del servizio se la chiavetta compare tra i dischi di LibreHardwareMonitor.
 - [ ] **Step 3: budget.** `pwsh scripts/measure-footprint.ps1` e righe M6b in `docs/perf-budget.md`.
 - [ ] **Step 4: `docs/follow-ups.md`.** Chiudere: USB e gate D6 (fallback SAT), `smartGateClosed` (sostituito da `drives`), copertura delle regole con l'HDD in standby, controllo "HDD standby" con la causa trovata. Aggiungere i limiti del §8 della spec e, tra i controlli dovuti, l'hard disk USB in standby. Scrivere la bozza della segnalazione a DiskInfoToolkit (ri-identificazione a ogni `DBT_DEVNODES_CHANGED`): si pubblica solo su richiesta dell'utente.
 - [ ] **Step 5: README** ("Known limits" in entrambe le lingue) con i limiti visibili all'utente; **`CLAUDE.md`**: stato della M6b e una riga sul protocollo v3.
-- [ ] **Step 6:** cancellare `crates/oma-win/examples/m6b_wake.rs`; `PYTHONHASHSEED=0 graphify update .`.
+- [ ] **Step 6:** archiviare se necessario e rimuovere il solo programma temporaneo `crates/oma-win/examples/m6b_wake.rs`; in PowerShell: `$env:PYTHONHASHSEED = '0'`, poi `graphify update .`. Nessun aggiornamento del grafo necessario per sole modifiche ai documenti.
 - [ ] **Step 7: verifica completa.**
   ```
   cargo fmt --all --check
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
-  cargo test -p oma-win -- --include-ignored
   dotnet test service/OpenMonitorAdvanced.slnx
   pwsh scripts/check-trim-warnings.ps1
-  cd app && pnpm test && pnpm check && pnpm build
+  pnpm --dir app test
+  pnpm --dir app check
+  pnpm --dir app build
   ```
+  I comandi sopra partono dalla radice. In più gli agenti eseguono `cargo test -p oma-win -- --include-ignored --skip reads_disk_temperatures_on_this_machine`; l'utente esegue `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored` con i dischi già svegli e dopo le prove di standby. Se il filtro del Task 10 non è stato deciso o V3 non passa in entrambe le modalità, registrare M6b come non completata anche con tutte le suite verdi.
 - [ ] **Step 8:** scrivere "Esito dell'esecuzione" in questo piano (verifiche, decisioni, ciò che resta non verificato) e fare commit `docs: record the M6b outcome and follow-ups`. Poi `superpowers:requesting-code-review` sull'intero branch (con `ffi-safety-reviewer` per `storage_ioctl.rs` e `protocol-parity-reviewer` per il protocollo) e `superpowers:finishing-a-development-branch`.
 
 La release 0.4.0 (spec D6) segue il flusso di `docs/release.md` dopo il merge, su richiesta dell'utente.
 
 ---
 
-## Esito del punto di controllo (Task 4)
+## Esito del punto di controllo (Task 0 e Task 4)
 
 Da compilare.
 

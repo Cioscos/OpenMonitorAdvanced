@@ -31,8 +31,8 @@ La M6b è il secondo dei tre piani della M6. Fa quattro cose:
 | D3 | Dischi USB, scelta **prudente**: la risposta SAT serve a sbloccare gli altri dischi; lo SMART del disco USB resta spento finché l'utente non lo accende (§4.2). |
 | D4 | Ri-identificazione all'hot-plug: limite dichiarato e segnalazione a monte. |
 | D5 | Protocollo v3 con **stato per disco** (`drives`), non il solo flag `smartGateClosed` previsto nei follow-up (§3). |
-| D7 | Nelle regole, lo standby confermato sospende le regole su temperatura e SMART del disco; «Inattivo» (senza servizio) sospende la sola regola sulla temperatura. Senza questa scelta, chi ha un HDD e non usa il servizio vedrebbe il banner "dati incompleti" quasi sempre (regola predefinita `disk-temp`). |
 | D6 | La release che contiene la M6b è la 0.4.0 e porta anche la correzione dell'installer italiano (commit `57fa804`). |
+| D7 | Nelle regole, lo standby confermato sospende le regole su temperatura e SMART del disco; «Inattivo» (senza servizio) sospende la sola regola sulla temperatura. Senza questa scelta, chi ha un HDD e non usa il servizio vedrebbe il banner "dati incompleti" quasi sempre (regola predefinita `disk-temp`). |
 
 ## 2. Esito dello spike (2026-10-02)
 

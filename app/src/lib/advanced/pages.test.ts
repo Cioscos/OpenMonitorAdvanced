@@ -1,4 +1,4 @@
-import { MOCK_SCHEMA, mockValues } from '../backend/mock';
+import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockValues } from '../backend/mock';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import { DASH, formatValue } from '../format';
 import { catalogs, i18n, translate } from '../i18n/index.svelte';
@@ -294,4 +294,13 @@ test('every known property has a label in both languages', () => {
     expect(catalogs.en[`property.${key}`], key).toBeDefined();
     expect(catalogs.it[`property.${key}`], key).toBeDefined();
   }
+});
+
+test('direct measurement kpis name their sensor, statistics do not', () => {
+  const storage = kpisFor('storage', SERVICE_MOCK_SCHEMA, ['storage/device-mock-hdd']);
+  const temperature = storage.find((k) => k.id === 'temperature');
+  expect(temperature?.sensorId).toBe('storage/device-mock-hdd/temperature/drive');
+  const network = kpisFor('network', MOCK_SCHEMA, ['network/mock-eth']);
+  expect(network.find((k) => k.id === 'down')?.sensorId).toBe('network/mock-eth/throughput/down');
+  expect(network.find((k) => k.id === 'peakDown')?.sensorId).toBeUndefined();
 });

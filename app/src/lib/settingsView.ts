@@ -1,6 +1,6 @@
 import { sensorLabel } from './advanced/labels';
 import { catalogs, type Translate } from './i18n/index.svelte';
-import type { Schema } from './types';
+import type { Schema, SourceDrive } from './types';
 
 /** Accepted update intervals, as in `oma_core::settings`: 0.5 s to 5 s in steps of 0.5 s. */
 export const INTERVALS_MS = Array.from({ length: 10 }, (_, i) => (i + 1) * 500);
@@ -30,20 +30,16 @@ export function iconSensorChoices(schema: Schema | null, t: Translate): SensorCh
 }
 
 /**
- * The disks that keep SMART closed, by name. An entry that is not a device of the schema (a disk
- * the app cannot identify, or a raw drive key) reads as "an unknown disk", once.
+ * The drives that keep SMART closed, by name: the device of the schema when the drive matches one,
+ * else the model the service read, else "Disk N" with the drive number.
  */
-export function blockingDiskNames(ids: string[], schema: Schema | null, t: Translate): string[] {
+export function blockingDiskNames(drives: SourceDrive[], schema: Schema | null, t: Translate): string[] {
   const names: string[] = [];
-  let unknown = false;
-  for (const id of ids) {
-    const device = schema?.devices.find((d) => d.id === id);
-    if (device) {
-      if (!names.includes(device.name)) names.push(device.name);
-    } else {
-      unknown = true;
-    }
+  for (const drive of drives) {
+    if (!drive.blocksSmart) continue;
+    const device = drive.deviceId === null ? undefined : schema?.devices.find((d) => d.id === drive.deviceId);
+    const name = device?.name ?? drive.model ?? t('settings.sources.smart.diskNumber', { n: drive.physicalDrive });
+    if (!names.includes(name)) names.push(name);
   }
-  if (unknown) names.push(t('settings.sources.smart.unknownDisk'));
   return names;
 }

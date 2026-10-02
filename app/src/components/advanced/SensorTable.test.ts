@@ -37,7 +37,7 @@ function setup() {
     [THROTTLE.id]: { min: 0, max: 1, avg: 0.25, count: 8 },
   };
   const stats = new StatsPoller(backend, () => ids, () => MOCK_SCHEMA.revision);
-  render(SensorTable, { sensors, valueOf, stats });
+  render(SensorTable, { sensors, valueOf, qualityOf: () => 0, stats });
   return { backend, stats };
 }
 
@@ -116,7 +116,7 @@ test('network pages show byte rates in bits, like the Simple view', async () => 
   const backend = new FakeBackend(MOCK_SCHEMA);
   backend.stats = { [DOWN]: { min: 125_000, max: 6_000_000, avg: 1_000_000, count: 4 } };
   const stats = new StatsPoller(backend, () => netSensors.map((s) => s.id), () => MOCK_SCHEMA.revision);
-  render(SensorTable, { sensors: netSensors, valueOf: (id: string) => (id === DOWN ? 6_000_000 : null), stats, rate: 'bits' });
+  render(SensorTable, { sensors: netSensors, valueOf: (id: string) => (id === DOWN ? 6_000_000 : null), qualityOf: () => 0, stats, rate: 'bits' });
   await stats.poll();
   flushSync();
   expect(cells(t('sensor.network.down'))).toEqual(['48 Mbit/s', '1.0 Mbit/s', '48 Mbit/s', '8.0 Mbit/s']);
@@ -140,4 +140,41 @@ test('create_rule_opens_settings_with_the_sensor', async () => {
   await fireEvent.click(within(row).getByRole('button', { name: t('advanced.table.createRule') }));
   expect(opened).toEqual([{ section: 'rules', newRuleSensor: THROTTLE.id }]);
   setSettingsOpener(null);
+});
+
+const TEMP = `${GPU}/temperature/core`;
+
+function setupQuality(quality: Record<string, 0 | 1 | 2>) {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const stats = new StatsPoller(backend, () => ids, () => MOCK_SCHEMA.revision);
+  render(SensorTable, { sensors, valueOf, qualityOf: (id: string) => quality[id] ?? 0, stats });
+}
+
+const valueCell = (label: string) => screen.getByText(label).closest('tr')!.querySelector('td.num') as HTMLElement;
+
+test('a suspended value is muted and labelled as the last reading', () => {
+  setupQuality({ [LOAD]: 2 });
+  const cell = valueCell(t('sensor.gpu.load.core'));
+  expect(cell.classList.contains('stale')).toBe(true);
+  expect(cell.textContent).toContain('63%');
+  expect(within(cell).getByText(t('value.lastReading'))).toBeTruthy();
+  // Another sensor of the same page stays as it is.
+  const other = valueCell(t('sensor.gpu.throttle.power'));
+  expect(other.classList.contains('stale')).toBe(false);
+  expect(within(other).queryByText(t('value.lastReading'))).toBeNull();
+});
+
+test('a held value looks like a fresh one', () => {
+  setupQuality({ [LOAD]: 1 });
+  const cell = valueCell(t('sensor.gpu.load.core'));
+  expect(cell.classList.contains('stale')).toBe(false);
+  expect(cell.textContent).toBe('63%');
+});
+
+test('a suspended sensor without a value shows no reading', () => {
+  setupQuality({ [TEMP]: 2 });
+  const cell = valueCell(t('sensor.gpu.temperature.core'));
+  expect(cell.textContent).toBe(DASH);
+  expect(cell.classList.contains('stale')).toBe(false);
+  expect(within(cell).queryByText(t('value.lastReading'))).toBeNull();
 });

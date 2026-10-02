@@ -164,11 +164,6 @@ pub struct ServiceSources {
     pub reconfiguration: Reconfiguration,
     /// Every physical drive the service enumerates, in `physical_drive` order.
     pub drives: Vec<SourceDrive>,
-    /// Core ids of the disks that keep SMART closed for all disks, derived from `drives`
-    /// (those with `blocks_smart` that were matched to a core disk). The list can be empty
-    /// while the gate is closed when no blocking drive could be matched. Kept until the
-    /// views read `drives` directly.
-    pub smart_blocked_by: Vec<String>,
 }
 
 /// What this app asks of the service and filters locally, by core ids: the
@@ -255,7 +250,6 @@ mod tests {
                     state: DriveState::Standby,
                     blocks_smart: true,
                 }],
-                smart_blocked_by: vec!["storage/device-b".to_owned()],
             }),
         };
         let json = serde_json::to_value(&status).unwrap();
@@ -277,7 +271,6 @@ mod tests {
                         "state": "standby",
                         "blocksSmart": true,
                     }],
-                    "smartBlockedBy": ["storage/device-b"],
                 },
             })
         );

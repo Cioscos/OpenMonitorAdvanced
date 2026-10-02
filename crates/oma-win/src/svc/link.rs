@@ -663,11 +663,6 @@ impl Machine {
                 blocks_smart: drive.blocks_smart,
             })
             .collect();
-        let smart_blocked_by = source_drives
-            .iter()
-            .filter(|drive| drive.blocks_smart)
-            .filter_map(|drive| drive.device_id.clone())
-            .collect();
         self.status.sources = Some(ServiceSources {
             active_modules: block.active_modules.clone(),
             requested_disabled_modules: self.request.disabled_modules.clone(),
@@ -679,7 +674,6 @@ impl Machine {
                 .collect(),
             reconfiguration,
             drives: source_drives,
-            smart_blocked_by,
         });
     }
 
@@ -3519,11 +3513,6 @@ mod tests {
                     blocks_smart: false,
                 },
             ]
-        );
-        assert_eq!(
-            sources.smart_blocked_by,
-            vec![DISK_ID.to_owned()],
-            "derived from the blocking drives that were matched to a core disk"
         );
     }
 

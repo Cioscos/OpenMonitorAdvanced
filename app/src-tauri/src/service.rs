@@ -762,7 +762,6 @@ mod tests {
                 smart_disabled_drives: Vec::new(),
                 reconfiguration,
                 drives: Vec::new(),
-                smart_blocked_by: Vec::new(),
             }),
         }
     }

@@ -174,12 +174,22 @@ export interface ServiceSources {
   /** Core ids of the disks whose SMART is off. */
   smartDisabledDrives: string[];
   reconfiguration: Reconfiguration;
-  /**
-   * Core ids of the disks that keep SMART closed for all disks. An entry that is not a device of
-   * the schema is a disk the app cannot identify ("unknown disk"); the list can be empty while the
-   * gate is closed.
-   */
-  smartBlockedBy: string[];
+  /** Every physical drive the service enumerates, in `physicalDrive` order. */
+  drives: SourceDrive[];
+}
+
+/** What the service reports about a drive: `active`, `standby`, `idle`, `unknown`, `smartOff` or `noMedia`. */
+export type SourceDriveState = 'active' | 'standby' | 'idle' | 'unknown' | 'smartOff' | 'noMedia';
+
+/** One physical drive of the service's list; mirrors `oma-ipc::SourceDrive`. */
+export interface SourceDrive {
+  physicalDrive: number;
+  /** Core device id when the drive matches a disk of the schema. */
+  deviceId: string | null;
+  model: string | null;
+  state: SourceDriveState;
+  /** Whether this drive keeps the SMART gate closed for all drives. */
+  blocksSmart: boolean;
 }
 
 export interface ServiceStatus {
@@ -271,6 +281,8 @@ export interface Settings {
     antiCheat: boolean;
     serviceModules: ServiceModules;
     smartDisabledDrives: string[];
+    /** Disks that are off by default (USB) and that the user turned on. */
+    smartEnabledDrives: string[];
   };
   advanced: {
     section?: string;

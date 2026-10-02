@@ -221,7 +221,7 @@ function mockSources(): ServiceSources {
     requestedDisabledModules: [],
     smartDisabledDrives: [],
     reconfiguration: 'applied',
-    smartBlockedBy: [],
+    drives: [],
   };
 }
 

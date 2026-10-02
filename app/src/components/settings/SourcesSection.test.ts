@@ -3,13 +3,14 @@ import { MOCK_SCHEMA } from '../../lib/backend/mock';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
-import type { EffectStatus, PawnIoStatus, Schema, ServiceSources, ServiceStatus, SettingsPatch } from '../../lib/types';
+import type { EffectStatus, PawnIoStatus, Schema, ServiceSources, ServiceStatus, SettingsPatch, SourceDrive } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { disconnectSettings } from '../../test/settings';
 import SourcesSection from './SourcesSection.svelte';
 
 const SSD = 'storage/device-mock-ssd';
 const USB = 'storage/device-mock-usb';
+const EXT = 'storage/usb';
 const MODULES = ['cpu', 'motherboard', 'memory', 'storage', 'controller', 'psu'];
 
 /** The mock schema with a selectable SSD and a USB disk whose descriptor has no serial. */
@@ -18,6 +19,7 @@ const SCHEMA: Schema = {
   devices: [
     ...MOCK_SCHEMA.devices.map((d) => (d.id === SSD ? { ...d, properties: { smartSelectable: 'true' } } : d)),
     { id: USB, kind: 'storage', name: 'USB disk', properties: { smartSelectable: 'false' } },
+    { id: EXT, kind: 'storage', name: 'External USB', properties: { smartSelectable: 'true', smartDefault: 'off' } },
   ],
 };
 
@@ -26,7 +28,7 @@ const sources = (over: Partial<ServiceSources> = {}): ServiceSources => ({
   requestedDisabledModules: [],
   smartDisabledDrives: [],
   reconfiguration: 'applied',
-  smartBlockedBy: [],
+  drives: [],
   ...over,
 });
 const connected = (over: Partial<ServiceStatus> = {}): ServiceStatus => ({
@@ -177,10 +179,10 @@ test('smart switches only for disks with a descriptor key, with the limit always
 
   await fireEvent.click(ssd);
   // Disks that are not plugged in now keep their choice.
-  await vi.waitFor(() => expect(patches).toEqual([{ sources: { smartDisabledDrives: ['storage/unplugged', SSD] } }]));
+  await vi.waitFor(() => expect(patches).toEqual([{ sources: { smartEnabledDrives: [], smartDisabledDrives: ['storage/unplugged', SSD] } }]));
   await vi.waitFor(() => expect(toggle('Disk 0 (C:)').getAttribute('aria-checked')).toBe('false'));
   await fireEvent.click(toggle('Disk 0 (C:)'));
-  await vi.waitFor(() => expect(patches[1]).toEqual({ sources: { smartDisabledDrives: ['storage/unplugged'] } }));
+  await vi.waitFor(() => expect(patches[1]).toEqual({ sources: { smartEnabledDrives: [], smartDisabledDrives: ['storage/unplugged'] } }));
 });
 
 test('smart switches wait for the disks module', async () => {
@@ -189,14 +191,65 @@ test('smart switches wait for the disks module', async () => {
   expect(screen.getByText(t('settings.sources.smart.storageOff'))).toBeTruthy();
 });
 
-test('a closed smart gate names the disk, or an unknown one', async () => {
-  const { view } = await setup(connected({ sources: sources({ smartBlockedBy: [SSD, '0123abcd'] }) }));
+const drive = (physicalDrive: number, over: Partial<SourceDrive> = {}): SourceDrive => ({
+  physicalDrive,
+  deviceId: null,
+  model: null,
+  state: 'unknown',
+  blocksSmart: true,
+  ...over,
+});
+
+test('a closed smart gate names the disk by device, model or number', async () => {
+  const drives = [
+    drive(0, { deviceId: SSD, model: 'Ignored model' }),
+    drive(2, { model: 'ST2000DM008' }),
+    drive(4),
+    drive(5, { model: 'Quiet disk', state: 'active', blocksSmart: false }),
+  ];
+  const { view } = await setup(connected({ sources: sources({ drives }) }));
   expect(
-    screen.getByText(t('settings.sources.smart.blocked', { disk: `Disk 0 (C:), ${t('settings.sources.smart.unknownDisk')}` })),
+    screen.getByText(t('settings.sources.smart.blocked', { disk: `Disk 0 (C:), ST2000DM008, ${t('settings.sources.smart.diskNumber', { n: 4 })}` })),
   ).toBeTruthy();
-  await view.rerender({ service: connected({ sources: sources({ smartBlockedBy: [] }) }) });
+  expect(t('settings.sources.smart.diskNumber', { n: 4 })).toBe('Disk 4');
+  await view.rerender({ service: connected({ sources: sources({ drives: [drive(5, { blocksSmart: false })] }) }) });
   expect(screen.queryByText((text) => text.startsWith('SMART is off for all disks because'))).toBeNull();
   expect(screen.getByText(t('settings.sources.smart.limit'))).toBeTruthy();
+});
+
+test('a usb disk starts with smart off and shows the warning', async () => {
+  await setup(connected());
+  const usb = toggle('External USB');
+  expect(usb.disabled).toBe(false);
+  expect(usb.getAttribute('aria-checked')).toBe('false');
+  expect(usb.closest('.field')?.textContent).toContain(t('settings.sources.smart.usbWarning'));
+  const ssd = toggle('Disk 0 (C:)');
+  expect(ssd.getAttribute('aria-checked')).toBe('true');
+  expect(ssd.closest('.field')?.textContent).not.toContain(t('settings.sources.smart.usbWarning'));
+});
+
+test('turning a usb disk on adds it to smartEnabledDrives', async () => {
+  const { patches } = await setup(connected());
+  await fireEvent.click(toggle('External USB'));
+  await vi.waitFor(() => expect(patches).toEqual([{ sources: { smartEnabledDrives: [EXT], smartDisabledDrives: [] } }]));
+  await vi.waitFor(() => expect(toggle('External USB').getAttribute('aria-checked')).toBe('true'));
+  // Turning it off again moves it to the disabled list: the two lists stay disjoint.
+  await fireEvent.click(toggle('External USB'));
+  await vi.waitFor(() => expect(patches[1]).toEqual({ sources: { smartEnabledDrives: [], smartDisabledDrives: [EXT] } }));
+});
+
+test('a usb disk the user had turned off before leaves the disabled list when turned on', async () => {
+  const { patches } = await setup(connected(), { sources: { smartDisabledDrives: [EXT, 'storage/unplugged'] } });
+  await fireEvent.click(toggle('External USB'));
+  await vi.waitFor(() =>
+    expect(patches).toEqual([{ sources: { smartEnabledDrives: [EXT], smartDisabledDrives: ['storage/unplugged'] } }]),
+  );
+});
+
+test('turning a normal disk off removes it from smartEnabledDrives', async () => {
+  const { patches } = await setup(connected(), { sources: { smartEnabledDrives: [SSD, EXT] } });
+  await fireEvent.click(toggle('Disk 0 (C:)'));
+  await vi.waitFor(() => expect(patches).toEqual([{ sources: { smartEnabledDrives: [EXT], smartDisabledDrives: [SSD] } }]));
 });
 
 test('the pawnio state is explained', async () => {

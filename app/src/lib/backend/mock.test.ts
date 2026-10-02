@@ -178,7 +178,7 @@ test('the mock serves lhm sensors only when the service is connected', async () 
       requestedDisabledModules: [],
       smartDisabledDrives: [],
       reconfiguration: 'applied',
-      smartBlockedBy: [],
+      drives: [],
     },
   });
 

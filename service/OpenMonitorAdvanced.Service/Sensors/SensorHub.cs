@@ -21,22 +21,26 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// only when more than one interval behind), and a subscriber's phase starts from the sample it
 /// first receives, so one subscriber costs one wake per interval.
 /// <c>oma-storage</c> owns every disk access: every 30 s (only while someone is subscribed) it
-/// applies the D6 gate, resolves each new disk's identity (<see cref="IDiskPowerProbe.Describe"/>),
-/// updates each disk that is known to be spinning and publishes an immutable, timestamped cache
-/// of raw values keyed by LHM sensor identifier, which the sampler only looks up (values older
-/// than two rounds, or from before an idle period, count as absent). A disk enters the schema
-/// only once the storage worker has resolved it, so the sampler never waits on disk I/O. The two
-/// threads share no lock across hardware I/O: <c>_subLock</c> only guards subscriber bookkeeping,
+/// applies the D6 gate, lists the drives, resolves each new disk's identity
+/// (<see cref="IDiskPowerProbe.Describe"/>), updates each disk that is known to be spinning and
+/// publishes the outcome as one immutable <see cref="StorageRound"/>: the state of every drive,
+/// the resolved disks and the raw values keyed by LHM sensor identifier, which the sampler only
+/// looks up (values older than two rounds, or from before an idle period, count as absent). A
+/// disk enters the schema only once the storage worker has resolved it, so the sampler never
+/// waits on disk I/O. The two threads share no lock across hardware I/O: <c>_subLock</c> only
+/// guards subscriber bookkeeping; a storage round is one reference swap at its end, the sampler
+/// takes one round per tick and uses it for the service block, the schema and the values alike,
 /// and schema, bindings and snapshot are swapped as one immutable <see cref="Published"/> reference.
 /// </para>
 /// <para>
 /// <b>D6.</b> The tree is opened without storage. <see cref="IHardwareTree.EnableStorage"/> is
-/// called only when <see cref="IDiskPowerProbe.GateBlockers"/> says every drive that needs it
+/// called only when <see cref="IDiskPowerProbe.CheckGate"/> says every drive that needs it
 /// (controller ruling R17) is spinning, re-checked on every storage round until it succeeds (the
-/// blockers' drive keys are the schema's <c>smartBlockedBy</c>); afterwards each disk whose
-/// <see cref="DriveFacts.RequiresPowerCheck"/> holds is updated only when
-/// <see cref="IDiskPowerProbe.IsSpunDown"/> is <see langword="false"/>, otherwise its values are
-/// absent.
+/// drives that block are flagged in the schema's <c>drives</c>). Afterwards nothing blocks: every
+/// round lists the drives again (<see cref="IDiskPowerProbe.Enumerate"/>) and asks each one whose
+/// <see cref="DriveFacts.RequiresPowerCheck"/> holds and whose SMART is on
+/// (<see cref="DriveStates.IsSmartOff"/>) for its power mode once, whether LHM exposes it or
+/// not; a disk is updated only when that answer is "active", otherwise its values are absent.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The tree is never closed while the hub lives: without subscribers sampling
@@ -72,12 +76,13 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <c>failed</c> and its park asked again on every tick, never forced; setters that throw are
 /// <c>failed</c> too and tried again only after <see cref="FailureRetryDelay"/>;</item>
 /// <item>storage, "softly" on the storage worker: switched off, its values and resolved disks are
-/// dropped and no gate, description, power check or update runs, but the LHM group stays open;
-/// a disk with SMART off is still described (access 0) and then neither power-checked nor
-/// updated. It still counts for the D6 gate (verdict c).</item>
+/// dropped, the last drive list stays with every entry <c>smartOff</c>, and no gate, enumeration,
+/// description, power check or update runs, but the LHM group stays open; a disk with SMART off
+/// (by request, or a USB disk nobody switched on) is still described (access 0) and then neither
+/// power-checked nor updated. It still counts for the D6 gate (verdict c).</item>
 /// </list>
 /// The service block reports the groups actually open, the storage worker's applied storage part,
-/// the request's status and the gate blockers. When a schema rebuild fails the current plan gets
+/// the request's status and the drive list. When a schema rebuild fails the current plan gets
 /// the new block anyway (<c>failed</c> if the request's schema could not be built), so no client
 /// waits on a request that cannot be shown.
 /// </para>
@@ -116,12 +121,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private EffectiveConfig _servedStoragePart = EffectiveConfig.AllOn.StoragePart;
     private ReconfigurationStatus _status = ReconfigurationStatus.Applied;
     private bool _rebuildFailing;
-    private (ServiceModules Groups, EffectiveConfig Storage, WireDrive[] Blockers, ReconfigurationStatus Status)? _stateInputs;
+    private StorageRound _view = StorageRound.Empty; // the storage round the current tick works with, taken once at its start
+    private (ServiceModules Groups, EffectiveConfig Storage, IReadOnlyList<WireDrive> Drives, ReconfigurationStatus Status)? _stateInputs;
     private ServiceStateBlock _serviceState = ServiceStateBlock.AllActive;
     private long _reflectedVersion; // the _desired version the published service block reflects
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
     private Plan? _plan;
-    private readonly Dictionary<string, (StorageInfo Info, string Id)> _storagePins = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (DiskResolution Disk, string Id)> _storagePins = new(StringComparer.Ordinal);
     private bool _pawnIo;
     private ulong _seq;
 
@@ -142,11 +148,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     private const int CriticalWarningMask = 0x3D;
 
-    private volatile StorageCache _storageCache = StorageCache.Empty;
-    private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
+    private volatile StorageRound _round = StorageRound.Empty; // replaced as a whole (PublishRound)
     private volatile bool _opened;
     private volatile EffectiveConfig _storageApplied = EffectiveConfig.AllOn.StoragePart; // written by the storage worker
-    private volatile WireDrive[] _gateBlockers = []; // the drives that keep the gate closed, written by the storage worker
     private readonly StoragePark _park = new();
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
@@ -263,6 +267,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         long tickStart = _time.GetTimestamp();
         ulong tickUnixMs = (ulong)_time.GetUtcNow().ToUnixTimeMilliseconds();
+
+        // One storage round for the whole tick: its drive list goes into the service block, its
+        // resolved disks into the schema and its values into the snapshot. A round published
+        // while this tick runs is the next tick's, so its states never meet this one's values.
+        _view = _round;
         ApplyDesired();
         Plan plan = _plan ?? OpenTree();
         if (IsDisposed)
@@ -270,10 +279,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return; // disposed from this very thread while it switched groups
         }
 
-        // A request's schema effect (or a new service block) is built before the updates, so a
-        // switched-off group is not updated from this tick on and this snapshot uses the new bindings.
+        // A request's schema effect (or a new service block, or the disks of a new storage round)
+        // is built before the updates, so a switched-off group is not updated from this tick on
+        // and this snapshot uses the new bindings.
         bool rebuildFailed = false;
-        if (!plan.Filter.Equals(_schemaFilter) || !SchemaComparer.SameServiceState(plan.Built.Schema.Service, _serviceState))
+        if (!plan.Filter.Equals(_schemaFilter)
+            || !ReferenceEquals(plan.Resolved, _view.Resolved)
+            || !SchemaComparer.SameServiceState(plan.Built.Schema.Service, _serviceState))
         {
             Interlocked.Exchange(ref _structureDirty, 0);
             plan = TryRebuildPlan(plan);
@@ -425,8 +437,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// One storage round: the D6 gate, then for every disk its identity (first touch only), its
-    /// power check and its update, then a new timestamped value cache.
+    /// One storage round: the D6 gate or, once it is open, the drive list with one power check
+    /// per drive; then for every disk LHM exposes its identity (first touch only) and its update;
+    /// then one new <see cref="StorageRound"/>.
     /// </summary>
     internal void StorageOnce()
     {
@@ -439,16 +452,24 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         EffectiveConfig config = _storageApplied;
         if (!config.Enabled.HasFlag(ServiceModules.Storage))
         {
-            return; // switched off softly (P10): no gate, no description, no power check, no update
+            return; // switched off softly (P10): no gate, no enumeration, no description, no power check, no update
         }
 
-        if (!_storageEnabled && !TryEnableStorage())
+        long roundStart = _time.GetTimestamp();
+        IReadOnlyList<DriveCheck>? checks = _storageEnabled ? CheckPowerStates(config) : TryEnableStorage(config, roundStart);
+        if (checks is null)
         {
             return;
         }
 
-        long roundStart = _time.GetTimestamp();
-        IReadOnlyDictionary<string, DiskResolution> previous = _resolvedDisks;
+        // The round's one answer per drive: it decides the update here and the state in the list.
+        var answers = new Dictionary<int, DriveCheck>(checks.Count);
+        foreach (DriveCheck check in checks)
+        {
+            answers[check.Drive.DriveNumber] = check;
+        }
+
+        IReadOnlyDictionary<string, DiskResolution> previous = _round.Resolved;
         var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
         IReadOnlyList<HardwareNode> roots = _tree.Roots;
@@ -488,13 +509,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             resolved[root.Identifier] = resolution;
-            if (resolution.Key is { } key && config.SmartDisabledDrives.Contains(key))
+            if (DriveStates.IsSmartOff(resolution.Facts, resolution.Key, config))
             {
-                continue; // SMART off for this disk (P7): no CHECK POWER MODE, no update, not in the schema
+                continue; // SMART off for this disk (P7, or off by default): no update, not in the schema
             }
 
             StorageInfo info = resolution.Info;
-            if (resolution.Availability == DriveAvailability.NoMedia)
+            if (resolution.Facts.Availability == DriveAvailability.NoMedia)
             {
                 // LHM enumerated this disk, so "not ready / no media" cannot mean "no platter to
                 // wake" (a USB bridge may answer so while its disk sleeps): it cannot be
@@ -505,17 +526,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
             if (info.Rotational)
             {
-                bool? spunDown;
-                try
-                {
-                    spunDown = _disks.IsSpunDown(info.DriveNumber, info.DescriptorModel, info.DescriptorSerial);
-                }
-                catch (Exception e)
-                {
-                    LogRateLimited("power:" + root.Identifier, e, "Checking the power mode of {Root} failed", root.Identifier);
-                    spunDown = null;
-                }
-
+                // A drive the round did not ask (gone from the enumeration, say) is unknown.
+                bool? spunDown = answers.TryGetValue(info.DriveNumber, out DriveCheck? answer) && answer.Asked ? answer.SpunDown : null;
                 LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown);
                 if (spunDown != false)
                 {
@@ -539,14 +551,36 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             resolved[root.Identifier] = CollectCriticalWarning(fresh, resolution, cache);
         }
 
-        if (!SameResolution(previous, resolved))
-        {
-            _resolvedDisks = resolved;
-            Interlocked.Exchange(ref _structureDirty, 1);
-        }
+        // Never mutated after publication: the sampler only looks them up.
+        PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache);
+    }
 
-        // Never mutated after publication: the sampler only looks values up.
-        _storageCache = new StorageCache(roundStart, cache);
+    /// <summary>
+    /// The one place a <see cref="StorageRound"/> is published: a single reference swap, with no
+    /// lock. <see langword="null"/> keeps the drives or the resolved disks as they are; unchanged
+    /// ones keep their instance, which is how the sampler tells that nothing has to be rebuilt.
+    /// The storage worker publishes at the end of a round (or when storage is switched off); only
+    /// the values are dropped from another thread, when the last client leaves.
+    /// </summary>
+    private void PublishRound(
+        long timestamp,
+        IReadOnlyList<WireDrive>? drives,
+        IReadOnlyDictionary<string, DiskResolution>? resolved,
+        IReadOnlyDictionary<string, double?> values)
+    {
+        StorageRound current;
+        StorageRound next;
+        do
+        {
+            current = _round;
+            next = new StorageRound(
+                current.Generation + 1,
+                timestamp,
+                drives is null || drives.SequenceEqual(current.Drives) ? current.Drives : drives,
+                resolved is null || SameResolution(current.Resolved, resolved) ? current.Resolved : resolved,
+                values);
+        }
+        while (Interlocked.CompareExchange(ref _round, next, current) != current);
     }
 
     /// <summary>One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber, only once open). Returns the delay until the next round.</summary>
@@ -730,7 +764,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             BuiltSchema stamped = current.Built with { Schema = current.Built.Schema with { Service = _serviceState } };
-            _plan = new Plan(current.Roots, stamped, current.Revision + 1, current.Filter);
+            _plan = new Plan(current.Roots, stamped, current.Revision + 1, current.Filter, current.Resolved);
             return _plan;
         }
     }
@@ -752,14 +786,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// The schema covers every non-storage root of a requested module plus the disks the storage
-    /// worker has resolved (with their resolved identity) whose SMART is on; unresolved disks stay
-    /// out until then. The plan only updates and reads the roots of requested modules.
+    /// The schema covers every non-storage root of a requested module plus the disks the tick's
+    /// storage round has resolved (with their resolved identity) whose SMART is on; unresolved
+    /// disks stay out until then. The plan only updates and reads the roots of requested modules.
     /// </summary>
     private Plan BuildPlan(IReadOnlyList<HardwareNode> roots, Plan? current)
     {
         EffectiveConfig filter = _schemaFilter;
-        IReadOnlyDictionary<string, DiskResolution> resolved = _resolvedDisks;
+        IReadOnlyDictionary<string, DiskResolution> resolved = _view.Resolved;
         var planRoots = new List<HardwareNode>(roots.Count);
         var schemaRoots = new List<HardwareNode>(roots.Count);
         foreach (HardwareNode root in roots)
@@ -775,7 +809,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 schemaRoots.Add(root);
             }
             else if (resolved.TryGetValue(root.Identifier, out DiskResolution? resolution)
-                && !(resolution.Key is { } key && filter.SmartDisabledDrives.Contains(key)))
+                && !DriveStates.IsSmartOff(resolution.Facts, resolution.Key, filter))
             {
                 schemaRoots.Add(root with { Storage = resolution.Info });
             }
@@ -784,9 +818,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         // A published id stays pinned while its disk keeps the same complete identity, so an
         // identical disk resolved in a later round never changes it (it gets its own id instead).
         var pins = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach ((string rootId, (StorageInfo info, string id)) in _storagePins)
+        foreach ((string rootId, (DiskResolution pinned, string id)) in _storagePins)
         {
-            if (resolved.TryGetValue(rootId, out DiskResolution? resolution) && resolution.Complete && Identity(resolution.Info) == Identity(info))
+            if (resolved.TryGetValue(rootId, out DiskResolution? resolution) && resolution.Complete && Identity(resolution.Info) == Identity(pinned.Info))
             {
                 pins[rootId] = id;
             }
@@ -799,38 +833,33 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         // A disk the request hides keeps its pin, so it comes back with the id its clients know.
-        var hidden = _storagePins.Where(pin => IsHidden(pin.Value.Info, filter)).ToList();
+        var hidden = _storagePins.Where(pin => DriveStates.IsSmartOff(pin.Value.Disk.Facts, pin.Value.Disk.Key, filter)).ToList();
         _storagePins.Clear();
         foreach ((string rootId, DiskResolution resolution) in resolved)
         {
             if (resolution.Complete && built.StorageDeviceIds.TryGetValue(rootId, out string? id))
             {
-                _storagePins[rootId] = (resolution.Info, id);
+                _storagePins[rootId] = (resolution, id);
             }
         }
 
-        foreach ((string rootId, (StorageInfo Info, string Id) pin) in hidden)
+        foreach ((string rootId, (DiskResolution Disk, string Id) pin) in hidden)
         {
             _storagePins.TryAdd(rootId, pin);
         }
 
         if (current is null)
         {
-            return new Plan(planRoots, built, revision: 1, filter);
+            return new Plan(planRoots, built, revision: 1, filter, resolved);
         }
 
         return SchemaComparer.SameStructure(current.Built, built)
-            ? new Plan(planRoots, current.Built, current.Revision, filter)
-            : new Plan(planRoots, built, current.Revision + 1, filter);
+            ? new Plan(planRoots, current.Built, current.Revision, filter, resolved)
+            : new Plan(planRoots, built, current.Revision + 1, filter, resolved);
     }
 
     /// <summary>The disk identity a pinned id depends on: the NVMe health flags come and go with updates and never change an id.</summary>
     private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false };
-
-    /// <summary>Whether <paramref name="filter"/> keeps that disk out of the schema (storage off, or its SMART off).</summary>
-    private static bool IsHidden(StorageInfo info, EffectiveConfig filter) =>
-        !filter.Enabled.HasFlag(ServiceModules.Storage)
-        || (DriveKey.Compute(info.DescriptorModel, info.DescriptorSerial) is { } key && filter.SmartDisabledDrives.Contains(key));
 
     /// <summary>
     /// The disk's identity with the descriptor model/serial and the rotational flag, from
@@ -887,7 +916,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             DescriptorSerial = facts.Serial,
             Rotational = facts.Availability == DriveAvailability.NoMedia || facts.RequiresPowerCheck,
         };
-        return new DiskResolution(info, facts.Availability, complete);
+        return new DiskResolution(info, facts, complete);
     }
 
     private static bool SameResolution(IReadOnlyDictionary<string, DiskResolution> a, IReadOnlyDictionary<string, DiskResolution> b) =>
@@ -906,37 +935,46 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         return null;
     }
 
+    /// <summary>Sampler: the values of the tick's storage round, unless they are too old to be current.</summary>
     private IReadOnlyDictionary<string, double?> FreshStorageValues(long now)
     {
-        StorageCache cache = _storageCache;
-        bool fresh = cache.Timestamp != long.MinValue && now - cache.Timestamp <= 2 * SecondsToTicks(StorageInterval);
-        return fresh ? cache.Values : StorageCache.Empty.Values;
+        StorageRound round = _view;
+        bool fresh = round.Timestamp != long.MinValue && now - round.Timestamp <= 2 * SecondsToTicks(StorageInterval);
+        return fresh ? round.Values : StorageRound.Empty.Values;
     }
 
-    private bool TryEnableStorage()
+    /// <summary>
+    /// The D6 gate, asked on every storage round until LHM's storage group is enabled. Returns the
+    /// gate's checks once it is: the round goes on with those answers, asking no drive twice.
+    /// Otherwise <see langword="null"/>, after publishing the drive list the gate saw.
+    /// </summary>
+    private IReadOnlyList<DriveCheck>? TryEnableStorage(EffectiveConfig config, long roundStart)
     {
-        bool allActive;
+        IReadOnlyList<DriveCheck>? checks;
         try
         {
-            IReadOnlyList<DriveBlocker> blockers = _disks.GateBlockers();
-            PublishGateBlockers(blockers);
-            allActive = blockers.Count == 0;
+            checks = _disks.CheckGate();
         }
         catch (Exception e)
         {
             LogRateLimited("storage-gate", e, "Checking the disks' power state failed; storage stays disabled");
-            allActive = false;
+            checks = null;
         }
 
-        if (!allActive)
+        if (checks is null || checks.Any(c => c.Blocks))
         {
+            if (checks is not null)
+            {
+                PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values);
+            }
+
             if (!_storageGateLogged)
             {
                 _storageGateLogged = true;
                 _log.LogInformation("Storage stays disabled: a rotational disk is in standby or its state is unknown (re-checked every {Seconds} s)", StorageInterval.TotalSeconds);
             }
 
-            return false;
+            return null;
         }
 
         try
@@ -946,37 +984,73 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         catch (Exception e)
         {
             LogRateLimited("storage-enable", e, "Enabling storage failed");
-            return false;
+
+            // No drive blocks: the list says so, and the next round tries again.
+            PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values);
+            return null;
         }
 
         _storageEnabled = true;
         _log.LogInformation("Every rotational disk is active: storage enabled");
-        return true;
+        return checks;
     }
 
     /// <summary>
-    /// Storage worker: the disks that keep the gate closed, in drive order, as the service block
-    /// lists them (standby or unknown; one without a key is listed too). Provisional: the block
-    /// holds only these until the hub reports the state of every drive.
+    /// Storage worker, once the gate is open: every drive of a fresh enumeration (access 0), with
+    /// one power check for each that needs it and whose SMART is on, whether LHM exposes it or
+    /// not. A drive whose SMART is off is not asked: nothing is sent to it periodically.
+    /// <see langword="null"/> when the drives cannot be listed: no disk is updated blind.
     /// </summary>
-    private void PublishGateBlockers(IReadOnlyList<DriveBlocker> blockers)
+    private IReadOnlyList<DriveCheck>? CheckPowerStates(EffectiveConfig config)
     {
-        WireDrive[] drives =
-        [
-            .. blockers
-                .OrderBy(b => b.Drive.DriveNumber)
-                .Select(b => new WireDrive((uint)b.Drive.DriveNumber, b.Key, b.Drive.Model, b.SpunDown == true ? "standby" : "unknown", BlocksSmart: true)),
-        ];
-        if (!drives.SequenceEqual(_gateBlockers))
+        IReadOnlyList<DriveFacts> drives;
+        try
         {
-            _gateBlockers = drives;
+            drives = _disks.Enumerate();
         }
+        catch (Exception e)
+        {
+            LogRateLimited("storage-enumerate", e, "Listing the drives failed; no disk is updated in this storage round");
+            return null;
+        }
+
+        var checks = new List<DriveCheck>(drives.Count);
+        foreach (DriveFacts drive in drives)
+        {
+            if (_stop.IsCancellationRequested)
+            {
+                return null;
+            }
+
+            var unasked = new DriveCheck(drive, Asked: false, SpunDown: null);
+            if (!drive.RequiresPowerCheck || DriveStates.IsSmartOff(drive, unasked.Key, config))
+            {
+                checks.Add(unasked);
+                continue;
+            }
+
+            bool? spunDown;
+            try
+            {
+                spunDown = _disks.IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial);
+            }
+            catch (Exception e)
+            {
+                LogRateLimited("power:" + drive.DriveNumber, e, "Checking the power mode of PhysicalDrive{Drive} failed", drive.DriveNumber);
+                spunDown = null;
+            }
+
+            checks.Add(unasked with { Asked = true, SpunDown = spunDown });
+        }
+
+        return checks;
     }
 
     /// <summary>
-    /// Storage worker: takes the storage part of a new request. Switched off (P10), the values,
-    /// the resolved disks and the gate blockers are dropped at once, with no I/O and the LHM group
-    /// left open; switched on, or with another SMART selection, a round runs at once.
+    /// Storage worker: takes the storage part of a new request. Switched off (P10), the values
+    /// and the resolved disks are dropped at once and the last drive list stays, every entry
+    /// <c>smartOff</c>, with no I/O and the LHM group left open; switched on, or with another
+    /// SMART selection, a round runs at once.
     /// </summary>
     private void SyncStorageConfig()
     {
@@ -995,10 +1069,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         if (!part.Enabled.HasFlag(ServiceModules.Storage))
         {
-            _storageCache = StorageCache.Empty;
-            _resolvedDisks = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
-            _gateBlockers = [];
-            Interlocked.Exchange(ref _structureDirty, 1);
+            PublishRound(long.MinValue, DriveStates.AllOff(_round.Drives), StorageRound.Empty.Resolved, StorageRound.Empty.Values);
         }
         else
         {
@@ -1180,8 +1251,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         if (idle)
         {
             // Sampling and storage rounds stop: values read before the idle period must not be
-            // published as current when a client comes back.
-            _storageCache = StorageCache.Empty;
+            // published as current when a client comes back. The drives and the disks stay.
+            PublishRound(long.MinValue, drives: null, resolved: null, StorageRound.Empty.Values);
         }
 
         SetQuietly(_samplerWake); // recompute the next wake (or sleep until a new subscriber)
@@ -1242,7 +1313,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// <summary>
     /// Sampler: the service block from what is actually applied: the groups open in the tree,
     /// the storage part the storage worker took, the request's status (<c>failed</c> too while
-    /// the request's schema cannot be built) and the gate blockers.
+    /// the request's schema cannot be built) and the drive list of the tick's storage round.
     /// </summary>
     private void UpdateServiceState()
     {
@@ -1250,8 +1321,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             ? ReconfigurationStatus.Failed
             : _status;
         EffectiveConfig storage = _storageApplied;
-        (ServiceModules, EffectiveConfig, WireDrive[], ReconfigurationStatus) inputs = (_applier.Groups, storage, _gateBlockers, status);
-        if (_stateInputs is { } last && last.Groups == inputs.Item1 && last.Storage.Equals(inputs.Item2) && ReferenceEquals(last.Blockers, inputs.Item3) && last.Status == inputs.Item4)
+        (ServiceModules, EffectiveConfig, IReadOnlyList<WireDrive>, ReconfigurationStatus) inputs = (_applier.Groups, storage, _view.Drives, status);
+        if (_stateInputs is { } last && last.Groups == inputs.Item1 && last.Storage.Equals(inputs.Item2) && ReferenceEquals(last.Drives, inputs.Item3) && last.Status == inputs.Item4)
         {
             return;
         }
@@ -1388,17 +1459,30 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     internal sealed record DesiredConfig(long Version, EffectiveConfig Config, long RequestedAt);
 
-    /// <summary>A disk's resolved identity; only a <paramref name="Complete"/> one is reused (and its device id pinned).</summary>
-    private sealed record DiskResolution(StorageInfo Info, DriveAvailability Availability, bool Complete)
+    /// <summary>
+    /// A disk's resolved identity, with the <paramref name="Facts"/> it was described by; only a
+    /// <paramref name="Complete"/> one is reused (and its device id pinned).
+    /// </summary>
+    private sealed record DiskResolution(StorageInfo Info, DriveFacts Facts, bool Complete)
     {
         /// <summary>Its <see cref="DriveKey"/> from the descriptor model and serial; <see langword="null"/> without them.</summary>
         public string? Key { get; } = DriveKey.Compute(Info.DescriptorModel, Info.DescriptorSerial);
     }
 
-    /// <summary>Raw storage values of one round, keyed by LHM sensor identifier, with the round's monotonic start.</summary>
-    private sealed record StorageCache(long Timestamp, IReadOnlyDictionary<string, double?> Values)
+    /// <summary>
+    /// What the storage worker knows after one round, published as a whole: the state of every
+    /// drive, the disks resolved for the schema (by LHM identifier) and the raw values (by LHM
+    /// sensor identifier) with the round's monotonic start (<see cref="long.MinValue"/>: no
+    /// values). <paramref name="Generation"/> grows by one per publication. Never mutated.
+    /// </summary>
+    private sealed record StorageRound(
+        long Generation,
+        long Timestamp,
+        IReadOnlyList<WireDrive> Drives,
+        IReadOnlyDictionary<string, DiskResolution> Resolved,
+        IReadOnlyDictionary<string, double?> Values)
     {
-        public static StorageCache Empty { get; } = new(long.MinValue, new Dictionary<string, double?>());
+        public static StorageRound Empty { get; } = new(0, long.MinValue, [], new Dictionary<string, DiskResolution>(), new Dictionary<string, double?>());
     }
 
     /// <summary>
@@ -1407,12 +1491,13 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// </summary>
     private sealed class Plan
     {
-        public Plan(IReadOnlyList<HardwareNode> roots, BuiltSchema built, int revision, EffectiveConfig filter)
+        public Plan(IReadOnlyList<HardwareNode> roots, BuiltSchema built, int revision, EffectiveConfig filter, IReadOnlyDictionary<string, DiskResolution> resolved)
         {
             Roots = roots;
             Built = built;
             Revision = revision;
             Filter = filter;
+            Resolved = resolved;
             UpdateRoots = roots.Where(r => r.Type != HardwareType.Storage).ToArray();
 
             var owners = new Dictionary<string, (string Root, bool Storage)>(StringComparer.Ordinal);
@@ -1455,6 +1540,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         /// <summary>The request whose schema effect this plan has.</summary>
         public EffectiveConfig Filter { get; }
+
+        /// <summary>The resolved disks (of a <see cref="StorageRound"/>) this plan was built from: another instance means a rebuild.</summary>
+        public IReadOnlyDictionary<string, DiskResolution> Resolved { get; }
 
         public HardwareNode[] UpdateRoots { get; }
 

@@ -74,13 +74,18 @@ public interface IDiskPowerProbe
     bool? IsSpunDown(int driveNumber, string? model, string? serial);
 
     /// <summary>
-    /// The D6 gate (controller ruling R17): the <c>PhysicalDriveN</c>s whose
-    /// <see cref="DriveFacts.RequiresPowerCheck"/> is true and that do not answer
-    /// <see cref="IsSpunDown"/> == <see langword="false"/>. The gate is open when the list is
-    /// empty; each blocker's <see cref="DriveBlocker.Key"/> is what the schema's
-    /// <c>smartBlockedBy</c> reports.
+    /// The D6 gate (controller ruling R17) over a fresh enumeration: one <see cref="DriveCheck"/>
+    /// per <c>PhysicalDriveN</c>, asked for its power mode only when
+    /// <see cref="DriveFacts.RequiresPowerCheck"/> holds. The gate is open when none
+    /// <see cref="DriveCheck.Blocks"/>.
     /// </summary>
-    IReadOnlyList<DriveBlocker> GateBlockers();
+    IReadOnlyList<DriveCheck> CheckGate();
+
+    /// <summary>
+    /// Every <c>PhysicalDriveN</c> as <see cref="Describe"/> sees it (access 0): no power command,
+    /// no SMART, nothing that could wake a disk.
+    /// </summary>
+    IReadOnlyList<DriveFacts> Enumerate();
 
     /// <summary>
     /// Model, serial, bus type and seek penalty of <c>\\.\PhysicalDriveN</c>, read with access 0
@@ -109,6 +114,9 @@ public enum DriveAvailability
 /// </summary>
 public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability, string? Model, string? Serial, uint? BusType, bool? SeekPenalty)
 {
+    /// <summary><c>STORAGE_BUS_TYPE.BusTypeUsb</c>.</summary>
+    public const uint BusTypeUsb = 0x07;
+
     /// <summary><c>STORAGE_BUS_TYPE.BusTypeVirtual</c>.</summary>
     public const uint BusTypeVirtual = 0x0E;
 
@@ -132,11 +140,23 @@ public sealed record DriveFacts(int DriveNumber, DriveAvailability Availability,
         Availability != DriveAvailability.NoMedia
         && BusType is not (BusTypeVirtual or BusTypeFileBackedVirtual or BusTypeSpaces or BusTypeNvme)
         && SeekPenalty != false;
+
+    /// <summary>
+    /// A USB disk: its SMART stays off until a client asks for it (a bridge may hide its disk's
+    /// standby, so periodic commands could keep it awake).
+    /// </summary>
+    public bool SmartOffByDefault => BusType == BusTypeUsb;
 }
 
-/// <summary>A drive that keeps the D6 gate closed, with its power-mode answer (standby or unknown).</summary>
-public sealed record DriveBlocker(DriveFacts Drive, bool? SpunDown)
+/// <summary>
+/// A drive as the D6 gate saw it: whether it was <paramref name="Asked"/> for its power mode
+/// and what it answered (<see langword="true"/> in standby, <see langword="null"/> unknown or not asked).
+/// </summary>
+public sealed record DriveCheck(DriveFacts Drive, bool Asked, bool? SpunDown)
 {
+    /// <summary>Whether it keeps the gate closed: asked, and not known to be active.</summary>
+    public bool Blocks => Asked && SpunDown != false;
+
     /// <summary>Its <see cref="DriveKey"/> from the descriptor model and serial; <see langword="null"/> when either is missing.</summary>
     public string? Key => DriveKey.Compute(Drive.Model, Drive.Serial);
 }

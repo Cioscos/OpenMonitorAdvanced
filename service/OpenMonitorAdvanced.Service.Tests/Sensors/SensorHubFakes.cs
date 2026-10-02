@@ -191,24 +191,30 @@ internal sealed class FakeTree : IHardwareTree
     }
 }
 
+/// <summary>
+/// Scripted <see cref="IDiskPowerProbe"/>. The enumeration lists drive 0 and every drive of
+/// <see cref="Facts"/>, each as <see cref="Describe"/> answers it (a <see langword="null"/> fact
+/// is a drive that does not exist); the gate asks <see cref="IsSpunDown"/> like the real probe.
+/// </summary>
 internal sealed class FakeDisks : IDiskPowerProbe
 {
     private int _spunDownQueries;
-    private int _allActiveQueries;
+    private int _gateQueries;
+    private int _enumerateCalls;
     private int _describeCalls;
     private readonly ConcurrentDictionary<int, int> _spunDownQueriesOf = new();
     private readonly ConcurrentDictionary<int, int> _describeCallsOf = new();
 
-    public volatile bool AllActive = true;
-
-    /// <summary>What <see cref="GateBlockers"/> answers while <see cref="AllActive"/> is false (default: drive 0 in standby).</summary>
-    public List<DriveBlocker> Blockers { get; } = [];
-
+    /// <summary>Per-drive power-mode answers; a drive not listed is active.</summary>
     public ConcurrentDictionary<int, bool?> SpunDown { get; } = new();
 
     public int SpunDownQueries => Volatile.Read(ref _spunDownQueries);
 
-    public int AllActiveQueries => Volatile.Read(ref _allActiveQueries);
+    /// <summary><see cref="CheckGate"/> calls.</summary>
+    public int GateQueries => Volatile.Read(ref _gateQueries);
+
+    /// <summary><see cref="Enumerate"/> calls.</summary>
+    public int EnumerateCalls => Volatile.Read(ref _enumerateCalls);
 
     public int DescribeCalls => Volatile.Read(ref _describeCalls);
 
@@ -230,9 +236,7 @@ internal sealed class FakeDisks : IDiskPowerProbe
         _describeCallsOf.AddOrUpdate(driveNumber, 1, (_, n) => n + 1);
         DescribeThreads.Enqueue(Thread.CurrentThread.Name);
         BeforeDescribe?.Invoke(driveNumber);
-        return Facts.TryGetValue(driveNumber, out DriveFacts? facts)
-            ? facts
-            : new DriveFacts(driveNumber, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true);
+        return FactsOf(driveNumber);
     }
 
     public bool? IsSpunDown(int driveNumber, string? model, string? serial)
@@ -242,25 +246,35 @@ internal sealed class FakeDisks : IDiskPowerProbe
         return SpunDown.TryGetValue(driveNumber, out bool? v) ? v : false;
     }
 
-    public IReadOnlyList<DriveBlocker> GateBlockers()
+    public IReadOnlyList<DriveCheck> CheckGate()
     {
-        Interlocked.Increment(ref _allActiveQueries);
-        if (AllActive)
-        {
-            return [];
-        }
-
-        return Blockers.Count > 0
-            ? [.. Blockers]
-            : [new DriveBlocker(new DriveFacts(0, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true), SpunDown: true)];
+        Interlocked.Increment(ref _gateQueries);
+        return DiskPowerProbe.CheckDrives(Listed(), drive => IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
     }
+
+    public IReadOnlyList<DriveFacts> Enumerate()
+    {
+        Interlocked.Increment(ref _enumerateCalls);
+        return Listed();
+    }
+
+    private DriveFacts? FactsOf(int driveNumber) => Facts.TryGetValue(driveNumber, out DriveFacts? facts)
+        ? facts
+        : new DriveFacts(driveNumber, DriveAvailability.Present, "ST2000DM008-2FR102", "DESCRIPTOR-SERIAL", BusType: 0x0B, SeekPenalty: true);
+
+    private List<DriveFacts> Listed() =>
+        [.. Facts.Keys.Append(0).Distinct().Order().Select(FactsOf).OfType<DriveFacts>()];
 }
 
 /// <summary>Builds <see cref="FeedRequest"/>s for tests.</summary>
 internal static class Requests
 {
     public static FeedRequest Of(uint intervalMs, ServiceModules disabled = ServiceModules.None, params string[] smartDisabledDrives) =>
-        new(intervalMs, disabled, new HashSet<string>(smartDisabledDrives, StringComparer.Ordinal));
+        new(intervalMs, disabled, new HashSet<string>(smartDisabledDrives, StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
+
+    /// <summary>The same request, asking for the SMART of those default-off drives.</summary>
+    public static FeedRequest WithSmartOn(this FeedRequest request, params string[] smartEnabledDrives) =>
+        request with { SmartEnabledDrives = new HashSet<string>(smartEnabledDrives, StringComparer.Ordinal) };
 
     /// <summary>A subscription with every source on, as the M4 tests made it.</summary>
     public static IFeedSubscription Subscribe(this ISensorFeed feed, uint intervalMs, Action<FeedUpdate> onUpdate) =>

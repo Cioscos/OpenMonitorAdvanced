@@ -19,8 +19,9 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// read/write access: the service runs as LocalSystem). A drive whose driver rejects it (a USB
 /// bridge) is asked the same command as <c>ATA PASS-THROUGH(16)</c> through
 /// <c>IOCTL_SCSI_PASS_THROUGH</c>; the route that answered is remembered per drive;</item>
-/// <item><see cref="GateBlockers"/>: the gate of controller ruling R17 over those
-/// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="FindGateBlockers"/>).</item>
+/// <item><see cref="CheckGate"/>: the gate of controller ruling R17 over those
+/// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="CheckDrives"/>);
+/// <see cref="Enumerate"/> lists the drives alone, with no power command.</item>
 /// </list>
 /// The IOCTLs need an elevated process and a real disk (verified in Task 15); the decision
 /// logic, the register interpretation, the error logging and the struct layouts are unit-tested.
@@ -156,41 +157,38 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     public DriveFacts? Describe(int driveNumber) => driveNumber < 0 ? null : _describe(driveNumber);
 
     /// <inheritdoc />
-    public IReadOnlyList<DriveBlocker> GateBlockers()
+    public IReadOnlyList<DriveCheck> CheckGate()
+    {
+        IReadOnlyList<DriveCheck> checks = CheckDrives(Enumerate(), drive => IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
+        LogBlockersOnChange([.. checks.Where(c => c.Blocks)]);
+        return checks;
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<DriveFacts> Enumerate()
     {
         IReadOnlyList<DriveFacts> drives = _enumerateDrives();
         ReconcileRoutes(drives);
-        IReadOnlyList<DriveBlocker> blockers = FindGateBlockers(drives, drive => IsSpunDown(drive.DriveNumber, drive.Model, drive.Serial));
-        LogBlockersOnChange(blockers);
-        return blockers;
+        return drives;
     }
 
-    /// <summary>Whether the D6 gate is open: <see cref="GateBlockers"/> is empty.</summary>
-    public bool AllRotationalDisksActive() => GateBlockers().Count == 0;
+    /// <summary>Whether the D6 gate is open: no drive of <see cref="CheckGate"/> blocks.</summary>
+    public bool AllRotationalDisksActive() => !CheckGate().Any(c => c.Blocks);
 
     /// <summary>
-    /// Controller ruling R17: the drives that keep the D6 gate closed. A drive whose
-    /// <see cref="DriveFacts.RequiresPowerCheck"/> is false is skipped without being asked; every
-    /// other drive blocks unless <paramref name="isSpunDown"/> answers <see langword="false"/>.
+    /// Controller ruling R17, drive by drive: one whose <see cref="DriveFacts.RequiresPowerCheck"/>
+    /// is false is not asked (and never blocks); every other drive is asked through
+    /// <paramref name="isSpunDown"/> and blocks unless it answers <see langword="false"/>.
     /// </summary>
-    internal static IReadOnlyList<DriveBlocker> FindGateBlockers(IEnumerable<DriveFacts> drives, Func<DriveFacts, bool?> isSpunDown)
+    internal static IReadOnlyList<DriveCheck> CheckDrives(IEnumerable<DriveFacts> drives, Func<DriveFacts, bool?> isSpunDown)
     {
-        var blockers = new List<DriveBlocker>();
+        var checks = new List<DriveCheck>();
         foreach (DriveFacts drive in drives)
         {
-            if (!drive.RequiresPowerCheck)
-            {
-                continue;
-            }
-
-            bool? spunDown = isSpunDown(drive);
-            if (spunDown != false)
-            {
-                blockers.Add(new DriveBlocker(drive, spunDown));
-            }
+            checks.Add(drive.RequiresPowerCheck ? new DriveCheck(drive, Asked: true, isSpunDown(drive)) : new DriveCheck(drive, Asked: false, SpunDown: null));
         }
 
-        return blockers;
+        return checks;
     }
 
     /// <summary>
@@ -213,17 +211,18 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     /// The answer of <c>ATA PASS-THROUGH(16)</c> CHECK POWER MODE: the registers come from the
     /// sense data whatever the SCSI status is (a SATA disk answers GOOD, a USB bridge CHECK
     /// CONDITION). Only the sense bytes within the <paramref name="returned"/> bytes of the reply
-    /// are read; <see langword="null"/> when they hold no registers.
+    /// and within the length the reply itself declares are read; <see langword="null"/> when they
+    /// hold no registers, or when the reply places its sense data anywhere but in our buffer.
     /// </summary>
     internal static bool? InterpretSatReply(in NativeMethods.ScsiPassThroughWithSense reply, uint returned)
     {
         uint senseOffset = (uint)Marshal.SizeOf<NativeMethods.ScsiPassThrough>();
-        if (returned <= senseOffset || reply.Sense is not { Length: SenseLength } sense)
+        if (reply.Spt.SenseInfoOffset != senseOffset || returned <= senseOffset || reply.Sense is not { Length: SenseLength } sense)
         {
             return null;
         }
 
-        int available = (int)Math.Min(returned - senseOffset, SenseLength);
+        int available = (int)Math.Min(Math.Min(returned - senseOffset, reply.Spt.SenseInfoLength), SenseLength);
         return SatSense.TryReadRegisters(sense.AsSpan(0, available), out byte status, out byte sectorCount)
             ? InterpretAtaResult(status, sectorCount)
             : null;
@@ -286,7 +285,7 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         }
     }
 
-    private void LogBlockersOnChange(IReadOnlyList<DriveBlocker> blockers)
+    private void LogBlockersOnChange(IReadOnlyList<DriveCheck> blockers)
     {
         string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{b.SpunDown}"));
         lock (_gateLogLock)
@@ -305,7 +304,7 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             return;
         }
 
-        foreach (DriveBlocker blocker in blockers)
+        foreach (DriveCheck blocker in blockers)
         {
             _log.LogInformation(
                 "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",

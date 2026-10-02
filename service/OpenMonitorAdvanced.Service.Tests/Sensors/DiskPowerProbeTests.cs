@@ -51,21 +51,27 @@ public sealed class DiskPowerProbeTests
         new(n, availability, model, null, bus, seekPenalty);
 
     /// <summary>Drives the rule would ask (a callback that records and answers "unknown", i.e. would block).</summary>
-    private static (IReadOnlyList<DriveBlocker> Blockers, List<int> Asked) Gate(params DriveFacts[] drives)
+    private static (IReadOnlyList<DriveCheck> Blockers, List<int> Asked) Gate(params DriveFacts[] drives)
     {
         var asked = new List<int>();
-        IReadOnlyList<DriveBlocker> blockers = DiskPowerProbe.FindGateBlockers(drives, drive =>
+        IReadOnlyList<DriveCheck> checks = DiskPowerProbe.CheckDrives(drives, drive =>
         {
             asked.Add(drive.DriveNumber);
             return null;
         });
-        return (blockers, asked);
+
+        // Every drive is reported, in order, asked or not.
+        Assert.Equal(drives, checks.Select(c => c.Drive));
+        Assert.Equal(asked, checks.Where(c => c.Asked).Select(c => c.Drive.DriveNumber));
+        return (Blockers(checks), asked);
     }
+
+    private static IReadOnlyList<DriveCheck> Blockers(IEnumerable<DriveCheck> checks) => [.. checks.Where(c => c.Blocks)];
 
     [Fact]
     public void ADriveWithoutMediaDoesNotBlockTheGate()
     {
-        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(4, bus: null, seekPenalty: null, DriveAvailability.NoMedia));
+        (IReadOnlyList<DriveCheck> blockers, List<int> asked) = Gate(Drive(4, bus: null, seekPenalty: null, DriveAvailability.NoMedia));
         Assert.Empty(blockers);
         Assert.Empty(asked);
     }
@@ -75,7 +81,7 @@ public sealed class DiskPowerProbeTests
     {
         // STORAGE_BUS_TYPE BusTypeVirtual (0xE), BusTypeFileBackedVirtual (0xF): VHD/VHDX, ramdisks;
         // BusTypeSpaces (0x10): a Storage Spaces virtual disk (ruling R19).
-        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(5, bus: 0x0E, seekPenalty: null), Drive(6, bus: 0x0F, seekPenalty: true), Drive(8, bus: 0x10, seekPenalty: null));
+        (IReadOnlyList<DriveCheck> blockers, List<int> asked) = Gate(Drive(5, bus: 0x0E, seekPenalty: null), Drive(6, bus: 0x0F, seekPenalty: true), Drive(8, bus: 0x10, seekPenalty: null));
         Assert.Empty(blockers);
         Assert.Empty(asked);
     }
@@ -83,7 +89,7 @@ public sealed class DiskPowerProbeTests
     [Fact]
     public void NvmeDoesNotBlockTheGate()
     {
-        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(2, bus: 0x11, seekPenalty: null));
+        (IReadOnlyList<DriveCheck> blockers, List<int> asked) = Gate(Drive(2, bus: 0x11, seekPenalty: null));
         Assert.Empty(blockers);
         Assert.Empty(asked);
     }
@@ -91,7 +97,7 @@ public sealed class DiskPowerProbeTests
     [Fact]
     public void ASolidStateDriveDoesNotBlockTheGate()
     {
-        (IReadOnlyList<DriveBlocker> blockers, List<int> asked) = Gate(Drive(1, bus: 0x0B, seekPenalty: false));
+        (IReadOnlyList<DriveCheck> blockers, List<int> asked) = Gate(Drive(1, bus: 0x0B, seekPenalty: false));
         Assert.Empty(blockers);
         Assert.Empty(asked);
     }
@@ -105,10 +111,10 @@ public sealed class DiskPowerProbeTests
 
         foreach (DriveFacts drive in new[] { hdd, unknown, unreadable })
         {
-            Assert.Empty(DiskPowerProbe.FindGateBlockers([drive], _ => false));
-            DriveBlocker standby = Assert.Single(DiskPowerProbe.FindGateBlockers([drive], _ => true));
+            Assert.Equal([new DriveCheck(drive, Asked: true, SpunDown: false)], DiskPowerProbe.CheckDrives([drive], _ => false));
+            DriveCheck standby = Assert.Single(Blockers(DiskPowerProbe.CheckDrives([drive], _ => true)));
             Assert.Equal((drive, (bool?)true), (standby.Drive, standby.SpunDown));
-            DriveBlocker unanswered = Assert.Single(DiskPowerProbe.FindGateBlockers([drive], _ => null));
+            DriveCheck unanswered = Assert.Single(Blockers(DiskPowerProbe.CheckDrives([drive], _ => null)));
             Assert.Null(unanswered.SpunDown);
         }
     }
@@ -127,6 +133,55 @@ public sealed class DiskPowerProbeTests
 
         Assert.True(probe.AllRotationalDisksActive());
         Assert.Equal([0], asked);
+    }
+
+    [Fact]
+    public void TheGateReportsEveryDriveAndTheEnumerationAsksNothing()
+    {
+        var asked = new List<int>();
+        DriveFacts[] drives = [Drive(0, 0x0B, true), Drive(2, 0x11, null), Drive(4, DriveFacts.BusTypeUsb, null)];
+        var probe = new DiskPowerProbe(
+            () => drives,
+            n =>
+            {
+                asked.Add(n);
+                return n == 4 ? null : false;
+            });
+
+        Assert.Equal(drives, probe.Enumerate());
+        Assert.Empty(asked);
+
+        Assert.Equal(
+            [
+                new DriveCheck(drives[0], Asked: true, SpunDown: false),
+                new DriveCheck(drives[1], Asked: false, SpunDown: null), // NVMe: nothing to wake
+                new DriveCheck(drives[2], Asked: true, SpunDown: null), // a USB disk is asked too: the first identification touches it
+            ],
+            probe.CheckGate());
+        Assert.Equal([0, 4], asked);
+        Assert.False(probe.AllRotationalDisksActive());
+    }
+
+    [Fact]
+    public void TheEnumerationAloneForgetsTheRouteOfADriveThatIsGone()
+    {
+        // After the gate opened the hub only enumerates: the route memory must follow that too.
+        var routes = new Routes { Native = null, Sat = false };
+        routes.Drives.Add(UsbStick());
+        DiskPowerProbe probe = routes.Probe();
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Single(routes.NativeAsked); // SAT is remembered
+
+        Assert.Single(probe.Enumerate());
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Single(routes.NativeAsked); // still there: the same disk
+
+        routes.Drives.Clear();
+        Assert.Empty(probe.Enumerate());
+        routes.Drives.Add(UsbStick());
+        Assert.False(probe.IsSpunDown(4, "Extreme", "4C53"));
+        Assert.Equal(2, routes.NativeAsked.Count); // unplugged in between: asked from scratch
     }
 
     [Fact]
@@ -334,7 +389,7 @@ public sealed class DiskPowerProbeTests
 
         // The same when the enumeration sees the new identity first.
         routes.Drives.Add(UsbStick(model: "Ultra", serial: "1111"));
-        Assert.Empty(probe.GateBlockers());
+        Assert.Empty(Blockers(probe.CheckGate()));
         Assert.Equal(4, routes.NativeAsked.Count);
     }
 
@@ -344,14 +399,14 @@ public sealed class DiskPowerProbeTests
         var routes = new Routes { Native = null, Sat = false };
         routes.Drives.Add(UsbStick());
         DiskPowerProbe probe = routes.Probe();
-        Assert.Empty(probe.GateBlockers());
-        Assert.Empty(probe.GateBlockers());
+        Assert.Empty(Blockers(probe.CheckGate()));
+        Assert.Empty(Blockers(probe.CheckGate()));
         Assert.Single(routes.NativeAsked);
 
         routes.Drives.Clear();
-        Assert.Empty(probe.GateBlockers());
+        Assert.Empty(Blockers(probe.CheckGate()));
         routes.Drives.Add(UsbStick());
-        Assert.Empty(probe.GateBlockers());
+        Assert.Empty(Blockers(probe.CheckGate()));
         Assert.Equal(2, routes.NativeAsked.Count);
     }
 
@@ -364,8 +419,8 @@ public sealed class DiskPowerProbeTests
             routes.Drives.Add(unidentified);
             DiskPowerProbe probe = routes.Probe();
 
-            Assert.Empty(probe.GateBlockers());
-            Assert.Empty(probe.GateBlockers());
+            Assert.Empty(Blockers(probe.CheckGate()));
+            Assert.Empty(Blockers(probe.CheckGate()));
             Assert.Equal(2, routes.NativeAsked.Count);
         }
 
@@ -373,8 +428,8 @@ public sealed class DiskPowerProbeTests
         var dead = new Routes { Native = null, Sat = null };
         dead.Drives.Add(UsbStick(serial: null));
         DiskPowerProbe deadProbe = dead.Probe();
-        Assert.Single(deadProbe.GateBlockers());
-        Assert.Single(deadProbe.GateBlockers());
+        Assert.Single(Blockers(deadProbe.CheckGate()));
+        Assert.Single(Blockers(deadProbe.CheckGate()));
         Assert.Equal((2, 2), (dead.NativeAsked.Count, dead.SatAsked.Count));
 
         // And not between enumerations either (the hub asks without enumerating).
@@ -432,6 +487,35 @@ public sealed class DiskPowerProbeTests
 
         reply.Sense = null!; // a reply the marshaller left without its array
         Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+    }
+
+    [Fact]
+    public void TheSenseSliceIsBoundedByTheLengthTheReplyDeclares()
+    {
+        // The USB stick's 18 sense bytes.
+        DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense reply = SatReply(0x02, "F00001005000FF0A00000000001D00000000");
+        reply.Spt.SenseInfoLength = 18;
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+
+        reply.Spt.SenseInfoLength = 17; // one byte short of what the sense data itself declares
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+
+        reply.Spt.SenseInfoLength = 0; // the driver wrote no sense data: the buffer is not an answer
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+
+        reply.Spt.SenseInfoLength = 255; // never past the buffer
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+    }
+
+    [Fact]
+    public void ASenseOffsetOtherThanTheBufferIsUnknown()
+    {
+        foreach (uint offset in new uint[] { 0, 48, 60, 88 })
+        {
+            DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense reply = SatReply(0x02, "F00001005000FF0A00000000001D00000000");
+            reply.Spt.SenseInfoOffset = offset;
+            Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+        }
     }
 
     [Fact]

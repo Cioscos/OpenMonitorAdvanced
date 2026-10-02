@@ -21,36 +21,39 @@ public enum ServiceModules
 }
 
 /// <summary>
-/// One subscriber's request: its interval (already clamped), the modules it does not want and
-/// the drive keys (<see cref="DriveKey"/>) whose SMART it does not want.
+/// One subscriber's request: its interval (already clamped), the modules it does not want, the
+/// drive keys (<see cref="DriveKey"/>) whose SMART it does not want and those, among the drives
+/// that are off by default (<see cref="DriveFacts.SmartOffByDefault"/>), whose SMART it wants on.
 /// </summary>
-public sealed record FeedRequest(uint IntervalMs, ServiceModules Disabled, IReadOnlySet<string> SmartDisabledDrives)
+public sealed record FeedRequest(uint IntervalMs, ServiceModules Disabled, IReadOnlySet<string> SmartDisabledDrives, IReadOnlySet<string> SmartEnabledDrives)
 {
-    /// <summary>
-    /// The request of a (decoder-validated) <see cref="SubscribeMessage"/> at <paramref name="intervalMs"/>.
-    /// Provisional: <see cref="SubscribeMessage.SmartEnabledDrives"/> is not read yet.
-    /// </summary>
+    /// <summary>The request of a (decoder-validated) <see cref="SubscribeMessage"/> at <paramref name="intervalMs"/>.</summary>
     public static FeedRequest From(SubscribeMessage subscribe, uint intervalMs) => new(
         intervalMs,
         ServiceModuleNames.Parse(subscribe.DisabledModules),
-        new HashSet<string>(subscribe.SmartDisabledDrives, StringComparer.Ordinal));
+        new HashSet<string>(subscribe.SmartDisabledDrives, StringComparer.Ordinal),
+        new HashSet<string>(subscribe.SmartEnabledDrives, StringComparer.Ordinal));
 }
 
 /// <summary>
-/// The configuration every subscriber's request adds up to. Compared by content (the drive set
-/// as a set), so an unchanged aggregate is recognised as such.
+/// The configuration every subscriber's request adds up to. Compared by content (the drive sets
+/// as sets), so an unchanged aggregate is recognised as such.
 /// </summary>
-public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string> SmartDisabledDrives)
+public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string> SmartDisabledDrives, IReadOnlySet<string> SmartEnabledDrives)
 {
-    /// <summary>Every module on, every drive's SMART on: the configuration before any request.</summary>
-    public static EffectiveConfig AllOn { get; } = new(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal));
+    /// <summary>
+    /// Every module on, no drive's SMART switched off and none switched on: the configuration
+    /// before any request (a drive that is off by default stays off).
+    /// </summary>
+    public static EffectiveConfig AllOn { get; } = new(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
 
-    /// <summary>The part the storage worker applies: the storage flag alone and the SMART-disabled drives.</summary>
-    public EffectiveConfig StoragePart => new(Enabled & ServiceModules.Storage, SmartDisabledDrives);
+    /// <summary>The part the storage worker applies: the storage flag alone and the two SMART drive sets.</summary>
+    public EffectiveConfig StoragePart => new(Enabled & ServiceModules.Storage, SmartDisabledDrives, SmartEnabledDrives);
 
     /// <summary>
-    /// A module is on if at least one request keeps it on; a drive's SMART is on if at least one
-    /// request with storage on keeps it on (with storage off everywhere no drive is listed).
+    /// A module is on if at least one request keeps it on. Among the requests with storage on, a
+    /// drive's SMART is off only if every one switches it off, and a default-off drive's SMART is
+    /// on if at least one switches it on (with storage off everywhere no drive is listed).
     /// <see langword="null"/> without requests: the caller keeps its last configuration.
     /// </summary>
     public static EffectiveConfig? Compute(IReadOnlyCollection<FeedRequest> requests)
@@ -62,6 +65,7 @@ public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string
 
         ServiceModules enabled = ServiceModules.None;
         HashSet<string>? smartDisabled = null;
+        var smartEnabled = new HashSet<string>(StringComparer.Ordinal);
         foreach (FeedRequest request in requests)
         {
             ServiceModules wanted = ServiceModules.All & ~request.Disabled;
@@ -71,6 +75,7 @@ public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string
                 continue;
             }
 
+            smartEnabled.UnionWith(request.SmartEnabledDrives);
             if (smartDisabled is null)
             {
                 smartDisabled = new HashSet<string>(request.SmartDisabledDrives, StringComparer.Ordinal);
@@ -81,21 +86,28 @@ public sealed record EffectiveConfig(ServiceModules Enabled, IReadOnlySet<string
             }
         }
 
-        return new EffectiveConfig(enabled, smartDisabled ?? new HashSet<string>(StringComparer.Ordinal));
+        return new EffectiveConfig(enabled, smartDisabled ?? new HashSet<string>(StringComparer.Ordinal), smartEnabled);
     }
 
     public bool Equals(EffectiveConfig? other) =>
-        other is not null && Enabled == other.Enabled && SmartDisabledDrives.SetEquals(other.SmartDisabledDrives);
+        other is not null
+        && Enabled == other.Enabled
+        && SmartDisabledDrives.SetEquals(other.SmartDisabledDrives)
+        && SmartEnabledDrives.SetEquals(other.SmartEnabledDrives);
 
-    public override int GetHashCode()
+    public override int GetHashCode() =>
+        HashCode.Combine(Enabled, SmartDisabledDrives.Count, SetHash(SmartDisabledDrives), SmartEnabledDrives.Count, SetHash(SmartEnabledDrives));
+
+    /// <summary>Independent of the enumeration order, like <see cref="ISet{T}.SetEquals"/>.</summary>
+    private static int SetHash(IReadOnlySet<string> drives)
     {
-        int drives = 0;
-        foreach (string drive in SmartDisabledDrives)
+        int hash = 0;
+        foreach (string drive in drives)
         {
-            drives ^= StringComparer.Ordinal.GetHashCode(drive);
+            hash ^= StringComparer.Ordinal.GetHashCode(drive);
         }
 
-        return HashCode.Combine(Enabled, SmartDisabledDrives.Count, drives);
+        return hash;
     }
 }
 

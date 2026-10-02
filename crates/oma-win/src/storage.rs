@@ -186,9 +186,16 @@ impl DiskGate {
         now: Instant,
         read: impl FnOnce() -> Option<TemperatureReport>,
     ) -> Self {
-        let (class, activity, carried) = match previous {
-            Some(gate) => (gate.class, gate.activity, Some(gate.temperatures)),
-            None => (class(), Activity::default(), None),
+        // A known disk keeps its last state until the next poll; a new one
+        // has none yet.
+        let (class, activity, power, carried) = match previous {
+            Some(gate) => (
+                gate.class,
+                gate.activity,
+                gate.power,
+                Some(gate.temperatures),
+            ),
+            None => (class(), Activity::default(), DiskPower::Unknown, None),
         };
         let temperatures = match class {
             DiskClass::NonRotational => DiskTemperatures::read(read(), now),
@@ -201,12 +208,12 @@ impl DiskGate {
             activity,
             temperatures,
             plan: Plan::Wait,
-            power: DiskPower::Unknown,
+            power,
         }
     }
 
-    /// Takes this poll's PDH rates (`None` on the warm-up poll or when
-    /// missing) and decides where the temperature comes from.
+    /// Takes this poll's PDH rates (`None` when missing) and decides where
+    /// the temperature comes from.
     fn observe(
         &mut self,
         read: Option<f64>,
@@ -216,6 +223,16 @@ impl DiskGate {
         now: &Stamp,
     ) {
         self.activity.observe(read, write, now);
+        self.decide(powered_on, service, now);
+    }
+
+    /// The first poll after a discovery: its PDH rates are not a sample, so
+    /// the activity window is neither opened nor closed, and only ages.
+    fn warm_up(&mut self, powered_on: Option<bool>, service: &ServiceDisk, now: &Stamp) {
+        self.decide(powered_on, service, now);
+    }
+
+    fn decide(&mut self, powered_on: Option<bool>, service: &ServiceDisk, now: &Stamp) {
         let recent = self.activity.recent(now);
         self.plan = plan(self.class, powered_on, service, recent);
         self.power = power(self.class, powered_on, service, recent);
@@ -224,14 +241,18 @@ impl DiskGate {
     /// The temperature values of this poll with their quality. A read
     /// suspended on purpose (idle, standby) repeats the last values as
     /// `Suspended`; a disk that waits for any other reason has no value. A
-    /// value measured by an earlier poll is `Held`.
+    /// value measured by an earlier poll is `Held`. A value that is absent
+    /// (never measured, or a failed read) is just absent, whatever the state.
     fn published(&mut self) -> Vec<(Option<f64>, Quality)> {
         let measured = std::mem::take(&mut self.temperatures.unpublished);
         let values = self.temperatures.values.iter().copied();
         match (self.plan, self.power) {
-            (Plan::Wait, DiskPower::Idle | DiskPower::Standby) => {
-                values.map(|value| (value, Quality::Suspended)).collect()
-            }
+            (Plan::Wait, DiskPower::Idle | DiskPower::Standby) => values
+                .map(|value| match value {
+                    Some(_) => (value, Quality::Suspended),
+                    None => (None, Quality::Fresh),
+                })
+                .collect(),
             (Plan::Wait, _) => values.map(|_| (None, Quality::Fresh)).collect(),
             // The service's temperature takes this place once its feed is wired.
             (Plan::Local | Plan::Service(_), _) => values
@@ -242,6 +263,22 @@ impl DiskGate {
                 .collect(),
         }
     }
+}
+
+/// What `DiskStateTable` publishes: the state of every identified disk, in
+/// disk order.
+fn disk_states(
+    disks: &[DiskInstance],
+    ids: &HashMap<u32, String>,
+    gates: &HashMap<u32, DiskGate>,
+) -> Vec<(String, DiskPower)> {
+    disks
+        .iter()
+        .filter_map(|disk| {
+            let id = ids.get(&disk.index)?;
+            Some((id.clone(), gates.get(&disk.index)?.power))
+        })
+        .collect()
 }
 
 /// The gate states of a discovery by device id, for the next one to pick up.
@@ -695,6 +732,9 @@ impl Provider for StorageProvider {
         self.fresh = true;
         self.quality = None;
         self.drives.publish(drive_entries);
+        // A removed disk leaves the table now, not at the next good poll.
+        self.disk_states
+            .publish(disk_states(&self.disks, &self.disk_ids, &self.gates));
         Ok(Inventory { devices, sensors })
     }
 
@@ -716,26 +756,26 @@ impl Provider for StorageProvider {
             |map: &HashMap<String, f64>, key: &str| map.get(key).copied().filter(|v| v.is_finite());
         let now = Stamp::now();
         // The gate: this poll's I/O decides which disks may be read at all.
-        // The rates of the first poll after a discovery are not activity.
-        let mut states = Vec::new();
+        // The rates of the first poll after a discovery are no sample.
         for disk in &self.disks {
-            let (Some(id), Some(gate)) = (
-                self.disk_ids.get(&disk.index),
-                self.gates.get_mut(&disk.index),
-            ) else {
+            let Some(gate) = self.gates.get_mut(&disk.index) else {
                 continue;
             };
-            let rate = |map| finite(map, &disk.instance).filter(|_| !fresh);
-            gate.observe(
-                rate(&read),
-                rate(&write),
-                powered_on(disk.index),
-                &ServiceDisk::Absent,
-                &now,
-            );
-            states.push((id.clone(), gate.power));
+            let powered_on = powered_on(disk.index);
+            if fresh {
+                gate.warm_up(powered_on, &ServiceDisk::Absent, &now);
+            } else {
+                gate.observe(
+                    finite(&read, &disk.instance),
+                    finite(&write, &disk.instance),
+                    powered_on,
+                    &ServiceDisk::Absent,
+                    &now,
+                );
+            }
         }
-        self.disk_states.publish(states);
+        self.disk_states
+            .publish(disk_states(&self.disks, &self.disk_ids, &self.gates));
         let (picked, rediscover) = refresh_one(&mut self.gates, now.mono, read_temperatures);
         if rediscover {
             return Err(ProviderError::Rediscover);
@@ -1188,7 +1228,7 @@ mod tests {
         // Never read: due as soon as the disk works, without waiting a period.
         let warm_up = stamp(start, 1);
         let disk = gates.get_mut(&0).unwrap();
-        disk.observe(None, None, Some(true), &ServiceDisk::Absent, &warm_up);
+        disk.warm_up(Some(true), &ServiceDisk::Absent, &warm_up);
         let outcome = refresh_one(&mut gates, warm_up.mono, |index| {
             panic!("disk {index} queried")
         });
@@ -1197,7 +1237,8 @@ mod tests {
         observe(gates.get_mut(&0).unwrap(), BUSY, &busy);
         let outcome = refresh_one(&mut gates, busy.mono, |_| Some(report(&[(0, 39.0)])));
         assert_eq!(outcome, (Some(0), true), "undeclared sensor: rediscover");
-        assert!(gates.get_mut(&0).unwrap().published().is_empty());
+        // The poll ends there: nothing is published before the rediscovery.
+        assert!(gates[&0].temperatures.values.is_empty());
 
         // The rediscovery declares the sensor from that report, with no query.
         let ids = HashMap::from([(0, "storage/a".to_owned())]);
@@ -1212,17 +1253,24 @@ mod tests {
             declared.temperatures.report.as_ref().unwrap().warning_c,
             Some(60)
         );
-        // The PDH warm-up poll that follows a rediscovery withdraws the
-        // activity of a moment ago: the value just read is published as the
-        // last reading of a disk that is not being read.
+        // The PDH warm-up poll that follows the rediscovery is no sample: the
+        // disk still counts as working, and the measurement no poll has
+        // published yet goes out as a new one.
         let after = stamp(start, 3);
-        declared.observe(None, None, Some(true), &ServiceDisk::Absent, &after);
-        assert_eq!(declared.published(), vec![(Some(39.0), Quality::Suspended)]);
+        declared.warm_up(Some(true), &ServiceDisk::Absent, &after);
+        assert_eq!(
+            (declared.plan, declared.power),
+            (Plan::Local, DiskPower::Active)
+        );
+        assert_eq!(declared.published(), vec![(Some(39.0), Quality::Fresh)]);
+        // From the next poll on it is the same measurement.
+        observe(&mut declared, BUSY, &stamp(start, 4));
+        assert_eq!(declared.published(), vec![(Some(39.0), Quality::Held)]);
 
         // A failed read keeps the sensor declared, without resurrecting the value.
         let mut failed = gate(RotationalOrUnknown, 35.0, start);
         assert!(!failed.temperatures.refresh(None, start));
-        let failed = DiskGate::discover(
+        let mut failed = DiskGate::discover(
             Some(failed),
             || panic!("class asked again"),
             start,
@@ -1230,6 +1278,168 @@ mod tests {
         );
         assert_eq!(failed.temperatures.positions, vec![0]);
         assert_eq!(failed.temperatures.values, vec![None]);
+        // Going idle does not turn the missing value into a suspended one.
+        observe(&mut failed, QUIET, &stamp(start, 1));
+        assert_eq!((failed.plan, failed.power), (Plan::Wait, DiskPower::Idle));
+        assert_eq!(failed.published(), vec![(None, Quality::Fresh)]);
+    }
+
+    #[test]
+    fn an_absent_value_is_never_suspended() {
+        let start = Instant::now();
+        let absent = ServiceDisk::Absent;
+        // An authorized read fails, then the disk goes idle, then to standby.
+        let mut gates = HashMap::from([(0, gate(RotationalOrUnknown, 35.0, start))]);
+        let now = stamp(start, 30);
+        observe(gates.get_mut(&0).unwrap(), BUSY, &now);
+        assert_eq!(
+            refresh_one(&mut gates, now.mono, |_| None),
+            (Some(0), false)
+        );
+        let disk = gates.get_mut(&0).unwrap();
+        for (second, powered_on, power) in [
+            (41, Some(true), DiskPower::Idle),
+            (42, Some(false), DiskPower::Standby),
+        ] {
+            disk.observe(QUIET.0, QUIET.1, powered_on, &absent, &stamp(start, second));
+            assert_eq!((disk.plan, disk.power), (Plan::Wait, power));
+            assert_eq!(disk.published(), vec![(None, Quality::Fresh)], "{power:?}");
+        }
+
+        // A sensor declared from a report that carried it, next to one whose
+        // last read failed: only the measured slot is a suspended reading.
+        let mut mixed = gate(RotationalOrUnknown, 35.0, start);
+        assert!(!mixed.temperatures.refresh(None, start));
+        mixed.temperatures.report = Some(report(&[(0, 36.0), (1, 30.0)]));
+        let mut mixed = DiskGate::discover(
+            Some(mixed),
+            || panic!("class asked again"),
+            start,
+            || panic!("queried at discovery"),
+        );
+        assert_eq!(mixed.temperatures.values, vec![None, Some(30.0)]);
+        observe(&mut mixed, QUIET, &stamp(start, 1));
+        assert_eq!(
+            mixed.published(),
+            vec![(None, Quality::Fresh), (Some(30.0), Quality::Suspended)]
+        );
+    }
+
+    #[test]
+    fn a_warm_up_poll_keeps_an_open_window_for_the_same_id() {
+        let start = Instant::now();
+        let absent = ServiceDisk::Absent;
+        let mut disk = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut disk, BUSY, &stamp(start, 1));
+        // A rediscovery, then its warm-up poll: the window opened under this
+        // id is neither closed nor renewed.
+        let ids = HashMap::from([(0, "storage/a".to_owned())]);
+        let mut disk = DiskGate::discover(
+            gates_by_id(HashMap::from([(0, disk)]), &ids).remove("storage/a"),
+            || panic!("class asked again"),
+            start,
+            || panic!("queried at discovery"),
+        );
+        assert_eq!(disk.power, DiskPower::Active, "no flap to unknown");
+        disk.warm_up(Some(true), &absent, &stamp(start, 2));
+        assert_eq!((disk.plan, disk.power), (Plan::Local, DiskPower::Active));
+        // It still ages from the last real sample, on both clocks.
+        disk.warm_up(Some(true), &absent, &stamp(start, 11));
+        assert_eq!(disk.plan, Plan::Local);
+        disk.warm_up(Some(true), &absent, &stamp(start, 12));
+        assert_eq!((disk.plan, disk.power), (Plan::Wait, DiskPower::Idle));
+        let mut suspended = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut suspended, BUSY, &stamp(start, 1));
+        let resumed = Stamp {
+            wall: stamp(start, 3_600).wall,
+            ..stamp(start, 2)
+        };
+        suspended.warm_up(Some(true), &absent, &resumed);
+        assert_eq!(suspended.plan, Plan::Wait);
+
+        // The power state is still read on a warm-up poll.
+        let mut off = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut off, BUSY, &stamp(start, 1));
+        off.warm_up(Some(false), &absent, &stamp(start, 2));
+        assert_eq!((off.plan, off.power), (Plan::Wait, DiskPower::Standby));
+
+        // A regular poll with missing counters does close the window, and a
+        // warm-up after a real gap does not bridge it.
+        let mut missing = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut missing, BUSY, &stamp(start, 1));
+        missing.observe(None, None, Some(true), &absent, &stamp(start, 2));
+        assert_eq!(missing.plan, Plan::Wait);
+        let mut gap = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut gap, BUSY, &stamp(start, 1));
+        gap.warm_up(Some(true), &absent, &stamp(start, 2));
+        observe(&mut gap, BUSY, &stamp(start, 13));
+        assert_eq!(gap.plan, Plan::Wait, "the sample after a gap is a warm-up");
+    }
+
+    #[test]
+    fn a_warm_up_poll_alone_never_authorizes_a_read() {
+        let start = Instant::now();
+        let no_query = |index: u32| -> Option<TemperatureReport> { panic!("disk {index} queried") };
+        let new = DiskGate::discover(
+            None,
+            || RotationalOrUnknown,
+            start,
+            || panic!("queried at discovery"),
+        );
+        assert_eq!(new.power, DiskPower::Unknown);
+        let mut gates = HashMap::from([
+            (0, new),
+            // Known, due, and quiet before the rediscovery.
+            (1, gate(RotationalOrUnknown, 35.0, start)),
+        ]);
+        observe(gates.get_mut(&1).unwrap(), QUIET, &stamp(start, 40));
+        for second in [41, 42] {
+            let now = stamp(start, second);
+            for disk in gates.values_mut() {
+                disk.warm_up(Some(true), &ServiceDisk::Absent, &now);
+                assert_eq!((disk.plan, disk.power), (Plan::Wait, DiskPower::Idle));
+            }
+            assert_eq!(refresh_one(&mut gates, now.mono, no_query), (None, false));
+        }
+    }
+
+    #[test]
+    fn disk_states_follow_the_discovered_disks() {
+        let start = Instant::now();
+        let disks = disk_instances(&["3 E:".into(), "0 C:".into(), "5".into()]);
+        let ids = HashMap::from([
+            (0, "storage/a".to_owned()),
+            (3, "storage/b".to_owned()),
+            // Disk 5 has no identity: no gate, no state.
+        ]);
+        let mut known = gate(RotationalOrUnknown, 35.0, start);
+        observe(&mut known, QUIET, &stamp(start, 1));
+        let new = DiskGate::discover(
+            None,
+            || RotationalOrUnknown,
+            start,
+            || panic!("queried at discovery"),
+        );
+        let gates = HashMap::from([(0, known), (3, new)]);
+        // Disk order; a disk seen for the first time is unknown until its
+        // first poll.
+        let states = disk_states(&disks, &ids, &gates);
+        assert_eq!(
+            states,
+            vec![
+                ("storage/a".to_owned(), DiskPower::Idle),
+                ("storage/b".to_owned(), DiskPower::Unknown),
+            ]
+        );
+        // The next discovery no longer finds disk 0: its entry goes with it.
+        let table = DiskStateTable::default();
+        table.publish(states);
+        let remaining = disk_instances(&["3 E:".into()]);
+        table.publish(disk_states(&remaining, &ids, &gates));
+        assert_eq!(
+            table.get(),
+            (2, vec![("storage/b".to_owned(), DiskPower::Unknown)])
+        );
     }
 
     #[test]

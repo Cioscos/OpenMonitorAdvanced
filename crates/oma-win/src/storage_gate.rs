@@ -50,7 +50,8 @@ pub struct Activity {
 }
 
 impl Activity {
-    /// `read`/`write`: the PDH rates of this poll; `None` on the warm-up poll or when missing.
+    /// `read`/`write`: the PDH rates of this poll; `None` when missing. The
+    /// warm-up poll after a discovery is no sample and is not observed at all.
     ///
     /// A sample is valid when both rates are finite and not negative. A valid
     /// positive one opens the window; a valid zero leaves an open window

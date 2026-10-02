@@ -44,10 +44,15 @@ fn assert_first_poll_has_no_rates(inventory: &Inventory, first: &[Option<f64>]) 
 /// Discovers, polls twice a second apart, and checks alignment. The first
 /// poll after a discover only primes the PDH rate counters (fresh baseline,
 /// no elapsed interval yet): its rate sensors must be `None`. The second poll
-/// carries real rate values. A provider that asks for a rediscovery on that
-/// poll (a hard disk at work declares its temperature sensor after its first
-/// authorized read) starts over once.
+/// carries real rate values.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
+    discover_and_poll_once(p).expect("second poll asked for a rediscovery")
+}
+
+/// [`discover_and_poll`] for the storage provider alone: a hard disk at work
+/// declares its temperature sensor after its first authorized read, through
+/// a rediscovery on the second poll. Starts over once.
+fn discover_and_poll_storage(p: &mut StorageProvider) -> (Inventory, Vec<Option<f64>>) {
     discover_and_poll_once(p)
         .unwrap_or_else(|| discover_and_poll_once(p).expect("a second rediscovery in a row"))
 }
@@ -122,7 +127,7 @@ fn memory_provider_reports_usage() {
 #[ignore = "requires real Windows hardware"]
 fn storage_provider_reports_disks_and_volumes() {
     let mut p = StorageProvider::default();
-    let (inventory, values) = discover_and_poll(&mut p);
+    let (inventory, values) = discover_and_poll_storage(&mut p);
     assert!(!inventory.devices.is_empty(), "at least the system disk");
     for (sensor, value) in inventory.sensors.iter().zip(&values) {
         if sensor.label.key == "storage.volumeUsed" {
@@ -182,7 +187,7 @@ fn reads_nvme_health_on_this_machine() {
         "percent/available-spare",
     ];
     let mut p = StorageProvider::default();
-    let (inventory, values) = discover_and_poll(&mut p);
+    let (inventory, values) = discover_and_poll_storage(&mut p);
     let mut with_health = 0;
     for device in &inventory.devices {
         let found: Vec<(&Sensor, Option<f64>)> = inventory

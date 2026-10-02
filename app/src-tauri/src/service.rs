@@ -206,10 +206,12 @@ impl ToggleState {
     }
 }
 
-/// What the user turned off, as the link and the provider take it: the names
-/// of the service modules switched off and the core ids of the disks whose
-/// SMART is off.
+/// What the user chose, as the link and the provider take it: the names of
+/// the service modules switched off, the core ids of the disks whose SMART is
+/// off and of the default-off disks switched on. A disk in both lists is
+/// switched off.
 pub(crate) fn request_of(settings: &Settings) -> SourceRequest {
+    let disabled = &settings.sources.smart_disabled_drives;
     SourceRequest {
         disabled_modules: settings
             .sources
@@ -218,9 +220,14 @@ pub(crate) fn request_of(settings: &Settings) -> SourceRequest {
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        smart_disabled_drives: settings.sources.smart_disabled_drives.clone(),
-        // No setting carries switched-on disks yet.
-        smart_enabled_drives: Vec::new(),
+        smart_disabled_drives: disabled.clone(),
+        smart_enabled_drives: settings
+            .sources
+            .smart_enabled_drives
+            .iter()
+            .filter(|id| !disabled.contains(id))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -228,8 +235,8 @@ pub(crate) fn request_of(settings: &Settings) -> SourceRequest {
 /// link. Must never block.
 type SourcesSink = Box<dyn Fn(SourceRequest) + Send + Sync>;
 
-/// Sends the request to `sink` whenever `sources.serviceModules` or
-/// `sources.smartDisabledDrives` change. It keeps the last request it saw and
+/// Sends the request to `sink` whenever `sources.serviceModules`,
+/// `sources.smartDisabledDrives` or `sources.smartEnabledDrives` change. It keeps the last request it saw and
 /// acts only when the new one differs; the listener gets only the new state,
 /// may run on any thread that changes the store (the settings writer
 /// included) and always in store order, so `sink` must be quick: it takes the
@@ -896,6 +903,45 @@ mod tests {
                 smart_enabled_drives: Vec::new(),
                 smart_disabled_drives: vec!["storage/device-a".to_owned()],
             }]
+        );
+    }
+
+    #[test]
+    fn smart_enabled_drives_changes_are_sent_as_a_request() {
+        let store = new_store(&FakeFs::new());
+        let requests = follow_into(&store);
+        store
+            .update(&serde_json::json!({"sources": {"smartEnabledDrives": ["storage/device-a"]}}))
+            .unwrap();
+        store
+            .update(&serde_json::json!({"sources": {"smartEnabledDrives": []}}))
+            .unwrap();
+        assert_eq!(
+            snapshot(&requests),
+            vec![
+                SourceRequest {
+                    disabled_modules: Vec::new(),
+                    smart_disabled_drives: Vec::new(),
+                    smart_enabled_drives: vec!["storage/device-a".to_owned()],
+                },
+                SourceRequest::default(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_id_in_both_lists_is_requested_as_disabled_only() {
+        let mut settings = Settings::default();
+        settings.sources.smart_disabled_drives = vec!["storage/device-a".to_owned()];
+        settings.sources.smart_enabled_drives =
+            vec!["storage/device-a".to_owned(), "storage/device-b".to_owned()];
+        assert_eq!(
+            request_of(&settings),
+            SourceRequest {
+                disabled_modules: Vec::new(),
+                smart_disabled_drives: vec!["storage/device-a".to_owned()],
+                smart_enabled_drives: vec!["storage/device-b".to_owned()],
+            }
         );
     }
 

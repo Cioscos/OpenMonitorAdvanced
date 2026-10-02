@@ -156,6 +156,9 @@ pub fn decode_lenient(value: &Value) -> Decoded {
     if let Some(list) = reader.string_list(&sources, "sources", "smartDisabledDrives") {
         settings.sources.smart_disabled_drives = list;
     }
+    if let Some(list) = reader.string_list(&sources, "sources", "smartEnabledDrives") {
+        settings.sources.smart_enabled_drives = list;
+    }
 
     let advanced = reader.section(root, "", "advanced");
     settings.advanced.section = reader.text(&advanced, "advanced", "section");

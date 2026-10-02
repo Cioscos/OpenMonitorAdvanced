@@ -51,14 +51,15 @@ use std::time::{Duration, Instant};
 
 use oma_ipc::{
     DriveState, Message, PawnIoStatus, Reconfiguration, ServiceSources, SourceDrive, Subscribe,
-    WireError, WireSchema, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, PROTOCOL_VERSION,
+    WireError, WireSchema, WireServiceState, WireSnapshot, PROTOCOL_VERSION,
 };
 
+use super::drives::{request_keys, wire_drive_for};
 use super::feed::{SourceRequest, SvcFeed};
 use super::pipe::{CloseReason, ConnectError, PipeClient, PipeEvent, PipeReader};
 use super::scm::{RunState, ServiceControl, ServiceQuery};
 use super::status::{ServiceDetail, ServiceState, ServiceStatus, ServiceStatusTable};
-use crate::storage::{core_id_for_key, drive_keys_for, DriveIdTable, DriveIds};
+use crate::storage::{core_id_for_key, DriveIdTable, DriveIds};
 
 /// Longest [`ServiceLink::shutdown`] waits for the thread before detaching it.
 pub const JOIN_WAIT: Duration = Duration::from_millis(500);
@@ -612,14 +613,9 @@ impl Machine {
         effects
     }
 
-    /// The drive keys of the request, switched off and switched on, translated with `drives`
-    /// and cut to [`MAX_DRIVE_KEYS`] each.
+    /// The drive keys of the request, switched off and switched on, translated with `drives`.
     fn request_keys(&self, drives: &DriveIds) -> (Vec<String>, Vec<String>) {
-        let mut disabled = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
-        disabled.truncate(MAX_DRIVE_KEYS);
-        let mut enabled = drive_keys_for(&self.request.smart_enabled_drives, &drives.drives);
-        enabled.truncate(MAX_DRIVE_KEYS);
-        (disabled, enabled)
+        request_keys(&self.request, drives)
     }
 
     /// The `Subscribe` for the current interval and request, with `drives`
@@ -654,11 +650,14 @@ impl Machine {
             .iter()
             .map(|drive| SourceDrive {
                 physical_drive: drive.physical_drive,
-                device_id: drive
-                    .key
-                    .as_deref()
-                    .and_then(|key| core_id_for_key(key, &drives.drives))
-                    .map(str::to_owned),
+                device_id: drives
+                    .drives
+                    .iter()
+                    .find(|entry| {
+                        wire_drive_for(entry, drives, block)
+                            .is_some_and(|matched| std::ptr::eq(matched, drive))
+                    })
+                    .map(|entry| entry.device_id.clone()),
                 model: drive.model.clone(),
                 state: DriveState::from_wire(&drive.state),
                 blocks_smart: drive.blocks_smart,
@@ -679,7 +678,6 @@ impl Machine {
                 .map(str::to_owned)
                 .collect(),
             reconfiguration,
-            // Provisional association by key (Task 11 matches on number and key).
             drives: source_drives,
             smart_blocked_by,
         });
@@ -3527,6 +3525,37 @@ mod tests {
             vec![DISK_ID.to_owned()],
             "derived from the blocking drives that were matched to a core disk"
         );
+    }
+
+    #[test]
+    fn a_drive_is_matched_to_a_core_disk_by_number_and_key() {
+        let now = Instant::now();
+        let settings = LinkSettings {
+            drives: one_disk_table(),
+            ..test_settings()
+        };
+        let device_ids = |wire: WireServiceState| -> Vec<Option<String>> {
+            let m = streaming_machine(settings.clone(), wire, now);
+            let sources = m.status.sources.expect("sources");
+            sources.drives.into_iter().map(|d| d.device_id).collect()
+        };
+
+        // The disk's key under another drive number: not the same disk.
+        let mut moved = block("applied");
+        moved.drives = vec![wire_drive(1, Some(disk_key()), "active", false)];
+        assert_eq!(device_ids(moved), vec![None]);
+
+        // The key twice in the service's table: neither is matched.
+        let mut twice = block("applied");
+        twice.drives = vec![
+            wire_drive(0, Some(disk_key()), "active", false),
+            wire_drive(1, Some(disk_key()), "active", false),
+        ];
+        assert_eq!(device_ids(twice), vec![None, None]);
+
+        let mut same = block("applied");
+        same.drives = vec![wire_drive(0, Some(disk_key()), "active", false)];
+        assert_eq!(device_ids(same), vec![Some(DISK_ID.to_owned())]);
     }
 
     #[test]

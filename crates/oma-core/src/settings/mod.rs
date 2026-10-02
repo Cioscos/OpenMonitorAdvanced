@@ -225,6 +225,9 @@ pub struct Sources {
     pub anti_cheat: bool,
     pub service_modules: ServiceModules,
     pub smart_disabled_drives: Vec<String>,
+    /// Core ids of the disks whose SMART is off by default and that the user
+    /// switched on.
+    pub smart_enabled_drives: Vec<String>,
 }
 
 /// Advanced view state. `None` means "never set", which is distinct from a
@@ -330,6 +333,7 @@ pub fn encode(settings: &Settings) -> Value {
                 "psu": s.service_modules.psu,
             },
             "smartDisabledDrives": s.smart_disabled_drives,
+            "smartEnabledDrives": s.smart_enabled_drives,
         },
         "advanced": advanced,
         "view": view,
@@ -380,6 +384,7 @@ pub(crate) mod test_support {
                     psu: false,
                 },
                 smart_disabled_drives: vec!["disk/0".into(), "disk/1".into()],
+                smart_enabled_drives: vec!["disk/2".into()],
             },
             advanced: AdvancedState {
                 section: Some("gpu".into()),
@@ -450,7 +455,8 @@ mod tests {
                 "antiCheat": false,
                 "serviceModules": {"cpu": true, "motherboard": true, "memory": true,
                                    "storage": true, "controller": true, "psu": true},
-                "smartDisabledDrives": []
+                "smartDisabledDrives": [],
+                "smartEnabledDrives": []
             },
             "advanced": {"series": {}},
             "view": {},
@@ -470,6 +476,30 @@ mod tests {
             assert!(decoded.diagnostics.is_empty(), "{:?}", decoded.diagnostics);
             assert_eq!(decoded.version, VersionStatus::Current);
         }
+    }
+
+    #[test]
+    fn smart_enabled_drives_round_trips() {
+        let mut settings = Settings::default();
+        settings.sources.smart_enabled_drives = vec!["storage/device-aaa".into()];
+        let encoded = encode(&settings);
+        assert_eq!(
+            encoded["sources"]["smartEnabledDrives"],
+            json!(["storage/device-aaa"])
+        );
+        let decoded = decode_lenient(&encoded);
+        assert_eq!(decoded.settings, settings);
+        assert!(decoded.diagnostics.is_empty(), "{:?}", decoded.diagnostics);
+
+        let patched = apply_patch(
+            &Settings::default(),
+            &json!({"sources": {"smartEnabledDrives": ["storage/device-aaa"]}}),
+        )
+        .unwrap();
+        assert_eq!(patched, settings);
+        let cleared =
+            apply_patch(&patched, &json!({"sources": {"smartEnabledDrives": []}})).unwrap();
+        assert!(cleared.sources.smart_enabled_drives.is_empty());
     }
 
     #[test]

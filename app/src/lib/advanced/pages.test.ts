@@ -270,6 +270,7 @@ test('the SMART switch property is for the settings, not the device page', () =>
   const disk = { id: 'storage/a', kind: 'storage' as const, name: 'Disk', properties: { smartSelectable: 'true', tempWarningC: '70' } };
   expect(propertyRows(disk, 'en', tEn).map((r) => r.key)).toEqual(['tempWarningC']);
   expect(propertyRows({ ...disk, properties: { smartSelectable: 'false' } }, 'en', tEn)).toEqual([]);
+  expect(propertyRows({ ...disk, properties: { smartSelectable: 'true', smartDefault: 'off' } }, 'en', tEn)).toEqual([]);
 });
 
 test('temperature limits follow the temperature unit and their labels carry no unit', async () => {

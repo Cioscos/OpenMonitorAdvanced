@@ -258,8 +258,8 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   tjMaxC: 'celsius',
 };
 
-/** Properties meant for other screens: `smartSelectable` feeds the Settings' SMART switches. */
-const HIDDEN_PROPERTIES = new Set(['smartSelectable']);
+/** Properties meant for other screens: `smartSelectable` and `smartDefault` feed the Settings' SMART switches. */
+const HIDDEN_PROPERTIES = new Set(['smartSelectable', 'smartDefault']);
 
 export interface PropertyRow {
   key: string;

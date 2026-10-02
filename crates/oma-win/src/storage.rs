@@ -8,7 +8,7 @@ use std::time::Instant;
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError, Quality};
 use windows::core::HSTRING;
-use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::Win32::Storage::FileSystem::{BusTypeUsb, GetDiskFreeSpaceExW};
 
 use crate::pdh::{Counter, Query};
 pub use crate::storage_gate::DiskPower;
@@ -386,10 +386,14 @@ pub struct DriveEntry {
     /// and this app call the disk when they talk about its SMART. `None` when
     /// the descriptor has no model or no serial.
     pub key: Option<String>,
+    /// The service leaves this disk's SMART off unless a client asks for it:
+    /// a disk on the USB bus (spec M6b §4.2).
+    pub smart_default_off: bool,
 }
 
 impl DriveEntry {
-    /// An entry whose `key` follows from `model` and `serial`.
+    /// An entry whose `key` follows from `model` and `serial`, with SMART on
+    /// by default.
     pub fn new(
         index: u32,
         device_id: String,
@@ -406,6 +410,7 @@ impl DriveEntry {
             model,
             serial,
             key,
+            smart_default_off: false,
         }
     }
 }
@@ -415,13 +420,26 @@ impl DriveEntry {
 /// model and a serial has a drive key (spec M5 §2.8).
 pub const SMART_SELECTABLE: &str = "smartSelectable";
 
-/// Properties of a disk device: its temperature limits and [`SMART_SELECTABLE`].
+/// Device property of a disk whose SMART is off unless the user switches it
+/// on (`"off"`); absent for every other disk.
+pub const SMART_DEFAULT: &str = "smartDefault";
+
+/// Whether a disk on this bus has its SMART off by default.
+fn smart_default_off(bus_type: Option<i32>) -> bool {
+    bus_type == Some(BusTypeUsb.0)
+}
+
+/// Properties of a disk device: its temperature limits, [`SMART_SELECTABLE`]
+/// and, for a default-off disk, [`SMART_DEFAULT`].
 pub(crate) fn disk_properties(
     report: Option<&TemperatureReport>,
     entry: &DriveEntry,
 ) -> BTreeMap<String, String> {
     let mut properties = temperature_properties(report);
     properties.insert(SMART_SELECTABLE.to_owned(), entry.key.is_some().to_string());
+    if entry.smart_default_off {
+        properties.insert(SMART_DEFAULT.to_owned(), "off".to_owned());
+    }
     properties
 }
 
@@ -624,8 +642,11 @@ impl Provider for StorageProvider {
                 continue;
             };
             let (model, serial) = descriptor_texts(disk.index);
-            let entry = DriveEntry::new(disk.index, id.clone(), model, serial);
             let bus = bus_type(disk.index);
+            let entry = DriveEntry {
+                smart_default_off: smart_default_off(bus),
+                ..DriveEntry::new(disk.index, id.clone(), model, serial)
+            };
             // A disk that may be rotational is not queried here (the query
             // wakes it up): it keeps what it had under the same id.
             // Unknown/asleep/idle disks remain scheduled; a later successful
@@ -1592,6 +1613,31 @@ mod tests {
             Some("false")
         );
         assert_eq!(without.len(), 1);
+    }
+
+    #[test]
+    fn disk_properties_mark_a_usb_disk_as_default_off() {
+        let usb = DriveEntry {
+            smart_default_off: true,
+            ..entry(1)
+        };
+        let properties = disk_properties(None, &usb);
+        assert_eq!(
+            properties.get(SMART_DEFAULT).map(String::as_str),
+            Some("off")
+        );
+        assert_eq!(
+            properties.get(SMART_SELECTABLE).map(String::as_str),
+            Some("true")
+        );
+        // Every other disk has no such property.
+        assert!(!disk_properties(None, &entry(1)).contains_key(SMART_DEFAULT));
+
+        assert!(smart_default_off(Some(BusTypeUsb.0)));
+        assert!(!smart_default_off(Some(
+            windows::Win32::Storage::FileSystem::BusTypeNvme.0
+        )));
+        assert!(!smart_default_off(None));
     }
 
     #[test]

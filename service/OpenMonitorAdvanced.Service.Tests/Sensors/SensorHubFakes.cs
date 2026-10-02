@@ -286,12 +286,16 @@ internal sealed class FakeActivity : IDiskActivityProbe
 
     public int ReadsOf(int drive) => _reads.GetValueOrDefault(drive);
 
+    /// <summary>Runs at the start of every counter read, on the calling thread.</summary>
+    public Action<int>? OnRead { get; set; }
+
     /// <summary>One more read and one more write on that drive.</summary>
     public void Work(int drive) =>
         Counters[drive] = Counters.TryGetValue(drive, out DiskCounters? c) && c is { } at ? new DiskCounters(at.ReadCount + 1, at.WriteCount + 1) : new DiskCounters(1, 1);
 
     public DiskCounters? Read(int driveNumber)
     {
+        OnRead?.Invoke(driveNumber);
         int n = _reads.AddOrUpdate(driveNumber, 1, (_, count) => count + 1);
         return Counters.TryGetValue(driveNumber, out DiskCounters? counters) ? counters : new DiskCounters(n, n);
     }

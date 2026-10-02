@@ -159,19 +159,17 @@ public sealed class DiskActivityProbe(ILogger<DiskActivityProbe> log) : IDiskAct
 /// <summary>What the passive sources say about a drive at the start of a storage round.</summary>
 /// <param name="PoweredOff">Windows reports the disk off. A failed call counts as on, unless Windows last reported the disk off: then it is still off.</param>
 /// <param name="Readable">Its counters could be read and belong to a drive with a <see cref="DriveKey"/>.</param>
-/// <param name="Recent">Its counters grew since the baseline taken shortly before the round, or Windows turned it on since the round before.</param>
+/// <param name="Recent">Its counters grew since the reference taken at the end of the round before, or Windows turned it on since that round.</param>
 /// <param name="First">It is watched for the first time; said once, whatever happens to the round.</param>
 internal readonly record struct DriveActivity(bool PoweredOff, bool Readable, bool Recent, bool First);
 
 /// <summary>The rule of recent activity (design M6b §4.4). Pure.</summary>
 internal static class DiskActivity
 {
-    /// <summary>How long before a round the baseline is taken.</summary>
-    internal static readonly TimeSpan Window = TimeSpan.FromSeconds(10);
-
     /// <summary>
-    /// How much later than <see cref="Window"/> the round's sample may still come: the round is
-    /// started by a timer and lists the drives first, so it is never exactly on time.
+    /// How much older than one <see cref="SensorHub.StorageInterval"/> the reference may be
+    /// when the round samples: the round is started by a timer and lists the drives first, so
+    /// it is never exactly on time.
     /// </summary>
     internal static readonly TimeSpan Tolerance = TimeSpan.FromSeconds(2);
 
@@ -206,13 +204,15 @@ internal static class DiskActivity
 /// <summary>
 /// The storage worker's samples of the passive sources (one thread, no lock).
 /// <para>
-/// <b>Baseline.</b> The counters are read <see cref="DiskActivity.Window"/> before a round and
-/// compared with a second sample at the round's start, before any command is sent. A baseline
-/// serves one round, and only for the drive it was read from: a drive with a
-/// <see cref="DriveKey"/>, in a drive list that has not changed since the round before (a new
-/// identity at its number, or a hot-plug, which renumbers drives), and no more than the window
-/// plus <see cref="DiskActivity.Tolerance"/> old (a suspension, a late round). Anything else is
-/// no growth.
+/// <b>Reference (baseline).</b> The counters are read at the end of a round, after its last
+/// question and its last SMART read, and compared with the sample at the start of the next
+/// round, before any command is sent: the window is the whole interval between two rounds, and
+/// the service's own traffic is never in it. A reference serves one round, and only for the
+/// drive it was read from: a drive with a <see cref="DriveKey"/>, in a drive list that has not
+/// changed since the round before (a new identity at its number, or a hot-plug, which renumbers
+/// drives), and no more than one <see cref="SensorHub.StorageInterval"/> plus
+/// <see cref="DiskActivity.Tolerance"/> old (a suspension, a late round). Anything else is no
+/// growth, and so is a round whose predecessor did not reach its end.
 /// </para>
 /// <para>
 /// <b>Memory of the watched drives</b>, by drive number, model and serial. A drive that was not
@@ -240,12 +240,13 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     private long _takenAt;
     private bool _taken;
 
-    /// <summary>Whether the next round has drives to watch and no baseline yet.</summary>
-    internal bool BaselineDue => !_taken && _watched.Length > 0;
-
-    /// <summary>Reads the counters of the drives the round before watched.</summary>
+    /// <summary>
+    /// The end of a round: reads the counters of the drives its <see cref="Sample"/> watched,
+    /// as the next round's reference. A read that throws leaves none.
+    /// </summary>
     internal void TakeBaseline()
     {
+        _taken = false;
         _baseline.Clear();
         foreach (int drive in _watched)
         {
@@ -259,13 +260,15 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     /// <summary>
     /// The round's sample of every drive <paramref name="watched"/> selects, by drive number.
     /// The counters of a drive without a <see cref="DriveKey"/> are not read: nothing proves
-    /// whose they are. Consumes the baseline and each drive's "first" at once.
+    /// whose they are. Consumes the reference and each drive's "first" at once, so a round
+    /// that fails after this leaves neither behind.
     /// </summary>
     internal IReadOnlyDictionary<int, DriveActivity> Sample(IReadOnlyList<DriveFacts> drives, Func<DriveFacts, bool> watched)
     {
         bool usable = _taken
-            && time.GetElapsedTime(_takenAt) <= DiskActivity.Window + DiskActivity.Tolerance
+            && time.GetElapsedTime(_takenAt) <= SensorHub.StorageInterval + DiskActivity.Tolerance
             && drives.SequenceEqual(_listed);
+        _taken = false;
         var seen = new Dictionary<int, DriveActivity>();
         var met = new HashSet<(int, string?, string?)>();
         var next = new List<int>();
@@ -305,20 +308,19 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
         _listed = drives;
         _watched = [.. next];
         _baseline.Clear();
-        _taken = false;
         return seen;
     }
 
     /// <summary>
     /// The round before this one expired: every drive is first watched again at the next
-    /// <see cref="Sample"/>, which consumes that at once. The baseline and the drive list stay
+    /// <see cref="Sample"/>, which consumes that at once. The reference and the drive list stay
     /// (they have their own limits), and so does what Windows last said about a drive being off.
     /// </summary>
     internal void Rearm() => _met = [];
 
     /// <summary>
-    /// Storage was switched off or the hub went idle: nothing is watched, no baseline is read,
-    /// and every drive is new afterwards. What Windows last said about a drive being off stays.
+    /// Storage was switched off or the hub went idle: nothing is watched, the reference is
+    /// dropped, and every drive is new afterwards. What Windows last said about a drive being off stays.
     /// </summary>
     internal void Clear()
     {

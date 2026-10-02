@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Time.Testing;
 using OpenMonitorAdvanced.Service.Sensors;
 using Xunit;
 
@@ -48,7 +49,42 @@ public sealed class DiskActivityTests
         Assert.Equal(40, (int)Marshal.OffsetOf<DiskActivityProbe.NativeMethods.DiskPerformance>(nameof(DiskActivityProbe.NativeMethods.DiskPerformance.ReadCount)));
         Assert.Equal(44, (int)Marshal.OffsetOf<DiskActivityProbe.NativeMethods.DiskPerformance>(nameof(DiskActivityProbe.NativeMethods.DiskPerformance.WriteCount)));
         Assert.Equal(0x00070020u, DiskActivityProbe.NativeMethods.IoctlDiskPerformance);
-        Assert.Equal(TimeSpan.FromSeconds(10), DiskActivity.Window);
+    }
+
+    [Fact]
+    public void ABaselineOlderThanOneIntervalIsNotUsed()
+    {
+        var time = new FakeTimeProvider();
+        var probe = new FakeActivity();
+        probe.Counters[0] = new DiskCounters(10, 20);
+        var watch = new ActivityWatch(probe, time);
+        IReadOnlyList<DriveFacts> drives = [Hdd];
+        bool Recent() => watch.Sample(drives, _ => true)[0].Recent;
+
+        // No round ended before this one: no reference, so growth is not activity.
+        Assert.False(Recent());
+
+        // One interval later, and as late as a timer may be: the reference counts.
+        watch.TakeBaseline();
+        probe.Work(0);
+        time.Advance(SensorHub.StorageInterval + DiskActivity.Tolerance);
+        Assert.True(Recent());
+
+        // A reference serves one round: the sample that used it leaves none behind.
+        probe.Work(0);
+        Assert.False(Recent());
+
+        // Any later (a suspension, a late round) it does not.
+        watch.TakeBaseline();
+        probe.Work(0);
+        time.Advance(SensorHub.StorageInterval + DiskActivity.Tolerance + TimeSpan.FromMilliseconds(1));
+        Assert.False(Recent());
+        Assert.Equal(TimeSpan.FromSeconds(32), SensorHub.StorageInterval + DiskActivity.Tolerance);
+
+        // Counters that did not move since the reference are no activity, however fresh it is.
+        watch.TakeBaseline();
+        time.Advance(SensorHub.StorageInterval);
+        Assert.False(Recent());
     }
 
     [Fact]

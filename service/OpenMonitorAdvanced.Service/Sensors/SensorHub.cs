@@ -48,7 +48,9 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <para>
 /// <b>Asking costs</b> (design M6b §4.4). CHECK POWER MODE resets Windows' idle timer of the
 /// disk and powers up a disk Windows turned off, so a disk is asked (and then read) only when
-/// Windows reports it on and its read/write counters grew in the ten seconds before the round;
+/// Windows reports it on and its read/write counters grew since the end of the round before
+/// (the reference is read after that round's own questions and SMART reads, so the window is
+/// the whole interval between two rounds and never holds the service's traffic);
 /// otherwise nothing is sent to it: it is <c>standby</c> when Windows turned it off and
 /// <c>idle</c> when it is on without recent activity (which may hide a standby the disk chose
 /// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). Two things
@@ -621,8 +623,30 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             resolved[root.Identifier] = CollectCriticalWarning(fresh, resolution, cache);
         }
 
+        TakeReference();
+
         // Never mutated after publication: the sampler only looks them up.
         PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache, held, config, keptFrom: before);
+    }
+
+    /// <summary>
+    /// The end of a round's disk work, on every path that completes it (a round that asked
+    /// nothing and a round of the closed gate too): the counters the next round compares its
+    /// sample with, read after this round's last question and last SMART read, so that the
+    /// service's own traffic is never taken for the disk's activity, and before the round is
+    /// published. Access 0, no command, no lock. A round that fails before this point leaves
+    /// no reference, and the next one sees no activity.
+    /// </summary>
+    private void TakeReference()
+    {
+        try
+        {
+            _watch.TakeBaseline();
+        }
+        catch (Exception e)
+        {
+            LogRateLimited("storage-reference", e, "Reading the disk counters failed; no disk activity is seen in the next storage round");
+        }
     }
 
     /// <summary>
@@ -773,15 +797,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     }
 
     /// <summary>
-    /// The baseline of the next storage round: the counters of the drives the round before
-    /// watched (access 0, no command).
-    /// </summary>
-    internal void BaselineOnce() => _watch.TakeBaseline();
-
-    /// <summary>
     /// One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber,
-    /// only once open) or, <see cref="DiskActivity.Window"/> before it, its baseline when there
-    /// are drives to watch. Returns the delay until the next wake.
+    /// only once open). Returns the delay until the next wake.
     /// </summary>
     internal TimeSpan RunStorageDue()
     {
@@ -826,19 +843,6 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
         }
 
-        // No lock from here on: the baseline is disk I/O (passive, but I/O).
-        if (!_watch.BaselineDue)
-        {
-            return TicksUntil(due); // nothing to watch, or the baseline of this round is taken
-        }
-
-        long baselineAt = due - SecondsToTicks(DiskActivity.Window);
-        if (_time.GetTimestamp() < baselineAt)
-        {
-            return TicksUntil(baselineAt);
-        }
-
-        BaselineOnce();
         return TicksUntil(due);
     }
 
@@ -1178,6 +1182,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         if (!_gate.Opens)
         {
             // A drive blocks, or an earlier attempt to enable the group failed and is not due again.
+            TakeReference();
             PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             if (!_storageGateLogged && checks.Any(c => c.Blocks))
             {
@@ -1198,6 +1203,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             _gate.EnableFailed();
 
             // No drive blocks: the list says so. The gate keeps its answers until the next attempt.
+            TakeReference();
             PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             return null;
         }
@@ -1242,7 +1248,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>
     /// A fresh enumeration (access 0) with what the passive sources say about each drive
-    /// <paramref name="watched"/> selects, sampled before any command is sent.
+    /// <paramref name="watched"/> selects, sampled before any command is sent and compared
+    /// with the reference the round before took at its end (<see cref="TakeReference"/>).
     /// <see langword="null"/> when the drives cannot be listed.
     /// </summary>
     private (IReadOnlyList<DriveFacts> Drives, IReadOnlyDictionary<int, DriveActivity> Activity)? ListDrives(Func<DriveFacts, bool> watched)
@@ -1281,7 +1288,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// <summary>
     /// Storage worker: takes the storage part of a new request. Switched off (P10), the values
     /// (kept ones too) and the resolved disks are dropped at once and the last drive list stays,
-    /// every entry <c>smartOff</c>, with no I/O (no baseline either) and the LHM group left open; switched on, or with
+    /// every entry <c>smartOff</c>, with no I/O (no counter read either) and the LHM group left open; switched on, or with
     /// another SMART selection, a round runs at once and publishes the request as applied.
     /// </summary>
     private void SyncStorageConfig()

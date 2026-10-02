@@ -3422,18 +3422,25 @@ public sealed class SensorHubTests
         });
         Assert.Equal((1, 1), Asked(h));
 
-        // The system slept between the baseline and the round.
+        // The system slept between the baseline and the round, briefly enough for the round
+        // before to stay current: the growth cannot be placed in the window.
         TimedRound(h, () =>
         {
-            h.Advance(600_000);
+            h.Advance(20_000);
             h.Activity.Work(0);
         });
         Assert.Equal((1, 1), Asked(h));
         Assert.Equal(1, h.Tree.Updates("/hdd/0"));
 
+        // A longer sleep expires the round before: each disk gets the one question of a new
+        // episode, with or without growth, and not for the old baseline.
+        TimedRound(h, () => h.Advance(600_000));
+        Assert.Equal((2, 2), Asked(h));
+        Assert.Equal(2, h.Tree.Updates("/hdd/0"));
+
         // The same disks, on time: used.
         TimedRound(h, () => h.Activity.Work(0));
-        Assert.Equal(2, h.Disks.SpunDownQueriesOf(0));
+        Assert.Equal((3, 2), Asked(h));
     }
 
     [Fact]
@@ -3660,6 +3667,15 @@ public sealed class SensorHubTests
         Assert.Equal([HddDrive("active"), WdcDrive("active")], Drives(a));
     }
 
+    /// <summary>A storage round that comes <paramref name="ms"/> after the one before, with no baseline, then a sampling tick.</summary>
+    private static void RoundAfter(Harness h, int ms)
+    {
+        h.Advance(ms - 1000);
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+    }
+
     [Fact]
     public void AnIdleDiskAfterAStallKeepsNothing()
     {
@@ -3668,22 +3684,124 @@ public sealed class SensorHubTests
         Assert.Equal(40, DriveTemperature(a, 0));
         Assert.True(DriveHeld(a, 0));
 
-        // No round for more than two intervals: what the last one kept has expired, and an idle
-        // round does not bring it back.
-        h.Advance(61_000);
+        // No round for more than two intervals: what the last one kept has expired. The late
+        // round asks the disk its one question again; it rests, and gets nothing back from the
+        // stale round.
+        h.Disks.SpunDown[0] = true;
+        RoundAfter(h, 62_000);
+        Assert.Equal([HddDrive("standby")], Drives(a));
+        Assert.Null(DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+        Assert.Equal((2, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+
+        // The rounds after it are on time: no question, and still nothing to bring back.
         for (int round = 0; round < 2; round++)
         {
-            h.Hub.RunStorageDue();
-            h.Advance(1000);
-            h.Hub.RunDue();
-
-            Assert.Equal([HddDrive("idle")], Drives(a));
+            TimedRound(h);
             Assert.Null(DriveTemperature(a, 0));
             Assert.False(DriveHeld(a, 0));
-            h.Advance(29_000);
         }
 
+        Assert.Equal((2, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+    }
+
+    [Fact]
+    public void AfterAResumeAnActiveHddIsReadOnce()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out _);
+        TimedRound(h);
+        Assert.Equal([HddDrive("idle")], Drives(a));
         Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+
+        // The PC slept for an hour. The disk spins and nothing works on it: without its one
+        // question it would show no SMART value until it next works.
+        RoundAfter(h, 3_600_000);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+
+        // Once: from the next round on it takes activity, and the values read are kept.
+        TimedRound(h);
+        TimedRound(h);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("idle")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+        Assert.True(DriveHeld(a, 0));
+    }
+
+    [Fact]
+    public void AResumeRightAfterAnEpisodeStartIsAnExpiryOfItsOwn()
+    {
+        // Storage switched off and on: the round at once has no round before it, which is an
+        // episode start and not a late round. A suspension right after it is the first expiry.
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out IFeedSubscription sub);
+        h.Advance(120_000);
+        SwitchStorageOffAndOn(h, sub);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+
+        RoundAfter(h, 120_000); // sooner than a second of two late rounds in a row would be asked
+        Assert.Equal((3, 3), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(a));
+    }
+
+    [Fact]
+    public void ALateRoundAsksEachWatchedDiskOnce()
+    {
+        using Harness h = GateHarness(wdcSpunDown: false, out List<FeedUpdate> a);
+        TimedRound(h);
+        Assert.Equal((1, 1), Asked(h));
+        Assert.Equal([HddDrive("idle"), WdcDrive("idle")], Drives(a));
+
+        // A round later than two intervals: each disk Windows reports on is asked once and,
+        // active, updated.
+        RoundAfter(h, 61_000);
+        Assert.Equal((2, 2), Asked(h));
+        Assert.Equal((2, 2), (h.Tree.Updates("/hdd/0"), h.Tree.Updates("/hdd/1")));
+        Assert.Equal([HddDrive("active"), WdcDrive("active")], Drives(a));
+
+        TimedRound(h);
+        TimedRound(h);
+        Assert.Equal((2, 2), Asked(h));
+        Assert.Equal([HddDrive("idle"), WdcDrive("idle")], Drives(a));
+
+        // Windows comes first after a late round too: the disk it turned off is sent nothing.
+        h.Activity.Powered[1] = false;
+        RoundAfter(h, 61_000);
+        Assert.Equal((3, 2), Asked(h));
+        Assert.Equal((3, 2), (h.Tree.Updates("/hdd/0"), h.Tree.Updates("/hdd/1")));
+        Assert.Equal([HddDrive("active"), WdcDrive("standby")], Drives(a));
+
+        // Its question was not kept for later rounds: it takes Windows turning it on again.
+        TimedRound(h);
+        Assert.Equal((3, 2), Asked(h));
+    }
+
+    [Fact]
+    public void ConsecutiveLateRoundsDoNotAskAtEveryRound()
+    {
+        using Harness h = QuietHddHarness(out _, out _);
+
+        // A worker that only manages a round every ninety seconds: every round is late. The
+        // disk is asked at the first one, then at most every five minutes, so that Windows
+        // can still turn it off.
+        int[] asked = new int[9];
+        for (int round = 0; round < asked.Length; round++)
+        {
+            RoundAfter(h, 90_000);
+            asked[round] = h.Disks.SpunDownQueries;
+        }
+
+        // Asked at 0 s, then at 360 s (the first round five minutes later), then at 720 s.
+        Assert.Equal([2, 2, 2, 2, 3, 3, 3, 3, 4], asked);
+        Assert.Equal(GateEpisode.BlindRetry, TimeSpan.FromMinutes(5));
+
+        // Rounds on time again, then one late round: that is a new expiry, asked at once.
+        TimedRound(h);
+        TimedRound(h);
+        Assert.Equal(4, h.Disks.SpunDownQueries);
+        RoundAfter(h, 61_000);
+        Assert.Equal(5, h.Disks.SpunDownQueries);
     }
 
     [Fact]

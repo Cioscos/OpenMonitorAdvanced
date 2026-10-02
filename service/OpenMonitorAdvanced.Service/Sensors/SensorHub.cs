@@ -173,6 +173,8 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly HashSet<string> _undescribedLogged = new(StringComparer.Ordinal);
     private readonly ActivityWatch _watch;
     private GateEpisode? _gate; // while the D6 gate is closed
+    private bool _lateRound; // the storage round before this one found its own predecessor expired
+    private long _rearmedAt; // when a late round last re-armed the first-watch questions
 
     // Shared, published by reference swap.
     private volatile DesiredConfig? _desired; // written under _subLock
@@ -500,6 +502,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         long roundStart = _time.GetTimestamp();
+        StorageRound before = _round;
+        bool keepable = IsCurrent(before, roundStart); // an expired round has nothing to carry over
+        RearmAfterAnExpiredRound(late: !keepable && before.Timestamp != long.MinValue, roundStart);
         IReadOnlyList<DriveCheck>? checks = _storageEnabled ? CheckPowerStates(config) : TryEnableStorage(config, roundStart);
         if (checks is null)
         {
@@ -514,8 +519,6 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             answers[check.Drive.DriveNumber] = check;
         }
 
-        StorageRound before = _round;
-        bool keepable = IsCurrent(before, roundStart); // an expired round has nothing to carry over
         IReadOnlyDictionary<string, DiskResolution> previous = before.Resolved;
         var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
@@ -620,6 +623,38 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         // Never mutated after publication: the sampler only looks them up.
         PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache, held, config, keptFrom: before);
+    }
+
+    /// <summary>
+    /// A round whose predecessor has expired (a suspension and resume, a stalled worker: see
+    /// <see cref="IsCurrent"/>) keeps nothing for a resting disk, so a spinning but quiet disk
+    /// would show no SMART value until it next works. Such a round starts a storage episode:
+    /// every watched drive is first watched again (<see cref="ActivityWatch.Rearm"/>), before
+    /// the drives are listed and so before any question, and each one Windows reports on is
+    /// asked once, as after the hub was idle. One question per drive and expiry: of rounds that
+    /// are late one after the other (a worker that never keeps up with
+    /// <see cref="StorageInterval"/>) only the first re-arms, then one every
+    /// <see cref="GateEpisode.BlindRetry"/>, since a question at every round would keep Windows
+    /// from ever turning the disk off. A round with no round before it (the first one, storage
+    /// switched on, a client after an idle hub) is an episode start already and not a late
+    /// round. With the D6 gate closed the gate's own rule decides.
+    /// </summary>
+    private void RearmAfterAnExpiredRound(bool late, long roundStart)
+    {
+        bool consecutive = _lateRound;
+        _lateRound = late;
+        if (!late || !_storageEnabled)
+        {
+            return;
+        }
+
+        if (consecutive && _time.GetElapsedTime(_rearmedAt, roundStart) < GateEpisode.BlindRetry)
+        {
+            return;
+        }
+
+        _rearmedAt = roundStart;
+        _watch.Rearm();
     }
 
     /// <summary>

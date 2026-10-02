@@ -217,7 +217,8 @@ internal static class DiskActivity
 /// <para>
 /// <b>Memory of the watched drives</b>, by drive number, model and serial. A drive that was not
 /// watched in the sample before is <see cref="DriveActivity.First"/>: after <see cref="Clear"/>
-/// (storage switched off, the hub idle) every drive is, and so is one that is newly listed,
+/// (storage switched off, the hub idle) or <see cref="Rearm"/> (a round whose predecessor
+/// expired) every drive is, and so is one that is newly listed,
 /// has a new identity, or whose SMART was just switched on. The memory is replaced before
 /// <see cref="Sample"/> returns, that is before any question is sent, so a round that fails
 /// afterwards cannot make a drive first again.
@@ -307,6 +308,13 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
         _taken = false;
         return seen;
     }
+
+    /// <summary>
+    /// The round before this one expired: every drive is first watched again at the next
+    /// <see cref="Sample"/>, which consumes that at once. The baseline and the drive list stay
+    /// (they have their own limits), and so does what Windows last said about a drive being off.
+    /// </summary>
+    internal void Rearm() => _met = [];
 
     /// <summary>
     /// Storage was switched off or the hub went idle: nothing is watched, no baseline is read,

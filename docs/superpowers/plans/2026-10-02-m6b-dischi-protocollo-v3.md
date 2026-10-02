@@ -838,6 +838,30 @@ Aggiunto il 2026-10-02 dopo la revisione finale, su decisione dell'utente. Si es
 
 ---
 
+### Task 17: le letture sospese non contano come misure
+
+Aggiunto il 2026-10-02 dopo la revisione finale, su decisione dell'utente (spec §6). Si esegue prima del Task 15.
+
+**Files:**
+- Modify: il punto in cui il tick entra nello storico (`crates/oma-core/src/history.rs` o il suo chiamante in `sampler.rs`/shell), `crates/oma-core/src/stats.rs` se le statistiche non derivano dallo storico, `crates/oma-core/src/csv.rs` (`row_line`), `app/src-tauri/src/log/session.rs` (`on_tick`) e i test accanto; la documentazione del formato CSV dove esiste (spec M5c, `docs/`, README)
+- Test: gli stessi file; `app/src-tauri/src/log/session/tests.rs`
+
+**Interfaces:**
+- Consumes: `TickOutput.quality: Vec<Quality>` (Task 1).
+- Produces:
+  - **Storico e statistiche:** un valore con qualità `Suspended` entra nello storico come assente (`None`), con qualunque valore lo accompagni. `Fresh` e `Held` restano invariati. Il valore corrente pubblicato all'interfaccia (`oma:snapshot`) non cambia: resta l'ultima lettura con il suo codice di qualità.
+  - **CSV:** la cella di un valore `Suspended` è il testo `suspended` (senza virgolette, minuscolo, uguale in tutte le lingue: è un dato, non un'etichetta); un valore assente non sospeso resta la cella vuota di oggi; un valore `Suspended` senza lettura precedente è anch'esso `suspended`. Se il file ha un indicatore di versione o un'intestazione che descrive il formato, va aggiornato; nessuna migrazione dei file esistenti.
+  - Nessuna allocazione nuova per tick nel percorso del log e dello storico oltre a quelle di oggi (budget di `docs/perf-budget.md`).
+- Il tray non cambia. Verificare leggendo `tray.rs` se può mostrare una temperatura di disco: se sì, riportarlo nel report senza modificarlo.
+
+- [ ] **Step 1: test che falliscono:** storico — `a_suspended_value_enters_the_history_as_absent`, `a_held_value_enters_the_history_unchanged`, `statistics_ignore_suspended_ticks` (min/max/media/picco calcolati su misure vere con tick sospesi in mezzo), `the_history_window_has_a_gap_while_a_sensor_is_suspended`; CSV — `a_suspended_value_is_written_as_the_word_suspended`, `an_absent_value_is_still_an_empty_cell`, `a_held_value_is_written_as_a_number`, `a_suspended_cell_needs_no_quoting_under_either_separator`; sessione di log — `a_tick_with_a_suspended_sensor_writes_suspended_in_its_column`.
+- [ ] **Step 2:** `cargo test -p oma-core` e `cargo test -p oma-app log` → falliscono.
+- [ ] **Step 3: implementazione.** Un solo punto di conversione per lo storico e uno per il log; nessuna modifica ai provider né al payload dell'interfaccia.
+- [ ] **Step 4:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cd app && pnpm test && pnpm check` → PASS.
+- [ ] **Step 5: commit** `feat(core): keep suspended readings out of the history and mark them in the CSV log`.
+
+---
+
 ### Task 15: Verifiche dal vivo, documenti e chiusura
 
 **Files:**

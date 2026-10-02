@@ -184,7 +184,9 @@ L'arrivo della prima misura, locale o del servizio, può dichiarare il sensore t
 
 ### 5.4 Valore non aggiornato
 
-Mentre la lettura è sospesa per standby o inattività, il sensore ripete l'ultimo valore con `Quality::Held`, senza scadenza: resta visibile, in grigio, anche per ore. L'interfaccia lo identifica come «Ultima lettura», non come temperatura attuale. Se non c'è mai stata una misura valida, il valore è assente. Un errore dopo una lettura autorizzata produce un dato assente, non una sospensione per inattività; la rimozione o il cambio d'identità elimina la cache.
+Mentre la lettura è sospesa per standby o inattività, il sensore ripete l'ultimo valore con una qualità dedicata, `Quality::Suspended`, senza scadenza: resta visibile, in grigio, anche per ore. L'interfaccia lo identifica come «Ultima lettura», non come temperatura attuale. Se non c'è mai stata una misura valida, il valore è assente. Un errore dopo una lettura autorizzata produce un dato assente, non una sospensione per inattività; la rimozione o il cambio d'identità elimina la cache.
+
+**Tre qualità.** `Fresh` è una misura nuova; `Held` è un valore ripetuto tra due letture regolari o per un ritardo del trasporto, e non cambia l'aspetto del valore (altrimenti ogni temperatura sarebbe in grigio per 29 secondi su 30); `Suspended` è la sospensione voluta per standby o inattività, l'unica che l'interfaccia mostra in grigio e che le regole contano come coperta (§6).
 
 **Qualità per sensore obbligatoria.** Oggi `Provider::repeated`, il worker e `Slot.held` nell'engine descrivono l'intero provider. Vanno estesi per trasportare qualità allineate ai valori: una temperatura `Held` non rende `Held` throughput, carico, spazio libero o gli altri dischi. La mancata risposta del worker continua a usare le regole di timeout dell'engine; non permette una conservazione infinita. La qualità arriva anche nel payload per il frontend: non si presume che la UI già riceva `TickOutput.quality`.
 
@@ -192,7 +194,7 @@ Il provider espone uno stato per disco: `standby` solo con evidenza corrente dal
 
 ## 6. Interfaccia e regole
 
-- **Pagina del disco** (vista Semplificata e Avanzata): con `standby` l'etichetta "In standby"; con `idle` l'etichetta "Inattivo". Le temperature `Held` si mostrano in grigio con «Ultima lettura», usando la qualità ricevuta dal backend (§5.4).
+- **Pagina del disco** (vista Avanzata; la vista Semplificata non nomina i singoli dischi e resta com'è): con `standby` l'etichetta "In standby"; con `idle` l'etichetta "Inattivo". Le temperature `Suspended` si mostrano in grigio con «Ultima lettura», usando la qualità ricevuta dal backend (§5.4).
 - **Vista Fonti:** il testo del blocco SMART nomina i dischi con `blocksSmart`, usando `model` e, se manca, "Disco N". Sostituisce l'uso di `smartBlockedBy`.
 - **Impostazioni › Fonti:** l'interruttore SMART per disco esistente compare spento per i dischi USB, con la riga: «Alcuni adattatori USB non segnalano lo standby: accendere lo SMART può tenere sveglio il disco». Nuova impostazione `sources.smartEnabledDrives` (id core persistiti, tradotti in `driveKey` al `Subscribe`, come `smartDisabledDrives`).
 - Il nucleo espone la classificazione USB anche senza servizio, per applicare il default nella UI. L'accensione/rimozione dell'abilitazione e lo spegnimento aggiornano atomicamente i due elenchi persistiti, mantenendoli disgiunti. Un altro client può tenere SMART acceso nel servizio, ma questo client continua a filtrarlo secondo la propria scelta; in assenza di sottoscrittori resta la configurazione effettiva precedente, come oggi.

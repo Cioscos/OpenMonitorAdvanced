@@ -51,11 +51,14 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// Windows reports it on and its read/write counters grew in the ten seconds before the round;
 /// otherwise nothing is sent to it: it is <c>standby</c> when Windows turned it off and
 /// <c>idle</c> when it is on without recent activity (which may hide a standby the disk chose
-/// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). The one
-/// exception is the first round of a storage episode, which asks every such disk Windows
-/// reports on once, so a spinning but quiet disk shows its values: the round that opens the
-/// gate (it goes on with the gate's answers), the first one after storage is switched on again
-/// and the first one after the hub was idle. From the second round on it takes activity.
+/// itself). The closed gate follows the same idea (<see cref="GateEpisode"/>). Two things
+/// stand in for counters that grew. A disk Windows reports on is asked once, without
+/// activity, the first time it is watched, so a spinning but quiet disk shows its values: in
+/// the round that opens the gate (which goes on with the gate's answers), after storage is
+/// switched on again, after the hub was idle, when its SMART is switched on and when it is
+/// newly listed; that once is spent when the drives are listed, before the question, so a
+/// round that fails cannot repeat it. And a disk Windows reported off and now reports on is
+/// asked in that round.
 /// </para>
 /// <para>
 /// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk that rests
@@ -185,6 +188,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private volatile bool _opened;
     private readonly StoragePark _park = new();
     private int _structureDirty;
+    private int _wentIdle; // set when the last client leaves, taken by the storage worker's next round
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _notUniqueLogged = new(StringComparer.Ordinal);
 
@@ -1173,11 +1177,10 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// Storage worker, once the gate is open: every drive of a fresh enumeration (access 0),
     /// whether LHM exposes it or not. A drive whose power mode matters and whose SMART is on is
     /// asked only by the rule of <see cref="DiskActivity.Check"/>: not when Windows turned it
-    /// off, and not without recent activity, except in the first round of a storage episode
-    /// (the published round has no values: storage was just switched on again, or the hub was
-    /// idle). A drive whose SMART is off is not even sampled: nothing is sent to it
-    /// periodically. <see langword="null"/> when the drives cannot be listed: no disk is
-    /// updated blind.
+    /// off, and not without recent activity, except the one time it is first watched
+    /// (<see cref="ActivityWatch"/>). A drive whose SMART is off is not even sampled: nothing
+    /// is sent to it periodically. <see langword="null"/> when the drives cannot be listed: no
+    /// disk is updated blind.
     /// </summary>
     private IReadOnlyList<DriveCheck>? CheckPowerStates(EffectiveConfig config)
     {
@@ -1186,7 +1189,6 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return null;
         }
 
-        bool first = _round.Timestamp == long.MinValue;
         var checks = new List<DriveCheck>(listed.Drives.Count);
         foreach (DriveFacts drive in listed.Drives)
         {
@@ -1196,7 +1198,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             checks.Add(listed.Activity.TryGetValue(drive.DriveNumber, out DriveActivity seen)
-                ? DiskActivity.Check(drive, seen, first, AskPowerMode)
+                ? DiskActivity.Check(drive, seen, AskPowerMode)
                 : new DriveCheck(drive, Asked: false, SpunDown: null));
         }
 
@@ -1212,6 +1214,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     {
         try
         {
+            if (Interlocked.Exchange(ref _wentIdle, 0) == 1)
+            {
+                _watch.Clear(); // a storage episode starts: every drive is watched anew
+            }
+
             IReadOnlyList<DriveFacts> drives = _disks.Enumerate();
             return (drives, _watch.Sample(drives, watched));
         }
@@ -1452,6 +1459,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             // Sampling and storage rounds stop: values read before the idle period must not be
             // published as current when a client comes back. The drives and the disks stay.
+            Interlocked.Exchange(ref _wentIdle, 1);
             PublishRound(long.MinValue, drives: null, resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, applied: null);
         }
 

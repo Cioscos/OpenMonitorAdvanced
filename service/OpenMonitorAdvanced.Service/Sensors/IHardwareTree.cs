@@ -101,12 +101,19 @@ public interface IDiskActivityProbe
     /// <summary>The driver's read and write counters (<c>IOCTL_DISK_PERFORMANCE</c>); <see langword="null"/> when they cannot be read.</summary>
     DiskCounters? Read(int driveNumber);
 
-    /// <summary>Whether Windows has the disk powered (<c>GetDevicePowerState</c>); <see langword="null"/> when the call fails.</summary>
-    bool? PoweredOn(int driveNumber);
+    /// <summary>
+    /// Whether Windows has the disk powered (<c>GetDevicePowerState</c>) and, when
+    /// <paramref name="withCounters"/>, its counters as <see cref="Read"/> gives them, from one
+    /// open of the drive.
+    /// </summary>
+    DiskSample Sample(int driveNumber, bool withCounters);
 }
 
 /// <summary>How many reads and writes a disk's driver has completed.</summary>
 public readonly record struct DiskCounters(long ReadCount, long WriteCount);
+
+/// <summary>One look at a disk through the passive sources; each part is <see langword="null"/> when its call fails (or was not asked for).</summary>
+public readonly record struct DiskSample(bool? PoweredOn, DiskCounters? Counters);
 
 /// <summary>Whether a <c>PhysicalDriveN</c> could be described.</summary>
 public enum DriveAvailability

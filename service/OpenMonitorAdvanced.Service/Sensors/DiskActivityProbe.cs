@@ -24,11 +24,20 @@ public sealed class DiskActivityProbe(ILogger<DiskActivityProbe> log) : IDiskAct
     public DiskCounters? Read(int driveNumber)
     {
         using SafeFileHandle? handle = Open(driveNumber);
-        if (handle is null)
-        {
-            return null;
-        }
+        return handle is null ? null : ReadCounters(handle, driveNumber);
+    }
 
+    /// <inheritdoc />
+    public DiskSample Sample(int driveNumber, bool withCounters)
+    {
+        using SafeFileHandle? handle = Open(driveNumber);
+        return handle is null
+            ? default
+            : new DiskSample(ReadPowerState(handle, driveNumber), withCounters ? ReadCounters(handle, driveNumber) : null);
+    }
+
+    private DiskCounters? ReadCounters(SafeFileHandle handle, int driveNumber)
+    {
         uint size = (uint)Marshal.SizeOf<NativeMethods.DiskPerformance>();
 
         // SAFETY: `handle` is valid; no input buffer; the reply is marshalled out as a native
@@ -58,15 +67,8 @@ public sealed class DiskActivityProbe(ILogger<DiskActivityProbe> log) : IDiskAct
         return new DiskCounters(performance.ReadCount, performance.WriteCount);
     }
 
-    /// <inheritdoc />
-    public bool? PoweredOn(int driveNumber)
+    private bool? ReadPowerState(SafeFileHandle handle, int driveNumber)
     {
-        using SafeFileHandle? handle = Open(driveNumber);
-        if (handle is null)
-        {
-            return null;
-        }
-
         // SAFETY: `handle` is valid; the BOOL is written to a local.
         if (!NativeMethods.GetDevicePowerState(handle, out bool on))
         {
@@ -157,8 +159,9 @@ public sealed class DiskActivityProbe(ILogger<DiskActivityProbe> log) : IDiskAct
 /// <summary>What the passive sources say about a drive at the start of a storage round.</summary>
 /// <param name="PoweredOff">Windows reports the disk off (a failed call counts as on).</param>
 /// <param name="Readable">Its counters could be read and belong to a drive with a <see cref="DriveKey"/>.</param>
-/// <param name="Recent">Its counters grew since the baseline taken shortly before the round.</param>
-internal readonly record struct DriveActivity(bool PoweredOff, bool Readable, bool Recent);
+/// <param name="Recent">Its counters grew since the baseline taken shortly before the round, or Windows turned it on since the round before.</param>
+/// <param name="First">It is watched for the first time; said once, whatever happens to the round.</param>
+internal readonly record struct DriveActivity(bool PoweredOff, bool Readable, bool Recent, bool First);
 
 /// <summary>The rule of recent activity (design M6b §4.4). Pure.</summary>
 internal static class DiskActivity
@@ -185,10 +188,10 @@ internal static class DiskActivity
     /// Windows reports it off, so it is in standby and nothing is sent; recent activity, so it is
     /// asked (it is working: resetting its idle timer changes nothing); otherwise idle, and
     /// nothing is sent, since the question alone would keep Windows from ever turning it off.
-    /// In the <paramref name="first"/> round of a storage episode a disk that is on is asked
-    /// once without activity: a spinning but quiet disk would otherwise never show a value.
+    /// A disk that is on is also asked the one time it is <see cref="DriveActivity.First"/>
+    /// watched: a spinning but quiet disk would otherwise never show a value.
     /// </summary>
-    internal static DriveCheck Check(DriveFacts drive, DriveActivity seen, bool first, Func<DriveFacts, bool?> isSpunDown)
+    internal static DriveCheck Check(DriveFacts drive, DriveActivity seen, Func<DriveFacts, bool?> isSpunDown)
     {
         var unasked = new DriveCheck(drive, Asked: false, SpunDown: null);
         if (seen.PoweredOff)
@@ -196,24 +199,35 @@ internal static class DiskActivity
             return unasked with { PoweredOff = true };
         }
 
-        return seen.Recent || first ? unasked with { Asked = true, SpunDown = isSpunDown(drive) } : unasked with { Idle = true };
+        return seen.Recent || seen.First ? unasked with { Asked = true, SpunDown = isSpunDown(drive) } : unasked with { Idle = true };
     }
 }
 
 /// <summary>
-/// The storage worker's samples of the passive sources (one thread, no lock): a baseline of the
-/// counters taken <see cref="DiskActivity.Window"/> before a round, compared with a second sample
-/// at the round's start, before any command is sent. A baseline serves one round, and only for
-/// the drive it was read from: a drive with a <see cref="DriveKey"/>, in a drive list that has
-/// not changed since the round before (a new identity at its number, or a hot-plug, which
-/// renumbers drives), and no more than the window plus <see cref="DiskActivity.Tolerance"/> old
-/// (a suspension, a late round). Anything else is "no recent activity". No baseline is read
-/// while storage is off or nobody is subscribed; the round that follows either is the first of
-/// a storage episode, which asks without one.
+/// The storage worker's samples of the passive sources (one thread, no lock).
+/// <para>
+/// <b>Baseline.</b> The counters are read <see cref="DiskActivity.Window"/> before a round and
+/// compared with a second sample at the round's start, before any command is sent. A baseline
+/// serves one round, and only for the drive it was read from: a drive with a
+/// <see cref="DriveKey"/>, in a drive list that has not changed since the round before (a new
+/// identity at its number, or a hot-plug, which renumbers drives), and no more than the window
+/// plus <see cref="DiskActivity.Tolerance"/> old (a suspension, a late round). Anything else is
+/// no growth.
+/// </para>
+/// <para>
+/// <b>Memory of the watched drives</b>, by drive number, model and serial. A drive that was not
+/// watched in the sample before is <see cref="DriveActivity.First"/>: after <see cref="Clear"/>
+/// (storage switched off, the hub idle) every drive is, and so is one that is newly listed,
+/// has a new identity, or whose SMART was just switched on. The memory is replaced before
+/// <see cref="Sample"/> returns, that is before any question is sent, so a round that fails
+/// afterwards cannot make a drive first again. A drive Windows reported off in the sample
+/// before and on in this one counts as recently active: Windows powers a disk up for I/O.
+/// </para>
 /// </summary>
 internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
 {
     private readonly Dictionary<int, DiskCounters?> _baseline = [];
+    private Dictionary<(int Drive, string? Model, string? Serial), bool> _watchedOff = [];
     private IReadOnlyList<DriveFacts> _listed = [];
     private int[] _watched = [];
     private long _takenAt;
@@ -238,7 +252,7 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
     /// <summary>
     /// The round's sample of every drive <paramref name="watched"/> selects, by drive number.
     /// The counters of a drive without a <see cref="DriveKey"/> are not read: nothing proves
-    /// whose they are. Consumes the baseline.
+    /// whose they are. Consumes the baseline and each drive's "first" at once.
     /// </summary>
     internal IReadOnlyDictionary<int, DriveActivity> Sample(IReadOnlyList<DriveFacts> drives, Func<DriveFacts, bool> watched)
     {
@@ -246,6 +260,7 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
             && time.GetElapsedTime(_takenAt) <= DiskActivity.Window + DiskActivity.Tolerance
             && drives.SequenceEqual(_listed);
         var seen = new Dictionary<int, DriveActivity>();
+        var watchedOff = new Dictionary<(int, string?, string?), bool>();
         var next = new List<int>();
         foreach (DriveFacts drive in drives)
         {
@@ -255,32 +270,33 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
             }
 
             bool keyed = DriveKey.Compute(drive.Model, drive.Serial) is not null;
-            bool off = probe.PoweredOn(drive.DriveNumber) == false;
-            DiskCounters? now = keyed ? probe.Read(drive.DriveNumber) : null;
-            bool recent = usable && _baseline.TryGetValue(drive.DriveNumber, out DiskCounters? earlier) && DiskActivity.Between(earlier, now);
-            seen[drive.DriveNumber] = new DriveActivity(off, now is not null, recent);
+            DiskSample now = probe.Sample(drive.DriveNumber, withCounters: keyed);
+            bool off = now.PoweredOn == false;
+            (int, string?, string?) identity = (drive.DriveNumber, drive.Model, drive.Serial);
+            bool first = !_watchedOff.TryGetValue(identity, out bool wasOff);
+            bool grew = usable && _baseline.TryGetValue(drive.DriveNumber, out DiskCounters? earlier) && DiskActivity.Between(earlier, now.Counters);
+            seen[drive.DriveNumber] = new DriveActivity(off, now.Counters is not null, grew || (wasOff && !off), first);
+            watchedOff[identity] = off;
             if (keyed)
             {
                 next.Add(drive.DriveNumber);
             }
         }
 
+        _watchedOff = watchedOff;
         _listed = drives;
         _watched = [.. next];
-        Forget();
+        _baseline.Clear();
+        _taken = false;
         return seen;
     }
 
-    /// <summary>Storage is off: nothing is watched, so no baseline is read.</summary>
+    /// <summary>Storage was switched off or the hub went idle: nothing is watched, no baseline is read, and every drive is new afterwards.</summary>
     internal void Clear()
     {
+        _watchedOff = [];
         _listed = [];
         _watched = [];
-        Forget();
-    }
-
-    private void Forget()
-    {
         _baseline.Clear();
         _taken = false;
     }

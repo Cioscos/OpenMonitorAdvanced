@@ -296,10 +296,10 @@ internal sealed class FakeActivity : IDiskActivityProbe
         return Counters.TryGetValue(driveNumber, out DiskCounters? counters) ? counters : new DiskCounters(n, n);
     }
 
-    public bool? PoweredOn(int driveNumber)
+    public DiskSample Sample(int driveNumber, bool withCounters)
     {
         _powerQueries.AddOrUpdate(driveNumber, 1, (_, count) => count + 1);
-        return Powered.TryGetValue(driveNumber, out bool? on) ? on : true;
+        return new DiskSample(Powered.TryGetValue(driveNumber, out bool? on) ? on : true, withCounters ? Read(driveNumber) : null);
     }
 }
 

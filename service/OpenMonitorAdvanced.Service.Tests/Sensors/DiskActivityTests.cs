@@ -62,23 +62,23 @@ public sealed class DiskActivityTests
         }
 
         // Windows turned it off: standby without a command, whatever the counters say.
-        DriveCheck off = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: true, Readable: true, Recent: true), first: false, Ask);
+        DriveCheck off = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: true, Readable: true, Recent: true, First: false), Ask);
         Assert.Equal((false, true, false, 0), (off.Asked, off.PoweredOff, off.Idle, asked));
 
-        // Not even in the first round of a storage episode.
-        off = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: true, Readable: true, Recent: false), first: true, Ask);
+        // Not even the first time it is watched.
+        off = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: true, Readable: true, Recent: false, First: true), Ask);
         Assert.Equal((false, true, false, 0), (off.Asked, off.PoweredOff, off.Idle, asked));
 
         // On, no recent activity: idle, no command.
-        DriveCheck idle = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: true, Recent: false), first: false, Ask);
+        DriveCheck idle = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: true, Recent: false, First: false), Ask);
         Assert.Equal((false, false, true, 0), (idle.Asked, idle.PoweredOff, idle.Idle, asked));
 
         // On and working: asked, and its answer is the round's.
-        DriveCheck working = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: true, Recent: true), first: false, Ask);
+        DriveCheck working = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: true, Recent: true, First: false), Ask);
         Assert.Equal((true, (bool?)true, false, false, 1), (working.Asked, working.SpunDown, working.PoweredOff, working.Idle, asked));
 
-        // On, in the first round of a storage episode: asked once without activity.
-        DriveCheck starting = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: false, Recent: false), first: true, Ask);
+        // On, and watched for the first time: asked without activity.
+        DriveCheck starting = DiskActivity.Check(Hdd, new DriveActivity(PoweredOff: false, Readable: false, Recent: false, First: true), Ask);
         Assert.Equal((true, (bool?)true, false, false, 2), (starting.Asked, starting.SpunDown, starting.PoweredOff, starting.Idle, asked));
     }
 }

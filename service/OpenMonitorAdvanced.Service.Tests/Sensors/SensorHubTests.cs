@@ -551,8 +551,6 @@ public sealed class SensorHubTests
             h.Disks.Facts.TryRemove(0, out _);
             h.Tree.Failing.Clear();
             h.Advance(30_000);
-            RoundAndTick(h); // after a change of the drive list or of the SMART selection no baseline counts: idle
-            h.Advance(30_000);
             RoundAndTick(h);
             Assert.Equal(34, DriveTemperature(a, 0));
             Assert.False(DriveHeld(a, 0));
@@ -595,12 +593,7 @@ public sealed class SensorHubTests
         Assert.DoesNotContain(LatestSchema(a).Devices, d => d.Kind == "storage");
         sub.Update(Requests.Of(1000));
         h.Hub.RunDue();
-        RoundAndTick(h); // back, with no baseline: idle, and nothing to keep
-        Assert.Equal([HddDrive("idle")], Drives(a));
-        Assert.Null(DriveTemperature(a, 0));
-        Assert.False(DriveHeld(a, 0));
-        h.Advance(30_000);
-        RoundAndTick(h);
+        RoundAndTick(h); // watched anew, so asked: standby, and nothing to keep
         Assert.Equal([HddDrive("standby")], Drives(a));
         Assert.Null(DriveTemperature(a, 0));
         Assert.False(DriveHeld(a, 0));
@@ -613,7 +606,7 @@ public sealed class SensorHubTests
         RoundAndTick(h);
         sub.Update(Requests.Of(1000));
         h.Hub.RunDue();
-        RoundAndTick(h); // the first round of a storage episode asks it: standby, and nothing to keep
+        RoundAndTick(h); // watched anew, so asked: standby, and nothing to keep
         Assert.Equal([HddDrive("standby")], Drives(a));
         Assert.Null(DriveTemperature(a, 0));
         Assert.False(DriveHeld(a, 0));
@@ -643,14 +636,14 @@ public sealed class SensorHubTests
             h.Tree.Replace(Cpu(), Hdd() with { Storage = Hdd().Storage! with { DriveSerial = "OTHER" } });
         }
 
-        // The first round sees a changed drive list, so no baseline counts and the disk is not
-        // asked (idle); the second one asks it (standby). Neither state keeps the other disk's value.
+        // A new identity is asked once when it is first listed, and afterwards when it works:
+        // standby both times, and the other disk's value is never kept for it.
         for (int round = 0; round < 2; round++)
         {
             h.Advance(30_000);
             RoundAndTick(h);
             Assert.Equal(DriveKey.Compute("ST2000DM008-2FR102", "OTHER-SERIAL"), Assert.Single(Drives(a)).Key);
-            Assert.Equal(round == 0 ? "idle" : "standby", Assert.Single(Drives(a)).State);
+            Assert.Equal("standby", Assert.Single(Drives(a)).State);
             Assert.Null(DriveTemperature(a, 0));
             Assert.False(DriveHeld(a, 0));
         }
@@ -3417,22 +3410,17 @@ public sealed class SensorHubTests
     public void ABaselineFromAnotherIdentityOrBeforeSuspendIsNotUsed()
     {
         using Harness h = QuietHddHarness(out _, out _);
+        h.Activity.Counters[1] = new DiskCounters(200, 200);
 
-        // Another disk took the drive number after the baseline: the counters are not its own.
-        TimedRound(h, () =>
-        {
-            h.Disks.Facts[0] = new DriveFacts(0, DriveAvailability.Present, "ST2000DM008-2FR102", "ANOTHER-SERIAL", BusType: 0x0B, SeekPenalty: true);
-            h.Activity.Work(0);
-        });
-        Assert.Equal(1, h.Disks.SpunDownQueries);
-
-        // A disk plugged in elsewhere renumbers the drives: no baseline from before counts.
+        // A disk plugged in after the baseline renumbers the drives: the counters read at a
+        // number before may be another disk's, so no baseline counts for any drive. (The new
+        // disk itself is asked once, as every newly listed one.)
         TimedRound(h, () =>
         {
             h.Disks.Facts[1] = WdcFacts();
             h.Activity.Work(0);
         });
-        Assert.Equal(1, h.Disks.SpunDownQueries);
+        Assert.Equal((1, 1), Asked(h));
 
         // The system slept between the baseline and the round.
         TimedRound(h, () =>
@@ -3440,7 +3428,7 @@ public sealed class SensorHubTests
             h.Advance(600_000);
             h.Activity.Work(0);
         });
-        Assert.Equal(1, h.Disks.SpunDownQueries);
+        Assert.Equal((1, 1), Asked(h));
         Assert.Equal(1, h.Tree.Updates("/hdd/0"));
 
         // The same disks, on time: used.
@@ -3627,11 +3615,13 @@ public sealed class SensorHubTests
         Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
         Assert.Equal([HddDrive("standby")], Drives(b));
 
-        // Turned on again, it is an ordinary round by then: asked only once it works.
+        // Its one question was not kept for later; it is asked when Windows turns it on again.
+        TimedRound(h, () => h.Activity.Work(0));
+        Assert.Equal(1, h.Disks.SpunDownQueries);
         h.Activity.Powered[0] = true;
         TimedRound(h);
-        Assert.Equal(1, h.Disks.SpunDownQueries);
-        Assert.Equal([HddDrive("idle")], Drives(b));
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(b));
     }
 
     [Fact]
@@ -3812,13 +3802,9 @@ public sealed class SensorHubTests
         Assert.Equal([HddDrive("standby", blocksSmart: true)], Drives(a));
         Assert.Equal(0, h.Disks.SpunDownQueries);
 
-        // Windows turned it on again, but nothing shows that it works: still not asked.
+        // Windows turned it on again: that round asks it, and the gate opens on its answer.
         h.Activity.Powered[0] = true;
         TimedRound(h);
-        Assert.Equal([HddDrive("idle", blocksSmart: true)], Drives(a));
-        Assert.Equal((0, 0), (h.Disks.SpunDownQueries, h.Tree.EnableStorageCount));
-
-        TimedRound(h, () => h.Activity.Work(0));
         Assert.Equal([HddDrive("active")], Drives(a));
         Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.EnableStorageCount));
         Assert.Equal(40, DriveTemperature(a, 0));
@@ -3889,5 +3875,164 @@ public sealed class SensorHubTests
         TimedRound(h, () => h.Activity.Work(0));
         Assert.Equal([HddDrive("active")], Drives(a));
         Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+    }
+
+    [Fact]
+    public void AFailingRoundAfterReenableAsksEachDiskOnlyOnce()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out IFeedSubscription sub);
+        sub.Update(Requests.Of(1000, ServiceModules.Storage));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunDue();
+
+        // The round at once lists the drives and asks the disk, then fails before it can
+        // publish anything; the loop retries it every thirty seconds.
+        h.Tree.ThrowOnRoots = true;
+        for (int retry = 0; retry < 4; retry++)
+        {
+            Assert.Throws<InvalidOperationException>(() => h.Hub.RunStorageDue());
+            Assert.Equal(2, h.Disks.SpunDownQueries); // one question in all: the retries do not repeat it
+            h.Time.Advance(SensorHub.FailureRetryDelay);
+        }
+
+        h.Tree.ThrowOnRoots = false;
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal((2, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("idle")], Drives(a));
+    }
+
+    [Fact]
+    public void ARoundInFlightWhenTheLastClientLeavesDoesNotEraseTheNextEpisodeStart()
+    {
+        using Harness h = QuietHddHarness(out _, out IFeedSubscription sub);
+
+        // The last client leaves while a round is updating the disk; that round still ends
+        // and publishes after the hub went idle.
+        h.Tree.BeforeUpdate = root =>
+        {
+            if (root.Type == HardwareType.Storage)
+            {
+                sub.Dispose();
+            }
+        };
+        TimedRound(h, () => h.Activity.Work(0));
+        h.Tree.BeforeUpdate = null;
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+
+        // The client that comes back starts an episode all the same: the quiet disk is read once.
+        h.Advance(5_000);
+        List<FeedUpdate> b = h.Subscribe(1000);
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal((3, 3), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(b));
+        Assert.Equal(50, DriveTemperature(b, 0));
+    }
+
+    [Fact]
+    public void ADiskWhoseSmartIsSwitchedOnIsAskedOnce()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out IFeedSubscription sub);
+        sub.Update(Requests.Of(1000, ServiceModules.None, HddKey));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal([HddDrive("smartOff")], Drives(a));
+        Assert.Equal(1, h.Disks.SpunDownQueries);
+
+        // Storage stays on; only this disk's SMART comes back: it is watched anew.
+        sub.Update(Requests.Of(1000));
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+
+        TimedRound(h);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("idle")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+        Assert.True(DriveHeld(a, 0));
+    }
+
+    [Fact]
+    public void ANewlyListedHddIsAskedOnce()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out _);
+        h.Activity.Counters[1] = new DiskCounters(200, 200);
+
+        // Plugged in: asked in the first round that lists it, without any activity.
+        h.Disks.Facts[1] = WdcFacts();
+        TimedRound(h);
+        Assert.Equal((1, 1), Asked(h));
+        Assert.Equal([HddDrive("idle"), WdcDrive("active")], Drives(a));
+
+        TimedRound(h);
+        Assert.Equal((1, 1), Asked(h));
+        Assert.Equal([HddDrive("idle"), WdcDrive("idle")], Drives(a));
+
+        // Another disk at the same number is new as well.
+        h.Disks.Facts[1] = WdcFacts() with { Serial = "WD-WCC7K0000002" };
+        TimedRound(h);
+        Assert.Equal((1, 2), Asked(h));
+        TimedRound(h);
+        Assert.Equal((1, 2), Asked(h));
+    }
+
+    [Fact]
+    public void ADiskThatWindowsTurnsBackOnIsAskedThatRound()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out _);
+        h.Activity.Powered[0] = false;
+        TimedRound(h);
+        Assert.Equal([HddDrive("standby")], Drives(a));
+        Assert.Equal(1, h.Disks.SpunDownQueries);
+
+        // Windows powers a disk up for I/O: the transition counts as activity, whatever the
+        // counters of the last ten seconds say.
+        h.Activity.Powered[0] = true;
+        TimedRound(h);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+        Assert.False(DriveHeld(a, 0));
+
+        TimedRound(h); // that round only
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("idle")], Drives(a));
+    }
+
+    [Fact]
+    public void ABlockerThatWindowsTurnsBackOnIsAskedWithoutCounters()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        h.Activity.Counters[0] = new DiskCounters(100, 100); // readable, and standing still throughout
+        h.Activity.Powered[0] = false;
+        List<FeedUpdate> a = h.Subscribe(1000);
+        h.Hub.TickOnce();
+        RoundAndTick(h);
+        TimedRound(h);
+        Assert.Equal([HddDrive("standby", blocksSmart: true)], Drives(a));
+        Assert.Equal(0, h.Disks.SpunDownQueries);
+
+        h.Activity.Powered[0] = true;
+        TimedRound(h);
+        Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.EnableStorageCount));
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(40, DriveTemperature(a, 0));
     }
 }

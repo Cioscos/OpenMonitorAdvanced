@@ -681,7 +681,7 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
 /// it asks it once, unless Windows reports it off: that drive is in standby and blocks, with no
 /// command.</item>
 /// <item>Afterwards only a drive that blocks is asked again, and only after recent activity on
-/// it; one whose counters cannot be read, at most every <see cref="BlindRetry"/>. An "active"
+/// it (its counters grew, or Windows turned it on again); one whose counters cannot be read, at most every <see cref="BlindRetry"/>. An "active"
 /// answer is kept as it is.</item>
 /// <item>When no drive blocks any more, every drive not asked in this very round is asked once
 /// more, so that the gate opens on answers of one round; a standby found then keeps it closed.
@@ -746,7 +746,7 @@ internal sealed class GateEpisode(TimeProvider time, ILogger log)
             }
             else
             {
-                checks[i] = checks[i] with { Idle = true }; // on again, never asked, and nothing shows that it works
+                checks[i] = checks[i] with { Idle = true }; // on, never asked, and nothing shows that it works
             }
         }
 

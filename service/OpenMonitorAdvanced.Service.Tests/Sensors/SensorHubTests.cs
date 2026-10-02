@@ -4035,4 +4035,107 @@ public sealed class SensorHubTests
         Assert.Equal([HddDrive("active")], Drives(a));
         Assert.Equal(40, DriveTemperature(a, 0));
     }
+
+    [Fact]
+    public void ANullPowerStateAfterOffSendsNothing()
+    {
+        // Gate open: Windows reported the disk off, then the call fails. The disk is still
+        // off as far as anyone knows: standby, values kept, nothing sent, whatever its counters say.
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out IFeedSubscription sub);
+        h.Activity.Powered[0] = false;
+        TimedRound(h, () => h.Activity.Work(0));
+        h.Activity.Powered[0] = null;
+        for (int round = 0; round < 2; round++)
+        {
+            TimedRound(h, () => h.Activity.Work(0));
+            Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+            Assert.Equal([HddDrive("standby")], Drives(a));
+            Assert.Equal(40, DriveTemperature(a, 0));
+            Assert.True(DriveHeld(a, 0));
+        }
+
+        // Not even when it is watched anew: storage switched off and on, a client that comes back.
+        SwitchStorageOffAndOn(h, sub);
+        Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("standby")], Drives(a));
+        sub.Dispose();
+        h.Advance(5_000);
+        List<FeedUpdate> b = h.Subscribe(1000);
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+        Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("standby")], Drives(b));
+
+        // Closed gate: the same reading keeps the drive a blocker that is not asked.
+        using var gate = new Harness();
+        gate.Tree.Initial.Add(Cpu());
+        gate.Tree.Storage.Add(Hdd());
+        gate.Activity.Counters[0] = null; // not even the five-minute retry of a drive without counters
+        gate.Activity.Powered[0] = false;
+        List<FeedUpdate> c = gate.Subscribe(1000);
+        gate.Hub.TickOnce();
+        RoundAndTick(gate);
+        gate.Activity.Powered[0] = null;
+        for (int round = 0; round < 12; round++)
+        {
+            gate.Advance(30_000);
+            RoundAndTick(gate);
+        }
+
+        Assert.Equal((0, 0), (gate.Disks.SpunDownQueries, gate.Tree.EnableStorageCount));
+        Assert.Equal([HddDrive("standby", blocksSmart: true)], Drives(c));
+    }
+
+    [Fact]
+    public void OffThenNullThenOnIsAskedOnce()
+    {
+        using Harness h = QuietHddHarness(out List<FeedUpdate> a, out _);
+        h.Activity.Powered[0] = false;
+        TimedRound(h);
+        h.Activity.Powered[0] = null;
+        TimedRound(h);
+        Assert.Equal(1, h.Disks.SpunDownQueries);
+
+        // The first real "on" after the "off" is the transition, although a failed call lay between.
+        h.Activity.Powered[0] = true;
+        TimedRound(h);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("active")], Drives(a));
+        Assert.Equal(50, DriveTemperature(a, 0));
+
+        TimedRound(h);
+        Assert.Equal((2, 2), (h.Disks.SpunDownQueries, h.Tree.Updates("/hdd/0")));
+        Assert.Equal([HddDrive("idle")], Drives(a));
+    }
+
+    [Fact]
+    public void ABlockerTurnedOnAcrossAnIdleHubIsAsked()
+    {
+        using var h = new Harness();
+        h.Tree.Initial.Add(Cpu());
+        h.Tree.Storage.Add(Hdd());
+        h.Tree.Values[HddTemp] = 40;
+        h.Activity.Counters[0] = new DiskCounters(100, 100); // readable, and standing still throughout
+        h.Activity.Powered[0] = false;
+        h.Subscribe(1000, out IFeedSubscription sub);
+        h.Hub.TickOnce();
+        RoundAndTick(h);
+        Assert.Equal((0, 0), (h.Disks.SpunDownQueries, h.Tree.EnableStorageCount));
+
+        // Everybody leaves, Windows turns the disk on, a client comes back.
+        sub.Dispose();
+        h.Advance(60_000);
+        h.Activity.Powered[0] = true;
+        List<FeedUpdate> b = h.Subscribe(1000);
+        h.Hub.RunDue();
+        h.Hub.RunStorageDue();
+        h.Advance(1000);
+        h.Hub.RunDue();
+
+        Assert.Equal((1, 1), (h.Disks.SpunDownQueries, h.Tree.EnableStorageCount));
+        Assert.Equal([HddDrive("active")], Drives(b));
+        Assert.Equal(40, DriveTemperature(b, 0));
+    }
 }

@@ -157,7 +157,7 @@ public sealed class DiskActivityProbe(ILogger<DiskActivityProbe> log) : IDiskAct
 }
 
 /// <summary>What the passive sources say about a drive at the start of a storage round.</summary>
-/// <param name="PoweredOff">Windows reports the disk off (a failed call counts as on).</param>
+/// <param name="PoweredOff">Windows reports the disk off. A failed call counts as on, unless Windows last reported the disk off: then it is still off.</param>
 /// <param name="Readable">Its counters could be read and belong to a drive with a <see cref="DriveKey"/>.</param>
 /// <param name="Recent">Its counters grew since the baseline taken shortly before the round, or Windows turned it on since the round before.</param>
 /// <param name="First">It is watched for the first time; said once, whatever happens to the round.</param>
@@ -220,14 +220,20 @@ internal static class DiskActivity
 /// (storage switched off, the hub idle) every drive is, and so is one that is newly listed,
 /// has a new identity, or whose SMART was just switched on. The memory is replaced before
 /// <see cref="Sample"/> returns, that is before any question is sent, so a round that fails
-/// afterwards cannot make a drive first again. A drive Windows reported off in the sample
-/// before and on in this one counts as recently active: Windows powers a disk up for I/O.
+/// afterwards cannot make a drive first again.
+/// </para>
+/// <para>
+/// <b>Memory of the drives Windows reported off</b>, which outlives <see cref="Clear"/> for as
+/// long as the drive is listed. Only a real "on" ends it: a failed call after an "off" leaves
+/// the drive off (nothing may be sent to it), and the first real "on" after an "off" counts as
+/// recent activity, since Windows powers a disk up for I/O.
 /// </para>
 /// </summary>
 internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
 {
     private readonly Dictionary<int, DiskCounters?> _baseline = [];
-    private Dictionary<(int Drive, string? Model, string? Serial), bool> _watchedOff = [];
+    private readonly HashSet<(int Drive, string? Model, string? Serial)> _off = [];
+    private HashSet<(int Drive, string? Model, string? Serial)> _met = [];
     private IReadOnlyList<DriveFacts> _listed = [];
     private int[] _watched = [];
     private long _takenAt;
@@ -260,7 +266,7 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
             && time.GetElapsedTime(_takenAt) <= DiskActivity.Window + DiskActivity.Tolerance
             && drives.SequenceEqual(_listed);
         var seen = new Dictionary<int, DriveActivity>();
-        var watchedOff = new Dictionary<(int, string?, string?), bool>();
+        var met = new HashSet<(int, string?, string?)>();
         var next = new List<int>();
         foreach (DriveFacts drive in drives)
         {
@@ -271,19 +277,30 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
 
             bool keyed = DriveKey.Compute(drive.Model, drive.Serial) is not null;
             DiskSample now = probe.Sample(drive.DriveNumber, withCounters: keyed);
-            bool off = now.PoweredOn == false;
             (int, string?, string?) identity = (drive.DriveNumber, drive.Model, drive.Serial);
-            bool first = !_watchedOff.TryGetValue(identity, out bool wasOff);
+            bool wasOff = _off.Contains(identity);
+            bool off = now.PoweredOn is { } on ? !on : wasOff; // an unknown state after "off" is still off
+            bool first = !_met.Contains(identity);
             bool grew = usable && _baseline.TryGetValue(drive.DriveNumber, out DiskCounters? earlier) && DiskActivity.Between(earlier, now.Counters);
             seen[drive.DriveNumber] = new DriveActivity(off, now.Counters is not null, grew || (wasOff && !off), first);
-            watchedOff[identity] = off;
+            met.Add(identity);
+            if (off)
+            {
+                _off.Add(identity);
+            }
+            else
+            {
+                _off.Remove(identity);
+            }
+
             if (keyed)
             {
                 next.Add(drive.DriveNumber);
             }
         }
 
-        _watchedOff = watchedOff;
+        _met = met;
+        _off.RemoveWhere(identity => !drives.Any(d => (d.DriveNumber, d.Model, d.Serial) == identity)); // gone, or another disk now
         _listed = drives;
         _watched = [.. next];
         _baseline.Clear();
@@ -291,10 +308,13 @@ internal sealed class ActivityWatch(IDiskActivityProbe probe, TimeProvider time)
         return seen;
     }
 
-    /// <summary>Storage was switched off or the hub went idle: nothing is watched, no baseline is read, and every drive is new afterwards.</summary>
+    /// <summary>
+    /// Storage was switched off or the hub went idle: nothing is watched, no baseline is read,
+    /// and every drive is new afterwards. What Windows last said about a drive being off stays.
+    /// </summary>
     internal void Clear()
     {
-        _watchedOff = [];
+        _met = [];
         _listed = [];
         _watched = [];
         _baseline.Clear();

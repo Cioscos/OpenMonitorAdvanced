@@ -70,7 +70,8 @@ export class LiveStore {
     this.lastReceivedAtMs = Date.now();
     this.values = snapshot.values;
     this.#quality = validQuality(snapshot.quality, schema.sensors.length) ?? [];
-    schema.sensors.forEach((s, i) => this.#series.get(s.id)?.push(snapshot.values[i]));
+    // The series take measurements only, like the core's history: a gap while suspended.
+    schema.sensors.forEach((s) => this.#series.get(s.id)?.push(this.measured(s.id)));
     this.#seriesTimestamps.push(snapshot.timestampMs);
     this.timestampMs = snapshot.timestampMs;
     if (this.firstTimestampMs === 0) this.firstTimestampMs = snapshot.timestampMs;
@@ -105,6 +106,15 @@ export class LiveStore {
   value(id: string): number | null {
     const i = this.#index.get(id);
     return i === undefined ? null : (this.values[i] ?? null);
+  }
+
+  /**
+   * The value as a measurement, for a series or a chart: a suspended value is a last
+   * reading, not a measurement, so it is `null` here while `value` still returns it.
+   */
+  measured(id: string): number | null {
+    const i = this.#index.get(id);
+    return i === undefined || this.#quality[i] === 2 ? null : (this.values[i] ?? null);
   }
 
   /** 0 fresh, 1 held, 2 suspended; fresh for an unknown id or when the snapshot had no valid codes. */

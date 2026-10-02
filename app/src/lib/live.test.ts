@@ -333,3 +333,51 @@ test('a failing initial disk query clears stale power states and still connects'
   off();
   errorSpy.mockRestore();
 });
+
+/** Quality codes with the second sensor at `code`. */
+const second = (code: number) => Array.from({ length: sensorCount }, (_, i) => (i === 1 ? code : 0));
+
+test('a suspended value is not appended to the live series', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(withQuality(2, second(2)));
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000]);
+  expect(store.series(ID2)[0]).toBe(mockValues(1)[1]);
+  expect(Number.isNaN(store.series(ID2)[1])).toBe(true);
+  expect(store.measured(ID2)).toBeNull();
+  // Only the suspended sensor; a held value is a regular repeat and stays.
+  expect(store.series(ID)).toEqual([mockValues(1)[0], mockValues(2)[0]]);
+  expect(store.measured(ID)).toBe(mockValues(2)[0]);
+  store.applySnapshot(withQuality(3, second(1)));
+  expect(store.series(ID2)[2]).toBe(mockValues(3)[1]);
+  expect(store.measured(ID2)).toBe(mockValues(3)[1]);
+  // Codes that do not fit the schema read as fresh.
+  store.applySnapshot(withQuality(4, [2, 2]));
+  expect(store.series(ID2)[3]).toBe(mockValues(4)[1]);
+  expect(store.measured('no/such/sensor')).toBeNull();
+});
+
+test('the current value of a suspended sensor stays the last reading', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  const suspended = withQuality(2, second(2));
+  store.applySnapshot(suspended);
+  expect(store.value(ID2)).toBe(suspended.values[1]);
+  expect(store.values).toEqual(suspended.values);
+  expect(store.quality(ID2)).toBe(2);
+});
+
+test('the series resumes at the next fresh value', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(withQuality(2, second(2)));
+  store.applySnapshot(withQuality(3, second(2)));
+  store.applySnapshot(snapshot(4));
+  const series = store.series(ID2);
+  expect(series.map(Number.isNaN)).toEqual([false, true, true, false]);
+  expect(series[3]).toBe(mockValues(4)[1]);
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000, 3_000, 4_000]);
+});

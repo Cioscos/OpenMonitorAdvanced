@@ -49,6 +49,8 @@ pub struct Subscribe {
     pub disabled_modules: Vec<String>,
     /// [`crate::drive_key`]s of the disks whose SMART this client does not want.
     pub smart_disabled_drives: Vec<String>,
+    /// [`crate::drive_key`]s of the disks that are off by default and that this client wants on.
+    pub smart_enabled_drives: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,8 +69,21 @@ pub struct WireServiceState {
     pub smart_disabled_drives: Vec<String>,
     /// `"applied"`, `"pending"` or `"failed"`.
     pub reconfiguration: String,
-    /// [`crate::drive_key`]s of the disks that keep SMART closed for all disks.
-    pub smart_blocked_by: Vec<String>,
+    /// One entry per physical drive the service enumerates, in `physical_drive` order.
+    pub drives: Vec<WireDrive>,
+}
+
+/// A physical drive as the service sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireDrive {
+    pub physical_drive: u32,
+    /// The drive's [`crate::drive_key`], `nil` when it has no model or no serial.
+    pub key: Option<String>,
+    pub model: Option<String>,
+    /// `"active"`, `"standby"`, `"unknown"`, `"smartOff"` or `"noMedia"`.
+    pub state: String,
+    /// Whether this drive keeps the SMART gate closed for all drives.
+    pub blocks_smart: bool,
 }
 
 impl Default for WireServiceState {
@@ -78,7 +93,7 @@ impl Default for WireServiceState {
             active_modules: crate::MODULES.map(str::to_owned).to_vec(),
             smart_disabled_drives: Vec::new(),
             reconfiguration: "applied".to_owned(),
-            smart_blocked_by: Vec::new(),
+            drives: Vec::new(),
         }
     }
 }
@@ -126,6 +141,9 @@ pub struct WireSnapshot {
     pub seq: u64,
     pub timestamp_ms: u64,
     pub values: Vec<Option<f64>>,
+    /// Same length and order as `values`: the value is kept from an earlier measurement.
+    /// Always `false` for an absent value.
+    pub held: Vec<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

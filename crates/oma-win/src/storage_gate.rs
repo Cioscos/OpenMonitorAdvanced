@@ -4,6 +4,7 @@
 //! unknown class, is therefore read only after recent real I/O. Pure
 //! decisions: no disk is touched here.
 
+use oma_ipc::DriveState;
 use std::time::Duration;
 
 use windows::Win32::Storage::FileSystem::{
@@ -90,18 +91,6 @@ pub enum DiskPower {
     Idle,
     Standby,
     Unknown,
-}
-
-/// A disk's state as the service reports it. Provisional: Task 5 replaces it
-/// with the protocol's type.
-#[allow(dead_code)] // built by the service feed, wired in a later task
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DriveState {
-    Active,
-    Standby,
-    Unknown,
-    SmartOff,
-    NoMedia,
 }
 
 /// The main temperature of a disk as the service measured it.

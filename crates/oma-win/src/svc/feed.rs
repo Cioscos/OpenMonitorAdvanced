@@ -65,14 +65,22 @@ impl SvcFeed {
     /// (and lose a sample of every series) for a description that did not
     /// change. Any difference at all counts as a new schema.
     ///
-    /// The `service` block is not part of that comparison: it describes the
-    /// service's configuration, not the sensors, and it changes when a
-    /// reconfiguration finishes. A schema that differs only there replaces
-    /// the stored one and leaves the snapshot and the generation alone.
+    /// The rest of the `service` block is not part of that comparison: it
+    /// describes the service's configuration, not the sensors, and it changes
+    /// when a reconfiguration finishes. A schema that differs only there
+    /// replaces the stored one and leaves the snapshot and the generation
+    /// alone. The drive table (`service.drives`) is the exception: a change
+    /// there drops the previous snapshot and bumps the generation even with
+    /// devices and sensors unchanged, so a drive state never pairs with a
+    /// snapshot taken under another table; only the next snapshot of the
+    /// same connection gives the new states their authority back.
     pub fn set_schema(&self, schema: WireSchema) {
         let mut inner = self.lock();
         if let Some(current) = inner.schema.as_deref() {
-            if current.devices == schema.devices && current.sensors == schema.sensors {
+            if current.devices == schema.devices
+                && current.sensors == schema.sensors
+                && current.service.drives == schema.service.drives
+            {
                 if current.service != schema.service {
                     inner.schema = Some(Arc::new(schema));
                 }
@@ -165,7 +173,24 @@ mod tests {
             seq,
             timestamp_ms: seq * 1000,
             values: vec![Some(1.0); values],
+            held: vec![false; values],
         }
+    }
+
+    fn drive(physical_drive: u32, state: &str) -> oma_ipc::WireDrive {
+        oma_ipc::WireDrive {
+            physical_drive,
+            key: None,
+            model: Some("Disk".to_owned()),
+            state: state.to_owned(),
+            blocks_smart: false,
+        }
+    }
+
+    fn schema_with_drives(drives: Vec<oma_ipc::WireDrive>) -> WireSchema {
+        let mut schema = schema(2);
+        schema.service.drives = drives;
+        schema
     }
 
     #[test]
@@ -265,6 +290,64 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_state_change_drops_the_previous_snapshot() {
+        let feed = SvcFeed::default();
+        feed.set_schema(schema_with_drives(vec![drive(0, "active")]));
+        feed.set_snapshot(snapshot(1, 2), Instant::now());
+        let before = feed.view();
+
+        // Same devices and sensors, another state for the drive.
+        let changed = schema_with_drives(vec![drive(0, "standby")]);
+        feed.set_schema(changed.clone());
+        let after = feed.view();
+        assert!(after.generation > before.generation);
+        assert!(
+            after.snapshot.is_none(),
+            "the old snapshot must not survive"
+        );
+        assert_eq!(after.schema.as_deref(), Some(&changed));
+
+        // The next snapshot of the same connection restores authority.
+        feed.set_snapshot(snapshot(2, 2), Instant::now());
+        assert_eq!(feed.view().snapshot.map(|(_, s)| s.seq), Some(2));
+    }
+
+    #[test]
+    fn an_equal_drive_table_keeps_the_snapshot() {
+        let feed = SvcFeed::default();
+        feed.set_schema(schema_with_drives(vec![drive(0, "active")]));
+        feed.set_snapshot(snapshot(1, 2), Instant::now());
+        let generation = feed.view().generation;
+
+        // Only the reconfiguration differs: the drives are equal.
+        let mut same_drives = schema_with_drives(vec![drive(0, "active")]);
+        same_drives.service.reconfiguration = "pending".to_owned();
+        feed.set_schema(same_drives.clone());
+        let view = feed.view();
+        assert_eq!(view.generation, generation);
+        assert_eq!(view.snapshot.map(|(_, s)| s.seq), Some(1));
+        assert_eq!(view.schema.as_deref(), Some(&same_drives));
+    }
+
+    #[test]
+    fn clearing_the_feed_revokes_drive_authority() {
+        let feed = SvcFeed::default();
+        feed.set_schema(schema_with_drives(vec![drive(0, "standby")]));
+        feed.set_snapshot(snapshot(1, 2), Instant::now());
+        let before = feed.view().generation;
+
+        feed.clear();
+        let view = feed.view();
+        assert!(view.generation > before);
+        assert!(view.schema.is_none(), "no drive table survives a clear");
+        assert!(view.snapshot.is_none());
+
+        // A schema with the same table on the next connection starts without a snapshot.
+        feed.set_schema(schema_with_drives(vec![drive(0, "standby")]));
+        assert!(feed.view().snapshot.is_none());
+    }
+
+    #[test]
     fn a_changed_request_bumps_the_generation_once() {
         let feed = SvcFeed::default();
         assert_eq!(*feed.view().request, SourceRequest::default());
@@ -273,6 +356,7 @@ mod tests {
         let request = SourceRequest {
             disabled_modules: vec!["psu".to_owned()],
             smart_disabled_drives: vec!["storage/device-a".to_owned()],
+            smart_enabled_drives: vec!["storage/device-b".to_owned()],
         };
         feed.set_request(request.clone());
         let view = feed.view();
@@ -290,6 +374,7 @@ mod tests {
         let request = SourceRequest {
             disabled_modules: vec!["cpu".to_owned()],
             smart_disabled_drives: Vec::new(),
+            smart_enabled_drives: Vec::new(),
         };
         feed.set_request(request.clone());
         feed.set_schema(schema(1));

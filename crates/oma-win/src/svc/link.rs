@@ -50,8 +50,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use oma_ipc::{
-    Message, PawnIoStatus, Reconfiguration, ServiceSources, Subscribe, WireError, WireSchema,
-    WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, PROTOCOL_VERSION,
+    DriveState, Message, PawnIoStatus, Reconfiguration, ServiceSources, SourceDrive, Subscribe,
+    WireError, WireSchema, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, PROTOCOL_VERSION,
 };
 
 use super::feed::{SourceRequest, SvcFeed};
@@ -426,8 +426,8 @@ struct Machine {
     /// the translation of the published sources, which has no say in whether
     /// the service was told about a disk).
     drive_generation: u64,
-    /// The drive keys of the last `Subscribe`.
-    sent_keys: Vec<String>,
+    /// The drive keys of the last `Subscribe`: those switched off, then those switched on.
+    sent_keys: (Vec<String>, Vec<String>),
 }
 
 impl Machine {
@@ -451,7 +451,7 @@ impl Machine {
             service: None,
             awaiting: false,
             drive_generation: 0,
-            sent_keys: Vec::new(),
+            sent_keys: (Vec::new(), Vec::new()),
         }
     }
 
@@ -612,17 +612,27 @@ impl Machine {
         effects
     }
 
+    /// The drive keys of the request, switched off and switched on, translated with `drives`
+    /// and cut to [`MAX_DRIVE_KEYS`] each.
+    fn request_keys(&self, drives: &DriveIds) -> (Vec<String>, Vec<String>) {
+        let mut disabled = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
+        disabled.truncate(MAX_DRIVE_KEYS);
+        let mut enabled = drive_keys_for(&self.request.smart_enabled_drives, &drives.drives);
+        enabled.truncate(MAX_DRIVE_KEYS);
+        (disabled, enabled)
+    }
+
     /// The `Subscribe` for the current interval and request, with `drives`
     /// turning core ids into keys; remembers what it was built from.
     fn subscribe_message(&mut self, drives: &DriveIds) -> Message {
-        let mut keys = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
-        keys.truncate(MAX_DRIVE_KEYS);
+        let (disabled, enabled) = self.request_keys(drives);
         self.drive_generation = drives.generation;
-        self.sent_keys = keys.clone();
+        self.sent_keys = (disabled.clone(), enabled.clone());
         Message::Subscribe(Subscribe {
             interval_ms: self.settings.interval_ms,
             disabled_modules: self.request.disabled_modules.clone(),
-            smart_disabled_drives: keys,
+            smart_disabled_drives: disabled,
+            smart_enabled_drives: enabled,
         })
     }
 
@@ -639,6 +649,26 @@ impl Machine {
         } else {
             wire
         };
+        let source_drives: Vec<SourceDrive> = block
+            .drives
+            .iter()
+            .map(|drive| SourceDrive {
+                physical_drive: drive.physical_drive,
+                device_id: drive
+                    .key
+                    .as_deref()
+                    .and_then(|key| core_id_for_key(key, &drives.drives))
+                    .map(str::to_owned),
+                model: drive.model.clone(),
+                state: DriveState::from_wire(&drive.state),
+                blocks_smart: drive.blocks_smart,
+            })
+            .collect();
+        let smart_blocked_by = source_drives
+            .iter()
+            .filter(|drive| drive.blocks_smart)
+            .filter_map(|drive| drive.device_id.clone())
+            .collect();
         self.status.sources = Some(ServiceSources {
             active_modules: block.active_modules.clone(),
             requested_disabled_modules: self.request.disabled_modules.clone(),
@@ -649,15 +679,9 @@ impl Machine {
                 .map(str::to_owned)
                 .collect(),
             reconfiguration,
-            smart_blocked_by: block
-                .smart_blocked_by
-                .iter()
-                .map(|key| {
-                    core_id_for_key(key, &drives.drives)
-                        .unwrap_or(key)
-                        .to_owned()
-                })
-                .collect(),
+            // Provisional association by key (Task 11 matches on number and key).
+            drives: source_drives,
+            smart_blocked_by,
         });
     }
 
@@ -667,13 +691,11 @@ impl Machine {
         let drives = self.settings.drives.get();
         self.drive_generation = drives.generation;
         let mut effects = Vec::new();
-        if !self.request.smart_disabled_drives.is_empty() {
-            let mut keys = drive_keys_for(&self.request.smart_disabled_drives, &drives.drives);
-            keys.truncate(MAX_DRIVE_KEYS);
-            if keys != self.sent_keys {
-                effects.push(Effect::Send(self.subscribe_message(&drives)));
-                self.awaiting = true;
-            }
+        let names_drives = !self.request.smart_disabled_drives.is_empty()
+            || !self.request.smart_enabled_drives.is_empty();
+        if names_drives && self.request_keys(&drives) != self.sent_keys {
+            effects.push(Effect::Send(self.subscribe_message(&drives)));
+            self.awaiting = true;
         }
         self.refresh_sources(&drives);
         effects
@@ -1473,7 +1495,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
-    use oma_ipc::{Hello, WireDevice, WireSensor};
+    use oma_ipc::{Hello, WireDevice, WireDrive, WireSensor};
 
     use super::*;
     use crate::storage::DriveEntry;
@@ -1492,6 +1514,7 @@ mod tests {
             interval_ms,
             disabled_modules: Vec::new(),
             smart_disabled_drives: Vec::new(),
+            smart_enabled_drives: Vec::new(),
         }
     }
 
@@ -1550,6 +1573,7 @@ mod tests {
             seq,
             timestamp_ms: seq * 1000,
             values: vec![Some(40.0); values],
+            held: vec![false; values],
         }
     }
 
@@ -3207,6 +3231,7 @@ mod tests {
         SourceRequest {
             disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
             smart_disabled_drives: drives.iter().map(|d| (*d).to_owned()).collect(),
+            smart_enabled_drives: Vec::new(),
         }
     }
 
@@ -3215,7 +3240,23 @@ mod tests {
             interval_ms: 1000,
             disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
             smart_disabled_drives: keys.to_vec(),
+            smart_enabled_drives: Vec::new(),
         })
+    }
+
+    fn wire_drive(
+        physical_drive: u32,
+        key: Option<String>,
+        state: &str,
+        blocks_smart: bool,
+    ) -> WireDrive {
+        WireDrive {
+            physical_drive,
+            key,
+            model: Some(format!("Model {physical_drive}")),
+            state: state.to_owned(),
+            blocks_smart,
+        }
     }
 
     /// A `Schema` whose `service` block is `block`.
@@ -3447,14 +3488,84 @@ mod tests {
         };
         let mut wire = block("applied");
         wire.smart_disabled_drives = vec![disk_key(), "unknown-disk".to_owned()];
-        wire.smart_blocked_by = vec![disk_key(), "unknown-disk".to_owned()];
+        wire.drives = vec![
+            wire_drive(0, Some(disk_key()), "standby", true),
+            wire_drive(1, Some("unknown-disk".to_owned()), "bogus", true),
+            wire_drive(2, None, "active", false),
+        ];
         let m = streaming_machine(settings, wire, now);
         let sources = m.status.sources.expect("sources");
         assert_eq!(sources.smart_disabled_drives, vec![DISK_ID.to_owned()]);
         assert_eq!(
+            sources.drives,
+            vec![
+                SourceDrive {
+                    physical_drive: 0,
+                    device_id: Some(DISK_ID.to_owned()),
+                    model: Some("Model 0".to_owned()),
+                    state: DriveState::Standby,
+                    blocks_smart: true,
+                },
+                SourceDrive {
+                    physical_drive: 1,
+                    device_id: None,
+                    model: Some("Model 1".to_owned()),
+                    state: DriveState::Unknown,
+                    blocks_smart: true,
+                },
+                SourceDrive {
+                    physical_drive: 2,
+                    device_id: None,
+                    model: Some("Model 2".to_owned()),
+                    state: DriveState::Active,
+                    blocks_smart: false,
+                },
+            ]
+        );
+        assert_eq!(
             sources.smart_blocked_by,
-            vec![DISK_ID.to_owned(), "unknown-disk".to_owned()],
-            "an unknown key is kept raw for the UI to show as an unknown disk"
+            vec![DISK_ID.to_owned()],
+            "derived from the blocking drives that were matched to a core disk"
+        );
+    }
+
+    #[test]
+    fn enabled_drives_are_translated_and_a_change_resubscribes() {
+        let now = Instant::now();
+        let drives = DriveIdTable::default();
+        let settings = LinkSettings {
+            sources: SourceRequest {
+                smart_enabled_drives: vec![DISK_ID.to_owned()],
+                ..SourceRequest::default()
+            },
+            drives: drives.clone(),
+            ..test_settings()
+        };
+        let enabled_subscribe = |keys: Vec<String>| {
+            Message::Subscribe(Subscribe {
+                smart_enabled_drives: keys,
+                ..subscribe_request(1000)
+            })
+        };
+        // The disk is not known yet: the first Subscribe carries no key.
+        let mut m = subscribed_with(settings, now, enabled_subscribe(vec![]));
+        m.decide(Event::Message(schema(2)), now);
+        assert_eq!(
+            m.decide(Event::Message(snapshot(1, 2)), now),
+            vec![Effect::SetSnapshot(wire_snapshot(1, 2))]
+        );
+
+        // Once the disk is known, the key goes out in smart_enabled_drives.
+        drives.publish(one_disk_table().get().drives);
+        let effects = m.decide(Event::Message(snapshot(2, 2)), now);
+        assert!(
+            effects.contains(&Effect::Send(enabled_subscribe(vec![disk_key()]))),
+            "{effects:?}"
+        );
+        // Then it is settled.
+        assert_eq!(
+            m.decide(Event::Message(snapshot(3, 2)), now),
+            vec![Effect::SetSnapshot(wire_snapshot(3, 2))]
         );
     }
 

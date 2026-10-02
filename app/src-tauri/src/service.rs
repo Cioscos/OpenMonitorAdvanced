@@ -219,6 +219,8 @@ pub(crate) fn request_of(settings: &Settings) -> SourceRequest {
             .map(str::to_owned)
             .collect(),
         smart_disabled_drives: settings.sources.smart_disabled_drives.clone(),
+        // No setting carries switched-on disks yet.
+        smart_enabled_drives: Vec::new(),
     }
 }
 
@@ -752,6 +754,7 @@ mod tests {
                 requested_disabled_modules: Vec::new(),
                 smart_disabled_drives: Vec::new(),
                 reconfiguration,
+                drives: Vec::new(),
                 smart_blocked_by: Vec::new(),
             }),
         }
@@ -868,10 +871,12 @@ mod tests {
                 SourceRequest {
                     disabled_modules: vec!["cpu".to_owned(), "psu".to_owned()],
                     smart_disabled_drives: Vec::new(),
+                    smart_enabled_drives: Vec::new(),
                 },
                 SourceRequest {
                     disabled_modules: vec!["cpu".to_owned()],
                     smart_disabled_drives: Vec::new(),
+                    smart_enabled_drives: Vec::new(),
                 },
             ]
         );
@@ -888,6 +893,7 @@ mod tests {
             snapshot(&requests),
             vec![SourceRequest {
                 disabled_modules: Vec::new(),
+                smart_enabled_drives: Vec::new(),
                 smart_disabled_drives: vec!["storage/device-a".to_owned()],
             }]
         );
@@ -919,6 +925,7 @@ mod tests {
             request_of(&store.settings()),
             SourceRequest {
                 disabled_modules: vec!["memory".to_owned()],
+                smart_enabled_drives: Vec::new(),
                 smart_disabled_drives: vec!["storage/x".to_owned()],
             }
         );

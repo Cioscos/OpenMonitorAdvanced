@@ -795,6 +795,7 @@ mod tests {
                 seq: 1,
                 timestamp_ms: 0,
                 values: vec![Some(1.0)],
+                held: vec![false],
             },
             stale_at,
         );
@@ -806,6 +807,7 @@ mod tests {
             seq,
             timestamp_ms: 0,
             values: vec![Some(1.0)],
+            held: vec![false],
         }
     }
 
@@ -922,6 +924,7 @@ mod tests {
     fn request(modules: &[&str], drives: &[&str]) -> SourceRequest {
         SourceRequest {
             disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            smart_enabled_drives: Vec::new(),
             smart_disabled_drives: drives.iter().map(|d| (*d).to_owned()).collect(),
         }
     }

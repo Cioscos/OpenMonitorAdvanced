@@ -852,7 +852,7 @@ impl Provider for StorageProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage_gate::DriveState;
+    use oma_ipc::DriveState;
 
     #[test]
     fn parses_disk_with_one_volume() {

@@ -547,6 +547,7 @@ mod tests {
             interval_ms: 1000,
             disabled_modules: Vec::new(),
             smart_disabled_drives: Vec::new(),
+            smart_enabled_drives: Vec::new(),
         });
         client.send(&subscribe).expect("send Subscribe");
         assert_eq!(server.recv(), subscribe);
@@ -664,6 +665,7 @@ mod tests {
                 interval_ms: 1000,
                 disabled_modules: Vec::new(),
                 smart_disabled_drives: Vec::new(),
+                smart_enabled_drives: Vec::new(),
             }))
             .expect_err("a closed connection refuses to send");
         assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
@@ -678,6 +680,7 @@ mod tests {
             seq: 1,
             timestamp_ms: 0,
             values: vec![Some(1.5); 200_000],
+            held: vec![false; 200_000],
         });
 
         let t = Instant::now();

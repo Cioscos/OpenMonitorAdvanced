@@ -13,7 +13,7 @@ use crate::storage_gate::{ServiceDisk, ServiceTemperature};
 use crate::svc::feed::{FeedView, SourceRequest};
 
 /// Wire kind and name of a disk's main temperature: the storage provider owns it for every
-/// disk the service binds onto (spec M6b §5.3).
+/// disk the service binds onto that may be rotational (spec M6b §5.3).
 pub(crate) const MAIN: (&str, &str) = ("temperature", "drive");
 
 /// A non-empty string, trimmed; `None` for missing, all-whitespace or absent

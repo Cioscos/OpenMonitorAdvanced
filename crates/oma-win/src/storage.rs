@@ -591,11 +591,24 @@ pub struct DriveEntry {
     /// The service leaves this disk's SMART off unless a client asks for it:
     /// a disk on the USB bus (spec M6b §4.2).
     pub smart_default_off: bool,
+    /// The storage provider owns this disk's main temperature: it takes the
+    /// service's measure itself (a disk that may be rotational, spec M6b
+    /// §5.3), so the `svc` provider leaves that sensor out. A non-rotational
+    /// disk is read locally and imports nothing: there the service's sensor
+    /// stays, and fills in when the local query yields none.
+    pub owns_main_temperature: bool,
+}
+
+/// Whether the storage provider owns the main temperature of a disk of this
+/// class ([`DriveEntry::owns_main_temperature`]).
+fn owns_main_temperature(class: DiskClass) -> bool {
+    class == DiskClass::RotationalOrUnknown
 }
 
 impl DriveEntry {
     /// An entry whose `key` follows from `model` and `serial`, with SMART on
-    /// by default.
+    /// by default and the main temperature owned, as for a disk of unknown
+    /// class.
     pub fn new(
         index: u32,
         device_id: String,
@@ -613,6 +626,7 @@ impl DriveEntry {
             serial,
             key,
             smart_default_off: false,
+            owns_main_temperature: true,
         }
     }
 }
@@ -852,10 +866,6 @@ impl Provider for StorageProvider {
             };
             let (model, serial) = descriptor_texts(disk.index);
             let bus = bus_type(disk.index);
-            let entry = DriveEntry {
-                smart_default_off: smart_default_off(bus),
-                ..DriveEntry::new(disk.index, id.clone(), model, serial)
-            };
             // A disk that may be rotational is not queried here (the query
             // wakes it up): it keeps what it had under the same id.
             // Unknown/asleep/idle disks remain scheduled; a later successful
@@ -867,6 +877,11 @@ impl Provider for StorageProvider {
                 Instant::now(),
                 || read_temperatures(disk.index),
             );
+            let entry = DriveEntry {
+                smart_default_off: smart_default_off(bus),
+                owns_main_temperature: owns_main_temperature(gate.class),
+                ..DriveEntry::new(disk.index, id.clone(), model, serial)
+            };
             let report = gate.temperatures.report.as_ref();
             // Only an NVMe disk is sent the health log query; a transient
             // failure keeps it scheduled, and its first successful read
@@ -2355,6 +2370,16 @@ mod tests {
             &next
         ));
         assert_eq!(published(&mut gates), vec![(Some(41.0), Quality::Held)]);
+    }
+
+    #[test]
+    fn only_a_disk_that_may_be_rotational_has_its_main_temperature_owned() {
+        // A non-rotational disk imports nothing from the service, so the
+        // service's sensor must stay available to fill the gap.
+        assert!(owns_main_temperature(RotationalOrUnknown));
+        assert!(!owns_main_temperature(NonRotational));
+        // An entry built without a class is the cautious one.
+        assert!(entry(0).owns_main_temperature);
     }
 
     #[test]

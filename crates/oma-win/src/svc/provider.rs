@@ -44,9 +44,9 @@ struct Bound {
     /// A storage device that did not bind onto a core disk: its own page
     /// shows the SMART data only (spec D3), see [`is_core_disk_io`].
     unbound_storage: bool,
-    /// A storage device bound onto a core disk: its main temperature is the
-    /// storage provider's, see [`is_main_disk_temperature`].
-    bound_to_disk: bool,
+    /// A storage device bound onto a core disk whose main temperature the
+    /// storage provider owns, see [`is_main_disk_temperature`].
+    main_temperature_owned: bool,
 }
 
 /// The service's per-disk I/O sensors, which duplicate what the core's
@@ -60,10 +60,16 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
     )
 }
 
-/// A disk's main temperature. The storage provider owns it for every disk the
-/// service binds onto (spec M6b §5.3): it is dropped there, so the disk has
-/// one main temperature. An unbound disk keeps it, and the additional
+/// A disk's main temperature. The storage provider owns it for a disk the
+/// service binds onto that may be rotational
+/// ([`DriveEntry::owns_main_temperature`], spec M6b §5.3): it is dropped
+/// there, so the disk has one main temperature. A bound non-rotational disk
+/// keeps it, as before M6b: the storage provider comes first and the engine
+/// keeps its sensor on a duplicate id, so the service's shows only when the
+/// local query yields none. An unbound disk keeps it too, and the additional
 /// `sensor-N` temperatures are never duplicates.
+///
+/// [`DriveEntry::owns_main_temperature`]: crate::storage::DriveEntry::owns_main_temperature
 fn is_main_disk_temperature(kind: &str, name: &str) -> bool {
     (kind, name) == MAIN
 }
@@ -75,7 +81,7 @@ fn is_main_disk_temperature(kind: &str, name: &str) -> bool {
 /// not match) gets `<kind>/<device id>`; such an unbound storage device keeps
 /// only its SMART data ([`is_core_disk_io`]), and is left out when nothing
 /// (no sensor, no property) remains; a bound one leaves its main temperature
-/// to the storage provider ([`is_main_disk_temperature`]). A device or sensor whose kind/unit
+/// to the storage provider where that owns it ([`is_main_disk_temperature`]). A device or sensor whose kind/unit
 /// is not one `oma_core::model` knows is skipped, with one log warning for
 /// the whole schema. Returns the kept sensors' wire indices, in the same
 /// order as `Inventory::sensors`, for `poll` to read the matching values.
@@ -129,15 +135,15 @@ pub(crate) fn bind(
         if bound_disk.is_some_and(|entry| !source_accepted(entry, request)) {
             continue;
         }
-        let bound_to_disk = bound_disk.is_some();
-        let unbound_storage = kind == DeviceKind::Storage && !bound_to_disk;
+        let main_temperature_owned = bound_disk.is_some_and(|entry| entry.owns_main_temperature);
+        let unbound_storage = kind == DeviceKind::Storage && bound_disk.is_none();
         bound.insert(
             device.id.as_str(),
             Bound {
                 final_id,
                 kind,
                 unbound_storage,
-                bound_to_disk,
+                main_temperature_owned,
             },
         );
     }
@@ -161,7 +167,7 @@ pub(crate) fn bind(
         if b.unbound_storage && is_core_disk_io(&sensor.kind, &sensor.name) {
             continue;
         }
-        if b.bound_to_disk && is_main_disk_temperature(&sensor.kind, &sensor.name) {
+        if b.main_temperature_owned && is_main_disk_temperature(&sensor.kind, &sensor.name) {
             continue;
         }
         let Some(kind) = parse_wire::<SensorKind>(&sensor.kind) else {
@@ -1092,6 +1098,74 @@ mod tests {
         assert_eq!(kept, vec![1]);
         let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["storage/device-bbb"]);
+    }
+
+    /// [`one_disk`] as the storage provider publishes a non-rotational disk:
+    /// read locally at every discovery, its main temperature is not owned.
+    fn one_non_rotational_disk() -> DriveIds {
+        drive_table(vec![DriveEntry {
+            owns_main_temperature: false,
+            ..drive(1, "storage/device-bbb", Some("M1"), Some("S1"))
+        }])
+    }
+
+    #[test]
+    fn a_bound_non_rotational_disk_keeps_the_services_main_temperature() {
+        // The storage provider imports nothing for such a disk: when its own
+        // query yields no sensor (a USB SSD, a vendor RAID driver) the
+        // service's is the only main temperature, and when it yields one the
+        // engine keeps the storage provider's, which comes first.
+        let (inventory, kept) = bind(
+            &disk_schema(),
+            &one_non_rotational_disk(),
+            &SourceRequest::default(),
+        )
+        .expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec![
+                "storage/device-bbb/temperature/drive",
+                "storage/device-bbb/temperature/sensor-1",
+            ]
+        );
+        assert_eq!(kept, vec![0, 1]);
+
+        // Through the provider: the value reaches the poll.
+        let feed = SvcFeed::default();
+        feed.set_schema(disk_schema());
+        let drives = DriveIdTable::default();
+        drives.publish(one_non_rotational_disk().drives);
+        let mut p = SvcProvider::new(feed.clone(), drives);
+        let inventory = p.discover().expect("discover");
+        assert_eq!(
+            inventory.sensors[0].id,
+            "storage/device-bbb/temperature/drive"
+        );
+        feed.set_snapshot(
+            WireSnapshot {
+                seq: 1,
+                timestamp_ms: 0,
+                values: vec![Some(44.0), Some(40.0)],
+                held: vec![false, false],
+            },
+            Instant::now(),
+        );
+        assert_eq!(p.poll().expect("poll"), vec![Some(44.0), Some(40.0)]);
+    }
+
+    #[test]
+    fn a_bound_rotational_disk_leaves_its_main_temperature_to_storage() {
+        // The storage provider owns it there (it takes the service's measure
+        // itself): one main temperature per disk.
+        let owned = one_disk();
+        assert!(owned.drives[0].owns_main_temperature);
+        let (inventory, kept) =
+            bind(&disk_schema(), &owned, &SourceRequest::default()).expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec!["storage/device-bbb/temperature/sensor-1"]
+        );
+        assert_eq!(kept, vec![1]);
     }
 
     #[test]

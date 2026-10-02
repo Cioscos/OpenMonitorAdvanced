@@ -44,8 +44,16 @@ fn assert_first_poll_has_no_rates(inventory: &Inventory, first: &[Option<f64>]) 
 /// Discovers, polls twice a second apart, and checks alignment. The first
 /// poll after a discover only primes the PDH rate counters (fresh baseline,
 /// no elapsed interval yet): its rate sensors must be `None`. The second poll
-/// carries real rate values.
+/// carries real rate values. A provider that asks for a rediscovery on that
+/// poll (a hard disk at work declares its temperature sensor after its first
+/// authorized read) starts over once.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
+    discover_and_poll_once(p)
+        .unwrap_or_else(|| discover_and_poll_once(p).expect("a second rediscovery in a row"))
+}
+
+/// `None` when the second poll asks for a rediscovery.
+fn discover_and_poll_once(p: &mut dyn Provider) -> Option<(Inventory, Vec<Option<f64>>)> {
     let inventory = p.discover().expect("discover");
     std::thread::sleep(Duration::from_millis(1_100));
     let first = p.poll().expect("first poll");
@@ -56,13 +64,16 @@ fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
     );
     assert_first_poll_has_no_rates(&inventory, &first);
     std::thread::sleep(Duration::from_millis(1_100));
-    let values = p.poll().expect("second poll");
+    let values = match p.poll() {
+        Err(ProviderError::Rediscover) => return None,
+        polled => polled.expect("second poll"),
+    };
     assert_eq!(
         values.len(),
         inventory.sensors.len(),
         "values must align with sensors"
     );
-    (inventory, values)
+    Some((inventory, values))
 }
 
 #[test]
@@ -120,7 +131,8 @@ fn storage_provider_reports_disks_and_volumes() {
         }
         if sensor.kind == SensorKind::Temperature {
             assert_eq!(sensor.unit, Unit::Celsius, "{}", sensor.id);
-            // Read at discovery and repeated until the 30 s refresh.
+            // Read at discovery (a hard disk only declares its sensor after
+            // an authorized read) and repeated until the 30 s refresh.
             let celsius = value.expect("disk temperature");
             assert!((5.0..=90.0).contains(&celsius), "{} = {celsius}", sensor.id);
         }

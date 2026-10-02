@@ -8,8 +8,9 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    PropertyStandardQuery, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
-    STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
+    PropertyStandardQuery, StorageDeviceSeekPenaltyProperty, DEVICE_SEEK_PENALTY_DESCRIPTOR,
+    IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_NUMBER,
+    STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
 };
 use windows::Win32::System::Power::GetDevicePowerState;
 use windows::Win32::System::IO::DeviceIoControl;
@@ -27,6 +28,15 @@ const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, PropertyId) =
 const _: () = assert!(std::mem::offset_of!(STORAGE_PROPERTY_QUERY, QueryType) == 4);
 const _: () = assert!(size_of::<STORAGE_DEVICE_NUMBER>() == 12);
 const _: () = assert!(std::mem::offset_of!(STORAGE_DEVICE_NUMBER, DeviceNumber) == 4);
+
+/// `DEVICE_SEEK_PENALTY_DESCRIPTOR`: `Version`, `Size`, then the flag.
+const SEEK_PENALTY_SIZE: usize = 12;
+const SEEK_PENALTY_FLAG: usize = 8;
+
+const _: () = assert!(size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() == SEEK_PENALTY_SIZE);
+const _: () = assert!(
+    std::mem::offset_of!(DEVICE_SEEK_PENALTY_DESCRIPTOR, IncursSeekPenalty) == SEEK_PENALTY_FLAG
+);
 
 /// Little-endian `u16` at `offset`, `None` past the end.
 pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -60,6 +70,12 @@ fn parse_disk_number(bytes: &[u8]) -> Option<u32> {
         return None;
     }
     le_u32(bytes, 4)
+}
+
+/// `IncursSeekPenalty` of a `DEVICE_SEEK_PENALTY_DESCRIPTOR`; `None` when
+/// the answer stops before the flag.
+fn parse_seek_penalty(bytes: &[u8]) -> Option<bool> {
+    bytes.get(SEEK_PENALTY_FLAG).map(|&flag| flag != 0)
 }
 
 /// An open disk handle, closed on drop.
@@ -161,6 +177,14 @@ impl PhysicalDrive {
         parse_disk_number(&bytes)
     }
 
+    /// Whether the disk has moving heads (`StorageDeviceSeekPenaltyProperty`);
+    /// `None` when the driver does not answer, as USB bridges often do.
+    pub(crate) fn seek_penalty(&self) -> Option<bool> {
+        parse_seek_penalty(
+            &self.query_property(StorageDeviceSeekPenaltyProperty, SEEK_PENALTY_SIZE)?,
+        )
+    }
+
     /// `Some(false)` while the disk is spun down or in a low-power state,
     /// `None` if Windows cannot tell. Asking does not wake the disk.
     pub(crate) fn powered_on(&self) -> Option<bool> {
@@ -206,5 +230,21 @@ mod tests {
         bytes[0..4].copy_from_slice(&2u32.to_le_bytes()); // CD-ROM
         assert_eq!(parse_disk_number(&bytes), None);
         assert_eq!(parse_disk_number(&bytes[..6]), None);
+    }
+
+    #[test]
+    fn seek_penalty_is_the_flag_after_version_and_size() {
+        let mut bytes = [0u8; 12];
+        bytes[0..4].copy_from_slice(&12u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&12u32.to_le_bytes());
+        assert_eq!(parse_seek_penalty(&bytes), Some(false));
+        bytes[8] = 1;
+        assert_eq!(parse_seek_penalty(&bytes), Some(true));
+        // The driver may return the descriptor without its trailing padding.
+        assert_eq!(parse_seek_penalty(&bytes[..9]), Some(true));
+        // A header alone says nothing: unknown, never "no penalty".
+        assert_eq!(parse_seek_penalty(&bytes[..8]), None);
+        assert_eq!(parse_seek_penalty(&[]), None);
+        assert_eq!(StorageDeviceSeekPenaltyProperty.0, 7);
     }
 }

@@ -154,9 +154,10 @@ fn main() {
     let processes = GpuProcessTable::new();
 
     #[cfg(windows)]
-    let (svc_feed, svc_drives, svc_status) = (
+    let (svc_feed, svc_drives, disk_states, svc_status) = (
         oma_win::svc::SvcFeed::default(),
         oma_win::storage::DriveIdTable::default(),
+        oma_win::storage::DiskStateTable::default(),
         oma_win::svc::ServiceStatusTable::default(),
     );
 
@@ -197,6 +198,7 @@ fn main() {
             oma_win::ServiceHandles {
                 feed: svc_feed.clone(),
                 drives: svc_drives.clone(),
+                disk_states: disk_states.clone(),
             },
         ),
         history_capacity(initial_interval),

@@ -24,8 +24,9 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// applies the D6 gate, lists the drives, resolves each new disk's identity
 /// (<see cref="IDiskPowerProbe.Describe"/>), updates each disk that is known to be spinning and
 /// publishes the outcome as one immutable <see cref="StorageRound"/>: the state of every drive,
-/// the resolved disks and the raw values keyed by LHM sensor identifier, which the sampler only
-/// looks up (values older than two rounds, or from before an idle period, count as absent). A
+/// the resolved disks, the storage part of the request it applied and the raw values keyed by LHM
+/// sensor identifier, which the sampler only looks up (values older than two rounds, or from
+/// before an idle period, count as absent). A
 /// disk enters the schema only once the storage worker has resolved it, so the sampler never
 /// waits on disk I/O. The two threads share no lock across hardware I/O: <c>_subLock</c> only
 /// guards subscriber bookkeeping; a storage round is one reference swap at its end, the sampler
@@ -41,6 +42,16 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <see cref="DriveFacts.RequiresPowerCheck"/> holds and whose SMART is on
 /// (<see cref="DriveStates.IsSmartOff"/>) for its power mode once, whether LHM exposes it or
 /// not; a disk is updated only when that answer is "active", otherwise its values are absent.
+/// </para>
+/// <para>
+/// <b>Held values</b> (protocol v3, <see cref="SnapshotMessage.Held"/>). A disk whose standby is
+/// confirmed keeps the values of the round before, flagged as held, round after round while it
+/// sleeps: only for the disk they were measured on (same <see cref="DriveKey"/> in the earlier
+/// round, in the resolved disk and in this round's enumeration), and only while rounds keep
+/// ending, since the two-round limit above applies to them too. An unknown state, "no media", a
+/// failed update or SMART off keep nothing. In a snapshot a storage value is held when its round
+/// kept it, or when that round's values went out in an earlier snapshot already (30 s rounds
+/// against faster sampling); an absent value and a value from another source never are.
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The tree is never closed while the hub lives: without subscribers sampling
@@ -81,7 +92,8 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// (by request, or a USB disk nobody switched on) is still described (access 0) and then neither
 /// power-checked nor updated. It still counts for the D6 gate (verdict c).</item>
 /// </list>
-/// The service block reports the groups actually open, the storage worker's applied storage part,
+/// The service block reports the groups actually open, the storage part the tick's storage round
+/// was made with (so a request shows as applied together with its drive list, never before),
 /// the request's status and the drive list. When a schema rebuild fails the current plan gets
 /// the new block anyway (<c>failed</c> if the request's schema could not be built), so no client
 /// waits on a request that cannot be shown.
@@ -130,9 +142,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private readonly Dictionary<string, (DiskResolution Disk, string Id)> _storagePins = new(StringComparer.Ordinal);
     private bool _pawnIo;
     private ulong _seq;
+    private long _publishedGeneration; // the storage round whose values the latest snapshot carried
 
     // Storage-owned state.
     private long _storageSyncedVersion;
+    private EffectiveConfig _storageApplied = EffectiveConfig.AllOn.StoragePart; // reaches the sampler inside a StorageRound
     private bool _storageEnabled;
     private bool _storageGateLogged;
     private readonly Dictionary<string, bool?> _diskStates = new(StringComparer.Ordinal);
@@ -150,7 +164,6 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     private volatile StorageRound _round = StorageRound.Empty; // replaced as a whole (PublishRound)
     private volatile bool _opened;
-    private volatile EffectiveConfig _storageApplied = EffectiveConfig.AllOn.StoragePart; // written by the storage worker
     private readonly StoragePark _park = new();
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
@@ -315,7 +328,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         var values = new double?[plan.LhmIds.Length];
+        var held = new bool[values.Length];
         IReadOnlyDictionary<string, double?> storage = FreshStorageValues(tickStart);
+
+        // A new seq is not a new measurement: once a round's values went out, they are repeated.
+        bool republished = _view.Generation == _publishedGeneration;
         bool anyFailed = _failedRoots.Count > 0;
         for (int i = 0; i < values.Length; i++)
         {
@@ -334,7 +351,10 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             }
 
             values[i] = raw is double r && double.IsFinite(r * plan.Scales[i]) ? r * plan.Scales[i] : null;
+            held[i] = plan.FromStorage[i] && values[i] is not null && (republished || _view.Held.Contains(plan.LhmIds[i]));
         }
+
+        _publishedGeneration = _view.Generation;
 
         long anchor;
         lock (_subLock)
@@ -358,7 +378,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         _seq++;
-        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values, new bool[values.Length]), anchor, _reflectedVersion);
+        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values, held), anchor, _reflectedVersion);
         DeliverDue(_time.GetTimestamp());
     }
 
@@ -459,6 +479,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         IReadOnlyList<DriveCheck>? checks = _storageEnabled ? CheckPowerStates(config) : TryEnableStorage(config, roundStart);
         if (checks is null)
         {
+            PublishApplied(); // no round to carry it: the request is taken all the same
             return;
         }
 
@@ -469,9 +490,11 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             answers[check.Drive.DriveNumber] = check;
         }
 
-        IReadOnlyDictionary<string, DiskResolution> previous = _round.Resolved;
+        StorageRound before = _round;
+        IReadOnlyDictionary<string, DiskResolution> previous = before.Resolved;
         var resolved = new Dictionary<string, DiskResolution>(StringComparer.Ordinal);
         var cache = new Dictionary<string, double?>(StringComparer.Ordinal);
+        var held = new HashSet<string>(StringComparer.Ordinal);
         IReadOnlyList<HardwareNode> roots = _tree.Roots;
         var identifierCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (HardwareNode root in roots)
@@ -531,7 +554,14 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 LogDiskStateChange(root.Identifier, info.DriveNumber, spunDown);
                 if (spunDown != false)
                 {
-                    continue; // standby or unknown: no SMART read, values absent
+                    // Standby or unknown: no SMART read. Only a confirmed standby keeps the
+                    // values of the round before; an unknown state leaves them absent.
+                    if (spunDown == true)
+                    {
+                        KeepValues(root, resolution, answer!, before, cache, held);
+                    }
+
+                    continue;
                 }
             }
 
@@ -552,7 +582,56 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         // Never mutated after publication: the sampler only looks them up.
-        PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache);
+        PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: true), resolved, cache, held, config);
+    }
+
+    /// <summary>
+    /// A sleeping disk's values of the round before, carried into this one as held. Only those
+    /// measured on this very disk: the earlier round's disk, the resolved one and the drive this
+    /// round enumerated at its number must share one <see cref="DriveKey"/> (the same LHM
+    /// identifier or drive number alone proves nothing). Absent and non-finite values are not kept.
+    /// </summary>
+    private static void KeepValues(
+        HardwareNode root,
+        DiskResolution resolution,
+        DriveCheck answer,
+        StorageRound before,
+        Dictionary<string, double?> cache,
+        HashSet<string> held)
+    {
+        if (resolution.Key is not { } key
+            || answer.Key != key
+            || !before.Resolved.TryGetValue(root.Identifier, out DiskResolution? measured)
+            || measured.Key != key
+            || measured.Info.DriveNumber != resolution.Info.DriveNumber)
+        {
+            return;
+        }
+
+        Keep(root.Identifier); // the critical warning flag is keyed by the disk itself
+        KeepSensors(root);
+
+        void KeepSensors(HardwareNode node)
+        {
+            foreach (SensorNode sensor in node.Sensors)
+            {
+                Keep(sensor.Identifier);
+            }
+
+            foreach (HardwareNode child in node.Children)
+            {
+                KeepSensors(child);
+            }
+        }
+
+        void Keep(string identifier)
+        {
+            if (before.Values.TryGetValue(identifier, out double? value) && value is double v && double.IsFinite(v))
+            {
+                cache[identifier] = v;
+                held.Add(identifier);
+            }
+        }
     }
 
     /// <summary>
@@ -560,13 +639,18 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// lock. <see langword="null"/> keeps the drives or the resolved disks as they are; unchanged
     /// ones keep their instance, which is how the sampler tells that nothing has to be rebuilt.
     /// The storage worker publishes at the end of a round (or when storage is switched off); only
-    /// the values are dropped from another thread, when the last client leaves.
+    /// the values are dropped from another thread, when the last client leaves. Every publication
+    /// is a new <see cref="StorageRound.Generation"/>, also when it measured the same values again.
+    /// <paramref name="applied"/> is the storage part the round was made with
+    /// (<see langword="null"/> keeps it), so it reaches the sampler together with the round.
     /// </summary>
     private void PublishRound(
         long timestamp,
         IReadOnlyList<WireDrive>? drives,
         IReadOnlyDictionary<string, DiskResolution>? resolved,
-        IReadOnlyDictionary<string, double?> values)
+        IReadOnlyDictionary<string, double?> values,
+        IReadOnlySet<string> held,
+        EffectiveConfig? applied)
     {
         StorageRound current;
         StorageRound next;
@@ -578,9 +662,31 @@ public sealed class SensorHub : ISensorFeed, IDisposable
                 timestamp,
                 drives is null || drives.SequenceEqual(current.Drives) ? current.Drives : drives,
                 resolved is null || SameResolution(current.Resolved, resolved) ? current.Resolved : resolved,
-                values);
+                values,
+                held,
+                applied ?? current.Applied);
         }
         while (Interlocked.CompareExchange(ref _round, next, current) != current);
+    }
+
+    /// <summary>
+    /// Storage worker, when it took a request but no round can carry it (the tree is not open
+    /// yet, or the drives could not be listed): the current round with the applied storage part,
+    /// and nothing else, replaced. Not a new generation: nothing was measured.
+    /// </summary>
+    private void PublishApplied()
+    {
+        EffectiveConfig applied = _storageApplied;
+        StorageRound current;
+        do
+        {
+            current = _round;
+            if (current.Applied.Equals(applied))
+            {
+                return;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _round, current with { Applied = applied }, current) != current);
     }
 
     /// <summary>One wake of the storage loop: a storage round when due (every 30 s, only with a subscriber, only once open). Returns the delay until the next round.</summary>
@@ -965,7 +1071,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             if (checks is not null)
             {
-                PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values);
+                PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             }
 
             if (!_storageGateLogged)
@@ -986,7 +1092,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             LogRateLimited("storage-enable", e, "Enabling storage failed");
 
             // No drive blocks: the list says so, and the next round tries again.
-            PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values);
+            PublishRound(roundStart, DriveStates.ToWire(checks, config, gateOpen: false), resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, config);
             return null;
         }
 
@@ -1048,9 +1154,9 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
     /// <summary>
     /// Storage worker: takes the storage part of a new request. Switched off (P10), the values
-    /// and the resolved disks are dropped at once and the last drive list stays, every entry
-    /// <c>smartOff</c>, with no I/O and the LHM group left open; switched on, or with another
-    /// SMART selection, a round runs at once.
+    /// (kept ones too) and the resolved disks are dropped at once and the last drive list stays,
+    /// every entry <c>smartOff</c>, with no I/O and the LHM group left open; switched on, or with
+    /// another SMART selection, a round runs at once and publishes the request as applied.
     /// </summary>
     private void SyncStorageConfig()
     {
@@ -1067,20 +1173,29 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             return;
         }
 
+        _storageApplied = part;
         if (!part.Enabled.HasFlag(ServiceModules.Storage))
         {
-            PublishRound(long.MinValue, DriveStates.AllOff(_round.Drives), StorageRound.Empty.Resolved, StorageRound.Empty.Values);
+            PublishRound(long.MinValue, DriveStates.AllOff(_round.Drives), StorageRound.Empty.Resolved, StorageRound.Empty.Values, StorageRound.Empty.Held, part);
         }
         else
         {
+            // Reported as applied by the round that is made with it, together with its drive
+            // list; before the tree is open there is no round to wait for.
+            bool opened;
             lock (_subLock)
             {
                 _nextStorageDue = _time.GetTimestamp();
+                opened = _opened;
+            }
+
+            if (!opened)
+            {
+                PublishApplied();
             }
         }
 
-        _storageApplied = part;
-        SetQuietly(_samplerWake); // the sampler reports the request as applied
+        SetQuietly(_samplerWake); // the sampler reports what was published here; a round's part goes out with the next sample
     }
 
     /// <summary>
@@ -1252,7 +1367,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         {
             // Sampling and storage rounds stop: values read before the idle period must not be
             // published as current when a client comes back. The drives and the disks stay.
-            PublishRound(long.MinValue, drives: null, resolved: null, StorageRound.Empty.Values);
+            PublishRound(long.MinValue, drives: null, resolved: null, StorageRound.Empty.Values, StorageRound.Empty.Held, applied: null);
         }
 
         SetQuietly(_samplerWake); // recompute the next wake (or sleep until a new subscriber)
@@ -1306,21 +1421,22 @@ public sealed class SensorHub : ISensorFeed, IDisposable
 
         _status = desired is null
             ? ReconfigurationStatus.Applied
-            : _applier.Step(desired, _storageApplied.Equals(_servedStoragePart));
+            : _applier.Step(desired, _view.Applied.Equals(_servedStoragePart));
         UpdateServiceState();
     }
 
     /// <summary>
     /// Sampler: the service block from what is actually applied: the groups open in the tree,
-    /// the storage part the storage worker took, the request's status (<c>failed</c> too while
-    /// the request's schema cannot be built) and the drive list of the tick's storage round.
+    /// the storage part and the drive list of the tick's storage round (one reference, so the two
+    /// never disagree) and the request's status (<c>failed</c> too while the request's schema
+    /// cannot be built).
     /// </summary>
     private void UpdateServiceState()
     {
         ReconfigurationStatus status = _rebuildFailing && _plan is { } plan && !plan.Filter.Equals(_schemaFilter)
             ? ReconfigurationStatus.Failed
             : _status;
-        EffectiveConfig storage = _storageApplied;
+        EffectiveConfig storage = _view.Applied;
         (ServiceModules, EffectiveConfig, IReadOnlyList<WireDrive>, ReconfigurationStatus) inputs = (_applier.Groups, storage, _view.Drives, status);
         if (_stateInputs is { } last && last.Groups == inputs.Item1 && last.Storage.Equals(inputs.Item2) && ReferenceEquals(last.Drives, inputs.Item3) && last.Status == inputs.Item4)
         {
@@ -1473,16 +1589,29 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     /// What the storage worker knows after one round, published as a whole: the state of every
     /// drive, the disks resolved for the schema (by LHM identifier) and the raw values (by LHM
     /// sensor identifier) with the round's monotonic start (<see cref="long.MinValue"/>: no
-    /// values). <paramref name="Generation"/> grows by one per publication. Never mutated.
+    /// values). <paramref name="Held"/> names the values kept from an earlier round for a
+    /// sleeping disk instead of measured in this one; <paramref name="Applied"/> is the storage
+    /// part of the request the round was made with. <paramref name="Generation"/> grows by one
+    /// per round, which is how the sampler tells a new measurement from one it already published.
+    /// Never mutated.
     /// </summary>
     private sealed record StorageRound(
         long Generation,
         long Timestamp,
         IReadOnlyList<WireDrive> Drives,
         IReadOnlyDictionary<string, DiskResolution> Resolved,
-        IReadOnlyDictionary<string, double?> Values)
+        IReadOnlyDictionary<string, double?> Values,
+        IReadOnlySet<string> Held,
+        EffectiveConfig Applied)
     {
-        public static StorageRound Empty { get; } = new(0, long.MinValue, [], new Dictionary<string, DiskResolution>(), new Dictionary<string, double?>());
+        public static StorageRound Empty { get; } = new(
+            0,
+            long.MinValue,
+            [],
+            new Dictionary<string, DiskResolution>(),
+            new Dictionary<string, double?>(),
+            new HashSet<string>(),
+            EffectiveConfig.AllOn.StoragePart);
     }
 
     /// <summary>

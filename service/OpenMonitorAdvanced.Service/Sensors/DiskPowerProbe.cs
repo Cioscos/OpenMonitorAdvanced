@@ -211,8 +211,10 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     /// The answer of <c>ATA PASS-THROUGH(16)</c> CHECK POWER MODE: the registers come from the
     /// sense data whatever the SCSI status is (a SATA disk answers GOOD, a USB bridge CHECK
     /// CONDITION). Only the sense bytes within the <paramref name="returned"/> bytes of the reply
-    /// and within the length the reply itself declares are read; <see langword="null"/> when they
-    /// hold no registers, or when the reply places its sense data anywhere but in our buffer.
+    /// and within the length the reply itself declares are read; a reply declaring no length (a
+    /// driver may leave it at zero on a GOOD status) is bounded by the returned bytes alone, and
+    /// the parser still follows the length the sense data states. <see langword="null"/> when
+    /// they hold no registers, or when the reply places its sense data anywhere but in our buffer.
     /// </summary>
     internal static bool? InterpretSatReply(in NativeMethods.ScsiPassThroughWithSense reply, uint returned)
     {
@@ -222,7 +224,8 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             return null;
         }
 
-        int available = (int)Math.Min(Math.Min(returned - senseOffset, reply.Spt.SenseInfoLength), SenseLength);
+        uint declared = reply.Spt.SenseInfoLength == 0 ? (uint)SenseLength : reply.Spt.SenseInfoLength;
+        int available = (int)Math.Min(Math.Min(returned - senseOffset, declared), SenseLength);
         return SatSense.TryReadRegisters(sense.AsSpan(0, available), out byte status, out byte sectorCount)
             ? InterpretAtaResult(status, sectorCount)
             : null;

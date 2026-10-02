@@ -500,11 +500,32 @@ public sealed class DiskPowerProbeTests
         reply.Spt.SenseInfoLength = 17; // one byte short of what the sense data itself declares
         Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
 
-        reply.Spt.SenseInfoLength = 0; // the driver wrote no sense data: the buffer is not an answer
-        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
-
         reply.Spt.SenseInfoLength = 255; // never past the buffer
         Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+    }
+
+    [Fact]
+    public void AZeroSenseLengthFallsBackToTheBytesReturned()
+    {
+        // A driver may leave SenseInfoLength at 0 on a GOOD reply that still carries the
+        // registers: the bytes returned bound the slice then, and the sense data's own length
+        // still bounds the parser.
+        DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense reply = SatReply(0x00, "720000000000000E090C000000FF00FF00000000E050");
+        reply.Spt.SenseInfoLength = 0;
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 56 + 22));
+        Assert.False(DiskPowerProbe.InterpretSatReply(reply, returned: 4096)); // never past the sense buffer
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 56 + 21)); // one byte short of the 22 the sense data declares
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 56));
+
+        // No sense data at all: a zeroed buffer is not an answer.
+        DiskPowerProbe.NativeMethods.ScsiPassThroughWithSense empty = SatReply(0x00, "");
+        empty.Spt.SenseInfoLength = 0;
+        Assert.Null(DiskPowerProbe.InterpretSatReply(empty, returned: 88));
+
+        // The offset rule does not depend on the length.
+        reply.Spt.SenseInfoOffset = 48;
+        Assert.Null(DiskPowerProbe.InterpretSatReply(reply, returned: 88));
     }
 
     [Fact]

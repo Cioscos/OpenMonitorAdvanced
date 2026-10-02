@@ -259,7 +259,7 @@ internal sealed class ListenerHarness : IAsyncDisposable
         try
         {
             await client.ReadAsync<HelloMessage>(ct);
-            await client.SendAsync(new SubscribeMessage(intervalMs, [], []), ct);
+            await client.SendAsync(new SubscribeMessage(intervalMs, [], [], []), ct);
             await PipeAssert.EventuallyAsync(() => Feed.All.Count > before, "the subscription", ct);
             return client;
         }

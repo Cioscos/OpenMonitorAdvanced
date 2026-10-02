@@ -116,7 +116,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private EffectiveConfig _servedStoragePart = EffectiveConfig.AllOn.StoragePart;
     private ReconfigurationStatus _status = ReconfigurationStatus.Applied;
     private bool _rebuildFailing;
-    private (ServiceModules Groups, EffectiveConfig Storage, string[] Blockers, ReconfigurationStatus Status)? _stateInputs;
+    private (ServiceModules Groups, EffectiveConfig Storage, WireDrive[] Blockers, ReconfigurationStatus Status)? _stateInputs;
     private ServiceStateBlock _serviceState = ServiceStateBlock.AllActive;
     private long _reflectedVersion; // the _desired version the published service block reflects
     private readonly HashSet<string> _failedRoots = new(StringComparer.Ordinal);
@@ -146,7 +146,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
     private volatile IReadOnlyDictionary<string, DiskResolution> _resolvedDisks = new Dictionary<string, DiskResolution>();
     private volatile bool _opened;
     private volatile EffectiveConfig _storageApplied = EffectiveConfig.AllOn.StoragePart; // written by the storage worker
-    private volatile string[] _gateBlockers = []; // drive keys, written by the storage worker
+    private volatile WireDrive[] _gateBlockers = []; // the drives that keep the gate closed, written by the storage worker
     private readonly StoragePark _park = new();
     private int _structureDirty;
     private readonly ConcurrentDictionary<string, long> _errorLoggedAt = new(StringComparer.Ordinal);
@@ -346,7 +346,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         }
 
         _seq++;
-        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values), anchor, _reflectedVersion);
+        _published = new Published(plan.Revision, plan.Built.Schema, new SnapshotMessage(_seq, tickUnixMs, values, new bool[values.Length]), anchor, _reflectedVersion);
         DeliverDue(_time.GetTimestamp());
     }
 
@@ -954,13 +954,22 @@ public sealed class SensorHub : ISensorFeed, IDisposable
         return true;
     }
 
-    /// <summary>Storage worker: the drive keys of the disks that keep the gate closed (a disk without a key cannot be named).</summary>
+    /// <summary>
+    /// Storage worker: the disks that keep the gate closed, in drive order, as the service block
+    /// lists them (standby or unknown; one without a key is listed too). Provisional: the block
+    /// holds only these until the hub reports the state of every drive.
+    /// </summary>
     private void PublishGateBlockers(IReadOnlyList<DriveBlocker> blockers)
     {
-        string[] keys = [.. blockers.Select(b => b.Key).OfType<string>().Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
-        if (!keys.SequenceEqual(_gateBlockers))
+        WireDrive[] drives =
+        [
+            .. blockers
+                .OrderBy(b => b.Drive.DriveNumber)
+                .Select(b => new WireDrive((uint)b.Drive.DriveNumber, b.Key, b.Drive.Model, b.SpunDown == true ? "standby" : "unknown", BlocksSmart: true)),
+        ];
+        if (!drives.SequenceEqual(_gateBlockers))
         {
-            _gateBlockers = keys;
+            _gateBlockers = drives;
         }
     }
 
@@ -1241,7 +1250,7 @@ public sealed class SensorHub : ISensorFeed, IDisposable
             ? ReconfigurationStatus.Failed
             : _status;
         EffectiveConfig storage = _storageApplied;
-        (ServiceModules, EffectiveConfig, string[], ReconfigurationStatus) inputs = (_applier.Groups, storage, _gateBlockers, status);
+        (ServiceModules, EffectiveConfig, WireDrive[], ReconfigurationStatus) inputs = (_applier.Groups, storage, _gateBlockers, status);
         if (_stateInputs is { } last && last.Groups == inputs.Item1 && last.Storage.Equals(inputs.Item2) && ReferenceEquals(last.Blockers, inputs.Item3) && last.Status == inputs.Item4)
         {
             return;
@@ -1555,7 +1564,7 @@ internal static class SchemaComparer
         x.Reconfiguration == y.Reconfiguration
         && x.ActiveModules.SequenceEqual(y.ActiveModules)
         && x.SmartDisabledDrives.SequenceEqual(y.SmartDisabledDrives)
-        && x.SmartBlockedBy.SequenceEqual(y.SmartBlockedBy);
+        && x.Drives.SequenceEqual(y.Drives);
 
     private static bool SameProperties(IReadOnlyDictionary<string, string> x, IReadOnlyDictionary<string, string> y) =>
         x.Count == y.Count

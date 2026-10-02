@@ -8,7 +8,7 @@ namespace OpenMonitorAdvanced.Service.Protocol;
 public static class ProtocolConstants
 {
     /// <summary>Current sensor IPC protocol version, sent in <see cref="HelloMessage.ProtocolVersion"/>.</summary>
-    public const uint Version = 2;
+    public const uint Version = 3;
 
     /// <summary>Name of the sensor named pipe.</summary>
     public const string PipeName = "OpenMonitorAdvanced.Sensors.v1";

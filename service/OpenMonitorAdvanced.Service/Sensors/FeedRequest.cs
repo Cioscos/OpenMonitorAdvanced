@@ -26,7 +26,10 @@ public enum ServiceModules
 /// </summary>
 public sealed record FeedRequest(uint IntervalMs, ServiceModules Disabled, IReadOnlySet<string> SmartDisabledDrives)
 {
-    /// <summary>The request of a (decoder-validated) <see cref="SubscribeMessage"/> at <paramref name="intervalMs"/>.</summary>
+    /// <summary>
+    /// The request of a (decoder-validated) <see cref="SubscribeMessage"/> at <paramref name="intervalMs"/>.
+    /// Provisional: <see cref="SubscribeMessage.SmartEnabledDrives"/> is not read yet.
+    /// </summary>
     public static FeedRequest From(SubscribeMessage subscribe, uint intervalMs) => new(
         intervalMs,
         ServiceModuleNames.Parse(subscribe.DisabledModules),

@@ -26,11 +26,11 @@ public sealed class PipeListenerTests
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
 
         var hello = await client.ReadAsync<HelloMessage>(Ct);
-        Assert.Equal(2u, hello.ProtocolVersion);
+        Assert.Equal(3u, hello.ProtocolVersion);
         Assert.Equal("ok", hello.PawnIo);
         Assert.False(string.IsNullOrWhiteSpace(hello.ServiceVersion));
 
-        await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
+        await client.SendAsync(new SubscribeMessage(1000, [], [], []), Ct);
         await PipeAssert.EventuallyAsync(() => h.Feed.Active.Count == 1, "the subscription", Ct);
         Assert.Equal([1000u], h.Feed.Intervals);
 
@@ -63,6 +63,8 @@ public sealed class PipeListenerTests
     [Theory]
     [InlineData("unknown module")]
     [InlineData("too many keys")]
+    [InlineData("too many enabled keys")]
+    [InlineData("key in both lists")]
     [InlineData("malformed key")]
     public async Task ABadSubscribeGetsAnErrorAndThePipeCloses(string problem)
     {
@@ -70,14 +72,22 @@ public sealed class PipeListenerTests
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
         await client.ReadAsync<HelloMessage>(Ct);
 
+        const string DriveA = "589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83";
         SubscribeMessage subscribe = problem switch
         {
-            "unknown module" => new SubscribeMessage(1000, ["gpu"], []),
+            "unknown module" => new SubscribeMessage(1000, ["gpu"], [], []),
             "too many keys" => new SubscribeMessage(
                 1000,
                 [],
+                Enumerable.Range(0, ProtocolConstants.MaxDriveKeys + 1).Select(i => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture)).ToArray(),
+                []),
+            "key in both lists" => new SubscribeMessage(1000, [], [DriveA], [DriveA]),
+            "too many enabled keys" => new SubscribeMessage(
+                1000,
+                [],
+                [],
                 Enumerable.Range(0, ProtocolConstants.MaxDriveKeys + 1).Select(i => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture)).ToArray()),
-            _ => new SubscribeMessage(1000, [], ["NOT-A-KEY"]),
+            _ => new SubscribeMessage(1000, [], ["NOT-A-KEY"], []),
         };
         await client.SendAsync(subscribe, Ct);
 
@@ -112,7 +122,7 @@ public sealed class PipeListenerTests
         using var client = await h.SubscribedClientAsync(1000, Ct);
         FakeFeed.Subscription subscription = Assert.Single(h.Feed.All);
 
-        await client.SendAsync(new SubscribeMessage(60000, ["storage", "psu"], [Drive]), Ct);
+        await client.SendAsync(new SubscribeMessage(60000, ["storage", "psu"], [Drive], []), Ct);
         await PipeAssert.EventuallyAsync(() => subscription.Requests.Count == 2, "the replaced request", Ct);
 
         // Replaced in place: no second subscription, and the first one is never disposed.
@@ -141,7 +151,7 @@ public sealed class PipeListenerTests
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
         await client.ReadAsync<HelloMessage>(Ct);
 
-        await client.SendAsync(new SubscribeMessage(1000, ["cpu"], []), Ct);
+        await client.SendAsync(new SubscribeMessage(1000, ["cpu"], [], []), Ct);
         await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 1, "the subscription", Ct);
 
         FeedRequest request = Assert.Single(h.Feed.All[0].Requests);
@@ -164,8 +174,8 @@ public sealed class PipeListenerTests
 
         byte[] frame = kind switch
         {
-            "snapshot" => MessageCodec.EncodeFrame(new SnapshotMessage(1, 2, [1.0])),
-            "hello" => MessageCodec.EncodeFrame(new HelloMessage(2, "client", "ok")),
+            "snapshot" => MessageCodec.EncodeFrame(new SnapshotMessage(1, 2, [1.0], [false])),
+            "hello" => MessageCodec.EncodeFrame(new HelloMessage(3, "client", "ok")),
             "error" => MessageCodec.EncodeFrame(new ErrorMessage("bad_request", "client")),
             "schema" => MessageCodec.EncodeFrame(MakeSchema(1)),
             "garbage" => [3, 0, 0, 0, 0xc1, 0xc1, 0xc1],
@@ -246,7 +256,7 @@ public sealed class PipeListenerTests
             }
 
             // The server ends one session; that client reads the EOF but keeps its handle open.
-            await clients[0].SendAsync(new HelloMessage(2, "client", "ok"), Ct);
+            await clients[0].SendAsync(new HelloMessage(3, "client", "ok"), Ct);
             Assert.Equal("bad_request", (await clients[0].ReadAsync<ErrorMessage>(Ct)).Code);
             Assert.Null(await clients[0].ReadAsync(Ct));
 
@@ -374,7 +384,7 @@ public sealed class PipeListenerTests
         {
             await client.ReadAsync<HelloMessage>(Ct);
             await PipeAssert.EventuallyAsync(() => h.Idle.ClientCount == 1, "the client to be counted", Ct);
-            await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
+            await client.SendAsync(new SubscribeMessage(1000, [], [], []), Ct);
 
             switch (failure)
             {
@@ -386,7 +396,7 @@ public sealed class PipeListenerTests
                     break;
                 case "bad-request":
                     await PipeAssert.EventuallyAsync(() => h.Feed.All.Count == 1, "the subscription", Ct);
-                    await client.SendAsync(new HelloMessage(2, "client", "ok"), Ct);
+                    await client.SendAsync(new HelloMessage(3, "client", "ok"), Ct);
                     Assert.Equal("bad_request", (await client.ReadAsync<ErrorMessage>(Ct)).Code);
                     break;
                 case "queue-overflow":
@@ -537,5 +547,5 @@ public sealed class PipeListenerTests
 
     private static FeedUpdate MakeUpdate(int sensors, ulong seq, bool withSchema) => new(
         withSchema ? MakeSchema(sensors) : null,
-        new SnapshotMessage(seq, 1_000 + seq, Enumerable.Range(0, sensors).Select(i => (double?)(i + (seq * 0.5))).ToList()));
+        new SnapshotMessage(seq, 1_000 + seq, Enumerable.Range(0, sensors).Select(i => (double?)(i + (seq * 0.5))).ToList(), Enumerable.Repeat(false, sensors).ToList()));
 }

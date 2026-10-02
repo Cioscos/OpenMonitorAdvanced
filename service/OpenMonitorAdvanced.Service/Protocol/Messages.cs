@@ -17,13 +17,15 @@ public sealed record HelloMessage(uint ProtocolVersion, string ServiceVersion, s
 
 /// <summary>
 /// A client's request: the interval, the modules it does not want (names from
-/// <see cref="ProtocolConstants.Modules"/>) and the drive keys (<see cref="Sensors.DriveKey"/>)
-/// whose SMART it does not want. The decoder validates the lists.
+/// <see cref="ProtocolConstants.Modules"/>), the drive keys (<see cref="Sensors.DriveKey"/>)
+/// whose SMART it does not want and those, among the drives that are off by default, whose SMART
+/// it wants on. The decoder validates the lists; no key may be in both drive lists.
 /// </summary>
 public sealed record SubscribeMessage(
     uint IntervalMs,
     IReadOnlyList<string> DisabledModules,
-    IReadOnlyList<string> SmartDisabledDrives) : IMessage;
+    IReadOnlyList<string> SmartDisabledDrives,
+    IReadOnlyList<string> SmartEnabledDrives) : IMessage;
 
 public sealed record SchemaMessage(
     IReadOnlyList<WireDevice> Devices,
@@ -32,19 +34,35 @@ public sealed record SchemaMessage(
 
 /// <summary>
 /// The service's effective configuration, global to all its clients. <c>Reconfiguration</c> is
-/// <c>applied</c>, <c>pending</c> or <c>failed</c>.
+/// <c>applied</c>, <c>pending</c> or <c>failed</c>. <c>Drives</c> lists the drives the service knows
+/// about, in <c>physical_drive</c> order.
 /// </summary>
 public sealed record ServiceStateBlock(
     IReadOnlyList<string> ActiveModules,
     IReadOnlyList<string> SmartDisabledDrives,
     string Reconfiguration,
-    IReadOnlyList<string> SmartBlockedBy)
+    IReadOnlyList<WireDrive> Drives)
 {
     /// <summary>Every module on, nothing disabled, nothing in progress.</summary>
     public static ServiceStateBlock AllActive { get; } = new(ProtocolConstants.Modules, [], "applied", []);
 }
 
-public sealed record SnapshotMessage(ulong Seq, ulong TimestampMs, IReadOnlyList<double?> Values) : IMessage;
+/// <summary>
+/// One drive of the service block. <c>Key</c> (<see cref="Sensors.DriveKey"/>) and <c>Model</c> are
+/// <see langword="null"/> when unknown. <c>State</c> is <c>active</c>, <c>standby</c>, <c>unknown</c>,
+/// <c>smartOff</c> or <c>noMedia</c>; <c>BlocksSmart</c> says the drive keeps the SMART gate closed.
+/// </summary>
+public sealed record WireDrive(uint PhysicalDrive, string? Key, string? Model, string State, bool BlocksSmart);
+
+/// <summary>
+/// One sample of every sensor. <c>Held</c> has the length and order of <c>Values</c>; <see langword="true"/>
+/// means the value is kept from an earlier measurement, and only a present value can be held.
+/// </summary>
+public sealed record SnapshotMessage(
+    ulong Seq,
+    ulong TimestampMs,
+    IReadOnlyList<double?> Values,
+    IReadOnlyList<bool> Held) : IMessage;
 
 public sealed record ErrorMessage(string Code, string Message) : IMessage;
 

@@ -87,7 +87,7 @@ public sealed class EffectiveConfigTests
     [Fact]
     public void ASubscribeBecomesARequest()
     {
-        var subscribe = new SubscribeMessage(60000, ["memory", "psu"], [DriveA]);
+        var subscribe = new SubscribeMessage(60000, ["memory", "psu"], [DriveA], []);
 
         FeedRequest request = FeedRequest.From(subscribe, intervalMs: 5000);
 

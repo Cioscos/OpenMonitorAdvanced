@@ -1237,7 +1237,7 @@ public sealed class SensorHubTests
         Assert.Equal("pending", pending.Reconfiguration);
         Assert.Equal(ProtocolConstants.Modules, pending.ActiveModules);
         Assert.Empty(pending.SmartDisabledDrives);
-        Assert.Empty(pending.SmartBlockedBy);
+        Assert.Empty(pending.Drives);
         Assert.Equal(revision + 1, h.Hub.Revision);
 
         sub.Update(Requests.Of(1000));
@@ -1998,26 +1998,31 @@ public sealed class SensorHubTests
         h.Hub.RunDue();
         Assert.Equal(2, h.Disks.AllActiveQueries);
         Assert.Equal(0, h.Tree.EnableStorageCount);
-        Assert.Equal([HddKey], LatestSchema(a).Service.SmartBlockedBy);
+        Assert.Equal([new WireDrive(0, HddKey, "ST2000DM008-2FR102", "standby", true)], LatestSchema(a).Service.Drives);
     }
 
     [Fact]
-    public void GateBlockersAreReportedAsDriveKeys()
+    public void GateBlockersAreReportedAsDrives()
     {
         using var h = new Harness();
         h.Tree.Initial.Add(Cpu());
         h.Tree.Storage.Add(Hdd());
         h.Disks.AllActive = false;
         h.Disks.Blockers.Add(new DriveBlocker(WdcFacts(), SpunDown: true));
-        h.Disks.Blockers.Add(new DriveBlocker(new DriveFacts(3, DriveAvailability.Present, "USB Bridge", null, BusType: 0x07, SeekPenalty: null), SpunDown: null)); // no serial: no key
+        h.Disks.Blockers.Add(new DriveBlocker(new DriveFacts(3, DriveAvailability.Present, "USB Bridge", null, BusType: 0x07, SeekPenalty: null), SpunDown: null)); // no serial: no key, but still listed
         List<FeedUpdate> a = h.Subscribe(1000);
         h.Hub.TickOnce();
-        Assert.Empty(LatestSchema(a).Service.SmartBlockedBy);
+        Assert.Empty(LatestSchema(a).Service.Drives);
 
         h.Hub.RunStorageDue();
         h.Advance(1000);
         h.Hub.RunDue();
-        Assert.Equal([WdcKey], LatestSchema(a).Service.SmartBlockedBy);
+        Assert.Equal(
+            [
+                new WireDrive(1, WdcKey, "WDC WD40EFRX-68N32N0", "standby", true),
+                new WireDrive(3, null, "USB Bridge", "unknown", true),
+            ],
+            LatestSchema(a).Service.Drives);
         int revision = h.Hub.Revision;
 
         h.Disks.AllActive = true;
@@ -2025,7 +2030,7 @@ public sealed class SensorHubTests
         h.Hub.RunStorageDue();
         h.Advance(1000);
         h.Hub.RunDue();
-        Assert.Empty(LatestSchema(a).Service.SmartBlockedBy);
+        Assert.Empty(LatestSchema(a).Service.Drives);
         Assert.True(h.Hub.Revision > revision);
     }
 }

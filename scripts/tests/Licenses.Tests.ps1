@@ -166,6 +166,14 @@ Describe 'Get-OmaNuGetPackageLicense' {
         New-Package 'File.Pkg' '2.0.0' '<license type="file">LICENSE.txt</license>' @{ 'LICENSE.txt' = 'own terms' }
         New-Package 'Loose.Pkg' '3.0.0' '<license type="expression">MIT</license>' @{ 'LICENSE.TXT' = 'loose terms' }
         New-Package 'Url.Pkg' '4.0.0' '<licenseUrl>https://example.invalid/terms</licenseUrl>'
+        New-Package 'Notices.Pkg' '5.0.0' '<license type="expression">MIT</license>' @{ 'Third-Party-Notices.TXT' = 'component notices' }
+    }
+
+    It 'reads the third-party notices file of the package, or null' {
+        (Get-OmaNuGetPackageLicense -PackagesRoot $pkgRoot -Id 'Notices.Pkg' -Version '5.0.0').Notices |
+            Should -BeExactly 'component notices'
+        (Get-OmaNuGetPackageLicense -PackagesRoot $pkgRoot -Id 'Expr.Pkg' -Version '1.0.0').Notices |
+            Should -BeNullOrEmpty
     }
 
     It 'reads the expression and the copyright from the nuspec' {

@@ -62,7 +62,7 @@ function Get-OmaNuGetRuntimePackages {
 
 <#
 .SYNOPSIS
-  Licence of a package in the NuGet global packages folder: @{ License; Copyright; Text }.
+  Licence of a package in the NuGet global packages folder: @{ License; Copyright; Text; Notices }.
 .DESCRIPTION
   Text is the package's own licence file (the nuspec's <license type="file"> or a LICENSE,
   LICENSE.txt or LICENSE.md at the package root), or $null when there is none and the caller
@@ -101,6 +101,9 @@ function Get-OmaNuGetPackageLicense {
             Sort-Object -Property { $_.Name.ToUpperInvariant() } |
             Select-Object -First 1 -ExpandProperty FullName
     }
+    $notices = Get-ChildItem -LiteralPath $dir -File |
+        Where-Object { $_.Name -ieq 'THIRD-PARTY-NOTICES.TXT' } |
+        Select-Object -First 1 -ExpandProperty FullName
     if (-not $expression) {
         if ($Overrides.ContainsKey($Id)) { $expression = $Overrides[$Id] }
         else { throw "$Id $Version has no SPDX licence expression in its nuspec: review its terms and add an override" }
@@ -109,6 +112,7 @@ function Get-OmaNuGetPackageLicense {
         License   = $expression
         Copyright = if ($copyrightNode -and $copyrightNode.InnerText.Trim()) { $copyrightNode.InnerText.Trim() } else { $null }
         Text      = if ($file) { [IO.File]::ReadAllText($file) } else { $null }
+        Notices   = if ($notices) { [IO.File]::ReadAllText($notices) } else { $null }
     }
 }
 

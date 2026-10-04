@@ -69,7 +69,7 @@ Rischi del lavoro dal vivo che nessun test copre, ciascuno legato al passo che l
 **Files:**
 - Create: `target/spike/m7b/bin/PresentMon-2.6.0-x64.exe`, `target/spike/m7b/help.txt`, `target/spike/m7b/notes.md` (non tracciati)
 
-- [ ] **Step 1 (agente): committare questo piano su `main` e creare il branch**
+- [x] **Step 1 (agente): committare questo piano su `main` e creare il branch**
 
 ```bash
 git add docs/superpowers/plans/2026-10-04-m7b-motore-frame.md
@@ -77,11 +77,11 @@ git commit -m "docs: add the M7b frame engine plan (spike first)"
 git switch -c feat/m7b-motore-frame
 ```
 
-- [ ] **Step 2 (agente): scaricare la console**
+- [x] **Step 2 (agente): scaricare la console**
 
 Sorgente: `https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe`, salvata in `target/spike/m7b/bin/`.
 
-- [ ] **Step 3 (agente): verificare l'eseguibile**
+- [x] **Step 3 (agente): verificare l'eseguibile**
 
 Comando: `Get-AuthenticodeSignature` e `Get-FileHash -Algorithm SHA256`.
 Atteso:
@@ -91,7 +91,7 @@ Atteso:
 
 Hash, soggetto e data vanno in `notes.md`. Se uno dei tre controlli non torna, ci si ferma e si avvisa l'utente.
 
-- [ ] **Step 4 (agente): salvare l'aiuto e verificare le opzioni**
+- [x] **Step 4 (agente): salvare l'aiuto e verificare le opzioni**
 
 Comando: `PresentMon-2.6.0-x64.exe --help > target/spike/m7b/help.txt`.
 Atteso: compaiono tutte queste opzioni:
@@ -110,7 +110,7 @@ Le opzioni che mancano vanno in `notes.md`, e i passi che le usano si adattano.
 **Files:**
 - Create: `target/spike/m7b/capture.ps1`, `target/spike/m7b/m7b.wprp` (non tracciati)
 
-- [ ] **Step 1 (agente): scrivere `capture.ps1`**
+- [x] **Step 1 (agente): scrivere `capture.ps1`**
 
 L'intestazione è `#Requires -RunAsAdministrator`. Parametri:
 - `-Name` obbligatorio, con convalida `^[a-z0-9-]{1,32}$`;
@@ -134,7 +134,7 @@ Comportamento:
    - con `-Wpr`, esegue `wpr -cancel` se la registrazione è ancora attiva.
 4. **Stampa finale:** dimensione e numero di righe dei due CSV, poi l'esito di `logman query -ets` filtrato su `OMA-Spike`, che deve risultare vuoto.
 
-- [ ] **Step 2 (agente): scrivere `m7b.wprp`**
+- [x] **Step 2 (agente): scrivere `m7b.wprp`**
 
 È un profilo WPR personalizzato chiamato `M7b`, in modalità file, con livello di dettaglio `Verbose` e soli provider utente, a livello 5 e con tutte le keyword:
 - `Microsoft-Windows-DxgKrnl` `802EC45A-1E99-4B83-9920-87C98277BA9D`;
@@ -147,7 +147,7 @@ Comportamento:
 
 I GUID di Dwm-Core e Kernel-Process si prendono da `logman query providers "<nome>"`, non a memoria. Nessun provider del kernel, per non registrare l'attività di tutto il sistema.
 
-- [ ] **Step 3 (agente): verificare la sintassi senza eseguire**
+- [x] **Step 3 (agente): verificare la sintassi senza eseguire**
 
 Comandi:
 - `pwsh -NoProfile -Command "[System.Management.Automation.Language.Parser]::ParseFile('target/spike/m7b/capture.ps1',[ref]$null,[ref]$e) | Out-Null; $e"`;
@@ -160,7 +160,7 @@ Atteso: nessun errore di parsing, XML valido.
 **Files:**
 - Create: `target/spike/m7b/analyze.py` (non tracciato)
 
-- [ ] **Step 1 (agente): scrivere l'analizzatore**
+- [x] **Step 1 (agente): scrivere l'analizzatore**
 
 Comando: `python analyze.py <csv> [--app <nome.exe>] [--skip 2] [--trim-fixture <out.csv> --seconds 10]`. Usa solo la libreria standard (`csv`, `statistics`), legge le colonne per nome e funziona con i CSV v1 e v2. Stampa:
 - l'elenco delle colonne dell'intestazione;
@@ -178,7 +178,7 @@ Comando: `python analyze.py <csv> [--app <nome.exe>] [--skip 2] [--trim-fixture 
 
 `--app` sceglie il processo con più righe tra quelli con quel nome. `--skip` scarta i primi N secondi. `--trim-fixture` scrive l'intestazione completa e le sole righe del PID scelto per `--seconds` secondi, dopo lo skip.
 
-- [ ] **Step 2 (agente): provarlo su un CSV costruito a mano**
+- [x] **Step 2 (agente): provarlo su un CSV costruito a mano**
 
 Il CSV ha 4 righe di 2 PID, una con `NA`, salvato in `target/spike/m7b/selftest.csv`.
 Atteso: i conteggi corrispondono a quelli scritti nel file, e la riga `NA` risulta scartata con il motivo.
@@ -190,7 +190,7 @@ Atteso: i conteggi corrispondono a quelli scritti nel file, e la riga `NA` risul
 
 Riproduce il §4.1 della spec quanto basta per misurarlo, nel linguaggio di `FrameCapture` (.NET).
 
-- [ ] **Step 1 (agente): scrivere la sonda**
+- [x] **Step 1 (agente): scrivere la sonda**
 
 Console `net10.0`, senza pacchetti NuGet, P/Invoke scritti a mano su `advapi32` e `kernel32`. Argomenti:
 - `--presentmon <path>` e `--out <log>`;
@@ -221,7 +221,7 @@ Sequenza:
 
 `EVENT_TRACE_PROPERTIES` ha il nome della sessione nello stesso buffer, a `LoggerNameOffset`. La dimensione della struct si controlla con `Marshal.SizeOf` all'avvio e si confronta con 120 byte (x64); se non coincide, la sonda esce con un errore.
 
-- [ ] **Step 2 (agente): compilare**
+- [x] **Step 2 (agente): compilare**
 
 Comando: `dotnet build target/spike/m7b/flush-probe -c Release`.
 Atteso: compilazione riuscita, 0 avvisi. L'agente non la esegue: senza privilegi otterrebbe solo accesso negato.
@@ -231,7 +231,7 @@ Atteso: compilazione riuscita, 0 avvisi. L'agente non la esegue: senza privilegi
 **Files:**
 - Create: `target/spike/m7b/overlay-probe/Cargo.toml` (con `[workspace]` proprio), `target/spike/m7b/overlay-probe/src/main.rs` (non tracciati)
 
-- [ ] **Step 1 (agente): scrivere la sonda**
+- [x] **Step 1 (agente): scrivere la sonda**
 
 Rust con `windows = "0.62"`; le feature servono per D3D11, DXGI, Direct2D, DirectWrite, DirectComposition, WindowsAndMessaging e Gdi. Argomenti:
 - `--x 16 --y 16 --w 320 --h 120` e `--fps 30`;
@@ -260,7 +260,7 @@ A ogni cambio di fase scrive `QueryPerformanceCounter`, ora locale e fase su std
 
 Ogni blocco `unsafe` ha il suo commento `// SAFETY:` anche nella sonda, perché la M7c ne riprenderà il codice.
 
-- [ ] **Step 2 (agente): compilare**
+- [x] **Step 2 (agente): compilare**
 
 Comando: `cargo build --release --manifest-path target/spike/m7b/overlay-probe/Cargo.toml`.
 Atteso: compilazione riuscita. La prima esecuzione è dell'utente, in A8.
@@ -270,7 +270,7 @@ Atteso: compilazione riuscita. La prima esecuzione è dell'utente, in A8.
 **Files:**
 - Create: `target/spike/m7b/captures/*.csv`, `*.etl` (non tracciati)
 
-- [ ] **Step 1 (agente → utente): scegliere i giochi**
+- [x] **Step 1 (agente → utente): scegliere i giochi**
 
 Si chiede all'utente quale gioco usa per ciascun caso:
 
@@ -287,7 +287,7 @@ Si annotano anche la versione del driver NVIDIA (`nvidia-smi --query-gpu=driver_
 
 Si evitano per primi i giochi con EA Javelin. AFMF sull'iGPU e Lossless Scaling restano fuori dallo spike (D12).
 
-- [ ] **Step 2 (utente): eseguire le catture**
+- [x] **Step 2 (utente): eseguire le catture**
 
 Per ogni caso:
 - gioco in borderless, in una scena di gioco stabile (non un menu);
@@ -296,7 +296,7 @@ Per ogni caso:
 
 L'utente riporta l'esito stampato dallo script, cioè righe dei CSV e sessioni rimaste.
 
-- [ ] **Step 3 (agente): analizzare**
+- [x] **Step 3 (agente): analizzare**
 
 Comando: `python target/spike/m7b/analyze.py <csv> --app <exe> --skip 2`, per ogni CSV (v1 e v2).
 
@@ -308,7 +308,7 @@ Se tracerpt non decodifica il provider PCL (TraceLogging), si aggiunge alla sond
 
 Un esito ambiguo, per esempio poche righe del gioco o una scena di caricamento, si ripete una volta sola, chiedendolo all'utente.
 
-- [ ] **Step 4 (agente): scrivere le risposte di S1 in `notes.md`**
+- [x] **Step 4 (agente): scrivere le risposte di S1 in `notes.md`**
 
 Le risposte coprono:
 1. **Mappa delle colonne:** campo `Frame` del §4.2 → colonna v1 e colonna v2, con la scelta tra v1 e `--v2_metrics`.
@@ -320,13 +320,13 @@ Le risposte coprono:
 
 ### Task A7: S2 e S3, costo e PresentMon come figlio di LocalSystem (utente + agente)
 
-- [ ] **Step 1 (utente, PowerShell amministratore, nessun gioco aperto): misure da amministratore**
+- [x] **Step 1 (utente, PowerShell amministratore, nessun gioco aperto): misure da amministratore**
 
 Ogni comando dura 60 s; `$p` è il percorso assoluto di `target\spike\m7b`:
 
 ```powershell
 $p = "$PWD\target\spike\m7b"
-$probe = "$p\flush-probe\bin\Release\net10.0\flush-probe.exe"
+$probe = "$p\flush-probe\bin\Release\net10.0-windows\flush-probe.exe"
 $pm = "$p\bin\PresentMon-2.6.0-x64.exe"
 & $probe --presentmon $pm --seconds 60 --flush-ms 0   --out "$p\s2-admin-noflush.log"
 & $probe --presentmon $pm --seconds 60 --flush-ms 100 --out "$p\s2-admin-flush.log"
@@ -334,7 +334,7 @@ $pm = "$p\bin\PresentMon-2.6.0-x64.exe"
 & $probe --presentmon $pm --seconds 60 --flush-ms 100 --pcl --out "$p\s2-admin-pcl.log"
 ```
 
-- [ ] **Step 2 (utente, PowerShell amministratore): la stessa sonda come SYSTEM**
+- [x] **Step 2 (utente, PowerShell amministratore): la stessa sonda come SYSTEM**
 
 Si usa un'operazione pianificata, senza gioco e poi con il gioco di C1 in primo piano:
 
@@ -345,7 +345,7 @@ schtasks /Run /TN OMA-M7b-Spike        # attendere 70 s
 # con il gioco di C1 aperto: stessa operazione con --out s3-system-game.log
 ```
 
-- [ ] **Step 3 (utente): caduta simulata e pulizia al riavvio**
+- [x] **Step 3 (utente): caduta simulata e pulizia al riavvio**
 
 Si ricrea l'operazione con `--failfast-after 10 --out "$p\s3-crash.log"` e la si esegue. Dopo 20 s:
 - `logman query OpenMonitorAdvanced-Frames -ets`: atteso, la sessione esiste ancora;
@@ -353,11 +353,11 @@ Si ricrea l'operazione con `--failfast-after 10 --out "$p\s3-crash.log"` e la si
 
 Poi si riesegue la sonda normale (`--out "$p\s3-after-crash.log"`): atteso, il primo `STOP` del log restituisce 0.
 
-- [ ] **Step 4 (utente): togliere l'operazione**
+- [x] **Step 4 (utente): togliere l'operazione**
 
 Comando: `schtasks /Delete /TN OMA-M7b-Spike /F`.
 
-- [ ] **Step 5 (agente): leggere i log e decidere**
+- [x] **Step 5 (agente): leggere i log e decidere**
 
 Si leggono i log e si annotano in `notes.md`:
 - **identità:** `NT AUTHORITY\SYSTEM` e sessione 0 nei log `s3-*`;
@@ -378,11 +378,11 @@ Porte di decisione (spec §4.7):
 
 ### Task A8: S4, finestra sopra un gioco borderless (utente + agente)
 
-- [ ] **Step 1 (utente): preparare**
+- [x] **Step 1 (utente): preparare**
 
 Si apre il gioco di C1 in borderless, con G-Sync attivo e il suo indicatore acceso (Pannello di controllo NVIDIA › Visualizza › «Indicatore G-SYNC/G-SYNC Compatible»), oppure con l'OSD del monitor che mostra la frequenza.
 
-- [ ] **Step 2 (utente): due finestre di PowerShell**
+- [x] **Step 2 (utente): due finestre di PowerShell**
 
 Nella finestra amministratore:
 
@@ -399,15 +399,15 @@ L'utente annota per ogni fase (0–30 visibile, 30–60 nascosta, 60–90 visibi
 - se un clic sul riquadro arriva al gioco;
 - l'indicatore G-Sync o la frequenza del monitor.
 
-- [ ] **Step 3 (utente): ripetere con la finestra vuota**
+- [x] **Step 3 (utente): ripetere con la finestra vuota**
 
 Si ripete con `--empty` (finestra visibile ma vuota) e `-Name overlay-empty`.
 
-- [ ] **Step 4 (utente, facoltativo): fullscreen esclusivo**
+- [x] **Step 4 (utente, facoltativo): fullscreen esclusivo**
 
 Se il gioco ha il fullscreen esclusivo, si ripete lì una sola fase visibile. Atteso: riquadro non visibile (§14).
 
-- [ ] **Step 5 (agente): correlare e decidere**
+- [x] **Step 5 (agente): correlare e decidere**
 
 Si allineano i QPC delle fasi di `s4.log` con `TimeInQPC` di `overlay-v1.csv` e si riportano i conteggi di `PresentMode` del gioco per fase.
 
@@ -420,7 +420,7 @@ Si allineano i QPC delle fasi di `s4.log` con `TimeInQPC` di `overlay-v1.csv` e 
 
 ### Task A9: S5, convivenza delle sessioni (utente + agente)
 
-- [ ] **Step 1 (utente, PowerShell amministratore): la sessione di un altro strumento**
+- [x] **Step 1 (utente, PowerShell amministratore): la sessione di un altro strumento**
 
 Nella stessa finestra di A7, oppure dopo aver ridefinito `$p`, `$probe` e `$pm` come nel suo passo 1:
 
@@ -432,11 +432,11 @@ logman query -ets > "$p\s5-before.txt"
 logman query -ets > "$p\s5-after.txt"
 ```
 
-- [ ] **Step 2 (utente, facoltativo): CapFrameX o FrameView**
+- [x] **Step 2 (utente, facoltativo): CapFrameX o FrameView**
 
 Se l'utente ha CapFrameX o FrameView, lo avvia in cattura durante il passo 1 e riporta se la cattura si interrompe.
 
-- [ ] **Step 3 (agente): controllare**
+- [x] **Step 3 (agente): controllare**
 
 Atteso:
 - `OMA-S5-Other` compare in `s5-before.txt`;
@@ -452,7 +452,7 @@ Il risultato va in `notes.md`.
 - Create: `testdata/presentmon/README.md`, `testdata/presentmon/<caso>-v1.csv` e `-v2.csv` per C1–C5 (e C6, se la soglia lo richiede)
 - Modify: questo piano (sezione «Decisioni dello spike»)
 
-- [ ] **Step 1 (agente): preparare le fixture**
+- [x] **Step 1 (agente): preparare le fixture**
 
 Per ogni caso:
 
@@ -470,7 +470,7 @@ Verifica: in ogni fixture `Application` ha un solo valore (il gioco) e `ProcessI
 - argomenti;
 - secondi tenuti.
 
-- [ ] **Step 2 (agente): scrivere l'esito**
+- [x] **Step 2 (agente): scrivere l'esito**
 
 `spike-findings.md` ha una sezione per S1–S5 con le misure, le risposte e le porte di decisione del §4.7 con il loro esito. In più:
 - gli argomenti definitivi di PresentMon;
@@ -481,27 +481,27 @@ Verifica: in ogni fixture `Application` ha un solo valore (il gioco) e `ProcessI
 
 Questi sono i punti del §15 per la M7b.
 
-- [ ] **Step 3 (agente): verificare la pulizia**
+- [x] **Step 3 (agente): verificare la pulizia**
 
 Comandi, eseguibili senza privilegi; se `logman` li richiede, si chiede all'utente:
 - `schtasks /Query /TN OMA-M7b-Spike`: atteso, non trovato;
 - `logman query -ets`: nessuna sessione `OMA-Spike-*`, `OMA-S5-Other` o `OpenMonitorAdvanced-Frames`;
 - `Get-Process PresentMon* -ErrorAction SilentlyContinue`: nessuno.
 
-- [ ] **Step 4 (agente): compilare «Decisioni dello spike»**
+- [x] **Step 4 (agente): compilare «Decisioni dello spike»**
 
 Si compila la sezione in fondo a questo piano: ogni correzione alla spec in una riga, nella forma «§x.y: prima → dopo, perché».
 
 Se una porta di decisione ha chiesto di fermarsi (A7 o A8), ci si ferma qui e si discute con l'utente prima di scrivere la Parte B.
 
-- [ ] **Step 5 (agente): commit**
+- [x] **Step 5 (agente): commit**
 
 ```bash
 git add docs/superpowers/references/m7/spike-findings.md testdata/presentmon docs/superpowers/plans/2026-10-04-m7b-motore-frame.md
 git commit -m "docs: record the M7b spike findings and PresentMon fixtures"
 ```
 
-- [ ] **Step 6 (agente): scrivere la Parte B**
+- [x] **Step 6 (agente): scrivere la Parte B**
 
 Si scrivono in questo file i passi dei task B1–B11, a partire dalla mappa qui sotto, con le risposte dello spike. Poi si chiede all'utente di rivedere la Parte B prima di eseguirla.
 
@@ -527,4 +527,19 @@ Si scrivono in questo file i passi dei task B1–B11, a partire dalla mappa qui 
 
 ## Decisioni dello spike
 
-_(si compila nel Task A10)_
+Spike eseguito il 2026-10-04 (esito: `docs/superpowers/references/m7/spike-findings.md`; fixture: `testdata/presentmon/`). Nessuna porta di decisione ha chiesto di fermarsi: D5 (console di PresentMon) resta. Correzioni alla spec, nella forma «§: prima → dopo, perché»:
+
+| # | Correzione |
+|---|---|
+| SD1 | §4.1 argomenti: «elenco da fissare» → `--output_stdout --no_console_stats --qpc_time --track_frame_type --write_frame_id --session_name OpenMonitorAdvanced-Frames --stop_existing_session --no_track_input`, più `--track_pc_latency` con `trackPcLatency` e `--no_track_gpu` senza `trackGpu`; colonne predefinite (né `--v1_metrics` né `--v2_metrics`). `--write_frame_id` è nascosta nell'aiuto ma senza di essa `PCLFrameId` non esiste; `--v2_metrics` non ha `MsBetweenPresents`, `MsBetweenDisplayChange`, `MsUntilDisplayed`. |
+| SD2 | §4.1 parser: colonne obbligatorie `Application, ProcessID, SwapChainAddress, PresentMode, TimeInQPC, MsBetweenPresents, MsBetweenDisplayChange, MsUntilDisplayed, MsBetweenAppStart`; facoltative `FrameType`, `MsPCLatency`, `PCLFrameId`, `MsGPUBusy` (assenti → campo nil). `NA` = nil; BOM e CR finale si tollerano. Il valore di `SwapChainAddress` è esadecimale con `0x`. |
+| SD3 | §4.2 `Frame`, derivazione dei campi: `qpc`←`TimeInQPC`; `swapchain`←`SwapChainAddress`; `frame_type`←`FrameType` (`Application`→`app`, `Intel XeSS-FG`→`generated_intel_xefg`, `AMD AFMF`→`generated_amd_afmf`, altro testo→`generated_other`, colonna assente→`unknown`); `displayed`←`MsBetweenDisplayChange` numerico; `ms_between_presents`←`MsBetweenPresents`; `ms_between_display_change`←`MsBetweenDisplayChange`; `ms_until_displayed`←`MsUntilDisplayed`; `ms_app_frametime`←`MsBetweenAppStart`; `ms_pc_latency`←`MsPCLatency`; `ms_gpu_busy`←`MsGPUBusy`; `pcl_frame_id`←`PCLFrameId` (0 → nil). Nessun campo in più. |
+| SD4 | §4.5 punto 2: «PCL solo per DLSS FG» → **vale per DLSS FG, FSR FG e Smooth Motion in ogni gioco con Reflex**; gli FPS renderizzati sono `(ultimo − primo pcl_frame_id) / tempo fra le due righe` nella finestra, non il conteggio degli id (PresentMon lascia senza id circa il 5% dei frame dell'app). L'etichetta dell'origine resta «Reflex». |
+| SD5 | §4.5 punto 3, euristica «FG?»: «rapporto ≥ 1,8 per 2 s» → alternanza ≥ 0,9 **e** rapporto ≥ 1,8 su 2 s. Scatta per DLSS FG e Smooth Motion senza PCL (1,00 / 44–58), non scatta senza FG (≤ 0,79 / ≤ 1,27) né con FSR FG senza PCL (presentazioni regolari). |
+| SD6 | §4.4 collo di bottiglia: «la maggior parte dei frame» → `gpu` se almeno il **75%** dei frame dell'app nella finestra ha `ms_gpu_busy ≥ 0,9 × ms_app_frametime`, altrimenti `cpu`; con meno di 30 frame dell'app `unknown`. Con FG i frame dell'app sono quelli con `pcl_frame_id`; con FG sospetta («FG?») e senza PCL, `unknown`. Misure: limite GPU 92–99%, limite CPU 40–54%. |
+| SD7 | §4.1 svuotamento: resta ogni 100 ms (50 ms non migliora). §4.7/§11 porta dei 300 ms → **ritardo tipico 200–400 ms dalla presentazione all'arrivo, con buchi occasionali fino a circa 2,3 s** in cui i frame arrivano in ritardo ma tutti; la causa non è isolata. Il servizio conta i buchi oltre 1 s e li scrive nel log a livello DEBUG; l'overlay (M7c) deve disegnare per tempo del dato, non d'arrivo. |
+| SD8 | §4.1 buffer ETW (§15): non configurabili con la console; PresentMon usa 64 KB × 256 (max 1024), `FlushTimer` 1 s. Nessun evento perso nelle prove. |
+| SD9 | §11: costo di PresentMon misurato 0,006–0,05% della CPU totale, 5–6,5 MB privati; il lavoro di lettura nel servizio è stimato da 0,04% a 0,1% (sonda). Limiti del §11 invariati. |
+| SD10 | §3.2 e §14 G-Sync: su RTX 4080 la finestra trasparente ai clic non toglie il flip indipendente (MPO) né G-Sync, visibile, vuota o nascosta. La regola «finestra nascosta» resta per l'hardware senza MPO; il limite del §14 diventa «può succedere su hardware senza piani MPO liberi». |
+| SD11 | §4.3 esclusioni: confermate `dwm.exe` (presenta come `Hardware: Legacy Flip` quando esiste una finestra sopra il gioco) e i nostri processi (la finestra dell'overlay presenta come ogni altra). |
+| SD12 | §14 limiti, FG: «FSR 3/4 FG e Smooth Motion non distinguibili» → **non distinguibili solo senza Reflex o con PCL spento**; con PCL spento DLSS FG e Smooth Motion mostrano «FG?», FSR FG solo gli FPS mostrati. |

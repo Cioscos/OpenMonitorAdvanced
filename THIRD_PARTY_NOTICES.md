@@ -72,9 +72,13 @@ packages unmodified; none of their source is copied into this repository.
   a LibreHardwareMonitor dependency (RAM SPD over PawnIO SMBus).
 - **BlackSharp.Core 1.0.7** (MPL-2.0) — https://github.com/Blacktempel/BlackSharp,
   a shared dependency of DiskInfoToolkit and RAMSPDToolkit-NDD.
-- **Mono.Posix.NETStandard 1.0.0** (Microsoft; licence terms at
-  https://go.microsoft.com/fwlink/?linkid=869050) — a LibreHardwareMonitor
-  dependency used only on Linux and macOS code paths. Its native helper
+- **Mono.Posix.NETStandard 1.0.0** (MIT, © Microsoft Corporation) — a
+  LibreHardwareMonitor dependency used only on Linux and macOS code paths. The
+  package's licence URL (https://go.microsoft.com/fwlink/?linkid=869050)
+  redirects to the Mono licence (https://github.com/mono/mono/blob/master/LICENSE),
+  under which "the runtime and its class libraries are licensed under the terms
+  of the MIT license"; Mono.Posix is one of those class libraries, so
+  redistribution is permitted with the MIT notice. Its native helper
   libraries (`MonoPosixHelper.dll`, `libMonoPosixHelper.dll`) are excluded from
   the publish.
 - **HidSharp 2.6.4** (Apache-2.0) — a LibreHardwareMonitor dependency (HID

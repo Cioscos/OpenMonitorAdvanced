@@ -42,7 +42,8 @@ temperature, tensioni, ventole e dati SMART.
   scorciatoie del log (vedi sotto). La sezione *Fonti dati* attiva o disattiva ogni libreria dei produttori
   di GPU, la modalità compatibile con gli anti-cheat, ogni modulo del servizio e, disco per
   disco, la lettura SMART, e mostra lo stato di PawnIO. *Informazioni* elenca versioni e
-  licenze. Le impostazioni sono salvate in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
+  licenze, controlla gli aggiornamenti (vedi [Controllo degli aggiornamenti](#controllo-degli-aggiornamenti))
+  ed esporta il report dei sensori (vedi [Report dei sensori](#report-dei-sensori)). Le impostazioni sono salvate in `%APPDATA%\OpenMonitorAdvanced\settings.json`.
 - **Icona nel tray.** L'icona mostra dal vivo il sensore scelto: una temperatura come numero,
   un carico come barra verticale. Diventa ambra o rossa quando una regola è in attenzione o in
   critico, e allora il suggerimento comincia con il problema prima di CPU, GPU e RAM. Il menu apre
@@ -170,6 +171,45 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   separatore di elenco (molte impostazioni regionali europee) mostra il log CSV in una sola
   colonna: aprilo con *Dati* → *Da testo/CSV* e scegli la virgola.
 
+## Controllo degli aggiornamenti
+
+L'app può dirti quando esce una nuova versione. In *Impostazioni › Informazioni*, **Controlla ora**
+interroga GitHub una volta; **Controlla automaticamente (una volta al giorno)** fa lo stesso ogni
+giorno ed è **spenta di default**.
+
+- **Cosa invia.** Una sola richiesta HTTPS ad `api.github.com` per l'ultima release di questo
+  repository. GitHub vede il tuo indirizzo IP, come per ogni connessione, e uno User-Agent con la
+  versione dell'app. Non invia identificativi, impostazioni né dati dei sensori.
+- **Cosa fa.** Mostra se hai l'ultima versione e, se no, un link alla pagina della release. Non
+  scarica e non installa mai nulla. Con il controllo automatico attivo, una nuova versione dà una
+  sola notifica di Windows per versione, e un pallino su *Informazioni* resta finché
+  l'aggiornamento è disponibile.
+- Senza un clic su *Controlla ora* e con il controllo automatico spento, l'app non fa alcuna
+  richiesta di rete. Il servizio non usa mai la rete. Vedi la sezione Privacy di
+  [CODE_SIGNING.md](CODE_SIGNING.md#privacy) (in inglese).
+
+## Report dei sensori
+
+**Esporta report sensori** in *Impostazioni › Informazioni* salva `oma-report-AAAAMMGG-HHMMSS.json`
+nella cartella che scegli. Non viene inviato nulla: sei tu ad allegare il file a una segnalazione.
+
+- **Cosa contiene:** le versioni di app, servizio e protocollo, la versione di Windows, lo stato
+  del servizio e della modalità anti-cheat, la modalità sicura, le fonti dati attive, ogni
+  dispositivo con modello, produttore e un elenco fisso di dettagli statici, e ogni sensore con
+  valore corrente, qualità e minimo, media e massimo della sessione.
+- **Cosa non contiene:** gli identificativi dei dischi e di rete (sostituiti da `storage/disk-N` e
+  `network/adapter-N`), i nomi degli adattatori di rete (sostituiti da *Ethernet N*, *Wi-Fi N* o
+  *Adapter N*), i GUID dei volumi (sostituiti da numeri progressivi), percorsi, nome utente o del
+  computer, indirizzi di rete, regole, altre impostazioni e storico.
+
+## Segnalare un problema
+
+Apri una [issue](https://github.com/Cioscos/OpenMonitorAdvanced/issues) e descrivi cosa ti
+aspettavi e cosa è successo. **Allega un report dei sensori** (vedi
+[Report dei sensori](#report-dei-sensori)): ci dice quale hardware, quali sensori e quali fonti
+ha il tuo PC, senza identificarlo. Per un sensore mancante o sbagliato, esporta il report mentre
+il problema è visibile.
+
 ## Compilare dal sorgente
 
 ### Prerequisiti
@@ -248,5 +288,11 @@ OpenMonitor Advanced è software libero, distribuito con la
 modificarlo; se distribuisci una versione modificata, devi pubblicarne il codice sorgente con la
 stessa licenza.
 
-I componenti di terze parti e le loro licenze sono elencati in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+I componenti di terze parti sono descritti in due file, entrambi installati con l'app e aperti da
+*Impostazioni › Informazioni*:
+
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), scritto a mano: le fonti dei binding GPU,
+  LibreHardwareMonitor, PawnIO e gli altri componenti inclusi;
+- [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt), generato da
+  `pwsh scripts/generate-licenses.ps1` e controllato in CI: i testi delle licenze di ogni crate
+  Rust, pacchetto JavaScript e pacchetto NuGet ridistribuito, e del runtime .NET.

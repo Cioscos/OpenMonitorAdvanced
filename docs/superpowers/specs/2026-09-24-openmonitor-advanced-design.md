@@ -189,7 +189,7 @@ File `%APPDATA%\OpenMonitorAdvanced\settings.json`, con versione dello schema e 
 - sensori selezionati per il log e per la tray;
 - interruttori per ogni provider;
 - comportamento della tray e avvio automatico;
-- controllo opzionale degli aggiornamenti (dalla M6).
+- controllo opzionale degli aggiornamenti (dalla M6c): sezione `updates` con `checkAutomatically` (`false` di default); la versione del formato resta `1`, perché il decoder dà il default alle chiavi mancanti. Lo stato del controllo (ultimo tentativo e ultimo successo, ultima release valida, versione già notificata) non è una preferenza e sta in `%APPDATA%\OpenMonitorAdvanced\update-state.json` (spec M6c, §2.3).
 
 ## 5. Acquisizione dati (Windows)
 
@@ -396,7 +396,11 @@ Verificato in M2 da utente normale su una RTX 4080 (driver 617.14) e sull'iGPU A
 - Regole e avvisi (tabella delle regole con modifica e creazione).
 - Log CSV.
 - Fonti dati (interruttori per provider, stato del servizio, modalità anti-cheat).
-- Informazioni (versione, licenze di terze parti; dalla M6 il controllo degli aggiornamenti e **"Esporta report sensori"**: un JSON anonimo con dispositivi, sensori, fonti e valori correnti da allegare alle segnalazioni).
+- Informazioni (dettaglio nella spec M6c, `docs/superpowers/specs/2026-10-04-m6c-report-aggiornamenti-design.md`):
+  - versioni di app, servizio e protocollo, cartelle delle impostazioni e dei log;
+  - licenza, con i pulsanti «Avvisi di terze parti» (`THIRD_PARTY_NOTICES.md`) e «Testi delle licenze» (`THIRD_PARTY_LICENSES.txt`, generato da `scripts/generate-licenses.ps1` e controllato in CI);
+  - riga «Aggiornamenti» (M6c): pulsante «Controlla ora», stato dell'ultimo controllo con il pulsante «Pagina della release» se c'è una versione nuova, casella «Controlla automaticamente (una volta al giorno)», spenta di default, con la nota su cosa invia; un pallino sulla voce Informazioni del menu quando un aggiornamento è disponibile e, con il controllo automatico, un toast di Windows una sola volta per versione;
+  - **«Esporta report sensori»** (M6c): un JSON anonimo (`oma-report-AAAAMMGG-HHMMSS.json`, formato 1) con versioni, stato del servizio, della modalità anti-cheat e della modalità sicura, fonti, dispositivi con le proprietà di una lista bianca e ogni sensore con valore, qualità e minimo, media e massimo della sessione. Gli id di dischi e rete diventano indici, i nomi di rete diventano il tipo più un indice, i GUID dei volumi negli id dei sensori diventano numeri progressivi. Il file si salva dove sceglie l'utente e non si invia mai.
 
 ### 7.5 Stile visivo — palette "Synthwave" (solo tema scuro nella v1)
 
@@ -465,7 +469,7 @@ Stringhe in file JSON per lingua (`en`, `it`), con l'inglese come lingua di rise
   - versione minima 2.2.0 (§10);
   - nessun modulo proprio nella v1;
   - niente WinRing0 né inpoutx64.
-- **Aggiornamenti nella v1 (dalla M6):** solo un controllo opzionale delle nuove release su GitHub, con link al download, senza installazione automatica.
+- **Rete e aggiornamenti (M6c):** l'unica richiesta di rete dell'app è il controllo degli aggiornamenti, e parte solo su azione dell'utente: il pulsante «Controlla ora» o la casella del controllo giornaliero, spenta di default. È un `GET https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/releases/latest` fatto con WinHTTP dalla shell (`crates/oma-win/src/http.rs`): TLS 1.2 o 1.3 (con ripiego sulla sola TLS 1.2 dove la 1.3 non è disponibile), proxy di sistema, certificati dello store di Windows, nessun cookie; invia solo l'indirizzo IP (implicito) e uno User-Agent con la versione dell'app. La revoca dei certificati non si controlla (decisione della M6c). Si accettano solo un tag `vX.Y.Z` e un URL della release sotto `https://github.com/Cioscos/OpenMonitorAdvanced/releases/`. L'app non scarica e non installa nulla: mostra il link alla pagina della release. La webview non fa richieste di rete (CSP invariata) e il servizio non usa mai la rete.
 - **Firma dei binari:** decisa con SignPath.io (firma gratuita per progetti open source), per ridurre gli avvisi di SmartScreen; il design è nella spec M6a (`docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md`). Ammissione alla Foundation e collaudo della firma pendenti (§13).
 
 ## 10. Installazione e distribuzione
@@ -538,7 +542,8 @@ Ogni milestone avrà un proprio piano di implementazione.
 4. **Servizio:** `oma-service` con LibreHardwareMonitorLib, protocollo IPC con le fixture, installer NSIS con PawnIO, modalità anti-cheat.
 4.5. **Intermezzo grafici fluidi:** scorrimento a circa 60 FPS delle due viste, curve morbide, punto finale bianco e glow leggero; design in `docs/superpowers/specs/2026-09-27-fluid-charts-design.md`.
 5. **Regole e integrazione:** motore regole, banner di stato, notifiche, tray completa, log CSV, impostazioni, traduzioni it/en. Design di dettaglio in `docs/superpowers/specs/2026-09-29-m5-regole-integrazione-design.md`; si esegue in tre piani: M5a impostazioni e tray, M5b regole, M5c log CSV.
-6. **Rifinitura e 1.0:** verifica del budget di prestazioni, controllo degli aggiornamenti, "Esporta report sensori", documentazione, licenze di terze parti, release.
+6. **Rifinitura:** verifica del budget di prestazioni, controllo degli aggiornamenti, "Esporta report sensori", documentazione, licenze di terze parti, release. Si esegue in tre piani: M6a release e firma, M6b dischi e protocollo v3, M6c report, aggiornamenti e licenze. La M6 chiude con la release **0.4.0**, che contiene M6b e M6c.
+7. **1.0:** arriva dopo la M6, quando ci sono la firma SignPath (ammissione alla Foundation e collaudo), la conferma dell'autore di PawnIO sulla ridistribuzione del setup e la matrice hardware, riempita anche con i report dei sensori della community.
 
 ## Appendice A — Riferimenti principali della ricerca (settembre 2026)
 

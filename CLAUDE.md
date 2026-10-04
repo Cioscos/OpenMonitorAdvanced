@@ -3,7 +3,7 @@
 Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplificata e vista Avanzata, palette Synthwave, nessun privilegio amministrativo per CPU/RAM/dischi/rete/GPU.
 
 - **Spec (fonte di verità):** `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`
-- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; M6 rifinitura in tre piani: M6a release e firma (implementata, ammissione e collaudo della firma pendenti), M6b dischi e protocollo v3 (completata; release 0.4.0 pendente, su richiesta dell'utente), poi M6c report e aggiornamenti)
+- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; M6 rifinitura in tre piani: M6a release e firma (implementata, ammissione e collaudo della firma pendenti), M6b dischi e protocollo v3 (completata), M6c report, aggiornamenti e licenze (implementata e documentata; verifiche dal vivo e bump alla 0.4.0 pendenti). La M6 chiude con la release 0.4.0 (M6b e M6c insieme, push su richiesta dell'utente); la 1.0 aspetta firma SignPath, conferma dell'autore di PawnIO e matrice hardware)
 - **Budget prestazioni:** `docs/perf-budget.md` (nucleo a riposo < 1% CPU, tray < 30 MB, finestra < 200 MB WebView2 compresa); si misura a ogni milestone con `scripts/measure-footprint.ps1`
 
 ## Struttura
@@ -31,6 +31,7 @@ pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in s
 pwsh scripts/check-trim-warnings.ps1         # confronta gli avvisi di trimming del servizio con service/trim-allowlist.txt
 pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] # le cinque versioni e Cargo.lock coincidono (con -Tag: il tag è vX.Y.Z, su HEAD e in main)
 pwsh scripts/bump-version.ps1 X.Y.Z          # aggiorna le cinque versioni e Cargo.lock; non fa commit né tag, stampa i comandi
+pwsh scripts/generate-licenses.ps1 [-Check]  # rigenera THIRD_PARTY_LICENSES.txt (con -Check: fallisce se non è aggiornato, come in CI); serve cargo-about 0.9.2
 Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester -Path scripts/tests -ExcludeTagFilter Integration -CI   # test degli script (Pester 5.7.1)
 cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio e PawnIO
 ```

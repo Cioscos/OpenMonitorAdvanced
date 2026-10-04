@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M6b).
+Updated at the end of every milestone (last update: M6c).
 
 ## Open: code
 
@@ -12,11 +12,10 @@ Updated at the end of every milestone (last update: M6b).
 | Upgrade over an installed version (user check, 2026-10-02, 0.3.0 setup downloaded from GitHub): the installer uninstalls the old version first, and during that step a message says the product is still running. The app was running (it starts at login and lives in the tray), so the check itself is right. The raw placeholder in the Italian text is fixed (see "Closed in M6a"). The upgrade behaviour stays as it is (user ruling, 2026-10-02): the installer asks, and the user clicks OK to let it close the running app. Still open: report the malformed placeholders to Tauri upstream. SmartScreen also appeared on that download, as expected for an unsigned setup. | `app/src-tauri/nsis/` | upstream report: when convenient |
 | On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
 | DDR5 SPD page stays on whichever page it was left on (e.g. page 4) after the service stops, instead of resetting; stock LHM behaves the same way (found in Task 15, 2026-09-27). Optional bounded reset for parity, otherwise accepted. | `app/src/` (RAM/SPD page) | accepted; revisit if a user reports it |
-| Privacy statement for the update check. The update check (M6c) will be the first network request of the app, to GitHub: review `CODE_SIGNING.md` (Privacy), the behavior and the opt-out that the SignPath Foundation terms require before it ships. | `CODE_SIGNING.md`, `docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md` §7 | M6c |
 | Confirm on the first real SignPath request: whether the `file-version` constraint of the artifact configurations matches the string `X.Y.Z` or the fixed `0.2.0.0` resource of the NSIS files; that the Integration Pester tests actually run (not skip) in the CI `scripts` job; the 8.3 short `TEMP` path of the runner against the uninstaller directory check of `sign-shim.ps1`; the English line `The signature is timestamped:` of signtool with SignPath's RFC 3161 timestamps. | `.signpath/`, `scripts/verify-signatures.ps1`, `scripts/sign-shim.ps1`, `.github/workflows/ci.yml` | first signed release |
 | A third-party folder inside `Program Files` that grants `Users` Modify rights passes the Advanced-sensors-component install-path check, which only verifies the path is under `Program Files` and free of reparse points, not its ACL. | `app/src-tauri/nsis/oma.nsh` (install-path check) | accepted; verify/document |
 | A silent install refused for a reason other than the path check (for example a missing `/NOSENSORS` outside `Program Files`) may still have created an empty `$INSTDIR` and installed the WebView2 runtime before refusing. | `app/src-tauri/nsis/installer.nsi` | accepted; verify/document |
-| Redistributing the official PawnIO setup is common practice (LibreHardwareMonitor and FanControl both do it), but the PawnIO author has not been asked to confirm it for this project. | `THIRD_PARTY_NOTICES.md`, `scripts/build-installer-payload.ps1` | before 1.0 |
+| Redistributing the official PawnIO setup is common practice (LibreHardwareMonitor and FanControl both do it), but the PawnIO author has not been asked to confirm it for this project. The request is drafted below ("Draft: request to the PawnIO author"), to be sent only on the user's request. | `THIRD_PARTY_NOTICES.md`, `scripts/build-installer-payload.ps1` | before 1.0 |
 | `used_pct` is duplicated in the memory and storage providers. | `crates/oma-win/src/memory.rs`, `crates/oma-win/src/storage.rs` | when touched |
 | PDH: the item count returned by the API goes unchecked into `from_raw_parts`, and a null `szName` is not guarded. | `crates/oma-win/src/pdh.rs` | when touched |
 | The label-key test keeps a hand-written list: only GPU keys are cross-checked against the code (`GpuField` self-test); CPU, memory, storage and network keys are not. | `crates/oma-win/tests/labels.rs` | when touched |
@@ -37,7 +36,8 @@ Updated at the end of every milestone (last update: M6b).
 | `SvcProvider::poll` clones the whole snapshot and the drive list every tick only to compare generations; generation accessors would avoid the per-tick allocation. | `crates/oma-win/src/svc/provider.rs` | when touched |
 | Pipe listener: after a failed connect, the replacement instance is created after the old one is disposed and without `FILE_FLAG_FIRST_PIPE_INSTANCE`, a brief zero-instance gap (the client-side PID check protects the app). Cheap hardening: create it with `first: Volatile.Read(ref _busy) == 0`, so a squatter makes it fail loudly (R20) instead of being joined. | `service/OpenMonitorAdvanced.Service/Pipe/PipeListener.cs` | when touched |
 | The service's logs live in `$INSTDIR\service\logs` (ruling R30). Any future service-owned path (settings, rules) must stay under a folder no user can create first, with the same service-side check (`LogDirectoryGuard`), never under `%ProgramData%`. | `service/OpenMonitorAdvanced.Service/Logging/LogDirectoryGuard.cs`, `app/src-tauri/nsis/oma.nsh` | M5 (settings) |
-| `Mono.Posix.NETStandard` 1.0.0 (a LibreHardwareMonitor dependency, now referenced directly to drop its native assets) has its licence only behind a Microsoft fwlink: confirm the terms when the licences are reviewed. | `THIRD_PARTY_NOTICES.md` | M6 (licences) |
+| `THIRD_PARTY_LICENSES.txt` includes the .NET runtime's `THIRD-PARTY-NOTICES.TXT`, but not the `THIRD-PARTY-NOTICES` files of the other Microsoft NuGet packages in the service publish (`Microsoft.Extensions.*`, `System.*`). They largely overlap with the runtime notices; add them to `scripts/generate-licenses.ps1` when it is next touched. | `scripts/generate-licenses.ps1`, `THIRD_PARTY_LICENSES.txt` | when touched |
+| Update check: WinHTTP does not check certificate revocation (M6c ruling). Revisit if the check ever downloads anything. | `crates/oma-win/src/http.rs` | accepted |
 | CPU thermal throttling has no sensor in LibreHardwareMonitor 0.9.6 (S1 §1), so `cpu-throttle` has no instances. On Intel the service could read bit 0 of `IA32_PACKAGE_THERM_STATUS` itself through the public `LibreHardwareMonitor.PawnIo.IntelMsr`: new code, Intel only, not testable on this PC. | `service/OpenMonitorAdvanced.Service/Sensors/` | when Intel hardware is available |
 | TjMax: the AMD table (`AmdTjMaxTable.cs`, 164 entries) covers desktop Ryzen only. Mobile and Ryzen AI (in the same AMD table, e.g. 7840HS at 100 °C), Threadripper, Zen/Zen+ with the offset Tctl, engineering samples and the Ryzen 3 3100/3300X (no published value) use the 85/95 °C fallback. The entries were checked against AMD's specifications table only (31 also against the product page). | `service/OpenMonitorAdvanced.Service/Sensors/AmdTjMaxTable.cs` | M6 (hardware matrix) |
 | Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
@@ -136,6 +136,57 @@ To be published on `github.com/Blacktempel/DiskInfoToolkit` **only on the user's
 >
 > Found by code reading, not reproduced: we do not own a disk that fails identification. Happy to test a change on the hardware we have.
 
+## Draft: request to the PawnIO author
+
+To be sent **only on the user's request**, as an issue on `github.com/namazso/PawnIO.Setup` or by e-mail to the address in the setup's signature. The author's confirmation is a requirement of the 1.0 release (main spec §9, §14).
+
+> **Title:** Permission to redistribute the unmodified PawnIO setup with OpenMonitor Advanced
+>
+> Hi, and thanks for PawnIO. I maintain OpenMonitor Advanced (https://github.com/Cioscos/OpenMonitorAdvanced), a free, open-source hardware monitor for Windows (GPL-3.0-or-later). Its optional sensor service uses LibreHardwareMonitorLib 0.9.6, which reads CPU, motherboard, RAM SPD and fan sensors through PawnIO.
+>
+> **What we do.** Our NSIS installer has an optional "Advanced sensors" component (selected by default; it can be cleared, and `/NOSENSORS` leaves it out of a silent install). When it is selected and PawnIO is missing or older than 2.2.0, the installer runs the official `PawnIO_setup.exe` 2.2.0 with `-install -silent`, exactly as published at https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0. We never modify, repack or re-sign the setup, and we ship no PawnIO module of our own.
+>
+> **How we check it.** The setup is never committed to our repository. At build time it is downloaded from your release (or read from a cached copy) and accepted only if:
+>
+> - its SHA-256 is `1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032` (pinned in our repository);
+> - its Authenticode signature is valid and the signer is `E=admin@namazso.eu, CN=namazso.eu, O=namazso, L=Debrecen, C=HU` (issued by GLOBALTRUST 2015 CODESIGNING 1), with the certificate thumbprint pinned as well.
+>
+> Our uninstaller never removes PawnIO, since other programs (such as FanControl) may share it. Our third-party notices credit PawnIO and state its licences (driver GPL-2.0 with the IOCTL exception, library and modules LGPL-2.1).
+>
+> **The question.** LibreHardwareMonitor and FanControl redistribute the setup in a similar way, but we would rather ask than assume: may we keep redistributing the official, unmodified PawnIO setup inside our installer as described? If you prefer different terms (a download at install time instead of bundling, a specific attribution, a minimum version), we will follow them.
+>
+> Thank you.
+
+## Draft: release notes for 0.4.0
+
+The hand-written part of the 0.4.0 draft release (above the block that `render-release-notes.ps1` generates), to be pasted into the draft **only when the user prepares the release**.
+
+> ## What's new
+>
+> ### Disks that are left to sleep (M6b)
+>
+> - **Hard disks can spin down.** The app reads a hard disk's temperature only after recent activity, and the sensor service no longer asks a disk that Windows turned off, or that has been idle since the previous round, for its power mode or SMART data. Before, these queries woke the disk or reset Windows' idle timer.
+> - **Disk power state** on the disk page: *Active*, *Idle* or *In standby*. While a disk is idle or asleep its last values stay visible, greyed out, as *Last reading*; they are left out of the history, the statistics and the rules, and the CSV log writes `suspended`.
+> - **USB disks:** SMART reads are off by default and can be switched on per disk in *Settings › Data sources*. Power-mode checks fall back to SAT pass-through for disks behind a USB bridge.
+> - *Data sources* names the disks that hold back SMART reads while they sleep.
+>
+> ### Updates, sensor report and licences (M6c)
+>
+> - **Optional update check.** *Settings › About* has a *Check now* button and a *Check automatically (once a day)* option, **off by default**. The check is a single HTTPS request to `api.github.com`; it sends your IP address and the app version, nothing else, and it never downloads or installs anything. With the automatic check on, a new version raises one Windows notification and a dot on *About*. See the privacy section of `CODE_SIGNING.md`.
+> - **Export sensor report.** An anonymous JSON file with devices, sensors, sources and values, to attach to bug reports. Disk and network identifiers, adapter names and volume GUIDs are replaced; nothing is sent.
+> - **Licence texts.** `THIRD_PARTY_LICENSES.txt` lists the licences of every redistributed Rust crate, JavaScript package and NuGet package and of the .NET runtime; it is installed with the app and opens from *About*, next to the third-party notices.
+> - The network adapter page shows the adapter type (Ethernet or Wi-Fi).
+>
+> ### Fixes
+>
+> - Italian installer texts: the "app is running" messages no longer show a raw `{product_name}` placeholder.
+>
+> ### Upgrading
+>
+> **App and service must be the same version (protocol v3); the installer updates both.** Do not mix a 0.4.0 app with a 0.3.0 service or the reverse: the app reports the service as a different version until both are updated.
+>
+> This release is not code-signed yet: Windows SmartScreen may warn you (see the README, "Verify your download").
+
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
 - NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick. The M5c CSV log does not need them (it logs what the tick already has), so they wait for a request.
@@ -155,6 +206,14 @@ To be published on `github.com/Blacktempel/DiskInfoToolkit` **only on the user's
 - D6 (disk standby detection) checks on real hardware: hot-plug of a disk while storage is on; empty card readers' error codes; the R17 bus-class exclusions (virtual disks, Storage Spaces). First open, the sampling cadence, NVMe and a USB stick at service start were exercised in the M6b live checks (2026-10-02/04, SATA HDD, SATA SSD, two NVMe, USB stick).
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
+
+## Manual checks owed after M6c
+
+The live checks of Task 13 (spec M6c §8.2, U1-U8) cover most of the flows below; what they leave open stays here.
+
+- The WinHTTP TLS 1.2 fallback on a Windows 10 VM (where WinHTTP has no TLS 1.3): *Check now* must still succeed. Not attempted on this PC (Windows 11).
+- The first CI run of the new "Check third-party licences" step (`generate-licenses.ps1 -Check`) on a hosted runner, after the push.
+- Live, by the user: *Export sensor report* with a save, a cancelled save dialog (nothing shown) and *Open folder*; a click on the update toast opening *Settings › About*.
 
 ## Manual checks owed after M6b
 
@@ -200,6 +259,12 @@ To settle on the first signed run (deferred from the M6a reviews):
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M6c
+
+- Privacy statement for the update check: `CODE_SIGNING.md` (Privacy) now describes the only network request of the app (the update check to `api.github.com`: the manual *Check now*, or the daily automatic check, off by default), what it sends (the IP address, implicitly, and a User-Agent with the app version), that it never downloads or installs anything, and that the service never uses the network; the README sections match it. This fits the SignPath Foundation terms (spec M6a §7): no network transmission unless the user asks for it.
+- `Mono.Posix.NETStandard` 1.0.0: its `.nuspec` has `licenseUrl` `https://go.microsoft.com/fwlink/?linkid=869050` (copyright "© Microsoft Corporation. All rights reserved."), which redirects (302, checked 2026-10-04) to `https://github.com/mono/mono/blob/master/LICENSE`: "the runtime and its class libraries are licensed under the terms of the MIT license". Redistribution is permitted; recorded as MIT in `THIRD_PARTY_NOTICES.md` and in `THIRD_PARTY_LICENSES.txt` (override in `scripts/generate-licenses.ps1`).
+- Third-party licence texts: `THIRD_PARTY_LICENSES.txt` is generated by `scripts/generate-licenses.ps1` (Rust crates with cargo-about 0.9.2, bundled JS packages from the Vite manifest, the service's NuGet runtime packages, the .NET runtime and its third-party notices), checked in CI with `-Check`, installed with the app and opened from *Settings › About*.
 
 ## Closed in M6b
 

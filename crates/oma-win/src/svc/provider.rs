@@ -7,12 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
-use oma_core::provider::{Inventory, Provider, ProviderError};
-use oma_ipc::{IdentityHint, WireSchema};
+use oma_core::provider::{Inventory, Provider, ProviderError, Quality};
+use oma_ipc::{DriveState, IdentityHint, WireSchema};
 use serde::de::value::{Error as DeError, StrDeserializer};
 use serde::Deserialize;
 
-use crate::storage::{DriveEntry, DriveIdTable, DriveIds};
+use crate::storage::{DriveIdTable, DriveIds};
+use crate::svc::drives::{source_accepted, storage_binding, wire_drive_for, MAIN};
 use crate::svc::feed::{SourceRequest, SvcFeed};
 
 /// Parses a wire string (already snake_case, matching `oma_core::model`'s
@@ -20,44 +21,6 @@ use crate::svc::feed::{SourceRequest, SvcFeed};
 /// unrecognised value.
 fn parse_wire<'de, T: Deserialize<'de>>(value: &'de str) -> Option<T> {
     T::deserialize(StrDeserializer::<DeError>::new(value)).ok()
-}
-
-/// A non-empty string, trimmed; `None` for missing, all-whitespace or absent
-/// input. `None == None` is never a proof of identity (D3): callers must
-/// require both sides of a comparison to produce `Some`.
-fn trimmed(value: Option<&str>) -> Option<&str> {
-    let text = value?.trim();
-    (!text.is_empty()).then_some(text)
-}
-
-/// The disk in `drives` bound to `physical_drive`, if the wire hint's model
-/// and serial both match the descriptor texts of that disk (D3) and that
-/// model/serial pair is not shared by another disk in the table (an
-/// ambiguous match binds nothing).
-fn storage_binding<'a>(
-    model: &Option<String>,
-    serial: &Option<String>,
-    physical_drive: u32,
-    drives: &'a DriveIds,
-) -> Option<&'a DriveEntry> {
-    let hint_model = trimmed(model.as_deref())?;
-    let hint_serial = trimmed(serial.as_deref())?;
-    let entry = drives.drives.iter().find(|d| d.index == physical_drive)?;
-    let drive_model = trimmed(entry.model.as_deref())?;
-    let drive_serial = trimmed(entry.serial.as_deref())?;
-    if hint_model != drive_model || hint_serial != drive_serial {
-        return None;
-    }
-    let unique = drives
-        .drives
-        .iter()
-        .filter(|d| {
-            trimmed(d.model.as_deref()) == Some(drive_model)
-                && trimmed(d.serial.as_deref()) == Some(drive_serial)
-        })
-        .count()
-        == 1;
-    unique.then_some(entry)
 }
 
 /// The module of `oma_ipc::MODULES` whose devices have this wire kind, as
@@ -81,6 +44,9 @@ struct Bound {
     /// A storage device that did not bind onto a core disk: its own page
     /// shows the SMART data only (spec D3), see [`is_core_disk_io`].
     unbound_storage: bool,
+    /// A storage device bound onto a core disk whose main temperature the
+    /// storage provider owns, see [`is_main_disk_temperature`].
+    main_temperature_owned: bool,
 }
 
 /// The service's per-disk I/O sensors, which duplicate what the core's
@@ -94,13 +60,28 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
     )
 }
 
+/// A disk's main temperature. The storage provider owns it for a disk the
+/// service binds onto that may be rotational
+/// ([`DriveEntry::owns_main_temperature`], spec M6b §5.3): it is dropped
+/// there, so the disk has one main temperature. A bound non-rotational disk
+/// keeps it, as before M6b: the storage provider comes first and the engine
+/// keeps its sensor on a duplicate id, so the service's shows only when the
+/// local query yields none. An unbound disk keeps it too, and the additional
+/// `sensor-N` temperatures are never duplicates.
+///
+/// [`DriveEntry::owns_main_temperature`]: crate::storage::DriveEntry::owns_main_temperature
+fn is_main_disk_temperature(kind: &str, name: &str) -> bool {
+    (kind, name) == MAIN
+}
+
 /// Binds `schema`'s devices onto core ids and builds the resulting
 /// inventory: `Cpu`/`Memory` hints map to the CPU/memory provider's device
 /// ids, a `Storage` hint maps onto a disk of `drives` only when
 /// [`storage_binding`] agrees, and every other device (or a hint that did
 /// not match) gets `<kind>/<device id>`; such an unbound storage device keeps
 /// only its SMART data ([`is_core_disk_io`]), and is left out when nothing
-/// (no sensor, no property) remains. A device or sensor whose kind/unit
+/// (no sensor, no property) remains; a bound one leaves its main temperature
+/// to the storage provider where that owns it ([`is_main_disk_temperature`]). A device or sensor whose kind/unit
 /// is not one `oma_core::model` knows is skipped, with one log warning for
 /// the whole schema. Returns the kept sensors' wire indices, in the same
 /// order as `Inventory::sensors`, for `poll` to read the matching values.
@@ -108,8 +89,9 @@ fn is_core_disk_io(kind: &str, name: &str) -> bool {
 /// `request` is the user's own choice, applied here whatever the service
 /// sends (another client may keep a source on that this app turned off): a
 /// device of a module in `disabled_modules` is left out with its sensors, and
-/// so is a service disk bound onto a core disk in `smart_disabled_drives`
-/// (the core's own I/O for that disk is not touched).
+/// so is a service disk bound onto a core disk this client does not take from
+/// the service ([`source_accepted`]: switched off, or off by default and not
+/// switched on; the core's own I/O for that disk is not touched).
 ///
 /// Fails without publishing a partial inventory if binding produces two
 /// devices with the same final id (e.g. two service devices bound onto the
@@ -133,7 +115,7 @@ pub(crate) fn bind(
         if turned_off {
             continue;
         }
-        let mut bound_to_disk = false;
+        let mut bound_disk = None;
         let final_id = match &device.hint {
             Some(IdentityHint::Cpu { index }) => format!("cpu/{index}"),
             Some(IdentityHint::Memory {}) => "memory/0".to_owned(),
@@ -143,23 +125,25 @@ pub(crate) fn bind(
                 serial,
             }) => match storage_binding(model, serial, *physical_drive, drives) {
                 Some(entry) => {
-                    bound_to_disk = true;
+                    bound_disk = Some(entry);
                     entry.device_id.clone()
                 }
                 None => format!("{}/{}", device.kind, device.id),
             },
             None => format!("{}/{}", device.kind, device.id),
         };
-        if bound_to_disk && request.smart_disabled_drives.contains(&final_id) {
+        if bound_disk.is_some_and(|entry| !source_accepted(entry, request)) {
             continue;
         }
-        let unbound_storage = kind == DeviceKind::Storage && !bound_to_disk;
+        let main_temperature_owned = bound_disk.is_some_and(|entry| entry.owns_main_temperature);
+        let unbound_storage = kind == DeviceKind::Storage && bound_disk.is_none();
         bound.insert(
             device.id.as_str(),
             Bound {
                 final_id,
                 kind,
                 unbound_storage,
+                main_temperature_owned,
             },
         );
     }
@@ -181,6 +165,9 @@ pub(crate) fn bind(
             continue;
         };
         if b.unbound_storage && is_core_disk_io(&sensor.kind, &sensor.name) {
+            continue;
+        }
+        if b.main_temperature_owned && is_main_disk_temperature(&sensor.kind, &sensor.name) {
             continue;
         }
         let Some(kind) = parse_wire::<SensorKind>(&sensor.kind) else {
@@ -237,6 +224,34 @@ pub(crate) fn bind(
     Ok((Inventory { devices, sensors }, kept))
 }
 
+/// For each kept sensor (wire indices `kept`), whether it is a SMART sensor of
+/// a disk the service reports in standby: one bound onto a core disk whose
+/// entry in the service's drive table ([`wire_drive_for`]) says so. The disk's
+/// I/O is measured without reaching the disk and is never suspended.
+fn standby_sensors(schema: &WireSchema, drives: &DriveIds, kept: &[usize]) -> Vec<bool> {
+    let in_standby = |device_id: &str| {
+        let device = schema.devices.iter().find(|d| d.id == device_id)?;
+        let Some(IdentityHint::Storage {
+            physical_drive,
+            model,
+            serial,
+        }) = &device.hint
+        else {
+            return None;
+        };
+        let entry = storage_binding(model, serial, *physical_drive, drives)?;
+        let wire = wire_drive_for(entry, drives, &schema.service)?;
+        Some(DriveState::from_wire(&wire.state) == DriveState::Standby)
+    };
+    kept.iter()
+        .map(|&i| {
+            let sensor = &schema.sensors[i];
+            !is_core_disk_io(&sensor.kind, &sensor.name)
+                && in_standby(&sensor.device_id) == Some(true)
+        })
+        .collect()
+}
+
 /// `Provider` fed by the sensor service's schema/snapshot feed, binding its
 /// devices onto core ids with the storage provider's drive table.
 pub struct SvcProvider {
@@ -246,9 +261,15 @@ pub struct SvcProvider {
     /// requests a rediscovery when either has since changed.
     bound_generation: u64,
     bound_drives_generation: u64,
+    /// The feed's drive-table generation `standby` was computed for; `poll`
+    /// computes it again when the service's drive table has since changed,
+    /// without a rediscovery: the table declares no sensor.
+    bound_table_generation: u64,
     /// Wire indices of the sensors kept by the last `discover`, in
     /// `Inventory::sensors` order.
     kept: Vec<usize>,
+    /// Aligned with `kept`, see [`standby_sensors`].
+    standby: Vec<bool>,
     interval: Duration,
     /// `seq` of the snapshot the last `poll` read, within the current
     /// connection; reset on every (re)discovery, since a restarted service
@@ -256,6 +277,8 @@ pub struct SvcProvider {
     last_seq: Option<u64>,
     /// The last `poll` read the same snapshot as the one before it.
     repeated: bool,
+    /// The quality of each value of the last successful `poll`.
+    quality: Option<Vec<Quality>>,
 }
 
 impl SvcProvider {
@@ -265,10 +288,13 @@ impl SvcProvider {
             drives,
             bound_generation: 0,
             bound_drives_generation: 0,
+            bound_table_generation: 0,
             kept: Vec::new(),
+            standby: Vec::new(),
             interval: Duration::default(),
             last_seq: None,
             repeated: false,
+            quality: None,
         }
     }
 }
@@ -283,14 +309,18 @@ impl Provider for SvcProvider {
         let drives = self.drives.get();
         self.bound_generation = view.generation;
         self.bound_drives_generation = drives.generation;
+        self.bound_table_generation = view.drives_generation;
         self.interval = view.interval;
         self.last_seq = None;
         self.repeated = false;
+        self.quality = None;
+        self.kept = Vec::new();
+        self.standby = Vec::new();
         let Some(schema) = view.schema else {
-            self.kept = Vec::new();
             return Ok(Inventory::default());
         };
         let (inventory, kept) = bind(&schema, &drives, &view.request)?;
+        self.standby = standby_sensors(&schema, &drives, &kept);
         self.kept = kept;
         Ok(inventory)
     }
@@ -299,28 +329,71 @@ impl Provider for SvcProvider {
         let view = self.feed.view();
         let drives = self.drives.get();
         self.repeated = false;
+        self.quality = None;
         if view.generation != self.bound_generation
             || drives.generation != self.bound_drives_generation
         {
             self.last_seq = None;
             return Err(ProviderError::Rediscover);
         }
-        let Some((received, snapshot)) = view.snapshot else {
-            self.last_seq = None;
-            return Ok(vec![None; self.kept.len()]);
+        // The service's drive table changed under the same sensors: the
+        // drive states are read again, and nothing else moves.
+        if view.drives_generation != self.bound_table_generation {
+            self.bound_table_generation = view.drives_generation;
+            self.standby = match &view.schema {
+                Some(schema) => standby_sensors(schema, &drives, &self.kept),
+                None => vec![false; self.kept.len()],
+            };
+        }
+        // Without a current snapshot the drive states have no authority
+        // either: the values are absent, not suspended.
+        self.quality = Some(vec![Quality::Fresh; self.kept.len()]);
+        // A snapshot taken under the drive table before this one still holds
+        // the last measurement of every sensor, so no value goes missing for
+        // a tick; it suspends nothing, whatever either table says.
+        let (received, snapshot, authority) = match (view.snapshot, view.carried) {
+            (Some((received, snapshot)), _) => (received, snapshot, true),
+            (None, Some((received, snapshot))) => (received, snapshot, false),
+            (None, None) => {
+                self.last_seq = None;
+                return Ok(vec![None; self.kept.len()]);
+            }
         };
         if received.elapsed() > view.interval * 3 {
             return Ok(vec![None; self.kept.len()]);
         }
         // The core polls at its own rate: the same `seq` as the previous poll
         // (same connection) is the same measurement read again.
-        self.repeated = self.last_seq == Some(snapshot.seq);
+        let repeated = self.last_seq == Some(snapshot.seq);
+        self.repeated = repeated;
         self.last_seq = Some(snapshot.seq);
-        Ok(self
+        let values: Vec<Option<f64>> = self
             .kept
             .iter()
             .map(|&i| snapshot.values.get(i).copied().flatten())
-            .collect())
+            .collect();
+        let quality = self
+            .kept
+            .iter()
+            .zip(&self.standby)
+            .zip(&values)
+            .map(|((&i, &standby), value)| {
+                let held = repeated || snapshot.held.get(i).copied().unwrap_or(false);
+                if standby && authority {
+                    Quality::Suspended
+                } else if held && value.is_some() {
+                    Quality::Held
+                } else {
+                    Quality::Fresh
+                }
+            })
+            .collect();
+        self.quality = Some(quality);
+        Ok(values)
+    }
+
+    fn quality(&self) -> Option<Vec<Quality>> {
+        self.quality.clone()
     }
 
     fn repeated(&self) -> bool {
@@ -336,6 +409,7 @@ mod tests {
     use oma_ipc::{WireDevice, WireSensor, WireSnapshot};
 
     use super::*;
+    use crate::storage::DriveEntry;
 
     fn device(id: &str, kind: &str, hint: Option<IdentityHint>) -> WireDevice {
         WireDevice {
@@ -562,7 +636,6 @@ mod tests {
                 "storage/device-aaa/throughput/read",
                 "storage/device-aaa/throughput/write",
                 "storage/device-aaa/load/active",
-                "storage/device-aaa/temperature/drive",
                 "storage/device-aaa/percent/life",
                 "storage/svc-unbound/temperature/drive",
                 "storage/svc-unbound/percent/life",
@@ -570,7 +643,7 @@ mod tests {
                 "storage/svc-nohint/percent/life",
             ]
         );
-        assert_eq!(kept, vec![0, 1, 2, 3, 4, 8, 9, 13, 14]);
+        assert_eq!(kept, vec![0, 1, 2, 4, 8, 9, 13, 14]);
     }
 
     #[test]
@@ -795,6 +868,7 @@ mod tests {
                 seq: 1,
                 timestamp_ms: 0,
                 values: vec![Some(1.0)],
+                held: vec![false],
             },
             stale_at,
         );
@@ -806,6 +880,7 @@ mod tests {
             seq,
             timestamp_ms: 0,
             values: vec![Some(1.0)],
+            held: vec![false],
         }
     }
 
@@ -922,6 +997,7 @@ mod tests {
     fn request(modules: &[&str], drives: &[&str]) -> SourceRequest {
         SourceRequest {
             disabled_modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            smart_enabled_drives: Vec::new(),
             smart_disabled_drives: drives.iter().map(|d| (*d).to_owned()).collect(),
         }
     }
@@ -982,8 +1058,8 @@ mod tests {
                 device("svc-b", "storage", hint(1, "M1", "S1")),
             ],
             sensors: vec![
-                sensor("svc-a", "temperature", "drive", "celsius", "temperature"),
-                sensor("svc-b", "temperature", "drive", "celsius", "temperature"),
+                sensor("svc-a", "percent", "life", "percent", "percent"),
+                sensor("svc-b", "percent", "life", "percent", "percent"),
             ],
         };
 
@@ -994,12 +1070,461 @@ mod tests {
         let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["storage/device-bbb"]);
         let sensor_ids: Vec<&str> = inventory.sensors.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(sensor_ids, vec!["storage/device-bbb/temperature/drive"]);
+        assert_eq!(sensor_ids, vec!["storage/device-bbb/percent/life"]);
         assert_eq!(kept, vec![1]);
 
         // A disk that is not in the request stays.
         let (inventory, _) = bind(&schema, &drives, &request(&[], &["storage/other"])).unwrap();
         assert_eq!(inventory.devices.len(), 2);
+    }
+
+    // ---- disks: ownership, default-off, quality ----
+
+    fn storage_hint(index: u32, model: &str, serial: &str) -> Option<IdentityHint> {
+        Some(IdentityHint::Storage {
+            physical_drive: index,
+            model: Some(model.to_owned()),
+            serial: Some(serial.to_owned()),
+        })
+    }
+
+    /// One service disk, `svc-b`, that binds onto `storage/device-bbb` of
+    /// [`one_disk`], with the main temperature and an additional one.
+    fn disk_schema() -> WireSchema {
+        WireSchema {
+            service: Default::default(),
+            devices: vec![device("svc-b", "storage", storage_hint(1, "M1", "S1"))],
+            sensors: vec![
+                sensor("svc-b", "temperature", "drive", "celsius", "temperature"),
+                sensor("svc-b", "temperature", "sensor-1", "celsius", "temperature"),
+            ],
+        }
+    }
+
+    fn one_disk() -> DriveIds {
+        drive_table(vec![drive(1, "storage/device-bbb", Some("M1"), Some("S1"))])
+    }
+
+    fn sensor_ids(inventory: &Inventory) -> Vec<&str> {
+        inventory.sensors.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_main_temperature_of_a_bound_disk_is_left_to_the_storage_provider() {
+        let (inventory, kept) =
+            bind(&disk_schema(), &one_disk(), &SourceRequest::default()).expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec!["storage/device-bbb/temperature/sensor-1"]
+        );
+        assert_eq!(kept, vec![1]);
+        let ids: Vec<&str> = inventory.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["storage/device-bbb"]);
+    }
+
+    /// [`one_disk`] as the storage provider publishes a non-rotational disk:
+    /// read locally at every discovery, its main temperature is not owned.
+    fn one_non_rotational_disk() -> DriveIds {
+        drive_table(vec![DriveEntry {
+            owns_main_temperature: false,
+            ..drive(1, "storage/device-bbb", Some("M1"), Some("S1"))
+        }])
+    }
+
+    #[test]
+    fn a_bound_non_rotational_disk_keeps_the_services_main_temperature() {
+        // The storage provider imports nothing for such a disk: when its own
+        // query yields no sensor (a USB SSD, a vendor RAID driver) the
+        // service's is the only main temperature, and when it yields one the
+        // engine keeps the storage provider's, which comes first.
+        let (inventory, kept) = bind(
+            &disk_schema(),
+            &one_non_rotational_disk(),
+            &SourceRequest::default(),
+        )
+        .expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec![
+                "storage/device-bbb/temperature/drive",
+                "storage/device-bbb/temperature/sensor-1",
+            ]
+        );
+        assert_eq!(kept, vec![0, 1]);
+
+        // Through the provider: the value reaches the poll.
+        let feed = SvcFeed::default();
+        feed.set_schema(disk_schema());
+        let drives = DriveIdTable::default();
+        drives.publish(one_non_rotational_disk().drives);
+        let mut p = SvcProvider::new(feed.clone(), drives);
+        let inventory = p.discover().expect("discover");
+        assert_eq!(
+            inventory.sensors[0].id,
+            "storage/device-bbb/temperature/drive"
+        );
+        feed.set_snapshot(
+            WireSnapshot {
+                seq: 1,
+                timestamp_ms: 0,
+                values: vec![Some(44.0), Some(40.0)],
+                held: vec![false, false],
+            },
+            Instant::now(),
+        );
+        assert_eq!(p.poll().expect("poll"), vec![Some(44.0), Some(40.0)]);
+    }
+
+    #[test]
+    fn a_bound_rotational_disk_leaves_its_main_temperature_to_storage() {
+        // The storage provider owns it there (it takes the service's measure
+        // itself): one main temperature per disk.
+        let owned = one_disk();
+        assert!(owned.drives[0].owns_main_temperature);
+        let (inventory, kept) =
+            bind(&disk_schema(), &owned, &SourceRequest::default()).expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec!["storage/device-bbb/temperature/sensor-1"]
+        );
+        assert_eq!(kept, vec![1]);
+    }
+
+    #[test]
+    fn an_unbound_disk_keeps_its_main_temperature() {
+        // No core disk to bind onto: the service's page is the only place
+        // where this disk's temperature shows.
+        let (inventory, kept) = bind(
+            &disk_schema(),
+            &DriveIds::default(),
+            &SourceRequest::default(),
+        )
+        .expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec![
+                "storage/svc-b/temperature/drive",
+                "storage/svc-b/temperature/sensor-1",
+            ]
+        );
+        assert_eq!(kept, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_usb_disk_enabled_by_another_client_is_filtered_locally() {
+        let usb = DriveEntry {
+            smart_default_off: true,
+            ..drive(1, "storage/device-bbb", Some("M1"), Some("S1"))
+        };
+        let drives = drive_table(vec![usb]);
+
+        // Another client switched the disk on, so the service sends it: this
+        // app did not, and hides it.
+        let (inventory, kept) =
+            bind(&disk_schema(), &drives, &SourceRequest::default()).expect("bind");
+        assert!(inventory.devices.is_empty(), "{:?}", inventory.devices);
+        assert!(inventory.sensors.is_empty());
+        assert!(kept.is_empty());
+
+        // Once this app switches it on too, it shows.
+        let enabled = SourceRequest {
+            smart_enabled_drives: vec!["storage/device-bbb".to_owned()],
+            ..SourceRequest::default()
+        };
+        let (inventory, kept) = bind(&disk_schema(), &drives, &enabled).expect("bind");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec!["storage/device-bbb/temperature/sensor-1"]
+        );
+        assert_eq!(kept, vec![1]);
+    }
+
+    /// A CPU and a bound disk (`storage/device-bbb`, drive 1) in `state`:
+    /// CPU load, the disk's I/O, its main temperature (not kept), an
+    /// additional temperature and a SMART percentage.
+    fn disk_state_schema(state: &str) -> WireSchema {
+        let mut schema = WireSchema {
+            service: Default::default(),
+            devices: vec![
+                device("cpu-hw", "cpu", Some(IdentityHint::Cpu { index: 0 })),
+                device("svc-b", "storage", storage_hint(1, "M1", "S1")),
+            ],
+            sensors: vec![
+                sensor("cpu-hw", "load", "total", "percent", "load"),
+                sensor(
+                    "svc-b",
+                    "throughput",
+                    "read",
+                    "bytes_per_second",
+                    "throughput",
+                ),
+                sensor("svc-b", "temperature", "drive", "celsius", "temperature"),
+                sensor("svc-b", "temperature", "sensor-1", "celsius", "temperature"),
+                sensor("svc-b", "percent", "life", "percent", "percent"),
+            ],
+        };
+        schema.service.drives = vec![oma_ipc::WireDrive {
+            physical_drive: 1,
+            key: oma_ipc::drive_key("M1", "S1"),
+            model: Some("M1".to_owned()),
+            state: state.to_owned(),
+            blocks_smart: false,
+        }];
+        schema
+    }
+
+    /// A provider that discovered [`disk_state_schema`] with the disk bound.
+    fn disk_provider(feed: &SvcFeed, state: &str) -> SvcProvider {
+        feed.set_schema(disk_state_schema(state));
+        feed.set_interval(Duration::from_millis(100));
+        let drives = DriveIdTable::default();
+        drives.publish(one_disk().drives);
+        let mut p = SvcProvider::new(feed.clone(), drives);
+        let inventory = p.discover().expect("discover");
+        assert_eq!(
+            sensor_ids(&inventory),
+            vec![
+                "cpu/0/load/total",
+                "storage/device-bbb/throughput/read",
+                "storage/device-bbb/temperature/sensor-1",
+                "storage/device-bbb/percent/life",
+            ]
+        );
+        p
+    }
+
+    /// Wire values for [`disk_state_schema`]: the additional temperature was
+    /// never measured, the SMART percentage is kept from an earlier round.
+    fn disk_snapshot(seq: u64) -> WireSnapshot {
+        WireSnapshot {
+            seq,
+            timestamp_ms: 0,
+            values: vec![Some(12.0), Some(0.0), Some(31.0), None, Some(97.0)],
+            held: vec![false, false, true, false, true],
+        }
+    }
+
+    #[test]
+    fn sensors_of_a_disk_in_standby_are_suspended() {
+        use Quality::{Fresh, Held, Suspended};
+
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "standby");
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        assert_eq!(
+            p.poll().expect("poll"),
+            vec![Some(12.0), Some(0.0), None, Some(97.0)]
+        );
+        // The SMART sensors, with or without a value; never the disk's I/O
+        // or another device.
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Suspended, Suspended]));
+
+        // Any other state leaves the service's own flags: an idle disk's
+        // kept value is held, its missing one is simply absent. Idle is a
+        // state of its own, and only a confirmed standby suspends SMART.
+        assert_eq!(DriveState::from_wire("idle"), DriveState::Idle);
+        for state in ["idle", "active", "unknown", "smartOff"] {
+            let feed = SvcFeed::default();
+            let mut p = disk_provider(&feed, state);
+            feed.set_snapshot(disk_snapshot(1), Instant::now());
+            p.poll().expect("poll");
+            assert_eq!(
+                p.quality(),
+                Some(vec![Fresh, Fresh, Fresh, Held]),
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drive_state_change_does_not_rediscover_the_service_sensors() {
+        // A hard disk goes idle and works again: the CPU's sensors (and every
+        // other one) must not lose a tick for it.
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "active");
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        let values = vec![Some(12.0), Some(0.0), None, Some(97.0)];
+        assert_eq!(p.poll().expect("poll"), values);
+
+        let mut seq = 1;
+        for state in ["idle", "active"] {
+            feed.set_schema(disk_state_schema(state));
+            // The tick between the new table and its first snapshot.
+            assert_eq!(p.poll().expect("no rediscovery"), values, "{state}");
+            assert!(p.repeated(), "the same measurement read again");
+            seq += 1;
+            feed.set_snapshot(disk_snapshot(seq), Instant::now());
+            assert_eq!(p.poll().expect("poll"), values, "{state}");
+            assert!(!p.repeated());
+        }
+    }
+
+    #[test]
+    fn a_drive_state_change_updates_the_suspended_set_without_rediscovery() {
+        use Quality::{Fresh, Held, Suspended};
+
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "active");
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Fresh, Held]));
+
+        // The disk goes to standby. Until a snapshot arrives under the new
+        // table no state has authority: nothing is suspended yet.
+        feed.set_schema(disk_state_schema("standby"));
+        p.poll().expect("no rediscovery");
+        assert_eq!(p.quality(), Some(vec![Held, Held, Fresh, Held]));
+        feed.set_snapshot(disk_snapshot(2), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Suspended, Suspended]));
+
+        // It wakes up: the standby of the table before suspends nothing,
+        // on the tick without a snapshot either.
+        feed.set_schema(disk_state_schema("active"));
+        p.poll().expect("no rediscovery");
+        assert_eq!(p.quality(), Some(vec![Held, Held, Fresh, Held]));
+        feed.set_snapshot(disk_snapshot(3), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Fresh, Fresh, Held]));
+
+        // The values carried over a table change age like any snapshot.
+        feed.set_snapshot(
+            disk_snapshot(4),
+            Instant::now() - Duration::from_millis(400),
+        );
+        feed.set_schema(disk_state_schema("standby"));
+        assert_eq!(p.poll().expect("poll"), vec![None; 4]);
+        assert_eq!(p.quality(), Some(vec![Fresh; 4]));
+    }
+
+    #[test]
+    fn a_stale_or_cleared_feed_does_not_suspend_smart_rules() {
+        let all_fresh = Some(vec![Quality::Fresh; 4]);
+
+        // No snapshot yet for the standby table: the state has no authority.
+        let feed = SvcFeed::default();
+        let mut p = disk_provider(&feed, "standby");
+        assert_eq!(p.poll().expect("poll"), vec![None; 4]);
+        assert_eq!(p.quality(), all_fresh);
+
+        // Current feed: suspended.
+        feed.set_snapshot(disk_snapshot(1), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality().unwrap()[2], Quality::Suspended);
+
+        // The same snapshot, now four intervals old: the exception is gone at once.
+        feed.set_snapshot(
+            disk_snapshot(1),
+            Instant::now() - Duration::from_millis(400),
+        );
+        assert_eq!(p.poll().expect("poll"), vec![None; 4]);
+        assert_eq!(p.quality(), all_fresh);
+
+        // The link drops: nothing of the old state survives the rediscovery.
+        feed.set_snapshot(disk_snapshot(2), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality().unwrap()[2], Quality::Suspended);
+        feed.clear();
+        assert_eq!(p.poll(), Err(ProviderError::Rediscover));
+        assert_eq!(p.quality(), None);
+        assert!(p.discover().expect("discover").sensors.is_empty());
+        assert_eq!(p.poll().expect("poll"), vec![]);
+        assert_eq!(p.quality(), Some(vec![]));
+    }
+
+    #[test]
+    fn held_flags_become_held_quality() {
+        use Quality::{Fresh, Held};
+
+        let mut schema = wire_schema();
+        schema.sensors.push(sensor(
+            "cpu-hw",
+            "temperature",
+            "package",
+            "celsius",
+            "temperature",
+        ));
+        schema.sensors.push(sensor(
+            "cpu-hw",
+            "temperature",
+            "core",
+            "celsius",
+            "temperature",
+        ));
+        let feed = SvcFeed::default();
+        feed.set_schema(schema);
+        let mut p = SvcProvider::new(feed.clone(), DriveIdTable::default());
+        p.discover().expect("discover");
+        assert_eq!(p.quality(), None, "nothing polled yet");
+
+        let snapshot = |seq| WireSnapshot {
+            seq,
+            timestamp_ms: 0,
+            values: vec![Some(1.0), Some(2.0), None],
+            held: vec![false, true, false],
+        };
+        feed.set_snapshot(snapshot(1), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Held, Fresh]));
+
+        // The same snapshot read again is the same measurement; an absent
+        // value is never a held one.
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Held, Held, Fresh]));
+
+        feed.set_snapshot(snapshot(2), Instant::now());
+        p.poll().expect("poll");
+        assert_eq!(p.quality(), Some(vec![Fresh, Held, Fresh]));
+    }
+
+    #[test]
+    fn translated_keys_are_unique_disjoint_and_bounded() {
+        use crate::svc::drives::request_keys;
+
+        let id = |i: u32| format!("storage/device-{i}");
+        let key = |i: u32| oma_ipc::drive_key("Model", &format!("SN{i}")).unwrap();
+        let mut entries: Vec<DriveEntry> = (0..70)
+            .map(|i| drive(i, &id(i), Some("Model"), Some(&format!("SN{i}"))))
+            .collect();
+        // Two core ids whose descriptors give the same key.
+        entries.push(drive(70, "storage/twin-a", Some("Twin"), Some("SN")));
+        entries.push(drive(71, "storage/twin-b", Some("Twin"), Some("SN")));
+        let drives = drive_table(entries);
+        let twin_key = oma_ipc::drive_key("Twin", "SN").unwrap();
+        let request = |disabled: Vec<String>, enabled: Vec<String>| SourceRequest {
+            disabled_modules: Vec::new(),
+            smart_disabled_drives: disabled,
+            smart_enabled_drives: enabled,
+        };
+
+        // Different ids, one key: it goes out as disabled only; repeats go out once.
+        let (disabled, enabled) = request_keys(
+            &request(
+                vec!["storage/twin-a".to_owned(), id(3), id(3)],
+                vec!["storage/twin-b".to_owned(), id(0), id(0), id(3), id(1)],
+            ),
+            &drives,
+        );
+        assert_eq!(disabled, vec![twin_key, key(3)]);
+        assert_eq!(enabled, vec![key(0), key(1)]);
+
+        // Each list is cut to the limit on its own.
+        let (disabled, enabled) =
+            request_keys(&request(vec![id(69)], (0..65).map(id).collect()), &drives);
+        assert_eq!(disabled, vec![key(69)]);
+        assert_eq!(enabled, (0..64).map(key).collect::<Vec<_>>());
+        let (disabled, enabled) =
+            request_keys(&request((0..65).map(id).collect(), vec![id(69)]), &drives);
+        assert_eq!(disabled, (0..64).map(key).collect::<Vec<_>>());
+        assert_eq!(enabled, vec![key(69)]);
+
+        // A disabled disk beyond the cut is still not asked on.
+        let (disabled, enabled) = request_keys(
+            &request((0..65).map(id).collect(), vec![id(64), id(69)]),
+            &drives,
+        );
+        assert_eq!(disabled.len(), 64);
+        assert_eq!(enabled, vec![key(69)]);
     }
 
     #[test]

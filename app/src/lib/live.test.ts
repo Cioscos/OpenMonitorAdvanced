@@ -209,3 +209,175 @@ test('applySnapshot records the local arrival time of new snapshots only', () =>
     now.mockRestore();
   }
 });
+
+const withQuality = (seq: number, quality?: number[], revision = 1) => ({ ...snapshot(seq, revision), quality });
+const sensorCount = MOCK_SCHEMA.sensors.length;
+const ID = MOCK_SCHEMA.sensors[0].id;
+const ID2 = MOCK_SCHEMA.sensors[1].id;
+
+test('quality defaults to fresh when the payload has none', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(snapshot(1));
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(2, [1, 2]));
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(3, Array.from({ length: sensorCount }, () => 7)));
+  expect(store.quality(ID)).toBe(0);
+  expect(store.quality('no/such/sensor')).toBe(0);
+});
+
+test('quality follows the snapshot', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  const codes = Array.from({ length: sensorCount }, () => 0);
+  codes[0] = 1;
+  codes[1] = 2;
+  store.applySnapshot(withQuality(1, codes));
+  expect(store.quality(ID)).toBe(1);
+  expect(store.quality(ID2)).toBe(2);
+  store.applySnapshot(snapshot(2));
+  expect(store.quality(ID)).toBe(0);
+  expect(store.quality(ID2)).toBe(0);
+});
+
+test('a rejected snapshot cannot overwrite quality', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  const held = Array.from({ length: sensorCount }, () => 1);
+  store.applySnapshot(withQuality(5, held));
+  const fresh = Array.from({ length: sensorCount }, () => 0);
+  expect(store.applySnapshot(withQuality(6, fresh, 2))).toBe(false); // Other revision.
+  expect(store.applySnapshot(withQuality(4, fresh))).toBe(true); // Out of order.
+  expect(store.quality(ID)).toBe(1);
+  expect(store.applySnapshot({ ...withQuality(7, fresh), values: [] })).toBe(false); // Wrong length.
+  expect(store.quality(ID)).toBe(1);
+});
+
+test('quality resets when the schema changes or the history is seeded', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(withQuality(1, Array.from({ length: sensorCount }, () => 2)));
+  const ids = MOCK_SCHEMA.sensors.map((s) => s.id);
+  store.seedHistory(ids, { revision: 1, seq: 2, timestampsMs: [10], series: ids.map(() => [1]) });
+  expect(store.quality(ID)).toBe(0);
+  store.applySnapshot(withQuality(3, Array.from({ length: sensorCount }, () => 2)));
+  store.applySchema({ ...MOCK_SCHEMA, revision: 2 });
+  expect(store.quality(ID)).toBe(0);
+});
+
+test('disk power comes from the backend and updates on the event', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
+  const store = new LiveStore();
+  const off = await connect(store, backend);
+  expect(store.diskPower('storage/a')).toBe('standby');
+  expect(store.diskPower('storage/b')).toBeUndefined();
+  backend.emitDiskStates([
+    { deviceId: 'storage/a', power: 'active' },
+    { deviceId: 'storage/b', power: 'idle' },
+  ]);
+  expect(store.diskPower('storage/a')).toBe('active');
+  expect(store.diskPower('storage/b')).toBe('idle');
+  off();
+});
+
+test('an empty disk event clears old power states', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
+  const store = new LiveStore();
+  const off = await connect(store, backend);
+  backend.emitDiskStates([]);
+  expect(store.diskPower('storage/a')).toBeUndefined();
+  off();
+});
+
+test('an event received during bootstrap wins over the initial disk query', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  let answer!: (states: import('./types').DiskStateEntry[]) => void;
+  backend.getDiskStates = () => new Promise((done) => { answer = done; });
+  const store = new LiveStore();
+  const connecting = connect(store, backend);
+  await vi.waitFor(() => expect(answer).toBeDefined());
+  backend.emitDiskStates([{ deviceId: 'storage/a', power: 'active' }]);
+  answer([{ deviceId: 'storage/a', power: 'standby' }]);
+  const off = await connecting;
+  expect(store.diskPower('storage/a')).toBe('active');
+  off();
+});
+
+test('disconnect removes the disk listener', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  backend.diskStates = [{ deviceId: 'storage/a', power: 'standby' }];
+  const off = await connect(store, backend);
+  expect(backend.diskStateListeners).toBe(1);
+  expect(store.diskPower('storage/a')).toBe('standby');
+  off();
+  expect(backend.diskStateListeners).toBe(0);
+  expect(store.diskPower('storage/a')).toBeUndefined();
+  backend.emitDiskStates([{ deviceId: 'storage/b', power: 'active' }]);
+  expect(store.diskPower('storage/b')).toBeUndefined();
+});
+
+test('a failing initial disk query clears stale power states and still connects', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.getDiskStates = async () => { throw new Error('offline'); };
+  const store = new LiveStore();
+  store.setDiskStates([{ deviceId: 'storage/a', power: 'standby' }]);
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const off = await connect(store, backend);
+  expect(errorSpy).toHaveBeenCalledWith('disk states query failed', expect.any(Error));
+  expect(store.diskPower('storage/a')).toBeUndefined();
+  off();
+  errorSpy.mockRestore();
+});
+
+/** Quality codes with the second sensor at `code`. */
+const second = (code: number) => Array.from({ length: sensorCount }, (_, i) => (i === 1 ? code : 0));
+
+test('a suspended value is not appended to the live series', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(withQuality(2, second(2)));
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000]);
+  expect(store.series(ID2)[0]).toBe(mockValues(1)[1]);
+  expect(Number.isNaN(store.series(ID2)[1])).toBe(true);
+  expect(store.measured(ID2)).toBeNull();
+  // Only the suspended sensor; a held value is a regular repeat and stays.
+  expect(store.series(ID)).toEqual([mockValues(1)[0], mockValues(2)[0]]);
+  expect(store.measured(ID)).toBe(mockValues(2)[0]);
+  store.applySnapshot(withQuality(3, second(1)));
+  expect(store.series(ID2)[2]).toBe(mockValues(3)[1]);
+  expect(store.measured(ID2)).toBe(mockValues(3)[1]);
+  // Codes that do not fit the schema read as fresh.
+  store.applySnapshot(withQuality(4, [2, 2]));
+  expect(store.series(ID2)[3]).toBe(mockValues(4)[1]);
+  expect(store.measured('no/such/sensor')).toBeNull();
+});
+
+test('the current value of a suspended sensor stays the last reading', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  const suspended = withQuality(2, second(2));
+  store.applySnapshot(suspended);
+  expect(store.value(ID2)).toBe(suspended.values[1]);
+  expect(store.values).toEqual(suspended.values);
+  expect(store.quality(ID2)).toBe(2);
+});
+
+test('the series resumes at the next fresh value', () => {
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  store.applySnapshot(snapshot(1));
+  store.applySnapshot(withQuality(2, second(2)));
+  store.applySnapshot(withQuality(3, second(2)));
+  store.applySnapshot(snapshot(4));
+  const series = store.series(ID2);
+  expect(series.map(Number.isNaN)).toEqual([false, true, true, false]);
+  expect(series[3]).toBe(mockValues(4)[1]);
+  expect(store.seriesTimestampsMs()).toEqual([1_000, 2_000, 3_000, 4_000]);
+});

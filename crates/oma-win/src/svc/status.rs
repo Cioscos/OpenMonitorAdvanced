@@ -182,7 +182,7 @@ mod tests {
             requested_disabled_modules: Vec::new(),
             smart_disabled_drives: Vec::new(),
             reconfiguration: oma_ipc::Reconfiguration::Pending,
-            smart_blocked_by: Vec::new(),
+            drives: Vec::new(),
         });
         table.set(&connected);
         assert!(table.get().0 > v2, "sources alone bump the version");

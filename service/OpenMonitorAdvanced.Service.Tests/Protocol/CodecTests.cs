@@ -62,6 +62,7 @@ public sealed class CodecTests
                 Assert.Equal(expectedSubscribe.IntervalMs, actualSubscribe.IntervalMs);
                 Assert.Equal(expectedSubscribe.DisabledModules, actualSubscribe.DisabledModules);
                 Assert.Equal(expectedSubscribe.SmartDisabledDrives, actualSubscribe.SmartDisabledDrives);
+                Assert.Equal(expectedSubscribe.SmartEnabledDrives, actualSubscribe.SmartEnabledDrives);
                 break;
             case "snapshot":
             case "snapshot_empty":
@@ -70,6 +71,7 @@ public sealed class CodecTests
                 Assert.Equal(expectedSnapshot.Seq, actualSnapshot.Seq);
                 Assert.Equal(expectedSnapshot.TimestampMs, actualSnapshot.TimestampMs);
                 Assert.Equal(expectedSnapshot.Values, actualSnapshot.Values);
+                Assert.Equal(expectedSnapshot.Held, actualSnapshot.Held);
                 break;
             case "schema":
                 var expectedSchema = (SchemaMessage)Reference(name);
@@ -89,7 +91,7 @@ public sealed class CodecTests
                 Assert.Equal(expectedSchema.Service.ActiveModules, actualSchema.Service.ActiveModules);
                 Assert.Equal(expectedSchema.Service.SmartDisabledDrives, actualSchema.Service.SmartDisabledDrives);
                 Assert.Equal(expectedSchema.Service.Reconfiguration, actualSchema.Service.Reconfiguration);
-                Assert.Equal(expectedSchema.Service.SmartBlockedBy, actualSchema.Service.SmartBlockedBy);
+                Assert.Equal(expectedSchema.Service.Drives, actualSchema.Service.Drives);
                 break;
         }
     }
@@ -97,7 +99,7 @@ public sealed class CodecTests
     [Fact]
     public void NonFiniteValuesAreWrittenAsNil()
     {
-        var message = new SnapshotMessage(1, 0, new double?[] { double.NaN, double.PositiveInfinity });
+        var message = new SnapshotMessage(1, 0, new double?[] { double.NaN, double.PositiveInfinity }, [false, false]);
         var payload = MessageCodec.EncodePayload(message);
         var decoded = Assert.IsType<SnapshotMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(payload)));
         Assert.Equal(new double?[] { null, null }, decoded.Values);
@@ -176,12 +178,211 @@ public sealed class CodecTests
         Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
     }
 
-    private static string KeyFor(int i) => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture);
-
-    private static byte[] SubscribeBody(string[] modules, string[] drives) =>
-        BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+    [Fact]
+    public void SubscribeWithoutTheV3ListIsRejected()
+    {
+        var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
         {
             w.WriteMapHeader(3);
+            w.Write("interval_ms");
+            w.Write(500u);
+            w.Write("disabled_modules");
+            w.WriteArrayHeader(0);
+            w.Write("smart_disabled_drives");
+            w.WriteArrayHeader(0);
+        });
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Contains("smart_enabled_drives", e.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AKeyInBothListsIsABadRequest()
+    {
+        var bytes = SubscribeBody([], [KeyA, KeyB], [KeyB]);
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Equal("a drive key cannot be both enabled and disabled", e.Message);
+    }
+
+    [Fact]
+    public void TooManyEnabledDriveKeysIsABadRequest()
+    {
+        var atLimit = Enumerable.Range(0, ProtocolConstants.MaxDriveKeys).Select(KeyFor).ToArray();
+        var accepted = Assert.IsType<SubscribeMessage>(
+            MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SubscribeBody([], [], atLimit))));
+        Assert.Equal(ProtocolConstants.MaxDriveKeys, accepted.SmartEnabledDrives.Count);
+
+        var tooMany = Enumerable.Range(0, ProtocolConstants.MaxDriveKeys + 1).Select(KeyFor).ToArray();
+        Assert.Throws<ProtocolException>(
+            () => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SubscribeBody([], [], tooMany))));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("abc")]
+    [InlineData("589488FB5895D8B81B82760DC67568E8C99B40A81FAFE4240BD45DD1EE614D83")] // uppercase
+    [InlineData("589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d8")] // 63 characters
+    [InlineData("589488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d833")] // 65 characters
+    [InlineData("g89488fb5895d8b81b82760dc67568e8c99b40a81fafe4240bd45dd1ee614d83")] // not hex
+    public void MalformedEnabledDriveKeyIsABadRequest(string key)
+    {
+        var bytes = SubscribeBody([], [], [key]);
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void ASnapshotWhoseHeldLengthDiffersIsRejected()
+    {
+        foreach (var (values, held) in new (double?[], bool[])[]
+        {
+            ([1.0, 2.0], [false]),
+            ([1.0], [false, false]),
+            ([], [false]),
+            ([1.0], []),
+        })
+        {
+            var bytes = SnapshotBody(values, held);
+            Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+            Assert.Throws<ProtocolException>(() => MessageCodec.EncodePayload(new SnapshotMessage(1, 0, values, held)));
+        }
+    }
+
+    [Fact]
+    public void HeldWithoutAValueIsRejected()
+    {
+        var bytes = SnapshotBody([1.0, null], [false, true]);
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+
+        // A held flag on a present value, and false on a nil, are fine.
+        var ok = Assert.IsType<SnapshotMessage>(
+            MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SnapshotBody([1.0, null], [true, false]))));
+        Assert.Equal([true, false], ok.Held);
+    }
+
+    [Fact]
+    public void ANonFiniteValueLosesItsHeldFlag()
+    {
+        var bytes = BuildEnvelope("snapshot", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(4);
+            w.Write("seq");
+            w.Write(1u);
+            w.Write("timestamp_ms");
+            w.Write(0u);
+            w.Write("values");
+            w.WriteArrayHeader(2);
+            w.WriteRaw(RawFloat64(double.NaN));
+            w.WriteRaw(RawFloat64(2.0));
+            w.Write("held");
+            w.WriteArrayHeader(2);
+            w.Write(true);
+            w.Write(true);
+        });
+
+        var decoded = Assert.IsType<SnapshotMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Equal(new double?[] { null, 2.0 }, decoded.Values);
+        Assert.Equal([false, true], decoded.Held);
+    }
+
+    [Fact]
+    public void ASnapshotWithoutHeldIsRejected()
+    {
+        var bytes = BuildEnvelope("snapshot", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(3);
+            w.Write("seq");
+            w.Write(1u);
+            w.Write("timestamp_ms");
+            w.Write(0u);
+            w.Write("values");
+            w.WriteArrayHeader(0);
+        });
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Contains("held", e.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AServiceBlockWithoutDrivesIsRejected()
+    {
+        var bytes = SchemaBody(writeDrives: false);
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Contains("drives", e.Message, StringComparison.Ordinal);
+
+        // The same block with the list decodes, so the rejection is about the missing key alone.
+        var ok = Assert.IsType<SchemaMessage>(
+            MessageCodec.DecodePayload(new ReadOnlySequence<byte>(SchemaBody(writeDrives: true))));
+        Assert.Empty(ok.Service.Drives);
+    }
+
+    [Theory]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    public void AHelloOfEitherVersionDecodes(uint version)
+    {
+        // The app must read a v2 service's Hello to report it as incompatible, and vice versa.
+        var payload = MessageCodec.EncodePayload(new HelloMessage(version, "0.1.0", "ok"));
+        var decoded = Assert.IsType<HelloMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(payload)));
+        Assert.Equal(version, decoded.ProtocolVersion);
+    }
+
+    private static byte[] SnapshotBody(double?[] values, bool[] held) =>
+        BuildEnvelope("snapshot", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(4);
+            w.Write("seq");
+            w.Write(1u);
+            w.Write("timestamp_ms");
+            w.Write(0u);
+            w.Write("values");
+            w.WriteArrayHeader(values.Length);
+            foreach (var v in values)
+            {
+                if (v is { } d)
+                {
+                    w.Write(d);
+                }
+                else
+                {
+                    w.WriteNil();
+                }
+            }
+
+            w.Write("held");
+            w.WriteArrayHeader(held.Length);
+            foreach (var h in held)
+            {
+                w.Write(h);
+            }
+        });
+
+    private static byte[] SchemaBody(bool writeDrives) =>
+        BuildEnvelope("schema", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(3);
+            w.Write("devices");
+            w.WriteArrayHeader(0);
+            w.Write("sensors");
+            w.WriteArrayHeader(0);
+            w.Write("service");
+            w.WriteMapHeader(writeDrives ? 4 : 3);
+            w.Write("active_modules");
+            w.WriteArrayHeader(0);
+            w.Write("smart_disabled_drives");
+            w.WriteArrayHeader(0);
+            w.Write("reconfiguration");
+            w.Write("applied");
+            if (writeDrives)
+            {
+                w.Write("drives");
+                w.WriteArrayHeader(0);
+            }
+        });
+
+    private static string KeyFor(int i) => i.ToString("x64", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static byte[] SubscribeBody(string[] modules, string[] drives, string[]? enabled = null) =>
+        BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
+        {
+            w.WriteMapHeader(4);
             w.Write("interval_ms");
             w.Write(1000u);
             w.Write("disabled_modules");
@@ -197,6 +398,13 @@ public sealed class CodecTests
             {
                 w.Write(d);
             }
+
+            w.Write("smart_enabled_drives");
+            w.WriteArrayHeader((enabled ?? []).Length);
+            foreach (var d in enabled ?? [])
+            {
+                w.Write(d);
+            }
         });
 
     [Fact]
@@ -204,12 +412,14 @@ public sealed class CodecTests
     {
         var bytes = BuildEnvelope("subscribe", (ref MessagePackWriter w) =>
         {
-            w.WriteMapHeader(4);
+            w.WriteMapHeader(5);
             w.Write("interval_ms");
             w.Write(500u);
             w.Write("disabled_modules");
             w.WriteArrayHeader(0);
             w.Write("smart_disabled_drives");
+            w.WriteArrayHeader(0);
+            w.Write("smart_enabled_drives");
             w.WriteArrayHeader(0);
             w.Write("extra");
             w.Write(1);
@@ -236,7 +446,7 @@ public sealed class CodecTests
     [Fact]
     public void TrailingBytesAreRejected()
     {
-        var payload = MessageCodec.EncodePayload(new SubscribeMessage(500, [], []));
+        var payload = MessageCodec.EncodePayload(new SubscribeMessage(500, [], [], []));
         var bytes = new byte[payload.Length + 1];
         payload.CopyTo(bytes, 0);
         bytes[^1] = 0xc0; // an extra nil byte tacked on after a valid message
@@ -297,7 +507,7 @@ public sealed class CodecTests
     [Fact]
     public async Task PartialFrameAtEofIsAnError()
     {
-        var frame = MessageCodec.EncodeFrame(new SubscribeMessage(500, [], []));
+        var frame = MessageCodec.EncodeFrame(new SubscribeMessage(500, [], [], []));
         var truncated = frame[..^2];
         var stream = new MemoryStream(truncated);
 
@@ -438,7 +648,7 @@ public sealed class CodecTests
     {
         var bytes = BuildEnvelope("snapshot", (ref MessagePackWriter w) =>
         {
-            w.WriteMapHeader(3);
+            w.WriteMapHeader(4);
             w.Write("seq");
             w.Write(1u);
             w.Write("timestamp_ms");
@@ -447,6 +657,10 @@ public sealed class CodecTests
             w.WriteArrayHeader(2);
             w.WriteRaw(RawFloat64(double.NaN));
             w.WriteRaw(RawFloat64(double.PositiveInfinity));
+            w.Write("held");
+            w.WriteArrayHeader(2);
+            w.Write(false);
+            w.Write(false);
         });
 
         var decoded = Assert.IsType<SnapshotMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
@@ -692,8 +906,8 @@ public sealed class CodecTests
     /// <summary>The logical message each fixture holds, per <c>protocol/fixtures/README.md</c>.</summary>
     private static IMessage Reference(string name) => name switch
     {
-        "hello" => new HelloMessage(2, "0.1.0", "rebootPending"),
-        "subscribe" => new SubscribeMessage(1000, ["memory", "psu"], [KeyA, KeyB]),
+        "hello" => new HelloMessage(3, "0.1.0", "rebootPending"),
+        "subscribe" => new SubscribeMessage(1000, ["memory", "psu"], [KeyA], [KeyB]),
         "schema" => new SchemaMessage(
             [
                 new WireDevice(
@@ -730,11 +944,15 @@ public sealed class CodecTests
                 ["cpu", "motherboard", "storage", "controller"],
                 [KeyA],
                 "pending",
-                [KeyB])),
+                [
+                    new WireDrive(0, KeyA, "Samsung SSD 990 PRO 2TB", "smartOff", false),
+                    new WireDrive(1, null, "ST2000DM008-2UB102", "standby", true),
+                ])),
         "snapshot" => new SnapshotMessage(
             4_294_967_301UL, 1_790_000_000_000UL,
-            new double?[] { 45.0, null, -12.5, 0.0 }),
-        "snapshot_empty" => new SnapshotMessage(1, 0, Array.Empty<double?>()),
+            new double?[] { 45.0, null, -12.5, 0.0 },
+            [false, false, true, false]),
+        "snapshot_empty" => new SnapshotMessage(1, 0, Array.Empty<double?>(), []),
         "error" => new ErrorMessage("bad_request", "Messaggio non valido: è atteso Subscribe"),
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, "unknown fixture name"),
     };

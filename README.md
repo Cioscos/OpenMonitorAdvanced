@@ -59,8 +59,10 @@ SMART data.
   closed, and an optional second hotkey pauses and resumes. The file is UTF-8 with a BOM,
   comma-separated, with CRLF line ends: one row per sampled tick (or every 1 to 60 ticks), a
   local timestamp with its UTC offset, and one column per sensor, named
-  `Device / Sensor [unit] {id}`. Files go to `Documents\OpenMonitor Advanced\logs` unless you
-  pick another folder. A new part (`-part2`, `-part3`, ...) starts when the file reaches the size limit
+  `Device / Sensor [unit] {id}`. A cell is empty when the sensor has no value, and holds the
+  word `suspended` (in every language) while a reading is on hold because the disk is asleep
+  or idle. Files go to `Documents\OpenMonitor Advanced\logs` unless you pick another folder.
+  A new part (`-part2`, `-part3`, ...) starts when the file reaches the size limit
   (100 MiB by default, 10 to 2048) or when the columns change: language, units or the selected
   sensors. *Settings › CSV log* sets the folder, the sensors, the interval, the size limit and
   the hotkeys. A failure such as a removed USB drive stops the recording with a notification and
@@ -142,11 +144,17 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   (such as FanControl) may share. FACEIT accepts PawnIO 2.2.0; no block by Vanguard, EAC or
   BattlEye is known. None of this has been tested against a real anti-cheat-protected game yet.
 - **Known limits.** On a PC with several signed-in users, any of them can stop the service for
-  everyone. A disk that Windows reports in standby is not queried, so it shows no health data while
-  asleep. If a connected disk cannot confirm its power state when the service starts (a USB
-  stick, for example), SMART reads stay off for all disks until it is unplugged. While a disk
-  sleeps, the banner can say that some data is incomplete. CPU thermal throttling is not
-  available from LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
+  everyone. To let hard disks sleep, a hard disk that is asleep or idle is not queried: its
+  temperature and SMART values are not updated until it works again, with or without the
+  service, and the page shows the last value, greyed out, as *Last reading*. A standby that the
+  disk chooses by itself (its own firmware timer), which Windows does not know about, shows as
+  *Idle* rather than *In standby*. If a hard disk is asleep when the service starts, no disk's
+  SMART values (NVMe included) appear until that disk wakes up. SMART reads of USB disks are off
+  by default, because standby behind a USB adapter could not be tested: you can switch them on
+  per disk in *Data sources*, but some adapters may then keep the disk awake. A disk plugged in
+  while SMART reads are on, that LibreHardwareMonitor cannot identify, may be woken whenever
+  another device is plugged in or removed. CPU thermal throttling is not available from
+  LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
   warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
   with a semicolon as the list separator (many European locales) shows the CSV log in one column:

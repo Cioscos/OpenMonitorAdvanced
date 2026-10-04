@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use oma_core::csv::BOM;
-use oma_core::engine::TickOutput;
+use oma_core::engine::{Quality, TickOutput};
 use oma_core::model::{
     Device, DeviceKind, Label, Schema, Sensor, SensorKind, Snapshot, Source, Unit,
 };
@@ -739,6 +739,31 @@ fn every_ticks_change_resets_the_phase() {
     }
     rig.log.stop();
     assert_eq!(rig.values(&base()), ["1", "4", "6", "8"]);
+}
+
+#[test]
+fn a_tick_with_a_suspended_sensor_writes_suspended_in_its_column() {
+    let mut rig = Rig::new();
+    rig.schema = cpu(1, &["total", "disk", "user"]);
+    rig.tick(0.0);
+    rig.log.start();
+    for (value, disk) in [
+        (41.0, Quality::Fresh),
+        (41.0, Quality::Suspended),
+        (41.0, Quality::Held),
+    ] {
+        let mut out = rig.next(value);
+        out.quality = vec![Quality::Fresh, disk, Quality::Fresh];
+        rig.log.on_tick(&out, &rig.schema, &rig.store.snapshot());
+        wait_until("the writer to drain", || rig.log.queue.writer_parked());
+    }
+    rig.log.stop();
+    let cells: Vec<String> = rig.lines(&base())[1..]
+        .iter()
+        .map(|line| line.split_once(',').expect("a timestamp").1.to_owned())
+        .collect();
+    // Only the suspended sensor's column, only on its tick.
+    assert_eq!(cells, ["41,41,41", "41,suspended,41", "41,41,41"]);
 }
 
 impl Rig {

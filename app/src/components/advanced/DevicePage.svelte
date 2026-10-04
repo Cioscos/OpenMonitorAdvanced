@@ -41,6 +41,10 @@
   // and everything else stay in bytes. The KPIs, the table and the chart all take `rate`.
   const rate = $derived(entry.kind === 'network' ? display.throughput : 'bytes');
   const valueOf = (id: string) => store.value(id);
+  const qualityOf = (id: string) => store.quality(id);
+  // A disk that is not being read says so; `active` and `unknown` say nothing. The state is read
+  // from the store, which follows hot-plug and wake-up, never from a discovery property.
+  const power = $derived(entry.kind === 'storage' ? store.diskPower(entry.deviceIds[0]) : undefined);
   // The backend of a mounted page never changes.
   const stats = new StatsPoller(untrack(() => backend), () => sensors.map((s) => s.id), () => schema?.revision ?? null);
 
@@ -50,9 +54,12 @@
 {#if schema}
   <div class="page">
     {#if showServiceNotice}<ServiceNotice />{/if}
-    <KpiRow {kpis} {valueOf} statsOf={stats.statsOf} {rate} />
+    {#if power === 'standby' || power === 'idle'}
+      <div><span class="tag disk-state">{t(`storage.power.${power}`)}</span></div>
+    {/if}
+    <KpiRow {kpis} {valueOf} {qualityOf} statsOf={stats.statsOf} {rate} />
     <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} {rate} />
-    <SensorTable {sensors} {valueOf} {stats} {rate} />
+    <SensorTable {sensors} {valueOf} {qualityOf} {stats} {rate} />
     {#if hasProperties || entry.kind === 'gpu'}
       <div class="extra">
         {#if hasProperties}<DeviceInfo {devices} />{/if}
@@ -68,6 +75,14 @@
     flex-direction: column;
     gap: 14px;
     min-width: 0;
+  }
+  .tag {
+    padding: 1px 6px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
   }
   .extra {
     display: grid;

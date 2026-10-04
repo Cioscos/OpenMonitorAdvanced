@@ -402,7 +402,7 @@
     const next = new ChartBuffer(ids, seconds);
     next.seed(history);
     // A snapshot applied while the request was in flight is newer than the seed.
-    if (store.timestampMs > (next.lastTimestampMs ?? 0)) next.append(store.timestampMs, ids.map((id) => store.value(id)));
+    if (store.timestampMs > (next.lastTimestampMs ?? 0)) next.append(store.timestampMs, ids.map((id) => store.measured(id)));
     next.trim(next.lastTimestampMs ?? 0);
     buffer = next;
     if (next.lastTimestampMs !== null) viewport.sample(next.lastTimestampMs, performance.now());
@@ -526,7 +526,7 @@
       buffer = new ChartBuffer(buffer.ids, buffer.windowSeconds);
       viewport.reset();
     }
-    buffer.append(timestampMs, buffer.ids.map((id) => store.value(id)));
+    buffer.append(timestampMs, buffer.ids.map((id) => store.measured(id)));
     buffer.trim(timestampMs);
     viewport.sample(timestampMs, performance.now());
     plot.batch(() => {

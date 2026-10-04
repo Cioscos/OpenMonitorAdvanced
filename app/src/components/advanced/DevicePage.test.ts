@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/svelte';
+import { flushSync } from 'svelte';
 import type { SidebarEntry } from '../../lib/advanced/nav';
-import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
+import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { formatValue } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
@@ -86,6 +87,83 @@ test('a disk whose only property is the SMART switch has no info box', async () 
   });
   render(DevicePage, { entry: { id: disk.id, kind: 'storage', labelKey: 'advanced.section.storage', deviceIds: [disk.id], labelArg: disk.name }, store, backend });
   expect(screen.queryByText(t('advanced.info.title'))).toBeNull();
+});
+
+const SSD = 'storage/device-mock-ssd';
+const SSD_ENTRY: SidebarEntry = { id: SSD, kind: 'storage', deviceIds: [SSD], labelKey: 'advanced.section.storage', labelArg: 'Disk 0 (C:)' };
+const stateLabels = () => [...document.querySelectorAll('.disk-state')].map((e) => e.textContent);
+
+test('a disk in standby shows its state', () => {
+  const { backend, store } = setup();
+  store.setDiskStates([{ deviceId: SSD, power: 'standby' }]);
+  render(DevicePage, { entry: SSD_ENTRY, store, backend });
+  expect(stateLabels()).toEqual([t('storage.power.standby')]);
+  expect(document.querySelector('.disk-state')!.classList.contains('tag')).toBe(true);
+});
+
+test('an idle disk shows "Inattivo"', () => {
+  i18n.locale = 'it';
+  const { backend, store } = setup();
+  store.setDiskStates([{ deviceId: SSD, power: 'idle' }]);
+  render(DevicePage, { entry: SSD_ENTRY, store, backend });
+  expect(stateLabels()).toEqual(['Inattivo']);
+});
+
+test('an active disk shows no state label', () => {
+  const { backend, store } = setup();
+  store.setDiskStates([{ deviceId: SSD, power: 'active' }]);
+  render(DevicePage, { entry: SSD_ENTRY, store, backend });
+  expect(stateLabels()).toEqual([]);
+});
+
+test('an unknown or removed disk keeps no state label', () => {
+  const { backend, store } = setup();
+  store.setDiskStates([{ deviceId: SSD, power: 'standby' }]);
+  render(DevicePage, { entry: SSD_ENTRY, store, backend });
+  expect(stateLabels()).toHaveLength(1);
+  // The state is read live: it follows the store, not a discovery property.
+  store.setDiskStates([{ deviceId: SSD, power: 'unknown' }]);
+  flushSync();
+  expect(stateLabels()).toEqual([]);
+  store.setDiskStates([{ deviceId: SSD, power: 'idle' }]);
+  flushSync();
+  expect(stateLabels()).toHaveLength(1);
+  store.setDiskStates([]);
+  flushSync();
+  expect(stateLabels()).toEqual([]);
+});
+
+test('a last reading is labelled in the table and in the kpi, through the live store', () => {
+  const HDD = 'storage/device-mock-hdd';
+  const schema = SERVICE_MOCK_SCHEMA;
+  const index = schema.sensors.findIndex((s) => s.id === `${HDD}/temperature/drive`);
+  expect(index).toBeGreaterThanOrEqual(0);
+  const backend = new FakeBackend(schema);
+  const store = new LiveStore();
+  store.applySchema(schema);
+  const values = schema.sensors.map((_, i) => (i === index ? 31 : 1));
+  // Quality 2 for the sleeping disk's temperature only: a value kept from its last reading.
+  const quality = schema.sensors.map((_, i) => (i === index ? 2 : 0));
+  store.applySnapshot({ revision: schema.revision, seq: 1, timestampMs: 2000, values, quality });
+  render(DevicePage, { entry: { id: HDD, kind: 'storage', deviceIds: [HDD], labelKey: 'advanced.section.storage', labelArg: 'Disk 1' }, store, backend });
+
+  const lastIn = (selector: string) => [...document.querySelectorAll(`${selector} .last`)].map((e) => e.textContent);
+  expect(lastIn('td.stale')).toEqual([t('value.lastReading')]);
+  expect(lastIn('.kpi')).toEqual([t('value.lastReading')]);
+  expect(document.querySelectorAll('.kpi .value.stale')).toHaveLength(1);
+
+  // The disk is read again: the same value, fresh, loses the label in both places.
+  store.applySnapshot({ revision: schema.revision, seq: 2, timestampMs: 3000, values, quality: quality.map(() => 0) });
+  flushSync();
+  expect(lastIn('td.stale')).toEqual([]);
+  expect(lastIn('.kpi')).toEqual([]);
+});
+
+test('only a disk page shows a power state', () => {
+  const { backend, store } = setup();
+  store.setDiskStates([{ deviceId: 'cpu/0', power: 'standby' }]);
+  render(DevicePage, { entry: CPU_ENTRY, store, backend });
+  expect(stateLabels()).toEqual([]);
 });
 
 test('network page: traffic in bits per second, like the Simple view', async () => {

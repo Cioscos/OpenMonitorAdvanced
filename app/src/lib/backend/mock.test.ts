@@ -10,6 +10,7 @@ import {
   parseServiceState,
   sortGpuProcesses,
 } from './mock';
+import type { Snapshot } from '../types';
 
 const GPU = 'gpu/pci-0000:01:00.0';
 const CPU_LOAD = 'cpu/0/load/total';
@@ -177,7 +178,7 @@ test('the mock serves lhm sensors only when the service is connected', async () 
       requestedDisabledModules: [],
       smartDisabledDrives: [],
       reconfiguration: 'applied',
-      smartBlockedBy: [],
+      drives: [],
     },
   });
 
@@ -466,4 +467,39 @@ describe('mock log recorder', () => {
     }
     expect((await createMockBackend().getLogStatus()).error).not.toBeNull();
   });
+});
+
+test('the mock with the service exposes a standby disk whose temperature is suspended', async () => {
+  history.replaceState(null, '', '?service=connected');
+  const backend = createMockBackend();
+  const states = await backend.getDiskStates();
+  expect(states).toEqual([{ deviceId: 'storage/device-mock-hdd', power: 'standby' }]);
+  states.pop();
+  expect(await backend.getDiskStates()).toHaveLength(1); // A copy, not the shared array.
+  const schema = await backend.getSchema();
+  const id = 'storage/device-mock-hdd/temperature/drive';
+  const index = schema.sensors.findIndex((s) => s.id === id);
+  expect(index).toBeGreaterThanOrEqual(0);
+  const history_ = await backend.getHistory([id], 5);
+  expect(history_.series[0].every((v) => typeof v === 'number')).toBe(true);
+  const seen: Snapshot[] = [];
+  const off = await backend.onSnapshot((s) => seen.push(s));
+  await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
+  off();
+  expect(seen[0].quality).toHaveLength(schema.sensors.length);
+  expect(seen[0].quality?.[index]).toBe(2);
+  expect(seen[0].quality?.filter((q) => q !== 0)).toHaveLength(1);
+});
+
+test('the mock without the service has no disk states and no quality', async () => {
+  for (const state of ['unreachable', 'notInstalled', 'antiCheat']) {
+    history.replaceState(null, '', `?service=${state}`);
+    const backend = createMockBackend();
+    expect(await backend.getDiskStates()).toEqual([]);
+    const seen: Snapshot[] = [];
+    const off = await backend.onSnapshot((s) => seen.push(s));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 3000 });
+    off();
+    expect(seen[0].quality).toBeUndefined();
+  }
 });

@@ -119,11 +119,12 @@ internal static class ServiceHost
     {
         ILoggerFactory logs = services.GetRequiredService<ILoggerFactory>();
         var disks = new DiskPowerProbe(logs.CreateLogger<DiskPowerProbe>());
+        var activity = new DiskActivityProbe(logs.CreateLogger<DiskActivityProbe>());
         PawnIoState pawnIo = services.GetRequiredService<PawnIoState>();
 
         // Owned by the hub, never registered in DI: the hub decides whether it may be closed.
         var tree = new LhmTree(logs.CreateLogger<LhmTree>());
-        return new SensorHub(tree, disks, () => pawnIo.Status == PawnIoStatus.Ok, TimeProvider.System, logs.CreateLogger<SensorHub>());
+        return new SensorHub(tree, disks, activity, () => pawnIo.Status == PawnIoStatus.Ok, TimeProvider.System, logs.CreateLogger<SensorHub>());
     }
 
     /// <summary>

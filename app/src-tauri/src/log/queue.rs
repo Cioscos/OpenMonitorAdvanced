@@ -14,7 +14,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
-use oma_core::csv::Layout;
+use oma_core::csv::{Cell, Layout};
 
 use super::writer::WriteFailure;
 
@@ -30,8 +30,8 @@ pub struct Row {
     pub layout: Arc<Layout>,
     pub timestamp_ms: u64,
     pub offset_minutes: i32,
-    /// Raw values in column order ([`Layout::extract`]).
-    pub values: Box<[Option<f64>]>,
+    /// Cells in column order ([`Layout::extract`]).
+    pub values: Box<[Cell]>,
 }
 
 /// Commands to the writer; each one is answered once on its `reply`.
@@ -299,7 +299,7 @@ fn identity(layout: &Arc<Layout>) -> usize {
 /// Conservative accounting of one queued row (L2): the row, its deque slot
 /// and the backing store of its values.
 fn row_cost(row: &Row) -> usize {
-    size_of::<Row>() + size_of::<Item>() + size_of::<Option<f64>>() * row.values.len()
+    size_of::<Row>() + size_of::<Item>() + size_of::<Cell>() * row.values.len()
 }
 
 #[cfg(test)]
@@ -327,7 +327,7 @@ mod tests {
             layout: layout.clone(),
             timestamp_ms: 0,
             offset_minutes: 0,
-            values: vec![Some(1.0); values].into_boxed_slice(),
+            values: vec![Cell::Value(1.0); values].into_boxed_slice(),
         }
     }
 
@@ -404,7 +404,7 @@ mod tests {
         let shared = layout("Load");
         let queue = LogQueue::new(MAX_ROWS, MAX_QUEUE_BYTES);
         let cost = row_cost(&row(&shared, 3));
-        assert!(cost >= size_of::<Row>() + size_of::<Item>() + 3 * size_of::<Option<f64>>());
+        assert!(cost >= size_of::<Row>() + size_of::<Item>() + 3 * size_of::<Cell>());
 
         queue.try_push_row(row(&shared, 3)).unwrap();
         assert_eq!(accounted(&queue), shared.retained_bytes() + cost);

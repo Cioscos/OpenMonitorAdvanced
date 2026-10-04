@@ -11,11 +11,14 @@
   let {
     sensors,
     valueOf,
+    qualityOf,
     stats,
     rate = 'bytes',
   }: {
     sensors: Sensor[];
     valueOf: ValueOf;
+    /** 2 marks a value repeated while the sensor is suspended (a disk in standby): the last reading. */
+    qualityOf: (id: string) => 0 | 1 | 2;
     stats: StatsPoller;
     /** 'bits' on network pages: traffic in bit/s, like the Simple view. */
     rate?: 'bits' | 'bytes';
@@ -58,13 +61,17 @@
         </tr>
         {#each group.sensors as sensor (sensor.id)}
           {@const s = stats.statsOf(sensor.id)}
+          {@const current = valueOf(sensor.id)}
+          {@const stale = current !== null && qualityOf(sensor.id) === 2}
           <tr tabindex="0">
             <th scope="row">
               <span class="name">{sensorLabel(sensor, t)}</span>
               {#if sensor.experimental}<span class="tag exp">{t('advanced.experimental')}</span>{/if}
               <span class="tag source" title={t(`source.${sensor.source}`)}>{sourceCode(sensor.source)}</span>
             </th>
-            <td class="num">{formatValue(valueOf(sensor.id), sensor.unit, locale, t, opts)}</td>
+            <td class="num" class:stale
+              >{#if stale}<span class="last">{t('value.lastReading')}</span> {/if}{formatValue(current, sensor.unit, locale, t, opts)}</td
+            >
             <td class="num">{formatValue(s?.min ?? null, sensor.unit, locale, t, opts)}</td>
             <td class="num">{formatValue(s?.max ?? null, sensor.unit, locale, t, opts)}</td>
             <td class="num">{formatAverage(s, sensor.unit, locale, t, opts)}</td>
@@ -142,6 +149,13 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+  .stale {
+    color: var(--text-muted);
+  }
+  .last {
+    margin-right: 4px;
+    font-size: 11px;
   }
   .tag {
     margin-left: 6px;

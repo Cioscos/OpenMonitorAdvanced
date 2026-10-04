@@ -13,6 +13,7 @@ import type {
   SettingsPatch,
   SettingsState,
   Snapshot,
+  DiskStateEntry,
   StartupStatus,
   StatsReply,
   NavigationTarget,
@@ -33,6 +34,10 @@ export interface Backend {
   getHistory(ids: string[], seconds: number, maxPoints?: number): Promise<HistorySeed>;
   onSchema(cb: (schema: Schema) => void): Promise<Unsubscribe>;
   onSnapshot(cb: (snapshot: Snapshot) => void): Promise<Unsubscribe>;
+  /** The power state of every identified disk. */
+  getDiskStates(): Promise<DiskStateEntry[]>;
+  /** Always the full list, emitted when it changes; an empty list revokes the earlier states. */
+  onDiskStates(cb: (states: DiskStateEntry[]) => void): Promise<Unsubscribe>;
   /** GPU safe-mode status of this session. */
   getStartupStatus(): Promise<StartupStatus>;
   /** Loads the GPU vendor libraries without a restart; returns the new status. */

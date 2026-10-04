@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
-use oma_core::model::Schema;
+use oma_core::model::{Schema, Snapshot};
+use oma_core::provider::Quality;
 use oma_core::rules::{HealthClock, HealthReport, Rule, RuleStatus};
 use oma_core::sampler::{unix_ms, IntervalHandle};
 use oma_core::settings::VendorLibraries;
@@ -19,11 +20,15 @@ use crate::window::{NavState, NavigationTarget};
 use crate::AppState;
 
 #[cfg(not(windows))]
+pub use no_disk_states::{DiskPower, DiskStateTable};
+#[cfg(not(windows))]
 pub use no_gpu_processes::{GpuProcess, GpuProcessTable};
 #[cfg(not(windows))]
 pub use no_vendor_libraries::{Vendor, VendorMask, VendorSwitch};
 #[cfg(windows)]
 pub use oma_win::gpu::{GpuProcess, GpuProcessTable, Vendor, VendorMask, VendorSwitch};
+#[cfg(windows)]
+pub use oma_win::storage::{DiskPower, DiskStateTable};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,6 +468,68 @@ pub struct GpuProcessState(pub GpuProcessTable);
 #[tauri::command(async)]
 pub fn get_gpu_processes(state: State<'_, GpuProcessState>, device_id: String) -> Vec<GpuProcess> {
     state.0.processes(&device_id)
+}
+
+/// The `oma:snapshot` payload: the snapshot plus one quality code per value
+/// (0 fresh, 1 held, 2 suspended), in the same order.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SnapshotEvent<'a> {
+    #[serde(flatten)]
+    pub snapshot: &'a Snapshot,
+    pub quality: Vec<u8>,
+}
+
+pub(crate) fn quality_codes(quality: &[Quality]) -> Vec<u8> {
+    quality
+        .iter()
+        .map(|q| match q {
+            Quality::Fresh => 0,
+            Quality::Held => 1,
+            Quality::Suspended => 2,
+        })
+        .collect()
+}
+
+/// Emitted with the full list of disk power states whenever it changes; an
+/// empty list revokes the earlier states.
+pub const EVENT_DISK_STATES: &str = "oma:disk-states";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiskStateEntry {
+    pub device_id: String,
+    pub power: DiskPower,
+}
+
+pub(crate) fn disk_state_entries(states: Vec<(String, DiskPower)>) -> Vec<DiskStateEntry> {
+    states
+        .into_iter()
+        .map(|(device_id, power)| DiskStateEntry { device_id, power })
+        .collect()
+}
+
+/// The current power state of every identified disk, for a window that has
+/// just opened; later changes arrive with `oma:disk-states`.
+#[tauri::command(async)]
+pub(crate) fn get_disk_states(state: State<'_, AppState>) -> Vec<DiskStateEntry> {
+    disk_state_entries(state.disk_states.get().1)
+}
+
+/// Off Windows no provider publishes disk states: the table is always empty.
+#[cfg(not(windows))]
+mod no_disk_states {
+    /// Never constructed off Windows; any serializable type fits the empty reply.
+    pub type DiskPower = serde_json::Value;
+
+    #[derive(Clone, Default)]
+    pub struct DiskStateTable;
+
+    impl DiskStateTable {
+        pub fn get(&self) -> (u64, Vec<(String, DiskPower)>) {
+            (0, Vec::new())
+        }
+    }
 }
 
 /// Off Windows no provider publishes GPU processes: the table is always empty.
@@ -957,5 +1024,50 @@ mod tests {
         assert_eq!(value["serviceVersion"], serde_json::Value::Null);
         assert_eq!(value["settingsPath"], serde_json::Value::Null);
         assert_eq!(value["logsPath"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_event_serializes_quality_next_to_the_values() {
+        let snapshot = oma_core::model::Snapshot {
+            revision: 3,
+            seq: 9,
+            timestamp_ms: 1_000,
+            values: vec![Some(1.0), None],
+        };
+        let event = SnapshotEvent {
+            snapshot: &snapshot,
+            quality: quality_codes(&[Quality::Held, Quality::Suspended]),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""values":[1.0,null]"#), "{json}");
+        assert!(json.contains(r#""quality":[1,2]"#), "{json}");
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["revision"], 3);
+        assert_eq!(value["timestampMs"], 1_000);
+    }
+
+    #[test]
+    fn quality_codes_map_the_three_states() {
+        assert_eq!(
+            quality_codes(&[Quality::Fresh, Quality::Held, Quality::Suspended]),
+            vec![0, 1, 2]
+        );
+        assert!(quality_codes(&[]).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disk_state_entries_serialize_in_camel_case() {
+        let entries = disk_state_entries(vec![
+            ("storage/device-a".to_owned(), DiskPower::Standby),
+            ("storage/device-b".to_owned(), DiskPower::Unknown),
+        ]);
+        assert_eq!(
+            serde_json::to_value(&entries).unwrap(),
+            serde_json::json!([
+                { "deviceId": "storage/device-a", "power": "standby" },
+                { "deviceId": "storage/device-b", "power": "unknown" },
+            ])
+        );
     }
 }

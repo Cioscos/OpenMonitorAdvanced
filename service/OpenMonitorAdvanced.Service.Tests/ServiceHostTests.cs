@@ -34,7 +34,7 @@ public sealed class ServiceHostTests
 
         using var client = await TestClient.ConnectAsync(pipeName, Ct);
         await client.ReadAsync<HelloMessage>(Ct);
-        await client.SendAsync(new SubscribeMessage(1000, [], []), Ct);
+        await client.SendAsync(new SubscribeMessage(1000, [], [], []), Ct);
         await PipeAssert.EventuallyAsync(() => _feed.All.Count == 1, "the subscription", Ct);
 
         host.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();

@@ -95,13 +95,15 @@ public static class MessageCodec
                 w.Write(hello.PawnIo);
                 break;
             case SubscribeMessage subscribe:
-                WriteEnvelopeHeader(ref w, "subscribe", 3);
+                WriteEnvelopeHeader(ref w, "subscribe", 4);
                 w.Write("interval_ms");
                 w.Write(subscribe.IntervalMs);
                 w.Write("disabled_modules");
                 WriteStrings(ref w, subscribe.DisabledModules);
                 w.Write("smart_disabled_drives");
                 WriteStrings(ref w, subscribe.SmartDisabledDrives);
+                w.Write("smart_enabled_drives");
+                WriteStrings(ref w, subscribe.SmartEnabledDrives);
                 break;
             case SchemaMessage schema:
                 WriteEnvelopeHeader(ref w, "schema", 3);
@@ -127,11 +129,17 @@ public static class MessageCodec
                 WriteStrings(ref w, schema.Service.SmartDisabledDrives);
                 w.Write("reconfiguration");
                 w.Write(schema.Service.Reconfiguration);
-                w.Write("smart_blocked_by");
-                WriteStrings(ref w, schema.Service.SmartBlockedBy);
+                w.Write("drives");
+                w.WriteArrayHeader(schema.Service.Drives.Count);
+                foreach (var drive in schema.Service.Drives)
+                {
+                    WriteDrive(ref w, drive);
+                }
+
                 break;
             case SnapshotMessage snapshot:
-                WriteEnvelopeHeader(ref w, "snapshot", 3);
+                ValidateHeld(snapshot.Values, snapshot.Held);
+                WriteEnvelopeHeader(ref w, "snapshot", 4);
                 w.Write("seq");
                 w.Write(snapshot.Seq);
                 w.Write("timestamp_ms");
@@ -141,6 +149,14 @@ public static class MessageCodec
                 foreach (var value in snapshot.Values)
                 {
                     WriteNullableDouble(ref w, value);
+                }
+
+                // A non-finite value goes out as nil, and a nil cannot be held.
+                w.Write("held");
+                w.WriteArrayHeader(snapshot.Held.Count);
+                for (var i = 0; i < snapshot.Held.Count; i++)
+                {
+                    w.Write(snapshot.Held[i] && snapshot.Values[i] is { } v && double.IsFinite(v));
                 }
 
                 break;
@@ -163,6 +179,21 @@ public static class MessageCodec
         w.Write(type);
         w.Write("body");
         w.WriteMapHeader(bodyFieldCount);
+    }
+
+    private static void WriteDrive(ref MessagePackWriter w, WireDrive drive)
+    {
+        w.WriteMapHeader(5);
+        w.Write("physical_drive");
+        w.Write(drive.PhysicalDrive);
+        w.Write("key");
+        WriteNullableString(ref w, drive.Key);
+        w.Write("model");
+        WriteNullableString(ref w, drive.Model);
+        w.Write("state");
+        w.Write(drive.State);
+        w.Write("blocks_smart");
+        w.Write(drive.BlocksSmart);
     }
 
     private static void WriteDevice(ref MessagePackWriter w, WireDevice device)
@@ -430,6 +461,7 @@ public static class MessageCodec
         uint? intervalMs = null;
         List<string>? disabledModules = null;
         List<string>? smartDisabledDrives = null;
+        List<string>? smartEnabledDrives = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
@@ -445,6 +477,9 @@ public static class MessageCodec
                     break;
                 case "smart_disabled_drives":
                     smartDisabledDrives = ReadDriveKeys(ref reader);
+                    break;
+                case "smart_enabled_drives":
+                    smartEnabledDrives = ReadDriveKeys(ref reader);
                     break;
                 default:
                     reader.Skip();
@@ -467,7 +502,17 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"smart_disabled_drives\"");
         }
 
-        return new SubscribeMessage(intervalMs.Value, disabledModules, smartDisabledDrives);
+        if (smartEnabledDrives is null)
+        {
+            throw new ProtocolException("missing required field \"smart_enabled_drives\"");
+        }
+
+        if (smartEnabledDrives.Intersect(smartDisabledDrives, StringComparer.Ordinal).Any())
+        {
+            throw new ProtocolException("a drive key cannot be both enabled and disabled");
+        }
+
+        return new SubscribeMessage(intervalMs.Value, disabledModules, smartDisabledDrives, smartEnabledDrives);
     }
 
     /// <summary>A module name from <see cref="ProtocolConstants.Modules"/>; anything else is a bad request.</summary>
@@ -574,7 +619,7 @@ public static class MessageCodec
         List<string>? activeModules = null;
         List<string>? smartDisabledDrives = null;
         string? reconfiguration = null;
-        List<string>? smartBlockedBy = null;
+        List<WireDrive>? drives = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
@@ -591,8 +636,8 @@ public static class MessageCodec
                 case "reconfiguration":
                     reconfiguration = ReadRequiredString(ref reader, "\"reconfiguration\"");
                     break;
-                case "smart_blocked_by":
-                    smartBlockedBy = ReadDriveKeys(ref reader);
+                case "drives":
+                    drives = ReadArray(ref reader, ReadDrive);
                     break;
                 default:
                     reader.Skip();
@@ -615,12 +660,71 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"reconfiguration\"");
         }
 
-        if (smartBlockedBy is null)
+        if (drives is null)
         {
-            throw new ProtocolException("missing required field \"smart_blocked_by\"");
+            throw new ProtocolException("missing required field \"drives\"");
         }
 
-        return new ServiceStateBlock(activeModules, smartDisabledDrives, reconfiguration, smartBlockedBy);
+        return new ServiceStateBlock(activeModules, smartDisabledDrives, reconfiguration, drives);
+    }
+
+    private static WireDrive ReadDrive(ref MessagePackReader reader)
+    {
+        uint? physicalDrive = null;
+        string? driveKey = null;
+        string? model = null;
+        string? state = null;
+        bool? blocksSmart = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "drive map key");
+            switch (key)
+            {
+                case "physical_drive":
+                    physicalDrive = reader.ReadUInt32();
+                    break;
+                case "key":
+                    driveKey = ReadNullableString(ref reader);
+                    if (driveKey is not null && !IsDriveKey(driveKey))
+                    {
+                        throw new ProtocolException("a drive key must be 64 lowercase hexadecimal characters");
+                    }
+
+                    break;
+                case "model":
+                    model = ReadNullableString(ref reader);
+                    break;
+                case "state":
+                    state = ReadRequiredString(ref reader, "\"state\"");
+                    break;
+                case "blocks_smart":
+                    blocksSmart = reader.ReadBoolean();
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        if (physicalDrive is null)
+        {
+            throw new ProtocolException("missing required field \"physical_drive\"");
+        }
+
+        if (state is null)
+        {
+            throw new ProtocolException("missing required field \"state\"");
+        }
+
+        if (blocksSmart is null)
+        {
+            throw new ProtocolException("missing required field \"blocks_smart\"");
+        }
+
+        // key and model are Option<String> in Rust: an omitted key decodes as null (ruling R10).
+        return new WireDrive(physicalDrive.Value, driveKey, model, state, blocksSmart.Value);
     }
 
     private static WireDevice ReadDevice(ref MessagePackReader reader)
@@ -917,6 +1021,7 @@ public static class MessageCodec
         ulong? seq = null;
         ulong? timestampMs = null;
         List<double?>? values = null;
+        List<bool>? held = null;
 
         var count = reader.ReadMapHeader();
         for (var i = 0; i < count; i++)
@@ -932,6 +1037,9 @@ public static class MessageCodec
                     break;
                 case "values":
                     values = ReadValues(ref reader);
+                    break;
+                case "held":
+                    held = ReadArray(ref reader, static (ref MessagePackReader r) => r.ReadBoolean());
                     break;
                 default:
                     reader.Skip();
@@ -954,7 +1062,45 @@ public static class MessageCodec
             throw new ProtocolException("missing required field \"values\"");
         }
 
-        return new SnapshotMessage(seq.Value, timestampMs.Value, values);
+        if (held is null)
+        {
+            throw new ProtocolException("missing required field \"held\"");
+        }
+
+        ValidateHeld(values, held);
+
+        // A non-finite value becomes nil and loses its held flag, as on the Rust side.
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (values[i] is { } v && !double.IsFinite(v))
+            {
+                values[i] = null;
+                held[i] = false;
+            }
+        }
+
+        return new SnapshotMessage(seq.Value, timestampMs.Value, values, held);
+    }
+
+    /// <summary>
+    /// The snapshot's <c>held</c> has the length of its <c>values</c> and flags no nil value (the
+    /// Rust decoder's rule, <c>frame.rs</c>). A non-finite value counts as present here: it is turned
+    /// into nil, with its flag cleared, rather than rejected.
+    /// </summary>
+    private static void ValidateHeld(IReadOnlyList<double?> values, IReadOnlyList<bool> held)
+    {
+        if (held.Count != values.Count)
+        {
+            throw new ProtocolException($"snapshot has {values.Count} values but {held.Count} held flags");
+        }
+
+        for (var i = 0; i < held.Count; i++)
+        {
+            if (held[i] && values[i] is null)
+            {
+                throw new ProtocolException("snapshot marks an absent value as held");
+            }
+        }
     }
 
     private static List<double?> ReadValues(ref MessagePackReader reader)
@@ -970,7 +1116,7 @@ public static class MessageCodec
             else
             {
                 var value = reader.ReadDouble();
-                values.Add(double.IsFinite(value) ? value : null);
+                values.Add(value);
             }
         }
 

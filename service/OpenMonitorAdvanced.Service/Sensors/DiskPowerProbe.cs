@@ -16,10 +16,13 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <c>\\.\PhysicalDriveN</c> opened with access 0 (metadata only);</item>
 /// <item><see cref="IsSpunDown"/>: ATA <c>CHECK POWER MODE</c> (0xE5) through
 /// <c>IOCTL_ATA_PASS_THROUGH</c>, a non-media command that never spins a drive up (needs
-/// read/write access: the service runs as LocalSystem);</item>
-/// <item><see cref="GateBlockers"/>: the gate of controller ruling R17 over those
-/// facts (<see cref="DriveFacts.RequiresPowerCheck"/>, <see cref="FindGateBlockers"/>).</item>
+/// read/write access: the service runs as LocalSystem). A drive whose driver rejects it (a USB
+/// bridge) is asked the same command as <c>ATA PASS-THROUGH(16)</c> through
+/// <c>IOCTL_SCSI_PASS_THROUGH</c>; the route that answered is remembered per drive;</item>
+/// <item><see cref="Enumerate"/>: every drive as <see cref="Describe"/> sees it, with no power
+/// command.</item>
 /// </list>
+/// <see cref="GateEpisode"/> is the gate of controller ruling R17 over those facts and answers.
 /// The IOCTLs need an elevated process and a real disk (verified in Task 15); the decision
 /// logic, the register interpretation, the error logging and the struct layouts are unit-tested.
 /// </summary>
@@ -31,20 +34,27 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     private const byte AtaCheckPowerMode = 0xE5;
     private const byte AtaStatusError = 0x01;
     private const uint AtaTimeoutSeconds = 5;
+    private const int SenseLength = 32;
+
+    /// <summary>How long a drive that answered on neither route is left alone.</summary>
+    private static readonly TimeSpan DeadRouteRetry = TimeSpan.FromMinutes(5);
 
     private const string OpenMetadata = "open (access 0)";
     private const string OpenReadWrite = "open (read/write)";
     private const string QueryDescriptor = "IOCTL_STORAGE_QUERY_PROPERTY(Device)";
     private const string QuerySeekPenalty = "IOCTL_STORAGE_QUERY_PROPERTY(SeekPenalty)";
     private const string CheckPowerMode = "IOCTL_ATA_PASS_THROUGH(CHECK POWER MODE)";
+    private const string SatCheckPowerMode = "IOCTL_SCSI_PASS_THROUGH(CHECK POWER MODE)";
 
     private readonly Func<IReadOnlyList<DriveFacts>> _enumerateDrives;
     private readonly Func<int, DriveFacts?> _describe;
-    private readonly Func<int, bool?> _isSpunDown;
+    private readonly Func<int, bool?> _nativeCheck;
+    private readonly Func<int, bool?> _satCheck;
+    private readonly TimeProvider _time;
     private readonly ILogger _log;
     private readonly Win32ErrorLog _errors;
-    private readonly object _gateLogLock = new();
-    private string? _lastBlockers;
+    private readonly object _routeLock = new();
+    private readonly Dictionary<int, RouteMemory> _routes = [];
 
     public DiskPowerProbe(ILogger<DiskPowerProbe> log)
     {
@@ -52,59 +62,104 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         _errors = new Win32ErrorLog(log);
         _enumerateDrives = EnumeratePhysicalDrives;
         _describe = DescribePhysicalDrive;
-        _isSpunDown = QueryCheckPowerMode;
+        _nativeCheck = QueryCheckPowerMode;
+        _satCheck = QuerySatCheckPowerMode;
+        _time = TimeProvider.System;
     }
 
     /// <summary>Test seam: the decision logic over scripted drive facts and power-mode answers.</summary>
     internal DiskPowerProbe(Func<IReadOnlyList<DriveFacts>> enumerateDrives, Func<int, bool?> isSpunDown, ILogger? log = null)
+        : this(enumerateDrives, isSpunDown, _ => null, TimeProvider.System, log)
+    {
+    }
+
+    /// <summary>Test seam: as above, with the answers of the native and of the SAT route scripted apart.</summary>
+    internal DiskPowerProbe(Func<IReadOnlyList<DriveFacts>> enumerateDrives, Func<int, bool?> nativeCheck, Func<int, bool?> satCheck, TimeProvider time, ILogger? log = null)
     {
         _log = log ?? NullLogger.Instance;
         _errors = new Win32ErrorLog(_log);
         _enumerateDrives = enumerateDrives;
         _describe = n => enumerateDrives().FirstOrDefault(d => d.DriveNumber == n);
-        _isSpunDown = isSpunDown;
+        _nativeCheck = nativeCheck;
+        _satCheck = satCheck;
+        _time = time;
+    }
+
+    private enum PowerRoute
+    {
+        /// <summary>Neither route gave an answer that could be interpreted.</summary>
+        None,
+        Native,
+        Sat,
     }
 
     /// <inheritdoc />
-    public bool? IsSpunDown(int driveNumber) => driveNumber < 0 ? null : _isSpunDown(driveNumber);
+    public bool? IsSpunDown(int driveNumber, string? model, string? serial)
+    {
+        if (driveNumber < 0)
+        {
+            return null;
+        }
+
+        long now = _time.GetTimestamp();
+        RouteMemory? known;
+        lock (_routeLock)
+        {
+            if (_routes.TryGetValue(driveNumber, out known) && (known.Model != model || known.Serial != serial))
+            {
+                _routes.Remove(driveNumber); // another disk took this drive number
+                known = null;
+            }
+        }
+
+        if (known is { Route: PowerRoute.None } && _time.GetElapsedTime(known.Since, now) < DeadRouteRetry)
+        {
+            return null; // unknown between the retries: no earlier answer is ever reused
+        }
+
+        // The remembered route first; the other one whenever it gives no answer.
+        PowerRoute route = known?.Route == PowerRoute.Sat ? PowerRoute.Sat : PowerRoute.Native;
+        bool? spunDown = Ask(route, driveNumber);
+        if (spunDown is null)
+        {
+            route = route == PowerRoute.Sat ? PowerRoute.Native : PowerRoute.Sat;
+            spunDown = Ask(route, driveNumber);
+        }
+
+        if (spunDown is null)
+        {
+            route = PowerRoute.None;
+        }
+
+        // The route only, never the answer; a failed retry of "none" restarts its five minutes.
+        // Without a model and a serial the next disk at this number could not be told apart, so
+        // nothing is remembered and both routes are asked every time.
+        bool identified = !string.IsNullOrEmpty(model) && !string.IsNullOrEmpty(serial);
+        if (identified && (known?.Route != route || route == PowerRoute.None))
+        {
+            if (known?.Route != route)
+            {
+                _log.LogDebug("PhysicalDrive{Drive}: CHECK POWER MODE route is now {Route}", driveNumber, route);
+            }
+
+            lock (_routeLock)
+            {
+                _routes[driveNumber] = new RouteMemory(route, model, serial, now);
+            }
+        }
+
+        return spunDown;
+    }
 
     /// <inheritdoc />
     public DriveFacts? Describe(int driveNumber) => driveNumber < 0 ? null : _describe(driveNumber);
 
     /// <inheritdoc />
-    public IReadOnlyList<DriveBlocker> GateBlockers()
+    public IReadOnlyList<DriveFacts> Enumerate()
     {
-        IReadOnlyList<DriveBlocker> blockers = FindGateBlockers(_enumerateDrives(), IsSpunDown);
-        LogBlockersOnChange(blockers);
-        return blockers;
-    }
-
-    /// <summary>Whether the D6 gate is open: <see cref="GateBlockers"/> is empty.</summary>
-    public bool AllRotationalDisksActive() => GateBlockers().Count == 0;
-
-    /// <summary>
-    /// Controller ruling R17: the drives that keep the D6 gate closed. A drive whose
-    /// <see cref="DriveFacts.RequiresPowerCheck"/> is false is skipped without being asked; every
-    /// other drive blocks unless <paramref name="isSpunDown"/> answers <see langword="false"/>.
-    /// </summary>
-    internal static IReadOnlyList<DriveBlocker> FindGateBlockers(IEnumerable<DriveFacts> drives, Func<int, bool?> isSpunDown)
-    {
-        var blockers = new List<DriveBlocker>();
-        foreach (DriveFacts drive in drives)
-        {
-            if (!drive.RequiresPowerCheck)
-            {
-                continue;
-            }
-
-            bool? spunDown = isSpunDown(drive.DriveNumber);
-            if (spunDown != false)
-            {
-                blockers.Add(new DriveBlocker(drive, spunDown));
-            }
-        }
-
-        return blockers;
+        IReadOnlyList<DriveFacts> drives = _enumerateDrives();
+        ReconcileRoutes(drives);
+        return drives;
     }
 
     /// <summary>
@@ -123,41 +178,84 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
     internal static bool? InterpretAtaResult(byte status, byte sectorCount) =>
         (status & AtaStatusError) != 0 ? null : InterpretCheckPowerMode(sectorCount);
 
+    /// <summary>
+    /// The answer of <c>ATA PASS-THROUGH(16)</c> CHECK POWER MODE: the registers come from the
+    /// sense data whatever the SCSI status is (a SATA disk answers GOOD, a USB bridge CHECK
+    /// CONDITION). Only the sense bytes within the <paramref name="returned"/> bytes of the reply
+    /// and within the length the reply itself declares are read; a reply declaring no length (a
+    /// driver may leave it at zero on a GOOD status) is bounded by the returned bytes alone, and
+    /// the parser still follows the length the sense data states. <see langword="null"/> when
+    /// they hold no registers, or when the reply places its sense data anywhere but in our buffer.
+    /// </summary>
+    internal static bool? InterpretSatReply(in NativeMethods.ScsiPassThroughWithSense reply, uint returned)
+    {
+        uint senseOffset = (uint)Marshal.SizeOf<NativeMethods.ScsiPassThrough>();
+        if (reply.Spt.SenseInfoOffset != senseOffset || returned <= senseOffset || reply.Sense is not { Length: SenseLength } sense)
+        {
+            return null;
+        }
+
+        uint declared = reply.Spt.SenseInfoLength == 0 ? (uint)SenseLength : reply.Spt.SenseInfoLength;
+        int available = (int)Math.Min(Math.Min(returned - senseOffset, declared), SenseLength);
+        return SatSense.TryReadRegisters(sense.AsSpan(0, available), out byte status, out byte sectorCount)
+            ? InterpretAtaResult(status, sectorCount)
+            : null;
+    }
+
+    /// <summary>
+    /// CHECK POWER MODE as <c>ATA PASS-THROUGH(16)</c>: protocol non-data (3 &lt;&lt; 1), CK_COND
+    /// set so the registers come back in the sense data, no data transfer. The 12-byte form is
+    /// rejected by SATA disks, so it is not used.
+    /// </summary>
+    internal static NativeMethods.ScsiPassThroughWithSense SatCheckPowerModeRequest()
+    {
+        byte[] cdb = new byte[16];
+        cdb[0] = 0x85; // ATA PASS-THROUGH(16)
+        cdb[1] = 0x06; // protocol: non-data
+        cdb[2] = 0x20; // CK_COND
+        cdb[14] = AtaCheckPowerMode;
+        return new NativeMethods.ScsiPassThroughWithSense
+        {
+            Spt = new NativeMethods.ScsiPassThrough
+            {
+                Length = (ushort)Marshal.SizeOf<NativeMethods.ScsiPassThrough>(),
+                CdbLength = (byte)cdb.Length,
+                SenseInfoLength = SenseLength,
+                DataIn = NativeMethods.ScsiIoctlDataUnspecified,
+                TimeOutValue = AtaTimeoutSeconds,
+                SenseInfoOffset = (uint)Marshal.SizeOf<NativeMethods.ScsiPassThrough>(),
+                Cdb = cdb,
+            },
+            Sense = new byte[SenseLength],
+        };
+    }
+
     /// <summary><c>DEVICE_SEEK_PENALTY_DESCRIPTOR.IncursSeekPenalty</c> (offset 8), or <see langword="null"/> when the reply is too short.</summary>
     internal static bool? ParseSeekPenalty(ReadOnlySpan<byte> descriptor) =>
         descriptor.Length > 8 ? descriptor[8] != 0 : null;
 
     private static bool IsNoMedia(int error) => error is NativeMethods.ErrorNotReady or NativeMethods.ErrorNoMediaInDrive;
 
-    private static string DrivePath(int drive) => @"\\.\PhysicalDrive" + drive.ToString(CultureInfo.InvariantCulture);
+    internal static string DrivePath(int drive) => @"\\.\PhysicalDrive" + drive.ToString(CultureInfo.InvariantCulture);
 
-    private void LogBlockersOnChange(IReadOnlyList<DriveBlocker> blockers)
+    private bool? Ask(PowerRoute route, int drive) => route == PowerRoute.Sat ? _satCheck(drive) : _nativeCheck(drive);
+
+    /// <summary>
+    /// Forgets the route of every drive that is gone or that changed model or serial: a drive
+    /// number is reused by whatever is plugged in next.
+    /// </summary>
+    private void ReconcileRoutes(IReadOnlyList<DriveFacts> drives)
     {
-        string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{b.SpunDown}"));
-        lock (_gateLogLock)
+        lock (_routeLock)
         {
-            if (key == _lastBlockers)
+            foreach ((int number, RouteMemory known) in _routes.ToArray())
             {
-                return;
+                DriveFacts? facts = drives.FirstOrDefault(d => d.DriveNumber == number);
+                if (facts is null || facts.Model != known.Model || facts.Serial != known.Serial)
+                {
+                    _routes.Remove(number);
+                }
             }
-
-            _lastBlockers = key;
-        }
-
-        if (blockers.Count == 0)
-        {
-            _log.LogInformation("No drive keeps storage disabled any more");
-            return;
-        }
-
-        foreach (DriveBlocker blocker in blockers)
-        {
-            _log.LogInformation(
-                "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
-                blocker.Drive.DriveNumber,
-                blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
-                blocker.Drive.Model ?? "unknown",
-                blocker.SpunDown == true ? "in standby" : "power state unknown");
         }
     }
 
@@ -265,11 +363,13 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         return ParseSeekPenalty(bytes[..(int)Math.Min(returned, (uint)bytes.Length)]);
     }
 
-    private bool? QueryCheckPowerMode(int drive)
+    /// <summary>The drive opened for a pass-through IOCTL; invalid (and logged) when the open fails.</summary>
+    private SafeFileHandle OpenForPassThrough(int drive)
     {
-        // SAFETY: read/write access is what IOCTL_ATA_PASS_THROUGH requires; opening the handle
-        // issues no media I/O, and CHECK POWER MODE is answered without spinning up.
-        using SafeFileHandle handle = NativeMethods.CreateFileW(
+        // SAFETY: read/write access is what IOCTL_ATA_PASS_THROUGH and IOCTL_SCSI_PASS_THROUGH
+        // require (both are FILE_READ_ACCESS | FILE_WRITE_ACCESS); opening the handle issues no
+        // media I/O, and CHECK POWER MODE is answered without spinning up.
+        SafeFileHandle handle = NativeMethods.CreateFileW(
             DrivePath(drive),
             NativeMethods.GenericRead | NativeMethods.GenericWrite,
             NativeMethods.FileShareReadWrite,
@@ -280,10 +380,23 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         if (handle.IsInvalid)
         {
             _errors.Failed(drive, OpenReadWrite, Marshal.GetLastPInvokeError());
+        }
+        else
+        {
+            _errors.Succeeded(drive, OpenReadWrite);
+        }
+
+        return handle;
+    }
+
+    private bool? QueryCheckPowerMode(int drive)
+    {
+        using SafeFileHandle handle = OpenForPassThrough(drive);
+        if (handle.IsInvalid)
+        {
             return null;
         }
 
-        _errors.Succeeded(drive, OpenReadWrite);
         var request = new NativeMethods.AtaPassThroughEx
         {
             Length = (ushort)Marshal.SizeOf<NativeMethods.AtaPassThroughEx>(),
@@ -327,6 +440,48 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
 
         return spunDown;
     }
+
+    private bool? QuerySatCheckPowerMode(int drive)
+    {
+        using SafeFileHandle handle = OpenForPassThrough(drive);
+        if (handle.IsInvalid)
+        {
+            return null;
+        }
+
+        NativeMethods.ScsiPassThroughWithSense request = SatCheckPowerModeRequest();
+        uint size = (uint)Marshal.SizeOf<NativeMethods.ScsiPassThroughWithSense>();
+
+        // SAFETY: `handle` is valid; the request is marshalled in and the reply out as separate
+        // native copies of SCSI_PASS_THROUGH followed by its sense buffer (56 + 32 bytes on x64,
+        // asserted in DiskPowerProbeTests); no data buffer (DataTransferLength 0).
+        bool ok = NativeMethods.DeviceIoControl(
+            handle,
+            NativeMethods.IoctlScsiPassThrough,
+            in request,
+            size,
+            out NativeMethods.ScsiPassThroughWithSense reply,
+            size,
+            out uint returned,
+            IntPtr.Zero);
+        if (!ok)
+        {
+            _errors.Failed(drive, SatCheckPowerMode, Marshal.GetLastPInvokeError());
+            return null;
+        }
+
+        _errors.Succeeded(drive, SatCheckPowerMode);
+        bool? spunDown = InterpretSatReply(reply, returned);
+        if (spunDown is null)
+        {
+            _log.LogDebug("PhysicalDrive{Drive}: CHECK POWER MODE through SAT answered SCSI status 0x{Status:X2} in {Returned} bytes (unknown)", drive, reply.Spt.ScsiStatus, returned);
+        }
+
+        return spunDown;
+    }
+
+    /// <summary>The route that last answered for a drive, with the identity it was learnt for and when (monotonic).</summary>
+    private sealed record RouteMemory(PowerRoute Route, string? Model, string? Serial, long Since);
 
     /// <summary>
     /// Logs a Win32 failure once per (drive, operation) until its error code changes; any success
@@ -382,6 +537,12 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
         /// <c>CTL_CODE(IOCTL_SCSI_BASE, 0x040b, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)</c> (ntddscsi.h).
         internal const uint IoctlAtaPassThrough = 0x0004D02C;
 
+        /// <c>CTL_CODE(IOCTL_SCSI_BASE, 0x0401, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)</c> (ntddscsi.h).
+        internal const uint IoctlScsiPassThrough = 0x0004D004;
+
+        /// <c>SCSI_IOCTL_DATA_UNSPECIFIED</c> (ntddscsi.h): the command transfers no data.
+        internal const byte ScsiIoctlDataUnspecified = 2;
+
         /// <c>STORAGE_PROPERTY_ID.StorageDeviceSeekPenaltyProperty</c>.
         internal const int StorageDeviceSeekPenaltyProperty = 7;
 
@@ -411,6 +572,37 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
 
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
             public byte[] CurrentTaskFile;
+        }
+
+        /// <summary><c>SCSI_PASS_THROUGH</c> (ntddscsi.h): 56 bytes on x64.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct ScsiPassThrough
+        {
+            public ushort Length;
+            public byte ScsiStatus;
+            public byte PathId;
+            public byte TargetId;
+            public byte Lun;
+            public byte CdbLength;
+            public byte SenseInfoLength;
+            public byte DataIn;
+            public uint DataTransferLength;
+            public uint TimeOutValue;
+            public nuint DataBufferOffset;
+            public uint SenseInfoOffset;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+            public byte[] Cdb;
+        }
+
+        /// <summary><see cref="ScsiPassThrough"/> followed by the sense buffer its <c>SenseInfoOffset</c> points at.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct ScsiPassThroughWithSense
+        {
+            public ScsiPassThrough Spt;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = SenseLength)]
+            public byte[] Sense;
         }
 
         /// <summary><c>STORAGE_PROPERTY_QUERY</c> (winioctl.h): 12 bytes.</summary>
@@ -464,5 +656,168 @@ public sealed class DiskPowerProbe : IDiskPowerProbe
             uint nOutBufferSize,
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DeviceIoControl(
+            SafeFileHandle hDevice,
+            uint dwIoControlCode,
+            in ScsiPassThroughWithSense lpInBuffer,
+            uint nInBufferSize,
+            out ScsiPassThroughWithSense lpOutBuffer,
+            uint nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
     }
+}
+
+/// <summary>
+/// The D6 gate (controller ruling R17, design M6b §4.4) from its first round until LHM's storage
+/// group is enabled: the storage worker's memory of what each drive answered, so that a closed
+/// gate does not ask every drive at every round (each question resets Windows' idle timer of
+/// that disk, and powers up a disk Windows turned off).
+/// <list type="number">
+/// <item>The first time it meets a drive whose <see cref="DriveFacts.RequiresPowerCheck"/> holds
+/// it asks it once, unless Windows reports it off: that drive is in standby and blocks, with no
+/// command.</item>
+/// <item>Afterwards only a drive that blocks is asked again, and only after recent activity on
+/// it (its counters grew, or Windows turned it on again); one whose counters cannot be read, at most every <see cref="BlindRetry"/>. An "active"
+/// answer is kept as it is.</item>
+/// <item>When no drive blocks any more, every drive not asked in this very round is asked once
+/// more, so that the gate opens on answers of one round; a standby found then keeps it closed.
+/// After a failed attempt to enable the group (<see cref="EnableFailed"/>) that check, and the
+/// next attempt, wait <see cref="BlindRetry"/>: the answers are kept meanwhile.</item>
+/// </list>
+/// The gate may be opened after a round when <see cref="Opens"/>.
+/// </summary>
+internal sealed class GateEpisode(TimeProvider time, ILogger log)
+{
+    /// <summary>How long a blocker whose counters cannot be read is left alone, and how long a failed enable is not tried again.</summary>
+    internal static readonly TimeSpan BlindRetry = TimeSpan.FromMinutes(5);
+
+    private readonly Dictionary<int, Known> _known = [];
+    private string? _lastBlockers;
+    private long? _enableFailedAt;
+
+    /// <summary>Whether the last round allows enabling the storage group: no drive blocks, on answers of that very round.</summary>
+    internal bool Opens { get; private set; }
+
+    /// <summary>Enabling the storage group failed after a round that <see cref="Opens"/>.</summary>
+    internal void EnableFailed() => _enableFailedAt = time.GetTimestamp();
+
+    /// <summary>
+    /// One gate round over a fresh enumeration: one <see cref="DriveCheck"/> per drive, in the
+    /// order of <paramref name="drives"/>. <paramref name="activity"/> is what the passive
+    /// sources say about each drive that needs a power check.
+    /// </summary>
+    internal IReadOnlyList<DriveCheck> Round(
+        IReadOnlyList<DriveFacts> drives,
+        IReadOnlyDictionary<int, DriveActivity> activity,
+        Func<DriveFacts, bool?> isSpunDown)
+    {
+        long now = time.GetTimestamp();
+        var checks = new DriveCheck[drives.Count];
+        var askedAt = new long?[drives.Count];
+        var askedNow = new bool[drives.Count];
+        for (int i = 0; i < drives.Count; i++)
+        {
+            DriveFacts drive = drives[i];
+            checks[i] = new DriveCheck(drive, Asked: false, SpunDown: null);
+            if (!drive.RequiresPowerCheck)
+            {
+                continue;
+            }
+
+            // Only for the disk it was learnt from: a drive number is reused by whatever is plugged in next.
+            Known? known = _known.TryGetValue(drive.DriveNumber, out Known? met) && met.Check.Drive.Model == drive.Model && met.Check.Drive.Serial == drive.Serial ? met : null;
+            askedAt[i] = known?.AskedAt;
+            activity.TryGetValue(drive.DriveNumber, out DriveActivity seen);
+            if (seen.PoweredOff)
+            {
+                checks[i] = checks[i] with { PoweredOff = true };
+            }
+            else if (known is null || (known.Check.Blocks && IsDue(seen, known.AskedAt, now)))
+            {
+                Ask(i);
+            }
+            else if (known.Check.Asked)
+            {
+                checks[i] = known.Check with { Drive = drive };
+            }
+            else
+            {
+                checks[i] = checks[i] with { Idle = true }; // on, never asked, and nothing shows that it works
+            }
+        }
+
+        bool waits = _enableFailedAt is long failedAt && time.GetElapsedTime(failedAt, now) < BlindRetry;
+        if (!waits && !checks.Any(c => c.Blocks))
+        {
+            for (int i = 0; i < drives.Count; i++)
+            {
+                if (drives[i].RequiresPowerCheck && !askedNow[i])
+                {
+                    Ask(i);
+                }
+            }
+        }
+
+        _known.Clear();
+        for (int i = 0; i < drives.Count; i++)
+        {
+            if (drives[i].RequiresPowerCheck)
+            {
+                _known[drives[i].DriveNumber] = new Known(checks[i], askedAt[i]);
+            }
+        }
+
+        Opens = !waits && !checks.Any(c => c.Blocks);
+        LogBlockersOnChange([.. checks.Where(c => c.Blocks)]);
+        return checks;
+
+        void Ask(int i)
+        {
+            checks[i] = new DriveCheck(drives[i], Asked: true, isSpunDown(drives[i]));
+            askedAt[i] = now;
+            askedNow[i] = true;
+        }
+    }
+
+    private bool IsDue(DriveActivity seen, long? askedAt, long now) =>
+        seen.Recent || (!seen.Readable && (askedAt is not long at || time.GetElapsedTime(at, now) >= BlindRetry));
+
+    private void LogBlockersOnChange(IReadOnlyList<DriveCheck> blockers)
+    {
+        string key = string.Join(';', blockers.Select(b => $"{b.Drive.DriveNumber}:{State(b)}"));
+        if (key == _lastBlockers)
+        {
+            return;
+        }
+
+        _lastBlockers = key;
+        if (blockers.Count == 0)
+        {
+            log.LogInformation("No drive keeps storage disabled any more");
+            return;
+        }
+
+        foreach (DriveCheck blocker in blockers)
+        {
+            log.LogInformation(
+                "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
+                blocker.Drive.DriveNumber,
+                blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
+                blocker.Drive.Model ?? "unknown",
+                State(blocker));
+        }
+
+        static string State(DriveCheck blocker) =>
+            blocker.PoweredOff ? "turned off by Windows"
+            : blocker.Idle ? "not asked, no recent activity"
+            : blocker.SpunDown == true ? "in standby"
+            : "power state unknown";
+    }
+
+    /// <summary>What a drive last answered, and when (monotonic) it was last asked; <see langword="null"/> if never.</summary>
+    private sealed record Known(DriveCheck Check, long? AskedAt);
 }

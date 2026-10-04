@@ -32,7 +32,7 @@ public sealed class EffectiveConfigTests
     {
         EffectiveConfig? config = EffectiveConfig.Compute([Requests.Of(1000)]);
 
-        Assert.Equal(new EffectiveConfig(ServiceModules.All, new HashSet<string>()), config);
+        Assert.Equal(new EffectiveConfig(ServiceModules.All, new HashSet<string>(), new HashSet<string>()), config);
     }
 
     [Fact]
@@ -69,14 +69,80 @@ public sealed class EffectiveConfigTests
     }
 
     [Fact]
-    public void NoSubscribersKeepsTheLastConfiguration() =>
+    public void ADefaultOffDriveIsEnabledIfAnyStorageSubscriberEnablesIt()
+    {
+        EffectiveConfig? config = EffectiveConfig.Compute(
+        [
+            Requests.Of(1000).WithSmartOn(DriveA),
+            Requests.Of(1000),
+            Requests.Of(1000, ServiceModules.Cpu).WithSmartOn(DriveB),
+        ]);
+
+        Assert.NotNull(config);
+        Assert.Equal([DriveB, DriveA], config.SmartEnabledDrives.Order(StringComparer.Ordinal));
+        Assert.Empty(config.SmartDisabledDrives);
+        Assert.Empty(EffectiveConfig.Compute([Requests.Of(1000)])!.SmartEnabledDrives);
+    }
+
+    [Fact]
+    public void EnabledDrivesOfASubscriberWithStorageOffAreIgnored()
+    {
+        EffectiveConfig? config = EffectiveConfig.Compute(
+        [
+            Requests.Of(1000, ServiceModules.Storage).WithSmartOn(DriveA),
+            Requests.Of(1000).WithSmartOn(DriveB),
+        ]);
+        Assert.NotNull(config);
+        Assert.Equal([DriveB], config.SmartEnabledDrives);
+
+        // With storage off everywhere no drive is listed at all.
+        EffectiveConfig? off = EffectiveConfig.Compute([Requests.Of(1000, ServiceModules.Storage).WithSmartOn(DriveA)]);
+        Assert.NotNull(off);
+        Assert.Empty(off.SmartEnabledDrives);
+    }
+
+    [Fact]
+    public void EnabledSetsParticipateInEqualityAndStoragePart()
+    {
+        HashSet<string> none = [];
+        var a = new EffectiveConfig(ServiceModules.All, none, new HashSet<string>(StringComparer.Ordinal) { DriveA, DriveB });
+        var b = new EffectiveConfig(ServiceModules.All, none, new HashSet<string>(StringComparer.Ordinal) { DriveB, DriveA });
+
+        Assert.Equal(a, b);
+        Assert.Equal(a.GetHashCode(), b.GetHashCode());
+        Assert.NotEqual(a, b with { SmartEnabledDrives = none });
+        Assert.NotEqual(a, b with { SmartEnabledDrives = new HashSet<string> { DriveA } });
+        Assert.NotEqual(a.GetHashCode(), (b with { SmartEnabledDrives = none }).GetHashCode());
+
+        // The same key enabled is not the same key disabled.
+        var disabled = new EffectiveConfig(ServiceModules.All, new HashSet<string> { DriveA }, none);
+        var enabled = new EffectiveConfig(ServiceModules.All, none, new HashSet<string> { DriveA });
+        Assert.NotEqual(disabled, enabled);
+        Assert.NotEqual(disabled.GetHashCode(), enabled.GetHashCode());
+
+        // The storage worker's part carries both sets, so a newly enabled drive is a new part.
+        Assert.Equal(new EffectiveConfig(ServiceModules.Storage, none, new HashSet<string> { DriveA, DriveB }), a.StoragePart);
+        Assert.NotEqual(a.StoragePart, (a with { SmartEnabledDrives = none }).StoragePart);
+        Assert.Empty(EffectiveConfig.AllOn.SmartEnabledDrives); // a USB disk stays off before any request
+    }
+
+    [Fact]
+    public void NoSubscribersKeepThePreviousConfiguration()
+    {
+        EffectiveConfig? previous = EffectiveConfig.Compute([Requests.Of(1000, ServiceModules.None, DriveB).WithSmartOn(DriveA)]);
+        Assert.NotNull(previous);
+        Assert.Equal([DriveA], previous.SmartEnabledDrives);
+
+        // Nothing replaces it: the caller keeps the previous one, enabled drives included.
         Assert.Null(EffectiveConfig.Compute([]));
+    }
 
     [Fact]
     public void ConfigurationsCompareByContent()
     {
-        var a = new EffectiveConfig(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal) { DriveA, DriveB });
-        var b = new EffectiveConfig(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal) { DriveB, DriveA });
+        HashSet<string> none = [];
+        var a = new EffectiveConfig(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal) { DriveA, DriveB }, none);
+        var b = new EffectiveConfig(ServiceModules.All, new HashSet<string>(StringComparer.Ordinal) { DriveB, DriveA }, none);
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
@@ -87,13 +153,14 @@ public sealed class EffectiveConfigTests
     [Fact]
     public void ASubscribeBecomesARequest()
     {
-        var subscribe = new SubscribeMessage(60000, ["memory", "psu"], [DriveA]);
+        var subscribe = new SubscribeMessage(60000, ["memory", "psu"], [DriveA], [DriveB]);
 
         FeedRequest request = FeedRequest.From(subscribe, intervalMs: 5000);
 
         Assert.Equal(5000u, request.IntervalMs);
         Assert.Equal(ServiceModules.Memory | ServiceModules.Psu, request.Disabled);
         Assert.Equal([DriveA], request.SmartDisabledDrives);
+        Assert.Equal([DriveB], request.SmartEnabledDrives);
     }
 
     [Fact]

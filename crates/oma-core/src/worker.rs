@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Instant;
 
 use crate::engine::backoff_ms;
-use crate::provider::{Inventory, Provider, ProviderError};
+use crate::provider::{Inventory, Provider, ProviderError, Quality};
 
 /// Consecutive `Rediscover` results retried on the very next tick; from the
 /// next one on, the retry waits `backoff_ms(n - FREE_REDISCOVERS)`, so a
@@ -14,8 +14,8 @@ const FREE_REDISCOVERS: u32 = 3;
 pub(crate) struct Sample {
     pub inventory: Inventory,
     pub values: Vec<Option<f64>>,
-    /// The provider reported that this poll carried no new measurement.
-    pub repeated: bool,
+    /// One entry per value: whether it is a new measurement.
+    pub quality: Vec<Quality>,
 }
 
 pub(crate) struct Worker {
@@ -38,7 +38,7 @@ impl Worker {
                 let mut retry_at = 0u64;
                 while let Ok(now) = requests.recv() {
                     let mut values = vec![None; inventory.sensors.len()];
-                    let mut repeated = false;
+                    let mut quality = vec![Quality::Fresh; values.len()];
                     if now >= retry_at {
                         // A Rust panic is isolated; native DLL access violations are not catchable.
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -50,13 +50,24 @@ impl Worker {
                             if polled.len() != inventory.sensors.len() {
                                 return Err(ProviderError::Failed("poll value count mismatch".into()));
                             }
-                            Ok((polled, provider.repeated()))
+                            let quality = provider
+                                .quality()
+                                .filter(|q| q.len() == polled.len())
+                                .unwrap_or_else(|| {
+                                    let base = if provider.repeated() {
+                                        Quality::Held
+                                    } else {
+                                        Quality::Fresh
+                                    };
+                                    vec![base; polled.len()]
+                                });
+                            Ok((polled, quality))
                         }))
                         .unwrap_or_else(|_| Err(ProviderError::Failed("provider panicked".into())));
                         match result {
-                            Ok((polled, was_repeated)) => {
+                            Ok((polled, polled_quality)) => {
                                 values = polled;
-                                repeated = was_repeated;
+                                quality = polled_quality;
                                 // Only a successful poll ends a failure or rediscovery streak.
                                 failures = 0;
                                 rediscovers = 0;
@@ -64,6 +75,7 @@ impl Worker {
                             Err(ProviderError::Rediscover) => {
                                 discover = true;
                                 values = vec![None; inventory.sensors.len()];
+                                quality = vec![Quality::Fresh; values.len()];
                                 rediscovers = rediscovers.saturating_add(1);
                                 if rediscovers > FREE_REDISCOVERS {
                                     let extra = rediscovers - FREE_REDISCOVERS;
@@ -80,6 +92,7 @@ impl Worker {
                                 retry_at = now.saturating_add(backoff_ms(failures));
                                 discover = true;
                                 values = vec![None; inventory.sensors.len()];
+                                quality = vec![Quality::Fresh; values.len()];
                                 tracing::warn!(provider = provider.name(), %err, failures, "provider degraded");
                             }
                         }
@@ -88,7 +101,7 @@ impl Worker {
                         .send(Sample {
                             inventory: inventory.clone(),
                             values,
-                            repeated,
+                            quality,
                         })
                         .is_err()
                     {

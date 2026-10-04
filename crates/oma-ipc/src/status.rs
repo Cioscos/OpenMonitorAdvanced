@@ -74,6 +74,54 @@ impl PawnIoStatus {
     }
 }
 
+/// The availability of a drive's SMART path as the service reports it. It is not the freshness
+/// of a temperature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DriveState {
+    /// The drive answers as awake, or does not need a power check.
+    Active,
+    /// `CHECK POWER MODE` answers standby.
+    Standby,
+    /// The drive needs a power check, Windows reports it on and it has no recent activity: the
+    /// service sends it nothing. It may hide a standby the drive decided on its own.
+    Idle,
+    /// The drive needs a power check and no path answers.
+    Unknown,
+    /// The service does not query this drive.
+    SmartOff,
+    /// The driver reports no medium.
+    NoMedia,
+}
+
+impl DriveState {
+    /// The state named by `WireDrive::state`; an unrecognised value (a newer service, a corrupt
+    /// value) reads as [`DriveState::Unknown`].
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "active" => Self::Active,
+            "standby" => Self::Standby,
+            "idle" => Self::Idle,
+            "smartOff" => Self::SmartOff,
+            "noMedia" => Self::NoMedia,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// A physical drive of the service, with the core device id of the disk it was matched to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDrive {
+    pub physical_drive: u32,
+    /// Core id of the disk this drive was matched to, `None` when it could not be identified.
+    pub device_id: Option<String>,
+    pub model: Option<String>,
+    pub state: DriveState,
+    /// Whether this drive keeps the SMART gate closed for all drives.
+    pub blocks_smart: bool,
+}
+
 /// Whether the service has taken the sources this client asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,15 +162,12 @@ pub struct ServiceSources {
     /// Core ids of the disks whose SMART is off.
     pub smart_disabled_drives: Vec<String>,
     pub reconfiguration: Reconfiguration,
-    /// Core ids of the disks that keep SMART closed for all disks. A disk
-    /// this app cannot identify shows as its raw key (never a core id), which
-    /// the UI reads as an unknown disk; the list can be empty while the gate
-    /// is closed when the blocking disk has no model or serial.
-    pub smart_blocked_by: Vec<String>,
+    /// Every physical drive the service enumerates, in `physical_drive` order.
+    pub drives: Vec<SourceDrive>,
 }
 
 /// What this app asks of the service and filters locally, by core ids: the
-/// modules the user turned off and the disks whose SMART is off. The Windows
+/// modules the user turned off, the disks whose SMART is off and the disks switched on. The Windows
 /// link translates it for the wire (disks become [`crate::drive_key`]s); the
 /// `svc` provider applies it to what the service sends, whether or not
 /// another client keeps those sources on.
@@ -132,6 +177,8 @@ pub struct SourceRequest {
     pub disabled_modules: Vec<String>,
     /// Core device ids of disks.
     pub smart_disabled_drives: Vec<String>,
+    /// Core device ids of the disks that are off by default and that the user wants on.
+    pub smart_enabled_drives: Vec<String>,
 }
 
 /// The service status shown by the shell: `detail`, `pawn_io` and `sources`
@@ -196,7 +243,13 @@ mod tests {
                 requested_disabled_modules: vec!["psu".to_owned()],
                 smart_disabled_drives: vec!["storage/device-a".to_owned()],
                 reconfiguration: Reconfiguration::Pending,
-                smart_blocked_by: vec!["storage/device-b".to_owned()],
+                drives: vec![SourceDrive {
+                    physical_drive: 1,
+                    device_id: None,
+                    model: Some("ST2000DM008-2UB102".to_owned()),
+                    state: DriveState::Standby,
+                    blocks_smart: true,
+                }],
             }),
         };
         let json = serde_json::to_value(&status).unwrap();
@@ -211,13 +264,48 @@ mod tests {
                     "requestedDisabledModules": ["psu"],
                     "smartDisabledDrives": ["storage/device-a"],
                     "reconfiguration": "pending",
-                    "smartBlockedBy": ["storage/device-b"],
+                    "drives": [{
+                        "physicalDrive": 1,
+                        "deviceId": null,
+                        "model": "ST2000DM008-2UB102",
+                        "state": "standby",
+                        "blocksSmart": true,
+                    }],
                 },
             })
         );
         assert_eq!(
             serde_json::from_value::<ServiceStatus>(json).unwrap(),
             status
+        );
+    }
+
+    #[test]
+    fn an_unknown_drive_state_reads_as_unknown() {
+        assert_eq!(DriveState::from_wire("spinning"), DriveState::Unknown);
+        for (wire, expected) in [
+            ("active", DriveState::Active),
+            ("standby", DriveState::Standby),
+            ("unknown", DriveState::Unknown),
+            ("smartOff", DriveState::SmartOff),
+            ("noMedia", DriveState::NoMedia),
+        ] {
+            assert_eq!(DriveState::from_wire(wire), expected, "{wire}");
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn an_idle_drive_state_round_trips() {
+        assert_eq!(DriveState::from_wire("idle"), DriveState::Idle);
+        let json = serde_json::to_value(DriveState::Idle).unwrap();
+        assert_eq!(json, serde_json::json!("idle"));
+        assert_eq!(
+            serde_json::from_value::<DriveState>(json).unwrap(),
+            DriveState::Idle
         );
     }
 

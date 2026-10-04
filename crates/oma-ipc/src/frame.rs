@@ -296,18 +296,34 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, IpcError> {
 /// Validates the raw bytes' structure (depth, element counts) before
 /// deserializing, rejects empty payloads and trailing bytes after the
 /// message, and replaces any non-finite `Snapshot` value with `None`
-/// defensively (values must never be NaN/infinite on the wire, but a
-/// malformed or hostile sender must not be able to smuggle one through).
+/// (and clears its `held` flag) defensively: values must never be NaN/infinite
+/// on the wire, but a malformed or hostile sender must not be able to smuggle
+/// one through. A snapshot whose `held` list differs in length from `values`,
+/// or flags an absent value as held, is a protocol error.
 pub fn decode_payload(bytes: &[u8]) -> Result<Message, IpcError> {
     validate_message(bytes)?;
     let mut msg: Message =
         rmp_serde::from_slice(bytes).map_err(|e| IpcError::Decode(e.to_string()))?;
     if let Message::Snapshot(snapshot) = &mut msg {
-        for value in snapshot.values.iter_mut() {
-            if let Some(v) = *value {
-                if !v.is_finite() {
-                    *value = None;
+        if snapshot.held.len() != snapshot.values.len() {
+            return Err(IpcError::Decode(format!(
+                "snapshot has {} values but {} held flags",
+                snapshot.values.len(),
+                snapshot.held.len()
+            )));
+        }
+        for (value, held) in snapshot.values.iter_mut().zip(snapshot.held.iter_mut()) {
+            match *value {
+                None if *held => {
+                    return Err(IpcError::Decode(
+                        "snapshot marks an absent value as held".to_owned(),
+                    ))
                 }
+                Some(v) if !v.is_finite() => {
+                    *value = None;
+                    *held = false;
+                }
+                _ => {}
             }
         }
     }
@@ -418,6 +434,7 @@ mod tests {
             interval_ms,
             disabled_modules: vec![],
             smart_disabled_drives: vec![],
+            smart_enabled_drives: vec![],
         })
     }
 
@@ -587,18 +604,20 @@ mod tests {
     #[test]
     fn extra_fields_are_ignored() {
         // {"type": "subscribe", "body": {"interval_ms": 500, "disabled_modules": [],
-        //  "smart_disabled_drives": [], "extra": 1}}
+        //  "smart_disabled_drives": [], "smart_enabled_drives": [], "extra": 1}}
         let mut bytes = vec![0x82];
         bytes.extend_from_slice(&encode_fixstr("type"));
         bytes.extend_from_slice(&encode_fixstr("subscribe"));
         bytes.extend_from_slice(&encode_fixstr("body"));
-        bytes.push(0x84); // body fixmap, 4 entries
+        bytes.push(0x85); // body fixmap, 5 entries
         bytes.extend_from_slice(&encode_fixstr("interval_ms"));
         bytes.push(0xcd); // uint16
         bytes.extend_from_slice(&500u16.to_be_bytes());
         bytes.extend_from_slice(&encode_fixstr("disabled_modules"));
         bytes.push(0x90); // []
         bytes.extend_from_slice(&encode_fixstr("smart_disabled_drives"));
+        bytes.push(0x90); // []
+        bytes.extend_from_slice(&encode_fixstr("smart_enabled_drives"));
         bytes.push(0x90); // []
         bytes.extend_from_slice(&encode_fixstr("extra"));
         bytes.push(0x01); // fixint 1
@@ -609,12 +628,13 @@ mod tests {
 
     #[test]
     fn non_finite_values_decode_as_missing() {
-        // {"type": "snapshot", "body": {"seq": 1, "timestamp_ms": 0, "values": [NaN, +inf]}}
+        // {"type": "snapshot", "body": {"seq": 1, "timestamp_ms": 0, "values": [NaN, +inf],
+        //  "held": [false, false]}}
         let mut bytes = vec![0x82];
         bytes.extend_from_slice(&encode_fixstr("type"));
         bytes.extend_from_slice(&encode_fixstr("snapshot"));
         bytes.extend_from_slice(&encode_fixstr("body"));
-        bytes.push(0x83); // body fixmap, 3 entries
+        bytes.push(0x84); // body fixmap, 4 entries
         bytes.extend_from_slice(&encode_fixstr("seq"));
         bytes.push(0x01);
         bytes.extend_from_slice(&encode_fixstr("timestamp_ms"));
@@ -625,6 +645,8 @@ mod tests {
         bytes.extend_from_slice(&f64::NAN.to_be_bytes());
         bytes.push(0xcb); // float64 +inf
         bytes.extend_from_slice(&f64::INFINITY.to_be_bytes());
+        bytes.extend_from_slice(&encode_fixstr("held"));
+        bytes.extend_from_slice(&[0x92, 0xc2, 0xc2]); // [false, false]
 
         let decoded = decode_payload(&bytes).unwrap();
         assert_eq!(
@@ -633,8 +655,58 @@ mod tests {
                 seq: 1,
                 timestamp_ms: 0,
                 values: vec![None, None],
+                held: vec![false, false],
             })
         );
+    }
+
+    fn snapshot_payload(values: Vec<Option<f64>>, held: Vec<bool>) -> Vec<u8> {
+        encode_payload(&Message::Snapshot(WireSnapshot {
+            seq: 1,
+            timestamp_ms: 0,
+            values,
+            held,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_snapshot_whose_held_length_differs_is_rejected() {
+        for (values, held) in [
+            (vec![Some(1.0), Some(2.0)], vec![false]),
+            (vec![Some(1.0)], vec![false, false]),
+            (vec![], vec![false]),
+            (vec![Some(1.0)], vec![]),
+        ] {
+            let err = decode_payload(&snapshot_payload(values, held)).unwrap_err();
+            assert!(matches!(err, IpcError::Decode(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn held_without_a_value_is_rejected() {
+        let err = decode_payload(&snapshot_payload(vec![Some(1.0), None], vec![false, true]))
+            .unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)), "{err:?}");
+
+        // A held flag on a present value is fine, and nil with false too.
+        let ok =
+            decode_payload(&snapshot_payload(vec![Some(1.0), None], vec![true, false])).unwrap();
+        assert!(matches!(ok, Message::Snapshot(s) if s.held == [true, false]));
+    }
+
+    #[test]
+    fn a_non_finite_value_loses_its_held_flag() {
+        let decoded = decode_payload(&snapshot_payload(
+            vec![Some(f64::NAN), Some(2.0), Some(f64::INFINITY)],
+            vec![true, true, true],
+        ))
+        .unwrap();
+        let Message::Snapshot(snapshot) = decoded else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.values, vec![None, Some(2.0), None]);
+        assert_eq!(snapshot.held, vec![false, true, false]);
     }
 
     #[test]
@@ -883,7 +955,7 @@ mod tests {
         bytes.push(0x90); // []
         bytes.extend_from_slice(&encode_fixstr("reconfiguration"));
         bytes.extend_from_slice(&encode_fixstr("applied"));
-        bytes.extend_from_slice(&encode_fixstr("smart_blocked_by"));
+        bytes.extend_from_slice(&encode_fixstr("drives"));
         bytes.push(0x90); // []
 
         let decoded = decode_payload(&bytes).unwrap();
@@ -903,7 +975,7 @@ mod tests {
                     active_modules: vec![],
                     smart_disabled_drives: vec![],
                     reconfiguration: "applied".to_owned(),
-                    smart_blocked_by: vec![],
+                    drives: vec![],
                 },
             })
         );

@@ -45,19 +45,23 @@ an encoder.
 
 ## Logical content
 
-Protocol version 2 (M5a) added the fields marked *v2* below. Every one is always present
-on the wire; the .NET decoder requires them, like the Rust one.
+Protocol version 2 (M5a) added the fields marked *v2* below. Protocol version 3 (M6b) added
+`Subscribe.smart_enabled_drives`, replaced `service.smart_blocked_by` with the per-drive list
+`service.drives`, and added `held` to the snapshot (fields marked *v3*). Every one is always
+present on the wire; the .NET decoder requires them, like the Rust one.
 
-- **`hello.msgpack`**: `Hello { protocol_version: 2, service_version: "0.1.0", pawn_io: "rebootPending" }`.
+- **`hello.msgpack`**: `Hello { protocol_version: 3, service_version: "0.1.0", pawn_io: "rebootPending" }`.
   *v2*: `pawn_io` is `"ok"`, `"missing"`, `"unavailable"`, `"unknown"` or `"rebootPending"`.
   The Rust decoder alone defaults an absent `pawn_io` to `"unknown"`: a protocol v1 service's `Hello` must
   still decode, so the app reports `Incompatible` instead of retrying a failed decode forever.
-- **`subscribe.msgpack`**: `Subscribe { interval_ms: 1000, disabled_modules: ["memory", "psu"], smart_disabled_drives: [KEY_A, KEY_B] }`
+- **`subscribe.msgpack`**: `Subscribe { interval_ms: 1000, disabled_modules: ["memory", "psu"], smart_disabled_drives: [KEY_A], smart_enabled_drives: [KEY_B] }`
   with `KEY_A = 589488fb…4d83` (the key of `Samsung SSD 990 PRO 2TB` / `0025_38B1_4150_2A6C.`) and
   `KEY_B = 3ed905bd…4ea6` (`ST2000DM008-2UB102` / `WFL4ABCD`). *v2*: `disabled_modules` (names from
   `MODULES`: `cpu`, `motherboard`, `memory`, `storage`, `controller`, `psu`) and `smart_disabled_drives`
-  (at most 64 keys of 64 lowercase hexadecimal characters). The service answers `bad_request` to a
-  `Subscribe` with an unknown module, more than 64 keys or a malformed key.
+  (at most 64 keys of 64 lowercase hexadecimal characters). *v3*: `smart_enabled_drives` follows the
+  same rules and names the drives that are off by default and that the client wants on. The
+  service answers `bad_request` to a `Subscribe` with an unknown module, more than 64 keys in
+  either list, a malformed key, or a key in both lists.
 - **`schema.msgpack`**: `WireSchema` with 5 devices, in this order:
   1. `lhm-cpu`, kind `cpu`, name `AMD Ryzen 9 7950X3D`, vendor `AMD`,
      properties `{}`, hint `Cpu { index: 0 }`.
@@ -77,11 +81,21 @@ on the wire; the .NET decoder requires them, like the Rust one.
   2. `{device_id: "lhm-mb", kind: "fan", name: "lhm-fan-1", unit: "rpm", label_key: "lhm.raw", label_arg: Some("Ventola n.1 — °C"), category: "fan"}`.
   3. `{device_id: "lhm-nvme0", kind: "percent", name: "wear", unit: "percent", label_key: "storage.percentUsed", label_arg: None, category: "percent"}`.
 
-  And, *v2*, the `service` block
-  `{active_modules: ["cpu", "motherboard", "storage", "controller"], smart_disabled_drives: [KEY_A], reconfiguration: "pending", smart_blocked_by: [KEY_B]}`
-  (`reconfiguration` is `"applied"`, `"pending"` or `"failed"`).
-- **`snapshot.msgpack`**: `WireSnapshot { seq: 4294967301, timestamp_ms: 1790000000000, values: [Some(45.0), None, Some(-12.5), Some(0.0)] }`.
-- **`snapshot_empty.msgpack`**: `WireSnapshot { seq: 1, timestamp_ms: 0, values: [] }`.
+  And the `service` block
+  `{active_modules: ["cpu", "motherboard", "storage", "controller"], smart_disabled_drives: [KEY_A], reconfiguration: "pending", drives: [...]}`
+  (`reconfiguration` is `"applied"`, `"pending"` or `"failed"`). *v3*: `drives` replaces the v2
+  `smart_blocked_by`; each entry is `{physical_drive, key, model, state, blocks_smart}`, in
+  `physical_drive` order, with `key` and `model` possibly `nil` and `state` one of `"active"`,
+  `"idle"`, `"standby"`, `"unknown"`, `"smartOff"`, `"noMedia"` (a client treats any other value as
+  `"unknown"`). `"idle"` is a drive that needs a power check, that Windows reports on and that
+  showed no recent activity: the service sends it nothing. The fixture has two:
+  1. `{physical_drive: 0, key: Some(KEY_A), model: Some("Samsung SSD 990 PRO 2TB"), state: "smartOff", blocks_smart: false}`.
+  2. `{physical_drive: 1, key: None, model: Some("ST2000DM008-2UB102"), state: "standby", blocks_smart: true}`.
+- **`snapshot.msgpack`**: `WireSnapshot { seq: 4294967301, timestamp_ms: 1790000000000, values: [Some(45.0), None, Some(-12.5), Some(0.0)], held: [false, false, true, false] }`.
+  *v3*: `held` has the length and order of `values`; `true` means the value is kept from an earlier
+  measurement. A `held` of another length, or `true` for a `nil` value, is a protocol error; a
+  non-finite value becomes `nil` and loses its `held` flag.
+- **`snapshot_empty.msgpack`**: `WireSnapshot { seq: 1, timestamp_ms: 0, values: [], held: [] }`.
 - **`error.msgpack`**: `WireError { code: "bad_request", message: "Messaggio non valido: è atteso Subscribe" }`.
 
 ## Drive key vector (`drive_key.json`)
@@ -166,10 +180,10 @@ byte-for-byte and decode back to the reference messages.
 | File | Bytes |
 |---|---|
 | `hello.msgpack` | 80 |
-| `subscribe.msgpack` | 221 |
-| `schema.msgpack` | 1273 |
-| `snapshot.msgpack` | 92 |
-| `snapshot_empty.msgpack` | 48 |
+| `subscribe.msgpack` | 243 |
+| `schema.msgpack` | 1418 |
+| `snapshot.msgpack` | 102 |
+| `snapshot_empty.msgpack` | 54 |
 | `error.msgpack` | 86 |
 
 `hello.msgpack` starts with `82 a4 74 79 70 65` (a 2-entry fixmap, then the

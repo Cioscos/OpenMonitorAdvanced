@@ -2,7 +2,9 @@
 //! client ([`pipe`]), the service control wrapper over the SCM ([`scm`]), the
 //! link thread that drives both ([`link`]), and what it publishes: the
 //! service status ([`status`]) and the latest schema and snapshot ([`feed`]).
+//! `drives` holds the rules that tell a service disk and a core disk apart.
 
+pub(crate) mod drives;
 #[cfg(test)]
 mod fake_server;
 pub mod feed;

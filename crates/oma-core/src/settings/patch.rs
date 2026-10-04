@@ -93,6 +93,7 @@ const SCHEMA: &[(&str, Node)] = &[
                 ]),
             ),
             ("smartDisabledDrives", leaf()),
+            ("smartEnabledDrives", leaf()),
         ]),
     ),
     (

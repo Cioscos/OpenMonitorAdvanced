@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use oma_ipc::{
     decode_payload, drive_key, encode_payload, Hello, IdentityHint, Message, Subscribe, WireDevice,
-    WireError, WireSchema, WireSensor, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS, MODULES,
-    PROTOCOL_VERSION,
+    WireDrive, WireError, WireSchema, WireSensor, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS,
+    MODULES, PROTOCOL_VERSION,
 };
 
 /// `drive_key("Samsung SSD 990 PRO 2TB", "0025_38B1_4150_2A6C.")`, from `drive_key.json`.
@@ -36,14 +36,15 @@ fn fixtures_dir() -> PathBuf {
 fn reference(name: &str) -> Message {
     match name {
         "hello" => Message::Hello(Hello {
-            protocol_version: 2,
+            protocol_version: PROTOCOL_VERSION,
             service_version: "0.1.0".to_owned(),
             pawn_io: "rebootPending".to_owned(),
         }),
         "subscribe" => Message::Subscribe(Subscribe {
             interval_ms: 1000,
             disabled_modules: vec!["memory".to_owned(), "psu".to_owned()],
-            smart_disabled_drives: vec![KEY_A.to_owned(), KEY_B.to_owned()],
+            smart_disabled_drives: vec![KEY_A.to_owned()],
+            smart_enabled_drives: vec![KEY_B.to_owned()],
         }),
         "schema" => {
             let mut nvme_props = BTreeMap::new();
@@ -140,7 +141,22 @@ fn reference(name: &str) -> Message {
                     .to_vec(),
                 smart_disabled_drives: vec![KEY_A.to_owned()],
                 reconfiguration: "pending".to_owned(),
-                smart_blocked_by: vec![KEY_B.to_owned()],
+                drives: vec![
+                    WireDrive {
+                        physical_drive: 0,
+                        key: Some(KEY_A.to_owned()),
+                        model: Some("Samsung SSD 990 PRO 2TB".to_owned()),
+                        state: "smartOff".to_owned(),
+                        blocks_smart: false,
+                    },
+                    WireDrive {
+                        physical_drive: 1,
+                        key: None,
+                        model: Some("ST2000DM008-2UB102".to_owned()),
+                        state: "standby".to_owned(),
+                        blocks_smart: true,
+                    },
+                ],
             };
 
             Message::Schema(WireSchema {
@@ -153,11 +169,13 @@ fn reference(name: &str) -> Message {
             seq: 4_294_967_301,
             timestamp_ms: 1_790_000_000_000,
             values: vec![Some(45.0), None, Some(-12.5), Some(0.0)],
+            held: vec![false, false, true, false],
         }),
         "snapshot_empty" => Message::Snapshot(WireSnapshot {
             seq: 1,
             timestamp_ms: 0,
             values: vec![],
+            held: vec![],
         }),
         "error" => Message::Error(WireError {
             code: "bad_request".to_owned(),
@@ -232,11 +250,12 @@ fn drive_key_matches_the_shared_vector() {
 }
 
 #[test]
-fn subscribe_v2_keeps_every_key() {
+fn subscribe_v3_keeps_every_key() {
     let msg = Message::Subscribe(Subscribe {
         interval_ms: 1000,
         disabled_modules: vec![],
         smart_disabled_drives: vec![],
+        smart_enabled_drives: vec![],
     });
     let bytes = encode_payload(&msg).expect("encode");
     let value: serde_json::Value = rmp_serde::from_slice(&bytes).expect("decode as a value");
@@ -244,17 +263,23 @@ fn subscribe_v2_keeps_every_key() {
     let keys: Vec<&str> = body.keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["disabled_modules", "interval_ms", "smart_disabled_drives"],
+        [
+            "disabled_modules",
+            "interval_ms",
+            "smart_disabled_drives",
+            "smart_enabled_drives"
+        ],
         "keys are sorted by serde_json only; the point is that none is missing"
     );
     assert_eq!(body["disabled_modules"], serde_json::json!([]));
     assert_eq!(body["smart_disabled_drives"], serde_json::json!([]));
+    assert_eq!(body["smart_enabled_drives"], serde_json::json!([]));
     assert_eq!(decode_payload(&bytes).expect("round trip"), msg);
 }
 
 #[test]
-fn protocol_constants_are_v2() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn protocol_constants_are_v3() {
+    assert_eq!(PROTOCOL_VERSION, 3);
     assert_eq!(
         MODULES,
         [

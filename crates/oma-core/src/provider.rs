@@ -18,6 +18,22 @@ pub enum ProviderError {
     Failed(String),
 }
 
+/// Whether a value of a snapshot is a new measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// Measured by this tick, or declared valid by its source. An absent
+    /// value (`None`) is `Fresh` unless its source suspended it on purpose:
+    /// absence is not a held measurement.
+    Fresh,
+    /// The same measurement as before: the provider said so
+    /// (`Provider::repeated`, `Provider::quality`) or missed the deadline and
+    /// the engine republished its last values.
+    Held,
+    /// The source does not measure on purpose (e.g. a spun-down disk). It may
+    /// accompany an absent value.
+    Suspended,
+}
+
 /// A source of sensor readings (PDH, a vendor SDK, the privileged service...).
 pub trait Provider: Send {
     /// Short name used in logs.
@@ -35,5 +51,11 @@ pub trait Provider: Send {
     /// declares valid within its TTL is not a repeat.
     fn repeated(&self) -> bool {
         false
+    }
+
+    /// Per-value quality of the last `poll`, aligned with its values.
+    /// `None`: every value follows `repeated()`.
+    fn quality(&self) -> Option<Vec<Quality>> {
+        None
     }
 }

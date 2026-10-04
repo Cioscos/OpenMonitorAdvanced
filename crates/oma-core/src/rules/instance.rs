@@ -318,9 +318,19 @@ impl Instance {
     /// the next Fresh valid value counts the time since that tick and may
     /// then mature. Held stretches are bounded upstream (a timed-out or
     /// stale source turns absent) and suspend gaps reset the timers. Levels
-    /// change only on Fresh valid values. Does not allocate.
+    /// change only on Fresh valid values. A suspended sensor (the source
+    /// intentionally does not measure) keeps the timers and levels but
+    /// clears the anchor: the suspended time is not counted either way.
+    /// Does not allocate.
     pub fn step(&mut self, rule: &Rule, value: Option<f64>, quality: Quality, now_ms: u64) -> Step {
         if self.problem.is_some() {
+            return Step::Stay;
+        }
+        if quality == Quality::Suspended {
+            // The source intentionally does not measure (a disk in standby):
+            // keep the timers and levels, but drop the anchor so the first
+            // fresh tick afterwards does not count the suspended time.
+            self.anchor_ms = None;
             return Step::Stay;
         }
         let Some(value) = value.filter(|v| v.is_finite()) else {
@@ -379,7 +389,7 @@ mod tests {
     use super::*;
     use crate::model::{DeviceKind, Label, SensorKind};
     use crate::rules::{default_rules, Hysteresis, LevelSpec, Notify};
-    use Quality::{Fresh, Held};
+    use Quality::{Fresh, Held, Suspended};
 
     const GPU_CORE: &str = "gpu/0/temperature/core";
     const GPU_FLAG: &str = "gpu/0/flag/throttle-thermal";
@@ -1206,6 +1216,67 @@ mod tests {
             feed(&mut instance, &rule, 40, 70, |s| (Some(70.0), quality(s))),
             [(50_000, left(Warn, Ok))]
         );
+    }
+
+    #[test]
+    fn suspended_without_a_value_neither_resets_nor_matures() {
+        let rule = above(Some((83.0, 30)), None, (3.0, 10));
+        let mut instance = only_instance(&rule, &gpu_schema());
+        // 20 s above the threshold, then a minute of suspension (no step),
+        // then fresh ticks: the first only sets a new anchor, so the
+        // suspended minute is not counted, and 10 measured seconds later the
+        // 30 s are reached.
+        let steps = feed(&mut instance, &rule, 0, 91, |s| match s {
+            0..=20 => (Some(95.0), Fresh),
+            21..=80 => (None, Suspended),
+            _ => (Some(95.0), Fresh),
+        });
+        assert_eq!(steps, [(91_000, Step::Entered(Warn))]);
+    }
+
+    #[test]
+    fn suspended_keeps_the_level_and_the_exit_timer() {
+        let rule = above(Some((83.0, 0)), None, (3.0, 30));
+        let mut instance = only_instance(&rule, &gpu_schema());
+        assert_eq!(
+            feed(&mut instance, &rule, 0, 0, fresh(95.0)),
+            [(0, Step::Entered(Warn))]
+        );
+        // 20 s below the band, then suspended: the level stays and the
+        // accumulated exit time is kept, so 10 more measured seconds leave.
+        assert!(feed(&mut instance, &rule, 10, 30, fresh(70.0)).is_empty());
+        assert!(feed(&mut instance, &rule, 31, 200, |_| (None, Suspended)).is_empty());
+        assert_eq!(instance.level(), Warn);
+        assert_eq!(
+            feed(&mut instance, &rule, 201, 211, fresh(70.0)),
+            [(211_000, left(Warn, Ok))]
+        );
+    }
+
+    #[test]
+    fn held_without_a_value_still_resets_timers() {
+        // Transport loss is not an intentional suspension: the same shape as
+        // the suspended test needs the full 30 s again.
+        let rule = above(Some((83.0, 30)), None, (3.0, 10));
+        let mut instance = only_instance(&rule, &gpu_schema());
+        let steps = feed(&mut instance, &rule, 0, 120, |s| match s {
+            0..=20 => (Some(95.0), Fresh),
+            21..=80 => (None, Held),
+            _ => (Some(95.0), Fresh),
+        });
+        assert_eq!(steps, [(111_000, Step::Entered(Warn))]);
+    }
+
+    #[test]
+    fn slow_fresh_measurements_separated_by_held_ticks_still_mature() {
+        // M5 R1: a real fresh measurement every 10 s with Held ticks in
+        // between still accrues the 30 s.
+        let rule = above(Some((83.0, 30)), None, (3.0, 10));
+        let mut instance = only_instance(&rule, &gpu_schema());
+        let steps = feed(&mut instance, &rule, 0, 40, |s| {
+            (Some(95.0), if s % 10 == 0 { Fresh } else { Held })
+        });
+        assert_eq!(steps, [(30_000, Step::Entered(Warn))]);
     }
 
     #[test]

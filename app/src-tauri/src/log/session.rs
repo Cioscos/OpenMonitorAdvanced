@@ -650,7 +650,7 @@ impl LogService {
             layout: layout.clone(),
             timestamp_ms: out.snapshot.timestamp_ms,
             offset_minutes: offset,
-            values: layout.extract(&out.snapshot.values),
+            values: layout.extract(&out.snapshot.values, &out.quality),
         };
         match self.queue.try_push_row(row) {
             Ok(()) => self.hook(Point::TickQueued),

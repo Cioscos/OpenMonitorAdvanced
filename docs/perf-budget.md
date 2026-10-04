@@ -265,6 +265,8 @@ misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 | M5c | same machine, same conditions | window (Advanced view, log recording, blinking dot) | 0.91 (7 processes; core 0.06) | 20.7 | 6 | 184.8 | yes |
 | M5c | same machine, same conditions | window (Settings › CSV log, log recording) | 0.15 (7 processes; core 0.06) | 21.1 | 6 | 130.0 | yes |
 | M5c | same machine, same conditions, control run: the same Advanced page, log not recording | window (Advanced view, no log) | 1.01 (7 processes; core 0.08) | 20.7 | 6 | 180.1 | at the limit (see the details) |
+| M6b | same machine, Windows 11 Pro 10.0.26300, PawnIO 2.2.0, release build `4608bed`, service (protocol v3) connected, SATA HDD in standby | window (Advanced view, HDD page) | 0.92 (7 processes; core 0.05) | 20.2 | 6 | 166.9 | yes |
+| M6b | same machine, same conditions | tray | 0.05 | 18.2 | 0 | 18.2 | yes |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
@@ -280,8 +282,51 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 | M5c | same machine, same conditions | window (Advanced view, log recording) | 0.03 | 63.2 MB |
 | M5c | same machine, same conditions | window (Settings › CSV log, log recording) | 0.03 | 66.6 MB |
 | M5c | same machine, same conditions, control run | window (Advanced view, no log) | 0.02 | 62.6 MB |
+| M6b | same machine, release build `4608bed` (protocol v3, disk activity gate), SATA HDD in standby | window (Advanced view, HDD page) | 0.09 | 57.1 MB |
+| M6b | same machine, same conditions | tray | 0.03 | 62.5 MB |
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M6b measurement details
+
+Measured 2026-10-04 at about 02:30 on the development machine (16 logical
+processors, Windows 11 Pro 10.0.26300, PawnIO 2.2.0) with the release build of
+the branch (`target\release\oma-app.exe` of `4608bed`, the same commit as the
+installer the user ran for the live checks), `scripts/measure-footprint.ps1
+-Service` (`-Minimized` for the tray run) with the script's defaults (15 s
+warm-up, 30 s sample), the branch's `oma-service` (version still 0.3.0, protocol v3)
+connected, no history fill. The SATA HDD was in standby (turned off by
+Windows) during both runs; the view saved in the profile was the Advanced view
+on the HDD page. The app exited by itself after each run. Raw output in
+`target/spike/m6b/task15-footprint-{window,tray}.log` (not tracked).
+
+```
+Mode              : window (Advanced view, HDD page)
+CorePercentCpu    : 0.05
+TotalAppPercentCpu: 0.92 (7 processes)
+AppPrivateMB      : 20.2
+WebView2Processes : 6
+TotalPrivateMB    : 166.9
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.09 %
+Service Private   : 57.1 MB
+
+Mode              : tray
+CorePercentCpu    : 0.05
+TotalAppPercentCpu: 0.05
+AppPrivateMB      : 18.2
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.03 %
+Service Private   : 62.5 MB
+```
+
+All budget items are met. The window run is in line with M5c (0.91 to 1.01 %
+on a page with charts): the per-sensor quality and the disk state tags add
+no visible cost (no control run without them), and the core stays at 0.05 %.
+The service's disk activity gate (counters read with access 0, no command to
+a resting disk) leaves the service at 0.03 to 0.09 % and under 63 MB, in line
+with M5c (0.02 to 0.03 %, 59.2 to 66.6 MB) and well inside its budget. No limit
+was widened.
 
 ## M5c measurement details
 

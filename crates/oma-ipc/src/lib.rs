@@ -12,16 +12,16 @@ mod status;
 pub use drive_key::drive_key;
 pub use frame::{decode_payload, encode_frame, encode_payload, FrameDecoder};
 pub use message::{
-    Hello, IdentityHint, Message, Subscribe, WireDevice, WireError, WireSchema, WireSensor,
-    WireServiceState, WireSnapshot,
+    Hello, IdentityHint, Message, Subscribe, WireDevice, WireDrive, WireError, WireSchema,
+    WireSensor, WireServiceState, WireSnapshot,
 };
 pub use status::{
-    PawnIoStatus, Reconfiguration, ServiceDetail, ServiceSources, ServiceState, ServiceStatus,
-    SourceRequest,
+    DriveState, PawnIoStatus, Reconfiguration, ServiceDetail, ServiceSources, ServiceState,
+    ServiceStatus, SourceDrive, SourceRequest,
 };
 
 /// Current sensor IPC protocol version, sent in [`Hello::protocol_version`].
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The service modules a client may switch off in [`Subscribe::disabled_modules`], and the
 /// names [`WireServiceState::active_modules`] uses.
@@ -34,8 +34,9 @@ pub const MODULES: [&str; 6] = [
     "psu",
 ];
 
-/// Maximum number of drive keys in [`Subscribe::smart_disabled_drives`] (the service rejects
-/// more; it probes at most 64 physical drives).
+/// Maximum number of drive keys in [`Subscribe::smart_disabled_drives`] and in
+/// [`Subscribe::smart_enabled_drives`] (the service rejects more; it probes at most 64
+/// physical drives).
 pub const MAX_DRIVE_KEYS: usize = 64;
 
 /// Name of the sensor named pipe.

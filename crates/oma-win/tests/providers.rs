@@ -46,6 +46,19 @@ fn assert_first_poll_has_no_rates(inventory: &Inventory, first: &[Option<f64>]) 
 /// no elapsed interval yet): its rate sensors must be `None`. The second poll
 /// carries real rate values.
 fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
+    discover_and_poll_once(p).expect("second poll asked for a rediscovery")
+}
+
+/// [`discover_and_poll`] for the storage provider alone: a hard disk at work
+/// declares its temperature sensor after its first authorized read, through
+/// a rediscovery on the second poll. Starts over once.
+fn discover_and_poll_storage(p: &mut StorageProvider) -> (Inventory, Vec<Option<f64>>) {
+    discover_and_poll_once(p)
+        .unwrap_or_else(|| discover_and_poll_once(p).expect("a second rediscovery in a row"))
+}
+
+/// `None` when the second poll asks for a rediscovery.
+fn discover_and_poll_once(p: &mut dyn Provider) -> Option<(Inventory, Vec<Option<f64>>)> {
     let inventory = p.discover().expect("discover");
     std::thread::sleep(Duration::from_millis(1_100));
     let first = p.poll().expect("first poll");
@@ -56,13 +69,16 @@ fn discover_and_poll(p: &mut dyn Provider) -> (Inventory, Vec<Option<f64>>) {
     );
     assert_first_poll_has_no_rates(&inventory, &first);
     std::thread::sleep(Duration::from_millis(1_100));
-    let values = p.poll().expect("second poll");
+    let values = match p.poll() {
+        Err(ProviderError::Rediscover) => return None,
+        polled => polled.expect("second poll"),
+    };
     assert_eq!(
         values.len(),
         inventory.sensors.len(),
         "values must align with sensors"
     );
-    (inventory, values)
+    Some((inventory, values))
 }
 
 #[test]
@@ -111,7 +127,7 @@ fn memory_provider_reports_usage() {
 #[ignore = "requires real Windows hardware"]
 fn storage_provider_reports_disks_and_volumes() {
     let mut p = StorageProvider::default();
-    let (inventory, values) = discover_and_poll(&mut p);
+    let (inventory, values) = discover_and_poll_storage(&mut p);
     assert!(!inventory.devices.is_empty(), "at least the system disk");
     for (sensor, value) in inventory.sensors.iter().zip(&values) {
         if sensor.label.key == "storage.volumeUsed" {
@@ -120,7 +136,8 @@ fn storage_provider_reports_disks_and_volumes() {
         }
         if sensor.kind == SensorKind::Temperature {
             assert_eq!(sensor.unit, Unit::Celsius, "{}", sensor.id);
-            // Read at discovery and repeated until the 30 s refresh.
+            // Read at discovery (a hard disk only declares its sensor after
+            // an authorized read) and repeated until the 30 s refresh.
             let celsius = value.expect("disk temperature");
             assert!((5.0..=90.0).contains(&celsius), "{} = {celsius}", sensor.id);
         }
@@ -170,7 +187,7 @@ fn reads_nvme_health_on_this_machine() {
         "percent/available-spare",
     ];
     let mut p = StorageProvider::default();
-    let (inventory, values) = discover_and_poll(&mut p);
+    let (inventory, values) = discover_and_poll_storage(&mut p);
     let mut with_health = 0;
     for device in &inventory.devices {
         let found: Vec<(&Sensor, Option<f64>)> = inventory

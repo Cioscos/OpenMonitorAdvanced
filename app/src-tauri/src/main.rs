@@ -23,8 +23,8 @@ use oma_core::sampler::{history_capacity, sample_interval, IntervalHandle, Sampl
 use tauri::{Emitter, Manager, RunEvent};
 
 use crate::commands::{
-    follow_vendor_libraries, vendor_mask, GpuProcessState, GpuProcessTable, StartupState,
-    StartupStatus, VendorSwitch,
+    follow_vendor_libraries, quality_codes, vendor_mask, DiskStateTable, GpuProcessState,
+    GpuProcessTable, SnapshotEvent, StartupState, StartupStatus, VendorSwitch, EVENT_DISK_STATES,
 };
 use crate::service::ServiceShell;
 use crate::settings::{RealFs, SettingsStore, EVENT_SETTINGS};
@@ -36,6 +36,15 @@ pub struct AppState {
     pub engine: Arc<Mutex<Engine>>,
     /// The live sampling interval, reported by `get_session`.
     pub interval: IntervalHandle,
+    /// The power state of each disk, published by the storage provider.
+    pub disk_states: DiskStateTable,
+}
+
+/// Whether `generation` differs from the last one seen, which it then becomes.
+fn generation_changed(last: &mut u64, generation: u64) -> bool {
+    let changed = generation != *last;
+    *last = generation;
+    changed
 }
 
 /// Owns the sampler so it can be stopped cleanly on exit.
@@ -159,6 +168,7 @@ fn main() {
         oma_win::storage::DriveIdTable::default(),
         oma_win::svc::ServiceStatusTable::default(),
     );
+    let disk_states = DiskStateTable::default();
 
     // Opened before anything reads a preference, so the tray, the sampler and
     // the UI commands all see the same settings from the first moment. The
@@ -197,6 +207,7 @@ fn main() {
             oma_win::ServiceHandles {
                 feed: svc_feed.clone(),
                 drives: svc_drives.clone(),
+                disk_states: disk_states.clone(),
             },
         ),
         history_capacity(initial_interval),
@@ -226,6 +237,7 @@ fn main() {
         .manage(AppState {
             engine: engine.clone(),
             interval: interval.clone(),
+            disk_states: disk_states.clone(),
         })
         .manage(StartupState::new(switch, status))
         .manage(GpuProcessState(processes))
@@ -237,6 +249,7 @@ fn main() {
             commands::get_stats,
             commands::reset_stats,
             commands::get_session,
+            commands::get_disk_states,
             commands::get_gpu_processes,
             commands::get_startup_status,
             commands::take_pending_view,
@@ -339,6 +352,7 @@ fn main() {
             let handle = app.handle().clone();
             #[cfg(windows)]
             let mut last_service_version = 0u64;
+            let mut last_disk_generation = 0u64;
             // The tray and the toasts follow every tick, window or not. One
             // feed (and one toast cooldown) lives for the whole session; it
             // keeps the latest schema and health report, which arrive only
@@ -361,7 +375,18 @@ fn main() {
                 if let Some(schema) = &out.schema {
                     let _ = handle.emit(EVENT_SCHEMA, schema);
                 }
-                let _ = handle.emit(EVENT_SNAPSHOT, &out.snapshot);
+                let _ = handle.emit(
+                    EVENT_SNAPSHOT,
+                    SnapshotEvent {
+                        snapshot: &out.snapshot,
+                        quality: quality_codes(&out.quality),
+                    },
+                );
+                // Always the full list: an empty one revokes the earlier states.
+                let (generation, states) = disk_states.get();
+                if generation_changed(&mut last_disk_generation, generation) {
+                    let _ = handle.emit(EVENT_DISK_STATES, &commands::disk_state_entries(states));
+                }
                 if let Some(health) = &out.health {
                     let _ = handle.emit(rules::EVENT_HEALTH, health);
                 }
@@ -439,6 +464,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_changed_reports_each_new_generation_once() {
+        let mut last = 0;
+        assert!(!generation_changed(&mut last, 0));
+        assert!(generation_changed(&mut last, 1));
+        assert!(!generation_changed(&mut last, 1));
+        assert!(generation_changed(&mut last, 2));
+        assert_eq!(last, 2);
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()

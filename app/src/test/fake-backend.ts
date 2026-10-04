@@ -17,6 +17,7 @@ import type {
   SettingsPatch,
   SettingsState,
   Snapshot,
+  DiskStateEntry,
   StartupStatus,
   StatsReply,
   NavigationTarget,
@@ -127,6 +128,9 @@ export class FakeBackend implements Backend {
   /** Every `setLogHotkeysSuspended` call, in order. */
   hotkeySuspensions: boolean[] = [];
   #logListeners = new Set<(s: LogStatus) => void>();
+  /** What `getDiskStates` answers. */
+  diskStates: DiskStateEntry[] = [];
+  #diskListeners = new Set<(s: DiskStateEntry[]) => void>();
   #schemaListeners = new Set<(s: Schema) => void>();
   #snapshotListeners = new Set<(s: Snapshot) => void>();
   #serviceListeners = new Set<(s: ServiceStatus) => void>();
@@ -164,6 +168,20 @@ export class FakeBackend implements Backend {
   async onSnapshot(cb: (s: Snapshot) => void): Promise<Unsubscribe> {
     this.#snapshotListeners.add(cb);
     return () => this.#snapshotListeners.delete(cb);
+  }
+
+  async getDiskStates(): Promise<DiskStateEntry[]> {
+    return [...this.diskStates];
+  }
+
+  async onDiskStates(cb: (s: DiskStateEntry[]) => void): Promise<Unsubscribe> {
+    this.#diskListeners.add(cb);
+    return () => this.#diskListeners.delete(cb);
+  }
+
+  /** Number of live `onDiskStates` listeners. */
+  get diskStateListeners(): number {
+    return this.#diskListeners.size;
   }
 
   async getStartupStatus(): Promise<StartupStatus> {
@@ -385,6 +403,11 @@ export class FakeBackend implements Backend {
 
   emitSnapshot(snapshot: Snapshot): void {
     this.#snapshotListeners.forEach((cb) => cb(snapshot));
+  }
+
+  emitDiskStates(states: DiskStateEntry[]): void {
+    this.diskStates = states;
+    this.#diskListeners.forEach((cb) => cb(states));
   }
 
   emitServiceStatus(status: ServiceStatus): void {

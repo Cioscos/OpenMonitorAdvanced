@@ -65,6 +65,11 @@ export interface KpiDef {
   unit: Unit;
   /** Optional small text under the value, already translated. */
   secondary?: (valueOf: ValueOf, stats: StatsOf) => string | null;
+  /**
+   * The sensor a direct measurement reads, so the tile can show that sensor's quality (its `id`
+   * is a KPI name). Absent for statistics and derived values: they are not a reading.
+   */
+  sensorId?: string;
 }
 
 const KPI_COUNT = 4;
@@ -86,17 +91,18 @@ function firstByCategory(schema: Schema, deviceIds: string[], category: string):
   return schema.sensors.find((s) => deviceIds.includes(s.deviceId) && s.category === category);
 }
 
-const kpi = (id: string, unit: Unit, value: KpiDef['value'], secondary?: KpiDef['secondary']): KpiDef => ({
+const kpi = (id: string, unit: Unit, value: KpiDef['value'], secondary?: KpiDef['secondary'], sensorId?: string): KpiDef => ({
   id,
   labelKey: `advanced.kpi.${id}`,
   unit,
   value,
   ...(secondary ? { secondary } : {}),
+  ...(sensorId ? { sensorId } : {}),
 });
 
 /** Live value of a sensor. */
 const live = (id: string, sensor: Sensor | undefined): KpiDef | null =>
-  sensor ? kpi(id, sensor.unit, (valueOf) => valueOf(sensor.id)) : null;
+  sensor ? kpi(id, sensor.unit, (valueOf) => valueOf(sensor.id), undefined, sensor.id) : null;
 
 /** Highest value since start (or reset), from the core statistics. */
 const peak = (id: string, sensor: Sensor | undefined): KpiDef | null =>
@@ -148,6 +154,7 @@ function candidates(kind: DeviceKind, schema: Schema, ids: string[]): (KpiDef | 
                     return bytes === null ? null : translateNow('advanced.kpi.vramOf', { total: formatBytes(bytes, i18n.locale) });
                   }
                 : undefined,
+              used.id,
             )
           : null,
         live('clock', find('gpu.clock.core')),
@@ -176,7 +183,7 @@ function candidates(kind: DeviceKind, schema: Schema, ids: string[]): (KpiDef | 
         live('read', find('storage.read')),
         live('write', find('storage.write')),
         live('temperature', find('storage.temperature')),
-        free ? kpi('freeSpace', free.unit, (valueOf) => valueOf(free.id), () => free.label.arg ?? null) : null,
+        free ? kpi('freeSpace', free.unit, (valueOf) => valueOf(free.id), () => free.label.arg ?? null, free.id) : null,
       ];
     }
     case 'network':
@@ -258,8 +265,8 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   tjMaxC: 'celsius',
 };
 
-/** Properties meant for other screens: `smartSelectable` feeds the Settings' SMART switches. */
-const HIDDEN_PROPERTIES = new Set(['smartSelectable']);
+/** Properties meant for other screens: `smartSelectable` and `smartDefault` feed the Settings' SMART switches. */
+const HIDDEN_PROPERTIES = new Set(['smartSelectable', 'smartDefault']);
 
 export interface PropertyRow {
   key: string;

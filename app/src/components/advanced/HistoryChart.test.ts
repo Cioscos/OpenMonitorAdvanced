@@ -172,6 +172,40 @@ test('live snapshots extend the chart and retain one point outside the left edge
   ]);
 });
 
+test('a suspended reading leaves a gap in the plotted data', async () => {
+  await settings.update({ advanced: { window: 60 } });
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+
+  const quality = (code: number) => MOCK_SCHEMA.sensors.map((_, i) => (i === index(TEMP) ? code : 0));
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3_000, values: mockValues(1), quality: quality(2) });
+  flushSync();
+  store.applySnapshot({ revision: 1, seq: 2, timestampMs: 4_000, values: mockValues(2), quality: quality(0) });
+  flushSync();
+  expect(plots[0].data).toEqual([
+    [1, 2, 3, 4],
+    [10, 20, mockValues(1)[index(LOAD)], mockValues(2)[index(LOAD)]],
+    [11, 21, null, mockValues(2)[index(TEMP)]],
+  ]);
+});
+
+test('a suspended snapshot that arrives while history loads is plotted as a gap', async () => {
+  const backend = fakeBackend();
+  let resolve!: (h: HistorySeed) => void;
+  backend.getHistory = () => new Promise((done) => (resolve = done));
+  const store = new LiveStore();
+  renderChart(backend, store);
+  await vi.waitFor(() => expect(resolve).toBeDefined());
+
+  const quality = MOCK_SCHEMA.sensors.map((_, i) => (i === index(TEMP) ? 2 : 0));
+  store.applySnapshot({ revision: 1, seq: 5, timestampMs: 3000, values: mockValues(5), quality });
+  flushSync();
+  resolve({ revision: 1, seq: 4, timestampsMs: [1000, 2000], series: [[1, 2], [3, 4]] });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(plots[0].data).toEqual([[1, 2, 3], [1, 2, mockValues(5)[index(LOAD)]], [3, 4, null]]);
+});
+
 test('a snapshot that arrives while history loads is not lost', async () => {
   const backend = fakeBackend();
   let resolve!: (h: HistorySeed) => void;

@@ -14,17 +14,7 @@ pub fn backoff_ms(failures: u32) -> u64 {
     (5_000u64 << failures.saturating_sub(1).min(4)).min(60_000)
 }
 
-/// Whether a value of a snapshot is a new measurement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Quality {
-    /// Measured by this tick, or declared valid by its source. An absent
-    /// value (`None`) is always `Fresh`: absence is not a held measurement.
-    Fresh,
-    /// The same measurement as before: the provider said so
-    /// (`Provider::repeated`) or missed the deadline and the engine
-    /// republished its last values.
-    Held,
-}
+pub use crate::provider::Quality;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickOutput {
@@ -45,9 +35,10 @@ struct Slot {
     worker: Worker,
     inventory: Inventory,
     last: Vec<Option<f64>>,
-    /// `last` is not a new measurement: the provider reported a repeat or the
-    /// slot just republished it after a missed deadline.
-    held: bool,
+    /// One entry per value of `last`: whether it is a new measurement (the
+    /// provider reported a repeat, suspended it, or the slot just
+    /// republished it after a missed deadline).
+    quality: Vec<Quality>,
     /// Set once a pending request has already missed one deadline: the next
     /// miss in a row means the provider is still hung, so its values are
     /// cleared instead of being republished forever (spec §4.1/§8).
@@ -96,6 +87,10 @@ pub struct Engine {
     history: History,
     /// Min/max/average since start, same retention rule as `history`.
     stats: Stats,
+    /// The tick's values as `history` and `stats` take them: a suspended
+    /// value is a last reading, not a measurement, so it is absent here.
+    /// Kept between ticks to reuse its buffer.
+    measured: Vec<Option<f64>>,
     /// Unix time of the first tick: when monitoring started (not the window).
     started_at_ms: Option<u64>,
     /// Rate limit of the "discarding implausible value" debug line.
@@ -115,7 +110,7 @@ impl Engine {
                     worker: Worker::spawn(p),
                     inventory: Inventory::default(),
                     last: Vec::new(),
-                    held: false,
+                    quality: Vec::new(),
                     timed_out: false,
                     keep: Vec::new(),
                 })
@@ -123,6 +118,7 @@ impl Engine {
             schema: Schema::default(),
             history: History::new(history_capacity),
             stats: Stats::new(),
+            measured: Vec::new(),
             started_at_ms: None,
             discards: DiscardLog::default(),
             rules: RuleEngine::new(),
@@ -191,7 +187,7 @@ impl Engine {
                     changed |= slot.inventory != sample.inventory;
                     slot.inventory = sample.inventory;
                     slot.last = sample.values;
-                    slot.held = sample.repeated;
+                    slot.quality = sample.quality;
                     slot.timed_out = false;
                 }
                 // A timeout retains the last values for one cycle only (§4.1); a
@@ -200,11 +196,15 @@ impl Engine {
                 // worker/request is spawned while busy.
                 None if slot.timed_out => {
                     slot.last = vec![None; slot.last.len()];
-                    slot.held = false;
+                    slot.quality = vec![Quality::Fresh; slot.last.len()];
                 }
                 None => {
                     slot.timed_out = true;
-                    slot.held = true;
+                    for quality in &mut slot.quality {
+                        if *quality != Quality::Suspended {
+                            *quality = Quality::Held;
+                        }
+                    }
                 }
             }
         }
@@ -256,6 +256,8 @@ impl Engine {
             self.discards.retain(&ids);
         }
         let discards = &mut self.discards;
+        let measured = &mut self.measured;
+        measured.clear();
         let mut values = Vec::with_capacity(self.schema.sensors.len());
         let mut quality = Vec::with_capacity(self.schema.sensors.len());
         let kept_values = self.slots.iter().flat_map(|slot| {
@@ -263,9 +265,14 @@ impl Engine {
                 .iter()
                 .enumerate()
                 .filter(|&(_, &kept)| kept)
-                .map(move |(i, _)| (slot.last.get(i).copied().flatten(), slot.held))
+                .map(move |(i, _)| {
+                    (
+                        slot.last.get(i).copied().flatten(),
+                        slot.quality.get(i).copied().unwrap_or(Quality::Fresh),
+                    )
+                })
         });
-        for ((value, held), sensor) in kept_values.zip(&self.schema.sensors) {
+        for ((value, slot_quality), sensor) in kept_values.zip(&self.schema.sensors) {
             let clean = sanitize_sensor(sensor, value);
             if let (Some(raw), None) = (value, clean) {
                 if discards.should_log(&sensor.id, monotonic_ms) {
@@ -278,14 +285,15 @@ impl Engine {
                 }
             }
             values.push(clean);
-            quality.push(if clean.is_some() && held {
-                Quality::Held
-            } else {
-                Quality::Fresh
+            measured.push(clean.filter(|_| slot_quality != Quality::Suspended));
+            quality.push(match slot_quality {
+                Quality::Suspended => Quality::Suspended,
+                Quality::Held if clean.is_some() => Quality::Held,
+                _ => Quality::Fresh,
             });
         }
-        self.history.push(timestamp_ms, &values);
-        self.stats.push(&values);
+        self.history.push(timestamp_ms, &self.measured);
+        self.stats.push(&self.measured);
         self.seq += 1;
         self.last_monotonic_ms = monotonic_ms;
         // The rules see the sanitized values; a new merged schema is flagged
@@ -333,6 +341,8 @@ mod tests {
         poll_calls: usize,
         /// What `Provider::repeated` answers after each poll.
         repeated: bool,
+        /// What `Provider::quality` answers after each poll.
+        quality: Option<Vec<Quality>>,
     }
 
     struct Fake {
@@ -365,6 +375,10 @@ mod tests {
 
         fn repeated(&self) -> bool {
             self.script.lock().unwrap().repeated
+        }
+
+        fn quality(&self) -> Option<Vec<Quality>> {
+            self.script.lock().unwrap().quality.clone()
         }
     }
 
@@ -1057,6 +1071,238 @@ mod tests {
         assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
         drop(e);
         drop(release);
+    }
+
+    #[test]
+    fn per_sensor_quality_marks_only_the_flagged_value() {
+        let (p, script) = fake("a", inventory("d", &["a", "b"]));
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Ok(vec![Some(1.0), Some(2.0)]));
+            s.quality = Some(vec![Quality::Fresh, Quality::Held]);
+        }
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Held]);
+    }
+
+    #[test]
+    fn suspended_is_reported_even_without_a_value() {
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Ok(vec![None]));
+            s.quality = Some(vec![Quality::Suspended]);
+        }
+        let mut e = Engine::new(vec![p], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.snapshot.values, vec![None]);
+        assert_eq!(out.quality, vec![Quality::Suspended]);
+    }
+
+    /// Ticks once per `(values, quality)` pair, one second apart from 1 s.
+    fn tick_with_quality(
+        e: &mut Engine,
+        script: &Arc<Mutex<Script>>,
+        ticks: &[(&[Option<f64>], &[Quality])],
+    ) -> Vec<TickOutput> {
+        (1u64..)
+            .zip(ticks)
+            .map(|(second, (values, quality))| {
+                {
+                    let mut s = script.lock().unwrap();
+                    s.polls.push_back(Ok(values.to_vec()));
+                    s.quality = Some(quality.to_vec());
+                }
+                e.tick(second * 1_000, second * 1_000)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_suspended_value_enters_the_history_as_absent() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        let outs = tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(40.0)], &[Fresh]),
+                (&[Some(40.0)], &[Suspended]),
+                // Suspended before any reading: absent as well.
+                (&[None], &[Suspended]),
+            ],
+        );
+        // The current value is still the last reading, with its quality.
+        assert_eq!(outs[1].snapshot.values, vec![Some(40.0)]);
+        assert_eq!(outs[1].quality, vec![Suspended]);
+        let w = e.history().window(&ids(&["d/load/a"]), 0);
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000]);
+        assert_eq!(w.series, vec![vec![Some(40.0), None, None]]);
+    }
+
+    #[test]
+    fn a_held_value_enters_the_history_unchanged() {
+        use Quality::{Fresh, Held};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        let outs = tick_with_quality(
+            &mut e,
+            &script,
+            &[(&[Some(40.0)], &[Fresh]), (&[Some(40.0)], &[Held])],
+        );
+        assert_eq!(outs[1].quality, vec![Held]);
+        let id = ids(&["d/load/a"]);
+        assert_eq!(
+            e.history().window(&id, 0).series,
+            vec![vec![Some(40.0), Some(40.0)]]
+        );
+        assert_eq!(e.stats().get(&id)[0].map(|s| s.count), Some(2));
+    }
+
+    #[test]
+    fn statistics_ignore_suspended_ticks() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a"]));
+        let mut e = Engine::new(vec![p], 10);
+        // The suspended ticks carry a value that would move every statistic.
+        tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(10.0)], &[Fresh]),
+                (&[Some(30.0)], &[Fresh]),
+                (&[Some(90.0)], &[Suspended]),
+                (&[Some(90.0)], &[Suspended]),
+                (&[Some(20.0)], &[Fresh]),
+            ],
+        );
+        let stats = e.stats().get(&ids(&["d/load/a"]))[0].expect("three measurements");
+        // `max` is also the peak KPI of the device pages.
+        assert_eq!(
+            (stats.min, stats.max, stats.avg, stats.count),
+            (10.0, 30.0, 20.0, 3)
+        );
+    }
+
+    #[test]
+    fn the_history_window_has_a_gap_while_a_sensor_is_suspended() {
+        use Quality::{Fresh, Suspended};
+        let (p, script) = fake("a", inventory("d", &["a", "b"]));
+        let mut e = Engine::new(vec![p], 10);
+        tick_with_quality(
+            &mut e,
+            &script,
+            &[
+                (&[Some(1.0), Some(35.0)], &[Fresh, Fresh]),
+                (&[Some(2.0), Some(35.0)], &[Fresh, Suspended]),
+                (&[Some(3.0), Some(35.0)], &[Fresh, Suspended]),
+                (&[Some(4.0), Some(36.0)], &[Fresh, Fresh]),
+            ],
+        );
+        let w = e.history().window(&ids(&["d/load/a", "d/load/b"]), 0);
+        // Every tick keeps its row: only the suspended sensor has the gap.
+        assert_eq!(w.timestamps_ms, vec![1_000, 2_000, 3_000, 4_000]);
+        assert_eq!(
+            w.series,
+            vec![
+                vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+                vec![Some(35.0), None, None, Some(36.0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quality_vector_of_the_wrong_length_falls_back_to_repeated() {
+        let (p, script) = fake("a", inventory("d", &["a", "b"]));
+        {
+            let mut s = script.lock().unwrap();
+            s.polls.push_back(Ok(vec![Some(1.0), Some(2.0)]));
+            s.quality = Some(vec![Quality::Held]);
+        }
+        let mut e = Engine::new(vec![p], 10);
+        assert_eq!(e.tick(0, 0).quality, vec![Quality::Fresh, Quality::Fresh]);
+        // With `repeated` the fallback is Held for every value.
+        script.lock().unwrap().repeated = true;
+        assert_eq!(
+            e.tick(1_000, 1_000).quality,
+            vec![Quality::Held, Quality::Held]
+        );
+    }
+
+    /// Two sensors; the first poll answers `[1, 2]` with `[Fresh, Suspended]`,
+    /// later polls block until released.
+    struct SlowQuality {
+        wait: std::sync::mpsc::Receiver<()>,
+        calls: usize,
+    }
+    impl Provider for SlowQuality {
+        fn name(&self) -> &'static str {
+            "slow-quality"
+        }
+        fn discover(&mut self) -> Result<Inventory, ProviderError> {
+            Ok(inventory("dev/slow", &["x", "y"]))
+        }
+        fn poll(&mut self) -> PollResult {
+            self.calls += 1;
+            if self.calls > 1 {
+                let _ = self.wait.recv();
+            }
+            Ok(vec![Some(1.0), Some(2.0)])
+        }
+        fn quality(&self) -> Option<Vec<Quality>> {
+            Some(vec![Quality::Fresh, Quality::Suspended])
+        }
+    }
+
+    #[test]
+    fn a_timed_out_slot_holds_its_values_and_keeps_suspended() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut e = Engine::new(vec![Box::new(SlowQuality { wait, calls: 0 })], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Suspended]);
+        let out = e.tick(1_000, 1_000);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+        assert_eq!(out.quality, vec![Quality::Held, Quality::Suspended]);
+        drop(e);
+        drop(release);
+    }
+
+    #[test]
+    fn a_second_timeout_clears_values_and_suspended_quality() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut e = Engine::new(vec![Box::new(SlowQuality { wait, calls: 0 })], 10);
+        e.tick(0, 0);
+        e.tick(1_000, 1_000);
+        let out = e.tick(2_000, 2_000);
+        assert_eq!(out.snapshot.values, vec![None, None]);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Fresh]);
+        drop(e);
+        drop(release);
+    }
+
+    #[test]
+    fn merged_quality_follows_the_winning_sensor_indices() {
+        // "a" and "b" both expose dev/a/load/x: "b" loses it, so only its
+        // second sensor (with its own quality) reaches the output.
+        let (a, script_a) = fake("a", inventory("dev/a", &["x"]));
+        let (b, script_b) = fake("b", inventory("dev/a", &["x", "y"]));
+        {
+            let mut s = script_a.lock().unwrap();
+            s.polls.push_back(Ok(vec![Some(1.0)]));
+            s.quality = Some(vec![Quality::Fresh]);
+        }
+        {
+            let mut s = script_b.lock().unwrap();
+            s.polls.push_back(Ok(vec![Some(9.0), Some(2.0)]));
+            s.quality = Some(vec![Quality::Suspended, Quality::Held]);
+        }
+        let mut e = Engine::new(vec![a, b], 10);
+        let out = e.tick(0, 0);
+        assert_eq!(out.snapshot.values, vec![Some(1.0), Some(2.0)]);
+        assert_eq!(out.quality, vec![Quality::Fresh, Quality::Held]);
     }
 
     #[test]

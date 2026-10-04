@@ -4,7 +4,7 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import { settings } from '../../lib/settings.svelte';
   import { blockingDiskNames, reasonText } from '../../lib/settingsView';
-  import type { ServiceModules, ServiceStatus } from '../../lib/types';
+  import type { Device, ServiceModules, ServiceStatus } from '../../lib/types';
   import ServiceExplainer from '../ServiceExplainer.svelte';
   import Group from './controls/Group.svelte';
   import Toggle from './controls/Toggle.svelte';
@@ -21,7 +21,7 @@
   const sources = $derived(connected ? (service?.sources ?? null) : null);
   const disks = $derived(store.schema?.devices.filter((d) => d.kind === 'storage') ?? []);
   const storageOn = $derived(current?.sources.serviceModules.storage ?? true);
-  const blockedBy = $derived(sources ? blockingDiskNames(sources.smartBlockedBy, store.schema, t) : []);
+  const blockedBy = $derived(sources ? blockingDiskNames(sources.drives, store.schema, t) : []);
 
   let antiCheatFailed = $state(false);
 
@@ -29,6 +29,8 @@
     const key = settings.errors[field];
     return key === undefined ? null : t(key);
   };
+
+  const smartError = $derived(errorOf('sources.smartDisabledDrives') ?? errorOf('sources.smartEnabledDrives'));
 
   async function setAntiCheat(enabled: boolean) {
     antiCheatFailed = false;
@@ -39,11 +41,22 @@
     }
   }
 
-  function setSmart(id: string, on: boolean) {
+  // USB disks start with SMART off: the user switches them on, which is not the same as "not off".
+  const startsOff = (disk: Device) => disk.properties?.smartDefault === 'off';
+  // Switched off wins over switched on, as in the backend, should a disk be in both lists.
+  const smartOn = (disk: Device) => {
+    const off = (current?.sources.smartDisabledDrives ?? []).includes(disk.id);
+    return startsOff(disk) ? (current?.sources.smartEnabledDrives ?? []).includes(disk.id) && !off : !off;
+  };
+
+  function setSmart(disk: Device, on: boolean) {
+    const id = disk.id;
     const off = current?.sources.smartDisabledDrives ?? [];
-    // Disks that are not plugged in now keep their choice.
-    const next = on ? off.filter((d) => d !== id) : off.includes(id) ? off : [...off, id];
-    return settings.update({ sources: { smartDisabledDrives: next } });
+    const enabled = current?.sources.smartEnabledDrives ?? [];
+    // Both lists change together and stay disjoint. Disks that are not plugged in now keep their choice.
+    const smartDisabledDrives = on ? off.filter((d) => d !== id) : off.includes(id) ? off : [...off, id];
+    const smartEnabledDrives = !on ? enabled.filter((d) => d !== id) : startsOff(disk) && !enabled.includes(id) ? [...enabled, id] : enabled;
+    return settings.update({ sources: { smartEnabledDrives, smartDisabledDrives } });
   }
 </script>
 
@@ -137,10 +150,14 @@
       <Toggle
         id="smart-{disk.id}"
         label={disk.name}
-        description={selectable ? null : t('settings.sources.smart.noDescriptor')}
-        checked={!current.sources.smartDisabledDrives.includes(disk.id)}
+        description={!selectable
+          ? t('settings.sources.smart.noDescriptor')
+          : startsOff(disk)
+            ? t('settings.sources.smart.usbWarning')
+            : null}
+        checked={smartOn(disk)}
         disabled={!connected || !storageOn || !selectable}
-        onChange={(on) => setSmart(disk.id, on)}
+        onChange={(on) => setSmart(disk, on)}
       />
     {:else}
       <p class="note">{t('settings.sources.smart.none')}</p>
@@ -150,8 +167,8 @@
         <p class="warn">{t('settings.sources.smart.blocked', { disk: blockedBy.join(', ') })}</p>
       {/if}
       <p>{t('settings.sources.smart.limit')}</p>
-      {#if errorOf('sources.smartDisabledDrives') !== null}
-        <p class="failed" role="alert">{errorOf('sources.smartDisabledDrives')}</p>
+      {#if smartError !== null}
+        <p class="failed" role="alert">{smartError}</p>
       {/if}
     </div>
   </Group>

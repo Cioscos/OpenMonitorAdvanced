@@ -38,6 +38,7 @@ Updated at the end of every milestone (last update: M6c).
 | The service's logs live in `$INSTDIR\service\logs` (ruling R30). Any future service-owned path (settings, rules) must stay under a folder no user can create first, with the same service-side check (`LogDirectoryGuard`), never under `%ProgramData%`. | `service/OpenMonitorAdvanced.Service/Logging/LogDirectoryGuard.cs`, `app/src-tauri/nsis/oma.nsh` | M5 (settings) |
 | `THIRD_PARTY_LICENSES.txt` includes the .NET runtime's `THIRD-PARTY-NOTICES.TXT`, but not the `THIRD-PARTY-NOTICES` files of the other Microsoft NuGet packages in the service publish (`Microsoft.Extensions.*`, `System.*`). They largely overlap with the runtime notices; add them to `scripts/generate-licenses.ps1` when it is next touched. | `scripts/generate-licenses.ps1`, `THIRD_PARTY_LICENSES.txt` | when touched |
 | Update check: WinHTTP does not check certificate revocation (M6c ruling). Revisit if the check ever downloads anything. | `crates/oma-win/src/http.rs` | accepted |
+| Pre-existing M5c `log::session` tests use 100-200 ms timeouts and can fail under parallel CPU load (seen once during M6c, passed on rerun). Widen the timeouts or wait on a condition instead of sleeping. | `crates/oma-core/src/log/` (`session` tests) | when touched |
 | CPU thermal throttling has no sensor in LibreHardwareMonitor 0.9.6 (S1 §1), so `cpu-throttle` has no instances. On Intel the service could read bit 0 of `IA32_PACKAGE_THERM_STATUS` itself through the public `LibreHardwareMonitor.PawnIo.IntelMsr`: new code, Intel only, not testable on this PC. | `service/OpenMonitorAdvanced.Service/Sensors/` | when Intel hardware is available |
 | TjMax: the AMD table (`AmdTjMaxTable.cs`, 164 entries) covers desktop Ryzen only. Mobile and Ryzen AI (in the same AMD table, e.g. 7840HS at 100 °C), Threadripper, Zen/Zen+ with the offset Tctl, engineering samples and the Ryzen 3 3100/3300X (no published value) use the 85/95 °C fallback. The entries were checked against AMD's specifications table only (31 also against the product page). | `service/OpenMonitorAdvanced.Service/Sensors/AmdTjMaxTable.cs` | M6 (hardware matrix) |
 | Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
@@ -209,11 +210,11 @@ The hand-written part of the 0.4.0 draft release (above the block that `render-r
 
 ## Manual checks owed after M6c
 
-The live checks of Task 13 (spec M6c §8.2, U1-U8) cover most of the flows below; what they leave open stays here.
+The live checks of Task 13 (spec M6c §8.2, U1-U8, 2026-10-04) are done: the update toast click opening *Settings › About*, *Export sensor report* with a save, a cancelled save dialog (nothing shown) and *Open folder*, and the licence buttons in `pnpm tauri dev`. What they leave open stays here.
 
 - The WinHTTP TLS 1.2 fallback on a Windows 10 VM (where WinHTTP has no TLS 1.3): *Check now* must still succeed. Not attempted on this PC (Windows 11).
-- The first CI run of the new "Check third-party licences" step (`generate-licenses.ps1 -Check`) on a hosted runner, after the push.
-- Live, by the user: *Export sensor report* with a save, a cancelled save dialog (nothing shown) and *Open folder*; a click on the update toast opening *Settings › About*.
+- The first CI run of the new "Check third-party licences" step (`generate-licenses.ps1 -Check`) on a hosted runner, with the cached cargo-about binary, after the push.
+- The two licence buttons in the installed app (not only in dev) on a VM, started by the user; the setup was only inspected with `7z l` (U8), not run.
 
 ## Manual checks owed after M6b
 

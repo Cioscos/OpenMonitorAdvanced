@@ -182,7 +182,7 @@ giorno ed è **spenta di default**.
   versione dell'app. Non invia identificativi, impostazioni né dati dei sensori.
 - **Cosa fa.** Mostra se hai l'ultima versione e, se no, un link alla pagina della release. Non
   scarica e non installa mai nulla. Con il controllo automatico attivo, una nuova versione dà una
-  sola notifica di Windows per versione, e un pallino su *Informazioni* resta finché
+  sola notifica di Windows per versione, e un pallino su *Informazioni* e sull'ingranaggio delle impostazioni resta finché
   l'aggiornamento è disponibile.
 - Senza un clic su *Controlla ora* e con il controllo automatico spento, l'app non fa alcuna
   richiesta di rete. Il servizio non usa mai la rete. Vedi la sezione Privacy di

@@ -171,7 +171,7 @@ GitHub once; **Check automatically (once a day)** does the same daily and is **o
   version. No identifiers, settings or sensor data are sent.
 - **What it does.** It shows whether you have the latest version and, if not, a link to the
   release page. It never downloads or installs anything. With the automatic check on, a new
-  version raises one Windows notification per version, and a dot on *About* stays while the
+  version raises one Windows notification per version, and a dot on *About* and on the settings gear stays while the
   update is available.
 - Without a click on *Check now* or the automatic check switched on, the app makes no network
   request at all. The service never uses the network. See the privacy section of

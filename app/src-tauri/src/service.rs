@@ -454,7 +454,6 @@ impl ServiceShell {
 
     /// The frame data the link receives (protocol v4): the same feed before
     /// and after [`Self::spawn_link`], empty until the service sends some.
-    #[expect(dead_code, reason = "read by the frame diagnostics (M7b task B11)")]
     pub(crate) fn frames_feed(&self) -> oma_win::svc::FramesFeed {
         self.frames.clone()
     }
@@ -466,7 +465,6 @@ impl ServiceShell {
     /// after [`Self::shutdown`] there is no link and the command is dropped,
     /// so call it once the link is spawned; the link itself remembers the
     /// last frame configuration and target across reconnections.
-    #[expect(dead_code, reason = "used by the frame diagnostics (M7b task B11)")]
     pub(crate) fn link_commands(&self) -> Box<dyn Fn(oma_win::svc::LinkCommand) + Send + Sync> {
         let link = Arc::clone(&self.link);
         Box::new(move |command| send_to_link(&link, command))

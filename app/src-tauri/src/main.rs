@@ -7,6 +7,8 @@ mod i18n;
 mod interval;
 mod log;
 mod notifier;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod overlay;
 mod report;
 mod rules;
 mod service;
@@ -51,6 +53,11 @@ fn generation_changed(last: &mut u64, generation: u64) -> bool {
 
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
+
+/// Owns the frame diagnostics (`OMA_FRAMES_DEBUG`), if they run, so they are
+/// stopped on exit.
+#[cfg(windows)]
+struct FramesGuard(Mutex<Option<overlay::frames::FramesDiagnostics>>);
 
 /// What a second launch asks of the running instance.
 #[derive(Debug, PartialEq, Eq)]
@@ -343,7 +350,16 @@ fn main() {
             // being built, so it never probes, starts or connects to the
             // service (final review M2).
             #[cfg(windows)]
-            app.state::<ServiceShell>().spawn_link(svc_feed, svc_drives);
+            {
+                let shell = app.state::<ServiceShell>();
+                shell.spawn_link(svc_feed, svc_drives);
+                // Only with `OMA_FRAMES_DEBUG` set; otherwise nothing starts.
+                if let Some(frames) =
+                    overlay::frames::start_if_requested(shell.link_commands(), shell.frames_feed())
+                {
+                    app.manage(FramesGuard(Mutex::new(Some(frames))));
+                }
+            }
             // From here on, `rules` drives the rule engine; the stored rules
             // are installed now, before the first tick.
             rules::install_rules(app.state::<Arc<SettingsStore>>().inner(), engine.clone());
@@ -501,6 +517,18 @@ fn main() {
                     .take()
                 {
                     sampler.stop();
+                }
+            }
+            // Before the link goes away; joins a thread that only waits.
+            #[cfg(windows)]
+            if let Some(guard) = app.try_state::<FramesGuard>() {
+                if let Some(frames) = guard
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                {
+                    frames.stop();
                 }
             }
             // No tick is running any more: stop the CSV log (bounded, L6).

@@ -32,8 +32,9 @@ passi 1-5 qui sotto servono per quando la Foundation risponde.
    - indica il repository `https://github.com/Cioscos/OpenMonitorAdvanced` e le release 0.1.0 e
      0.2.0 già pubblicate;
    - dichiara con trasparenza il packaging: servizio .NET self-contained con
-     LibreHardwareMonitorLib, driver PawnIO (firmato dal suo autore, che noi non firmiamo) e
-     installer/uninstaller generati da NSIS con i suoi plugin. L'ammissibilità del packaging va
+     LibreHardwareMonitorLib, driver PawnIO (firmato dal suo autore, che noi non firmiamo),
+     console PresentMon 2.6.0 (firmata da Intel, ridistribuita senza modifiche e non firmata da
+     noi) e installer/uninstaller generati da NSIS con i suoi plugin. L'ammissibilità del packaging va
      confermata dalla Foundation, non data per scontata;
    - linka `CODE_SIGNING.md` come pagina "Code signing policy".
 4. L'ammissione è discrezionale. Finché non arriva, nei README e nelle note non va scritta nessuna

@@ -47,6 +47,12 @@ signature, or the lack of one, of their authors:
 
 - `PawnIO_setup.exe`, the installer of the [PawnIO](https://pawnio.eu/) driver, bundled
   unchanged and checked against a pinned SHA-256 at build time;
+- `PresentMon-2.6.0-x64.exe`, Intel's [PresentMon](https://github.com/GameTechDev/PresentMon)
+  console from the official v2.6.0 release, which we redistribute unchanged next to the service
+  (`service\presentmon\`). It is signed by Intel Corporation, not by us: the build accepts it
+  only with the pinned SHA-256 (`app/src-tauri/nsis/presentmon.sha256`) and a valid Authenticode
+  signature by Intel, the release verification checks both again in the setup, and the service
+  checks the hash before every start;
 - the NSIS plugin DLLs (`nsExec.dll`, `NSISdl.dll`, `System.dll`, ...), which stay unsigned.
 
 ## How to verify a signature
@@ -90,6 +96,14 @@ describing it.
 - **PawnIO is bundled, not downloaded.** `PawnIO_setup.exe` is inside our installer. It is installed
   only if you keep the *Advanced sensors* component selected. For the driver's own policies see
   [pawnio.eu](https://pawnio.eu/).
+- **PresentMon is bundled, not downloaded.** `PresentMon-2.6.0-x64.exe` is inside our installer
+  and installed with the *Advanced sensors* component. The service starts it only while the app
+  asks for frame metrics and reads its output over a local pipe; no frame data is written to disk
+  (only PresentMon's error output goes, truncated, to the service log) and the frame data go only
+  to the app. Measuring PC latency, which is never on unless you ask for it,
+  makes games with Reflex send themselves a ping (a window message or F13–F15 key presses): see
+  the README, "Frame metrics". For PresentMon's own documentation see its
+  [repository](https://github.com/GameTechDev/PresentMon).
 
 **Update check (optional).** The app can check whether a newer release exists. It does so only
 when you press *Check now* in Settings › About, or once a day if you turn on *Check automatically*

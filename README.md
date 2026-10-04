@@ -172,6 +172,43 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   installer and then points at a program that is gone: remove it in *Settings › Apps › Startup*
   (or turn the option off before uninstalling).
 
+## Frame metrics (preview)
+
+The Advanced sensors component also installs Intel's
+[PresentMon](https://github.com/GameTechDev/PresentMon) 2.6.0 console, unmodified and signed by
+Intel, next to the service. The service runs it to read the frame times of the game in the
+foreground: displayed and rendered FPS, frametimes, 1% and 0.1% lows, stutter, latency. They are
+meant for an in-game overlay, which is still being built.
+
+- **Off unless asked.** PresentMon runs only while the app asks for frame metrics. In this
+  version only a diagnostic switch does: set the environment variable `OMA_FRAMES_DEBUG` to `1`,
+  `pcl` or `all` before starting the app, and it writes one `frames:` line per second to its log
+  in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`. PresentMon traces through its own ETW session,
+  `OpenMonitorAdvanced-Frames`, and never stops the sessions of other tools.
+- **The game is not touched.** No handle on the game's process, no reads of its memory, no input
+  sent to it. The service checks PresentMon's SHA-256 before every start and refuses a modified
+  copy.
+- **PC latency is not entirely passive.** Measuring PC latency (`pcl` or `all`) turns on
+  NVIDIA's PCL Stats events. A game that supports Reflex then starts a ping every 100–300 ms
+  while it is in the foreground: a window message to its own window or, if the game is set up
+  that way, synthesized F13–F15 key presses. This is how NVIDIA designed it (FrameView and
+  PresentMon rely on it) and it is harmless, but a program that reacts to F13–F15 may see those
+  keys. It is never on unless you ask for it.
+- **Known limits.**
+  - Frame generation: with PC latency on, the rendered FPS are known for DLSS FG, FSR FG and
+    NVIDIA Smooth Motion in games with Reflex, and for Intel XeSS-FG and AMD AFMF from the
+    driver. Without Reflex, or with PC latency off, FSR FG and Smooth Motion cannot be told
+    apart from real frames: DLSS FG and Smooth Motion then show *FG?* instead of a number, FSR
+    FG only the displayed FPS.
+  - G-Sync/FreeSync: a visible overlay window may make Windows compose the game instead of
+    using independent flip, on hardware without a free MPO plane. On an RTX 4080 it did not:
+    independent flip and G-Sync stayed on with the window visible, empty or hidden.
+  - Exclusive fullscreen: the overlay will not be visible over a game in true exclusive
+    fullscreen; the measurement works.
+  - Anti-cheat: some anti-cheat systems refuse the ETW session if it starts after the game
+    (turn the frame metrics on before starting the game), and some block external windows too.
+  - HDR: the overlay content is SDR, composed by the desktop window manager.
+
 ## Update check
 
 The app can tell you when a newer release is out. In *Settings › About*, **Check now** asks
@@ -254,9 +291,11 @@ cd app
 pnpm tauri build --bundles nsis
 ```
 
-The payload script publishes `oma-service` (self-contained, trimmed, single file, win-x64) and
+The payload script publishes `oma-service` (self-contained, trimmed, single file, win-x64),
 downloads the official PawnIO 2.2.0 setup, checked against the SHA-256 in
-`app/src-tauri/nsis/pawnio.sha256`. PawnIO is never committed to this repository. The installer
+`app/src-tauri/nsis/pawnio.sha256`, and the official PresentMon 2.6.0 console, checked against
+`app/src-tauri/nsis/presentmon.sha256` and Intel's signature. Neither is ever committed to this
+repository. The installer
 ends up in `target/release/bundle/nsis/`.
 
 ## Project layout
@@ -270,6 +309,7 @@ ends up in `target/release/bundle/nsis/`.
 | `app/src` | Svelte 5 + TypeScript UI, English and Italian translations |
 | `service/` | `oma-service`, a .NET 10 Windows service built on LibreHardwareMonitorLib, with its tests |
 | `protocol/fixtures/` | Reference MessagePack messages shared by the Rust and .NET protocol tests |
+| `testdata/presentmon/` | Anonymised PresentMon CSV captures used by the frame-metric tests |
 | `docs/` | Design spec, milestone plans and performance budget (in Italian) |
 | `scripts/` | Installer payload, footprint measurement and other build scripts |
 

@@ -228,6 +228,20 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
+## Manual checks after M7b
+
+Owed: the live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-motore-frame.md`, Task B12 step 8, spec M7 §13.2), never run by an agent. An agent builds the setup (`pwsh scripts/build-installer-payload.ps1`, then `cd app && pnpm tauri build --bundles nsis`) and prints its path; the user installs it, quits the app from the tray, starts it again from a PowerShell with `$env:OMA_FRAMES_DEBUG='pcl'` (or `1`, or `all`) and plays, while the agent reads the `frames:` lines in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs` (format in `app/src-tauri/src/overlay/frames.rs`). Results go to the plan («Esito dell'esecuzione») and here.
+
+- V1: a game without frame generation: displayed FPS within 5 % of the Steam overlay.
+- V2: DLSS FG with and without PCL (`pcl` against `1`): with PCL `source=Reflex` and `mult` about 2; without PCL `source=FG?`.
+- V3: FSR FG with PCL (`mult` about 2) and without PCL (displayed FPS only).
+- V4: NVIDIA Smooth Motion with and without PCL.
+- V5: alt-tab out of the game and back: the target holds for 3 s, then drops; back in the game, it is followed again.
+- V6: `scripts/measure-footprint.ps1 -Service` with the frame engine on and no game: PresentMon plus the service's extra work under 0.5 % of the total CPU (spec M7 §11, `docs/perf-budget.md`).
+- V7: restart the service from `services.msc` with the app open: after the reconnection the `frames:` lines resume by themselves.
+
+Also owed with that setup: the installer's PresentMon paths in a VM or Windows Sandbox (`service\presentmon\PresentMon-2.6.0-x64.exe` installed and protected, removed on deselection and uninstall, `logman stop OpenMonitorAdvanced-Frames -ets` run by the uninstaller), and `scripts/verify-signatures.ps1 -Policy none` on the new setup (exactly one PresentMon, Intel signature).
+
 ## Manual checks after M7a
 
 The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are done (2026-10-04, published 0.4.1 setup, SHA-256 `d45c2eda...465c`, all passed):

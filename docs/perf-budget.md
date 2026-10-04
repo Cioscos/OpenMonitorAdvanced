@@ -291,6 +291,30 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
+## M7 — motore dei frame e overlay (spec M7 §11)
+
+Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con
+`scripts/measure-footprint.ps1 -Service`, che dalla M7b riporta anche il
+processo PresentMon figlio del servizio (`PresentMonCpuPercent`,
+`PresentMonPrivateBytesMB`, oppure `PresentMonValid = False` con il motivo
+`not running` quando il servizio non lo ha avviato). Il lavoro in più del
+servizio è la differenza fra `ServiceCorePercentCpu` con il motore acceso e
+quella con il motore spento.
+
+| Stato | Limite | Punto di partenza (spike M7b, SD9) |
+|---|---|---|
+| Overlay spento | nessun processo in più, costo invariato | PresentMon non gira |
+| Overlay acceso, nessun gioco | PresentMon + `oma-overlay` < 0,5% della CPU totale; `oma-overlay` < 40 MB privati | PresentMon 0,006–0,023% sul desktop, 5–6,5 MB privati |
+| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
+| Editor aperto | come la finestra principale (< 200 MB con WebView2) | — |
+
+Le cifre dello spike vengono da `flush-probe` (60 s, 16 processori logici;
+dettagli in `docs/superpowers/references/m7/spike-findings.md`, S2), non dal
+servizio. La misura sul servizio installato, con il motore acceso e senza
+gioco (PresentMon più il lavoro del servizio sotto lo 0,5%), è la verifica dal
+vivo V6 della M7b, ancora da eseguire (`docs/follow-ups.md`). `oma-overlay`
+arriva con la M7c.
+
 ## M6c measurement details
 
 Measured 2026-10-04 on the development machine (16 logical processors,

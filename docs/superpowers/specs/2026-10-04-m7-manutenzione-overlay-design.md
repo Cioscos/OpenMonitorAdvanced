@@ -211,7 +211,7 @@ Da quali colonne del CSV derivano i campi (SD3), senza altri campi:
 |---|---|
 | `qpc` | `TimeInQPC` |
 | `swapchain` | `SwapChainAddress` |
-| `frame_type` | `FrameType`: `Application` → `app`, `Intel XeSS-FG` → `generated_intel_xefg`, `AMD AFMF` → `generated_amd_afmf`, altro testo → `generated_other`, colonna assente → `unknown` |
+| `frame_type` | `FrameType`: `Application` → `app`, `Intel XeSS-FG` → `generated_intel_xefg`, `AMD AFMF` → `generated_amd_afmf`, `Unknown`, `NA` o vuoto → `unknown`, altro testo → `generated_other`, colonna assente → `unknown` |
 | `displayed` | `MsBetweenDisplayChange` numerico |
 | `ms_between_presents` | `MsBetweenPresents` |
 | `ms_between_display_change` | `MsBetweenDisplayChange` |

@@ -110,6 +110,9 @@ public sealed class PresentMonCsvTests
     [InlineData("Intel XeSS-FG", "generated_intel_xefg")]
     [InlineData("AMD AFMF", "generated_amd_afmf")]
     [InlineData("NVIDIA DLSS-FG", "generated_other")]
+    [InlineData("Unknown", "unknown")]
+    [InlineData("NA", "unknown")]
+    [InlineData("", "unknown")]
     public void MapsFrameTypes(string text, string expected)
     {
         var csv = ReadyParser();

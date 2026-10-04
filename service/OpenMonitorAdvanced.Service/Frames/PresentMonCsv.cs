@@ -170,9 +170,11 @@ internal sealed class PresentMonCsv
         return ulong.TryParse(span, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out result);
     }
 
+    // PresentMon 2.6.0 writes Application, Intel XeSS-FG, AMD AFMF or Unknown; an absent column, NA,
+    // empty or Unknown must stay "unknown" so rendered FPS never takes the frame-type path on a guess.
     private static string MapFrameType(string? text) => text switch
     {
-        null => "unknown",
+        null or "" or "NA" or "Unknown" => "unknown",
         "Application" => "app",
         "Intel XeSS-FG" => "generated_intel_xefg",
         "AMD AFMF" => "generated_amd_afmf",

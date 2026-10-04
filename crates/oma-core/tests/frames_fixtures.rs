@@ -10,7 +10,7 @@ use oma_core::frames::{
 };
 
 /// Reads a fixture by column name. Absent column or `NA` gives `None`;
-/// `PCLFrameId` 0 gives `None`; an absent `FrameType` gives `Unknown`.
+/// `PCLFrameId` 0 gives `None`; `FrameType` follows SD3 (see [`frame_kind`]).
 fn load(name: &str) -> Vec<FrameSample> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/presentmon")
@@ -38,10 +38,7 @@ fn load(name: &str) -> Vec<FrameSample> {
                 16,
             )
             .expect("swapchain");
-            let kind = match raw("FrameType") {
-                Some("Application") => FrameKind::App,
-                _ => FrameKind::Unknown,
-            };
+            let kind = frame_kind(raw("FrameType"));
             FrameSample {
                 t_s: qpc / 1e7,
                 swapchain,
@@ -59,6 +56,33 @@ fn load(name: &str) -> Vec<FrameSample> {
             }
         })
         .collect()
+}
+
+/// SD3: the service's `FrameType` mapping, mirrored for the fixtures.
+fn frame_kind(text: Option<&str>) -> FrameKind {
+    match text {
+        None | Some("" | "NA" | "Unknown") => FrameKind::Unknown,
+        Some("Application") => FrameKind::App,
+        Some("Intel XeSS-FG") => FrameKind::GeneratedIntelXefg,
+        Some("AMD AFMF") => FrameKind::GeneratedAmdAfmf,
+        Some(_) => FrameKind::GeneratedOther,
+    }
+}
+
+#[test]
+fn frame_kind_follows_sd3() {
+    for (text, expected) in [
+        (Some("Application"), FrameKind::App),
+        (Some("Intel XeSS-FG"), FrameKind::GeneratedIntelXefg),
+        (Some("AMD AFMF"), FrameKind::GeneratedAmdAfmf),
+        (Some("NVIDIA DLSS-FG"), FrameKind::GeneratedOther),
+        (Some("Unknown"), FrameKind::Unknown),
+        (Some("NA"), FrameKind::Unknown),
+        (Some(""), FrameKind::Unknown),
+        (None, FrameKind::Unknown),
+    ] {
+        assert_eq!(frame_kind(text), expected, "{text:?}");
+    }
 }
 
 fn near(actual: f64, expected: f64, tol: f64, what: &str) {

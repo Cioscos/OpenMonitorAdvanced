@@ -210,11 +210,9 @@ The hand-written part of the 0.4.0 draft release (above the block that `render-r
 
 ## Manual checks owed after M6c
 
-The live checks of Task 13 (spec M6c §8.2, U1-U8, 2026-10-04) are done: the update toast click opening *Settings › About*, *Export sensor report* with a save, a cancelled save dialog (nothing shown) and *Open folder*, and the licence buttons in `pnpm tauri dev`. What they leave open stays here.
+The live checks of Task 13 (spec M6c §8.2, U1-U8, 2026-10-04) are done: the update toast click opening *Settings › About*, *Export sensor report* with a save, a cancelled save dialog (nothing shown) and *Open folder*, and the licence buttons (closed by the user on 2026-10-04: both files open). The first CI run of the "Check third-party licences" step passed on the merge push (run 37209604023, cargo-about installed and cached). What they leave open stays here.
 
 - The WinHTTP TLS 1.2 fallback on a Windows 10 VM (where WinHTTP has no TLS 1.3): *Check now* must still succeed. Not attempted on this PC (Windows 11).
-- The first CI run of the new "Check third-party licences" step (`generate-licenses.ps1 -Check`) on a hosted runner, with the cached cargo-about binary, after the push.
-- The two licence buttons in the installed app (not only in dev) on a VM, started by the user; the setup was only inspected with `7z l` (U8), not run.
 
 ## Manual checks owed after M6b
 

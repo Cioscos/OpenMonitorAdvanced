@@ -55,6 +55,9 @@ Var OmaBase
 ; OMA_RELAUNCH_APP reopens it; "1" in OmaAppClosed after the first call.
 Var OmaAppWasRunning
 Var OmaAppClosed
+; OmaCloseApp: the user's start-with-Windows command (HKCU Run value), read
+; before the old uninstaller can delete it; NSIS_HOOK_POSTINSTALL puts it back.
+Var OmaRunValue
 ; OMA_RUN_AS_USER: scratch for the stack marker.
 Var OmaStack
 
@@ -413,6 +416,24 @@ FunctionEnd
   !insertmacro OMA_CLOSE_APP
 !macroend
 
+; Tauri hook: end of the template's Install section, after the reinstall page
+; ran the old uninstaller (if it did) and after NSIS_HOOK_PREINSTALL. That
+; uninstaller runs without /UPDATE, so it deletes the user's start-with-Windows
+; value: put back the command OmaCloseApp read, unchanged (the app repairs the
+; path at startup if it moved). A value present now is left alone.
+!macro NSIS_HOOK_POSTINSTALL
+  ${If} $OmaRunValue != ""
+    Push $0
+    ClearErrors
+    ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+    ${If} ${Errors}
+      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" "$OmaRunValue"
+    ${EndIf}
+    ClearErrors
+    Pop $0
+  ${EndIf}
+!macroend
+
 ; Closes the running app before its files are replaced (OmaCloseApp, defined in
 ; OMA_SECTIONS). Inserted on the template's reinstall page right before the old
 ; uninstaller runs (line marked OMA) and at the end of NSIS_HOOK_PREINSTALL for
@@ -750,12 +771,14 @@ FunctionEnd
 ; 0 = found, 1 = not found; KillProcess pushes 0 = killed, 1 = some not killed,
 ; 2 = none found; SemverCompare a b pushes 1 (a newer), 0 or -1 (b newer; an
 ; unparsable a counts as older). Preserves $0-$2; never touches $R0-$R6, which
-; the reinstall page relies on.
+; the reinstall page relies on. It also remembers the start-with-Windows value
+; (OmaRunValue): the old uninstaller run from the reinstall page deletes it.
 Function OmaCloseApp
   ${If} $OmaAppClosed == "1"
     Return
   ${EndIf}
   StrCpy $OmaAppClosed "1"
+  ReadRegStr $OmaRunValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
   Push $0
   Push $1
   Push $2
@@ -797,6 +820,7 @@ Function OmaCloseApp
     DetailPrint "Could not close ${PRODUCTNAME}"
   ${EndIf}
   oma_close_done:
+  ClearErrors
   Pop $2
   Pop $1
   Pop $0

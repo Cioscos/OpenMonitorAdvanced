@@ -195,6 +195,7 @@ function block(stmts: string[], start: RegExp, end: RegExp): string[] {
 const indexOf = (stmts: string[], re: RegExp, from = 0) => stmts.findIndex((s, i) => i >= from && re.test(s));
 
 const MARKER_WRITE = /^WriteRegStr HKLM "Software\\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc" /;
+const RUN_RESTORE = /^WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "\$\{PRODUCTNAME\}" "\$OmaRunValue"$/;
 const STOP = /^Call (un\.)?OmaStopService$/;
 const STOP_CHECK = /^\$\{If\} \$OmaResult != "0"$/;
 const HELPER = /^!insertmacro OMA_HELPER "(install|uninstall)"$/;
@@ -303,7 +304,8 @@ describe('oma.nsh failure paths', () => {
 
   it('records the choice only in the bookkeeping section, after the component or its removal', () => {
     const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
-    const writes = all.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s));
+    // The reboot marker and the restored start-with-Windows value are not the choice.
+    const writes = all.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s) && !RUN_RESTORE.test(s));
     expect(writes).toHaveLength(2);
     for (const w of writes) expect(book).toContain(w);
     // Deselected: stop, helper uninstall, then delete; the 0 is written after all of that.
@@ -728,8 +730,50 @@ describe('closing and reopening the app around an upgrade', () => {
     expect(pushes).toEqual(['$0', '$1', '$2']);
     // Every plugin result is popped into $0; the three saved registers come back in reverse order.
     expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
-    expect(fn.slice(-5)).toEqual(['oma_close_done:', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
+    // ClearErrors after the label: a missing DisplayVersion or Run value leaves no error flag behind.
+    expect(fn.slice(-6)).toEqual(['oma_close_done:', 'ClearErrors', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
     expect(fn.join('\n')).not.toMatch(/\$R\d/);
+  });
+
+  const RUN_KEY = String.raw`HKCU "Software\Microsoft\Windows\CurrentVersion\Run" ` + '"${PRODUCTNAME}"';
+
+  it('remembers the start-with-Windows value before the old uninstaller can delete it', () => {
+    expect(nsh).toMatch(/^Var OmaRunValue$/m);
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    // Once (after the idempotence guard), on every path, before anything can stop early.
+    expect(fn[5]).toBe(`ReadRegStr $OmaRunValue ${RUN_KEY}`);
+    expect(all.filter((s) => /^(ReadRegStr|StrCpy|Pop) \$OmaRunValue\b/.test(s))).toEqual([fn[5]]);
+    // The same value the template's uninstaller deletes (same hive, key and name).
+    const tplDelete = tpl.map((l) => l.trim()).filter((l) => /^DeleteRegValue HKCU ".*\\Run" /.test(l));
+    expect(tplDelete).toEqual([`DeleteRegValue ${RUN_KEY}`]);
+  });
+
+  it('puts the start-with-Windows value back after the install if the old uninstaller removed it', () => {
+    const post = block(all, /^!macro NSIS_HOOK_POSTINSTALL$/, /^!macroend$/);
+    expect(post).toEqual([
+      '!macro NSIS_HOOK_POSTINSTALL',
+      '${If} $OmaRunValue != ""',
+      'Push $0',
+      'ClearErrors',
+      `ReadRegStr $0 ${RUN_KEY}`,
+      '${If} ${Errors}',
+      `WriteRegStr ${RUN_KEY} "$OmaRunValue"`,
+      '${EndIf}',
+      'ClearErrors',
+      'Pop $0',
+      '${EndIf}',
+      '!macroend',
+    ]);
+    // The hook runs in the template's Install section, which comes after the
+    // reinstall page (where the old uninstaller runs) and after the pre-install hook.
+    const lines = tpl.map((l) => l.trim());
+    const install = lines.indexOf('Section -Install ; OMA hidden');
+    const hook = lines.indexOf('!insertmacro NSIS_HOOK_POSTINSTALL');
+    const pre = lines.indexOf('!insertmacro NSIS_HOOK_PREINSTALL');
+    expect(install).toBeGreaterThan(lines.indexOf('reinst_uninstall:'));
+    expect(pre).toBeGreaterThan(install);
+    expect(hook).toBeGreaterThan(pre);
+    expect(lines.indexOf('SectionEnd', install)).toBeGreaterThan(hook);
   });
 
   it('keeps the stack balanced whether or not RunAsUser leaves a result on it', () => {

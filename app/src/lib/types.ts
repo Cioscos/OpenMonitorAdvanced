@@ -459,7 +459,7 @@ export interface UpdateStatus {
 }
 
 /** The only places `openKnownPath` opens (never a path the UI chooses). */
-export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'startupAppsSettings';
+export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'thirdPartyLicenses' | 'startupAppsSettings';
 
 /** Overall level of the rules engine; `neutral` when there is nothing to judge yet. */
 export type HealthLevel = 'neutral' | 'ok' | 'warn' | 'crit';

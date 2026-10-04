@@ -142,6 +142,8 @@
         <span class="value">GPL-3.0-or-later</span>
         <button type="button" onclick={() => open('thirdPartyNotices')}>{t('settings.about.thirdParty')}</button>
         {@render failed('thirdPartyNotices')}
+        <button type="button" onclick={() => open('thirdPartyLicenses')}>{t('settings.about.licenseTexts')}</button>
+        {@render failed('thirdPartyLicenses')}
       </dd>
     </div>
     <div class="row">

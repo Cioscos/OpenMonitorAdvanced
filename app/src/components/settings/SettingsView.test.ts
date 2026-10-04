@@ -205,6 +205,18 @@ test('about shows versions and opens known paths', async () => {
   expect(await within(about).findByText(t('settings.openFailed', { reason: backend.openKnownPathError }))).toBeTruthy();
 });
 
+test('licence row has notices and texts buttons', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await settings.connect(backend);
+  const store = new LiveStore();
+  render(SettingsView, { store, backend, service: null, onBack: () => {} });
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.section.about') }));
+  const about = await screen.findByRole('region', { name: t('settings.section.about') });
+  expect(within(about).getByRole('button', { name: t('settings.about.thirdParty') })).toBeTruthy();
+  await fireEvent.click(within(about).getByRole('button', { name: t('settings.about.licenseTexts') }));
+  expect(backend.openKnownPathCalls).toEqual(['thirdPartyLicenses']);
+});
+
 test('about without a service version says so', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   await settings.connect(backend);

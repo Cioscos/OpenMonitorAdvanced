@@ -365,6 +365,8 @@ pub enum KnownPath {
     SettingsFolder,
     LogsFolder,
     ThirdPartyNotices,
+    /// The licence texts of the dependencies, generated into `THIRD_PARTY_LICENSES.txt`.
+    ThirdPartyLicenses,
     /// Windows Settings › Apps › Startup, where Windows keeps the real state
     /// of the start-up entry.
     StartupAppsSettings,
@@ -373,6 +375,8 @@ pub enum KnownPath {
 /// `THIRD_PARTY_NOTICES.md` as the bundle ships it (`bundle.resources` in
 /// tauri.conf.json): renamed to `.txt`, which Windows always knows how to open.
 const THIRD_PARTY_NOTICES: &str = "THIRD_PARTY_NOTICES.txt";
+/// `THIRD_PARTY_LICENSES.txt` as the bundle ships it (same name in the repository root).
+const THIRD_PARTY_LICENSES: &str = "THIRD_PARTY_LICENSES.txt";
 const STARTUP_APPS_SETTINGS: &str = "ms-settings:startupapps";
 
 /// Where the known paths are on this machine.
@@ -408,6 +412,10 @@ impl KnownDirs {
                 .resources
                 .as_ref()
                 .map(|dir| dir.join(THIRD_PARTY_NOTICES)),
+            KnownPath::ThirdPartyLicenses => self
+                .resources
+                .as_ref()
+                .map(|dir| dir.join(THIRD_PARTY_LICENSES)),
             KnownPath::StartupAppsSettings => Some(PathBuf::from(STARTUP_APPS_SETTINGS)),
         }
     }
@@ -937,6 +945,7 @@ mod tests {
             ("\"settingsFolder\"", KnownPath::SettingsFolder),
             ("\"logsFolder\"", KnownPath::LogsFolder),
             ("\"thirdPartyNotices\"", KnownPath::ThirdPartyNotices),
+            ("\"thirdPartyLicenses\"", KnownPath::ThirdPartyLicenses),
             ("\"startupAppsSettings\"", KnownPath::StartupAppsSettings),
         ] {
             assert_eq!(serde_json::from_str::<KnownPath>(json).unwrap(), target);
@@ -984,6 +993,12 @@ mod tests {
             ))
         );
         assert_eq!(
+            dirs.target(KnownPath::ThirdPartyLicenses),
+            Some(PathBuf::from(
+                r"C:\Program Files\OMA\THIRD_PARTY_LICENSES.txt"
+            ))
+        );
+        assert_eq!(
             dirs.target(KnownPath::StartupAppsSettings),
             Some(PathBuf::from("ms-settings:startupapps"))
         );
@@ -995,6 +1010,7 @@ mod tests {
         assert_eq!(none.target(KnownPath::SettingsFolder), None);
         assert_eq!(none.target(KnownPath::LogsFolder), None);
         assert_eq!(none.target(KnownPath::ThirdPartyNotices), None);
+        assert_eq!(none.target(KnownPath::ThirdPartyLicenses), None);
         assert!(none.target(KnownPath::StartupAppsSettings).is_some());
     }
 

@@ -2,8 +2,11 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using OpenMonitorAdvanced.Service.Frames;
 using OpenMonitorAdvanced.Service.Pipe;
 using OpenMonitorAdvanced.Service.Protocol;
+using OpenMonitorAdvanced.Service.Tests.Frames;
 using OpenMonitorAdvanced.Service.Tests.Pipe;
 using OpenMonitorAdvanced.Service.Tests.Sensors;
 using Xunit;
@@ -19,6 +22,7 @@ public sealed class ServiceHostTests
     private static readonly TimeSpan RunTimeout = TimeSpan.FromSeconds(15);
 
     private readonly FakeFeed _feed = new();
+    private readonly FakeEtw _etw = new();
     private readonly ListLoggerProvider _logs = new();
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -48,6 +52,9 @@ public sealed class ServiceHostTests
         Assert.All(_feed.All, s => Assert.Equal(1, s.DisposeCount));
         Assert.Equal(0, _feed.ActiveWhenDisposed);
         Assert.True(disposedBeforeStopped);
+
+        // The frame capture ran on the injected fake ETW control (never the real session).
+        Assert.True(_etw.Stops.Count > 0);
     }
 
     [Fact]
@@ -84,7 +91,8 @@ public sealed class ServiceHostTests
         _logs,
         new PipeListenerOptions { PipeName = pipeName, SecurityDescriptorSddl = null },
         idleAfter,
-        _ => _feed);
+        _ => _feed,
+        _ => new FrameCapture(new FakeFrameSource(), _etw, () => PresentMonPin.Sha256, TimeProvider.System, NullLogger<FrameCapture>.Instance));
 
     private Task<int> RunInBackground(IHost host) =>
         Task.Run(() => ServiceHost.Run(host, _logs.CreateLogger("test")), Ct);

@@ -83,6 +83,13 @@ internal sealed class FramesHub : IDisposable
             subscriber.StatusOwed = !deliver(_capture.Status);
             if (_batchTimer is null)
             {
+                // Frames gathered while nobody was subscribed (a session within its grace) are old:
+                // discard them, so the first batch holds only what arrives from now on.
+                foreach (uint pid in _requests.Targets)
+                {
+                    _ = _aggregator.TakeBatch(pid);
+                }
+
                 _batchTimer = _time.CreateTimer(_ => OnBatchTick(), null, BatchInterval, BatchInterval);
                 _summaryTimer = _time.CreateTimer(_ => OnSummaryTick(), null, SummaryInterval, SummaryInterval);
             }

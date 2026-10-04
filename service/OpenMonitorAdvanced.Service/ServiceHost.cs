@@ -48,7 +48,8 @@ internal static class ServiceHost
         ILoggerProvider fileLogs,
         PipeListenerOptions pipeOptions,
         TimeSpan idleAfter,
-        Func<IServiceProvider, ISensorFeed> feed)
+        Func<IServiceProvider, ISensorFeed> feed,
+        Func<IServiceProvider, FrameCapture> frameCapture)
     {
         HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
         {
@@ -98,12 +99,7 @@ internal static class ServiceHost
 
         // The frame engine: nothing runs until a client asks for frames (the capture's constructor
         // only stops a session left over by a crashed service).
-        builder.Services.AddSingleton(sp => new FrameCapture(
-            new PresentMonProcess(PresentMonPath),
-            new EtwSessionControl(),
-            () => PresentMonPin.HashOf(PresentMonPath),
-            TimeProvider.System,
-            sp.GetRequiredService<ILogger<FrameCapture>>()));
+        builder.Services.AddSingleton(frameCapture);
         builder.Services.AddSingleton(_ => new FrameAggregator(ticksPerSecond: TimeProvider.System.TimestampFrequency));
         builder.Services.AddSingleton(_ => new FrameRequests(TimeProvider.System));
         builder.Services.AddSingleton(sp => new FramesHub(
@@ -148,6 +144,17 @@ internal static class ServiceHost
         var tree = new LhmTree(logs.CreateLogger<LhmTree>());
         return new SensorHub(tree, disks, activity, () => pawnIo.Status == PawnIoStatus.Ok, TimeProvider.System, logs.CreateLogger<SensorHub>());
     }
+
+    /// <summary>
+    /// The production frame capture: the pinned PresentMon and the real ETW session control. Tests
+    /// pass fakes instead, so no test stops the product's live ETW session.
+    /// </summary>
+    internal static FrameCapture CreateFrameCapture(IServiceProvider services) => new(
+        new PresentMonProcess(PresentMonPath),
+        new EtwSessionControl(),
+        () => PresentMonPin.HashOf(PresentMonPath),
+        TimeProvider.System,
+        services.GetRequiredService<ILogger<FrameCapture>>());
 
     /// <summary>
     /// Runs <paramref name="host"/> until it stops and returns the process exit code: 0 for a

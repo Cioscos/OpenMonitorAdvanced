@@ -155,6 +155,32 @@ public sealed class FramesHubTests : IDisposable
     }
 
     [Fact]
+    public void FramesGatheredWithNoSubscriberAreNotDeliveredLater()
+    {
+        // A client asked for PID 10 and left: within its grace the target stays, nobody reads.
+        _hub.OnConfigure(1, On);
+        _hub.OnTarget(1, new FramesTargetMessage(10));
+        _hub.OnDisconnected(1);
+        for (ulong i = 0; i < 600; i++)
+        {
+            _aggregator.Add(Row(10, 100 + i), 0);
+        }
+
+        _time.Advance(TimeSpan.FromSeconds(5));
+
+        // It reconnects as a new session for the same game.
+        var client = Subscribe(2);
+        _hub.OnConfigure(2, On);
+        _hub.OnTarget(2, new FramesTargetMessage(10));
+        _aggregator.Add(Row(10, 5000), 0);
+        _time.Advance(Tick);
+
+        var batch = Assert.Single(client.Of<FrameBatchMessage>());
+        Assert.Equal([5000UL], batch.Frames.Select(f => f.Qpc));
+        Assert.Equal(0u, batch.Dropped);
+    }
+
+    [Fact]
     public async Task StatusChangesAreBroadcast()
     {
         var a = Subscribe(1);

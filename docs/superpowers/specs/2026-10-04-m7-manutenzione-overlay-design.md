@@ -541,7 +541,7 @@ Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,
 - **Font:** solo quelli di sistema, nessun file incluso.
 - **README:**
   - la sezione «Overlay in-game», con cosa misura, come attivarlo e scorciatoie;
-  - i «Known limits»: fullscreen esclusivo, frame generation non distinguibile per FSR e Smooth Motion (salvo esito dello spike), anti-cheat che bloccano anche le finestre, G-Sync con overlay visibile senza MPO, HDR;
+  - i «Known limits»: fullscreen esclusivo, frame generation senza FPS renderizzati soltanto senza Reflex o con PCL spento («FG?» per DLSS FG e Smooth Motion, solo FPS mostrati per FSR FG; §14, SD12), anti-cheat che bloccano anche le finestre, G-Sync con overlay visibile senza MPO, HDR;
   - la nota di privacy su PCL.
 - **`CODE_SIGNING.md`:** PresentMon è un binario firmato Intel che ridistribuiamo; i nuovi eseguibili `oma-overlay.exe` sono nella stessa politica di firma dell'app.
 - **`CLAUDE.md`:**
@@ -592,7 +592,7 @@ Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,
 ## 14. Limiti dichiarati
 
 - **Fullscreen esclusivo vero:** l'overlay non si vede finché non arriva `uiAccess`, dopo la firma. La misura e il benchmark funzionano.
-- **FSR 3/4 FG e Smooth Motion:** gli FPS renderizzati non sono distinguibili solo senza Reflex o con PCL spento (SD12); con PCL e Reflex valgono i marcatori PCL anche per loro e per DLSS FG. Con PCL spento DLSS FG e Smooth Motion mostrano «FG?», FSR FG solo gli FPS mostrati.
+- **FSR 3/4 FG e Smooth Motion:** gli FPS renderizzati sono indistinguibili soltanto senza Reflex o con PCL spento (SD12); con PCL e Reflex valgono i marcatori PCL anche per loro e per DLSS FG. Con PCL spento DLSS FG e Smooth Motion mostrano «FG?», FSR FG solo gli FPS mostrati.
 - **G-Sync/FreeSync e latenza:** mentre l'overlay è visibile, Windows può comporre il gioco invece di usare il flip indipendente; può succedere su hardware senza piani MPO liberi (SD10: su RTX 4080 la finestra, visibile, vuota o nascosta, non toglie né il flip indipendente né G-Sync). Nascondere l'overlay ripristina il flip indipendente.
 - **Anti-cheat che bloccano anche le finestre esterne** (caso noto: Battlefield 6 con FrameView 2.0): si usa l'elenco dei giochi esclusi.
 - **HDR:** il contenuto dell'overlay è SDR composto da DWM.

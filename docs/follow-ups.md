@@ -242,6 +242,8 @@ Owed: the live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-mo
 
 Also owed with that setup: the installer's PresentMon paths in a VM or Windows Sandbox (`service\presentmon\PresentMon-2.6.0-x64.exe` installed and protected, removed on deselection and uninstall, `logman stop OpenMonitorAdvanced-Frames -ets` run by the uninstaller), and `scripts/verify-signatures.ps1 -Policy none` on the new setup (exactly one PresentMon, Intel signature).
 
+Open: after the setup rebuild, extend the real-lister test in `scripts/tests/VerifySignatures.Tests.ps1` ("the default lister reads a real setup") to `service\presentmon\PresentMon-2.6.0-x64.exe`; the setup on disk at the end of B12 predates PresentMon.
+
 ## Manual checks after M7a
 
 The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are done (2026-10-04, published 0.4.1 setup, SHA-256 `d45c2eda...465c`, all passed):

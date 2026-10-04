@@ -197,9 +197,8 @@ meant for an in-game overlay, which is still being built.
 - **Known limits.**
   - Frame generation: with PC latency on, the rendered FPS are known for DLSS FG, FSR FG and
     NVIDIA Smooth Motion in games with Reflex, and for Intel XeSS-FG and AMD AFMF from the
-    driver. Without Reflex, or with PC latency off, FSR FG and Smooth Motion cannot be told
-    apart from real frames: DLSS FG and Smooth Motion then show *FG?* instead of a number, FSR
-    FG only the displayed FPS.
+    driver. Without Reflex, or with PC latency off, the rendered FPS are unknown: DLSS FG and
+    Smooth Motion show *FG?* instead of a number, FSR FG only the displayed FPS.
   - G-Sync/FreeSync: a visible overlay window may make Windows compose the game instead of
     using independent flip, on hardware without a free MPO plane. On an RTX 4080 it did not:
     independent flip and G-Sync stayed on with the window visible, empty or hidden.

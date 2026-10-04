@@ -117,7 +117,7 @@ this redistribution (`docs/follow-ups.md`).
 ## PresentMon
 
 The "Sensori avanzati" installer component redistributes Intel's official
-PresentMon console `PresentMon-2.6.0-x64.exe` 2.6.0 unmodified
+PresentMon console `PresentMon-2.6.0-x64.exe` unmodified
 (https://github.com/GameTechDev/PresentMon/releases/tag/v2.6.0), installed as
 `service\presentmon\PresentMon-2.6.0-x64.exe` next to `oma-service`, which
 starts it to read the frame times of the game in the foreground. The console is
@@ -127,9 +127,9 @@ SHA-256 is pinned in `app/src-tauri/nsis/presentmon.sha256` (checked by
 `scripts/build-installer-payload.ps1`, by the installer build and by the service
 before it starts the console) and its signer in
 `scripts/lib/OmaPresentMonPins.psm1`; the file itself is never committed to this
-repository, only downloaded (or read from a cached, verified copy) at build time. PresentMon is MIT-licensed, "Copyright
-(C) 2017-2024 Intel Corporation"; the console compiles in cereal 1.3.2
-(BSD-3-Clause, Copyright (c) 2013-2022, Randolph Voorhies, Shane Grant). Both
-licence texts are in `THIRD_PARTY_LICENSES.txt`. No PresentMon source is
-included here: the service only reads the CSV the console writes to its
-standard output.
+repository, only downloaded (or read from a cached, verified copy) at build
+time. PresentMon is MIT-licensed, "Copyright (C) 2017-2024 Intel Corporation";
+the console compiles in cereal 1.3.2 (BSD-3-Clause, Copyright (c) 2013-2022,
+Randolph Voorhies, Shane Grant). Both licence texts are in
+`THIRD_PARTY_LICENSES.txt`. No PresentMon source is included here: the service
+only reads the CSV the console writes to its standard output.

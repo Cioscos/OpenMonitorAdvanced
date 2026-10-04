@@ -64,7 +64,9 @@ temperature, tensioni, ventole e dati SMART.
   scorciatoia facoltativa mette in pausa e riprende. Il file è UTF-8 con BOM, separato da
   virgole, con fine riga CRLF: una riga per ogni tick campionato (o ogni 1-60 tick), un
   timestamp locale con lo scarto dall'UTC e una colonna per sensore, chiamata
-  `Dispositivo / Sensore [unità] {id}`. I file vanno in `Documenti\OpenMonitor Advanced\logs`,
+  `Dispositivo / Sensore [unità] {id}`. Una cella è vuota quando il sensore non ha un valore, e
+  contiene la parola `suspended` (uguale in tutte le lingue) mentre una lettura è sospesa perché
+  il disco dorme o è inattivo. I file vanno in `Documenti\OpenMonitor Advanced\logs`,
   salvo un'altra cartella a tua scelta. Una nuova parte (`-part2`, `-part3`, ...) parte quando il file
   raggiunge il limite di dimensione (100 MiB per impostazione predefinita, da 10 a 2048) o
   quando cambiano le colonne: lingua, unità o sensori selezionati. *Impostazioni › Log CSV*
@@ -161,7 +163,8 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   allora tenere sveglio il disco. Un disco collegato con la lettura SMART accesa, che
   LibreHardwareMonitor non riesce a identificare, può essere svegliato ogni volta che si collega
   o si scollega un altro dispositivo. Il throttling termico della CPU non è disponibile con
-  LibreHardwareMonitor 0.9.6, quindi quella regola non ha un sensore. Il critical warning dei dischi c'è solo per gli NVMe. Il
+  LibreHardwareMonitor 0.9.6, quindi quella regola non ha un sensore. Il critical warning dei
+  dischi c'è solo per gli NVMe. Il
   TjMax del processore è noto per le CPU Intel e per i modelli AMD desktop della tabella
   integrata; le altre CPU usano le soglie di ripiego (85/95 °C). Excel con il punto e virgola come
   separatore di elenco (molte impostazioni regionali europee) mostra il log CSV in una sola

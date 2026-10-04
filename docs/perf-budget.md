@@ -322,9 +322,11 @@ Service Private   : 62.5 MB
 
 All budget items are met. The window run is in line with M5c (0.91 to 1.01 %
 on a page with charts): the per-sensor quality and the disk state tags add
-nothing measurable, and the core stays at 0.05 %. The service's disk activity
-gate (counters read with access 0, no command to a resting disk) leaves the
-service at 0.03 to 0.09 % and under 63 MB, below M5c. No limit was widened.
+no visible cost (no control run without them), and the core stays at 0.05 %.
+The service's disk activity gate (counters read with access 0, no command to
+a resting disk) leaves the service at 0.03 to 0.09 % and under 63 MB, in line
+with M5c (0.02 to 0.03 %, 59.2 to 66.6 MB) and well inside its budget. No limit
+was widened.
 
 ## M5c measurement details
 

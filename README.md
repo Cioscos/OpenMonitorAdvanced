@@ -153,8 +153,8 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   by default, because standby behind a USB adapter could not be tested: you can switch them on
   per disk in *Data sources*, but some adapters may then keep the disk awake. A disk plugged in
   while SMART reads are on, that LibreHardwareMonitor cannot identify, may be woken whenever
-  another device is plugged in or removed. CPU thermal throttling is not
-  available from LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
+  another device is plugged in or removed. CPU thermal throttling is not available from
+  LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
   warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
   with a semicolon as the list separator (many European locales) shows the CSV log in one column:

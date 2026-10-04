@@ -8,7 +8,7 @@
 //! with `-` for a value that is not available:
 //!
 //! ```text
-//! frames: target=game.exe pid=4242 state=running fps=143.8 rendered=72.1 source=Reflex mult=1.99 low1=98.4 low01=61.0 ft_ms=6.95 stutter=2 stutter_pct=0.41 pc_lat_ms=31.2 disp_lat_ms=8.1 bottleneck=gpu dropped=0
+//! frames: target=game.exe pid=4242 state=running detail=- fps=143.8 rendered=72.1 source=Reflex mult=1.99 low1=98.4 low01=61.0 ft_ms=6.95 stutter=2 stutter_pct=0.41 pc_lat_ms=31.2 disp_lat_ms=8.1 bottleneck=gpu dropped=0
 //! ```
 //!
 //! - `fps`, `rendered`, `mult`, `ft_ms` (mean displayed frametime), `pc_lat_ms`
@@ -18,8 +18,13 @@
 //! - `source` is the rendered-FPS origin (`Reflex`, `XeSS-FG`, `AFMF`, `FG`),
 //!   or `FG?` when frame generation is only suspected (then `rendered=-`).
 //! - `state` is the service's frame-engine state; an unknown one is `failed`.
+//!   `detail` is the status's detail (for example why it failed), as one
+//!   token.
 //! - `bottleneck` is `-` unless `all` turned GPU tracking on.
-//! - `dropped` is the running total of frames the service left out.
+//! - `dropped` is the running total of frames the service left out, summed
+//!   over every batch received (whatever its process).
+//! - The windows are anchored on the newest frame, not on the clock: while
+//!   no new frames arrive, the line repeats the last figures.
 
 use std::fmt::Write as _;
 
@@ -141,6 +146,7 @@ pub(crate) struct Diagnostics {
     window: FrameWindow,
     qpc_frequency: u64,
     state: String,
+    detail: String,
     dropped: u64,
     last_report_ms: u64,
 }
@@ -157,6 +163,7 @@ impl Diagnostics {
             window: FrameWindow::new(LOWS_WINDOW_S),
             qpc_frequency,
             state: "-".to_owned(),
+            detail: "-".to_owned(),
             dropped: 0,
             last_report_ms: 0,
         }
@@ -196,6 +203,9 @@ impl Diagnostics {
             self.window.clear();
         }
         self.state = state_label(status).to_owned();
+        self.detail = status
+            .and_then(|s| s.detail.as_deref())
+            .map_or_else(|| "-".to_owned(), token);
         for batch in batches {
             self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
             // A batch of the previous target may still arrive after a change.
@@ -264,10 +274,11 @@ impl Diagnostics {
         let mut line = String::from("frames:");
         let _ = write!(
             line,
-            " target={} pid={} state={}",
+            " target={} pid={} state={} detail={}",
             current.map_or_else(|| "-".to_owned(), |p| token(&p.name)),
             current.map_or_else(|| "-".to_owned(), |p| p.pid.to_string()),
             self.state,
+            self.detail,
         );
         let _ = write!(
             line,
@@ -513,7 +524,7 @@ mod tests {
         let line = step.report.expect("a line after one second");
         assert_eq!(
             line,
-            "frames: target=- pid=- state=- fps=- rendered=- source=- mult=- low1=- low01=- \
+            "frames: target=- pid=- state=- detail=- fps=- rendered=- source=- mult=- low1=- low01=- \
              ft_ms=- stutter=- stutter_pct=- pc_lat_ms=- disp_lat_ms=- bottleneck=- dropped=0"
         );
     }
@@ -530,10 +541,16 @@ mod tests {
         );
         assert_eq!(first.target_changed, Some(Some(GAME)));
         assert_eq!(first.report, None);
+        // Another process's frames, distinguishable: they would pull the
+        // displayed FPS far from 100 if they reached the window.
+        let mut foreign = batch(999, 5.0, 50, 2);
+        for frame in &mut foreign.frames {
+            frame.ms_between_display_change = Some(50.0);
+        }
         let step = d.step(
             Some(&status("running")),
             Some(&processes()),
-            &[batch(GAME, 5.0, 101, 3), batch(999, 5.0, 50, 2)],
+            &[batch(GAME, 5.0, 101, 3), foreign],
             Some(GAME),
             1_000,
         );
@@ -562,6 +579,14 @@ mod tests {
             .report
             .unwrap();
         assert_eq!(field(&line, "state"), "failed");
+        assert_eq!(field(&line, "detail"), "-");
+        let mut with_detail = status("failed");
+        with_detail.detail = Some("bad columns".to_owned());
+        let line = d
+            .step(Some(&with_detail), None, &[], None, 2_000)
+            .report
+            .unwrap();
+        assert_eq!(field(&line, "detail"), "bad_columns");
     }
 
     #[test]

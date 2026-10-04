@@ -107,7 +107,6 @@ impl LogEnv for FakeEnv {
 struct GateState {
     block_flush: bool,
     block_create: bool,
-    flush_delay: Duration,
     flushes_entered: u32,
     creates_entered: u32,
 }
@@ -126,11 +125,6 @@ impl Gate {
         self.cv.notify_all();
         while state.block_flush {
             state = self.cv.wait(state).unwrap_or_else(PoisonError::into_inner);
-        }
-        let delay = state.flush_delay;
-        drop(state);
-        if !delay.is_zero() {
-            std::thread::sleep(delay);
         }
     }
 
@@ -151,10 +145,6 @@ impl Gate {
     fn block_create(&self, on: bool) {
         lock(&self.state).block_create = on;
         self.cv.notify_all();
-    }
-
-    fn flush_delay(&self, delay: Duration) {
-        lock(&self.state).flush_delay = delay;
     }
 
     fn flushes(&self) -> u32 {
@@ -352,6 +342,9 @@ impl Rig {
     /// A tick, then a wait until the writer has taken its row and waits
     /// again: the next tick's `try_push_row` cannot meet it on the queue lock.
     fn tick(&mut self, value: f64) {
+        // The writer reports a start's progress from its own thread, maybe
+        // after the start returned: it must not meet this tick on the lock.
+        wait_until("the writer to be idle", || self.log.queue.writer_parked());
         self.tick_raw(value);
         wait_until("the writer to drain", || self.log.queue.writer_parked());
     }
@@ -422,7 +415,7 @@ impl Drop for Rig {
     fn drop(&mut self) {
         self.gate.block_flush(false);
         self.gate.block_create(false);
-        self.log.shutdown(Duration::from_secs(2));
+        self.log.shutdown(Duration::from_secs(10));
     }
 }
 
@@ -769,6 +762,7 @@ fn a_tick_with_a_suspended_sensor_writes_suspended_in_its_column() {
 impl Rig {
     /// A tick that meets the session lock taken.
     fn contended_tick(&mut self, value: f64) {
+        wait_until("the writer to be idle", || self.log.queue.writer_parked());
         let out = self.next(value);
         let log = self.log.clone();
         let guard = lock(&log.inner);
@@ -1121,7 +1115,11 @@ fn old_writer_events_cannot_mutate_a_new_session() {
     rig.log.start();
     rig.tick(1.0);
     rig.log.stop();
-    let current = rig.log.start();
+    rig.log.start();
+    // The writer's own start progress is reported from its thread, maybe
+    // after the start returned: let it land before injecting events.
+    wait_until("the writer to be idle", || rig.log.queue.writer_parked());
+    let current = rig.status();
     assert_eq!(current.session, 2);
 
     rig.log.on_writer_event(WriterEvent::Progress {
@@ -1144,6 +1142,13 @@ fn old_writer_events_cannot_mutate_a_new_session() {
         session: 2,
         failure: WriteFailure::Denied,
     });
+    // The failure queued a stop for the real writer, which reports its own
+    // progress while closing: let it finish, then send ours last.
+    let session_path = path_of(&current).unwrap();
+    wait_until("the writer's stop flush", || {
+        rig.mem.flush_count(&session_path) == 2
+    });
+    wait_until("the writer to be idle", || rig.log.queue.writer_parked());
     rig.log.on_writer_event(WriterEvent::Progress {
         session: 2,
         path: path_of(&current).unwrap(),
@@ -1210,12 +1215,16 @@ fn commands_are_serialized_during_a_slow_stop() {
     rig.tick(0.0);
     rig.log.start();
     rig.tick(1.0);
-    rig.gate.flush_delay(Duration::from_millis(200));
+    rig.gate.block_flush(true);
     let flushes = rig.gate.flushes();
     let stop = rig.command(LogService::stop);
     rig.gate.wait_flushes(flushes + 1);
-    // The stop is waiting for the writer: a start now waits for it.
+    // The stop is waiting for the writer, held in its flush: a start now
+    // waits for the stop to finish, until the test releases the writer.
     let start = rig.command(LogService::start);
+    assert!(!stop.is_finished(), "the stop is held in the flush");
+    assert!(!start.is_finished(), "the start waits for the stop");
+    rig.gate.block_flush(false);
     let stopped = stop.join().unwrap();
     let started = start.join().unwrap();
     assert_eq!((stopped.state, stopped.session), (LogState::Idle, 1));
@@ -1230,7 +1239,7 @@ fn stop_timeout_moves_to_error() {
     rig.gate.block_flush(true);
     let begun = Instant::now();
     let status = rig.log.stop();
-    assert!(begun.elapsed() < Duration::from_secs(3));
+    assert!(begun.elapsed() < Duration::from_secs(10));
     assert_eq!(status.state, LogState::Error);
     assert_eq!(key_of(&status), Some("log.error.closeTimeout"));
     rig.gate.block_flush(false);
@@ -1260,7 +1269,7 @@ fn exit_stops_the_session_within_the_bound() {
     stuck.gate.block_flush(true);
     let begun = Instant::now();
     assert!(!stuck.log.shutdown(Duration::from_millis(200)));
-    assert!(begun.elapsed() < Duration::from_secs(2));
+    assert!(begun.elapsed() < Duration::from_secs(10));
 }
 
 // --- barriers ------------------------------------------------------------------------

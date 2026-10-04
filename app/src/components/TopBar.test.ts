@@ -1,6 +1,9 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { MOCK_SCHEMA } from '../lib/backend/mock';
+import { updates } from '../lib/updates.svelte';
+import { FakeBackend } from '../test/fake-backend';
 import { i18n, t } from '../lib/i18n/index.svelte';
-import type { ServiceState, ServiceStatus } from '../lib/types';
+import type { ServiceState, ServiceStatus, UpdateStatus } from '../lib/types';
 import TopBar from './TopBar.svelte';
 
 beforeEach(() => {
@@ -141,4 +144,47 @@ test('the badge of a non-connected state keeps its basic-mode text without a Paw
   setup({ state: 'unreachable', detail: null, pawnIo: 'missing', sources: null });
   expect(screen.getByText(t('service.baseMode'))).toBeTruthy();
   expect(screen.queryByText(t('settings.sources.pawnIo.missing'))).toBeNull();
+});
+
+describe('update dot on the gear', () => {
+  const UPDATE = () => t('settings.about.updateBadge');
+  let off: (() => void) | undefined;
+  afterEach(() => {
+    off?.();
+    off = undefined;
+  });
+
+  async function connect(initial: UpdateStatus) {
+    const backend = new FakeBackend(MOCK_SCHEMA);
+    backend.updateStatus = initial;
+    off = await updates.connect(backend);
+    return backend;
+  }
+  const upd = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({ state: 'idle', current: '0.4.0', latest: null, checkedAtMs: null, error: null, ...over });
+  const gear = () => screen.getByRole('button', { name: new RegExp(t('settings.title')) });
+
+  test('no dot and no text without a newer version', async () => {
+    await connect(upd({ state: 'upToDate' }));
+    setup(null);
+    expect(screen.queryByText(UPDATE())).toBeNull();
+    expect(gear().querySelector('.dot')).toBeNull();
+  });
+
+  test('dot and accessible text with a newer version, also after an error', async () => {
+    await connect(upd({ state: 'error', error: 'offline', latest: { version: '0.5.0' } }));
+    setup(null);
+    expect(screen.getByText(UPDATE())).toBeTruthy();
+    expect(gear().getAttribute('aria-label')).toBeNull();
+    expect(gear().querySelector('.dot')?.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.getByRole('button', { name: `${t('settings.title')} ${UPDATE()}` })).toBeTruthy();
+  });
+
+  test('the dot appears after an update-status event', async () => {
+    const backend = await connect(upd());
+    setup(null);
+    expect(screen.queryByText(UPDATE())).toBeNull();
+    backend.emitUpdateStatus(upd({ state: 'available', latest: { version: '0.5.0' } }));
+    expect(await screen.findByText(UPDATE())).toBeTruthy();
+    expect(gear().querySelector('.dot')).not.toBeNull();
+  });
 });

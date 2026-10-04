@@ -936,6 +936,7 @@ Eseguito tra il 2026-10-02 e il 2026-10-04 in modalità subagent-driven sul bran
 | V7, budget | Finestra 0,92 % (7 processi; nucleo 0,05 %), 166,9 MB; tray 0,05 %, 18,2 MB; servizio 0,03-0,09 %, 57,1-62,5 MB. **Superata** (`docs/perf-budget.md`, M6b). |
 | V9, HDD «Inattivo», anti-cheat acceso e spento | Avviso della modalità base, tag «Inattivo», 35 °C «Ultima lettura», righe del solo servizio rimosse; al ritorno del servizio una sola riga «Temperatura», lettura fresca al primo giro dell'episodio (R11), nessun nuovo allarme. **Superata.** I «—» visti una volta in min/max/media subito dopo la riconnessione erano il transitorio delle revisioni dello schema: verificato a parte, chiuso. |
 | Verifica completa su `4608bed` più la correzione del commento di `SensorHub.cs` | `cargo fmt --check` e `cargo clippy -D warnings` puliti; `cargo test --workspace` 1063 superati, 0 falliti; `dotnet test` 532 superati; `check-trim-warnings.ps1` OK; Vitest 630 superati in 44 file; `svelte-check` 0 errori e 0 avvisi; `pnpm build` riuscita; `cargo test -p oma-win -- --include-ignored` (esclusi `reads_disk_temperatures_on_this_machine` e `records_this_machine_schema`) 511 superati, 0 falliti. |
+| Test hardware dell'utente (2026-10-04, dopo le prove di standby, HDD svegliato con un accesso a `D:`) | `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored`: superato (1 test, 0,04 s). |
 | Pulizia | `crates/oma-win/examples/m6b_wake.rs` archiviato in `target/spike/m6b/` e rimosso, mai committato; grafo aggiornato. |
 | Merge e release | Revisione dell'intero branch e chiusura del branch a cura del controller. La release 0.4.0 (D6) segue `docs/release.md` dopo il merge, su richiesta dell'utente. |
 
@@ -955,6 +956,5 @@ Eseguito tra il 2026-10-02 e il 2026-10-04 in modalità subagent-driven sul bran
 
 **Non verificato:**
 
-- `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored`, da eseguire dall'utente con i dischi svegli dopo le prove di standby: **dovuto**.
 - Un hard disk USB dietro un bridge (manca l'hardware), le verifiche suggerite dalla revisione finale (SSD senza sensore locale con il servizio, HDD che alterna attivo e inattivo con un grafico della CPU aperto, sospensione e ripresa con un HDD quieto), l'hot-plug di un disco con lo storage acceso: in `docs/follow-ups.md`, «Manual checks owed after M6b».
 - Limiti dichiarati (spec §8 e quelli emersi dal vivo, tra cui l'HDD addormentato all'avvio del servizio che tiene chiuso il gate per tutti i dischi): «Limits declared in M6b» in `docs/follow-ups.md` e «Known limits» nei README. La segnalazione a DiskInfoToolkit è in bozza nello stesso file e si pubblica solo su richiesta dell'utente.

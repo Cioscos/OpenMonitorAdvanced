@@ -158,7 +158,6 @@ To be published on `github.com/Blacktempel/DiskInfoToolkit` **only on the user's
 
 ## Manual checks owed after M6b
 
-- The user's hardware test with the disks awake, after the standby checks: `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored` (agents never run it). Owed.
 - A hard disk behind a USB bridge (no such hardware): standby with the SMART switch off (default) and on; the bridge's answer to SAT `CHECK POWER MODE`.
 - With the service connected, from the final review: an SSD or NVMe without a local temperature sensor keeps its main temperature (I1); an HDD going active and idle while a CPU chart is on screen shows no dropout of the service sensors (I2); the first service measure of an HDD (it costs a full storage rediscovery in the core).
 - PC suspend and resume with a quiet HDD and the service connected: SMART values come back after the resume without waiting for the disk to work (I3, covered by tests only).

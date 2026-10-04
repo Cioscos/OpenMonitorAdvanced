@@ -163,9 +163,10 @@ export function mockValues(t: number): (number | null)[] {
 /** The mock never starts in GPU safe mode. */
 export const MOCK_STARTUP: StartupStatus = { safeMode: false, reason: null, crashModule: null };
 
-/** Same cap as the core (`MAX_HISTORY_SECONDS`): one hour at 1 s. */
+/** The mock's update check never ran. */
 const MOCK_UPDATE_STATUS: UpdateStatus = { state: 'idle', current: '0.1.0', latest: null, checkedAtMs: null, error: null };
 
+/** Same cap as the core (`MAX_HISTORY_SECONDS`): one hour at 1 s. */
 export const MOCK_HISTORY_SECONDS = 3600;
 
 /** Plausible processes on the mock GPU at tick `t`, unsorted. */

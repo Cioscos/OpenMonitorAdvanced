@@ -166,10 +166,13 @@
             aria-describedby="about-updates-note"
             onchange={(event) => {
               const box = event.currentTarget;
-              void settings.update({ updates: { checkAutomatically: box.checked } }).then(() => {
-                // The box shows the state in effect, never a guess.
-                box.checked = settings.state?.settings.updates.checkAutomatically ?? false;
-              });
+              void settings
+                .update({ updates: { checkAutomatically: box.checked } })
+                .catch((error: unknown) => console.error('settings update failed', error))
+                .finally(() => {
+                  // The box shows the state in effect, never a guess, even after a failure.
+                  box.checked = settings.state?.settings.updates.checkAutomatically ?? false;
+                });
             }}
           />
           {t('settings.about.checkAutomatically')}

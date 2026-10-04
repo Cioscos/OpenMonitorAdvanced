@@ -165,7 +165,7 @@
   "settings.about.protocol": "Protocol version",
   "settings.about.license": "License",
   "settings.about.thirdParty": "Third-party notices",
-  "settings.about.licenseTexts": "Licence texts",
+  "settings.about.licenseTexts": "License texts",
   "settings.about.settingsFolder": "Settings folder",
   "settings.about.logsFolder": "Logs folder",
   "settings.about.openFolder": "Open folder",

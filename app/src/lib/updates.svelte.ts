@@ -10,6 +10,8 @@ class UpdatesStore {
   #backend: Backend | null = null;
   /** Bumped by every `connect` and disconnect, so a superseded connection's late callbacks are dropped. */
   #generation = 0;
+  /** Bumped by every status event, so a check reply older than an event is dropped. */
+  #events = 0;
 
   /** Subscribes before reading, so a change in between is not lost. */
   async connect(backend: Backend): Promise<Unsubscribe> {
@@ -28,7 +30,10 @@ class UpdatesStore {
     };
     try {
       off = await backend.onUpdateStatus((next) => {
-        if (this.#generation === generation) this.state = next;
+        if (this.#generation === generation) {
+          this.#events++;
+          this.state = next;
+        }
       });
       const current = await backend.getUpdateStatus();
       // An event that arrived during the read is newer than the read.
@@ -40,14 +45,19 @@ class UpdatesStore {
     return stop;
   }
 
-  /** Runs a check now. A rejection (the background task panicked) keeps what was known and reports an invalid response. */
+  /**
+   * Runs a check now. The reply is dropped when a status event arrived meanwhile: the shell emits the
+   * result of every check, so the event is at least as new. A rejection (the background task panicked)
+   * keeps what was known and reports an invalid response.
+   */
   async check(): Promise<void> {
     const backend = this.#backend;
     if (backend === null || this.state?.state === 'checking') return;
     const generation = this.#generation;
+    const events = this.#events;
     try {
       const reply = await backend.checkUpdates();
-      if (this.#generation === generation) this.state = reply;
+      if (this.#generation === generation && this.#events === events) this.state = reply;
     } catch (error) {
       console.error('update check failed', error);
       if (this.#generation !== generation) return;

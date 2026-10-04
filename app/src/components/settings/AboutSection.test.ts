@@ -105,6 +105,20 @@ test('checkbox patches updates.checkAutomatically and shows the note', async () 
   await vi.waitFor(() => expect(box.checked).toBe(true));
 });
 
+test('a rejected settings update resets the checkbox to the state in effect', async () => {
+  const backend = await setup();
+  const spy = vi.spyOn(settings, 'update').mockRejectedValueOnce(new Error('gone'));
+  try {
+    render(AboutSection, { backend });
+    const box = screen.getByRole('checkbox', { name: t('settings.about.checkAutomatically') }) as HTMLInputElement;
+    await fireEvent.click(box);
+    expect(spy).toHaveBeenCalledWith({ updates: { checkAutomatically: true } });
+    await vi.waitFor(() => expect(box.checked).toBe(false));
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 test('checkbox is disabled when the settings are read-only', async () => {
   const backend = await setup(status(), { kind: 'readOnly', reason: 'locked' });
   render(AboutSection, { backend });

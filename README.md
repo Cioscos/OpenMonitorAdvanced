@@ -160,6 +160,9 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
   with a semicolon as the list separator (many European locales) shows the CSV log in one column:
   open it with *Data* → *From Text/CSV* and choose the comma.
+  The *Start with Windows* entry of a standard user survives an uninstall of the per-machine
+  installer and then points at a program that is gone: remove it in *Settings › Apps › Startup*
+  (or turn the option off before uninstalling).
 
 ## Update check
 

@@ -29,8 +29,18 @@ pub trait StartupEntry: Send + Sync {
     fn configured(&self) -> io::Result<bool>;
     /// Creates (`true`) or removes (`false`) the entry.
     fn set(&self, on: bool) -> io::Result<()>;
+    /// Rewrites the entry when it points at another executable than this one
+    /// (the app was reinstalled elsewhere). `true` when it rewrote.
+    fn repair(&self) -> io::Result<bool>;
     /// Whether Windows will start the entry.
     fn effective(&self) -> Effective;
+}
+
+/// Whether a stored `Run` command is out of date: there is one, and it differs
+/// from the command for this executable (ASCII case aside, as Windows paths).
+#[cfg(any(windows, test))]
+fn needs_repair(stored: Option<&str>, expected: &str) -> bool {
+    stored.is_some_and(|stored| !stored.eq_ignore_ascii_case(expected))
 }
 
 /// What the Settings screen shows about the start-up entry.
@@ -59,7 +69,27 @@ impl Autostart {
     /// The listener may run on the settings writer thread: it compares the new
     /// value with the last one acted on and, only on a change, makes one quick
     /// registry call. It never waits for the store.
+    ///
+    /// A stale entry is repaired once first, in release builds only: a
+    /// development build runs from `target\debug`, and repairing would point
+    /// the user's start-up entry at it.
     pub fn follow(store: &Arc<SettingsStore>, entry: Arc<dyn StartupEntry>) -> Arc<Self> {
+        Self::follow_with(store, entry, !cfg!(debug_assertions))
+    }
+
+    /// [`Self::follow`] with the repair switch explicit, so tests can drive both ways.
+    fn follow_with(
+        store: &Arc<SettingsStore>,
+        entry: Arc<dyn StartupEntry>,
+        repair_enabled: bool,
+    ) -> Arc<Self> {
+        if repair_enabled {
+            match entry.repair() {
+                Ok(true) => tracing::info!("repaired the start-with-Windows path"),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(%err, "cannot repair the start-with-Windows path"),
+            }
+        }
         let autostart = Arc::new(Self {
             store: Arc::clone(store),
             entry,
@@ -169,6 +199,17 @@ impl StartupEntry for RunEntry {
         }
     }
 
+    fn repair(&self) -> io::Result<bool> {
+        let stored = self.key.read()?;
+        let expected = oma_win::autostart::command_line(&self.exe);
+        if needs_repair(stored.as_deref(), &expected) {
+            self.key.write(&self.exe)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn effective(&self) -> Effective {
         self.key.effective()
     }
@@ -197,6 +238,10 @@ impl StartupEntry for Unsupported {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
+    fn repair(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
     fn effective(&self) -> Effective {
         Effective::NotConfigured
     }
@@ -219,6 +264,11 @@ mod tests {
         on: Mutex<bool>,
         fail: AtomicBool,
         calls: Mutex<Vec<bool>>,
+        /// The stored path is out of date, so `repair` rewrites it.
+        stale: AtomicBool,
+        repair_fails: AtomicBool,
+        /// `"repair"` / `"set"` in call order.
+        order: Mutex<Vec<&'static str>>,
     }
 
     impl FakeEntry {
@@ -229,6 +279,10 @@ mod tests {
         fn calls(&self) -> Vec<bool> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn order(&self) -> Vec<&'static str> {
+            self.order.lock().unwrap().clone()
+        }
     }
 
     impl StartupEntry for FakeEntry {
@@ -238,11 +292,20 @@ mod tests {
 
         fn set(&self, on: bool) -> io::Result<()> {
             self.calls.lock().unwrap().push(on);
+            self.order.lock().unwrap().push("set");
             if self.fail.load(Ordering::SeqCst) {
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
             }
             *self.on.lock().unwrap() = on;
             Ok(())
+        }
+
+        fn repair(&self) -> io::Result<bool> {
+            self.order.lock().unwrap().push("repair");
+            if self.repair_fails.load(Ordering::SeqCst) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            Ok(self.stale.swap(false, Ordering::SeqCst))
         }
 
         fn effective(&self) -> Effective {
@@ -354,5 +417,72 @@ mod tests {
         let reading = autostart.refresh();
         assert!(!reading.configured);
         assert_eq!(store.state().revision, revision);
+    }
+
+    #[test]
+    fn needs_repair_only_for_a_stale_path() {
+        let expected = r#""C:\Program Files\OpenMonitor Advanced\oma-app.exe" --minimized"#;
+        assert!(!needs_repair(None, expected));
+        assert!(!needs_repair(Some(expected), expected));
+        assert!(!needs_repair(Some(&expected.to_lowercase()), expected));
+        assert!(needs_repair(
+            Some(r#""D:\Old\oma-app.exe" --minimized"#),
+            expected
+        ));
+    }
+
+    fn stale_rig(repair: bool) -> (Arc<SettingsStore>, Arc<FakeEntry>) {
+        let store = Arc::new(open_fast(&FakeFs::new()));
+        let entry = Arc::new(FakeEntry::default());
+        entry.stale.store(true, Ordering::SeqCst);
+        let _ = Autostart::follow_with(&store, entry.clone(), repair);
+        (store, entry)
+    }
+
+    #[test]
+    fn follow_repairs_a_stale_entry_once_at_startup() {
+        let (store, entry) = stale_rig(true);
+        assert_eq!(entry.order(), vec!["repair"], "once, and no set() yet");
+        assert!(
+            !entry.stale.load(Ordering::SeqCst),
+            "the path was rewritten"
+        );
+
+        // Later changes follow the setting and never repair again.
+        store.update_with(|s| s.tray.autostart = true);
+        assert_eq!(entry.order(), vec!["repair", "set"]);
+    }
+
+    #[test]
+    fn a_failed_repair_is_logged_and_changes_nothing_else() {
+        let store = Arc::new(open_fast(&FakeFs::new()));
+        let entry = Arc::new(FakeEntry::default());
+        entry.repair_fails.store(true, Ordering::SeqCst);
+        let revision = store.state().revision;
+
+        let _ = Autostart::follow_with(&store, entry.clone(), true);
+
+        assert_eq!(entry.order(), vec!["repair"]);
+        assert!(entry.calls().is_empty(), "no set() call");
+        assert!(!store.settings().tray.autostart, "setting unchanged");
+        assert_eq!(store.state().revision, revision);
+        assert_eq!(status(&store), EffectStatus::Idle);
+    }
+
+    #[test]
+    fn repair_is_never_called_when_disabled() {
+        // Debug builds run from target\debug: repairing would point the
+        // user's autostart at the development executable.
+        let (_store, entry) = stale_rig(false);
+        assert!(entry.order().is_empty());
+        assert!(entry.stale.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn follow_enables_repair_only_in_release_builds() {
+        let store = Arc::new(open_fast(&FakeFs::new()));
+        let entry = Arc::new(FakeEntry::default());
+        let _ = Autostart::follow(&store, entry.clone());
+        assert_eq!(entry.order().len(), usize::from(!cfg!(debug_assertions)));
     }
 }

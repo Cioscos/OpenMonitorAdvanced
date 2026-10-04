@@ -7,7 +7,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::GetLastError;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
@@ -53,15 +52,24 @@ fn outcome(code: isize) -> Result<(), OpenError> {
 }
 
 /// The error of a `ShellExecuteExW` that returned FALSE: the `hInstApp` code
-/// when it carries one (it also names the `SE_ERR_*` cases), else `GetLastError`.
-fn failure(hinst_app: isize, last_error: u32) -> Result<(), OpenError> {
+/// when it carries one (it also names the `SE_ERR_*` cases), else the HRESULT
+/// windows-rs reported, with a Win32-facility one turned back into its Win32
+/// code. A zero code names no cause and becomes a plain failure.
+fn failure(hinst_app: isize, hresult: i32) -> Result<(), OpenError> {
     if (1..=32).contains(&hinst_app) {
-        outcome(hinst_app)
-    } else {
-        Err(OpenError::Os(io::Error::from_raw_os_error(
-            last_error as i32,
-        )))
+        return outcome(hinst_app);
     }
+    let bits = hresult as u32;
+    let code = if bits & 0xFFFF_0000 == 0x8007_0000 {
+        (bits & 0xFFFF) as i32
+    } else {
+        hresult
+    };
+    Err(OpenError::Os(if code == 0 {
+        io::Error::other("ShellExecuteExW failed")
+    } else {
+        io::Error::from_raw_os_error(code)
+    }))
 }
 
 /// The caller's side of the hand-off: the shell thread's answer, or `TimedOut`.
@@ -98,11 +106,7 @@ fn shell_execute(file: &[u16]) -> Result<(), OpenError> {
     let result = unsafe { ShellExecuteExW(&mut info) };
     let outcome = match result {
         Ok(()) => Ok(()),
-        Err(_) => {
-            // SAFETY: reads the calling thread's last error, right after the failed call.
-            let last_error = unsafe { GetLastError() }.0;
-            failure(info.hInstApp.0 as isize, last_error)
-        }
+        Err(err) => failure(info.hInstApp.0 as isize, err.code().0),
     };
     if com.is_ok() {
         // SAFETY: balances the successful `CoInitializeEx` above.
@@ -167,15 +171,31 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_prefers_the_legacy_code_and_falls_back_to_the_last_error() {
-        let Err(OpenError::Os(err)) = failure(2, 5) else {
+    fn a_failure_prefers_the_legacy_code_and_falls_back_to_the_error_code() {
+        // HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED), as windows-rs reports it.
+        let access_denied = 0x8007_0005_u32 as i32;
+        let Err(OpenError::Os(err)) = failure(2, access_denied) else {
             panic!("expected an OS error");
         };
         assert_eq!(err.raw_os_error(), Some(2));
-        let Err(OpenError::Os(err)) = failure(0, 5) else {
+        let Err(OpenError::Os(err)) = failure(0, access_denied) else {
             panic!("expected an OS error");
         };
-        assert_eq!(err.raw_os_error(), Some(5));
+        assert_eq!(err.raw_os_error(), Some(5), "Win32 facility: the low word");
+    }
+
+    #[test]
+    fn a_failure_keeps_other_hresults_and_never_reports_success_as_the_cause() {
+        let e_fail = 0x8000_4005_u32 as i32;
+        let Err(OpenError::Os(err)) = failure(0, e_fail) else {
+            panic!("expected an OS error");
+        };
+        assert_eq!(err.raw_os_error(), Some(e_fail));
+        let Err(OpenError::Os(err)) = failure(0, 0) else {
+            panic!("expected an OS error");
+        };
+        assert_eq!(err.raw_os_error(), None);
+        assert_eq!(err.to_string(), "ShellExecuteExW failed");
     }
 
     #[test]

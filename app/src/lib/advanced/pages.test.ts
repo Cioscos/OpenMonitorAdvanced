@@ -229,6 +229,13 @@ test('default series per kind', () => {
   expect(defaultSeries('battery', MOCK_SCHEMA, ['none'])).toEqual([]);
 });
 
+test('adapterType is shown translated', () => {
+  const device = { id: NIC, kind: 'network' as const, name: 'Wi-Fi', properties: { adapterType: 'wifi' } };
+  const rows = propertyRows(device, 'it', (k) => translate('it', k));
+  expect(rows).toEqual([{ key: 'adapterType', label: 'Tipo di adattatore', value: 'Wi-Fi' }]);
+  expect(propertyRows({ ...device, properties: { adapterType: 'ethernet' } }, 'en', tEn).map((r) => [r.label, r.value])).toEqual([['Adapter type', 'Ethernet']]);
+});
+
 test('device properties are translated, formatted and ordered', () => {
   const rows = propertyRows(
     {

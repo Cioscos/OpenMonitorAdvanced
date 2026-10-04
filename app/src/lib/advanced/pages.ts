@@ -231,6 +231,7 @@ export function defaultSeries(kind: DeviceKind, schema: Schema, deviceIds: strin
 
 /** Display order of the static device properties; unknown keys follow alphabetically. */
 export const PROPERTY_ORDER = [
+  'adapterType',
   'pciAddress',
   'integrated',
   'pcieMaxGen',
@@ -289,7 +290,9 @@ export function propertyRows(device: Device, locale: string, t: Translate): Prop
       const format = PROPERTY_FORMATS[key];
       const number = Number(raw);
       let value = raw;
+      const valueKey = `property.${key}.${raw}`;
       if (key === 'integrated') value = t(raw === 'true' ? 'advanced.info.yes' : 'advanced.info.no');
+      else if (key === 'adapterType' && valueKey in catalogs.en) value = t(valueKey);
       else if (format && raw.trim() !== '' && Number.isFinite(number)) {
         value = format === 'number' ? new Intl.NumberFormat(locale).format(number) : formatValue(number, format, locale, t);
       }

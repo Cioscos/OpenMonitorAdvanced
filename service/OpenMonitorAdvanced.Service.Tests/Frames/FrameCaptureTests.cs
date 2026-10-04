@@ -31,13 +31,14 @@ public sealed class FrameCaptureTests : IDisposable
     private readonly Channel<FramesStatusMessage> _statuses = Channel.CreateUnbounded<FramesStatusMessage>();
     private readonly Channel<TimeSpan> _retries = Channel.CreateUnbounded<TimeSpan>();
     private string? _hash = PresentMonPin.Sha256;
+    private Func<string?>? _hashOverride;
     private FrameCapture? _capture;
 
     public void Dispose() => _capture?.Dispose();
 
     private FrameCapture NewCapture()
     {
-        _capture = new FrameCapture(_source, _etw, () => _hash, _time, NullLogger<FrameCapture>.Instance);
+        _capture = new FrameCapture(_source, _etw, () => _hashOverride is { } f ? f() : _hash, _time, NullLogger<FrameCapture>.Instance);
         _capture.StatusChanged += s => _statuses.Writer.TryWrite(s);
         _capture.RetryScheduled += d => _retries.Writer.TryWrite(d);
         return _capture;
@@ -278,6 +279,59 @@ public sealed class FrameCaptureTests : IDisposable
         _source.ThrowOnStart = null;
         _time.Advance(TimeSpan.FromSeconds(1));
         await _source.RunAsync(0);
+    }
+
+    [Fact]
+    public async Task HashFailureCountsAsACrash()
+    {
+        int calls = 0;
+        _hashOverride = () => ++calls == 1 ? throw new System.Security.Cryptography.CryptographicException("boom") : _hash;
+        var capture = NewCapture();
+
+        capture.Configure(Plain);
+
+        Assert.Equal(Starting, await NextStatusAsync());
+        Assert.Equal(TimeSpan.FromSeconds(1), await NextRetryAsync());
+        _time.Advance(TimeSpan.FromSeconds(1));
+        (await _source.RunAsync(0)).WriteLine(Header);
+        Assert.Equal(Running, await NextStatusAsync());
+    }
+
+    [Fact]
+    public async Task RowsBufferedFromAStoppedRunAreNotRaised()
+    {
+        _source.KeepStdoutOpenOnDispose = true;
+        var capture = NewCapture();
+        var rows = new List<uint>();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        capture.RowParsed += (row, _) =>
+        {
+            lock (rows)
+            {
+                rows.Add(row.Pid);
+            }
+
+            entered.Set();
+            release.Wait(FramesWait.Limit);
+        };
+        var run = await StartRunningAsync(capture, Plain);
+
+        // The reader is held inside the handler of the first row while a second one waits in the buffer.
+        run.WriteLine(Row);
+        Assert.True(entered.Wait(FramesWait.Limit, TestContext.Current.CancellationToken));
+        run.WriteLine(Row.Replace(",4242,", ",4343,"));
+        capture.Configure(null);
+        Assert.Equal(Off, await NextStatusAsync());
+        Assert.True(run.IsDisposed);
+
+        release.Set();
+        await run.ExitedAwaited.WaitForAsync(1);
+
+        lock (rows)
+        {
+            Assert.Equal([4242u], rows);
+        }
     }
 
     [Fact]

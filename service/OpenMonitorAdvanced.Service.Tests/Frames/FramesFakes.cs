@@ -74,13 +74,30 @@ internal sealed class FakeRun : IPresentMonRun
     private readonly TaskCompletionSource<PresentMonExit> _exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _disposed;
 
-    public FakeRun(IReadOnlyList<string> arguments) => Arguments = arguments;
+    public FakeRun(IReadOnlyList<string> arguments, bool keepStdoutOpenOnDispose = false)
+    {
+        Arguments = arguments;
+        KeepStdoutOpenOnDispose = keepStdoutOpenOnDispose;
+    }
 
     public IReadOnlyList<string> Arguments { get; }
 
+    /// <summary>Like stdout lines still buffered after the kill: <see cref="Dispose"/> ends the process but not stdout.</summary>
+    public bool KeepStdoutOpenOnDispose { get; }
+
+    /// <summary>Counts reads of <see cref="Exited"/>: the reader only awaits it once it stopped reading stdout.</summary>
+    public CountSignal ExitedAwaited { get; } = new();
+
     public ChannelReader<string> StdoutLines => _lines.Reader;
 
-    public Task<PresentMonExit> Exited => _exit.Task;
+    public Task<PresentMonExit> Exited
+    {
+        get
+        {
+            ExitedAwaited.Increment();
+            return _exit.Task;
+        }
+    }
 
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
@@ -98,7 +115,14 @@ internal sealed class FakeRun : IPresentMonRun
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            Exit(1);
+            if (KeepStdoutOpenOnDispose)
+            {
+                _exit.TrySetResult(new PresentMonExit(1, []));
+            }
+            else
+            {
+                Exit(1);
+            }
         }
     }
 }
@@ -110,6 +134,9 @@ internal sealed class FakeFrameSource : IFrameSource
     private readonly List<FakeRun> _runs = [];
 
     public CountSignal Starts { get; } = new();
+
+    /// <summary>New runs keep stdout open when disposed (see <see cref="FakeRun.KeepStdoutOpenOnDispose"/>).</summary>
+    public bool KeepStdoutOpenOnDispose { get; set; }
 
     /// <summary>When set, <see cref="Start"/> throws it instead of starting (not counted in <see cref="Starts"/>).</summary>
     public Exception? ThrowOnStart { get; set; }
@@ -132,7 +159,7 @@ internal sealed class FakeFrameSource : IFrameSource
             throw ex;
         }
 
-        var run = new FakeRun(arguments);
+        var run = new FakeRun(arguments, KeepStdoutOpenOnDispose);
         lock (_gate)
         {
             _runs.Add(run);

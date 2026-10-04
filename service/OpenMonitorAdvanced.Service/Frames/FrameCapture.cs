@@ -74,10 +74,18 @@ internal sealed class FrameCapture : IDisposable
         _worker = Task.Run(WorkAsync);
     }
 
-    /// <summary>Raised on the worker thread at every status change.</summary>
+    /// <summary>
+    /// Raised on the worker thread at every status change. A handler must not call
+    /// <see cref="Dispose"/>: that waits for the worker, which is the thread running the handler.
+    /// </summary>
     public event Action<FramesStatusMessage>? StatusChanged;
 
-    /// <summary>Raised on the reading thread for each parsed row, with the arrival time from <see cref="TimeProvider.GetTimestamp"/>.</summary>
+    /// <summary>
+    /// Raised on the reading thread for each parsed row of the current run, with the arrival time
+    /// from <see cref="TimeProvider.GetTimestamp"/>. Rows still buffered when a run is stopped are
+    /// dropped (at most a row already being raised can finish). A handler that throws ends the
+    /// reading: the run is killed and handled as a crash.
+    /// </summary>
     public event Action<PresentMonRow, long>? RowParsed;
 
     /// <summary>Raised on the worker thread once a retry is armed, with its wait (test seam).</summary>
@@ -205,9 +213,9 @@ internal sealed class FrameCapture : IDisposable
         {
             hash = _currentHash();
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e)
         {
-            _log.LogWarning(e, "PresentMon: cannot read the executable");
+            _log.LogWarning(e, "PresentMon: cannot hash the executable");
             OnCrash(runningSince: null);
             return;
         }
@@ -240,41 +248,58 @@ internal sealed class FrameCapture : IDisposable
         }
 
         long id = ++_lastRunId;
-        _active = new ActiveRun(id, run);
+        var active = new ActiveRun(id, run);
+        _active = active;
         _log.LogInformation("PresentMon {Version} started (run {Run})", PresentMonPin.Version, id);
-        _ = Task.Run(() => ReadAsync(id, run));
+        _ = Task.Run(() => ReadAsync(id, run, active.Stopped.Token));
     }
 
-    /// <summary>Reader of one run: header, then rows; posts the header outcome and the exit to the worker.</summary>
-    private async Task ReadAsync(long id, IPresentMonRun run)
+    /// <summary>
+    /// Reader of one run: header, then rows; posts the header outcome and the exit to the worker.
+    /// <paramref name="stopped"/> is cancelled when the worker drops the run, so lines still
+    /// buffered from it are never raised.
+    /// </summary>
+    private async Task ReadAsync(long id, IPresentMonRun run, CancellationToken stopped)
     {
         var csv = new PresentMonCsv();
         try
         {
             bool header = false;
-            await foreach (string line in run.StdoutLines.ReadAllAsync().ConfigureAwait(false))
+            try
             {
-                if (header)
+                await foreach (string line in run.StdoutLines.ReadAllAsync(stopped).ConfigureAwait(false))
                 {
-                    if (csv.ParseRow(line) is { } row)
+                    if (stopped.IsCancellationRequested)
                     {
-                        RowParsed?.Invoke(row, _time.GetTimestamp());
+                        break;
                     }
 
-                    continue;
-                }
+                    if (header)
+                    {
+                        if (csv.ParseRow(line) is { } row)
+                        {
+                            RowParsed?.Invoke(row, _time.GetTimestamp());
+                        }
 
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
+                        continue;
+                    }
 
-                header = csv.TryReadHeader(line, out string? missing);
-                Post(new HeaderCommand(id, missing));
-                if (!header)
-                {
-                    return; // the worker kills the run; nothing more to read
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    header = csv.TryReadHeader(line, out string? missing);
+                    Post(new HeaderCommand(id, missing));
+                    if (!header)
+                    {
+                        return; // the worker kills the run; nothing more to read
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (stopped.IsCancellationRequested)
+            {
+                // The worker dropped this run; its exit is stale and will be ignored.
             }
 
             PresentMonExit exit = await run.Exited.ConfigureAwait(false);
@@ -416,9 +441,12 @@ internal sealed class FrameCapture : IDisposable
         }
 
         _active = null;
+        active.Stopped.Cancel();
         Interlocked.Exchange(ref _flushRun, 0);
         active.FlushTimer?.Dispose();
         active.Run.Dispose();
+
+        // The source is not disposed: the reader may still check its token, and it holds no timer.
     }
 
     private void StopSession()
@@ -457,6 +485,9 @@ internal sealed class FrameCapture : IDisposable
         public DateTimeOffset? RunningSince { get; set; }
 
         public ITimer? FlushTimer { get; set; }
+
+        /// <summary>Cancelled when the worker drops the run: its reader stops raising rows.</summary>
+        public CancellationTokenSource Stopped { get; } = new();
     }
 
     private abstract record Command;

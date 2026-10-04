@@ -68,6 +68,7 @@ const SCHEMA: &[(&str, Node)] = &[
             ("iconSensor", nullable()),
         ]),
     ),
+    ("updates", Node::Object(&[("checkAutomatically", leaf())])),
     (
         "sources",
         Node::Object(&[
@@ -363,6 +364,16 @@ mod tests {
     }
 
     #[test]
+    fn patch_applies_update_checks() {
+        let next = apply_patch(
+            &Settings::default(),
+            &json!({"updates": {"checkAutomatically": true}}),
+        )
+        .unwrap();
+        assert!(next.updates.check_automatically);
+    }
+
+    #[test]
     fn empty_patch_is_a_no_op() {
         let start = everything_changed();
         assert_eq!(apply_patch(&start, &json!({})).unwrap(), start);
@@ -395,6 +406,18 @@ mod tests {
             (
                 json!({"tray": {"closeToTray": null}}),
                 err("tray.closeToTray", "settings.error.null"),
+            ),
+            (
+                json!({"updates": {"nope": 1}}),
+                err("updates.nope", "settings.error.unknownField"),
+            ),
+            (
+                json!({"updates": null}),
+                err("updates", "settings.error.null"),
+            ),
+            (
+                json!({"updates": {"checkAutomatically": null}}),
+                err("updates.checkAutomatically", "settings.error.null"),
             ),
             (
                 json!({"general": null}),

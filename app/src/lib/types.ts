@@ -276,6 +276,9 @@ export interface Settings {
     /** Sensor id, or null for automatic. */
     iconSensor: string | null;
   };
+  updates: {
+    checkAutomatically: boolean;
+  };
   sources: {
     vendorLibraries: { nvml: boolean; nvapi: boolean; adl: boolean; igcl: boolean };
     antiCheat: boolean;

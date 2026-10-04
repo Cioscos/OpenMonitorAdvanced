@@ -135,6 +135,15 @@ pub fn decode_lenient(value: &Value) -> Decoded {
     t.autostart = reader.boolean(&tray, "tray", "autostart", t.autostart);
     t.icon_sensor = reader.text(&tray, "tray", "iconSensor");
 
+    let updates = reader.section(root, "", "updates");
+    let u = &mut settings.updates;
+    u.check_automatically = reader.boolean(
+        &updates,
+        "updates",
+        "checkAutomatically",
+        u.check_automatically,
+    );
+
     let sources = reader.section(root, "", "sources");
     let vendors = reader.section(&sources, "sources", "vendorLibraries");
     let v = &mut settings.sources.vendor_libraries;
@@ -719,6 +728,27 @@ mod tests {
                     kind: DiagnosticKind::WrongType
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn updates_default_off_and_round_trip() {
+        let d = decode(json!({"version": 1}));
+        assert!(!d.settings.updates.check_automatically);
+        assert!(d.diagnostics.is_empty());
+
+        let d = decode(json!({"version": 1, "updates": {"checkAutomatically": true}}));
+        assert!(d.settings.updates.check_automatically);
+        assert!(d.diagnostics.is_empty());
+
+        let d = decode(json!({"version": 1, "updates": {"checkAutomatically": "yes"}}));
+        assert!(!d.settings.updates.check_automatically);
+        assert_eq!(
+            d.diagnostics,
+            vec![Diagnostic {
+                path: "updates.checkAutomatically".into(),
+                kind: DiagnosticKind::WrongType
+            }]
         );
     }
 

@@ -1,0 +1,43 @@
+# cargo-about configuration for scripts/generate-licenses.ps1 (spec M6c §4), which also
+# applies this `accepted` list to the JavaScript and NuGet packages. Only the crates compiled
+# for x86_64-pc-windows-msvc into the workspace binaries count: no dev or build dependencies.
+#
+# `accepted` is a priority list: for "MIT OR Apache-2.0" cargo-about picks the first one listed.
+# Each entry is a licence actually chosen for at least one shipped dependency (census of
+# 2026-10-04); all are permissive or weak-copyleft and compatible with GPL-3.0-or-later. A
+# licence missing from the list makes the generation fail: review it before adding it here.
+accepted = [
+    # Permissive; the most common crate licence; also MessagePack, Microsoft.Extensions.*,
+    # System.*, Mono.Posix.NETStandard, svelte, clsx, uplot, @tauri-apps/api.
+    "MIT",
+    # Permissive with a patent grant, compatible with GPL-3.0 (not with GPL-2.0): dpi, tao,
+    # dunce; HidSharp.
+    "Apache-2.0",
+    # Permissive: alloc-no-stdlib, alloc-stdlib, brotli.
+    "BSD-3-Clause",
+    # Permissive: foldhash.
+    "Zlib",
+    # Permissive Unicode data licence: icu_*, zerovec, yoke, litemap, unicode-ident data.
+    "Unicode-3.0",
+    # File-level weak copyleft, GPL-compatible through its Secondary Licence clause (§3.3):
+    # cssparser, selectors, dtoa-short, option-ext; LibreHardwareMonitorLib, BlackSharp.Core,
+    # DiskInfoToolkit, RAMSPDToolkit-NDD. Sources of these packages are public and unmodified.
+    "MPL-2.0",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+
+# Our own workspace crates: GPL-3.0-or-later, accepted only for them. The script leaves them
+# out of THIRD_PARTY_LICENSES.txt.
+[oma-app]
+accepted = ["GPL-3.0-or-later"]
+
+[oma-core]
+accepted = ["GPL-3.0-or-later"]
+
+[oma-ipc]
+accepted = ["GPL-3.0-or-later"]
+
+[oma-win]
+accepted = ["GPL-3.0-or-later"]

@@ -1,0 +1,8 @@
+{{!--
+  cargo-about template for scripts/generate-licenses.ps1: a reduced JSON document (licence
+  id, text and the crates that use it), with no local paths. The script renders the final
+  THIRD_PARTY_LICENSES.txt together with the JavaScript and NuGet sections.
+--}}
+[{{#each licenses}}{{#unless @first}},{{/unless}}
+{"id":{{json id}},"name":{{json name}},"text":{{json text}},"used_by":[{{#each used_by}}{{#unless @first}},{{/unless}}{"name":{{json crate.name}},"version":{{json crate.version}},"license":{{json crate.license}}}{{/each}}]}{{/each}}
+]

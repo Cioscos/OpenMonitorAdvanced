@@ -11,6 +11,7 @@ use oma_ipc::DriveState;
 use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::{BusTypeUsb, GetDiskFreeSpaceExW};
 
+use crate::memory::used_pct;
 use crate::pdh::{Counter, Query};
 pub use crate::storage_gate::DiskPower;
 use crate::storage_gate::{
@@ -108,10 +109,6 @@ pub(crate) fn disk_name(disk: &DiskInstance) -> String {
 
 pub(crate) fn active_pct(idle: f64) -> Option<f64> {
     idle.is_finite().then(|| (100.0 - idle).clamp(0.0, 100.0))
-}
-
-pub(crate) fn used_pct(total: u64, free: u64) -> Option<f64> {
-    (total > 0).then(|| total.saturating_sub(free) as f64 * 100.0 / total as f64)
 }
 
 /// `(total, free)` bytes of a volume such as "C:"; `None` if unavailable.
@@ -513,12 +510,6 @@ mod tests {
         assert!((active_pct(99.9).unwrap() - 0.1).abs() < 1e-9);
         assert_eq!(active_pct(120.0), Some(0.0));
         assert_eq!(active_pct(f64::NAN), None);
-    }
-
-    #[test]
-    fn volume_usage() {
-        assert_eq!(used_pct(200, 50), Some(75.0));
-        assert_eq!(used_pct(0, 0), None);
     }
 
     #[test]

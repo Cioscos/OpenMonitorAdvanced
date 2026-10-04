@@ -10,7 +10,7 @@ Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplif
 
 - `crates/oma-core`: modello dati, scheduler/worker, merge per fonte, storico. Niente codice Windows.
 - `crates/oma-win`: provider Windows (PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete). Tutto il codice specifico di Windows sta qui.
-  - `storage/` (modulo: `disk_gate`, `tables`, `temperatures`) e `svc/link/` (`machine`, `transport`, driver e test) sono moduli divisi dalla M7a, senza cambi di comportamento.
+  - `storage/` (modulo: `disk_gate`, `tables`, `temperatures`) e `svc/link/` (`machine`, `transport` e i test, con il driver in `link/mod.rs`) sono moduli divisi dalla M7a, senza cambi di comportamento.
 - `crates/oma-ipc`: tipi del protocollo, codifica MessagePack e framing verso `oma-service`; portabile, senza codice Windows.
 - `app/src-tauri` (crate `oma-app`): shell Tauri 2.11 (comandi, tray, finestra, modalità sicura).
 - `app/src-tauri/nsis`: template NSIS proprio (`installer.nsi`, copiato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5 e modificato solo sulle righe marcate `; OMA`), i nostri hook e le sezioni dei sensori avanzati in `oma.nsh`, i testi italiani dell'installer in `Italian.nsh` (copia corretta di quello di Tauri, da confrontare a ogni aggiornamento di tauri-cli), e lo SHA-256 fissato di PawnIO (`pawnio.sha256`).

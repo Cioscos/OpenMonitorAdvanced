@@ -191,14 +191,15 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 >
 > - **The installer closes the app for you.** Running a newer setup over an installed version no longer shows the "product is still running" message. The installer asks the running app to quit, waits up to 10 seconds, forces it closed only if it does not, and starts it again afterwards (with *Run* ticked in the interface, or minimized to the tray in a silent install). The service restarts with the app. Uninstalling from *Settings › Apps* still asks.
 > - Upgrading **from 0.4.0** closes the app by force, because 0.4.0 does not know `--quit`; from 0.4.1 on the app quits in an orderly way. `oma-app.exe --quit` can also be run by hand.
-> - *Start with Windows* repairs itself: if the program moved, the entry is rewritten at the next start.
+> - *Start with Windows* survives the upgrade, also with *Uninstall before installing* chosen in the interface.
+> - *Start with Windows* repairs itself: if the program moved and its old location is gone, the entry is rewritten at the next start. Another copy that still exists, such as a portable one, leaves the entry alone.
 >
 > ### Fixes
 >
-> - **Charts of a disk in standby** keep the y-axis and say "No reading while the device is idle or in standby" instead of showing a blank plot.
+> - **Charts of a disk in standby** keep the y-axis and say "No readings while the device is idle or in standby" instead of showing a blank plot.
 > - **Opening a file or folder** (log folder, licences, report) shows a clear message when it does not exist, and no longer hangs the app if the shell is slow.
 > - **Disk names** no longer carry trailing spaces or control characters in the log and in the sensor list.
-> - The service link no longer queues commands without limit, and shows *Not installed* or *Stopped* after an incompatible version.
+> - The service link no longer queues commands without limit. After an incompatible version, a service that is then uninstalled or stopped is reported as such ("…the OpenMonitor Advanced service, which is not installed" or "The sensor service is not running or not responding.") instead of the version mismatch.
 > - `THIRD_PARTY_LICENSES.txt` now includes the notices of the Microsoft NuGet packages.
 >
 > ### Upgrading
@@ -231,13 +232,13 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 
 The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are owed by the user, with the 0.4.1 setup.
 
-- U1: with 0.4.0 installed and the app in the tray, run the 0.4.1 setup in graphical mode and keep «Uninstall first»: no «running» message; at the end, with «Run» ticked, the app opens and the service starts with it.
+- U1: with 0.4.0 installed, *Start with Windows* on and the app in the tray, run the 0.4.1 setup in graphical mode and keep «Uninstall first»: no «running» message; at the end, with «Run» ticked, the app opens and the service starts with it; the Run value is still there and *Start with Windows* is still on.
 - U2: with 0.4.1 installed and the app in the tray, `setup.exe /S` (same version): no window, no question; the app quits in an orderly way (`--quit`) and returns to the tray (`--minimized`).
 - U3: as U2 with the app closed: the app stays closed.
 - U4: uninstall from Settings › Apps with the app open: the «running» question is still there.
 - U5: delete the log folder, then *Open folder*: «the file or folder does not exist»; the other *About* buttons work.
-- U6: chart of a standby HDD with a 1 min window: the y-axis is visible and the «No reading while the device is idle or in standby» text appears.
-- U7: `oma-app.exe --quit` from a terminal with the app open (it exits), then with the app closed (the process ends without a window). In both cases the Run value and the crash marker stay unchanged.
+- U6: chart of a standby HDD with a 1 min window: the y-axis is visible and the «No readings while the device is idle or in standby» text appears.
+- U7: `oma-app.exe --quit` from a terminal with the app open (it exits), then with the app closed (the process ends without a window). In both cases the Run value and the crash marker stay unchanged. Also: with *Start with Windows* on for the installed app, running `target\release\oma-app.exe` leaves the Run value unchanged.
 
 ## Manual checks owed after M6c
 
@@ -295,16 +296,16 @@ To settle on the first signed run (deferred from the M6a reviews):
 - Split of the large files with no change of behaviour: `storage.rs` into a module directory (`4b88fca`), the service link into machine, transport and driver (`fbee564`), the display-key formatter out of `health.rs` (`7d5a650`, tests `1653e60`), `SensorHub` into partial files with `GateEpisode` in its own file (`0dfdb90`).
 - LibreHardwareMonitor names with trailing spaces and NUL bytes: the service cleans display names before logging and publishing them (`d1508af`).
 - An unknown module name or message `type` echoed unbounded in `bad_request` and in the log: client text is now clipped (`d1508af`).
-- Upgrade over an installed version: the user's decision of 2026-10-04 replaces the ruling of 2026-10-02. The installer no longer asks: it closes the running app by itself (`--quit`, with a forced kill after 10 s, or at once if `DisplayVersion` is unreadable) and reopens it afterwards; from 0.4.0 the app is closed by force, from 0.4.1 in an orderly way (`08daff0`, `12d6445`). Only the upstream report of the malformed placeholders stays open.
+- Upgrade over an installed version: the user's decision of 2026-10-04 replaces the ruling of 2026-10-02. The installer no longer asks: it closes the running app by itself (`--quit`, with a forced kill after 10 s, or at once if `DisplayVersion` is unreadable) and reopens it afterwards; from 0.4.0 the app is closed by force, from 0.4.1 in an orderly way (`08daff0`, `12d6445`). A graphical upgrade with «Uninstall first» keeps the user's *Start with Windows* value: the setup reads it before the old uninstaller deletes it and writes it back afterwards (`78f9e44`). Only the upstream report of the malformed placeholders stays open.
 - `used_pct` duplicated in the memory and storage providers: one shared function (`0df0c00`).
 - PDH item count unchecked before `from_raw_parts` and a null `szName` unguarded: the arrays are bounded and `item_name` is an `unsafe fn` with a documented contract (`0df0c00`, `ad147f6`).
 - `shell_open` without a timeout, without `SEE_MASK_NOASYNC`/`FLAG_NO_UI` and without an existence check: it now uses `ShellExecuteExW` on a bounded thread, reports a missing path, and the log folder button shows a translated message (`e42b819`, `8cb9f75`).
-- Stale autostart path: at startup a release build rewrites a Run value that points to another executable; a debug build never does (`a977a65`). The standard-user Run value left by an uninstall stays open as a documented limit.
-- Service link: the command queue is bounded (a full queue returns an error at once) and the held state shows `NotInstalled`/`Stopped` (`f7ea18e`).
-- Flaky timing assert of `reads_disk_temperatures_on_this_machine` under parallel load: the test no longer depends on the timing of other tests (`0df0c00`).
+- Stale autostart path: at startup a release build rewrites a Run value whose executable no longer exists; another existing copy (`target\release`, a portable copy) and a debug build never do (`a977a65`, `64c422d`). The standard-user Run value left by an uninstall stays open as a documented limit.
+- Service link: the command queue is bounded (a full queue returns an error at once) and the held state follows the service: `NotInstalled` after an uninstall, unreachable and disconnected once it stops (`f7ea18e`).
+- Flaky timing assert of `reads_disk_temperatures_on_this_machine` under parallel load: it is still a timing test, now judged on the fastest of three reads per disk, so a load spike no longer fails it while a disk that is always slow still does (`0df0c00`).
 - `THIRD_PARTY_LICENSES.txt` now includes the third-party notices of the Microsoft NuGet packages (`6181767`).
 - M5c `log::session` timing tests flaky under CPU load: they wait on conditions instead of sleeping (`98bd9f7`, with two more found under load).
-- Chart window with the whole series suspended: the y-axis stays and the text "No reading while the device is idle or in standby" explains the blank plot (`1e957a5`).
+- Chart window with the whole series suspended: the y-axis stays and the text "No readings while the device is idle or in standby" explains the blank plot (`1e957a5`).
 
 ## Closed in M6c
 

@@ -96,8 +96,10 @@ Per le installazioni automatiche, `/S` avvia l'installer in modalità silenziosa
 esclude il componente Sensori avanzati.
 
 L'aggiornamento non chiede conferme: eseguendo un setup più recente sopra una versione installata,
-l'app in esecuzione viene chiusa da sola (le si chiede di uscire e la si forza solo dopo 10
-secondi) e poi riaperta. Con un'installazione silenziosa (`/S`) l'app torna ridotta nel tray, e
+l'app in esecuzione viene chiusa da sola e poi riaperta. Dalla 0.4.1 in poi le si chiede di
+uscire e la si chiude forzatamente solo se dopo 10 secondi è ancora in esecuzione; la 0.4.0 non sa
+uscire su richiesta, quindi un aggiornamento dalla 0.4.0 la chiude subito. L'*Avvio con Windows*
+resta com'era. Con un'installazione silenziosa (`/S`) l'app torna ridotta nel tray, e
 solo se era in esecuzione. La disinstallazione da *Impostazioni › App* chiede ancora conferma prima
 di chiudere l'app. Per chiudere l'app da un terminale c'è `oma-app.exe --quit`.
 
@@ -176,6 +178,9 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   integrata; le altre CPU usano le soglie di ripiego (85/95 °C). Excel con il punto e virgola come
   separatore di elenco (molte impostazioni regionali europee) mostra il log CSV in una sola
   colonna: aprilo con *Dati* → *Da testo/CSV* e scegli la virgola.
+  La voce *Avvio con Windows* di un utente standard sopravvive alla disinstallazione
+  dell'installer per tutto il computer e poi punta a un programma che non c'è più: rimuovila da
+  *Impostazioni › App › Avvio* (o disattiva l'opzione prima di disinstallare).
 
 ## Controllo degli aggiornamenti
 

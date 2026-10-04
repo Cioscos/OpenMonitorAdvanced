@@ -91,9 +91,11 @@ For unattended installs, `/S` runs the installer silently and `/NOSENSORS` leave
 Advanced sensors component.
 
 Upgrading needs no confirmation: running a newer setup over an installed version closes the
-running app by itself (it asks it to quit and forces it only after 10 seconds) and starts it again
-afterwards. A silent install (`/S`) brings the app back minimized to the tray, and only if it was
-running. Uninstalling from *Settings › Apps* still asks before closing the app. You can also
+running app by itself and starts it again afterwards. From 0.4.1 on, the app is asked to quit
+and is forced closed only if it is still running after 10 seconds; 0.4.0 does not know how to quit
+on request, so an upgrade from 0.4.0 closes it at once. *Start with Windows* stays as it was.
+A silent install (`/S`) brings the app back minimized to the tray, and only if it was running.
+Uninstalling from *Settings › Apps* still asks before closing the app. You can also
 close the running app from a terminal with `oma-app.exe --quit`.
 
 ## Verify your download

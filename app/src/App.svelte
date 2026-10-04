@@ -10,6 +10,7 @@
   import { health } from './lib/health.svelte';
   import { LiveStore, connect } from './lib/live.svelte';
   import { log } from './lib/log.svelte';
+  import { updates } from './lib/updates.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
@@ -68,6 +69,7 @@
     let offService: (() => void) | undefined;
     let offHealth: (() => void) | undefined;
     let offLog: (() => void) | undefined;
+    let offUpdates: (() => void) | undefined;
     let cancelled = false;
     // Ordering race (spec §6): a late `getServiceStatus` reply must never overwrite a status
     // already delivered by `oma:service`, so the event subscription is set up first and this
@@ -97,6 +99,13 @@
         else offLog = unsubscribe;
       })
       .catch((error) => console.error('log status unavailable', error));
+    updates
+      .connect(backend)
+      .then((unsubscribe) => {
+        if (cancelled) unsubscribe();
+        else offUpdates = unsubscribe;
+      })
+      .catch((error) => console.error('update status unavailable', error));
     backend
       .onServiceStatus((status) => {
         serviceEventSeen = true;
@@ -165,6 +174,7 @@
       off?.();
       offHealth?.();
       offLog?.();
+      offUpdates?.();
       offService?.();
       offSettings?.();
       offNavigate?.();

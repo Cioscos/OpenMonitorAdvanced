@@ -19,6 +19,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  UpdateStatus,
 } from '../types';
 import type { Backend } from './backend';
 
@@ -70,5 +71,9 @@ export function createTauriBackend(): Backend {
     openLogFolder: () => invoke<void>('open_log_folder'),
     pickLogFolder: () => invoke<string | null>('pick_log_folder'),
     setLogHotkeysSuspended: (suspended) => invoke<void>('set_log_hotkeys_suspended', { suspended }),
+    checkUpdates: () => invoke<UpdateStatus>('check_updates'),
+    getUpdateStatus: () => invoke<UpdateStatus>('get_update_status'),
+    openReleasePage: () => invoke<void>('open_release_page'),
+    onUpdateStatus: (cb) => listen<UpdateStatus>('oma:update-status', (e) => cb(e.payload)),
   };
 }

@@ -20,6 +20,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  UpdateStatus,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -113,4 +114,10 @@ export interface Backend {
    * keys) and their presses ignored; false registers them again.
    */
   setLogHotkeysSuspended(suspended: boolean): Promise<void>;
+  /** Asks GitHub for the latest release now; replies with the resulting status (rejects only if the background task panics). */
+  checkUpdates(): Promise<UpdateStatus>;
+  getUpdateStatus(): Promise<UpdateStatus>;
+  /** Opens the page of the newer release in the browser; rejects when no newer release is known. */
+  openReleasePage(): Promise<void>;
+  onUpdateStatus(cb: (status: UpdateStatus) => void): Promise<Unsubscribe>;
 }

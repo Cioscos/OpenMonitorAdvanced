@@ -3,6 +3,7 @@
   import { t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
   import { settings } from '../../lib/settings.svelte';
+  import { updates } from '../../lib/updates.svelte';
   import type { ServiceStatus } from '../../lib/types';
   import type { SettingsTarget } from '../../lib/view';
   import AboutSection from './AboutSection.svelte';
@@ -56,6 +57,10 @@
         onclick={() => show(id)}
       >
         {t(`settings.section.${id}`)}
+        {#if id === 'about' && updates.state?.latest != null}
+          <span class="dot" aria-hidden="true"></span>
+          <span class="sr-only">{t('settings.about.updateBadge')}</span>
+        {/if}
       </button>
     {/each}
   </nav>
@@ -137,6 +142,23 @@
   .entry:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-left: 6px;
+    vertical-align: middle;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .content {
     display: flex;

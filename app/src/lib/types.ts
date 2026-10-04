@@ -441,6 +441,18 @@ export interface AppInfo {
   logsPath: string | null;
 }
 
+/** Why the last update check failed; mirrors `updates::UpdateError`. */
+export type UpdateError = 'offline' | 'timeout' | 'tls' | 'http' | 'invalid';
+
+/** The update check as the shell last reported it; `latest` is set only for a version newer than `current`, also in `error`. */
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'upToDate' | 'available' | 'error';
+  current: string;
+  latest: { version: string } | null;
+  checkedAtMs: number | null;
+  error: UpdateError | null;
+}
+
 /** The only places `openKnownPath` opens (never a path the UI chooses). */
 export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'startupAppsSettings';
 

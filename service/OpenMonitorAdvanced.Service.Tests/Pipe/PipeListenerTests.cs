@@ -26,7 +26,7 @@ public sealed class PipeListenerTests
         using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
 
         var hello = await client.ReadAsync<HelloMessage>(Ct);
-        Assert.Equal(3u, hello.ProtocolVersion);
+        Assert.Equal(4u, hello.ProtocolVersion);
         Assert.Equal("ok", hello.PawnIo);
         Assert.False(string.IsNullOrWhiteSpace(hello.ServiceVersion));
 

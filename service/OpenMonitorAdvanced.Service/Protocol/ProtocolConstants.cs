@@ -8,7 +8,7 @@ namespace OpenMonitorAdvanced.Service.Protocol;
 public static class ProtocolConstants
 {
     /// <summary>Current sensor IPC protocol version, sent in <see cref="HelloMessage.ProtocolVersion"/>.</summary>
-    public const uint Version = 3;
+    public const uint Version = 4;
 
     /// <summary>Name of the sensor named pipe.</summary>
     public const string PipeName = "OpenMonitorAdvanced.Sensors.v1";
@@ -27,4 +27,22 @@ public static class ProtocolConstants
 
     /// <summary>Maximum number of drive keys in a <see cref="SubscribeMessage"/> (Rust: <c>MAX_DRIVE_KEYS</c>).</summary>
     public const int MaxDriveKeys = 64;
+
+    /// <summary>Maximum number of frames in one <see cref="FrameBatchMessage"/> (Rust: <c>MAX_FRAMES_PER_BATCH</c>).</summary>
+    public const int MaxFramesPerBatch = 512;
+
+    /// <summary>Maximum number of entries in <see cref="PresentingProcessesMessage.Processes"/> (Rust: <c>MAX_PRESENTING_PROCESSES</c>).</summary>
+    public const int MaxPresentingProcesses = 32;
+}
+
+/// <summary>Values of <see cref="FramesStatusMessage.State"/> (Rust: <c>frames_state</c>).</summary>
+public static class FramesStates
+{
+    public const string Off = "off";
+    public const string Starting = "starting";
+    public const string Running = "running";
+    public const string Denied = "denied";
+    public const string Tampered = "tampered";
+    public const string Missing = "missing";
+    public const string Failed = "failed";
 }

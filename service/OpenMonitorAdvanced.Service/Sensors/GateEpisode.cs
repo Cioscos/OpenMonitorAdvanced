@@ -139,7 +139,7 @@ internal sealed class GateEpisode(TimeProvider time, ILogger log)
                 "PhysicalDrive{Drive} (bus {Bus}, model {Model}) keeps storage disabled: {State}",
                 blocker.Drive.DriveNumber,
                 blocker.Drive.BusType is uint bus ? "0x" + bus.ToString("X2", CultureInfo.InvariantCulture) : "unknown",
-                blocker.Drive.Model ?? "unknown",
+                DisplayName.Clean(blocker.Drive.Model) is { Length: > 0 } model ? model : "unknown",
                 State(blocker));
         }
 

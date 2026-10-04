@@ -575,6 +575,29 @@ public sealed class SchemaBuilderTests
     }
 
     [Fact]
+    public void StorageDisplayNameIsCleanedButIdentityIsNot()
+    {
+        const string dirty = "SanDisk pSSD    ";
+        var storage = new HardwareNode(
+            "/nvme/2",
+            HardwareType.Storage,
+            dirty,
+            [Sensor("/nvme/2/load/51", SensorType.Load, "Total Activity", 51)],
+            [],
+            new StorageInfo(2, null, null, "SERIAL-1", Rotational: false));
+
+        BuiltSchema schema = Build([storage], pawnIoAvailable: true);
+
+        WireDevice device = Assert.Single(schema.Schema.Devices);
+        Assert.Equal("SanDisk pSSD", device.Name);
+        Assert.Equal("lhm-" + Sha256HexOf(dirty + " SERIAL-1"), device.Id);
+        var hint = Assert.IsType<StorageHint>(device.Hint);
+        Assert.Equal(2u, hint.PhysicalDrive);
+        Assert.Null(hint.Model);
+        Assert.Null(hint.Serial);
+    }
+
+    [Fact]
     public void StorageMapsDuplicatesHealthAndCounters()
     {
         var storage = new HardwareNode(

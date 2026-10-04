@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use oma_ipc::{
     DriveState, Hello, PawnIoStatus, Reconfiguration, SourceDrive, Subscribe, WireDevice,
@@ -212,6 +212,32 @@ struct FakeConn {
     sent: Arc<Mutex<Vec<Message>>>,
     send_block: Duration,
     alive: Arc<AtomicBool>,
+    gate: Arc<Gate>,
+}
+
+/// Holds the writes of a scripted connection while closed, so a test can
+/// keep the link thread inside an effect for as long as it needs.
+#[derive(Default)]
+struct Gate {
+    closed: Mutex<bool>,
+    opened: Condvar,
+    /// Writes started so far.
+    entered: AtomicUsize,
+}
+
+impl Gate {
+    fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut closed = self.closed.lock().unwrap();
+        while *closed {
+            closed = self.opened.wait(closed).unwrap();
+        }
+    }
+
+    fn set(&self, closed: bool) {
+        *self.closed.lock().unwrap() = closed;
+        self.opened.notify_all();
+    }
 }
 
 impl FakeConn {
@@ -237,6 +263,7 @@ impl Connection for FakeConn {
     }
 
     fn send(&mut self, msg: &Message) -> std::io::Result<()> {
+        self.gate.pass();
         if !self.send_block.is_zero() {
             std::thread::sleep(self.send_block);
         }
@@ -253,9 +280,35 @@ struct ConnCtl {
     pipe: Arc<Mutex<FakePipe>>,
     sent: Arc<Mutex<Vec<Message>>>,
     alive: Arc<AtomicBool>,
+    gate: Arc<Gate>,
 }
 
 impl ConnCtl {
+    /// From now on the link's writes on this connection wait for
+    /// [`open_writes`](Self::open_writes).
+    fn hold_writes(&self) {
+        self.gate.set(true);
+    }
+
+    fn open_writes(&self) {
+        self.gate.set(false);
+    }
+
+    /// Waits until the link has started `count` writes on this connection.
+    fn wait_for_writes(&self, count: usize) {
+        let end = Instant::now() + WAIT;
+        while self.gate.entered.load(Ordering::SeqCst) < count {
+            assert!(Instant::now() < end, "the link never wrote");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Snapshots the link's queue had no room for, on this connection.
+    fn dropped_snapshots(&self) -> u64 {
+        let pipe = self.pipe.lock().unwrap();
+        pipe.sink.as_ref().map_or(0, LinkSink::dropped_snapshots)
+    }
+
     fn push(&self, msg: Message) {
         self.pipe.lock().unwrap().deliver(Step::Msg(msg));
     }
@@ -280,14 +333,24 @@ fn fake_conn(pid: Option<u32>) -> (FakeConn, ConnCtl) {
     let pipe = Arc::new(Mutex::new(FakePipe::default()));
     let sent = Arc::new(Mutex::new(Vec::new()));
     let alive = Arc::new(AtomicBool::new(true));
+    let gate = Arc::new(Gate::default());
     let conn = FakeConn {
         pid,
         pipe: Arc::clone(&pipe),
         sent: Arc::clone(&sent),
         send_block: Duration::ZERO,
         alive: Arc::clone(&alive),
+        gate: Arc::clone(&gate),
     };
-    (conn, ConnCtl { pipe, sent, alive })
+    (
+        conn,
+        ConnCtl {
+            pipe,
+            sent,
+            alive,
+            gate,
+        },
+    )
 }
 
 /// A connection that greets, describes two sensors and sends one snapshot.
@@ -398,7 +461,15 @@ impl Harness {
     }
 
     fn send(&self, command: LinkCommand) {
-        self.link.as_ref().unwrap().send(command);
+        self.link
+            .as_ref()
+            .unwrap()
+            .send(command)
+            .expect("the link queue has room");
+    }
+
+    fn try_send(&self, command: LinkCommand) -> Result<(), LinkBusy> {
+        self.link.as_ref().unwrap().send(command)
     }
 
     fn wait_for(&self, what: impl Fn(&ServiceStatus) -> bool) -> ServiceStatus {

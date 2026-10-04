@@ -391,14 +391,18 @@ impl ServiceShell {
 }
 
 /// Sends `command` to the running link, if any. Only takes the `link` lock and
-/// pushes on a channel, so the store listener may call it from any thread.
+/// tries to push on a bounded channel, so the store listener may call it from
+/// any thread: with the queue full the command is dropped and logged, never
+/// waited for.
 #[cfg(windows)]
 fn send_to_link(
     link: &Mutex<Option<oma_win::svc::ServiceLink>>,
     command: oma_win::svc::LinkCommand,
 ) {
     if let Some(link) = link.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-        link.send(command);
+        if link.send(command.clone()).is_err() {
+            tracing::warn!("service link queue full; {command:?} dropped");
+        }
     }
 }
 

@@ -597,7 +597,8 @@ impl Machine {
     /// The SCM's answer while held: connect again only if the service is
     /// running (or starting) as something new. Anything else just becomes the
     /// new baseline, so that the next `Running` counts as a change; errors
-    /// say nothing.
+    /// say nothing. A service uninstalled or stopped meanwhile is shown as
+    /// such, so `Incompatible` or `PidMismatch` does not outlive it.
     fn on_held_query(
         &mut self,
         query: ServiceQuery,
@@ -613,7 +614,20 @@ impl Machine {
                 tracing::info!("sensor service changed ({query:?}); connecting again");
                 return self.connect_now();
             }
-            ServiceQuery::State { .. } | ServiceQuery::NotInstalled => baseline = Some(query),
+            // Gone or stopped: say so, as the connect loop would, but stay
+            // held (only a `Start` or a new running service reconnects).
+            ServiceQuery::NotInstalled => {
+                self.status = status(ServiceState::NotInstalled, None);
+                baseline = Some(query);
+            }
+            ServiceQuery::State {
+                state: RunState::Stopped,
+                ..
+            } => {
+                self.status = disconnected();
+                baseline = Some(query);
+            }
+            ServiceQuery::State { .. } => baseline = Some(query),
             ServiceQuery::Error(_) | ServiceQuery::AccessDenied => {}
         }
         self.go(Phase::Held { baseline }, Some(now + self.settings.retry));

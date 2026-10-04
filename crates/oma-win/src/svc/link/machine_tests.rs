@@ -4,7 +4,7 @@ use crate::svc::link::tests::{
     connected, disconnected, hello, in_state, machine, running, schema, shows, snapshot, st,
     subscribe_request, subscribed, wire_schema, wire_snapshot, PID,
 };
-use crate::svc::link::{pipe_connector, Input, LinkSink};
+use crate::svc::link::{pipe_connector, Input, LinkSink, LINK_QUEUE_CAPACITY};
 use std::sync::mpsc;
 
 #[test]
@@ -570,7 +570,7 @@ fn decide_reenabling_anti_cheat_cancels_the_pending_start() {
 fn pipe_connector_reads_and_writes_the_real_pipe() {
     let server = FakeServer::new();
     let connect = pipe_connector();
-    let (tx, inbox) = mpsc::channel();
+    let (tx, inbox) = mpsc::sync_channel(LINK_QUEUE_CAPACITY);
     let mut conn = connect(&server.name, LinkSink::new(3, tx)).expect("connect");
     server.accept();
     assert_eq!(conn.server_pid(), Some(std::process::id()));
@@ -594,4 +594,71 @@ fn pipe_connector_reads_and_writes_the_real_pipe() {
         Input::Closed(3, _) => {}
         _ => panic!("expected the close of connection 3"),
     }
+}
+
+#[test]
+fn held_incompatible_shows_not_installed_after_an_uninstall() {
+    let (mut m, t0) = machine(false);
+    m.decide(Event::Queried(running()), t0);
+    m.decide(Event::Connected(Ok(Some(PID))), t0);
+    m.decide(Event::Queried(running()), t0);
+    m.decide(Event::Message(hello(PROTOCOL_VERSION + 1)), t0);
+    assert_eq!(m.status, st(ServiceState::Incompatible, None));
+
+    let t1 = t0 + Duration::from_millis(20);
+    assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Query]);
+    assert_eq!(
+        m.decide(Event::Queried(ServiceQuery::NotInstalled), t1),
+        vec![]
+    );
+    assert_eq!(m.status, st(ServiceState::NotInstalled, None));
+    assert_eq!(
+        m.phase,
+        Phase::Held {
+            baseline: Some(ServiceQuery::NotInstalled)
+        }
+    );
+    assert_eq!(m.deadline, Some(t1 + Duration::from_millis(20)));
+
+    // Installed and running again: something new, so it connects.
+    let t2 = t1 + Duration::from_millis(20);
+    assert_eq!(m.decide(Event::Timer, t2), vec![Effect::Query]);
+    assert_eq!(
+        m.decide(Event::Queried(running()), t2),
+        vec![Effect::Connect]
+    );
+}
+
+#[test]
+fn held_pid_mismatch_shows_stopped_when_the_service_stops() {
+    let (mut m, t0) = machine(false);
+    m.decide(Event::Queried(running()), t0);
+    m.decide(Event::Connected(Ok(Some(PID))), t0);
+    let other = ServiceQuery::State {
+        state: RunState::Running,
+        pid: PID + 7,
+    };
+    m.decide(Event::Queried(other), t0);
+    assert_eq!(
+        m.status,
+        st(ServiceState::Unreachable, Some(ServiceDetail::PidMismatch))
+    );
+
+    let t1 = t0 + Duration::from_millis(20);
+    let stopped = in_state(RunState::Stopped);
+    assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Query]);
+    assert_eq!(m.decide(Event::Queried(stopped), t1), vec![]);
+    // Stopped reads as in the connect loop: not reachable, disconnected.
+    assert_eq!(m.status, disconnected());
+    assert_eq!(
+        m.phase,
+        Phase::Held {
+            baseline: Some(stopped)
+        }
+    );
+    // Never started from here: only a Start command does that.
+    assert_eq!(
+        m.decide(Event::Timer, t1 + Duration::from_millis(20)),
+        vec![Effect::Query]
+    );
 }

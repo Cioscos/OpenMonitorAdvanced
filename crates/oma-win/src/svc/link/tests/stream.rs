@@ -316,8 +316,8 @@ fn the_link_reconnects_after_a_close() {
 // ---- one queue, no wake-ups ----
 
 /// A driver around `machine` for tests that call `next_event` directly.
-fn bare_driver(machine: Machine) -> (Driver, Sender<Input>) {
-    let (tx, rx) = mpsc::channel();
+fn bare_driver(machine: Machine) -> (Driver, SyncSender<Input>) {
+    let (tx, rx) = mpsc::sync_channel(LINK_QUEUE_CAPACITY);
     let driver = Driver {
         machine,
         control: FakeControl::new(running()),
@@ -328,6 +328,7 @@ fn bare_driver(machine: Machine) -> (Driver, Sender<Input>) {
         sender: tx.clone(),
         stop: Arc::new(AtomicBool::new(false)),
         conn: None,
+        conn_sink: None,
         conn_id: Some(7),
         unread: VecDeque::new(),
         pending: VecDeque::new(),
@@ -497,4 +498,123 @@ fn dropping_the_link_without_shutdown_stops_the_thread() {
         assert!(Instant::now() < end, "the thread never stopped");
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+// ---- the bounded queue ----
+
+/// A link whose thread is stuck in the write of its first `Subscribe`.
+fn stuck_link() -> (Harness, ConnCtl) {
+    let control = FakeControl::new(running());
+    let (conn, ctl) = fake_conn(Some(PID));
+    ctl.hold_writes();
+    ctl.push(hello(PROTOCOL_VERSION));
+    let h = Harness::spawn(control, Script::with(vec![conn]), false);
+    ctl.wait_for_writes(1);
+    (h, ctl)
+}
+
+/// Fills the stuck link's queue with commands that each cost a write.
+fn fill_with_commands(h: &Harness) {
+    for i in 0..LINK_QUEUE_CAPACITY {
+        let interval = 1001 + u32::try_from(i).unwrap();
+        assert_eq!(
+            h.try_send(LinkCommand::SetInterval(interval)),
+            Ok(()),
+            "command {i} fits"
+        );
+    }
+}
+
+#[test]
+fn send_returns_busy_when_the_queue_is_full() {
+    let (h, ctl) = stuck_link();
+    fill_with_commands(&h);
+
+    let t = Instant::now();
+    let result = h.try_send(LinkCommand::Start);
+    let took = t.elapsed();
+    assert_eq!(result, Err(LinkBusy));
+    assert!(took < Duration::from_millis(50), "send took {took:?}");
+    assert_eq!(LinkBusy.to_string(), "the sensor service link is busy");
+    ctl.open_writes();
+}
+
+#[test]
+fn a_full_queue_drops_snapshots_but_keeps_the_schema() {
+    let control = FakeControl::new(running());
+    let (conn, ctl) = streaming_conn(Some(PID));
+    let h = Harness::spawn(control, Script::with(vec![conn]), false);
+    h.wait_for(is(connected()));
+
+    // Stuck in the write of a new `Subscribe`.
+    ctl.hold_writes();
+    h.send(LinkCommand::SetInterval(2000));
+    ctl.wait_for_writes(2);
+
+    // The reader (here, this thread) fills the queue with snapshots...
+    let capacity = u64::try_from(LINK_QUEUE_CAPACITY).unwrap();
+    for seq in 2..2 + capacity {
+        ctl.push(snapshot(seq, 2));
+    }
+    assert_eq!(ctl.dropped_snapshots(), 0);
+    // ...and the next ones are dropped, without blocking it.
+    ctl.push(snapshot(2 + capacity, 2));
+    ctl.push(snapshot(3 + capacity, 2));
+    assert_eq!(ctl.dropped_snapshots(), 2);
+
+    // A schema waits for room instead: the reader blocks until the link
+    // drains its queue.
+    let reader = {
+        let ctl = ctl.clone();
+        std::thread::spawn(move || ctl.push(schema(3)))
+    };
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(!reader.is_finished(), "the schema waits for room");
+    ctl.open_writes();
+    reader.join().unwrap();
+
+    let end = Instant::now() + WAIT;
+    while h.feed.view().schema.as_deref() != Some(&wire_schema(3)) {
+        assert!(Instant::now() < end, "the schema never arrived");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    ctl.push(snapshot(10_000, 3));
+    let end = Instant::now() + WAIT;
+    while h.feed.view().snapshot.map(|(_, s)| s.seq) != Some(10_000) {
+        assert!(Instant::now() < end, "the stream did not resume");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        shows(&h.status()),
+        shows(&connected()),
+        "the connection is kept"
+    );
+}
+
+#[test]
+fn a_reader_waiting_for_room_gives_up_when_the_connection_is_dropped() {
+    let (tx, _inbox) = mpsc::sync_channel(1);
+    let sink = LinkSink::new(9, tx);
+    assert!(sink.message(hello(PROTOCOL_VERSION)));
+    let reader = {
+        let sink = sink.clone();
+        std::thread::spawn(move || sink.message(schema(1)))
+    };
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(!reader.is_finished(), "the schema waits for room");
+    // What the link does before dropping (and so joining) the reader.
+    sink.shared.cancel();
+    assert!(!reader.join().unwrap(), "the reader is told to close");
+}
+
+#[test]
+fn the_link_thread_never_waits_for_room() {
+    // `LinkSink::new` makes this thread the one that drains the queue.
+    let (tx, _inbox) = mpsc::sync_channel(1);
+    let sink = LinkSink::new(9, tx);
+    assert!(sink.message(hello(PROTOCOL_VERSION)));
+    let t = Instant::now();
+    assert!(!sink.message(schema(1)), "no room: dropped, not waited for");
+    sink.closed(CloseReason::Disconnected);
+    assert!(t.elapsed() < Duration::from_millis(50));
 }

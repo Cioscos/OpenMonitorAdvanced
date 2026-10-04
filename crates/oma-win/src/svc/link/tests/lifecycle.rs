@@ -575,3 +575,39 @@ fn set_sources_reaches_the_service_and_the_feed() {
             .is_some_and(|x| x.reconfiguration == Reconfiguration::Pending)
     });
 }
+
+#[test]
+fn shutdown_returns_within_join_wait_with_a_full_queue() {
+    let control = FakeControl::new(running());
+    let (conn, ctl) = fake_conn(Some(PID));
+    ctl.hold_writes();
+    ctl.push(hello(PROTOCOL_VERSION));
+    let mut h = Harness::spawn(control, Script::with(vec![conn]), false);
+    ctl.wait_for_writes(1);
+    // Each queued command would cost a write of its own.
+    for i in 0..LINK_QUEUE_CAPACITY {
+        let interval = 1001 + u32::try_from(i).unwrap();
+        assert_eq!(h.try_send(LinkCommand::SetInterval(interval)), Ok(()));
+    }
+    assert_eq!(h.try_send(LinkCommand::Start), Err(LinkBusy));
+
+    // The write completes while shutdown waits: the thread sees the stop
+    // flag before the next input, so it exits instead of draining the queue.
+    let opener = {
+        let ctl = ctl.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            ctl.open_writes();
+        })
+    };
+    let t = Instant::now();
+    h.link.take().unwrap().shutdown();
+    let took = t.elapsed();
+    opener.join().unwrap();
+    assert!(took < JOIN_WAIT, "shutdown took {took:?}");
+    assert!(
+        !ctl.is_alive(),
+        "the thread exited and released the connection"
+    );
+    assert_eq!(ctl.sent().len(), 1, "no queued command was run");
+}

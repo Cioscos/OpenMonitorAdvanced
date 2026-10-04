@@ -14,6 +14,13 @@
 //! sleeps until the machine's deadline (or for good when there is none), so a
 //! connected link costs no timer wake-ups.
 //!
+//! The queue holds at most [`LINK_QUEUE_CAPACITY`] inputs, so a thread stuck
+//! in a long call cannot make it grow without limit. With the queue full, a
+//! command fails at once with [`LinkBusy`] (the shell's main thread and its
+//! store listeners never wait for the link), a snapshot is dropped, and the
+//! connection's reader, a thread of its own, waits for room for anything
+//! else (see [`LinkSink`]).
+//!
 //! Limits, by design:
 //! - The anti-cheat preference is per user and only restrains this app: it
 //!   stops the service once, verifies the stop, and then leaves the service
@@ -44,7 +51,7 @@ use std::collections::VecDeque;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -64,7 +71,25 @@ mod tests;
 
 pub use machine::{validate_schema, LinkCommand, LinkSettings};
 use machine::{Effect, Event, Machine};
+use transport::SinkShared;
 pub use transport::{pipe_connector, Connection, Connector, LinkSink};
+
+/// How many inputs the link thread's queue holds: commands, shutdown, and
+/// what the connection's reader forwards.
+pub const LINK_QUEUE_CAPACITY: usize = 256;
+
+/// [`ServiceLink::send`] found the link's queue full: the command was not
+/// delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkBusy;
+
+impl std::fmt::Display for LinkBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the sensor service link is busy")
+    }
+}
+
+impl std::error::Error for LinkBusy {}
 
 /// Longest [`ServiceLink::shutdown`] waits for the thread before detaching it.
 pub const JOIN_WAIT: Duration = Duration::from_millis(500);
@@ -94,9 +119,12 @@ struct Driver {
     /// forwards.
     inbox: Receiver<Input>,
     /// A sender on `inbox`, for the sinks of new connections.
-    sender: Sender<Input>,
+    sender: SyncSender<Input>,
     stop: Arc<AtomicBool>,
     conn: Option<Box<dyn Connection>>,
+    /// The sink state of the current connection, cancelled before the
+    /// connection is dropped.
+    conn_sink: Option<Arc<SinkShared>>,
     /// Id of the current connection (the one `conn` holds, or that is being
     /// opened): events tagged with another id are discarded.
     conn_id: Option<u64>,
@@ -127,6 +155,16 @@ impl Driver {
             self.apply(effects);
         }
         // Stops the pipe reader and closes the handle.
+        self.drop_connection();
+    }
+
+    /// Drops the connection, if any, first releasing a reader that waits
+    /// for room in the queue: dropping joins the reader, and the queue
+    /// would never drain while this thread waits for it.
+    fn drop_connection(&mut self) {
+        if let Some(shared) = self.conn_sink.take() {
+            shared.cancel();
+        }
         self.conn = None;
     }
 
@@ -200,17 +238,25 @@ impl Driver {
                     let id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
                     self.conn_id = Some(id);
                     self.unread.clear();
+                    // A previous connection's reader stops waiting for room.
+                    if let Some(old) = self.conn_sink.take() {
+                        old.cancel();
+                    }
+                    let shared = SinkShared::new();
                     let sink = LinkSink {
                         id,
                         tx: self.sender.clone(),
+                        shared: Arc::clone(&shared),
                     };
                     let result = match (self.connector)(&self.machine.settings.pipe_name, sink) {
                         Ok(conn) => {
                             let pid = conn.server_pid();
                             self.conn = Some(conn);
+                            self.conn_sink = Some(shared);
                             Ok(pid)
                         }
                         Err(e) => {
+                            shared.cancel();
                             self.conn_id = None;
                             Err(e)
                         }
@@ -233,7 +279,7 @@ impl Driver {
                     self.pending.push_back(Event::Sent(ok));
                 }
                 Effect::Close => {
-                    self.conn = None;
+                    self.drop_connection();
                     self.conn_id = None;
                     self.unread.clear();
                 }
@@ -255,7 +301,7 @@ impl Driver {
 
 /// The running link: a command channel and the thread.
 pub struct ServiceLink {
-    commands: Sender<Input>,
+    commands: SyncSender<Input>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     #[cfg(test)]
@@ -276,7 +322,7 @@ impl ServiceLink {
         feed.set_request(settings.sources.clone());
         let machine = Machine::new(settings, anti_cheat);
         status.set(&machine.status);
-        let (commands, inbox) = mpsc::channel();
+        let (commands, inbox) = mpsc::sync_channel(LINK_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         let waits = Arc::new(AtomicUsize::new(0));
@@ -290,6 +336,7 @@ impl ServiceLink {
             sender: commands.clone(),
             stop: Arc::clone(&stop),
             conn: None,
+            conn_sink: None,
             conn_id: None,
             unread: VecDeque::new(),
             pending: VecDeque::new(),
@@ -315,9 +362,14 @@ impl ServiceLink {
         }
     }
 
-    /// Never blocks.
-    pub fn send(&self, command: LinkCommand) {
-        let _ = self.commands.send(Input::Command(command));
+    /// Queues `command` for the thread. Never blocks: with the queue full
+    /// it fails at once with [`LinkBusy`]. A link whose thread is gone takes
+    /// the command and drops it, as before.
+    pub fn send(&self, command: LinkCommand) -> Result<(), LinkBusy> {
+        match self.commands.try_send(Input::Command(command)) {
+            Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(LinkBusy),
+        }
     }
 
     /// How many times the thread has gone to sleep waiting for an event.
@@ -327,10 +379,12 @@ impl ServiceLink {
     }
 
     /// Tells the thread to stop. The thread holds a sender of its own queue,
-    /// so it would not notice the link being dropped otherwise.
+    /// so it would not notice the link being dropped otherwise. With the
+    /// queue full the wake-up is not queued, and not needed: the thread does
+    /// not sleep on a full queue, and it checks `stop` before each input.
     fn signal_stop(&self) {
         self.stop.store(true, Ordering::Release);
-        let _ = self.commands.send(Input::Shutdown);
+        let _ = self.commands.try_send(Input::Shutdown);
     }
 
     /// Stops the thread, closing any connection. Returns within

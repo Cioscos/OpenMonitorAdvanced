@@ -16,7 +16,8 @@ pub mod status;
 
 pub use feed::{FeedView, SourceRequest, SvcFeed};
 pub use link::{
-    pipe_connector, validate_schema, Connection, Connector, LinkCommand, LinkSettings, ServiceLink,
+    pipe_connector, validate_schema, Connection, Connector, LinkBusy, LinkCommand, LinkSettings,
+    ServiceLink, LINK_QUEUE_CAPACITY,
 };
 pub use pipe::{CloseReason, ConnectError, PipeClient, PipeEvent, PipeReader};
 pub use provider::SvcProvider;

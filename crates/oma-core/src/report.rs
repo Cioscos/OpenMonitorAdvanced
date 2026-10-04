@@ -482,12 +482,7 @@ mod tests {
                     ALIAS_2,
                     &[("adapterType", "wifi")],
                 ),
-                device(
-                    &fan_controller(),
-                    DeviceKind::FanController,
-                    "Fan hub",
-                    &[],
-                ),
+                device(&fan_controller(), DeviceKind::FanController, "Fan hub", &[]),
             ],
             sensors: vec![
                 sensor(

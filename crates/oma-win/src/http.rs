@@ -125,10 +125,18 @@ impl Deadline {
     }
 
     /// Before a call that may resolve, connect, send and receive (session
-    /// setup, `WinHttpSendRequest`, `WinHttpReceiveResponse` which may follow
-    /// a redirect): shares the time left across the four phase timeouts.
+    /// setup, `WinHttpSendRequest`): shares the time left across the four
+    /// phase timeouts.
     fn arm_phases(&self, handle: &Handle) -> Result<(), CheckError> {
         let [resolve, connect, send, receive] = split_timeouts(self.remaining_ms()?);
+        set_timeouts(handle, resolve, connect, send, receive)
+    }
+
+    /// Before `WinHttpReceiveResponse`: resolve, connect and send (repeated
+    /// by a redirect) keep their share, while waiting for the response may
+    /// use all the time left.
+    fn arm_response(&self, handle: &Handle) -> Result<(), CheckError> {
+        let [resolve, connect, send, receive] = response_timeouts(self.remaining_ms()?);
         set_timeouts(handle, resolve, connect, send, receive)
     }
 
@@ -163,12 +171,26 @@ fn split_timeouts(remaining_ms: i32) -> [i32; 4] {
     [ms; 4]
 }
 
+/// Timeouts before `WinHttpReceiveResponse`: those of [`split_timeouts`],
+/// with the receive timeout raised to the whole time left.
+fn response_timeouts(remaining_ms: i32) -> [i32; 4] {
+    let [resolve, connect, send, _] = split_timeouts(remaining_ms);
+    [resolve, connect, send, remaining_ms.max(1)]
+}
+
 /// Sets `WINHTTP_OPTION_SECURE_PROTOCOLS` through `set`: TLS 1.2 and 1.3,
 /// or TLS 1.2 alone when that fails (older WinHTTP rejects the TLS 1.3 flag
 /// with `ERROR_INVALID_PARAMETER`).
 fn with_tls_fallback(mut set: impl FnMut(u32) -> Result<(), CheckError>) -> Result<(), CheckError> {
-    set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3)
-        .or_else(|_| set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2))
+    set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3).or_else(
+        |error| {
+            tracing::debug!(
+                ?error,
+                "update check: TLS 1.3 not accepted, using TLS 1.2 alone"
+            );
+            set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2)
+        },
+    )
 }
 
 /// The parts of an `https` URL needed to connect.
@@ -338,7 +360,7 @@ pub fn get(
     // and outlives the call; no request body.
     unsafe { WinHttpSendRequest(request.0, extra, None, 0, 0, 0) }.map_err(win_error)?;
 
-    deadline.arm_phases(&request)?;
+    deadline.arm_response(&request)?;
     // SAFETY: `request` is live and was sent; the reserved pointer is null.
     unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.map_err(win_error)?;
 
@@ -505,6 +527,15 @@ mod tests {
         assert_eq!(split_timeouts(400), [250; 4]);
         assert_eq!(split_timeouts(100), [100; 4]);
         assert_eq!(split_timeouts(1), [1; 4]);
+    }
+
+    #[test]
+    fn response_timeouts_give_receive_the_whole_time_left() {
+        // Resolve, connect and send split as before (a redirect repeats
+        // them); waiting for the response may use all the time left.
+        assert_eq!(response_timeouts(10_000), [2_500, 2_500, 2_500, 10_000]);
+        assert_eq!(response_timeouts(400), [250, 250, 250, 400]);
+        assert_eq!(response_timeouts(1), [1; 4]);
     }
 
     #[test]

@@ -14,4 +14,5 @@ pub mod sampler;
 pub mod sanitize;
 pub mod settings;
 pub mod stats;
+pub mod updates;
 mod worker;

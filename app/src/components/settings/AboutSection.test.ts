@@ -142,3 +142,44 @@ test('mock backend implements update commands', async () => {
   off();
   await expect(backend.openReleasePage()).resolves.toBeUndefined();
 });
+
+const exportButton = () => screen.getByRole('button', { name: t('settings.about.exportReport') });
+
+test('export shows saved message and Open folder', async () => {
+  const backend = await setup();
+  backend.exportResult = { fileName: 'oma-report-20261004-090507.json' };
+  render(AboutSection, { backend });
+  expect(screen.getByText(t('settings.about.reportNote'))).toBeTruthy();
+  await fireEvent.click(exportButton());
+  await screen.findByText(t('settings.about.reportSaved', { file: 'oma-report-20261004-090507.json' }));
+  expect(backend.exportSensorReportCalls).toBe(1);
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.about.openFolder') }));
+  expect(backend.revealSensorReportCalls).toBe(1);
+});
+
+test('cancelled export shows nothing', async () => {
+  const backend = await setup();
+  backend.exportResult = null;
+  render(AboutSection, { backend });
+  await fireEvent.click(exportButton());
+  await vi.waitFor(() => expect(backend.exportSensorReportCalls).toBe(1));
+  expect(screen.queryByText(/oma-report/)).toBeNull();
+  expect(screen.queryByRole('button', { name: t('settings.about.openFolder') })).toBeNull();
+  expect(screen.queryAllByRole('alert')).toHaveLength(0);
+});
+
+test('failed export shows the error text', async () => {
+  const backend = await setup();
+  backend.exportError = 'Access is denied. (os error 5)';
+  render(AboutSection, { backend });
+  await fireEvent.click(exportButton());
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Access is denied. (os error 5)');
+  expect(screen.queryByRole('button', { name: t('settings.about.openFolder') })).toBeNull();
+});
+
+test('mock backend implements report commands', async () => {
+  const backend = createMockBackend();
+  expect((await backend.exportSensorReport())?.fileName).toMatch(/^oma-report-\d{8}-\d{6}\.json$/);
+  await expect(backend.revealSensorReport()).resolves.toBeUndefined();
+});

@@ -12,6 +12,7 @@ pub mod known_folder;
 pub mod local_time;
 pub mod memory;
 pub mod network;
+pub mod os_version;
 mod pdh;
 pub mod shell_open;
 pub mod storage;

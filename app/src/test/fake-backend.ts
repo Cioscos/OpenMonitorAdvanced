@@ -2,6 +2,7 @@ import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
   AppInfo,
+  ExportedReport,
   AutostartStatus,
   GpuProcess,
   HealthClock,
@@ -136,6 +137,12 @@ export class FakeBackend implements Backend {
   checkError: string | null = null;
   checkUpdatesCalls = 0;
   openReleasePageCalls = 0;
+  /** What `exportSensorReport` returns; null is a cancelled dialog. */
+  exportResult: ExportedReport | null = null;
+  /** Set to reject `exportSensorReport` with this text instead of resolving. */
+  exportError: string | null = null;
+  exportSensorReportCalls = 0;
+  revealSensorReportCalls = 0;
   #updateListeners = new Set<(s: UpdateStatus) => void>();
   #logListeners = new Set<(s: LogStatus) => void>();
   /** What `getDiskStates` answers. */
@@ -390,6 +397,16 @@ export class FakeBackend implements Backend {
 
   async openReleasePage(): Promise<void> {
     this.openReleasePageCalls++;
+  }
+
+  async exportSensorReport(): Promise<ExportedReport | null> {
+    this.exportSensorReportCalls++;
+    if (this.exportError !== null) throw this.exportError;
+    return this.exportResult;
+  }
+
+  async revealSensorReport(): Promise<void> {
+    this.revealSensorReportCalls++;
   }
 
   async onUpdateStatus(cb: (s: UpdateStatus) => void): Promise<Unsubscribe> {

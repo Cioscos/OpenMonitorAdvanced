@@ -441,6 +441,11 @@ export interface AppInfo {
   logsPath: string | null;
 }
 
+/** A sensor report saved by `exportSensorReport`; mirrors `report::ExportedReport`. Only the name, never the path. */
+export interface ExportedReport {
+  fileName: string;
+}
+
 /** Why the last update check failed; mirrors `updates::UpdateError`. */
 export type UpdateError = 'offline' | 'timeout' | 'tls' | 'http' | 'invalid';
 

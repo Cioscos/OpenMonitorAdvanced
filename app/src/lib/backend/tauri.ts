@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
   AppInfo,
+  ExportedReport,
   AutostartStatus,
   GpuProcess,
   HealthClock,
@@ -75,5 +76,7 @@ export function createTauriBackend(): Backend {
     getUpdateStatus: () => invoke<UpdateStatus>('get_update_status'),
     openReleasePage: () => invoke<void>('open_release_page'),
     onUpdateStatus: (cb) => listen<UpdateStatus>('oma:update-status', (e) => cb(e.payload)),
+    exportSensorReport: () => invoke<ExportedReport | null>('export_sensor_report'),
+    revealSensorReport: () => invoke<void>('reveal_sensor_report'),
   };
 }

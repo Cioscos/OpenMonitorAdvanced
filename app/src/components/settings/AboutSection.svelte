@@ -59,6 +59,33 @@
     }
   }
 
+  /** The last export: the saved file's name or the error text; a cancelled dialog shows nothing. */
+  let report = $state<{ saved: string } | { failed: string } | null>(null);
+  let exporting = $state(false);
+  let revealFailure = $state<string | null>(null);
+
+  async function exportReport() {
+    exporting = true;
+    revealFailure = null;
+    try {
+      const saved = await backend.exportSensorReport();
+      report = saved === null ? null : { saved: saved.fileName };
+    } catch (error) {
+      report = { failed: String(error) };
+    } finally {
+      exporting = false;
+    }
+  }
+
+  async function revealReport() {
+    revealFailure = null;
+    try {
+      await backend.revealSensorReport();
+    } catch (error) {
+      revealFailure = t('settings.openFailed', { reason: String(error) });
+    }
+  }
+
   async function open(target: KnownPath) {
     failure = null;
     try {
@@ -146,6 +173,21 @@
           {t('settings.about.checkAutomatically')}
         </label>
         <p id="about-updates-note" class="note">{t('settings.about.updatesNote')}</p>
+      </dd>
+    </div>
+    <div class="row">
+      <dt>{t('settings.about.report')}</dt>
+      <dd>
+        <button type="button" disabled={exporting} aria-describedby="about-report-note" onclick={exportReport}
+          >{t('settings.about.exportReport')}</button
+        >
+        {#if report !== null && 'saved' in report}
+          <span class="status" role="status">{t('settings.about.reportSaved', { file: report.saved })}</span>
+          <button type="button" onclick={revealReport}>{t('settings.about.openFolder')}</button>
+        {/if}
+        {#if report !== null && 'failed' in report}<p class="failed" role="alert">{report.failed}</p>{/if}
+        {#if revealFailure !== null}<p class="failed" role="alert">{revealFailure}</p>{/if}
+        <p id="about-report-note" class="note">{t('settings.about.reportNote')}</p>
       </dd>
     </div>
     {@render folder(t('settings.about.settingsFolder'), info?.settingsPath ?? null, 'settingsFolder')}

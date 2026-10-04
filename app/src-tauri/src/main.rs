@@ -7,6 +7,7 @@ mod i18n;
 mod interval;
 mod log;
 mod notifier;
+mod report;
 mod rules;
 mod service;
 mod settings;
@@ -244,6 +245,7 @@ fn main() {
         .manage(GpuProcessState(processes))
         .manage(service_shell)
         .manage(settings_store)
+        .manage(report::ReportState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
@@ -280,6 +282,8 @@ fn main() {
             updates::check_updates,
             updates::get_update_status,
             updates::open_release_page,
+            report::export_sensor_report,
+            report::reveal_sensor_report,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

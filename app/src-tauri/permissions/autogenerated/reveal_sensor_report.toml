@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reveal-sensor-report"
+description = "Enables the reveal_sensor_report command without any pre-configured scope."
+commands.allow = ["reveal_sensor_report"]
+
+[[permission]]
+identifier = "deny-reveal-sensor-report"
+description = "Denies the reveal_sensor_report command without any pre-configured scope."
+commands.deny = ["reveal_sensor_report"]

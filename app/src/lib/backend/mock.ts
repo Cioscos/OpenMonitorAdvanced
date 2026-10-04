@@ -551,5 +551,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
     getUpdateStatus: async () => MOCK_UPDATE_STATUS,
     openReleasePage: async () => console.info('mock: open release page'),
     onUpdateStatus: async () => () => {},
+    // No native dialog or file system in the browser: pretend the user saved the report.
+    exportSensorReport: async () => ({ fileName: 'oma-report-20261004-090507.json' }),
+    revealSensorReport: async () => console.info('mock: open report folder'),
   };
 }

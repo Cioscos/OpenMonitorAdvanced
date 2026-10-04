@@ -35,6 +35,8 @@ fn main() {
             "check_updates",
             "get_update_status",
             "open_release_page",
+            "export_sensor_report",
+            "reveal_sensor_report",
         ]),
     ))
     .expect("Tauri build")

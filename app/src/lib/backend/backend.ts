@@ -1,5 +1,6 @@
 import type {
   AppInfo,
+  ExportedReport,
   AutostartStatus,
   GpuProcess,
   HealthClock,
@@ -120,4 +121,8 @@ export interface Backend {
   /** Opens the page of the newer release in the browser; rejects when no newer release is known. */
   openReleasePage(): Promise<void>;
   onUpdateStatus(cb: (status: UpdateStatus) => void): Promise<Unsubscribe>;
+  /** Builds the anonymous sensor report and saves it where the user chooses; null when the dialog is cancelled; rejects with the system's text. */
+  exportSensorReport(): Promise<ExportedReport | null>;
+  /** Opens the folder of the last exported report; rejects when there is none or with the system's text. */
+  revealSensorReport(): Promise<void>;
 }

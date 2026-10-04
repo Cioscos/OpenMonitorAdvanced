@@ -86,7 +86,7 @@ fn second_launch(args: &[String]) -> SecondLaunch {
 /// process ends inside the plugin), but nothing else starts. No log file, no
 /// crash marker, no settings, no window, tray, sampler, service link or
 /// autostart write; the app asks to exit as soon as the event loop runs.
-fn run_quit_only() -> ! {
+fn run_quit_only(context: tauri::Context<tauri::Wry>) -> ! {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if is_quit(&args) {
@@ -97,7 +97,7 @@ fn run_quit_only() -> ! {
             app.handle().exit(0);
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build the Tauri application");
     std::process::exit(app.run_return(|_, _| {}));
 }
@@ -191,9 +191,12 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 }
 
 fn main() {
+    // Built once (it embeds the frontend assets) for whichever path runs; no
+    // side effects.
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     // Before anything with side effects (see `run_quit_only`).
     if is_quit(&std::env::args().collect::<Vec<_>>()) {
-        run_quit_only();
+        run_quit_only(context);
     }
     // Held for the program's lifetime when present, so buffered log lines are
     // flushed on drop; the app still runs (without a file log) if this is None.
@@ -471,7 +474,7 @@ fn main() {
             app.manage(SamplerGuard(Mutex::new(Some(sampler))));
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build the Tauri application");
 
     // `run_return` (not `run`, which ends the process itself) so the log guard

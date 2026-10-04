@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Win32.SafeHandles;
+using OpenMonitorAdvanced.Service.Frames;
 using OpenMonitorAdvanced.Service.Pipe;
 using OpenMonitorAdvanced.Service.Protocol;
 using OpenMonitorAdvanced.Service.Sensors;
+using OpenMonitorAdvanced.Service.Tests.Frames;
 using OpenMonitorAdvanced.Service.Tests.Sensors;
 using Xunit;
 
@@ -203,7 +206,8 @@ internal sealed class TestClient(PipeStream stream) : IDisposable
 /// <summary>
 /// A running <see cref="PipeListener"/> on a unique test pipe name with the default DACL (an
 /// unprivileged server with the production DACL cannot create its own second instance, spike S3),
-/// a <see cref="FakeFeed"/> and an <see cref="IdleShutdown"/> on a <see cref="FakeTimeProvider"/>.
+/// a <see cref="FakeFeed"/>, an <see cref="IdleShutdown"/> on a <see cref="FakeTimeProvider"/> and a
+/// <see cref="FramesHub"/> over a capture on fake PresentMon runs (same clock).
 /// </summary>
 internal sealed class ListenerHarness : IAsyncDisposable
 {
@@ -211,7 +215,14 @@ internal sealed class ListenerHarness : IAsyncDisposable
     {
         Options = options;
         Idle = new IdleShutdown(Lifetime, Time, TimeSpan.FromMinutes(2));
-        Listener = new PipeListener(Feed, options, Idle, new PawnIoState(() => pawnIo), Log);
+        FrameRequests = new FrameRequests(Time);
+        Frames = new FramesHub(
+            new FrameCapture(FrameSource, new FakeEtw(), () => PresentMonPin.Sha256, Time, NullLogger<FrameCapture>.Instance),
+            new FrameAggregator(ticksPerSecond: Time.TimestampFrequency),
+            FrameRequests,
+            Time,
+            NullLogger<FramesHub>.Instance);
+        Listener = new PipeListener(Feed, options, Idle, new PawnIoState(() => pawnIo), Frames, Log);
     }
 
     public PipeListenerOptions Options { get; }
@@ -227,6 +238,12 @@ internal sealed class ListenerHarness : IAsyncDisposable
     public ListLogger<PipeListener> Log { get; } = new();
 
     public IdleShutdown Idle { get; }
+
+    public FakeFrameSource FrameSource { get; } = new();
+
+    public FrameRequests FrameRequests { get; }
+
+    public FramesHub Frames { get; }
 
     public PipeListener Listener { get; }
 
@@ -274,6 +291,7 @@ internal sealed class ListenerHarness : IAsyncDisposable
     {
         await Listener.StopAsync(CancellationToken.None);
         Listener.Dispose();
+        Frames.Dispose();
     }
 }
 

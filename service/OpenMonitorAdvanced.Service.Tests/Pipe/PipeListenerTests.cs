@@ -207,6 +207,52 @@ public sealed class PipeListenerTests
     }
 
     [Fact]
+    public async Task FramesConfigureAfterSubscribeIsAccepted()
+    {
+        await using var h = await ListenerHarness.StartAsync(Ct);
+        using var client = await h.SubscribedClientAsync(1000, Ct);
+
+        await client.SendAsync(new FramesConfigureMessage(Enabled: true, TrackPcLatency: false, TrackGpu: true), Ct);
+
+        // The current status on subscribing, then the capture starting.
+        Assert.Equal(FramesStates.Off, (await client.ReadAsync<FramesStatusMessage>(Ct)).State);
+        Assert.Equal(FramesStates.Starting, (await client.ReadAsync<FramesStatusMessage>(Ct)).State);
+        Assert.NotNull(h.FrameRequests.Effective);
+
+        await client.SendAsync(new FramesTargetMessage(4242), Ct);
+        await PipeAssert.EventuallyAsync(() => h.FrameRequests.Targets.Contains(4242u), "the target", Ct);
+
+        // Sensor updates still flow on the same session.
+        h.Feed.Push(new FeedUpdate(null, new SnapshotMessage(1, 2, [1.0], [false])));
+        Assert.Equal(1UL, (await client.ReadAsync<SnapshotMessage>(Ct)).Seq);
+
+        client.Dispose();
+        await PipeAssert.EventuallyAsync(() => h.FrameRequests.NextExpiry is not null, "the disconnect", Ct);
+        Assert.NotNull(h.FrameRequests.Effective); // within the 30 s grace
+    }
+
+    [Theory]
+    [InlineData("configure")]
+    [InlineData("target")]
+    public async Task FramesConfigureBeforeSubscribeGetsAnError(string kind)
+    {
+        await using var h = await ListenerHarness.StartAsync(Ct);
+        using var client = await TestClient.ConnectAsync(h.PipeName, Ct);
+        await client.ReadAsync<HelloMessage>(Ct);
+
+        IMessage message = kind == "configure"
+            ? new FramesConfigureMessage(Enabled: true, TrackPcLatency: false, TrackGpu: true)
+            : new FramesTargetMessage(4242);
+        await client.SendAsync(message, Ct);
+
+        Assert.Equal("bad_request", (await client.ReadAsync<ErrorMessage>(Ct)).Code);
+        Assert.Null(await client.ReadAsync(Ct));
+        Assert.Null(h.FrameRequests.Effective);
+        Assert.Empty(h.FrameRequests.Targets);
+        Assert.Equal(0, h.FrameSource.Starts.Count);
+    }
+
+    [Fact]
     public async Task NinthClientIsRefusedAndOthersKeepStreaming()
     {
         await using var h = await ListenerHarness.StartAsync(Ct);
@@ -465,7 +511,7 @@ public sealed class PipeListenerTests
 
         var log = new ListLogger<PipeListener>();
         var idle = new IdleShutdown(new FakeLifetime(), new FakeTimeProvider(), TimeSpan.FromMinutes(2));
-        using var second = new PipeListener(new FakeFeed(), h.Options, idle, new PawnIoState(() => PawnIoStatus.Ok), log);
+        using var second = new PipeListener(new FakeFeed(), h.Options, idle, new PawnIoState(() => PawnIoStatus.Ok), h.Frames, log);
         await second.StartAsync(Ct);
         try
         {

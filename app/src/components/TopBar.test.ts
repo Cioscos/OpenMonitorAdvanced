@@ -147,7 +147,6 @@ test('the badge of a non-connected state keeps its basic-mode text without a Paw
 });
 
 describe('update dot on the gear', () => {
-  const UPDATE = () => t('settings.about.updateBadge');
   let off: (() => void) | undefined;
   afterEach(() => {
     off?.();
@@ -162,29 +161,31 @@ describe('update dot on the gear', () => {
   }
   const upd = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({ state: 'idle', current: '0.4.0', latest: null, checkedAtMs: null, error: null, ...over });
   const gear = () => screen.getByRole('button', { name: new RegExp(t('settings.title')) });
+  const WITH_UPDATE = () => t('settings.titleWithUpdate');
 
   test('no dot and no text without a newer version', async () => {
     await connect(upd({ state: 'upToDate' }));
     setup(null);
-    expect(screen.queryByText(UPDATE())).toBeNull();
     expect(gear().querySelector('.dot')).toBeNull();
+    expect(gear().getAttribute('title')).toBe(t('settings.title'));
+    expect(screen.getByRole('button', { name: t('settings.title') })).toBeTruthy();
   });
 
   test('dot and accessible text with a newer version, also after an error', async () => {
     await connect(upd({ state: 'error', error: 'offline', latest: { version: '0.5.0' } }));
     setup(null);
-    expect(screen.getByText(UPDATE())).toBeTruthy();
+    expect(gear().getAttribute('title')).toBe(WITH_UPDATE());
     expect(gear().getAttribute('aria-label')).toBeNull();
     expect(gear().querySelector('.dot')?.getAttribute('aria-hidden')).toBe('true');
-    expect(screen.getByRole('button', { name: `${t('settings.title')} ${UPDATE()}` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: WITH_UPDATE() })).toBeTruthy();
   });
 
   test('the dot appears after an update-status event', async () => {
     const backend = await connect(upd());
     setup(null);
-    expect(screen.queryByText(UPDATE())).toBeNull();
+    expect(gear().querySelector('.dot')).toBeNull();
     backend.emitUpdateStatus(upd({ state: 'available', latest: { version: '0.5.0' } }));
-    expect(await screen.findByText(UPDATE())).toBeTruthy();
+    expect(await screen.findByRole('button', { name: WITH_UPDATE() })).toBeTruthy();
     expect(gear().querySelector('.dot')).not.toBeNull();
   });
 });

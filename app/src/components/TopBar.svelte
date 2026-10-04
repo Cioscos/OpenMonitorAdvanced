@@ -30,6 +30,8 @@
     /** The gear button, so focus can return to it when the settings close. */
     gear?: HTMLButtonElement;
   } = $props();
+  const hasUpdate = $derived(updates.state?.latest != null);
+  const gearLabel = $derived(hasUpdate ? t('settings.titleWithUpdate') : t('settings.title'));
 
   // Collapsed by default (R23): the badge must not occupy permanent space for users without
   // the service. A command failure opens it so the error is visible.
@@ -74,7 +76,7 @@
       class="icon"
       class:on={view === 'settings'}
       type="button"
-      title={t('settings.title')}
+      title={gearLabel}
       aria-pressed={view === 'settings'}
       bind:this={gear}
       onclick={onSettings}
@@ -84,10 +86,9 @@
         <circle cx="12" cy="12" r="9" stroke-width="3" stroke-dasharray="3.53 3.54" />
         <circle cx="12" cy="12" r="6.6" stroke-width="2.4" />
       </svg>
-      <span class="sr-only">{t('settings.title')}</span>
-      {#if updates.state?.latest != null}
+      <span class="sr-only">{gearLabel}</span>
+      {#if hasUpdate}
         <span class="dot" aria-hidden="true"></span>
-        <span class="sr-only">{t('settings.about.updateBadge')}</span>
       {/if}
     </button>
   </div>

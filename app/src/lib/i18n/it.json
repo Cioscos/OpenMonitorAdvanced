@@ -16,6 +16,7 @@
   "view.simple": "Semplice",
   "view.advanced": "Avanzata",
   "settings.title": "Impostazioni",
+  "settings.titleWithUpdate": "Impostazioni (aggiornamento disponibile)",
   "settings.back": "Indietro",
   "settings.sections": "Sezioni delle impostazioni",
   "settings.section.general": "Generale",

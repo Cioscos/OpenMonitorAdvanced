@@ -13,7 +13,7 @@
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
-  import { setSettingsOpener, type SettingsTarget, type View } from './lib/view';
+  import { openSettings, setSettingsOpener, type SettingsTarget, type View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
   // The first view is chosen once the settings and the tray's request are known (see `start`).
@@ -51,6 +51,7 @@
   function navigate(target: NavigationTarget) {
     if (target.deviceId !== undefined) focus = { deviceId: target.deviceId };
     showView(target.view);
+    if (target.settingsSection === 'about') openSettings({ section: 'about' });
   }
 
   onMount(() => {

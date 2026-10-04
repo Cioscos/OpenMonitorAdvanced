@@ -230,6 +230,8 @@ export type ViewKind = 'simple' | 'advanced';
 export interface NavigationTarget {
   view: ViewKind;
   deviceId?: string;
+  /** The settings section to open, for the update toast. */
+  settingsSection?: 'about';
 }
 
 export interface ServiceModules {

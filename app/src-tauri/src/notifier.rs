@@ -171,6 +171,8 @@ pub enum LaunchTarget {
     Device(String),
     /// The main window (log toasts, L8).
     Main,
+    /// Settings › About (update toasts).
+    About,
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -196,6 +198,7 @@ pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
             Some(LaunchTarget::Device(device))
         }
         Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
+        Launch::Open(OpenLaunch { open }) if open == "about" => Some(LaunchTarget::About),
         _ => None,
     }
 }
@@ -227,6 +230,7 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
         let result = app.run_on_main_thread(move || match target {
             LaunchTarget::Device(device) => crate::window::show_device(&handle, &device),
             LaunchTarget::Main => crate::window::show_main(&handle),
+            LaunchTarget::About => crate::window::show_about(&handle),
         });
         if let Err(err) = result {
             tracing::warn!(%err, "cannot open the window for a toast");
@@ -578,6 +582,15 @@ mod tests {
         let toasts = recorder.toasts();
         assert_eq!(toasts.len(), 2);
         assert_eq!(toasts[1].0, "Temperatura CPU");
+    }
+
+    #[test]
+    fn about_launch_round_trips() {
+        assert_eq!(
+            launch_target(&launch_for_about()),
+            Some(LaunchTarget::About)
+        );
+        assert_eq!(launch_target(r#"{"open":"other"}"#), None);
     }
 
     #[test]

@@ -117,6 +117,9 @@ struct Inner {
     /// Bumped at the end of every check, for the callers waiting on it.
     generation: u64,
     auto: bool,
+    /// Callers waiting on a running check (tests only).
+    #[cfg(test)]
+    waiting: usize,
 }
 
 pub struct UpdateService {
@@ -129,6 +132,8 @@ pub struct UpdateService {
     /// Wakes the scheduler (setting changed, check finished) and the callers
     /// waiting on a running check.
     wake: Condvar,
+    /// The listener, also held while a status is read and delivered, so
+    /// emitted statuses never go back in time.
     listener: Mutex<Option<StatusListener>>,
 }
 
@@ -162,6 +167,8 @@ impl UpdateService {
                 in_flight: false,
                 generation: 0,
                 auto: false,
+                #[cfg(test)]
+                waiting: 0,
             }),
             wake: Condvar::new(),
             listener: Mutex::new(None),
@@ -177,9 +184,12 @@ impl UpdateService {
         *self.listener.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
     }
 
-    fn emit(&self, status: &UpdateStatus) {
-        if let Some(listener) = &*self.listener.lock().unwrap_or_else(PoisonError::into_inner) {
-            listener(status);
+    /// Delivers the current status. It is read under the listener's lock,
+    /// so a finished check never overwrites the `checking` of the next one.
+    fn publish(&self) {
+        let listener = self.listener.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(listener) = &*listener {
+            listener(&self.status());
         }
     }
 
@@ -241,18 +251,25 @@ impl UpdateService {
         let mut inner = self.lock();
         if inner.in_flight {
             let generation = inner.generation;
+            #[cfg(test)]
+            {
+                inner.waiting += 1;
+            }
             while inner.generation == generation {
                 inner = self
                     .wake
                     .wait(inner)
                     .unwrap_or_else(PoisonError::into_inner);
             }
+            #[cfg(test)]
+            {
+                inner.waiting -= 1;
+            }
             return self.status_of(&inner);
         }
         inner.in_flight = true;
-        let checking = self.status_of(&inner);
         drop(inner);
-        self.emit(&checking);
+        self.publish();
 
         let agent = user_agent(&self.current.to_string());
         // A panic must not leave `in_flight` set, or every caller would wait forever.
@@ -312,7 +329,7 @@ impl UpdateService {
                 launch_for_about(),
             );
         }
-        self.emit(&status);
+        self.publish();
         status
     }
 
@@ -340,21 +357,25 @@ impl UpdateService {
         }
     }
 
+    /// How long the scheduler sleeps at `now`; `None` to check at once.
+    fn next_wait_ms(&self, inner: &Inner, now: u64, started_ms: u64) -> Option<u64> {
+        match next_check_ms(now, started_ms, &inner.state, inner.auto) {
+            Some(due) if due <= now && !inner.in_flight => None,
+            // A manual check is running: its end wakes the scheduler.
+            Some(due) if due <= now => Some(MAX_WAIT_MS),
+            Some(due) => Some((due - now).min(MAX_WAIT_MS)),
+            None => Some(MAX_WAIT_MS),
+        }
+    }
+
     fn schedule(&self, started_ms: u64) {
         let mut inner = self.lock();
         loop {
-            let now = now_ms();
-            let wait_ms = match next_check_ms(now, started_ms, &inner.state, inner.auto) {
-                Some(due) if due <= now && !inner.in_flight => {
-                    drop(inner);
-                    self.check_auto();
-                    inner = self.lock();
-                    continue;
-                }
-                // A manual check is running: its end wakes this thread.
-                Some(due) if due <= now => MAX_WAIT_MS,
-                Some(due) => (due - now).min(MAX_WAIT_MS),
-                None => MAX_WAIT_MS,
+            let Some(wait_ms) = self.next_wait_ms(&inner, now_ms(), started_ms) else {
+                drop(inner);
+                self.check_auto();
+                inner = self.lock();
+                continue;
             };
             inner = match self
                 .wake
@@ -464,10 +485,14 @@ pub fn install(
     service
 }
 
-/// A check on request; waits for its result (spec §2.4).
-#[tauri::command(async)]
-pub fn check_updates(service: State<'_, Arc<UpdateService>>) -> UpdateStatus {
-    service.check_now()
+/// A check on request; waits for its result (spec §2.4) on a blocking
+/// thread, not on an async worker.
+#[tauri::command]
+pub async fn check_updates(service: State<'_, Arc<UpdateService>>) -> Result<UpdateStatus, String> {
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || service.check_now())
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command(async)]
@@ -486,6 +511,7 @@ pub fn open_release_page(service: State<'_, Arc<UpdateService>>) -> Result<(), S
         err.to_string()
     })
 }
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -678,7 +704,8 @@ mod tests {
 
     #[test]
     fn auto_result_after_disable_shows_no_toast() {
-        let (svc, h, ends) = service(None, Ok((200, release_body("0.5.0"))), true);
+        let path = temp_dir().join("update-state.json");
+        let (svc, h, ends) = service(Some(path.clone()), Ok((200, release_body("0.5.0"))), true);
         let (entered, release) = ends.unwrap();
         svc.set_auto(true);
         let worker = {
@@ -693,6 +720,26 @@ mod tests {
         assert_eq!(status.state, UpdateStateKind::Available);
         assert_eq!(svc.status().state, UpdateStateKind::Available);
         assert!(h.toasts.toasts().is_empty());
+        assert!(saved(&path)["notifiedVersion"].is_null());
+    }
+
+    #[test]
+    fn failure_after_a_future_success_does_not_spin() {
+        // The clock went back past the stored success; the check then fails.
+        let path = temp_dir().join("update-state.json");
+        let future = now_ms() + 50 * 3_600_000;
+        std::fs::write(&path, format!(r#"{{"lastSuccessMs":{future}}}"#)).unwrap();
+        let (svc, _h, _) = service(Some(path), Err(CheckError::Offline), false);
+        svc.set_auto(true);
+        let started = now_ms() - 3_600_000;
+        assert_eq!(svc.next_wait_ms(&svc.lock(), now_ms(), started), None);
+        svc.check_auto();
+        let now = now_ms();
+        assert_eq!(
+            svc.next_wait_ms(&svc.lock(), now, started),
+            Some(MAX_WAIT_MS),
+            "a failed check must wait for the retry"
+        );
     }
 
     #[test]
@@ -740,8 +787,15 @@ mod tests {
             let svc = svc.clone();
             std::thread::spawn(move || svc.check_now())
         };
-        // Lets the second caller reach the wait before the first finishes.
-        std::thread::sleep(Duration::from_millis(200));
+        // The second caller must be waiting before the first one finishes.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while svc.lock().waiting == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second caller never waited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         release.send(()).unwrap();
         // A second fetch, if any, must not block.
         drop(release);

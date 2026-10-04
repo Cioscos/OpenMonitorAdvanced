@@ -140,6 +140,26 @@ public sealed class FrameAggregatorTests
     }
 
     [Fact]
+    public void ClearForgetsProcessesAndPendingFramesButKeepsTargetsAndStalls()
+    {
+        var agg = NewAggregator();
+        agg.SetTargets([10u]);
+        agg.Add(Row(10, 1 * Freq), 0);
+        agg.Add(Row(10, 1 * Freq + 1), 2 * Freq); // one stall
+
+        agg.Clear();
+
+        Assert.Empty(agg.TakeSummary(1 * Freq).Processes);
+        Assert.Null(agg.TakeBatch(10));
+        Assert.Equal(1, agg.Stalls);
+
+        // The silence across a restart is not a stall, and the target still gathers frames.
+        agg.Add(Row(10, 9 * Freq), 9 * Freq);
+        Assert.Equal(1, agg.Stalls);
+        Assert.Single(agg.TakeBatch(10)!.Frames);
+    }
+
+    [Fact]
     public void AddAndTakeBatchFromTwoThreadsLoseNothing()
     {
         const int total = 5000;

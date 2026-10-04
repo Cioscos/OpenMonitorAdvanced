@@ -5,8 +5,8 @@ namespace OpenMonitorAdvanced.Service.Frames;
 
 /// <summary>
 /// Per-process frame bookkeeping between the PresentMon reader and the hub (spec M7b section 4.1). The
-/// reader thread calls <see cref="Add"/>; the hub timer calls <see cref="TakeBatch"/>,
-/// <see cref="TakeSummary"/>, <see cref="SetTargets"/> and reads <see cref="Stalls"/>. One internal lock
+/// reader thread calls <see cref="Add"/>; the hub calls <see cref="TakeBatch"/>,
+/// <see cref="TakeSummary"/>, <see cref="SetTargets"/>, <see cref="Clear"/> and reads <see cref="Stalls"/>. One internal lock
 /// guards all state. <c>ticksPerSecond</c> is both the QPC frequency of <c>TimeInQPC</c> and the unit of
 /// the arrival timestamps (<c>TimeProvider.GetTimestamp()</c>); on Windows they are the same clock.
 /// </summary>
@@ -112,6 +112,21 @@ internal sealed class FrameAggregator(
                     pending.Dropped++;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Forgets every process window and pending batch, for when the capture stops: with no more rows
+    /// nothing would age them out. Targets and <see cref="Stalls"/> stay; the silence until the next
+    /// row is not counted as a stall.
+    /// </summary>
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _windows.Clear();
+            _pending.Clear();
+            _hasArrival = false;
         }
     }
 

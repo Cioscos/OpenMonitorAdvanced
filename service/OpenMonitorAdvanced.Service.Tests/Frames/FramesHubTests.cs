@@ -201,6 +201,32 @@ public sealed class FramesHubTests : IDisposable
     }
 
     [Fact]
+    public async Task LeavingRunningClearsTheProcessListAndPendingFrames()
+    {
+        var client = Subscribe(1);
+        _hub.OnConfigure(1, On);
+        _hub.OnTarget(1, new FramesTargetMessage(4242));
+        var run = await _source.RunAsync(0);
+        run.WriteLine(Header);
+        await client.WaitForAsync(m => m is FramesStatusMessage { State: FramesStates.Running });
+        run.WriteLine(CsvRow);
+        await _parsed.WaitForAsync(1);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(4242u, Assert.Single(client.Of<PresentingProcessesMessage>()[^1].Processes).Pid);
+        int batches = client.Of<FrameBatchMessage>().Count;
+
+        // A frame still pending when PresentMon crashes: no more rows will come to age it out.
+        _aggregator.Add(Row(4242, 366427208400), 0);
+        var watcher = Subscribe(2); // receives Running at once, then the change
+        run.Exit(3);
+        await watcher.WaitForAsync(m => m is FramesStatusMessage { State: FramesStates.Starting });
+
+        _time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Empty(client.Of<PresentingProcessesMessage>()[^1].Processes);
+        Assert.Equal(batches, client.Of<FrameBatchMessage>().Count);
+    }
+
+    [Fact]
     public async Task UndeliveredStatusIsSentOnTheNextTick()
     {
         var client = Subscribe(1);

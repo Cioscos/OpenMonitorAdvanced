@@ -49,6 +49,7 @@ internal sealed class FramesHub : IDisposable
     private FramesOptions? _applied;
     private int _loggedStalls;
     private DateTimeOffset? _lastStallLog;
+    private bool _wasRunning;
     private bool _disposed;
 
     public FramesHub(FrameCapture capture, FrameAggregator aggregator, FrameRequests requests, TimeProvider time, ILogger<FramesHub> log)
@@ -192,6 +193,16 @@ internal sealed class FramesHub : IDisposable
             {
                 return;
             }
+
+            // Once the capture leaves running no rows come to age the process list and the batches
+            // out: drop them, so the next summary is empty instead of frozen on the last values.
+            bool running = status.State == FramesStates.Running;
+            if (_wasRunning && !running)
+            {
+                _aggregator.Clear();
+            }
+
+            _wasRunning = running;
 
             foreach (Subscriber subscriber in _subscribers.Values)
             {

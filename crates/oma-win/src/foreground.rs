@@ -37,6 +37,14 @@ pub struct ForegroundWatcher {
 impl ForegroundWatcher {
     /// Starts the `oma-foreground` thread. The current foreground window is
     /// reported at once, then every change. Fails if the hook cannot be set.
+    ///
+    /// The sink runs on the `oma-foreground` thread (the initial report
+    /// included), so it must never block and must not own or drop the
+    /// watcher. A panic in the sink is caught and swallowed.
+    ///
+    /// The hook uses `WINEVENT_SKIPOWNPROCESS`: switching to this app's own
+    /// window produces no event, so the last reported PID stays; the initial
+    /// report may still deliver the app's own PID.
     pub fn spawn(sink: Sink) -> io::Result<ForegroundWatcher> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<u32>>(1);
         let thread = std::thread::Builder::new()
@@ -61,12 +69,20 @@ impl ForegroundWatcher {
 
 impl Drop for ForegroundWatcher {
     fn drop(&mut self) {
+        let Some(t) = self.thread.take() else { return };
+        if t.is_finished() {
+            let _ = t.join();
+            return;
+        }
         // SAFETY: plain Win32 call with value arguments; it fails harmlessly
         // when the thread (and its queue) is already gone.
-        let _ = unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
-        if let Some(t) = self.thread.take() {
+        let posted =
+            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }.is_ok();
+        if posted {
             let _ = t.join();
         }
+        // Otherwise the thread cannot be told to stop: detach rather than
+        // risk blocking forever on the join.
     }
 }
 
@@ -95,7 +111,9 @@ fn run_thread(sink: Sink, ready: mpsc::SyncSender<io::Result<u32>>) {
         )
     };
     if hook.0.is_null() {
-        let _ = ready.send(Err(io::Error::last_os_error()));
+        let err = io::Error::last_os_error();
+        SINK.with(|s| *s.borrow_mut() = None);
+        let _ = ready.send(Err(err));
         return;
     }
     // SAFETY: trivial query of the calling thread's id.
@@ -103,7 +121,7 @@ fn run_thread(sink: Sink, ready: mpsc::SyncSender<io::Result<u32>>) {
     let _ = ready.send(Ok(thread_id));
 
     // SAFETY: trivial query of the foreground window handle.
-    report(unsafe { GetForegroundWindow() });
+    report_guarded(unsafe { GetForegroundWindow() });
 
     // SAFETY: `msg` is a valid MSG; the loop ends on WM_QUIT (0) or error (-1).
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
@@ -125,7 +143,12 @@ unsafe extern "system" fn on_foreground_event(
     _thread: u32,
     _time: u32,
 ) {
-    // Never unwind across the FFI boundary.
+    report_guarded(hwnd);
+}
+
+/// `report` behind `catch_unwind`: a panicking sink must neither unwind across
+/// the FFI boundary nor kill the thread before it removes the hook.
+fn report_guarded(hwnd: HWND) {
     let _ = std::panic::catch_unwind(|| report(hwnd));
 }
 
@@ -148,7 +171,8 @@ fn report(hwnd: HWND) {
 fn window_pid(hwnd: HWND) -> Option<u32> {
     let own = pid_of(hwnd);
     let mut class = [0u16; 64];
-    // SAFETY: the buffer is valid for its length; PWSTR points at it for the call only.
+    // SAFETY: the slice is valid and writable for its length, and the returned
+    // count is bounded by it.
     let len = unsafe { GetClassNameW(hwnd, &mut class) };
     let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
     let core = if class == FRAME_HOST_CLASS {
@@ -205,7 +229,9 @@ mod tests {
         .expect("hook installed");
         let pid = rx.recv_timeout(Duration::from_secs(2)).expect("a pid");
         assert_ne!(pid, 0);
+        let started = std::time::Instant::now();
         drop(watcher);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

@@ -132,6 +132,19 @@ public sealed class PresentMonCsvTests
         Assert.Equal(2, csv.Rejected);
     }
 
+    [Theory]
+    [InlineData("14.173", "NaN")]
+    [InlineData("14.173", "Infinity")]
+    [InlineData("13.64", "NaN")]
+    [InlineData("60.55", "-Infinity")]
+    public void RejectsNonFiniteNumbers(string original, string replacement)
+    {
+        var csv = ReadyParser();
+
+        Assert.Null(csv.ParseRow(Row.Replace(original, replacement)));
+        Assert.Equal(1, csv.Rejected);
+    }
+
     [Fact]
     public void RejectsRowsWithTheWrongFieldCountOrBeforeTheHeader()
     {

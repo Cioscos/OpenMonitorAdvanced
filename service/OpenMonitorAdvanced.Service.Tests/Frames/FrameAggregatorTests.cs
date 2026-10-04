@@ -122,7 +122,7 @@ public sealed class FrameAggregatorTests
         var p = Assert.Single(agg.TakeSummary(last).Processes);
 
         Assert.Equal(expected, p.DisplayedFps, 0.5);
-        Assert.InRange(p.DisplayedFps, 74.2 - 5, 74.2 + 5);
+        Assert.InRange(p.DisplayedFps, 74.2 - 0.5, 74.2 + 0.5);
     }
 
     [Fact]

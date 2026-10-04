@@ -91,7 +91,7 @@ internal sealed class PresentMonCsv
         if (!uint.TryParse(f[_pid], NumberStyles.None, CultureInfo.InvariantCulture, out var pid)
             || !ulong.TryParse(f[_qpc], NumberStyles.None, CultureInfo.InvariantCulture, out var qpc)
             || !TryHex(f[_swapchain], out var swapchain)
-            || !double.TryParse(f[_betweenPresents], NumberStyles.Float, CultureInfo.InvariantCulture, out var betweenPresents)
+            || !TryFinite(f[_betweenPresents], out var betweenPresents)
             || !TryOptional(f[_betweenDisplay], out var betweenDisplay)
             || !TryOptional(f[_untilDisplayed], out var untilDisplayed)
             || !TryOptional(f[_appStart], out var appStart))
@@ -146,7 +146,7 @@ internal sealed class PresentMonCsv
             return true;
         }
 
-        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d))
+        if (!TryFinite(value, out var d))
         {
             return false;
         }
@@ -154,6 +154,10 @@ internal sealed class PresentMonCsv
         result = d;
         return true;
     }
+
+    // NaN and Infinity parse as doubles but are not valid measurements.
+    private static bool TryFinite(string value, out double result) =>
+        double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out result) && double.IsFinite(result);
 
     private static bool TryHex(string value, out ulong result)
     {

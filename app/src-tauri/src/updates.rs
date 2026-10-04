@@ -508,10 +508,8 @@ pub fn open_release_page(service: State<'_, Arc<UpdateService>>) -> Result<(), S
     let url = service
         .release_page()
         .ok_or_else(|| "no update available".to_owned())?;
-    crate::commands::shell_open(Path::new(&url)).map_err(|err| {
-        tracing::warn!(%err, "cannot open the release page");
-        err.to_string()
-    })
+    crate::commands::open_uri(&url)
+        .inspect_err(|err| tracing::warn!(%err, "cannot open the release page"))
 }
 
 #[cfg(test)]

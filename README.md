@@ -15,7 +15,7 @@ CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) are read **without admini
 An optional Windows service adds the sensors that need them: temperatures, voltages, fans and
 SMART data.
 
-> **Status:** early development (version 0.4.0). Expect rough edges and breaking changes between
+> **Status:** early development (version 0.4.1). Expect rough edges and breaking changes between
 > versions.
 
 ## Features
@@ -90,6 +90,14 @@ Windows 11). Administrator rights are needed only during setup.
 For unattended installs, `/S` runs the installer silently and `/NOSENSORS` leaves out the
 Advanced sensors component.
 
+Upgrading needs no confirmation: running a newer setup over an installed version closes the
+running app by itself and starts it again afterwards. From 0.4.1 on, the app is asked to quit
+and is forced closed only if it is still running after 10 seconds; 0.4.0 does not know how to quit
+on request, so an upgrade from 0.4.0 closes it at once. *Start with Windows* stays as it was.
+A silent install (`/S`) brings the app back minimized to the tray, and only if it was running.
+Uninstalling from *Settings › Apps* still asks before closing the app. You can also
+close the running app from a terminal with `oma-app.exe --quit`.
+
 ## Verify your download
 
 From 0.3.0 on, each release lists the installer's SHA-256 in `SHA256SUMS.txt`, and GitHub attests that the
@@ -160,6 +168,9 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
   with a semicolon as the list separator (many European locales) shows the CSV log in one column:
   open it with *Data* → *From Text/CSV* and choose the comma.
+  The *Start with Windows* entry of a standard user survives an uninstall of the per-machine
+  installer and then points at a program that is gone: remove it in *Settings › Apps › Startup*
+  (or turn the option off before uninstalling).
 
 ## Update check
 

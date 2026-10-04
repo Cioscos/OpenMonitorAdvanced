@@ -3,7 +3,7 @@
 use std::fmt;
 
 use oma_core::provider::ProviderError;
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhGetFormattedCounterValue, PdhGetRawCounterArrayW, PdhOpenQueryW, PDH_CSTATUS_NEW_DATA,
@@ -16,6 +16,8 @@ use windows::Win32::System::Performance::{
 const FMT_DOUBLE_NOCAP: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);
 /// Returned while a rate counter has fewer than two samples.
 pub(crate) const PDH_INVALID_DATA: u32 = 0xC000_0BBA;
+/// `ERROR_INVALID_DATA`: PDH reported more items than its buffer can hold.
+const ERROR_INVALID_DATA: u32 = 13;
 /// Returned when a wildcard counter currently has no instances.
 const PDH_NO_DATA: u32 = 0x8000_07D5;
 /// A rate counter's base went backwards between the two samples: a 32-bit
@@ -73,6 +75,29 @@ fn formatted(status: u32, value_status: u32, value: f64) -> Result<f64, u32> {
     }
 }
 
+/// True if `count` items of `item_size` bytes fit in `buffer_bytes`, without
+/// overflowing the multiplication.
+fn items_fit(count: u32, item_size: usize, buffer_bytes: usize) -> bool {
+    (count as usize)
+        .checked_mul(item_size)
+        .is_some_and(|bytes| bytes <= buffer_bytes)
+}
+
+/// Name of a PDH item; empty if the pointer is null.
+///
+/// # Safety
+///
+/// A non-null `name` must point to a NUL-terminated UTF-16 string that stays
+/// valid for the duration of the call.
+unsafe fn item_name(name: PWSTR) -> String {
+    if name.is_null() {
+        return String::new();
+    }
+    // SAFETY: non-null, and the caller guarantees a valid NUL-terminated
+    // string for the duration of the call.
+    unsafe { name.to_string() }.unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +124,19 @@ mod tests {
         assert_eq!(formatted(PDH_INVALID_DATA, 0, 0.0), Err(PDH_INVALID_DATA));
         // The call succeeds but PDH marks the value itself invalid.
         assert_eq!(formatted(0, PDH_INVALID_DATA, 0.0), Err(PDH_INVALID_DATA));
+    }
+
+    #[test]
+    fn items_fit_rejects_counts_beyond_the_buffer() {
+        assert!(items_fit(2, 24, 48));
+        assert!(!items_fit(3, 24, 48));
+        assert!(!items_fit(u32::MAX, usize::MAX / 2, 1024));
+    }
+
+    #[test]
+    fn a_null_item_name_reads_as_empty() {
+        // SAFETY: a null pointer is explicitly allowed and never dereferenced.
+        assert_eq!(unsafe { item_name(PWSTR::null()) }, "");
     }
 }
 
@@ -209,13 +247,27 @@ impl Query {
                     })
                 }
             }
-            // SAFETY: PDH wrote `count` items into `buffer`, which outlives the slice.
+            if !items_fit(
+                count,
+                std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>(),
+                buffer.len() * 8,
+            ) {
+                return Err(PdhError {
+                    call: CALL,
+                    status: ERROR_INVALID_DATA,
+                });
+            }
+            // SAFETY: `buffer` is zero-initialised, so all `count * size_of` bytes are
+            // initialised whatever PDH wrote; `items_fit` keeps them inside the
+            // allocation; the `u64` buffer gives 8-byte alignment; `buffer` outlives
+            // the slice.
             let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
             return Ok(items
                 .iter()
                 .map(|item| {
-                    // SAFETY: `szName` points into `buffer`.
-                    let name = unsafe { item.szName.to_string() }.unwrap_or_default();
+                    // SAFETY: PDH points `szName` at a NUL-terminated string inside
+                    // `buffer` (or leaves it null), and `buffer` outlives this call.
+                    let name = unsafe { item_name(item.szName) };
                     let value = if valid_status(item.FmtValue.CStatus) {
                         // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member.
                         unsafe { item.FmtValue.Anonymous.doubleValue }
@@ -266,12 +318,28 @@ impl Query {
                     })
                 }
             }
-            // SAFETY: PDH wrote `count` items into `buffer`, which outlives the slice.
+            if !items_fit(
+                count,
+                std::mem::size_of::<PDH_RAW_COUNTER_ITEM_W>(),
+                buffer.len() * 8,
+            ) {
+                return Err(PdhError {
+                    call: CALL,
+                    status: ERROR_INVALID_DATA,
+                });
+            }
+            // SAFETY: `buffer` is zero-initialised, so all `count * size_of` bytes are
+            // initialised whatever PDH wrote; `items_fit` keeps them inside the
+            // allocation; the `u64` buffer gives 8-byte alignment; `buffer` outlives
+            // the slice.
             let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
-            // SAFETY: `szName` points into `buffer`.
             return Ok(items
                 .iter()
-                .map(|item| unsafe { item.szName.to_string() }.unwrap_or_default())
+                .map(|item| {
+                    // SAFETY: PDH points `szName` at a NUL-terminated string inside
+                    // `buffer` (or leaves it null), and `buffer` outlives this call.
+                    unsafe { item_name(item.szName) }
+                })
                 .collect());
         }
         Err(PdhError {

@@ -102,11 +102,11 @@ public static partial class SchemaBuilder
                     break;
 
                 case HardwareType.Cooler:
-                    ProcessDevice(root, DeviceId(root.Identifier), "fan_controller", root.Name, hint: null, GenericFallback, output);
+                    ProcessDevice(root, DeviceId(root.Identifier), "fan_controller", DisplayName.Clean(root.Name), hint: null, GenericFallback, output);
                     break;
 
                 case HardwareType.Psu:
-                    ProcessDevice(root, DeviceId(root.Identifier), "psu", root.Name, hint: null, GenericFallback, output);
+                    ProcessDevice(root, DeviceId(root.Identifier), "psu", DisplayName.Clean(root.Name), hint: null, GenericFallback, output);
                     break;
 
                 default:
@@ -136,7 +136,7 @@ public static partial class SchemaBuilder
             properties = new Dictionary<string, string> { ["tjMaxC"] = tjMaxC.ToString(CultureInfo.InvariantCulture) };
         }
 
-        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", cpu.Name, new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties);
+        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", DisplayName.Clean(cpu.Name), new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties);
     }
 
     /// <summary>Kind prefix and label key of an Intel core sensor, by the LHM name prefix of its core type.</summary>
@@ -355,7 +355,7 @@ public static partial class SchemaBuilder
             return;
         }
 
-        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", ram.Name, Vendor: null, EmptyProperties, new MemoryHint()), localSensors, localBindings);
+        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", DisplayName.Clean(ram.Name), Vendor: null, EmptyProperties, new MemoryHint()), localSensors, localBindings);
     }
 
     private static SensorMatch MatchMemorySensor(SensorNode s) => s.Type switch
@@ -375,7 +375,7 @@ public static partial class SchemaBuilder
                 continue;
             }
 
-            ProcessDevice(child, DeviceId(child.Identifier), "motherboard", child.Name, hint: null, GenericFallback, output);
+            ProcessDevice(child, DeviceId(child.Identifier), "motherboard", DisplayName.Clean(child.Name), hint: null, GenericFallback, output);
         }
     }
 
@@ -524,7 +524,7 @@ public static partial class SchemaBuilder
             return;
         }
 
-        output.TryAdd(node.Identifier, new WireDevice(deviceId, "storage", node.Name, Vendor: null, properties, hint), local, localBindings);
+        output.TryAdd(node.Identifier, new WireDevice(deviceId, "storage", DisplayName.Clean(node.Name), Vendor: null, properties, hint), local, localBindings);
     }
 
     private static SensorMatch MatchStorageSensor(SensorNode s)
@@ -652,7 +652,7 @@ public static partial class SchemaBuilder
         }
 
         string name = $"lhm-{s.Type.ToString().ToLowerInvariant()}-{s.Index.ToString(CultureInfo.InvariantCulture)}";
-        return Include(info.Kind, name, "lhm.raw", s.Name, info.Unit, info.Scale);
+        return Include(info.Kind, name, "lhm.raw", DisplayName.Clean(s.Name), info.Unit, info.Scale);
     }
 
     private static void ProcessDevice(

@@ -407,7 +407,7 @@ public static class MessageCodec
             "schema" => ReadSchema(ref bodyReader),
             "snapshot" => ReadSnapshot(ref bodyReader),
             "error" => ReadError(ref bodyReader),
-            _ => throw new ProtocolException($"unknown message type \"{type}\""),
+            _ => throw new ProtocolException($"unknown message type \"{ProtocolText.Clip(type)}\""),
         };
     }
 
@@ -521,7 +521,7 @@ public static class MessageCodec
         var name = ReadRequiredString(ref reader, "module name");
         if (!ProtocolConstants.Modules.Contains(name))
         {
-            throw new ProtocolException($"unknown module \"{name}\"");
+            throw new ProtocolException($"unknown module \"{ProtocolText.Clip(name)}\"");
         }
 
         return name;
@@ -854,7 +854,7 @@ public static class MessageCodec
             "cpu" => ReadCpuHint(ref valueReader),
             "storage" => ReadStorageHint(ref valueReader),
             "memory" => ReadMemoryHint(ref valueReader),
-            _ => throw new ProtocolException($"unknown identity hint kind \"{kind}\""),
+            _ => throw new ProtocolException($"unknown identity hint kind \"{ProtocolText.Clip(kind)}\""),
         };
     }
 

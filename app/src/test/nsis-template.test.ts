@@ -195,6 +195,7 @@ function block(stmts: string[], start: RegExp, end: RegExp): string[] {
 const indexOf = (stmts: string[], re: RegExp, from = 0) => stmts.findIndex((s, i) => i >= from && re.test(s));
 
 const MARKER_WRITE = /^WriteRegStr HKLM "Software\\OpenMonitorAdvanced" "PawnIoRebootRequestedUtc" /;
+const RUN_RESTORE = /^WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "\$\{PRODUCTNAME\}" "\$OmaRunValue"$/;
 const STOP = /^Call (un\.)?OmaStopService$/;
 const STOP_CHECK = /^\$\{If\} \$OmaResult != "0"$/;
 const HELPER = /^!insertmacro OMA_HELPER "(install|uninstall)"$/;
@@ -303,7 +304,8 @@ describe('oma.nsh failure paths', () => {
 
   it('records the choice only in the bookkeeping section, after the component or its removal', () => {
     const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
-    const writes = all.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s));
+    // The reboot marker and the restored start-with-Windows value are not the choice.
+    const writes = all.filter((s) => /^WriteReg/.test(s) && !MARKER_WRITE.test(s) && !RUN_RESTORE.test(s));
     expect(writes).toHaveLength(2);
     for (const w of writes) expect(book).toContain(w);
     // Deselected: stop, helper uninstall, then delete; the 0 is written after all of that.
@@ -633,5 +635,177 @@ describe('custom Italian language file', () => {
     const keys = lines.map((l) => l.split(' ')[1]);
     expect(keys).toEqual(expect.arrayContaining(['appRunning', 'appRunningOkKill', 'failedToKillApp']));
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+// M7a: the installer closes the app before an upgrade (graceful `--quit` from 0.4.1 on, a
+// forced kill otherwise) and reopens it after a silent or passive install.
+describe('closing and reopening the app around an upgrade', () => {
+  const nsh = existsSync(resolve(nsisDir, 'oma.nsh')) ? read(resolve(nsisDir, 'oma.nsh')) : '';
+  const all = statements(nsh);
+  const tpl = read(resolve(nsisDir, 'installer.nsi')).split('\n');
+
+  /** The trimmed template line right after the only line whose trimmed text is `line`. */
+  function lineAfterTheOnly(line: string) {
+    const at = tpl.flatMap((l, i) => (l.trim() === line ? [i] : []));
+    expect(at, line).toHaveLength(1);
+    return tpl[at[0] + 1].trim();
+  }
+
+  it('closes the app right before the old uninstaller runs', () => {
+    expect(tpl.filter((l) => l.includes('OMA_CLOSE_APP'))).toHaveLength(1);
+    expect(lineAfterTheOnly('reinst_uninstall:')).toBe('!insertmacro OMA_CLOSE_APP ; OMA');
+  });
+
+  it('reopens the app from .onInstSuccess, after the reboot exit code', () => {
+    expect(tpl.filter((l) => l.includes('OMA_RELAUNCH_APP'))).toHaveLength(1);
+    expect(lineAfterTheOnly('!insertmacro OMA_ONINSTSUCCESS ; OMA')).toBe('!insertmacro OMA_RELAUNCH_APP ; OMA');
+  });
+
+  it('closes the app last in the pre-install hook, for the paths that skip the reinstall page', () => {
+    const pre = block(all, /^!macro NSIS_HOOK_PREINSTALL$/, /^!macroend$/);
+    expect(pre.slice(1, 4)).toEqual([
+      'Call OmaCheckSensorsInstallDir',
+      '${If} $OmaResult != "0"',
+      expect.stringMatching(/^!insertmacro OMA_FAIL "\$\(omaSensorsNeedProgramFiles\)" /),
+    ]);
+    expect(pre[pre.length - 2]).toBe('!insertmacro OMA_CLOSE_APP');
+    const close = block(all, /^!macro OMA_CLOSE_APP$/, /^!macroend$/);
+    expect(close).toEqual(['!macro OMA_CLOSE_APP', 'Call OmaCloseApp', '!macroend']);
+  });
+
+  it('closes the app once, remembering whether it ran for the installing user', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    expect(fn.slice(1, 5)).toEqual(['${If} $OmaAppClosed == "1"', 'Return', '${EndIf}', 'StrCpy $OmaAppClosed "1"']);
+    const mine = indexOf(fn, /^nsis_tauri_utils::FindProcessCurrentUser "\$\{MAINBINARYNAME\}\.exe"$/);
+    expect(mine).toBeGreaterThan(0);
+    expect(fn.slice(mine + 1, mine + 4)).toEqual(['Pop $0', '${If} $0 = 0', 'StrCpy $OmaAppWasRunning "1"']);
+    expect(mine).toBeLessThan(indexOf(fn, /KillProcess/));
+    expect(mine).toBeLessThan(indexOf(fn, /RUN_AS_USER|RunAsUser/));
+    // Nothing running anywhere: nothing to do.
+    const any = indexOf(fn, /^nsis_tauri_utils::FindProcess "\$\{MAINBINARYNAME\}\.exe"$/, mine);
+    expect(fn.slice(any + 1, any + 4)).toEqual(['Pop $0', '${If} $0 <> 0', 'Goto oma_close_done']);
+  });
+
+  it('asks only 0.4.1 or newer to quit, and kills a missing or older version (Review Focus 3)', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    const quits = fn.flatMap((s, i) => (/--quit/.test(s) ? [i] : []));
+    expect(quits).toHaveLength(1);
+    expect(fn[quits[0]]).toBe('!insertmacro OMA_RUN_AS_USER "$INSTDIR\\${MAINBINARYNAME}.exe" "--quit"');
+    const version = indexOf(fn, /^ReadRegStr \$1 SHCTX "\$\{UNINSTKEY\}" "DisplayVersion"$/);
+    expect(version).toBeGreaterThan(0);
+    expect(fn.slice(version + 1, version + 7)).toEqual([
+      '${If} $1 != ""',
+      'nsis_tauri_utils::SemverCompare "$1" "0.4.1"',
+      'Pop $0',
+      '${If} $0 >= 0',
+      '${AndIf} ${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"',
+      fn[quits[0]],
+    ]);
+    // Then up to 40 x 250 ms for it to go, leaving as soon as no instance is left.
+    expect(fn.slice(quits[0] + 1, quits[0] + 11)).toEqual([
+      'StrCpy $2 0',
+      '${Do}',
+      'Sleep 250',
+      'nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"',
+      'Pop $0',
+      '${If} $0 <> 0',
+      'Goto oma_close_done',
+      '${EndIf}',
+      'IntOp $2 $2 + 1',
+      '${LoopUntil} $2 >= 40',
+    ]);
+    // The forced kill comes after the wait (and after both version blocks close).
+    const kill = indexOf(fn, /^nsis_tauri_utils::KillProcess "\$\{MAINBINARYNAME\}\.exe"$/);
+    expect(kill).toBe(quits[0] + 13);
+    expect(fn.slice(kill - 2, kill)).toEqual(['${EndIf}', '${EndIf}']);
+    expect(fn.slice(kill + 1, kill + 6)).toEqual(['Pop $0', 'Sleep 500', '${If} $0 <> 0', '${AndIf} $0 <> 2', expect.stringMatching(/^DetailPrint /)]);
+    expect(fn.filter((s) => /KillProcess/.test(s))).toHaveLength(1);
+  });
+
+  it('preserves the registers it uses (the reinstall page relies on $R0-$R6)', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    const pushes = fn.filter((s) => /^Push /.test(s)).map((s) => s.slice(5));
+    const pops = fn.filter((s) => /^Pop /.test(s)).map((s) => s.slice(4));
+    expect(pushes).toEqual(['$0', '$1', '$2']);
+    // Every plugin result is popped into $0; the three saved registers come back in reverse order.
+    expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
+    // ClearErrors after the label: a missing DisplayVersion or Run value leaves no error flag behind.
+    expect(fn.slice(-6)).toEqual(['oma_close_done:', 'ClearErrors', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
+    expect(fn.join('\n')).not.toMatch(/\$R\d/);
+  });
+
+  const RUN_KEY = String.raw`HKCU "Software\Microsoft\Windows\CurrentVersion\Run" ` + '"${PRODUCTNAME}"';
+
+  it('remembers the start-with-Windows value before the old uninstaller can delete it', () => {
+    expect(nsh).toMatch(/^Var OmaRunValue$/m);
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    // Once (after the idempotence guard), on every path, before anything can stop early.
+    expect(fn[5]).toBe(`ReadRegStr $OmaRunValue ${RUN_KEY}`);
+    expect(all.filter((s) => /^(ReadRegStr|StrCpy|Pop) \$OmaRunValue\b/.test(s))).toEqual([fn[5]]);
+    // The same value the template's uninstaller deletes (same hive, key and name).
+    const tplDelete = tpl.map((l) => l.trim()).filter((l) => /^DeleteRegValue HKCU ".*\\Run" /.test(l));
+    expect(tplDelete).toEqual([`DeleteRegValue ${RUN_KEY}`]);
+  });
+
+  it('puts the start-with-Windows value back after the install if the old uninstaller removed it', () => {
+    const post = block(all, /^!macro NSIS_HOOK_POSTINSTALL$/, /^!macroend$/);
+    expect(post).toEqual([
+      '!macro NSIS_HOOK_POSTINSTALL',
+      '${If} $OmaRunValue != ""',
+      'Push $0',
+      'ClearErrors',
+      `ReadRegStr $0 ${RUN_KEY}`,
+      '${If} ${Errors}',
+      `WriteRegStr ${RUN_KEY} "$OmaRunValue"`,
+      '${EndIf}',
+      'ClearErrors',
+      'Pop $0',
+      '${EndIf}',
+      '!macroend',
+    ]);
+    // The hook runs in the template's Install section, which comes after the
+    // reinstall page (where the old uninstaller runs) and after the pre-install hook.
+    const lines = tpl.map((l) => l.trim());
+    const install = lines.indexOf('Section -Install ; OMA hidden');
+    const hook = lines.indexOf('!insertmacro NSIS_HOOK_POSTINSTALL');
+    const pre = lines.indexOf('!insertmacro NSIS_HOOK_PREINSTALL');
+    expect(install).toBeGreaterThan(lines.indexOf('reinst_uninstall:'));
+    expect(pre).toBeGreaterThan(install);
+    expect(hook).toBeGreaterThan(pre);
+    expect(lines.indexOf('SectionEnd', install)).toBeGreaterThan(hook);
+  });
+
+  it('keeps the stack balanced whether or not RunAsUser leaves a result on it', () => {
+    const run = block(all, /^!macro OMA_RUN_AS_USER exe args$/, /^!macroend$/);
+    expect(run).toEqual([
+      '!macro OMA_RUN_AS_USER exe args',
+      'Push "OmaRunAsUserMark"',
+      'nsis_tauri_utils::RunAsUser "${exe}" "${args}"',
+      'Pop $OmaStack',
+      '${If} $OmaStack != "OmaRunAsUserMark"',
+      'Pop $OmaStack',
+      '${EndIf}',
+      '!macroend',
+    ]);
+  });
+
+  it('reopens the app minimized only if it ran, only when silent or passive, and not with /R', () => {
+    const relaunch = block(all, /^!macro OMA_RELAUNCH_APP$/, /^!macroend$/);
+    expect(relaunch).toEqual([
+      '!macro OMA_RELAUNCH_APP',
+      'Push $0',
+      '${If} $OmaAppWasRunning == "1"',
+      '${If} $PassiveMode = 1',
+      '${OrIf} ${Silent}',
+      '${GetOptions} $CMDLINE "/R" $0',
+      '${If} ${Errors}',
+      '!insertmacro OMA_RUN_AS_USER "$INSTDIR\\${MAINBINARYNAME}.exe" "--minimized"',
+      '${EndIf}',
+      '${EndIf}',
+      '${EndIf}',
+      'Pop $0',
+      '!macroend',
+    ]);
   });
 });

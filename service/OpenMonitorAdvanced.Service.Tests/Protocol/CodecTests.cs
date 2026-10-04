@@ -133,6 +133,18 @@ public sealed class CodecTests
     }
 
     [Fact]
+    public void AHugeUnknownTypeIsClipped()
+    {
+        string huge = new('x', 1 << 20);
+        var bytes = BuildEnvelope(huge, (ref MessagePackWriter w) => w.WriteMapHeader(0));
+        var e = Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.True(e.Message.Length <= 128, $"message is {e.Message.Length} characters");
+
+        var frame = MessageCodec.EncodeFrame(new ErrorMessage("bad_request", e.Message));
+        Assert.True(frame.Length < 1024);
+    }
+
+    [Fact]
     public void EveryKnownModuleIsAccepted()
     {
         var bytes = SubscribeBody(["cpu", "motherboard", "memory", "storage", "controller", "psu"], []);

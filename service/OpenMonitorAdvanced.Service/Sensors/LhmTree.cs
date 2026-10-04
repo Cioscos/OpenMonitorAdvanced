@@ -386,7 +386,7 @@ public sealed class LhmTree : IHardwareTree
                 // (in-memory) sensors here is safe from any thread. No disk I/O under this lock.
                 Entry entry = CreateEntry(hardware);
                 _entries.Add(entry);
-                _log.LogInformation("Hardware added: {Identifier} ({Type}, {Name})", entry.Identifier, hardware.HardwareType, hardware.Name);
+                _log.LogInformation("Hardware added: {Identifier} ({Type}, {Name})", entry.Identifier, hardware.HardwareType, DisplayName.Clean(hardware.Name));
             }
 
             Compose();

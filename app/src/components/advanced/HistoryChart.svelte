@@ -66,6 +66,8 @@
   const selected = $derived(fitSelection(chosen, candidateIds, schema));
   const selectionKey = $derived(selected.join('\n'));
   let paused = $state(document.visibilityState === 'hidden');
+  /** Every series is empty over the visible window and its latest reading is suspended. */
+  let allSuspended = $state(false);
 
   let container: HTMLDivElement;
   let plot: uPlot | undefined;
@@ -112,7 +114,17 @@
   function yRange(unit: Parameters<typeof scaleOptions>[0]): uPlot.Range.Function {
     const config = scaleOptions(unit).range as uPlot.Range.Config | undefined;
     return (_u, dataMin, dataMax, key) => {
-      if (settingY || dataMin == null || dataMax == null) return [dataMin, dataMax];
+      if (settingY) return [dataMin, dataMax];
+      // No values in view (a suspended device): keep the axis that was shown, else the unit's
+      // soft bounds, else 0..1, so uPlot always has a valid Y scale.
+      if (dataMin == null || dataMax == null) {
+        const shown = yShown.get(key);
+        if (shown) return [shown.min, shown.max];
+        const soft = config as { min?: { soft?: number }; max?: { soft?: number } } | undefined;
+        const lo = soft?.min?.soft;
+        const hi = soft?.max?.soft;
+        return lo !== undefined && hi !== undefined ? [lo, hi] : [0, 1];
+      }
       const [min, max] = config ? uPlot.rangeNum(dataMin, dataMax, config) : uPlot.rangeNum(dataMin, dataMax, 0.1, true);
       if (min == null || max == null) return [min, max];
       const shown = yShown.get(key);
@@ -383,6 +395,7 @@
     viewportRevision = revision;
     // Never append values from a new schema to a plot of the previous source/unit.
     buffer = undefined;
+    allSuspended = false;
     viewport = createChartViewport(seconds);
     if (previousEdge !== undefined) viewport.sample(previousEdge * 1000, performance.now());
     if (reducedMotion) viewport.suspend(performance.now());
@@ -405,8 +418,21 @@
     if (store.timestampMs > (next.lastTimestampMs ?? 0)) next.append(store.timestampMs, ids.map((id) => store.measured(id)));
     next.trim(next.lastTimestampMs ?? 0);
     buffer = next;
+    allSuspended = windowAllSuspended();
     if (next.lastTimestampMs !== null) viewport.sample(next.lastTimestampMs, performance.now());
     build(ids);
+  }
+
+  /**
+   * True when no series has a value inside the visible window (the one retained sample before
+   * its left edge does not count) and the store's latest quality of each is suspended (2).
+   */
+  function windowAllSuspended(): boolean {
+    if (!buffer || buffer.ids.length === 0 || buffer.lastTimestampMs === null) return false;
+    if (buffer.ids.some((id) => store.quality(id) !== 2)) return false;
+    const [xs, ...columns] = buffer.data();
+    const since = (buffer.lastTimestampMs - buffer.windowSeconds * 1000) / 1000;
+    return columns.every((column) => xs.every((x, k) => x < since || column[k] == null));
   }
 
   function build(ids: string[]) {
@@ -528,6 +554,7 @@
     }
     buffer.append(timestampMs, buffer.ids.map((id) => store.measured(id)));
     buffer.trim(timestampMs);
+    allSuspended = windowAllSuspended();
     viewport.sample(timestampMs, performance.now());
     plot.batch(() => {
       plot!.setData(buffer!.data(converters), false);
@@ -667,6 +694,8 @@
   <div class="plot" bind:this={container}></div>
   {#if selected.length === 0}
     <p class="empty">{t('advanced.chart.empty')}</p>
+  {:else if allSuspended}
+    <p class="empty">{t('chart.suspended')}</p>
   {/if}
 </section>
 

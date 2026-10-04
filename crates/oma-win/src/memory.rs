@@ -95,6 +95,7 @@ mod tests {
     #[test]
     fn used_percentage() {
         assert_eq!(used_pct(32, 8), Some(75.0));
+        assert_eq!(used_pct(200, 50), Some(75.0));
         assert_eq!(used_pct(0, 0), None);
     }
 }

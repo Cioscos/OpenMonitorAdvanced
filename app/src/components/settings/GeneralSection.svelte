@@ -3,6 +3,7 @@
   import type { Backend } from '../../lib/backend';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
+  import { openFailureText } from '../../lib/openFailure';
   import { settings } from '../../lib/settings.svelte';
   import { INTERVALS_MS, iconSensorChoices, reasonText } from '../../lib/settingsView';
   import type { AutostartStatus, ChartFps, DefaultView, Language, SettingsPatch, TemperatureUnit, ThroughputUnit } from '../../lib/types';
@@ -47,7 +48,7 @@
     try {
       await backend.openKnownPath('startupAppsSettings');
     } catch (error) {
-      openError = t('settings.openFailed', { reason: String(error) });
+      openError = openFailureText(error);
     }
   }
 

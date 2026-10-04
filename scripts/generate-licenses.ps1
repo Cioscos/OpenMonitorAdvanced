@@ -162,6 +162,9 @@ function Get-NuGetEntries([string[]]$Accepted) {
         } else {
             Get-StandardTexts $lic.License $Accepted
         }
+        if ($lic.Notices) {
+            $texts = @($texts) + [pscustomobject]@{ Title = 'Third-party notices'; Body = $lic.Notices }
+        }
         [pscustomobject]@{
             Ecosystem = '.NET'; Name = $p.Id; Version = $p.Version; License = $lic.License
             Copyright = $lic.Copyright; Texts = @($texts)

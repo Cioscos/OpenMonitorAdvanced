@@ -190,6 +190,52 @@ test('a suspended reading leaves a gap in the plotted data', async () => {
   ]);
 });
 
+test('a fully suspended window keeps a y range and says why it is empty', async () => {
+  await settings.update({ advanced: { window: 60 } });
+  FakeUplot.autoRangeY = true;
+  const backend = fakeBackend();
+  backend.history = { timestampsMs: [], series: [] };
+  const store = new LiveStore();
+  renderChart(backend, store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(screen.queryByText(t('chart.suspended'))).toBeNull();
+
+  const quality = MOCK_SCHEMA.sensors.map(() => 2);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 100_000, values: mockValues(1), quality });
+  flushSync();
+  expect(plots[0].data.slice(1)).toEqual([[null], [null]]);
+  for (const scale of ['percent', 'celsius']) {
+    const range = plots[0].yRanges.get(scale)!;
+    expect(Number.isFinite(range.min)).toBe(true);
+    expect(Number.isFinite(range.max)).toBe(true);
+  }
+  expect(screen.getByText(t('chart.suspended'))).toBeTruthy();
+
+  // The first fresh reading brings the plot back.
+  const fresh = MOCK_SCHEMA.sensors.map(() => 0);
+  store.applySnapshot({ revision: 1, seq: 2, timestampMs: 101_000, values: mockValues(2), quality: fresh });
+  flushSync();
+  expect(screen.queryByText(t('chart.suspended'))).toBeNull();
+});
+
+test('a partly suspended window shows no suspended notice', async () => {
+  await settings.update({ advanced: { window: 60 } });
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+
+  const quality = MOCK_SCHEMA.sensors.map((_, i) => (i === index(TEMP) ? 2 : 0));
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3_000, values: mockValues(1), quality });
+  flushSync();
+  expect(screen.queryByText(t('chart.suspended'))).toBeNull();
+
+  // Every series suspended, but older readings still sit in the visible window.
+  const all = MOCK_SCHEMA.sensors.map(() => 2);
+  store.applySnapshot({ revision: 1, seq: 2, timestampMs: 4_000, values: mockValues(2), quality: all });
+  flushSync();
+  expect(screen.queryByText(t('chart.suspended'))).toBeNull();
+});
+
 test('a suspended snapshot that arrives while history loads is plotted as a gap', async () => {
   const backend = fakeBackend();
   let resolve!: (h: HistorySeed) => void;

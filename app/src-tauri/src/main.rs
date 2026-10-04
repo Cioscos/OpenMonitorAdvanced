@@ -52,11 +52,54 @@ fn generation_changed(last: &mut u64, generation: u64) -> bool {
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
-/// Whether a launch with these arguments should show the window. A second
-/// `--minimized` launch (autostart racing a running instance) stays quiet; one
-/// without it, like `measure-footprint.ps1`'s, opens the window.
-fn opens_window(args: &[String]) -> bool {
-    !args.iter().any(|arg| arg == "--minimized")
+/// What a second launch asks of the running instance.
+#[derive(Debug, PartialEq, Eq)]
+enum SecondLaunch {
+    /// `--quit`: exit the running instance (the installer's way to close it).
+    Quit,
+    /// A plain or `--safe` launch: bring the window up.
+    ShowWindow,
+    /// `--minimized` (autostart racing a running instance): stay quiet.
+    Nothing,
+}
+
+/// Whether the arguments carry `--quit`, as a whole argument.
+fn is_quit(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--quit")
+}
+
+/// What a second launch with these arguments asks for. `--quit` wins over
+/// `--minimized`. A second `--minimized` launch stays quiet; one without it,
+/// like `measure-footprint.ps1`'s, opens the window.
+fn second_launch(args: &[String]) -> SecondLaunch {
+    if is_quit(args) {
+        SecondLaunch::Quit
+    } else if args.iter().any(|arg| arg == "--minimized") {
+        SecondLaunch::Nothing
+    } else {
+        SecondLaunch::ShowWindow
+    }
+}
+
+/// `--quit` with no instance running: only the single-instance plugin is
+/// built, so a running peer still gets the arguments forwarded (and this
+/// process ends inside the plugin), but nothing else starts. No log file, no
+/// crash marker, no settings, no window, tray, sampler, service link or
+/// autostart write; the app asks to exit as soon as the event loop runs.
+fn run_quit_only(context: tauri::Context<tauri::Wry>) -> ! {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if is_quit(&args) {
+                app.exit(0);
+            }
+        }))
+        .setup(|app| {
+            app.handle().exit(0);
+            Ok(())
+        })
+        .build(context)
+        .expect("failed to build the Tauri application");
+    std::process::exit(app.run_return(|_, _| {}));
 }
 
 /// Whether closing the last window keeps the app running in the tray.
@@ -148,6 +191,13 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 }
 
 fn main() {
+    // Built once (it embeds the frontend assets) for whichever path runs; no
+    // side effects.
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    // Before anything with side effects (see `run_quit_only`).
+    if is_quit(&std::env::args().collect::<Vec<_>>()) {
+        run_quit_only(context);
+    }
     // Held for the program's lifetime when present, so buffered log lines are
     // flushed on drop; the app still runs (without a file log) if this is None.
     let log_guard = init_logging();
@@ -227,11 +277,13 @@ fn main() {
     let service_shell = ServiceShell::new(settings_store.clone());
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if opens_window(&args) {
-                window::show_main(app);
-            }
-        }))
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, _cwd| match second_launch(&args) {
+                SecondLaunch::Quit => app.exit(0),
+                SecondLaunch::ShowWindow => window::show_main(app),
+                SecondLaunch::Nothing => {}
+            },
+        ))
         // Rust side only: no `global-shortcut:*` permission reaches the UI.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -422,7 +474,7 @@ fn main() {
             app.manage(SamplerGuard(Mutex::new(Some(sampler))));
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build the Tauri application");
 
     // `run_return` (not `run`, which ends the process itself) so the log guard
@@ -525,10 +577,34 @@ mod tests {
     }
 
     #[test]
-    fn opens_window_ignores_minimized_launches() {
-        assert!(!opens_window(&args(&["oma-app.exe", "--minimized"])));
-        assert!(opens_window(&args(&["oma-app.exe"])));
-        assert!(opens_window(&args(&["oma-app.exe", "--safe"])));
+    fn second_launch_decides_quit_show_or_nothing() {
+        assert_eq!(
+            second_launch(&args(&["oma-app.exe", "--quit"])),
+            SecondLaunch::Quit
+        );
+        assert_eq!(
+            second_launch(&args(&["oma-app.exe", "--minimized", "--quit"])),
+            SecondLaunch::Quit
+        );
+        assert_eq!(
+            second_launch(&args(&["oma-app.exe", "--minimized"])),
+            SecondLaunch::Nothing
+        );
+        assert_eq!(
+            second_launch(&args(&["oma-app.exe"])),
+            SecondLaunch::ShowWindow
+        );
+        assert_eq!(
+            second_launch(&args(&["oma-app.exe", "--safe"])),
+            SecondLaunch::ShowWindow
+        );
+    }
+
+    #[test]
+    fn quit_is_recognised_only_as_a_whole_argument() {
+        assert!(is_quit(&args(&["oma-app.exe", "--quit"])));
+        assert!(!is_quit(&args(&["oma-app.exe", "--quitter"])));
+        assert!(!is_quit(&args(&["oma-app.exe"])));
     }
 
     #[test]

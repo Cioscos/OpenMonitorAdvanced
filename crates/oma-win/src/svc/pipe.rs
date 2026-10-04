@@ -321,10 +321,12 @@ impl PipeClient {
     }
 
     /// Like [`start_reader`](Self::start_reader), but each event goes to
-    /// `deliver`, which must not block: it returns `false` when nobody can
-    /// take the event (the consumer is gone or overwhelmed), and the reader
-    /// then closes the connection without a `Closed` event. `deliver` is
-    /// dropped when the reader exits.
+    /// `deliver`, which must not block for good: it returns `false` when
+    /// nobody can take the event (the consumer is gone or overwhelmed), and
+    /// the reader then closes the connection without a `Closed` event. A
+    /// `deliver` that waits for its consumer must stop waiting before
+    /// [`PipeReader::stop`], which joins this thread. `deliver` is dropped
+    /// when the reader exits.
     pub fn start_reader_with(
         &self,
         deliver: impl Fn(PipeEvent) -> bool + Send + 'static,

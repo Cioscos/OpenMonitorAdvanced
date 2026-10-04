@@ -92,10 +92,8 @@ fn open_folder(log: &LogService) -> Result<(), String> {
     if !dir.is_dir() {
         return Err("log.error.folderMissing".to_owned());
     }
-    crate::commands::shell_open(&dir).map_err(|err| {
-        tracing::warn!(%err, "cannot open the log folder");
-        err.to_string()
-    })
+    crate::commands::open_path(&dir)
+        .inspect_err(|err| tracing::warn!(%err, "cannot open the log folder"))
 }
 
 /// A toast of the log: a click opens the main window (L8).

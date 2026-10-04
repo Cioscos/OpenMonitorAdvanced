@@ -626,14 +626,79 @@ Le esegue l'utente. L'agente prepara il setup e annota l'esito nel piano.
 
 | # | Prova | Atteso |
 |---|---|---|
-| U1 | Con la 0.4.0 installata e l'app nel tray, si esegue il setup 0.4.1 in modalità grafica e si lascia l'opzione predefinita «Disinstalla prima» | nessun messaggio «in esecuzione»; a fine installazione, con «Avvia» spuntata, l'app si apre e il servizio riparte con lei |
+| U1 | Con la 0.4.0 installata, l'avvio con Windows attivo e l'app nel tray, si esegue il setup 0.4.1 in modalità grafica e si lascia l'opzione predefinita «Disinstalla prima» | nessun messaggio «in esecuzione»; a fine installazione, con «Avvia» spuntata, l'app si apre e il servizio riparte con lei; dopo l'aggiornamento il valore Run c'è ancora e «Avvio con Windows» è ancora attivo |
 | U2 | Con la 0.4.1 installata e l'app nel tray, `setup.exe /S` (stessa versione) | nessuna finestra e nessuna domanda; l'app si chiude in modo ordinato (`--quit`) e torna nel tray (`--minimized`) |
 | U3 | Come U2, ma con l'app chiusa | l'app non si apre |
 | U4 | Disinstallazione da Impostazioni › App con l'app aperta | la domanda «in esecuzione» c'è ancora |
 | U5 | Si cancella la cartella dei log, poi «Apri cartella»; si usano i pulsanti di Informazioni | messaggio «Il file o la cartella non esiste»; gli altri pulsanti funzionano |
 | U6 | Grafico di un HDD in standby con una finestra di 1 min | asse Y visibile e testo «Nessuna lettura mentre il dispositivo è inattivo o in standby» |
-| U7 | `oma-app.exe --quit` dal terminale con l'app aperta, poi di nuovo con l'app chiusa | la prima volta l'app esce; la seconda il processo termina senza finestra |
+| U7 | `oma-app.exe --quit` dal terminale con l'app aperta, poi di nuovo con l'app chiusa; poi, con l'avvio con Windows attivo per l'app installata, si avvia `target\release\oma-app.exe` | la prima volta l'app esce; la seconda il processo termina senza finestra; l'avvio di `target\release\oma-app.exe` lascia invariato il valore Run |
 
 ## Esito dell'esecuzione
 
-Da compilare a fine piano: commit, decisioni prese durante l'esecuzione, esito delle verifiche U1–U7.
+Branch `feat/m7a-manutenzione` (da `main` ad8f744), eseguito task per task con revisione dedicata; nessun tag e nessun push.
+
+### Commit per task
+
+| Task | Commit |
+|---|---|
+| 1 | `4b88fca` split di `storage.rs` in una cartella di moduli |
+| 2 | `fbee564` split del link al servizio in macchina a stati, trasporto e driver |
+| 3 | `7d5a650` formatter della chiave di visualizzazione fuori da `health.rs`; `1653e60` test di arrotondamento, segno e joule |
+| 4 | `0dfdb90` split di `SensorHub` in file parziali, `GateEpisode` in un file proprio |
+| 5 | `12d6445` `--quit` per chiudere l'istanza in esecuzione |
+| 6 | `08daff0` l'installer chiude l'app prima dell'aggiornamento e la riapre dopo |
+| 7 | `a977a65` riparazione del percorso dell'avvio automatico all'avvio |
+| 8 | `e42b819` apertura con timeout e messaggio per percorso mancante; `8cb9f75` messaggi tradotti nel pulsante della cartella dei log |
+| 9 | `f7ea18e` coda del link limitata e stato del servizio visibile in `Held` |
+| 10 | `0df0c00` array PDH limitati, `used_pct` condiviso, test di tempo dei dischi stabilizzato; `ad147f6` `item_name` diventa `unsafe` con i suoi invarianti |
+| 11 | `98bd9f7` test di sessione del log che aspettano condizioni |
+| 12 | `1e957a5` asse mantenuto e spiegazione nel grafico tutto sospeso |
+| 13 | `d1508af` testo del client troncato in `bad_request` e nomi LHM puliti |
+| 14 | `6181767` avvisi di terze parti dei pacchetti NuGet Microsoft nelle licenze |
+| 15 | documentazione (`docs: record the M7a outcome`) e bump alla 0.4.1 (`chore: release 0.4.1`) |
+
+### Decisioni prese durante l'esecuzione
+
+- I trailer dei commit nominano il modello che ha scritto il commit, non la stringa fissa del piano; la storia non è stata riscritta.
+- Task 2: gli helper di test `machine()`, `subscribed()` e `subscribed_with()` stanno in `link/tests/mod.rs`, usati sia dai test della macchina sia da quelli del driver: è l'allargamento minimo per uno spostamento puro.
+- Task 5: `main()` controlla `--quit` per prima e lancia `run_quit_only` (solo il plugin single-instance) invece di uscire nel `setup` dell'app completa. È più rigoroso sul punto di revisione 2: niente log, niente marcatore di crash, niente scritture delle impostazioni. Se U7 rivelasse un blocco, la correzione è piccola.
+- Task 6: le quattro preoccupazioni dell'implementer sono accettate senza modifiche. La reinstallazione grafica della stessa versione chiude l'app senza domanda, la pagina di reinstallazione può attendere fino a 10 s e la casella «Avvia» apre la finestra senza minimizzarla, come da decisione dell'utente e §2.1 della spec. Il kill per nome di `oma-app.exe` chiude anche una build di sviluppo in esecuzione, come prescrive il piano (`KillProcess`).
+- Task 7: la frase sul limite noto dell'avvio automatico nel README è in inglese, perché il README è interamente in inglese.
+- Task 8: `open_target` restituisce `Option<OpenTarget>`, perché alcune cartelle note possono mancare; serve ai casi di percorso assente già esistenti.
+- Task 9: il lettore usa un nuovo tentativo di 2 ms, annullabile, per i messaggi che non sono snapshot, invece di un invio bloccante, che andrebbe in stallo perché il thread del link attende il lettore alla chiusura. Con «stopped» in stato `Held` si mostra `disconnected()`, perché `ServiceState` non ha `Stopped` (come nel ciclo di connessione).
+- Task 10: `item_name` è una `unsafe fn` con contratto `# Safety` e commenti `SAFETY` nei punti di chiamata. La regola della spec (`SAFETY` su ogni `unsafe`) prevale sulla firma del piano.
+- Task 11: accettate le correzioni di due ulteriori test instabili sotto carico (`old_writer_events_cannot_mutate_a_new_session`, `busy_lock_ticks_keep_the_every_n_spacing`), oltre ai quattro del piano. Le prove di stress hanno saturato la CPU: da allora niente generatori di carico né cicli lunghi senza chiedere.
+- Step 6 del Task 15 (build del setup 0.4.1 e SHA-256) rinviato a dopo la revisione finale dell'intero branch e le sue correzioni, altrimenti il setup sarebbe precedente alle correzioni.
+
+### Correzioni della revisione finale
+
+La revisione dell'intero branch (ad8f744..e1eac9b) ha trovato due problemi importanti e alcuni minori, corretti in un'unica tornata.
+
+| Commit | Correzione |
+|---|---|
+| `64c422d` | l'avvio automatico si ripara solo se l'eseguibile del comando salvato non esiste più |
+| `78f9e44` | l'installer conserva il valore Run in un aggiornamento grafico con «Disinstalla prima»; `OmaCloseApp` azzera il flag di errore prima di uscire |
+| `5175072` | il contesto Tauri si costruisce una sola volta per i due percorsi d'avvio |
+| `291a056` | `shell_open` usa il codice d'errore restituito da windows-rs invece di rileggere `GetLastError` |
+| documentazione | README (chiusura forzata solo dalla 0.4.0, limite noto anche in italiano), `CLAUDE.md`, `docs/follow-ups.md` e questo piano |
+
+Decisioni:
+
+- **Valore Run in un aggiornamento grafico.** La pagina di reinstallazione esegue il vecchio disinstallatore senza `/UPDATE` (comportamento del template), quindi il valore Run dell'utente veniva cancellato e l'app aggiornata spegneva l'opzione. La correzione sta solo in `oma.nsh`, senza nuove righe in `installer.nsi`: `OmaCloseApp`, che gira prima del vecchio disinstallatore su ogni percorso e una sola volta, legge il valore in `OmaRunValue`; `NSIS_HOOK_POSTINSTALL`, alla fine della sezione Install (dopo la pagina di reinstallazione e dopo `NSIS_HOOK_PREINSTALL`), lo riscrive invariato se ora manca. Stessa chiave e stesso nome che cancella il disinstallatore del template (`HKCU`, `${PRODUCTNAME}`); se il percorso è cambiato lo corregge la riparazione all'avvio dell'app.
+- **Riparazione dell'avvio automatico.** Prima riscriveva il valore Run per qualunque build release diversa da quella salvata, quindi `target\release\oma-app.exe` (usato da `measure-footprint.ps1`), l'output di `pnpm tauri build` o una copia portatile puntavano a sé stessi l'avvio dell'utente. Ora `needs_repair` riceve un predicato di esistenza e ripara solo se l'eseguibile tra virgolette del comando salvato non esiste più («l'app si è spostata»); un comando non nel formato di `command_line` resta com'è. Restano il confronto senza distinzione di maiuscole e la guardia delle build di debug.
+- `ClearErrors` di `OmaCloseApp` sta subito dopo l'etichetta `oma_close_done:` e non subito prima: così copre anche i salti all'etichetta (per esempio un valore Run assente seguito da «nessuna istanza in esecuzione»), non solo il caso di `DisplayVersion` mancante.
+
+### Verifiche dal vivo
+
+| # | Esito |
+|---|---|
+| U1 | da fare (utente): dopo l'aggiornamento il valore Run c'è ancora e «Avvio con Windows» è ancora attivo |
+| U2 | da fare (utente) |
+| U3 | da fare (utente) |
+| U4 | da fare (utente) |
+| U5 | da fare (utente) |
+| U6 | da fare (utente) |
+| U7 | da fare (utente): oltre alla chiusura e al processo senza finestra, il valore Run e il marcatore di crash devono restare invariati; l'avvio di `target\release\oma-app.exe` lascia invariato il valore Run |
+
+Il setup 0.4.1 e il suo SHA-256 si preparano dopo la revisione finale del branch.

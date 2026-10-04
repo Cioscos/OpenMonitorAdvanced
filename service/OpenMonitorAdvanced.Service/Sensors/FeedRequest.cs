@@ -157,7 +157,7 @@ public static class ServiceModuleNames
             int index = IndexOf(name);
             if (index < 0)
             {
-                throw new ArgumentException($"unknown module '{name}'", nameof(names));
+                throw new ArgumentException($"unknown module '{ProtocolText.Clip(name)}'", nameof(names));
             }
 
             modules |= (ServiceModules)(1 << index);

@@ -48,22 +48,48 @@ Describe 'Merge-OmaLicenseSections' {
         )
         $m = Merge-OmaLicenseSections -Sections $sections
         @($m.Texts).Count | Should -Be 1
-        $m.Texts[0].Label | Should -BeExactly 'Apache-2.0'
+        $m.Texts[0].Label | Should -BeExactly 'Apache-2.0 (alpha.pkg)'
         $entries = @($m.Sections[0].Entries)
         ($entries | ForEach-Object Name) -join ',' | Should -BeExactly 'alpha.pkg,Zeta.Pkg'
-        $entries | ForEach-Object { $_.Refs -join ',' | Should -BeExactly 'Apache-2.0' }
+        $entries | ForEach-Object { $_.Refs -join ',' | Should -BeExactly 'Apache-2.0 (alpha.pkg)' }
     }
 
-    It 'numbers different texts with the same title and orders sections by ecosystem' {
+    It 'labels each text with its title and first user, and orders sections by ecosystem' {
         $sections = @(
             [pscustomobject]@{ Ecosystem = 'JavaScript'; Entries = @((New-Entry 'JavaScript' 'b' '1.0.0' 'MIT' @((Text 'MIT' "Copyright B`n$mit")))) },
             [pscustomobject]@{ Ecosystem = 'Rust'; Entries = @((New-Entry 'Rust' 'a' '1.0.0' 'MIT' @((Text 'MIT' "Copyright A`n$mit")))) }
         )
         $m = Merge-OmaLicenseSections -Sections $sections
         ($m.Sections | ForEach-Object Ecosystem) -join ',' | Should -BeExactly 'Rust,JavaScript'
-        ($m.Texts | ForEach-Object Label) -join ',' | Should -BeExactly 'MIT-1,MIT-2'
-        $m.Sections[0].Entries[0].Refs | Should -BeExactly 'MIT-1'
+        ($m.Texts | ForEach-Object Label) -join ',' | Should -BeExactly 'MIT (a),MIT (b)'
+        $m.Sections[0].Entries[0].Refs | Should -BeExactly 'MIT (a)'
         $m.Texts[0].Body | Should -BeLike 'Copyright A*'
+    }
+
+    It 'keeps existing labels when a dependency is added' {
+        $base = @(
+            (New-Entry 'Rust' 'm' '1.0.0' 'MIT' @((Text 'MIT' "Copyright M`n$mit"))),
+            (New-Entry 'Rust' 'z' '1.0.0' 'MIT' @((Text 'MIT' "Copyright Z`n$mit")))
+        )
+        $before = Merge-OmaLicenseSections -Sections @([pscustomobject]@{ Ecosystem = 'Rust'; Entries = $base })
+        $after = Merge-OmaLicenseSections -Sections @([pscustomobject]@{ Ecosystem = 'Rust'; Entries = @(
+                    (New-Entry 'Rust' 'a' '1.0.0' 'MIT' @((Text 'MIT' "Copyright A`n$mit")))) + $base })
+        ($before.Texts | ForEach-Object Label) -join ',' | Should -BeExactly 'MIT (m),MIT (z)'
+        ($after.Texts | ForEach-Object Label) -join ',' | Should -BeExactly 'MIT (a),MIT (m),MIT (z)'
+    }
+
+    It 'disambiguates texts with the same title and first user name' {
+        $m = Merge-OmaLicenseSections -Sections @([pscustomobject]@{ Ecosystem = 'Rust'; Entries = @(
+                    (New-Entry 'Rust' 'w' '0.52.0' 'MIT' @((Text 'MIT' "Copyright 1`n$mit"))),
+                    (New-Entry 'Rust' 'w' '0.59.0' 'MIT' @((Text 'MIT' "Copyright 2`n$mit"))),
+                    (New-Entry 'Rust' 'v' '1.0.0' 'MIT' @((Text 'MIT' "Copyright 3`n$mit"), (Text 'MIT' "Copyright 4`n$mit")))
+                ) })
+        $labels = @($m.Texts | ForEach-Object Label)
+        $labels.Count | Should -Be 4
+        @($labels | Sort-Object -Unique).Count | Should -Be 4
+        $labels | Should -Contain 'MIT (w 0.52.0)'
+        $labels | Should -Contain 'MIT (w 0.59.0)'
+        @($labels | Where-Object { $_ -like 'MIT (v 1.0.0 #*)' }).Count | Should -Be 2
     }
 
     It 'sorts versions numerically and merges duplicate entries' {
@@ -77,7 +103,7 @@ Describe 'Merge-OmaLicenseSections' {
         )
         $m = Merge-OmaLicenseSections -Sections $sections
         ($m.Sections[0].Entries | ForEach-Object Version) -join ',' | Should -BeExactly '0.9.1,0.10.0'
-        $m.Sections[0].Entries[0].Refs -join ',' | Should -BeExactly 'Apache-2.0,MIT'
+        $m.Sections[0].Entries[0].Refs -join ',' | Should -BeExactly 'Apache-2.0 (x),MIT (x)'
     }
 }
 
@@ -110,6 +136,19 @@ Describe 'Test-OmaLicenseAccepted' {
         Test-OmaLicenseAccepted -Expression 'Apache-2.0 WITH LLVM-exception' -Accepted $ok | Should -BeTrue
         Test-OmaLicenseAccepted -Expression 'GPL-2.0-only WITH Classpath-exception-2.0' -Accepted $ok | Should -BeFalse
         Test-OmaLicenseAccepted -Expression 'MIT/Apache-2.0' -Accepted $ok | Should -BeTrue
+    }
+}
+
+Describe 'Test-OmaPinnedText' {
+    It 'compares texts ignoring line ends, BOM and trailing whitespace' {
+        $pinned = Join-Path $TestDrive 'pinned.txt'
+        $same = Join-Path $TestDrive 'same.txt'
+        $other = Join-Path $TestDrive 'other.txt'
+        [IO.File]::WriteAllText($pinned, "Notices`nxxHash`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($same, "Notices  `r`nxxHash`r`n", [Text.UTF8Encoding]::new($true))
+        [IO.File]::WriteAllText($other, "Notices`nxxHash`nmimalloc`n", [Text.UTF8Encoding]::new($false))
+        Test-OmaPinnedText -Pinned $pinned -Current $same | Should -BeTrue
+        Test-OmaPinnedText -Pinned $pinned -Current $other | Should -BeFalse
     }
 }
 

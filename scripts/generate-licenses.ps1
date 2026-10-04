@@ -14,7 +14,9 @@
   3. .NET: `dotnet restore service/OpenMonitorAdvanced.Service -r win-x64`, then the packages
      of obj/project.assets.json with a runtime or native asset for win-x64; licence file from
      the package, else the standard text of its nuspec expression (scripts/licenses/). Plus the
-     .NET runtime, which the self-contained single-file service carries (MIT).
+     .NET runtime, which the self-contained single-file service carries (MIT), with its
+     third-party notices from a pinned copy (a warning, not a failure, when the restored
+     runtime pack has different ones).
   Every licence expression must be satisfiable with the `accepted` list of about.toml. The
   output is UTF-8 without BOM, LF, with no date and no local path, so it is deterministic.
   -Check writes to a temporary folder and compares; exit code 1 lists the differing lines.
@@ -50,6 +52,12 @@ $NuGetOverrides = @{
 
 $utf8 = [Text.UTF8Encoding]::new($false)
 $licensesDir = Join-Path $PSScriptRoot 'licenses'
+
+# THIRD-PARTY-NOTICES.TXT of the .NET runtime, copied (LF, no BOM) from the runtime pack
+# microsoft.netcore.app.runtime.win-x64 10.0.11. Pinned so the output does not depend on the
+# SDK patch level; the script warns when the restored pack's file differs.
+$PinnedRuntimeNotices = Join-Path $licensesDir 'dotnet-runtime-THIRD-PARTY-NOTICES.txt'
+$PinnedRuntimeNoticesVersion = '10.0.11'
 
 function Get-AcceptedLicenses {
     $toml = [IO.File]::ReadAllText((Join-Path $RepoRoot 'about.toml'))
@@ -159,12 +167,45 @@ function Get-NuGetEntries([string[]]$Accepted) {
             Copyright = $lic.Copyright; Texts = @($texts)
         }
     }
-    # The self-contained publish carries the .NET runtime of the target framework.
+    # The self-contained publish carries the .NET runtime of the target framework, with its
+    # third-party notices (BSD-style components such as xxHash, Brotli, mimalloc, fmtlib).
     $framework = @($assets['targets'].Keys | Where-Object { $_ -notmatch '/' })[0]
     if ($framework -notmatch '^net(\d+\.\d+)') { throw "unexpected target framework '$framework' in project.assets.json" }
+    $runtimeVersion = $Matches[1]
+    Test-RuntimeNotices $assets $packagesRoot
     [pscustomobject]@{
-        Ecosystem = '.NET'; Name = '.NET runtime'; Version = $Matches[1]; License = 'MIT'
-        Copyright = '.NET Foundation and Contributors'; Texts = @(Get-StandardText 'MIT')
+        Ecosystem = '.NET'; Name = '.NET runtime'; Version = $runtimeVersion; License = 'MIT'
+        Copyright = '.NET Foundation and Contributors'
+        Texts = @(
+            (Get-StandardText 'MIT'),
+            [pscustomobject]@{ Title = 'Third-party notices'; Body = [IO.File]::ReadAllText($PinnedRuntimeNotices) }
+        )
+    }
+}
+
+# Warns (never fails, so the output stays the same on every machine) when the THIRD-PARTY-NOTICES
+# of the restored runtime pack differ from the pinned copy, which then needs a review and update.
+function Test-RuntimeNotices($Assets, [string]$PackagesRoot) {
+    $pack = $null
+    foreach ($fw in $Assets['project']['frameworks'].Values) {
+        foreach ($d in @($fw['downloadDependencies'])) {
+            if ($d -and $d['name'] -eq 'Microsoft.NETCore.App.Runtime.win-x64') { $pack = $d['version'] -replace '[\[\]\s]', '' -replace ',.*$', '' }
+        }
+    }
+    $message = $null
+    if (-not $pack) {
+        $message = 'the .NET runtime pack is not in project.assets.json: cannot compare its THIRD-PARTY-NOTICES with the pinned copy'
+    } else {
+        $file = Join-Path $PackagesRoot "microsoft.netcore.app.runtime.win-x64\$pack\THIRD-PARTY-NOTICES.TXT"
+        if (-not (Test-Path -LiteralPath $file)) {
+            $message = "THIRD-PARTY-NOTICES.TXT not found in the .NET runtime pack $pack"
+        } elseif (-not (Test-OmaPinnedText -Pinned $PinnedRuntimeNotices -Current $file)) {
+            $message = "the THIRD-PARTY-NOTICES.TXT of the .NET runtime pack $pack differs from scripts/licenses/dotnet-runtime-THIRD-PARTY-NOTICES.txt (pinned from $PinnedRuntimeNoticesVersion): review it and update the pinned copy"
+        }
+    }
+    if ($message) {
+        if ($env:GITHUB_ACTIONS -eq 'true') { [Console]::Out.WriteLine("::warning title=Third-party licences::$message") }
+        else { Write-Warning $message }
     }
 }
 

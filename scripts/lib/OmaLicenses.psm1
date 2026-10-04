@@ -175,8 +175,8 @@ function Test-OmaLicenseAccepted {
   case) and version (numeric segments compared as numbers), and the same name and version is
   one entry. Texts are compared after normalisation (LF line ends, no BOM, no trailing
   whitespace, no leading or trailing blank lines), so the same text from two packages is kept
-  once. A text is labelled with its title, or "<title>-<n>" when different texts share a title,
-  numbered in the order of their first user. Returns @{ Sections = @(@{ Ecosystem; Title;
+  once. A text is labelled "<title> (<first user>)", which does not change when an unrelated
+  dependency is added (see the label block below for collisions). Returns @{ Sections = @(@{ Ecosystem; Title;
   Entries = @(@{ Name; Version; License; Copyright; Refs }) }); Texts = @(@{ Label; Body }) }.
 #>
 function Merge-OmaLicenseSections {
@@ -197,9 +197,9 @@ function Merge-OmaLicenseSections {
             [string]::CompareOrdinal($a, $b)
         })
 
-    # Distinct texts, keyed by normalised body; Users counts the order of first use.
-    $texts = [ordered]@{}
-    $order = 0
+    # Distinct texts, keyed by normalised body (ordinal: [ordered]@{} would ignore case), with
+    # the first entry that references each one.
+    $texts = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $outSections = foreach ($eco in $ecos) {
         # Join duplicate entries (same name and version).
         $merged = [ordered]@{}
@@ -228,12 +228,13 @@ function Merge-OmaLicenseSections {
             $keys = [Collections.Generic.List[string]]::new()
             foreach ($t in $m.Bodies) {
                 $body = ConvertTo-OmaNormalizedText $t.Body
-                if (-not $texts.Contains($body)) {
-                    $texts[$body] = [pscustomobject]@{ Title = $t.Title; Body = $body; First = $order; Label = $null }
+                if (-not $texts.ContainsKey($body)) {
+                    $texts[$body] = [pscustomobject]@{
+                        Title = $t.Title; Body = $body; FirstName = $m.Name; FirstVersion = $m.Version; Label = $null
+                    }
                 }
                 if (-not $keys.Contains($body)) { $keys.Add($body) }
             }
-            $order++
             [pscustomobject]@{
                 Name = $m.Name; Version = $m.Version; License = $m.License
                 Copyright = @($m.Copyright); RefKeys = $keys
@@ -246,25 +247,22 @@ function Merge-OmaLicenseSections {
         }
     }
 
-    # Labels: the title alone when unique, else numbered by first use.
+    # Labels, stable when a dependency is added: "<title> (<first user>)", where the first user
+    # is the first entry of the file that references the text. Should two texts collide, the
+    # user's version is added, then the start of the text's SHA-256.
     $all = [object[]]@($texts.Values)
+    foreach ($t in $all) { $t.Label = "$($t.Title) ($($t.FirstName))" }
+    foreach ($t in (Get-OmaCollidingTexts $all)) { $t.Label = "$($t.Title) ($($t.FirstName) $($t.FirstVersion))" }
+    foreach ($t in (Get-OmaCollidingTexts $all)) {
+        $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($t.Body)))
+        $t.Label = "$($t.Title) ($($t.FirstName) $($t.FirstVersion) #$($hash.Substring(0, 8).ToLowerInvariant()))"
+    }
     [Array]::Sort($all, [Comparison[object]] {
             param($a, $b)
-            $c = [StringComparer]::OrdinalIgnoreCase.Compare($a.Title, $b.Title)
-            if ($c -eq 0) { $c = [string]::CompareOrdinal($a.Title, $b.Title) }
-            if ($c -eq 0) { $c = $a.First.CompareTo($b.First) }
+            $c = [StringComparer]::OrdinalIgnoreCase.Compare($a.Label, $b.Label)
+            if ($c -eq 0) { $c = [string]::CompareOrdinal($a.Label, $b.Label) }
             $c
         })
-    $groups = @{}
-    foreach ($t in $all) { $groups[$t.Title] = 1 + $(if ($groups.ContainsKey($t.Title)) { $groups[$t.Title] } else { 0 }) }
-    $seen = @{}
-    foreach ($t in $all) {
-        if ($groups[$t.Title] -eq 1) { $t.Label = $t.Title }
-        else {
-            $seen[$t.Title] = 1 + $(if ($seen.ContainsKey($t.Title)) { $seen[$t.Title] } else { 0 })
-            $t.Label = "$($t.Title)-$($seen[$t.Title])"
-        }
-    }
 
     foreach ($s in @($outSections)) {
         foreach ($e in $s.Entries) {
@@ -336,6 +334,28 @@ function ConvertTo-OmaLicenseText {
     ($out -join "`n") + "`n"
 }
 
+# Texts whose label is shared with another text.
+function Get-OmaCollidingTexts([object[]]$Texts) {
+    $count = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($t in $Texts) { $count[$t.Label] = 1 + $(if ($count.ContainsKey($t.Label)) { $count[$t.Label] } else { 0 }) }
+    @($Texts | Where-Object { $count[$_.Label] -gt 1 })
+}
+
+<#
+.SYNOPSIS
+  True when two text files hold the same text, ignoring line ends, BOM and trailing whitespace.
+.DESCRIPTION
+  Used to compare a pinned copy under scripts/licenses/ with the file of the restored package.
+#>
+function Test-OmaPinnedText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Pinned,
+        [Parameter(Mandatory)] [string]$Current
+    )
+    (ConvertTo-OmaNormalizedText ([IO.File]::ReadAllText($Pinned))) -ceq (ConvertTo-OmaNormalizedText ([IO.File]::ReadAllText($Current)))
+}
+
 # Text with LF line ends, no BOM, no trailing whitespace and no leading or trailing blank lines.
 function ConvertTo-OmaNormalizedText([string]$Text) {
     $t = $Text.Replace("`r`n", "`n").Replace("`r", "`n").Replace([string][char]0xFEFF, '')
@@ -362,4 +382,4 @@ function Compare-OmaNameVersion([string]$NameA, [string]$VersionA, [string]$Name
 }
 
 Export-ModuleMember -Function Get-OmaNuGetRuntimePackages, Get-OmaNuGetPackageLicense, Test-OmaLicenseAccepted,
-    Merge-OmaLicenseSections, ConvertTo-OmaLicenseText
+    Merge-OmaLicenseSections, ConvertTo-OmaLicenseText, Test-OmaPinnedText

@@ -149,10 +149,12 @@ impl UpdateService {
     ) -> Arc<Self> {
         let state = load_state(state_path.as_deref());
         // A stored release newer than this version is still news; one that
-        // is not (the app was updated meanwhile) is simply gone.
-        let (outcome, checked_at_ms) = match state.available(current) {
-            Some(_) => (Outcome::Available, state.last_success_ms),
-            None => (Outcome::Idle, None),
+        // is not (the app was updated meanwhile) is simply gone, so a past
+        // success reads as up to date, with its time. Without one: idle.
+        let (outcome, checked_at_ms) = match (state.available(current), state.last_success_ms) {
+            (Some(_), at) => (Outcome::Available, at),
+            (None, Some(at)) => (Outcome::UpToDate, Some(at)),
+            (None, None) => (Outcome::Idle, None),
         };
         Arc::new(Self {
             fetch,
@@ -832,11 +834,43 @@ mod tests {
         let (svc, _h, _) = service(Some(path), Err(CheckError::Offline), false);
         let status = svc.status();
         assert_eq!(status.state, UpdateStateKind::Available);
+        assert_eq!(status.checked_at_ms, Some(7));
         assert_eq!(status.latest.unwrap().version, "0.5.0");
         assert_eq!(
             svc.release_page().as_deref(),
             Some(format!("{RELEASE_PAGE_PREFIX}tag/v0.5.0").as_str())
         );
+    }
+
+    #[test]
+    fn past_success_without_news_is_up_to_date_at_start() {
+        let path = temp_dir().join("update-state.json");
+        // No stored release, then one that is not newer than 0.4.0.
+        for state in [
+            serde_json::json!({"lastSuccessMs": 9}),
+            serde_json::json!({
+                "lastSuccessMs": 9,
+                "latest": {"version": "0.4.0", "url": format!("{RELEASE_PAGE_PREFIX}tag/v0.4.0")},
+            }),
+        ] {
+            std::fs::write(&path, state.to_string()).unwrap();
+            let (svc, _h, _) = service(Some(path.clone()), Err(CheckError::Offline), false);
+            let status = svc.status();
+            assert_eq!(status.state, UpdateStateKind::UpToDate);
+            assert_eq!(status.checked_at_ms, Some(9));
+            assert_eq!(status.latest, None);
+            assert_eq!(svc.release_page(), None);
+        }
+    }
+
+    #[test]
+    fn no_success_yet_is_idle_at_start() {
+        let path = temp_dir().join("update-state.json");
+        std::fs::write(&path, serde_json::json!({"lastAttemptMs": 4}).to_string()).unwrap();
+        let (svc, _h, _) = service(Some(path), Err(CheckError::Offline), false);
+        let status = svc.status();
+        assert_eq!(status.state, UpdateStateKind::Idle);
+        assert_eq!(status.checked_at_ms, None);
     }
 
     #[test]

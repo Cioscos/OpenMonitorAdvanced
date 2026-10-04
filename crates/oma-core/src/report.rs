@@ -2,7 +2,8 @@
 //!
 //! `build_report` is pure: the shell gathers the input under its locks and
 //! writes the file. Device ids that identify the machine (disk hashes,
-//! network GUIDs) and network aliases never reach the output.
+//! network GUIDs, the hashed LHM identifiers of service devices) and
+//! network aliases never reach the output.
 
 use serde_json::{json, Value};
 
@@ -202,6 +203,9 @@ struct Anonymizer {
     /// GUIDs met in other strings (e.g. volume GUIDs in sensor names),
     /// lowercase, numbered in order of appearance.
     guids: Vec<String>,
+    /// Runs of 64+ hex digits met in other strings (e.g. the hashed LHM
+    /// identifiers of service devices), lowercase, numbered in order.
+    hashes: Vec<String>,
 }
 
 impl Anonymizer {
@@ -261,6 +265,7 @@ impl Anonymizer {
             ids,
             names,
             guids: Vec::new(),
+            hashes: Vec::new(),
         }
     }
 
@@ -286,8 +291,36 @@ impl Anonymizer {
         }
     }
 
-    /// Free text with every GUID (and its braces) replaced by its number.
+    /// Free text with every GUID (and its braces) and every run of 64 or
+    /// more hex digits replaced by its number.
     fn text(&mut self, text: &str) -> String {
+        let text = self.guids_in(text);
+        self.hashes_in(&text)
+    }
+
+    /// Every run of [`HASH_LEN`] or more hex digits replaced by its number.
+    fn hashes_in(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some((start, end)) = find_hash(rest) {
+            let hash = rest[start..end].to_ascii_lowercase();
+            let n = match self.hashes.iter().position(|h| *h == hash) {
+                Some(i) => i + 1,
+                None => {
+                    self.hashes.push(hash);
+                    self.hashes.len()
+                }
+            };
+            out.push_str(&rest[..start]);
+            out.push_str(&n.to_string());
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Every GUID (and its braces) replaced by its number.
+    fn guids_in(&mut self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = find_guid(rest) {
@@ -314,6 +347,30 @@ impl Anonymizer {
         out.push_str(rest);
         out
     }
+}
+
+/// Shortest hex run treated as a hash: a SHA-256 in hex.
+const HASH_LEN: usize = 64;
+
+/// Byte range of the first run of at least [`HASH_LEN`] hex digits.
+fn find_hash(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !bytes[start].is_ascii_hexdigit() {
+            start += 1;
+            continue;
+        }
+        let end = bytes[start..]
+            .iter()
+            .position(|b| !b.is_ascii_hexdigit())
+            .map_or(bytes.len(), |n| start + n);
+        if end - start >= HASH_LEN {
+            return Some((start, end));
+        }
+        start = end;
+    }
+    None
 }
 
 /// Length of a GUID without braces: `8-4-4-4-12` hex digits.
@@ -349,6 +406,9 @@ mod tests {
     const ALIAS_1: &str = "VPN ufficio";
     const ALIAS_2: &str = "Casa di Mario";
     const SERIAL: &str = "SN-INVENTED-0042";
+    /// A service device id: the hash of an LHM identifier that can carry a
+    /// USB serial.
+    const LHM_HASH: &str = "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789";
 
     fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -380,11 +440,16 @@ mod tests {
         format!("network/{{{GUID_2}}}")
     }
 
+    fn fan_controller() -> String {
+        format!("fan_controller/lhm-{LHM_HASH}")
+    }
+
     fn sensor(dev: &str, kind: SensorKind, name: &str, unit: Unit, label: Label) -> Sensor {
         Sensor::new(dev, kind, name, unit, label, Source::Win32)
     }
 
-    /// CPU, GPU, LHM board, two disks and two network adapters.
+    /// CPU, GPU, LHM board, two disks, two network adapters and a fan
+    /// controller.
     fn schema() -> Schema {
         let mut cpu = device("cpu/0", DeviceKind::Cpu, "AMD Ryzen 7", &[("tjMaxC", "95")]);
         cpu.vendor = Some("AMD".into());
@@ -416,6 +481,12 @@ mod tests {
                     DeviceKind::Network,
                     ALIAS_2,
                     &[("adapterType", "wifi")],
+                ),
+                device(
+                    &fan_controller(),
+                    DeviceKind::FanController,
+                    "Fan hub",
+                    &[],
                 ),
             ],
             sensors: vec![
@@ -476,6 +547,13 @@ mod tests {
                     Unit::BytesPerSecond,
                     Label::new("network.up"),
                 ),
+                sensor(
+                    &fan_controller(),
+                    SensorKind::Fan,
+                    "1",
+                    Unit::Rpm,
+                    Label::with_arg("board.fan", "1"),
+                ),
             ],
         }
     }
@@ -519,6 +597,7 @@ mod tests {
                     Some(f64::INFINITY),
                     Some(1_024.0),
                     None,
+                    Some(1_200.0),
                 ],
             },
             quality: vec![
@@ -526,6 +605,7 @@ mod tests {
                 Quality::Fresh,
                 Quality::Held,
                 Quality::Suspended,
+                Quality::Fresh,
                 Quality::Fresh,
                 Quality::Fresh,
                 Quality::Fresh,
@@ -540,6 +620,7 @@ mod tests {
                 st(0.0, 1.0, 2.0, 10),
                 st(0.0, 512.0, 1_024.0, 10),
                 None,
+                st(1_100.0, 1_150.0, 1_200.0, 10),
             ],
             schema,
             sources,
@@ -636,7 +717,7 @@ mod tests {
         let f = fixture();
         let report = build_report(&input(&f));
         let sensors = report["sensors"].as_array().unwrap();
-        assert_eq!(sensors.len(), 8);
+        assert_eq!(sensors.len(), 9);
         assert_eq!(
             sensors[0],
             json!({
@@ -732,6 +813,7 @@ mod tests {
                 "storage/disk-2",
                 "network/adapter-1",
                 "network/adapter-2",
+                "fan_controller/lhm-1",
             ]
         );
         assert_eq!(
@@ -745,6 +827,7 @@ mod tests {
                 "storage/disk-2/throughput/read",
                 "network/adapter-1/throughput/down",
                 "network/adapter-2/throughput/up",
+                "fan_controller/lhm-1/fan/1",
             ]
         );
         for s in report["sensors"].as_array().unwrap() {
@@ -823,6 +906,25 @@ mod tests {
     }
 
     #[test]
+    fn hex_runs_are_numbered_ignoring_case() {
+        let mut a = Anonymizer {
+            ids: Vec::new(),
+            names: Vec::new(),
+            guids: Vec::new(),
+            hashes: Vec::new(),
+        };
+        let short = "ab".repeat(31);
+        assert_eq!(a.text(&format!("psu/lhm-{HASH_1}")), "psu/lhm-1");
+        assert_eq!(a.text(&format!("x-{HASH_2}0/y")), "x-2/y");
+        assert_eq!(
+            a.text(&format!("{}:{HASH_1}", HASH_2.to_uppercase())),
+            "3:1"
+        );
+        // Shorter runs, like PCI addresses or 62 hex digits, stay.
+        assert_eq!(a.text(&format!("gpu/{short}")), format!("gpu/{short}"));
+    }
+
+    #[test]
     fn no_original_identifier_anywhere() {
         let mut f = fixture();
         // A disk the schema no longer lists still gets a new id.
@@ -841,6 +943,7 @@ mod tests {
             ALIAS_1,
             ALIAS_2,
             SERIAL,
+            LHM_HASH,
             "ffffeeeeddddcccc",
             "device-",
         ] {
@@ -850,5 +953,6 @@ mod tests {
             );
         }
         assert!(text.contains("storage/disk-3"));
+        assert!(text.contains("fan_controller/lhm-1/fan/1"));
     }
 }

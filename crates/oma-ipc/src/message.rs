@@ -24,6 +24,11 @@ pub enum Message {
     Schema(WireSchema),
     Snapshot(WireSnapshot),
     Error(WireError),
+    FramesConfigure(FramesConfigure),
+    FramesTarget(FramesTarget),
+    FramesStatus(FramesStatus),
+    PresentingProcesses(PresentingProcesses),
+    FrameBatch(FrameBatch),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,4 +155,69 @@ pub struct WireSnapshot {
 pub struct WireError {
     pub code: String,
     pub message: String,
+}
+
+/// App to service: switches the frame engine on or off and picks its optional columns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FramesConfigure {
+    pub enabled: bool,
+    pub track_pc_latency: bool,
+    pub track_gpu: bool,
+}
+
+/// App to service: the process whose frames the app wants (`nil` for none).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FramesTarget {
+    pub pid: Option<u32>,
+}
+
+/// Service to app: state of the frame engine (a [`crate::frames_state`] value).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FramesStatus {
+    pub state: String,
+    pub detail: Option<String>,
+    pub presentmon_version: Option<String>,
+}
+
+/// A process that presented recently, as seen by the frame engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresentingProcess {
+    pub pid: u32,
+    pub name: String,
+    pub displayed_fps: f64,
+    pub present_mode: String,
+    pub swapchains: u32,
+}
+
+/// Service to app: the processes presenting now (at most [`crate::MAX_PRESENTING_PROCESSES`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresentingProcesses {
+    pub at_qpc: u64,
+    pub processes: Vec<PresentingProcess>,
+}
+
+/// One presented frame of the target process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireFrame {
+    pub qpc: u64,
+    pub swapchain: u64,
+    /// `"app"`, `"generated_intel_xefg"`, `"generated_amd_afmf"`, `"generated_other"` or `"unknown"`.
+    pub frame_type: String,
+    pub displayed: bool,
+    pub ms_between_presents: f64,
+    pub ms_between_display_change: Option<f64>,
+    pub ms_until_displayed: Option<f64>,
+    pub ms_app_frametime: Option<f64>,
+    pub ms_pc_latency: Option<f64>,
+    pub ms_gpu_busy: Option<f64>,
+    pub pcl_frame_id: Option<u64>,
+}
+
+/// Service to app: frames of the target since the last batch (at most
+/// [`crate::MAX_FRAMES_PER_BATCH`]); `dropped` counts the ones left out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameBatch {
+    pub pid: u32,
+    pub frames: Vec<WireFrame>,
+    pub dropped: u32,
 }

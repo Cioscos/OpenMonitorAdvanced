@@ -327,6 +327,50 @@ pub fn decode_payload(bytes: &[u8]) -> Result<Message, IpcError> {
             }
         }
     }
+    match &mut msg {
+        Message::FrameBatch(batch) => {
+            if batch.frames.len() > crate::MAX_FRAMES_PER_BATCH {
+                return Err(IpcError::Decode(format!(
+                    "frame batch has {} frames, the maximum is {}",
+                    batch.frames.len(),
+                    crate::MAX_FRAMES_PER_BATCH
+                )));
+            }
+            for frame in &mut batch.frames {
+                if !frame.ms_between_presents.is_finite() {
+                    return Err(IpcError::Decode(
+                        "frame has a non-finite ms_between_presents".to_owned(),
+                    ));
+                }
+                for value in [
+                    &mut frame.ms_between_display_change,
+                    &mut frame.ms_until_displayed,
+                    &mut frame.ms_app_frametime,
+                    &mut frame.ms_pc_latency,
+                    &mut frame.ms_gpu_busy,
+                ] {
+                    if value.is_some_and(|v| !v.is_finite()) {
+                        *value = None;
+                    }
+                }
+            }
+        }
+        Message::PresentingProcesses(list) => {
+            if list.processes.len() > crate::MAX_PRESENTING_PROCESSES {
+                return Err(IpcError::Decode(format!(
+                    "presenting process list has {} entries, the maximum is {}",
+                    list.processes.len(),
+                    crate::MAX_PRESENTING_PROCESSES
+                )));
+            }
+            if list.processes.iter().any(|p| !p.displayed_fps.is_finite()) {
+                return Err(IpcError::Decode(
+                    "presenting process has a non-finite displayed_fps".to_owned(),
+                ));
+            }
+        }
+        _ => {}
+    }
     Ok(msg)
 }
 
@@ -427,7 +471,9 @@ impl FrameDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Subscribe, WireSnapshot};
+    use crate::message::{
+        FrameBatch, PresentingProcess, PresentingProcesses, Subscribe, WireFrame, WireSnapshot,
+    };
 
     fn subscribe(interval_ms: u32) -> Message {
         Message::Subscribe(Subscribe {
@@ -707,6 +753,101 @@ mod tests {
         };
         assert_eq!(snapshot.values, vec![None, Some(2.0), None]);
         assert_eq!(snapshot.held, vec![false, true, false]);
+    }
+
+    fn wire_frame() -> WireFrame {
+        WireFrame {
+            qpc: 1,
+            swapchain: 2,
+            frame_type: "app".to_owned(),
+            displayed: true,
+            ms_between_presents: 16.6,
+            ms_between_display_change: Some(16.6),
+            ms_until_displayed: Some(5.0),
+            ms_app_frametime: Some(16.6),
+            ms_pc_latency: Some(30.0),
+            ms_gpu_busy: Some(10.0),
+            pcl_frame_id: Some(7),
+        }
+    }
+
+    fn batch(frames: Vec<WireFrame>) -> Message {
+        Message::FrameBatch(FrameBatch {
+            pid: 10,
+            frames,
+            dropped: 0,
+        })
+    }
+
+    fn process(displayed_fps: f64) -> PresentingProcess {
+        PresentingProcess {
+            pid: 10,
+            name: "game.exe".to_owned(),
+            displayed_fps,
+            present_mode: "Hardware: Independent Flip".to_owned(),
+            swapchains: 1,
+        }
+    }
+
+    #[test]
+    fn a_batch_over_512_frames_is_rejected() {
+        let ok = encode_payload(&batch(vec![wire_frame(); crate::MAX_FRAMES_PER_BATCH])).unwrap();
+        assert!(decode_payload(&ok).is_ok());
+        let over =
+            encode_payload(&batch(vec![wire_frame(); crate::MAX_FRAMES_PER_BATCH + 1])).unwrap();
+        let err = decode_payload(&over).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn thirty_three_processes_are_rejected() {
+        let make = |n: usize| {
+            Message::PresentingProcesses(PresentingProcesses {
+                at_qpc: 1,
+                processes: vec![process(60.0); n],
+            })
+        };
+        let ok = encode_payload(&make(crate::MAX_PRESENTING_PROCESSES)).unwrap();
+        assert!(decode_payload(&ok).is_ok());
+        let over = encode_payload(&make(crate::MAX_PRESENTING_PROCESSES + 1)).unwrap();
+        let err = decode_payload(&over).unwrap_err();
+        assert!(matches!(err, IpcError::Decode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn non_finite_optional_frame_values_become_none() {
+        let mut frame = wire_frame();
+        frame.ms_between_display_change = Some(f64::NAN);
+        frame.ms_until_displayed = Some(f64::INFINITY);
+        frame.ms_app_frametime = Some(f64::NEG_INFINITY);
+        frame.ms_pc_latency = Some(f64::NAN);
+        frame.ms_gpu_busy = Some(f64::INFINITY);
+        let decoded = decode_payload(&encode_payload(&batch(vec![frame])).unwrap()).unwrap();
+        let Message::FrameBatch(b) = decoded else {
+            panic!("expected a frame batch");
+        };
+        let f = &b.frames[0];
+        assert_eq!(f.ms_between_display_change, None);
+        assert_eq!(f.ms_until_displayed, None);
+        assert_eq!(f.ms_app_frametime, None);
+        assert_eq!(f.ms_pc_latency, None);
+        assert_eq!(f.ms_gpu_busy, None);
+        assert_eq!(f.ms_between_presents, 16.6);
+    }
+
+    #[test]
+    fn non_finite_required_frame_values_are_rejected() {
+        let mut frame = wire_frame();
+        frame.ms_between_presents = f64::NAN;
+        let bytes = encode_payload(&batch(vec![frame])).unwrap();
+        assert!(matches!(decode_payload(&bytes), Err(IpcError::Decode(_))));
+
+        let processes = Message::PresentingProcesses(PresentingProcesses {
+            at_qpc: 1,
+            processes: vec![process(f64::INFINITY)],
+        });
+        let bytes = encode_payload(&processes).unwrap();
+        assert!(matches!(decode_payload(&bytes), Err(IpcError::Decode(_))));
     }
 
     #[test]

@@ -47,10 +47,11 @@ an encoder.
 
 Protocol version 2 (M5a) added the fields marked *v2* below. Protocol version 3 (M6b) added
 `Subscribe.smart_enabled_drives`, replaced `service.smart_blocked_by` with the per-drive list
-`service.drives`, and added `held` to the snapshot (fields marked *v3*). Every one is always
+`service.drives`, and added `held` to the snapshot (fields marked *v3*). Protocol version 4 (M7b) added
+the five frame messages at the end of the logical content below (fields marked *v4*). Every one is always
 present on the wire; the .NET decoder requires them, like the Rust one.
 
-- **`hello.msgpack`**: `Hello { protocol_version: 3, service_version: "0.1.0", pawn_io: "rebootPending" }`.
+- **`hello.msgpack`**: `Hello { protocol_version: 4, service_version: "0.1.0", pawn_io: "rebootPending" }`.
   *v2*: `pawn_io` is `"ok"`, `"missing"`, `"unavailable"`, `"unknown"` or `"rebootPending"`.
   The Rust decoder alone defaults an absent `pawn_io` to `"unknown"`: a protocol v1 service's `Hello` must
   still decode, so the app reports `Incompatible` instead of retrying a failed decode forever.
@@ -97,6 +98,30 @@ present on the wire; the .NET decoder requires them, like the Rust one.
   non-finite value becomes `nil` and loses its `held` flag.
 - **`snapshot_empty.msgpack`**: `WireSnapshot { seq: 1, timestamp_ms: 0, values: [], held: [] }`.
 - **`error.msgpack`**: `WireError { code: "bad_request", message: "Messaggio non valido: è atteso Subscribe" }`.
+- **`frames_configure.msgpack`** (*v4*, app → servizio): `FramesConfigure { enabled: true, track_pc_latency: true, track_gpu: false }`.
+- **`frames_target.msgpack`** (*v4*, app → servizio): `FramesTarget { pid: Some(25848) }`.
+- **`frames_target_none.msgpack`** (*v4*): `FramesTarget { pid: None }`; la chiave `pid` c'è sempre, con `nil`.
+- **`frames_status.msgpack`** (*v4*, servizio → app): `FramesStatus { state: "running", detail: None, presentmon_version: Some("2.6.0") }`.
+  `state` è `"off"`, `"starting"`, `"running"`, `"denied"`, `"tampered"`, `"missing"` o `"failed"` (costanti
+  `frames_state`); un client tratta ogni altro valore come `"failed"`.
+- **`presenting_processes.msgpack`** (*v4*, servizio → app): `PresentingProcesses { at_qpc: 380058775270, processes: [...] }` con due voci
+  `{pid, name, displayed_fps, present_mode, swapchains}`:
+  1. `{25848, "CONTROLResonant.exe", 61.5, "Hardware Composed: Independent Flip", 1}`.
+  2. `{1852, "dwm.exe", 20.0, "Hardware: Legacy Flip", 1}`.
+
+  Al massimo 32 voci (`MAX_PRESENTING_PROCESSES`); `displayed_fps` deve essere finito.
+- **`frame_batch.msgpack`** (*v4*, servizio → app): `FrameBatch { pid: 25848, frames: [...], dropped: 3 }`. I due frame vengono dalle prime
+  due righe di dati di `testdata/presentmon/dlssfg-pcl.csv`; ogni `WireFrame` ha `qpc, swapchain, frame_type, displayed,
+  ms_between_presents, ms_between_display_change, ms_until_displayed, ms_app_frametime, ms_pc_latency, ms_gpu_busy, pcl_frame_id`
+  (in quest'ordine), con `frame_type` `"app"` in entrambi, `swapchain` 0x22A3569E270 e `displayed` true:
+  1. `qpc` 369166005856, `ms_between_presents` 17.1266, `ms_between_display_change` 7.1667, `ms_until_displayed` 11.7554,
+     `ms_app_frametime` 17.1706, `ms_pc_latency` 35.5189, `ms_gpu_busy` 16.1228, `pcl_frame_id` 43715.
+  2. `qpc` 369166008179, `ms_between_presents` 0.2323, `ms_between_display_change` 10.4468, `ms_until_displayed` 21.9699,
+     `ms_app_frametime` 0.1817, `ms_pc_latency` 45.9657, `ms_gpu_busy` 0.2476, `pcl_frame_id` nil (la colonna vale 0).
+
+  `frame_type` è `"app"`, `"generated_intel_xefg"`, `"generated_amd_afmf"`, `"generated_other"` o `"unknown"`. Al massimo 512 frame
+  (`MAX_FRAMES_PER_BATCH`); `ms_between_presents` deve essere finito, un `f64` facoltativo non finito diventa `nil`.
+  I decoder rifiutano un lotto con più di 512 frame o un elenco con più di 32 processi.
 
 ## Drive key vector (`drive_key.json`)
 
@@ -185,6 +210,12 @@ byte-for-byte and decode back to the reference messages.
 | `snapshot.msgpack` | 102 |
 | `snapshot_empty.msgpack` | 54 |
 | `error.msgpack` | 86 |
+| `frames_configure.msgpack` | 67 |
+| `frames_target.msgpack` | 33 |
+| `frames_target_none.msgpack` | 31 |
+| `frames_status.msgpack` | 73 |
+| `presenting_processes.msgpack` | 269 |
+| `frame_batch.msgpack` | 520 |
 
 `hello.msgpack` starts with `82 a4 74 79 70 65` (a 2-entry fixmap, then the
 fixstr `"type"`), as expected for the `{"type": "hello", "body": {...}}`

@@ -10,9 +10,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use oma_ipc::{
-    decode_payload, drive_key, encode_payload, Hello, IdentityHint, Message, Subscribe, WireDevice,
-    WireDrive, WireError, WireSchema, WireSensor, WireServiceState, WireSnapshot, MAX_DRIVE_KEYS,
-    MODULES, PROTOCOL_VERSION,
+    decode_payload, drive_key, encode_payload, FrameBatch, FramesConfigure, FramesStatus,
+    FramesTarget, Hello, IdentityHint, Message, PresentingProcess, PresentingProcesses, Subscribe,
+    WireDevice, WireDrive, WireError, WireFrame, WireSchema, WireSensor, WireServiceState,
+    WireSnapshot, MAX_DRIVE_KEYS, MAX_FRAMES_PER_BATCH, MAX_PRESENTING_PROCESSES, MODULES,
+    PROTOCOL_VERSION,
 };
 
 /// `drive_key("Samsung SSD 990 PRO 2TB", "0025_38B1_4150_2A6C.")`, from `drive_key.json`.
@@ -27,6 +29,12 @@ const NAMES: &[&str] = &[
     "snapshot",
     "snapshot_empty",
     "error",
+    "frames_configure",
+    "frames_target",
+    "frames_target_none",
+    "frames_status",
+    "presenting_processes",
+    "frame_batch",
 ];
 
 fn fixtures_dir() -> PathBuf {
@@ -181,6 +189,71 @@ fn reference(name: &str) -> Message {
             code: "bad_request".to_owned(),
             message: "Messaggio non valido: \u{e8} atteso Subscribe".to_owned(),
         }),
+        "frames_configure" => Message::FramesConfigure(FramesConfigure {
+            enabled: true,
+            track_pc_latency: true,
+            track_gpu: false,
+        }),
+        "frames_target" => Message::FramesTarget(FramesTarget { pid: Some(25848) }),
+        "frames_target_none" => Message::FramesTarget(FramesTarget { pid: None }),
+        "frames_status" => Message::FramesStatus(FramesStatus {
+            state: "running".to_owned(),
+            detail: None,
+            presentmon_version: Some("2.6.0".to_owned()),
+        }),
+        "presenting_processes" => Message::PresentingProcesses(PresentingProcesses {
+            at_qpc: 380_058_775_270,
+            processes: vec![
+                PresentingProcess {
+                    pid: 25848,
+                    name: "CONTROLResonant.exe".to_owned(),
+                    displayed_fps: 61.5,
+                    present_mode: "Hardware Composed: Independent Flip".to_owned(),
+                    swapchains: 1,
+                },
+                PresentingProcess {
+                    pid: 1852,
+                    name: "dwm.exe".to_owned(),
+                    displayed_fps: 20.0,
+                    present_mode: "Hardware: Legacy Flip".to_owned(),
+                    swapchains: 1,
+                },
+            ],
+        }),
+        // The first two data rows of testdata/presentmon/dlssfg-pcl.csv (the first has a
+        // PCLFrameId, the second has 0, which is nil on the wire).
+        "frame_batch" => Message::FrameBatch(FrameBatch {
+            pid: 25848,
+            frames: vec![
+                WireFrame {
+                    qpc: 369_166_005_856,
+                    swapchain: 0x022A_3569_E270,
+                    frame_type: "app".to_owned(),
+                    displayed: true,
+                    ms_between_presents: 17.1266,
+                    ms_between_display_change: Some(7.1667),
+                    ms_until_displayed: Some(11.7554),
+                    ms_app_frametime: Some(17.1706),
+                    ms_pc_latency: Some(35.5189),
+                    ms_gpu_busy: Some(16.1228),
+                    pcl_frame_id: Some(43715),
+                },
+                WireFrame {
+                    qpc: 369_166_008_179,
+                    swapchain: 0x022A_3569_E270,
+                    frame_type: "app".to_owned(),
+                    displayed: true,
+                    ms_between_presents: 0.2323,
+                    ms_between_display_change: Some(10.4468),
+                    ms_until_displayed: Some(21.9699),
+                    ms_app_frametime: Some(0.1817),
+                    ms_pc_latency: Some(45.9657),
+                    ms_gpu_busy: Some(0.2476),
+                    pcl_frame_id: None,
+                },
+            ],
+            dropped: 3,
+        }),
         other => panic!("unknown fixture name: {other}"),
     }
 }
@@ -278,8 +351,10 @@ fn subscribe_v3_keeps_every_key() {
 }
 
 #[test]
-fn protocol_constants_are_v3() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+fn protocol_constants_are_v4() {
+    assert_eq!(PROTOCOL_VERSION, 4);
+    assert_eq!(MAX_FRAMES_PER_BATCH, 512);
+    assert_eq!(MAX_PRESENTING_PROCESSES, 32);
     assert_eq!(
         MODULES,
         [
@@ -292,6 +367,15 @@ fn protocol_constants_are_v3() {
         ]
     );
     assert_eq!(MAX_DRIVE_KEYS, 64);
+}
+
+#[test]
+fn frames_target_none_keeps_the_pid_key() {
+    let bytes = encode_payload(&Message::FramesTarget(FramesTarget { pid: None })).expect("encode");
+    let value: serde_json::Value = rmp_serde::from_slice(&bytes).expect("decode as a value");
+    let body = value["body"].as_object().expect("body is a map");
+    assert!(body.contains_key("pid"), "the pid key must be present");
+    assert!(body["pid"].is_null());
 }
 
 /// `protocol/fixtures/hello.msgpack` as protocol v1 wrote it (commit 46a024f): no `pawn_io`.

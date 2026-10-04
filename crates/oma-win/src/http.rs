@@ -1,7 +1,10 @@
 //! HTTPS GET over WinHTTP (spec M6c §2.1), used only by the update check on a
-//! background thread. Synchronous; TLS 1.2/1.3 only, no cookies, redirects
-//! only from HTTPS to HTTPS, certificates verified by WinHTTP against the
-//! Windows store (no option to ignore errors).
+//! background thread. Synchronous; TLS 1.2/1.3 only (TLS 1.2 alone where
+//! WinHTTP does not know TLS 1.3), no cookies, redirects only from HTTPS to
+//! HTTPS. WinHTTP validates the server certificate chain and name against the
+//! Windows store, with no option to ignore errors. Revocation checking
+//! (`WINHTTP_ENABLE_SSL_REVOCATION`) is deliberately not enabled: behind
+//! proxies an unreachable CRL/OCSP server would fail every check.
 
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
@@ -13,10 +16,12 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, ERROR_WINHTTP_CANNOT_CONNECT,
-    ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_NAME_NOT_RESOLVED,
-    ERROR_WINHTTP_SECURE_CERT_CN_INVALID, ERROR_WINHTTP_SECURE_CERT_DATE_INVALID,
-    ERROR_WINHTTP_SECURE_CERT_REV_FAILED, ERROR_WINHTTP_SECURE_FAILURE,
-    ERROR_WINHTTP_SECURE_INVALID_CA, ERROR_WINHTTP_TIMEOUT, URL_COMPONENTS,
+    ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_CONNECTION_ERROR,
+    ERROR_WINHTTP_NAME_NOT_RESOLVED, ERROR_WINHTTP_SECURE_CERT_CN_INVALID,
+    ERROR_WINHTTP_SECURE_CERT_DATE_INVALID, ERROR_WINHTTP_SECURE_CERT_REV_FAILED,
+    ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE, ERROR_WINHTTP_SECURE_CHANNEL_ERROR,
+    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_SECURE_INVALID_CA,
+    ERROR_WINHTTP_SECURE_INVALID_CERT, ERROR_WINHTTP_TIMEOUT, URL_COMPONENTS,
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_COOKIES, WINHTTP_FLAG_SECURE,
     WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
     WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_REDIRECT_POLICY,
@@ -38,15 +43,24 @@ pub struct HttpResponse {
 /// Maps a WinHTTP error code (`GetLastError`) to a check error category.
 pub(crate) fn classify(code: u32) -> CheckError {
     match code {
-        ERROR_WINHTTP_NAME_NOT_RESOLVED | ERROR_WINHTTP_CANNOT_CONNECT => CheckError::Offline,
+        ERROR_WINHTTP_NAME_NOT_RESOLVED
+        | ERROR_WINHTTP_CANNOT_CONNECT
+        | ERROR_WINHTTP_CONNECTION_ERROR => CheckError::Offline,
         ERROR_WINHTTP_TIMEOUT => CheckError::Timeout,
         ERROR_WINHTTP_SECURE_FAILURE
         | ERROR_WINHTTP_SECURE_CERT_DATE_INVALID
         | ERROR_WINHTTP_SECURE_CERT_CN_INVALID
         | ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED
         | ERROR_WINHTTP_SECURE_INVALID_CA
-        | ERROR_WINHTTP_SECURE_CERT_REV_FAILED => CheckError::Tls,
-        _ => CheckError::Invalid,
+        | ERROR_WINHTTP_SECURE_CERT_REV_FAILED
+        | ERROR_WINHTTP_SECURE_CHANNEL_ERROR
+        | ERROR_WINHTTP_SECURE_INVALID_CERT
+        | ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE => CheckError::Tls,
+        _ => {
+            // The category alone would hide the cause; keep the raw code.
+            tracing::warn!(code, "update check: unclassified WinHTTP error");
+            CheckError::Invalid
+        }
     }
 }
 
@@ -93,7 +107,10 @@ impl Drop for Handle {
     }
 }
 
-/// Overall deadline of one request, checked before every blocking call.
+/// Overall deadline of one request. It is checked between WinHTTP calls and
+/// bounds each phase through `WinHttpSetTimeouts`; it is not a hard bound on
+/// the whole request: redirects repeat phases, and WPAD proxy discovery
+/// (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`) is not bounded by these timeouts.
 struct Deadline(Instant);
 
 impl Deadline {
@@ -107,13 +124,51 @@ impl Deadline {
         Ok(i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1))
     }
 
-    /// Re-arms the four WinHTTP timeouts of `handle` with the time left, so
-    /// the next blocking call cannot outlive the overall deadline.
-    fn arm(&self, handle: &Handle) -> Result<(), CheckError> {
-        let ms = self.remaining_ms()?;
-        // SAFETY: `handle` is a live WinHTTP handle.
-        unsafe { WinHttpSetTimeouts(handle.0, ms, ms, ms, ms) }.map_err(win_error)
+    /// Before a call that may resolve, connect, send and receive (session
+    /// setup, `WinHttpSendRequest`, `WinHttpReceiveResponse` which may follow
+    /// a redirect): shares the time left across the four phase timeouts.
+    fn arm_phases(&self, handle: &Handle) -> Result<(), CheckError> {
+        let [resolve, connect, send, receive] = split_timeouts(self.remaining_ms()?);
+        set_timeouts(handle, resolve, connect, send, receive)
     }
+
+    /// Before a body read, where only the receive timeout applies: all four
+    /// timeouts get the time left.
+    fn arm_receive(&self, handle: &Handle) -> Result<(), CheckError> {
+        let ms = self.remaining_ms()?;
+        set_timeouts(handle, ms, ms, ms, ms)
+    }
+}
+
+fn set_timeouts(
+    handle: &Handle,
+    resolve: i32,
+    connect: i32,
+    send: i32,
+    receive: i32,
+) -> Result<(), CheckError> {
+    // SAFETY: `handle` is a live WinHTTP session or request handle.
+    unsafe { WinHttpSetTimeouts(handle.0, resolve, connect, send, receive) }.map_err(win_error)
+}
+
+/// Lowest per-phase timeout, unless less time than that is left.
+const MIN_PHASE_MS: i32 = 250;
+
+/// Per-phase timeouts (resolve, connect, send, receive) for the time left:
+/// a quarter each, at least `MIN_PHASE_MS` but never more than the time left.
+fn split_timeouts(remaining_ms: i32) -> [i32; 4] {
+    let ms = (remaining_ms / 4)
+        .max(MIN_PHASE_MS.min(remaining_ms))
+        .max(1);
+    [ms; 4]
+}
+
+/// Sets `WINHTTP_OPTION_SECURE_PROTOCOLS` through `set`: TLS 1.2 and 1.3,
+/// or TLS 1.2 alone when that fails (older WinHTTP rejects the TLS 1.3 flag
+/// with `ERROR_INVALID_PARAMETER`).
+fn with_tls_fallback(mut set: impl FnMut(u32) -> Result<(), CheckError>) -> Result<(), CheckError> {
+    set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3)
+        .or_else(|_| set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2))
 }
 
 /// The parts of an `https` URL needed to connect.
@@ -136,6 +191,8 @@ fn crack_url(url: &str) -> Result<Target, CheckError> {
         // `wide` instead of copying it.
         dwSchemeLength: u32::MAX,
         dwHostNameLength: u32::MAX,
+        dwUserNameLength: u32::MAX,
+        dwPasswordLength: u32::MAX,
         dwUrlPathLength: u32::MAX,
         dwExtraInfoLength: u32::MAX,
         ..Default::default()
@@ -143,7 +200,11 @@ fn crack_url(url: &str) -> Result<Target, CheckError> {
     // SAFETY: `wide` is a non-empty buffer passed with its length; `parts`
     // is an initialised `URL_COMPONENTS` with its size set.
     unsafe { WinHttpCrackUrl(&wide, 0, &mut parts) }.map_err(|_| CheckError::Invalid)?;
-    if parts.nScheme != WINHTTP_INTERNET_SCHEME_HTTPS {
+    // Credentials in the URL are never sent.
+    if parts.nScheme != WINHTTP_INTERNET_SCHEME_HTTPS
+        || parts.dwUserNameLength != 0
+        || parts.dwPasswordLength != 0
+    {
         return Err(CheckError::Invalid);
     }
     let base = wide.as_ptr_range();
@@ -167,6 +228,10 @@ fn crack_url(url: &str) -> Result<Target, CheckError> {
     }
     let mut object = part(parts.lpszUrlPath.0, parts.dwUrlPathLength)?;
     object.extend(part(parts.lpszExtraInfo.0, parts.dwExtraInfoLength)?);
+    // The fragment belongs to the client, never to the request line.
+    if let Some(hash) = object.iter().position(|&c| c == u16::from(b'#')) {
+        object.truncate(hash);
+    }
     if object.is_empty() {
         object.push(u16::from(b'/'));
     }
@@ -203,9 +268,12 @@ fn set_u32_option(handle: &Handle, option: u32, value: u32) -> Result<(), CheckE
     unsafe { WinHttpSetOption(Some(handle.0), option, Some(&bytes)) }.map_err(win_error)
 }
 
-/// Sends `GET url` over HTTPS and reads the response within `deadline`.
-/// Any HTTP status is returned as is (the caller judges it); a body larger
-/// than `max_body` is `Invalid`.
+/// Sends `GET url` over HTTPS and reads the response. `deadline` is checked
+/// between WinHTTP calls (`Timeout` once it has passed) and bounds each
+/// phase through the WinHTTP timeouts; it is not a hard bound on the whole
+/// request, since redirects repeat phases and WPAD proxy discovery is not
+/// bounded. Any HTTP status is returned as is (the caller judges it); a body
+/// larger than `max_body` is `Invalid`.
 pub fn get(
     url: &str,
     user_agent: &str,
@@ -232,12 +300,8 @@ pub fn get(
             0,
         )
     })?;
-    set_u32_option(
-        &session,
-        WINHTTP_OPTION_SECURE_PROTOCOLS,
-        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
-    )?;
-    deadline.arm(&session)?;
+    with_tls_fallback(|flags| set_u32_option(&session, WINHTTP_OPTION_SECURE_PROTOCOLS, flags))?;
+    deadline.arm_phases(&session)?;
 
     // SAFETY: `session` is live; `target.host` is NUL-terminated and alive.
     let connection = Handle::new(unsafe {
@@ -268,13 +332,13 @@ pub fn get(
         WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP,
     )?;
 
-    deadline.arm(&request)?;
+    deadline.arm_phases(&request)?;
     let extra = (!header_block.is_empty()).then_some(header_block.as_slice());
     // SAFETY: `request` is live; the header block is passed with its length
     // and outlives the call; no request body.
     unsafe { WinHttpSendRequest(request.0, extra, None, 0, 0, 0) }.map_err(win_error)?;
 
-    deadline.arm(&request)?;
+    deadline.arm_phases(&request)?;
     // SAFETY: `request` is live and was sent; the reserved pointer is null.
     unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.map_err(win_error)?;
 
@@ -297,7 +361,7 @@ pub fn get(
 
     let mut body = Vec::new();
     loop {
-        deadline.arm(&request)?;
+        deadline.arm_receive(&request)?;
         let mut available: u32 = 0;
         // SAFETY: `request` is live with a received response; valid out-pointer.
         unsafe { WinHttpQueryDataAvailable(request.0, &mut available) }.map_err(win_error)?;
@@ -306,11 +370,17 @@ pub fn get(
         }
         let available = available as usize;
         if available > max_body - body.len() {
+            tracing::warn!(
+                read = body.len(),
+                available,
+                max_body,
+                "update check: response body too large"
+            );
             return Err(CheckError::Invalid);
         }
         let start = body.len();
         body.resize(start + available, 0);
-        deadline.arm(&request)?;
+        deadline.arm_receive(&request)?;
         let mut read: u32 = 0;
         // SAFETY: `body[start..]` is `available` writable bytes owned by
         // `body`; `read` is a valid out-pointer.
@@ -343,7 +413,10 @@ mod tests {
         assert_eq!(classify(12007), CheckError::Offline);
         assert_eq!(classify(12029), CheckError::Offline);
         assert_eq!(classify(12002), CheckError::Timeout);
-        for code in [12175, 12037, 12038, 12044, 12045, 12057] {
+        assert_eq!(classify(12030), CheckError::Offline);
+        for code in [
+            12175, 12037, 12038, 12044, 12045, 12057, 12157, 12169, 12179,
+        ] {
             assert_eq!(classify(code), CheckError::Tls, "code {code}");
         }
         assert_eq!(classify(12152), CheckError::Invalid);
@@ -369,6 +442,122 @@ mod tests {
             1024,
         );
         assert_eq!(result, Err(CheckError::Invalid));
+    }
+
+    fn text(wide: &[u16]) -> String {
+        String::from_utf16(wide.strip_suffix(&[0]).expect("NUL-terminated")).unwrap()
+    }
+
+    #[test]
+    fn crack_url_splits_an_https_url() {
+        let target = crack_url("https://api.example.com/repos/x/releases/latest").unwrap();
+        assert_eq!(text(&target.host), "api.example.com");
+        assert_eq!(target.port, 443);
+        assert_eq!(text(&target.object), "/repos/x/releases/latest");
+    }
+
+    #[test]
+    fn crack_url_keeps_port_and_query_and_drops_the_fragment() {
+        let target = crack_url("https://example.com:8443/a/b?x=1&y=2#frag").unwrap();
+        assert_eq!(text(&target.host), "example.com");
+        assert_eq!(target.port, 8443);
+        assert_eq!(text(&target.object), "/a/b?x=1&y=2");
+    }
+
+    #[test]
+    fn crack_url_uses_a_slash_for_an_empty_path() {
+        let target = crack_url("https://example.com").unwrap();
+        assert_eq!(text(&target.object), "/");
+    }
+
+    #[test]
+    fn crack_url_rejects_credentials() {
+        for url in [
+            "https://user@example.com/",
+            "https://user:secret@example.com/",
+        ] {
+            assert_eq!(
+                crack_url(url).err(),
+                Some(CheckError::Invalid),
+                "url {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_agent_control_characters_are_rejected_without_connecting() {
+        for agent in ["a\rb", "a\nb", "a\0b"] {
+            let result = get(
+                "https://example.invalid/",
+                agent,
+                &[],
+                Duration::from_secs(10),
+                1024,
+            );
+            assert_eq!(result, Err(CheckError::Invalid), "agent {agent:?}");
+        }
+    }
+
+    #[test]
+    fn split_timeouts_shares_the_time_left_across_phases() {
+        assert_eq!(split_timeouts(10_000), [2_500; 4]);
+        // A floor keeps each phase usable, never above the time left.
+        assert_eq!(split_timeouts(400), [250; 4]);
+        assert_eq!(split_timeouts(100), [100; 4]);
+        assert_eq!(split_timeouts(1), [1; 4]);
+    }
+
+    #[test]
+    fn tls_fallback_retries_with_tls_1_2_alone() {
+        let both = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+        let mut calls = Vec::new();
+        let result = with_tls_fallback(|flags| {
+            calls.push(flags);
+            if flags == both {
+                Err(CheckError::Invalid)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, [both, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2]);
+    }
+
+    #[test]
+    fn tls_fallback_stops_when_both_succeed() {
+        let mut calls = 0;
+        assert_eq!(
+            with_tls_fallback(|_| {
+                calls += 1;
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn tls_fallback_fails_when_tls_1_2_fails_too() {
+        let mut calls = 0;
+        let result = with_tls_fallback(|_| {
+            calls += 1;
+            Err(CheckError::Invalid)
+        });
+        assert_eq!(result, Err(CheckError::Invalid));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    #[ignore = "requires network"]
+    fn an_unresolvable_host_is_offline() {
+        let result = get(
+            "https://nonexistent.invalid/",
+            "test",
+            &[],
+            Duration::from_secs(10),
+            1024,
+        );
+        assert_eq!(result, Err(CheckError::Offline));
     }
 
     #[test]

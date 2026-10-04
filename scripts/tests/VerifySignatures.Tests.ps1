@@ -9,6 +9,7 @@
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..\lib\OmaCommon.psm1') -Force -ErrorAction Stop
     Import-Module (Join-Path $PSScriptRoot '..\lib\OmaPawnIoPins.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $PSScriptRoot '..\lib\OmaPresentMonPins.psm1') -Force -ErrorAction Stop
     Import-Module (Join-Path $PSScriptRoot '..\lib\OmaSigning.psm1') -Force -ErrorAction Stop
     $script:verifyScript = (Resolve-Path (Join-Path $PSScriptRoot '..\verify-signatures.ps1')).Path
     $script:pwshExe = (Get-Process -Id $PID).Path
@@ -21,6 +22,7 @@ BeforeAll {
     $script:testRoot = 'C3' * 20
     $script:pawnSubject = 'CN=PawnIO Fake Signer, O=namazso'
     $script:pawnThumb = 'D4' * 20
+    $script:presentMonSubject = 'CN=PresentMon Fake Signer, O=Intel'
 
     function New-Certificates {
         [pscustomobject]@{
@@ -70,6 +72,7 @@ BeforeAll {
         $script:signatureCalls.Add($n)
         if ($script:sigOverride.ContainsKey($n)) { return $script:sigOverride[$n] }
         if ($n -eq 'PawnIO_setup.exe') { return New-Sig -Subject $pawnSubject -Thumb $pawnThumb }
+        if ($n -eq 'PresentMon-2.6.0-x64.exe') { return New-Sig -Subject $presentMonSubject -Thumb ('F6' * 20) }
         New-Sig
     }
     $script:embeddedProvider = {
@@ -166,6 +169,7 @@ BeforeAll {
             'oma-app.exe'                      = $content["app-$which"]
             'service\oma-service.exe'          = $content["service-$which"]
             'service\PawnIO_setup.exe'         = 'pawnio setup bytes'
+            'service\presentmon\PresentMon-2.6.0-x64.exe' = 'presentmon bytes'
             'THIRD_PARTY_NOTICES.txt'          = 'notices'
             '$PLUGINSDIR\System.dll'           = 'nsis plugin'
         }
@@ -215,11 +219,16 @@ BeforeAll {
         }
     }
 
-    function Invoke-Payload($Run, [string]$Policy = 'release', $Pins = (Get-FakePins), [string]$Version = $version) {
+    function Get-FakePresentMonPins {
+        [pscustomobject]@{ Sha256 = (Get-TextSha 'presentmon bytes').ToUpperInvariant(); SignerSubject = $presentMonSubject }
+    }
+
+    function Invoke-Payload($Run, [string]$Policy = 'release', $Pins = (Get-FakePins), [string]$Version = $version,
+        $PresentMonPins = (Get-FakePresentMonPins)) {
         @(Test-OmaPayload -Setup $Run.Setup -Policy $Policy -Manifest $Run.Manifest -Version $Version `
                 -Certificates (New-Certificates) -Extractor $extractor -Lister $lister -SignatureProvider $sigProvider `
                 -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
-                -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore -PawnIoPins $Pins)
+                -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore -PawnIoPins $Pins -PresentMonPins $PresentMonPins)
     }
 
     $script:savedIsolation = @{
@@ -460,12 +469,13 @@ Describe 'signature and payload verification with fake providers' {
                 -Certificates (New-Certificates) -Extractor $extractor -Lister $lister -SignatureProvider $sigProvider `
                 -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
                 -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore -PawnIoPins (Get-FakePins) `
-                -InformationVariable notes
+                -PresentMonPins (Get-FakePresentMonPins) -InformationVariable notes
             @($p) | Should -BeNullOrEmpty
             ($notes -join "`n") | Should -BeLike '*installed uninstaller signature not verified*'
-            # Setup, both extracted binaries, the signed uninstaller copy and PawnIO.
+            # Setup, both extracted binaries, the signed uninstaller copy, PawnIO and PresentMon.
             $signatureCalls | Should -Contain 'uninstall.exe'
             $signatureCalls | Should -Contain 'PawnIO_setup.exe'
+            $signatureCalls | Should -Contain 'PresentMon-2.6.0-x64.exe'
             $signatureCalls | Should -Contain (Split-Path -Leaf $run.Setup)
         }
 
@@ -487,6 +497,14 @@ Describe 'signature and payload verification with fake providers' {
             $run = New-FakeRun
             $extract['service\PawnIO_setup.exe'] = $null
             ((Invoke-Payload $run) -join "`n") | Should -BeLike '*PawnIO_setup.exe*found 0*'
+
+            $run = New-FakeRun
+            $extract['service\presentmon\PresentMon-2.6.0-x64.exe'] = $null
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*exactly one PresentMon-2.6.0-x64.exe in the archive listing, found 0*'
+
+            $run = New-FakeRun
+            $extract['service\PresentMon-2.6.0-x64.exe'] = 'presentmon bytes'
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*PresentMon-2.6.0-x64.exe*found 2*'
         }
 
         It 'extractor_failure_fails' {
@@ -572,6 +590,33 @@ Describe 'signature and payload verification with fake providers' {
             ((Invoke-Payload $run -Policy none) -join "`n") | Should -BeLike '*PawnIO_setup.exe*HashMismatch*'
         }
 
+        It 'presentmon_hash_and_intel_signature_checked' {
+            $run = New-FakeRun
+            Invoke-Payload $run | Should -BeNullOrEmpty
+
+            $run = New-FakeRun
+            $extract['service\presentmon\PresentMon-2.6.0-x64.exe'] = 'tampered presentmon'
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*PresentMon-2.6.0-x64.exe: SHA-256*'
+
+            # Valid alone is not enough: the pinned signer is required.
+            $run = New-FakeRun
+            $sigOverride['PresentMon-2.6.0-x64.exe'] = New-Sig
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike "*PresentMon-2.6.0-x64.exe: signer '$releaseSubject'*"
+
+            # Checked under every policy, the unsigned build included.
+            $run = New-FakeRun -Kind unsigned
+            $sigOverride['PresentMon-2.6.0-x64.exe'] = New-Sig -Status 'NotSigned' -Subject $presentMonSubject
+            ((Invoke-Payload $run -Policy none) -join "`n") | Should -BeLike '*PresentMon-2.6.0-x64.exe: Authenticode status NotSigned*'
+        }
+
+        It 'uses the shared PresentMon pins by default' {
+            $run = New-FakeRun
+            $pins = Get-OmaPresentMonPins
+            $p = @(Test-OmaPayload -Setup $run.Setup -Policy none -Manifest $run.Manifest -Version $version -Extractor $extractor -Lister $lister `
+                    -SignatureProvider $sigProvider -VersionInfoProvider $versionProvider -PawnIoPins (Get-FakePins))
+            ($p -join "`n") | Should -BeLike "*PresentMon-2.6.0-x64.exe: SHA-256 *, expected $($pins.Sha256)*"
+        }
+
         It 'uses the shared PawnIO pins by default' {
             $run = New-FakeRun
             $pins = Get-OmaPawnIoPins
@@ -583,8 +628,8 @@ Describe 'signature and payload verification with fake providers' {
         It 'none_policy_checks_content_and_warns' {
             $run = New-FakeRun -Kind unsigned
             Invoke-Payload $run -Policy none | Should -BeNullOrEmpty
-            # Only PawnIO's signature is read; the product files are unsigned by design.
-            $signatureCalls | Should -Be @('PawnIO_setup.exe')
+            # Only the signatures of PawnIO and PresentMon are read; the product files are unsigned by design.
+            $signatureCalls | Should -Be @('PawnIO_setup.exe', 'PresentMon-2.6.0-x64.exe')
 
             # Hashes are compared with the collect pass.
             $run = New-FakeRun -Kind unsigned

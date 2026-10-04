@@ -95,7 +95,8 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Publishes oma-service (trim gate) and fetches the pinned, signature-checked PawnIO setup.
+      # Publishes oma-service (trim gate) and fetches the pinned, signature-checked PawnIO setup
+      # and PresentMon console.
       - name: Build installer payload
         run: |
           ./scripts/build-installer-payload.ps1

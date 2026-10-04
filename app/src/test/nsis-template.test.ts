@@ -599,6 +599,96 @@ describe('oma.nsh failure paths', () => {
     );
   });
 
+  // M7b: PresentMon ships with the service, in $INSTDIR\service\presentmon (where the service
+  // looks for it), behind the same folder protection and the same compile-time hash check.
+  const PM_DIR = /^SetOutPath "\$INSTDIR\\service\\presentmon"$/;
+  const PM_FILE = /^File "\$\{OMA_PAYLOAD\}\\presentmon\\PresentMon-2\.6\.0-x64\.exe"$/;
+  const PM_DELETE = 'Delete "$INSTDIR\\service\\presentmon\\PresentMon-2.6.0-x64.exe"';
+  const PM_RMDIR = 'RMDir "$INSTDIR\\service\\presentmon"';
+
+  it('copies PresentMon into the protected service folder after the service exe, and checks the copy', () => {
+    const section = block(all, /^Section "\$\(omaSensorsSection\)" SecSensors$/, /^SectionEnd$/);
+    const protect = indexOf(section, /^Call OmaProtectServiceDir$/);
+    const exe = indexOf(section, /^File .*OMA_SERVICE_EXE/);
+    const dir = indexOf(section, PM_DIR);
+    const file = indexOf(section, PM_FILE);
+    expect(dir).toBeGreaterThan(exe);
+    expect(exe).toBeGreaterThan(protect);
+    expect(file).toBeGreaterThan(dir);
+    expect(section[file + 1]).toBe('${If} ${Errors}');
+    expect(section[file + 2]).toMatch(FAIL);
+    // Copied before the helper registers the service, which may start it.
+    expect(file).toBeLessThan(indexOf(section, HELPER));
+  });
+
+  it('refuses to compile without PresentMon or with one that does not match the pinned hash', () => {
+    expect(nsh).toMatch(
+      /!if \/FileExists "\$\{OMA_PAYLOAD\}\\presentmon\\PresentMon-2\.6\.0-x64\.exe"\n!else\n\s*!error "Missing /,
+    );
+    const check = all.find((s) => /^!system /.test(s) && /presentmon\.sha256/.test(s));
+    expect(check).toBeDefined();
+    expect(check).toMatch(/^!system `pwsh\.exe /);
+    expect(check).toMatch(/Get-FileHash/);
+    expect(check).toMatch(/\$\{OMA_PAYLOAD\}\\presentmon\\PresentMon-2\.6\.0-x64\.exe/);
+    expect(check).toMatch(/\$\{__FILEDIR__\}\\presentmon\.sha256/);
+    expect(check).toMatch(/ = 0$/);
+    expect(read(resolve(nsisDir, 'presentmon.sha256'))).toMatch(/^[0-9A-F]{64}\n?$/);
+  });
+
+  it('the folder protection removes an old presentmon folder, and a link in its place without following it', () => {
+    const fn = block(all, /^Function OmaProtectServiceDir$/, /^FunctionEnd$/);
+    const text = fn.join('\n');
+    const grant = indexOf(fn, /^!insertmacro OMA_ICACLS "\/inheritance:r \/grant:r /);
+    const pm = indexOf(fn, /^StrCpy \$OmaPath "\$1\\presentmon"$/);
+    const empty = indexOf(fn, /^Delete "\$1\\\*\.\*"$/);
+    expect(pm).toBeGreaterThan(grant);
+    expect(empty).toBeGreaterThan(pm);
+    expect(fn[pm + 1]).toBe('Call OmaPathAttributes');
+    // A link goes as a link; a real folder is emptied and removed (never RMDir /r). Anything
+    // left in it makes the emptiness check below fail, since only logs may stay.
+    expect(text).toMatch(
+      /IntOp \$2 \$OmaAttr & 0x400\n\$\{If\} \$2 <> 0\nIntOp \$2 \$OmaAttr & 0x10\n\$\{If\} \$2 <> 0\nRMDir "\$1\\presentmon"\n\$\{Else\}\nDelete "\$1\\presentmon"\n\$\{EndIf\}\n\$\{Else\}\nIntOp \$2 \$OmaAttr & 0x10\n\$\{If\} \$2 <> 0\nDelete "\$1\\presentmon\\\*\.\*"\nRMDir "\$1\\presentmon"\n\$\{EndIf\}/,
+    );
+    expect(text).not.toMatch(/RMDir \/r/i);
+    expect(text).not.toMatch(/\$\{AndIf\} \$2 != "presentmon"/);
+  });
+
+  it('deselection and uninstall remove PresentMon and its folder, after the service is gone', () => {
+    const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
+    const dels = book.flatMap((s, i) => (s === PM_DELETE ? [i] : []));
+    expect(dels).toHaveLength(2); // with the exe, and for an orphaned service
+    expect(dels[0]).toBeGreaterThan(indexOf(book, HELPER));
+    for (const at of dels) {
+      expect(book[at + 1]).toBe(PM_RMDIR);
+      expect(indexOf(book, /^RMDir "\$INSTDIR\\service"$/, at)).toBeGreaterThan(at + 1);
+    }
+
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    const del = hook.indexOf(PM_DELETE);
+    expect(del).toBeGreaterThan(indexOf(hook, HELPER));
+    expect(hook[del + 1]).toBe(PM_RMDIR);
+    expect(indexOf(hook, /^RMDir "\$INSTDIR\\service"$/)).toBeGreaterThan(del + 1);
+  });
+
+  it('stops the frames ETW session after the service stops, ignoring the result', () => {
+    const macro = block(all, /^!macro OMA_STOP_FRAMES_SESSION$/, /^!macroend$/);
+    // Our own session name only: never PresentMon or PMService, which belong to other tools.
+    expect(macro.slice(1, -1)).toEqual([
+      `nsExec::ExecToLog '"$SYSDIR\\logman.exe" stop OpenMonitorAdvanced-Frames -ets'`,
+      'Pop $0',
+    ]);
+    const uses = (stmts: string[]) => stmts.flatMap((s, i) => (s === '!insertmacro OMA_STOP_FRAMES_SESSION' ? [i] : []));
+
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    const stop = indexOf(hook, STOP);
+    expect(uses(hook)).toEqual([stop + 4]); // after the stop, its check and OMA_FAIL, ${EndIf}
+    expect(hook[stop + 3]).toBe('${EndIf}');
+
+    const book = block(all, /^Section -OmaSensorsBookkeeping$/, /^SectionEnd$/);
+    const stops = book.flatMap((s, i) => (STOP.test(s) ? [i] : []));
+    expect(uses(book)).toEqual(stops.map((at) => at + 4));
+  });
+
   it('turns the reboot flag into exit code 3010 only on success', () => {
     const lines = all.filter((s) => /SetErrorLevel 3010/.test(s));
     expect(lines).toHaveLength(1);

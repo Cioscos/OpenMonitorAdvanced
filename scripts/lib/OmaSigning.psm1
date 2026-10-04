@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'OmaCommon.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OmaPawnIoPins.psm1')
+Import-Module (Join-Path $PSScriptRoot 'OmaPresentMonPins.psm1')
 
 $ProductName = 'OpenMonitor Advanced'
 $SignedNames = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe')
@@ -500,6 +501,9 @@ function Assert-OmaSigningPass {
 
 $script:SignPathFoundationCn = 'SignPath Foundation'
 $script:OwnPayloadNames = @('oma-app.exe', 'oma-service.exe')
+# Intel's PresentMon console, shipped unmodified with the service (M7b): checked against its own
+# pins, never against our signing policy.
+$script:PresentMonName = 'PresentMon-2.6.0-x64.exe'
 
 $script:DefaultSignatureProvider = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path }
 $script:DefaultEmbeddedSignatureProvider = { param($Path) Get-OmaEmbeddedSignature -Path $Path }
@@ -886,10 +890,11 @@ function Get-OmaSingleEntry($List, [string]$Role, [string]$Pass) {
   Verifies a setup against the signing manifest and a policy; returns the problems.
 .DESCRIPTION
   All policies: non-empty setup, the manifest of this version, the 7-Zip archive listing and
-  extraction (exit codes checked), exactly one oma-app.exe, oma-service.exe and PawnIO_setup.exe
-  among the listed entries (so two entries at the same path fail), PawnIO with the pinned
-  hash, status Valid and pinned signer (OmaPawnIoPins.psm1), and the product metadata of the
-  setup and the payload. release|test: every product file carries a signature accepted by
+  extraction (exit codes checked), exactly one oma-app.exe, oma-service.exe, PawnIO_setup.exe and
+  PresentMon-2.6.0-x64.exe among the listed entries (so two entries at the same path fail),
+  PawnIO with the pinned hash, status Valid and pinned signer (OmaPawnIoPins.psm1), PresentMon
+  with the pinned hash, status Valid and the Intel signer (OmaPresentMonPins.psm1), and the
+  product metadata of the setup and the payload. release|test: every product file carries a signature accepted by
   Test-OmaSignature and the extracted payload has the hashes of the imported signed copies;
   none: the payload has the hashes of the collect pass.
   uninstall.exe: 7-Zip does not list it (spike, 7-Zip 26.01). If it ever appears it is checked
@@ -913,6 +918,7 @@ function Test-OmaPayload {
         [scriptblock]$EmbeddedSignatureProvider = $script:DefaultEmbeddedSignatureProvider,
         [hashtable]$TrustStore = $script:DefaultTrustStore,
         [pscustomobject]$PawnIoPins,
+        [pscustomobject]$PresentMonPins,
         [scriptblock]$Lister = $script:DefaultLister
     )
     Assert-OmaVersionString $Version
@@ -970,7 +976,7 @@ function Test-OmaPayload {
         return $problems.ToArray()
     }
     $entryNames = @($listing.Paths | ForEach-Object { ("$_" -split '[\\/]')[-1] })
-    $names = @($script:OwnPayloadNames) + 'PawnIO_setup.exe' + 'uninstall.exe'
+    $names = @($script:OwnPayloadNames) + 'PawnIO_setup.exe' + $script:PresentMonName + 'uninstall.exe'
     $listed = @{}
     foreach ($n in $names) {
         $listed[$n] = @($entryNames | Where-Object { $_ -ieq $n }).Count
@@ -1017,6 +1023,12 @@ function Test-OmaPayload {
             $pins = if ($PawnIoPins) { $PawnIoPins } else { Get-OmaPawnIoPins }
             $p = Test-OmaPawnIoSetup -Path $found['PawnIO_setup.exe'][0].FullName -Pins $pins -SignatureProvider $SignatureProvider
             if ($p) { $problems.Add("PawnIO_setup.exe: $p") }
+        }
+
+        if (& $single $script:PresentMonName) {
+            $pins = if ($PresentMonPins) { $PresentMonPins } else { Get-OmaPresentMonPins }
+            $p = Test-OmaPresentMonExe -Path $found[$script:PresentMonName][0].FullName -Pins $pins -SignatureProvider $SignatureProvider
+            if ($p) { $problems.Add("${script:PresentMonName}: $p") }
         }
 
         if ($listed['uninstall.exe'] -eq 0) {

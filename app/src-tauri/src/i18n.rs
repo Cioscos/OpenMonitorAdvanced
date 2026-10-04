@@ -80,6 +80,8 @@ pub const RUST_KEYS: &[&str] = &[
     "log.toast.stopped",
     "log.hotkey.inUse",
     "log.hotkey.failed",
+    "updates.toast.title",
+    "updates.toast.body",
 ];
 
 type Catalog = HashMap<String, String>;

@@ -52,6 +52,7 @@ const OVERRIDE_SHAPE: { [key: string]: Node } = { enabled: 'leaf', warn: 'nullab
 const SHAPE: { [key: string]: Node } = {
   general: { language: 'leaf', temperatureUnit: 'leaf', throughputUnit: 'leaf', intervalMs: 'leaf', chartFps: 'leaf', defaultView: 'leaf' },
   tray: { closeToTray: 'leaf', autostart: 'leaf', iconSensor: 'nullable' },
+  updates: { checkAutomatically: 'leaf' },
   sources: {
     vendorLibraries: { nvml: 'leaf', nvapi: 'leaf', adl: 'leaf', igcl: 'leaf' },
     antiCheat: 'leaf',
@@ -124,6 +125,7 @@ function checkTypes(merged: Record<string, unknown>): void {
   const { tray, sources, advanced } = merged as { tray: Record<string, unknown>; sources: Record<string, unknown>; advanced: Record<string, unknown> };
   for (const key of ['closeToTray', 'autostart']) if (typeof tray[key] !== 'boolean') fail(`tray.${key}`, 'settings.error.type');
   if (tray.iconSensor !== null && typeof tray.iconSensor !== 'string') fail('tray.iconSensor', 'settings.error.type');
+  if (typeof (merged.updates as Record<string, unknown>).checkAutomatically !== 'boolean') fail('updates.checkAutomatically', 'settings.error.type');
   if (typeof sources.antiCheat !== 'boolean') fail('sources.antiCheat', 'settings.error.type');
   if (advanced.section != null && typeof advanced.section !== 'string') fail('advanced.section', 'settings.error.type');
   const series = advanced.series;
@@ -254,6 +256,7 @@ export function defaultSettings(): Settings {
     version: 1,
     general: { language: 'system', temperatureUnit: 'c', throughputUnit: 'bits', intervalMs: 1000, chartFps: 60, defaultView: 'last' },
     tray: { closeToTray: true, autostart: false, iconSensor: null },
+    updates: { checkAutomatically: false },
     sources: {
       vendorLibraries: { nvml: true, nvapi: true, adl: true, igcl: true },
       antiCheat: false,

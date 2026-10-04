@@ -267,6 +267,8 @@ misure dei grafici fluidi useranno `TotalAppPercentCpu` con validità esplicita.
 | M5c | same machine, same conditions, control run: the same Advanced page, log not recording | window (Advanced view, no log) | 1.01 (7 processes; core 0.08) | 20.7 | 6 | 180.1 | at the limit (see the details) |
 | M6b | same machine, Windows 11 Pro 10.0.26300, PawnIO 2.2.0, release build `4608bed`, service (protocol v3) connected, SATA HDD in standby | window (Advanced view, HDD page) | 0.92 (7 processes; core 0.05) | 20.2 | 6 | 166.9 | yes |
 | M6b | same machine, same conditions | tray | 0.05 | 18.2 | 0 | 18.2 | yes |
+| M6c | same machine, Windows 11 Pro 10.0.26300, PawnIO 2.2.0, release build `54da8a7`, service connected, automatic update check on | window | 0.84 (7 processes; core 0.04) | 20.7 | 6 | 129 | yes |
+| M6c | same machine, same conditions | tray | 0.04 | 18.0 | 0 | 18.0 | yes |
 
 Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
@@ -284,8 +286,48 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 | M5c | same machine, same conditions, control run | window (Advanced view, no log) | 0.02 | 62.6 MB |
 | M6b | same machine, release build `4608bed` (protocol v3, disk activity gate), SATA HDD in standby | window (Advanced view, HDD page) | 0.09 | 57.1 MB |
 | M6b | same machine, same conditions | tray | 0.03 | 62.5 MB |
+| M6c | same machine, release build `54da8a7` (automatic update check on) | window | 0.01 | 63.7 MB |
+| M6c | same machine, same conditions | tray | 0.01 | 62.8 MB |
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
+
+## M6c measurement details
+
+Measured 2026-10-04 on the development machine (16 logical processors,
+Windows 11 Pro 10.0.26300, PawnIO 2.2.0) with the release build of commit
+`54da8a7` (`target\release\oma-app.exe`, built by `pnpm tauri build --bundles
+nsis`), `scripts/measure-footprint.ps1 -Service` (`-Minimized` for the tray
+run) with the script's defaults (15 s warm-up, 30 s sample), the automatic
+update check enabled, the service connected. Raw output in
+`.superpowers/sdd/2026-10-04-m6c-report-aggiornamenti/u7-{window,tray}.log`
+(not tracked).
+
+```
+Mode              : window
+CorePercentCpu    : 0.04
+TotalAppPercentCpu: 0.84 (7 processes)
+AppPrivateMB      : 20.7
+WebView2Processes : 6
+TotalPrivateMB    : 129
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.01 %
+Service Private   : 63.7 MB
+
+Mode              : tray
+CorePercentCpu    : 0.04
+TotalAppPercentCpu: 0.04
+AppPrivateMB      : 18.0
+WebView2Processes : 0
+TotalPrivateMB    : 18.0
+VendorModules     : atiadlxx.dll, nvapi64.dll, nvml.dll
+Service CPU       : 0.01 %
+Service Private   : 62.8 MB
+```
+
+All budget items are met. The update check (one timer, one HTTPS request per
+day at most) and the gear dot add no visible cost: the core stays at 0.04 % and
+the tray at 18.0 MB. The service is at 0.01 % and under 64 MB. No limit was
+widened.
 
 ## M6b measurement details
 

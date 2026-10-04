@@ -417,7 +417,7 @@ fn take_then<T>(slot: &Mutex<Option<T>>, finish: impl FnOnce(T)) {
 
 #[cfg(windows)]
 impl ServiceShell {
-    fn status(&self) -> ServiceStatus {
+    pub(crate) fn status(&self) -> ServiceStatus {
         self.status_table.get().1
     }
 
@@ -455,7 +455,7 @@ impl ServiceShell {
 
 #[cfg(not(windows))]
 impl ServiceShell {
-    fn status(&self) -> ServiceStatus {
+    pub(crate) fn status(&self) -> ServiceStatus {
         not_installed_status()
     }
 

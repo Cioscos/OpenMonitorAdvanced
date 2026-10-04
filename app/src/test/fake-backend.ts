@@ -2,6 +2,7 @@ import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
   AppInfo,
+  ExportedReport,
   AutostartStatus,
   GpuProcess,
   HealthClock,
@@ -24,6 +25,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  UpdateStatus,
 } from '../lib/types';
 import defaultRulesFixture from './fixtures/default-rules.json';
 
@@ -127,6 +129,21 @@ export class FakeBackend implements Backend {
   pickedLogFolder: string | null = null;
   /** Every `setLogHotkeysSuspended` call, in order. */
   hotkeySuspensions: boolean[] = [];
+  /** What `getUpdateStatus` returns; `emitUpdateStatus` replaces it and notifies listeners. */
+  updateStatus: UpdateStatus = { state: 'idle', current: '0.4.0', latest: null, checkedAtMs: null, error: null };
+  /** What `checkUpdates` returns (and emits); null means it returns `updateStatus` unchanged. */
+  checkResult: UpdateStatus | null = null;
+  /** Set to reject `checkUpdates` with this error. */
+  checkError: string | null = null;
+  checkUpdatesCalls = 0;
+  openReleasePageCalls = 0;
+  /** What `exportSensorReport` returns; null is a cancelled dialog. */
+  exportResult: ExportedReport | null = null;
+  /** Set to reject `exportSensorReport` with this text instead of resolving. */
+  exportError: string | null = null;
+  exportSensorReportCalls = 0;
+  revealSensorReportCalls = 0;
+  #updateListeners = new Set<(s: UpdateStatus) => void>();
   #logListeners = new Set<(s: LogStatus) => void>();
   /** What `getDiskStates` answers. */
   diskStates: DiskStateEntry[] = [];
@@ -365,6 +382,41 @@ export class FakeBackend implements Backend {
 
   async setLogHotkeysSuspended(suspended: boolean): Promise<void> {
     this.hotkeySuspensions.push(suspended);
+  }
+
+  async checkUpdates(): Promise<UpdateStatus> {
+    this.checkUpdatesCalls++;
+    if (this.checkError !== null) throw this.checkError;
+    if (this.checkResult !== null) this.emitUpdateStatus(this.checkResult);
+    return this.updateStatus;
+  }
+
+  async getUpdateStatus(): Promise<UpdateStatus> {
+    return this.updateStatus;
+  }
+
+  async openReleasePage(): Promise<void> {
+    this.openReleasePageCalls++;
+  }
+
+  async exportSensorReport(): Promise<ExportedReport | null> {
+    this.exportSensorReportCalls++;
+    if (this.exportError !== null) throw this.exportError;
+    return this.exportResult;
+  }
+
+  async revealSensorReport(): Promise<void> {
+    this.revealSensorReportCalls++;
+  }
+
+  async onUpdateStatus(cb: (s: UpdateStatus) => void): Promise<Unsubscribe> {
+    this.#updateListeners.add(cb);
+    return () => this.#updateListeners.delete(cb);
+  }
+
+  emitUpdateStatus(status: UpdateStatus): void {
+    this.updateStatus = status;
+    this.#updateListeners.forEach((cb) => cb(status));
   }
 
   /** Number of live `oma:log` listeners. */

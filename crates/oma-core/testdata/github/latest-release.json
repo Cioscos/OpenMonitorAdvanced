@@ -1,0 +1,36 @@
+{
+  "url": "https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/releases/200000001",
+  "assets_url": "https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/releases/200000001/assets",
+  "html_url": "https://github.com/Cioscos/OpenMonitorAdvanced/releases/tag/v0.3.0",
+  "id": 200000001,
+  "author": {
+    "login": "Cioscos",
+    "id": 1234567,
+    "type": "User",
+    "site_admin": false,
+    "html_url": "https://github.com/Cioscos"
+  },
+  "node_id": "RE_kwDOExample",
+  "tag_name": "v0.3.0",
+  "target_commitish": "main",
+  "name": "OpenMonitor Advanced 0.3.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-10-01T09:00:00Z",
+  "published_at": "2026-10-01T10:30:00Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/releases/assets/300000001",
+      "id": 300000001,
+      "name": "OpenMonitorAdvanced_0.3.0_x64-setup.exe",
+      "content_type": "application/x-msdownload",
+      "state": "uploaded",
+      "size": 18874368,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Cioscos/OpenMonitorAdvanced/releases/download/v0.3.0/OpenMonitorAdvanced_0.3.0_x64-setup.exe"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/tarball/v0.3.0",
+  "zipball_url": "https://api.github.com/repos/Cioscos/OpenMonitorAdvanced/zipball/v0.3.0",
+  "body": "## Changes\n\n- Settings and tray\n- Rules\n- CSV log\n"
+}

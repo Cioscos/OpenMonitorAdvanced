@@ -1,0 +1,39 @@
+{
+  "version": 3,
+  "targets": {
+    "net10.0-windows": {
+      "Runtime.Lib/1.2.0": {
+        "type": "package",
+        "compile": { "lib/net10.0/Runtime.Lib.dll": {} },
+        "runtime": { "lib/net10.0/Runtime.Lib.dll": {} }
+      }
+    },
+    "net10.0-windows/win-x64": {
+      "Runtime.Lib/1.2.0": {
+        "type": "package",
+        "compile": { "lib/net10.0/Runtime.Lib.dll": {} },
+        "runtime": { "lib/net10.0/Runtime.Lib.dll": {} }
+      },
+      "Native.Only/2.0.0": {
+        "type": "package",
+        "native": { "runtimes/win-x64/native/native_only.dll": {} }
+      },
+      "Placeholder.Only/3.0.0": {
+        "type": "package",
+        "compile": { "ref/net10.0/_._": {} },
+        "runtime": { "lib/net10.0/_._": {} },
+        "native": { "runtimes/win-x64/native/_._": {} }
+      },
+      "Some.Analyzer/4.0.0": {
+        "type": "package",
+        "build": { "build/Some.Analyzer.targets": {} }
+      },
+      "Sibling.Project/1.0.0": {
+        "type": "project",
+        "compile": { "bin/placeholder/Sibling.Project.dll": {} },
+        "runtime": { "bin/placeholder/Sibling.Project.dll": {} }
+      }
+    }
+  },
+  "libraries": {}
+}

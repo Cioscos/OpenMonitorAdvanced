@@ -230,6 +230,8 @@ export type ViewKind = 'simple' | 'advanced';
 export interface NavigationTarget {
   view: ViewKind;
   deviceId?: string;
+  /** The settings section to open, for the update toast. */
+  settingsSection?: 'about';
 }
 
 export interface ServiceModules {
@@ -275,6 +277,9 @@ export interface Settings {
     autostart: boolean;
     /** Sensor id, or null for automatic. */
     iconSensor: string | null;
+  };
+  updates: {
+    checkAutomatically: boolean;
   };
   sources: {
     vendorLibraries: { nvml: boolean; nvapi: boolean; adl: boolean; igcl: boolean };
@@ -436,8 +441,25 @@ export interface AppInfo {
   logsPath: string | null;
 }
 
+/** A sensor report saved by `exportSensorReport`; mirrors `report::ExportedReport`. Only the name, never the path. */
+export interface ExportedReport {
+  fileName: string;
+}
+
+/** Why the last update check failed; mirrors `updates::UpdateError`. */
+export type UpdateError = 'offline' | 'timeout' | 'tls' | 'http' | 'invalid';
+
+/** The update check as the shell last reported it; `latest` is set only for a version newer than `current`, also in `error`. */
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'upToDate' | 'available' | 'error';
+  current: string;
+  latest: { version: string } | null;
+  checkedAtMs: number | null;
+  error: UpdateError | null;
+}
+
 /** The only places `openKnownPath` opens (never a path the UI chooses). */
-export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'startupAppsSettings';
+export type KnownPath = 'settingsFolder' | 'logsFolder' | 'thirdPartyNotices' | 'thirdPartyLicenses' | 'startupAppsSettings';
 
 /** Overall level of the rules engine; `neutral` when there is nothing to judge yet. */
 export type HealthLevel = 'neutral' | 'ok' | 'warn' | 'crit';

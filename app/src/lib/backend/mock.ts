@@ -8,6 +8,7 @@ import type {
   Label,
   LogState,
   LogStatus,
+  UpdateStatus,
   Rule,
   RuleStatus,
   Schema,
@@ -161,6 +162,9 @@ export function mockValues(t: number): (number | null)[] {
 
 /** The mock never starts in GPU safe mode. */
 export const MOCK_STARTUP: StartupStatus = { safeMode: false, reason: null, crashModule: null };
+
+/** The mock's update check never ran. */
+const MOCK_UPDATE_STATUS: UpdateStatus = { state: 'idle', current: '0.1.0', latest: null, checkedAtMs: null, error: null };
 
 /** Same cap as the core (`MAX_HISTORY_SECONDS`): one hour at 1 s. */
 export const MOCK_HISTORY_SECONDS = 3600;
@@ -543,5 +547,13 @@ export function createMockBackend(intervalMs = 1000): Backend {
     pickLogFolder: async () => 'C:\\Users\\mock\\Documents\\OpenMonitorAdvanced\\logs',
     // No global hotkeys in the browser.
     setLogHotkeysSuspended: async () => {},
+    // The browser has no network access to GitHub: the check always finds nothing to report.
+    checkUpdates: async () => MOCK_UPDATE_STATUS,
+    getUpdateStatus: async () => MOCK_UPDATE_STATUS,
+    openReleasePage: async () => console.info('mock: open release page'),
+    onUpdateStatus: async () => () => {},
+    // No native dialog or file system in the browser: pretend the user saved the report.
+    exportSensorReport: async () => ({ fileName: 'oma-report-20261004-090507.json' }),
+    revealSensorReport: async () => console.info('mock: open report folder'),
   };
 }

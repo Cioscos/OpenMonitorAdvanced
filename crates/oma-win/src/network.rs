@@ -30,6 +30,30 @@ pub(crate) struct InterfaceRow {
     pub link_bps: u64,
 }
 
+/// The `adapterType` device property for an `IfType`, or `None` for types we do not name.
+pub(crate) fn adapter_type(if_type: u32) -> Option<&'static str> {
+    match if_type {
+        IF_TYPE_ETHERNET_CSMACD => Some("ethernet"),
+        IF_TYPE_IEEE80211 => Some("wifi"),
+        _ => None,
+    }
+}
+
+/// The network `Device` for a monitored interface row.
+fn network_device(row: &InterfaceRow) -> Device {
+    let mut properties = std::collections::BTreeMap::new();
+    if let Some(kind) = adapter_type(row.if_type) {
+        properties.insert("adapterType".to_string(), kind.to_string());
+    }
+    Device {
+        id: format!("network/{}", row.guid),
+        kind: DeviceKind::Network,
+        name: row.alias.clone(),
+        vendor: None,
+        properties,
+    }
+}
+
 /// Connected physical Ethernet/Wi-Fi adapters; skips virtual adapters, NDIS
 /// filter (LWF) duplicates and disconnected interfaces.
 pub(crate) fn is_monitored(row: &InterfaceRow) -> bool {
@@ -169,13 +193,7 @@ impl Provider for NetworkProvider {
         let mut adapters = Vec::new();
         for row in &rows {
             let id = format!("network/{}", row.guid);
-            devices.push(Device {
-                id: id.clone(),
-                kind: DeviceKind::Network,
-                name: row.alias.clone(),
-                vendor: None,
-                properties: Default::default(),
-            });
+            devices.push(network_device(row));
             sensors.push(Sensor::new(
                 &id,
                 SensorKind::Throughput,
@@ -264,6 +282,29 @@ mod tests {
         assert!(!is_monitored(&row("filter", 6, 0b11, true)));
         assert!(!is_monitored(&row("loopback", 24, 0b01, true)));
         assert!(!is_monitored(&row("down", 6, 0b01, false)));
+    }
+
+    #[test]
+    fn adapter_type_from_if_type() {
+        assert_eq!(adapter_type(IF_TYPE_ETHERNET_CSMACD), Some("ethernet"));
+        assert_eq!(adapter_type(IF_TYPE_IEEE80211), Some("wifi"));
+        assert_eq!(adapter_type(24), None);
+    }
+
+    #[test]
+    fn device_carries_the_adapter_type_property() {
+        let wifi = network_device(&row("w", 71, 1, true));
+        assert_eq!(
+            wifi.properties.get("adapterType").map(String::as_str),
+            Some("wifi")
+        );
+        let eth = network_device(&row("e", 6, 1, true));
+        assert_eq!(
+            eth.properties.get("adapterType").map(String::as_str),
+            Some("ethernet")
+        );
+        let other = network_device(&row("o", 24, 1, true));
+        assert!(other.properties.is_empty());
     }
 
     #[test]

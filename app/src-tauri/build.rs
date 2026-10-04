@@ -6,6 +6,7 @@ fn main() {
             "get_stats",
             "reset_stats",
             "get_session",
+            "get_disk_states",
             "get_gpu_processes",
             "get_startup_status",
             "enable_vendor_libraries",
@@ -32,6 +33,11 @@ fn main() {
             "open_log_folder",
             "pick_log_folder",
             "set_log_hotkeys_suspended",
+            "check_updates",
+            "get_update_status",
+            "open_release_page",
+            "export_sensor_report",
+            "reveal_sensor_report",
         ]),
     ))
     .expect("Tauri build")

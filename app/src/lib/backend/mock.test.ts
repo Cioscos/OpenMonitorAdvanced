@@ -233,6 +233,17 @@ test('mock backend rejects an off-step interval', async () => {
   expect((await backend.getSettings()).settings.general.intervalMs).toBe(1000);
 });
 
+test('mock backend keeps update checks off by default and accepts a patch', async () => {
+  const backend = createMockBackend();
+  expect((await backend.getSettings()).settings.updates).toEqual({ checkAutomatically: false });
+  const state = await backend.updateSettings({ updates: { checkAutomatically: true } });
+  expect(state.settings.updates.checkAutomatically).toBe(true);
+  await expect(backend.updateSettings({ updates: { checkAutomatically: 'yes' } } as never)).rejects.toEqual({
+    field: 'updates.checkAutomatically',
+    key: 'settings.error.type',
+  });
+});
+
 test('mock backend rejects an unknown field and null on a plain field', async () => {
   const backend = createMockBackend();
   await expect(backend.updateSettings({ general: { nope: 1 } } as never)).rejects.toEqual({

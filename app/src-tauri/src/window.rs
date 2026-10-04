@@ -21,6 +21,9 @@ pub struct NavigationTarget {
     pub view: ViewKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// The settings section to open (`about`), for the update toast.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_section: Option<String>,
 }
 
 fn view_name<S: Serializer>(view: &ViewKind, serializer: S) -> Result<S::Ok, S::Error> {
@@ -32,6 +35,7 @@ impl NavigationTarget {
         Self {
             view,
             device_id: None,
+            settings_section: None,
         }
     }
 
@@ -40,6 +44,16 @@ impl NavigationTarget {
         Self {
             view: ViewKind::Advanced,
             device_id: Some(device_id.to_owned()),
+            settings_section: None,
+        }
+    }
+
+    /// Settings › About, with `view` as the view Back returns to.
+    pub fn about(view: ViewKind) -> Self {
+        Self {
+            view,
+            device_id: None,
+            settings_section: Some("about".to_owned()),
         }
     }
 }
@@ -100,6 +114,18 @@ pub fn show_device(app: &AppHandle, device_id: &str) {
     navigate(app, NavigationTarget::device(device_id));
 }
 
+/// Shows Settings › About (a clicked update toast); Back returns to the last
+/// view, Simple when none is remembered.
+pub fn show_about(app: &AppHandle) {
+    let view = app
+        .state::<std::sync::Arc<crate::settings::SettingsStore>>()
+        .snapshot()
+        .view
+        .last
+        .unwrap_or(ViewKind::Simple);
+    navigate(app, NavigationTarget::about(view));
+}
+
 /// Leaves `target` pending, tells an open window at once, and shows it.
 fn navigate(app: &AppHandle, target: NavigationTarget) {
     app.state::<NavState>().request(target.clone());
@@ -150,6 +176,14 @@ mod tests {
         assert_eq!(
             json(NavigationTarget::device("storage/a\"b")),
             r#"{"view":"advanced","deviceId":"storage/a\"b"}"#
+        );
+    }
+
+    #[test]
+    fn about_target_serializes_section() {
+        assert_eq!(
+            serde_json::to_string(&NavigationTarget::about(ViewKind::Simple)).unwrap(),
+            r#"{"view":"simple","settingsSection":"about"}"#
         );
     }
 }

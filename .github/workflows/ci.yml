@@ -72,6 +72,30 @@ jobs:
         shell: pwsh
         run: ./scripts/build-installer-payload.ps1
 
+      # cargo-about is built from source once per pinned version, then restored from the
+      # cache. The version is pinned here (key and install) and in the script, which also
+      # checks the version of the binary it runs.
+      - name: Restore cargo-about
+        id: cargo-about
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-about.exe
+          key: cargo-about-0.9.2-cli-${{ runner.os }}
+
+      - name: Install cargo-about
+        if: steps.cargo-about.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cargo install cargo-about --locked --version 0.9.2 --features cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Regenerates THIRD_PARTY_LICENSES.txt in a temporary folder (cargo-about for the
+      # crates, the Vite bundle manifest for the UI, project.assets.json for the service)
+      # and fails if the committed file differs.
+      - name: Check third-party licences
+        shell: pwsh
+        run: ./scripts/generate-licenses.ps1 -Check
+
       - name: Build NSIS installer
         working-directory: app
         run: pnpm tauri build --bundles nsis

@@ -7,11 +7,13 @@ mod i18n;
 mod interval;
 mod log;
 mod notifier;
+mod report;
 mod rules;
 mod service;
 mod settings;
 mod tray;
 mod tray_icon;
+mod updates;
 mod window;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -243,6 +245,7 @@ fn main() {
         .manage(GpuProcessState(processes))
         .manage(service_shell)
         .manage(settings_store)
+        .manage(report::ReportState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_schema,
             commands::get_history,
@@ -276,6 +279,11 @@ fn main() {
             log::commands::open_log_folder,
             log::commands::pick_log_folder,
             hotkeys::set_log_hotkeys_suspended,
+            updates::check_updates,
+            updates::get_update_status,
+            updates::open_release_page,
+            report::export_sensor_report,
+            report::reveal_sensor_report,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -333,6 +341,8 @@ fn main() {
             // fetch it from the managed state.
             let toaster = Arc::new(notifier::system_toaster(app.handle()));
             app.manage(toaster.clone());
+            // Update checks: on request, or daily with `updates.checkAutomatically`.
+            app.manage(updates::install(app.handle(), &store, toaster.clone()));
             let log_service = log::LogService::new(
                 store.clone(),
                 Arc::new(log::fs::RealFs),
@@ -464,6 +474,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every command in `generate_handler!` must be listed in the build
+    /// manifest and allowed by the main window capability, or the UI gets
+    /// "not allowed. Command not found" at run time.
+    #[test]
+    fn every_registered_command_is_in_the_manifest_and_the_capability() {
+        let main_src = include_str!("main.rs");
+        let build_src = include_str!("../build.rs");
+        let capability = include_str!("../capabilities/default.json");
+
+        // The first occurrence is the real invocation, not this test.
+        let start = main_src
+            .find("generate_handler![")
+            .expect("generate_handler!")
+            + 18;
+        let end = start + main_src[start..].find(']').expect("closing bracket");
+        let commands: Vec<&str> = main_src[start..end]
+            .split(',')
+            .map(|entry| entry.trim().rsplit("::").next().unwrap())
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(commands.len() > 20, "parsed too few commands: {commands:?}");
+
+        let mut missing = Vec::new();
+        for name in commands {
+            if !build_src.contains(&format!("\"{name}\"")) {
+                missing.push(format!("{name}: missing from build.rs"));
+            }
+            let permission = format!("\"allow-{}\"", name.replace('_', "-"));
+            if !capability.contains(&permission) {
+                missing.push(format!("{name}: missing from capabilities/default.json"));
+            }
+        }
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
 
     #[test]
     fn generation_changed_reports_each_new_generation_once() {

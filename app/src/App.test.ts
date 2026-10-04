@@ -378,6 +378,19 @@ test('a navigate event is acknowledged by taking the pending request', async () 
   expect(backend.pendingView).toBeNull();
 });
 
+test('navigate with settingsSection opens About', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'simple' } });
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  backend.emitNavigate({ view: 'simple', settingsSection: 'about' });
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'About' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  await simpleShown();
+});
+
 test('a toast opens the page of its device', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   await backend.settings.update({ general: { defaultView: 'simple' } });

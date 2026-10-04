@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenMonitor Advanced",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "io.github.openmonitoradvanced",
   "build": {
     "frontendDist": "../dist",
@@ -20,7 +20,10 @@
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
     "publisher": "OpenMonitorAdvanced",
-    "resources": { "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.txt" },
+    "resources": {
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.txt",
+      "../../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt"
+    },
     "windows": {
       "nsis": {
         "template": "nsis/installer.nsi",

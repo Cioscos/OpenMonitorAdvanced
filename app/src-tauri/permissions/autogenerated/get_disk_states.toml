@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-disk-states"
+description = "Enables the get_disk_states command without any pre-configured scope."
+commands.allow = ["get_disk_states"]
+
+[[permission]]
+identifier = "deny-get-disk-states"
+description = "Denies the get_disk_states command without any pre-configured scope."
+commands.deny = ["get_disk_states"]

@@ -494,4 +494,21 @@ Il controller le esegue con l'utente; nessun input sintetico.
 
 ## Esito dell'esecuzione
 
-Da compilare durante l'esecuzione.
+Task 1-12 completati, ciascuno con la revisione dedicata; la revisione finale dell'intero branch ha prodotto correzioni, applicate prima dei controlli dal vivo.
+
+Controlli dal vivo del Task 13 (2026-10-04, con l'utente):
+
+- U1 superato: «Controlla ora» mostra «Hai l'ultima versione (0.3.0)»; `update-state.json` nasce solo dal clic.
+- U2 superato: con una versione finta 0.2.0 compaiono il segno e «Disponibile la versione 0.3.0»; «Controlla ora» lo mantiene e la pagina della release si apre.
+- U3 superato: il toast arriva dopo circa 60 s e il clic apre Informazioni; al secondo avvio il controllo automatico riparte dopo 60 s, senza nuovi toast e con i segni al loro posto.
+- U4 superato: offline, «Controlla ora» mostra «Nessuna connessione» e nessun toast.
+- U5 superato: due report (servizio connesso: 10 dispositivi, 171 sensori; anti-cheat: 9 dispositivi, 91 sensori) senza id di archiviazione, GUID, hash lunghi, utente, macchina, seriali o MAC.
+- U6 superato in `tauri dev`: entrambi i pulsanti aprono i file delle licenze; il controllo nell'app installata resta da fare su una VM.
+- U7 superato: build release di `54da8a7`, nucleo 0,04 % (finestra e tray), app 20,7 MB e 18,0 MB, servizio 0,01 % e circa 63 MB (dettagli in `docs/perf-budget.md`).
+- U8 superato: payload e installer NSIS (setup 0.3.0, 12,7 MB) con `THIRD_PARTY_LICENSES.txt` e `THIRD_PARTY_NOTICES.txt` all'interno; l'installer non è stato eseguito.
+
+Durante U1 è emerso un bug preesistente di M6b: `get_disk_states` mancava da `build.rs` e dalla capability ("not allowed"). Corretto in `653b981`, con un test di guardia che confronta `generate_handler!`, `build.rs` e la capability.
+
+Due aggiunte richieste dall'utente durante i controlli: un pallino sull'ingranaggio delle impostazioni quando un aggiornamento è noto, con la stessa regola del segno su Informazioni (`b4fe719`), e il tooltip «Impostazioni (aggiornamento disponibile)» (`54da8a7`).
+
+Resta da fare, annotato in `docs/follow-ups.md`: il ripiego WinHTTP con TLS 1.2 su una VM Windows 10, la prima esecuzione in CI del passo sulle licenze (con la cache di cargo-about) e i pulsanti delle licenze nell'app installata su una VM. Rinviato: CSS `.dot`/`.sr-only` duplicato tra TopBar e SettingsView. La release 0.4.0 (Task 14) resta in attesa della richiesta dell'utente.

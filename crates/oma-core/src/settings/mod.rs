@@ -159,6 +159,12 @@ impl Default for Tray {
     }
 }
 
+/// Update check preferences. The check is opt-in: nothing touches the network by default.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Updates {
+    pub check_automatically: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VendorLibraries {
     pub nvml: bool,
@@ -256,6 +262,7 @@ pub struct Settings {
     pub version: u32,
     pub general: General,
     pub tray: Tray,
+    pub updates: Updates,
     pub sources: Sources,
     pub advanced: AdvancedState,
     pub view: ViewState,
@@ -272,6 +279,7 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             general: General::default(),
             tray: Tray::default(),
+            updates: Updates::default(),
             sources: Sources::default(),
             advanced: AdvancedState::default(),
             view: ViewState::default(),
@@ -315,6 +323,9 @@ pub fn encode(settings: &Settings) -> Value {
             "closeToTray": settings.tray.close_to_tray,
             "autostart": settings.tray.autostart,
             "iconSensor": settings.tray.icon_sensor,
+        },
+        "updates": {
+            "checkAutomatically": settings.updates.check_automatically,
         },
         "sources": {
             "vendorLibraries": {
@@ -366,6 +377,9 @@ pub(crate) mod test_support {
                 close_to_tray: false,
                 autostart: true,
                 icon_sensor: Some("gpu0/temperature/core".into()),
+            },
+            updates: Updates {
+                check_automatically: true,
             },
             sources: Sources {
                 vendor_libraries: VendorLibraries {
@@ -450,6 +464,7 @@ mod tests {
             "general": {"language": "system", "temperatureUnit": "c", "throughputUnit": "bits",
                         "intervalMs": 1000, "chartFps": 60, "defaultView": "last"},
             "tray": {"closeToTray": true, "autostart": false, "iconSensor": null},
+            "updates": {"checkAutomatically": false},
             "sources": {
                 "vendorLibraries": {"nvml": true, "nvapi": true, "adl": true, "igcl": true},
                 "antiCheat": false,

@@ -1,5 +1,6 @@
 import type {
   AppInfo,
+  ExportedReport,
   AutostartStatus,
   GpuProcess,
   HealthClock,
@@ -20,6 +21,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  UpdateStatus,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -113,4 +115,14 @@ export interface Backend {
    * keys) and their presses ignored; false registers them again.
    */
   setLogHotkeysSuspended(suspended: boolean): Promise<void>;
+  /** Asks GitHub for the latest release now; replies with the resulting status (rejects only if the background task panics). */
+  checkUpdates(): Promise<UpdateStatus>;
+  getUpdateStatus(): Promise<UpdateStatus>;
+  /** Opens the page of the newer release in the browser; rejects when no newer release is known. */
+  openReleasePage(): Promise<void>;
+  onUpdateStatus(cb: (status: UpdateStatus) => void): Promise<Unsubscribe>;
+  /** Builds the anonymous sensor report and saves it where the user chooses; null when the dialog is cancelled; rejects with the system's text. */
+  exportSensorReport(): Promise<ExportedReport | null>;
+  /** Opens the folder of the last exported report; rejects when there is none or with the system's text. */
+  revealSensorReport(): Promise<void>;
 }

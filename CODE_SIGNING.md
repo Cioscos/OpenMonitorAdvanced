@@ -70,11 +70,12 @@ components. Where a third-party component has its own behavior, we link to its p
 describing it.
 
 - **The application (`oma-app.exe`) and the service (`oma-service.exe`) send no data over the
-  network.** The Rust workspace and the service have no HTTP client and no telemetry, and the web
-  interface may talk only to the local Tauri bridge (its content security policy allows
-  `connect-src ipc: http://ipc.localhost`). The app and the service communicate with each other
-  over a local named pipe. The sensor library the service uses, LibreHardwareMonitorLib 0.9.6,
-  references no HTTP or socket types, only the local network adapter list
+  network, except the optional update check below.** There is no telemetry. The only HTTP client
+  is the update check of the application (WinHTTP, in `crates/oma-win/src/http.rs`); the service
+  has none. The web interface may talk only to the local Tauri bridge (its content security policy
+  allows `connect-src ipc: http://ipc.localhost`). The app and the service communicate with each
+  other over a local named pipe. The sensor library the service uses, LibreHardwareMonitorLib
+  0.9.6, references no HTTP or socket types, only the local network adapter list
   (`System.Net.NetworkInformation`).
 - **Settings, history and the optional CSV log stay on your PC**, in
   `%APPDATA%\OpenMonitorAdvanced` and in the folder you pick for the log. Nothing is uploaded.
@@ -90,9 +91,18 @@ describing it.
   only if you keep the *Advanced sensors* component selected. For the driver's own policies see
   [pawnio.eu](https://pawnio.eu/).
 
-The app currently has **no update check**. A planned future release will add one that contacts
-GitHub; when it does, this section, the setting to turn it off and the documentation will be
-updated before the release.
+**Update check (optional).** The app can check whether a newer release exists. It does so only
+when you press *Check now* in Settings › About, or once a day if you turn on *Check automatically*
+(off by default). The check is a single HTTPS request to `api.github.com` for the latest release of
+this repository; it sends your IP address, as any connection does, and a User-Agent with the app
+version. No identifiers, no settings and no sensor data are sent. GitHub's own policy applies to
+that request:
+[GitHub Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement).
+The app never downloads or installs anything: it shows a link to the release page. The service
+never uses the network.
+
+**Sensor report.** *Export sensor report* in Settings › About writes an anonymous JSON file to a
+folder you choose. Nothing is sent: you attach it to an issue yourself if you want to.
 
 ## Attribution
 

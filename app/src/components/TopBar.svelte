@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from '../lib/i18n/index.svelte';
+  import { updates } from '../lib/updates.svelte';
   import type { ServiceStatus } from '../lib/types';
   import type { View } from '../lib/view';
   import Recorder from './log/Recorder.svelte';
@@ -29,6 +30,8 @@
     /** The gear button, so focus can return to it when the settings close. */
     gear?: HTMLButtonElement;
   } = $props();
+  const hasUpdate = $derived(updates.state?.latest != null);
+  const gearLabel = $derived(hasUpdate ? t('settings.titleWithUpdate') : t('settings.title'));
 
   // Collapsed by default (R23): the badge must not occupy permanent space for users without
   // the service. A command failure opens it so the error is visible.
@@ -73,8 +76,7 @@
       class="icon"
       class:on={view === 'settings'}
       type="button"
-      title={t('settings.title')}
-      aria-label={t('settings.title')}
+      title={gearLabel}
       aria-pressed={view === 'settings'}
       bind:this={gear}
       onclick={onSettings}
@@ -84,6 +86,10 @@
         <circle cx="12" cy="12" r="9" stroke-width="3" stroke-dasharray="3.53 3.54" />
         <circle cx="12" cy="12" r="6.6" stroke-width="2.4" />
       </svg>
+      <span class="sr-only">{gearLabel}</span>
+      {#if hasUpdate}
+        <span class="dot" aria-hidden="true"></span>
+      {/if}
     </button>
   </div>
 </header>
@@ -162,6 +168,7 @@
     border: 1px solid color-mix(in srgb, var(--crit) 45%, transparent);
   }
   .icon {
+    position: relative;
     display: grid;
     place-items: center;
     width: 32px;
@@ -179,6 +186,24 @@
   .icon.on {
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  }
+  .dot {
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    border: 1.5px solid var(--surface);
+    border-radius: 50%;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .icon:focus-visible,
   .seg button:focus-visible {

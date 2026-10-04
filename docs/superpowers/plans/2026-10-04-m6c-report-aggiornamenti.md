@@ -511,4 +511,4 @@ Durante U1 è emerso un bug preesistente di M6b: `get_disk_states` mancava da `b
 
 Due aggiunte richieste dall'utente durante i controlli: un pallino sull'ingranaggio delle impostazioni quando un aggiornamento è noto, con la stessa regola del segno su Informazioni (`b4fe719`), e il tooltip «Impostazioni (aggiornamento disponibile)» (`54da8a7`).
 
-Resta da fare, annotato in `docs/follow-ups.md`: il ripiego WinHTTP con TLS 1.2 su una VM Windows 10, la prima esecuzione in CI del passo sulle licenze (con la cache di cargo-about) e i pulsanti delle licenze nell'app installata su una VM. Rinviati: due `.sr-only` adiacenti in TopBar e CSS `.dot`/`.sr-only` duplicato tra TopBar e SettingsView. La release 0.4.0 (Task 14) resta in attesa della richiesta dell'utente.
+Resta da fare, annotato in `docs/follow-ups.md`: il ripiego WinHTTP con TLS 1.2 su una VM Windows 10, la prima esecuzione in CI del passo sulle licenze (con la cache di cargo-about) e i pulsanti delle licenze nell'app installata su una VM. Rinviato: CSS `.dot`/`.sr-only` duplicato tra TopBar e SettingsView. La release 0.4.0 (Task 14) resta in attesa della richiesta dell'utente.

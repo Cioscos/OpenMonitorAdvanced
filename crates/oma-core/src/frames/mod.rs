@@ -2,7 +2,16 @@
 //! rolling window ordered by presentation time. No Windows code here; the
 //! providers that produce the samples live in `oma-win` and the service.
 
+pub mod generation;
 pub mod metrics;
+pub mod swapchain;
+pub mod synthetic;
+
+pub use generation::{
+    fg_multiplier, fg_suspected, rendered_fps, source_label, Rendered, RenderedSource,
+};
+pub use swapchain::pick_swapchain;
+pub use synthetic::{synthetic, SyntheticProfile};
 
 use std::collections::VecDeque;
 

@@ -63,7 +63,7 @@ public sealed class PresentMonCsvTests
     public void ToleratesBomAndCarriageReturn()
     {
         var csv = new PresentMonCsv();
-        Assert.True(csv.TryReadHeader("﻿" + Header + "\r", out _));
+        Assert.True(csv.TryReadHeader("\uFEFF" + Header + "\r", out _));
 
         var row = csv.ParseRow(Row + "\r");
 

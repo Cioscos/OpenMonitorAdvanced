@@ -134,7 +134,7 @@ internal sealed class PresentMonCsv
         return null;
     }
 
-    private static string Clean(string line) => line.TrimStart('﻿').TrimEnd('\r', '\n');
+    private static string Clean(string line) => line.TrimStart('\uFEFF').TrimEnd('\r', '\n');
 
     private static bool IsNull(string value) => value.Length == 0 || value == "NA";
 

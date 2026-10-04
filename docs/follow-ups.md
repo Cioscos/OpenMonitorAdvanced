@@ -228,17 +228,19 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
-## Manual checks owed after M7a
+## Manual checks after M7a
 
-The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are owed by the user, with the 0.4.1 setup.
+The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are done (2026-10-04, published 0.4.1 setup, SHA-256 `d45c2eda...465c`, all passed):
 
-- U1: with 0.4.0 installed, *Start with Windows* on and the app in the tray, run the 0.4.1 setup in graphical mode and keep «Uninstall first»: no «running» message; at the end, with «Run» ticked, the app opens and the service starts with it; the Run value is still there and *Start with Windows* is still on.
-- U2: with 0.4.1 installed and the app in the tray, `setup.exe /S` (same version): no window, no question; the app quits in an orderly way (`--quit`) and returns to the tray (`--minimized`).
-- U3: as U2 with the app closed: the app stays closed.
+- U1: 0.4.0 → 0.4.1 in graphical mode with «Uninstall first», *Start with Windows* on and the app in the tray: no «running» message, the app reopened, the service running, the Run value still there and `autostart: true`.
+- U2: `setup.exe /S` over 0.4.1 with the app in the tray: no window, the app came back with `--minimized` (new PID). The app does not log its shutdown, so the orderly `--quit` path is inferred (no window appeared), not proven from a log.
+- U3: as U2 with the app closed: it stayed closed.
 - U4: uninstall from Settings › Apps with the app open: the «running» question is still there.
-- U5: delete the log folder, then *Open folder*: «the file or folder does not exist»; the other *About* buttons work.
-- U6: chart of a standby HDD with a 1 min window: the y-axis is visible and the «No readings while the device is idle or in standby» text appears.
-- U7: `oma-app.exe --quit` from a terminal with the app open (it exits), then with the app closed (the process ends without a window). In both cases the Run value and the crash marker stay unchanged. Also: with *Start with Windows* on for the installed app, running `target\release\oma-app.exe` leaves the Run value unchanged.
+- U5: CSV log folder renamed away, *Open folder*: «the file or folder does not exist»; the *About* and *General* buttons work.
+- U6: standby HDD, 1 min window: y-axis visible, the suspended notice shown.
+- U7: `--quit` with the app open (exits) and closed (no window); then `target\release\oma-app.exe` started and quit: the Run value still points at `Program Files` and no crash marker.
+
+Open: log one INFO line at app shutdown (reason: tray, `--quit`, session end) so a future U2 can prove the orderly path from the log.
 
 ## Manual checks owed after M6c
 

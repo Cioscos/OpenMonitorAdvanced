@@ -693,12 +693,12 @@ Decisioni:
 
 | # | Esito |
 |---|---|
-| U1 | da fare (utente): dopo l'aggiornamento il valore Run c'è ancora e «Avvio con Windows» è ancora attivo |
-| U2 | da fare (utente) |
-| U3 | da fare (utente) |
-| U4 | da fare (utente) |
-| U5 | da fare (utente) |
-| U6 | da fare (utente) |
-| U7 | da fare (utente): oltre alla chiusura e al processo senza finestra, il valore Run e il marcatore di crash devono restare invariati; l'avvio di `target\release\oma-app.exe` lascia invariato il valore Run |
+| U1 | superata (2026-10-04, setup 0.4.1 pubblicato): nessun messaggio «in esecuzione», app riaperta, servizio avviato, valore Run presente e `autostart: true` |
+| U2 | superata: nessuna finestra, app tornata nel tray con `--minimized` (nuovo PID); l'app non registra la chiusura nel log, quindi il percorso ordinato `--quit` è dedotto (nessuna finestra), non dimostrato |
+| U3 | superata: l'app è rimasta chiusa |
+| U4 | superata: la domanda «in esecuzione» compare ancora |
+| U5 | superata: cartella dei log rinominata, «Il file o la cartella non esiste»; gli altri pulsanti funzionano |
+| U6 | superata: asse Y visibile e testo di standby mostrato |
+| U7 | superata: `--quit` con l'app aperta (esce) e chiusa (nessuna finestra); dopo l'avvio di `target\release\oma-app.exe` il valore Run punta ancora a `Program Files` e `crash.txt` non c'è |
 
 Il setup 0.4.1 e il suo SHA-256 si preparano dopo la revisione finale del branch.

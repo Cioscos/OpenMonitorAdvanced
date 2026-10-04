@@ -84,12 +84,17 @@ fn items_fit(count: u32, item_size: usize, buffer_bytes: usize) -> bool {
 }
 
 /// Name of a PDH item; empty if the pointer is null.
-fn item_name(name: PWSTR) -> String {
+///
+/// # Safety
+///
+/// A non-null `name` must point to a NUL-terminated UTF-16 string that stays
+/// valid for the duration of the call.
+unsafe fn item_name(name: PWSTR) -> String {
     if name.is_null() {
         return String::new();
     }
-    // SAFETY: non-null, and PDH points `szName` at a NUL-terminated string
-    // inside the buffer it filled, which outlives this call.
+    // SAFETY: non-null, and the caller guarantees a valid NUL-terminated
+    // string for the duration of the call.
     unsafe { name.to_string() }.unwrap_or_default()
 }
 
@@ -130,7 +135,8 @@ mod tests {
 
     #[test]
     fn a_null_item_name_reads_as_empty() {
-        assert_eq!(item_name(PWSTR::null()), "");
+        // SAFETY: a null pointer is explicitly allowed and never dereferenced.
+        assert_eq!(unsafe { item_name(PWSTR::null()) }, "");
     }
 }
 
@@ -251,13 +257,17 @@ impl Query {
                     status: ERROR_INVALID_DATA,
                 });
             }
-            // SAFETY: `count` items were just checked to fit in `buffer`, which is
-            // 8-byte aligned and outlives the slice; PDH wrote them.
+            // SAFETY: `buffer` is zero-initialised, so all `count * size_of` bytes are
+            // initialised whatever PDH wrote; `items_fit` keeps them inside the
+            // allocation; the `u64` buffer gives 8-byte alignment; `buffer` outlives
+            // the slice.
             let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
             return Ok(items
                 .iter()
                 .map(|item| {
-                    let name = item_name(item.szName);
+                    // SAFETY: PDH points `szName` at a NUL-terminated string inside
+                    // `buffer` (or leaves it null), and `buffer` outlives this call.
+                    let name = unsafe { item_name(item.szName) };
                     let value = if valid_status(item.FmtValue.CStatus) {
                         // SAFETY: PDH_FMT_DOUBLE fills the `doubleValue` union member.
                         unsafe { item.FmtValue.Anonymous.doubleValue }
@@ -318,10 +328,19 @@ impl Query {
                     status: ERROR_INVALID_DATA,
                 });
             }
-            // SAFETY: `count` items were just checked to fit in `buffer`, which is
-            // 8-byte aligned and outlives the slice; PDH wrote them.
+            // SAFETY: `buffer` is zero-initialised, so all `count * size_of` bytes are
+            // initialised whatever PDH wrote; `items_fit` keeps them inside the
+            // allocation; the `u64` buffer gives 8-byte alignment; `buffer` outlives
+            // the slice.
             let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
-            return Ok(items.iter().map(|item| item_name(item.szName)).collect());
+            return Ok(items
+                .iter()
+                .map(|item| {
+                    // SAFETY: PDH points `szName` at a NUL-terminated string inside
+                    // `buffer` (or leaves it null), and `buffer` outlives this call.
+                    unsafe { item_name(item.szName) }
+                })
+                .collect());
         }
         Err(PdhError {
             call: CALL,

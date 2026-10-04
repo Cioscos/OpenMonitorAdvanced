@@ -4,6 +4,7 @@
 //! state machine live in `instance`; the engine that evaluates them and its
 //! health report in `health`; the toast cooldown in `notify`.
 
+mod display_key;
 mod health;
 mod instance;
 mod notify;

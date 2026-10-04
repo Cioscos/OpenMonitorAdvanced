@@ -112,4 +112,38 @@ mod tests {
         assert!(same(1.0, 0.7, Unit::Boolean));
         assert!(!same(1.0, 0.0, Unit::Boolean));
     }
+
+    #[test]
+    fn display_key_rounds_whole_number_units() {
+        assert_eq!(display_key(1.5, Unit::Hours)[0], 2);
+        assert_eq!(display_key(2.5, Unit::Count)[0], 3);
+        assert_eq!(display_key(1234.4, Unit::Rpm)[0], 1234);
+    }
+
+    #[test]
+    fn display_key_rounds_pcie_fields_half_up() {
+        assert_eq!(display_key(3.5, Unit::PcieGeneration)[0], 4);
+        assert_eq!(display_key(2.5, Unit::PcieGeneration)[0], 3);
+        assert_eq!(display_key(15.5, Unit::Lanes)[0], 16);
+    }
+
+    #[test]
+    fn display_key_keeps_the_sign_of_negative_temperatures() {
+        // -0.5 degC rounds away from zero; in Fahrenheit it is 31.1.
+        assert_eq!(display_key(-0.5, Unit::Celsius), [-1, 31, 0, 0]);
+    }
+
+    #[test]
+    fn display_key_steps_joules() {
+        // `formatEnergy` in format.ts: decimal steps (J, kJ, MJ, GJ), zero
+        // decimals at J or from 100 up, else one. The key is
+        // `[step * 4 + digits, round(scaled * 10^digits), 0, 0]`.
+        // 999 J: below 1000, stays in J, 0 digits -> "999 J" -> [0, 999].
+        assert_eq!(display_key(999.0, Unit::Joule), [0, 999, 0, 0]);
+        // 1500 J: 1.5 kJ, one digit -> "1.5 kJ" -> [4 + 1, 15].
+        assert_eq!(display_key(1500.0, Unit::Joule), [5, 15, 0, 0]);
+        // 2 500 000 J: 2500 kJ, then 2.5 MJ, one digit -> "2.5 MJ"
+        // -> [2 * 4 + 1, 25].
+        assert_eq!(display_key(2_500_000.0, Unit::Joule), [9, 25, 0, 0]);
+    }
 }

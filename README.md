@@ -15,7 +15,7 @@ CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) are read **without admini
 An optional Windows service adds the sensors that need them: temperatures, voltages, fans and
 SMART data.
 
-> **Status:** early development (version 0.3.0). Expect rough edges and breaking changes between
+> **Status:** early development (version 0.4.0). Expect rough edges and breaking changes between
 > versions.
 
 ## Features

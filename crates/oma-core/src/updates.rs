@@ -180,11 +180,12 @@ pub fn next_check_ms(now_ms: u64, started_ms: u64, state: &UpdateState, auto: bo
         return None;
     }
     let first = started_ms.saturating_add(FIRST_CHECK_DELAY_MS);
-    let (attempt, success) = (state.last_attempt_ms, state.last_success_ms);
-    // A stored time in the future means the clock went back: start over.
-    if attempt.is_some_and(|t| t > now_ms) || success.is_some_and(|t| t > now_ms) {
-        return Some(first);
-    }
+    // A stored time in the future means the clock went back: that field is
+    // ignored, the other still counts. Dropping both would let a fresh
+    // failure (attempt = now) after a "future" success look like no check at
+    // all, and the scheduler would retry at once, forever.
+    let attempt = state.last_attempt_ms.filter(|&t| t <= now_ms);
+    let success = state.last_success_ms.filter(|&t| t <= now_ms);
     let due = match (attempt, success) {
         (Some(a), s) if s.is_none_or(|s| a > s) => a.saturating_add(RETRY_INTERVAL_MS),
         (_, Some(s)) => s.saturating_add(SUCCESS_INTERVAL_MS),
@@ -346,7 +347,26 @@ mod tests {
         assert_eq!(next(&st(Some(far), Some(early))), Some(first));
         // clock went backwards
         assert_eq!(next(&st(Some(now + 1), Some(now + 1))), Some(first));
-        assert_eq!(next(&st(Some(t), Some(now + 1))), Some(first));
+        // only the future field is ignored: the past success still counts
+        assert_eq!(
+            next(&st(Some(t), Some(now + 1))),
+            Some(t + SUCCESS_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn failure_after_a_future_success_waits_for_the_retry() {
+        // The clock went back past the last success, then a check failed
+        // now: the next one is a retry, not an immediate check (no busy loop).
+        let now = STARTED + 100 * H;
+        let state = UpdateState {
+            last_success_ms: Some(now + 50 * H),
+            last_attempt_ms: Some(now),
+            ..UpdateState::default()
+        };
+        let due = next_check_ms(now, STARTED, &state, true).unwrap();
+        assert!(due >= now + RETRY_INTERVAL_MS, "due {due} too early");
+        assert_eq!(due, now + RETRY_INTERVAL_MS);
     }
 
     #[test]

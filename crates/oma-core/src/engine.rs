@@ -99,6 +99,8 @@ pub struct Engine {
     /// `monotonic_ms` of the latest tick, the epoch of the rules' timers.
     last_monotonic_ms: u64,
     seq: u64,
+    /// Snapshot and quality of the latest tick, for the sensor report.
+    latest: Option<(Snapshot, Vec<Quality>)>,
 }
 
 impl Engine {
@@ -124,6 +126,7 @@ impl Engine {
             rules: RuleEngine::new(),
             last_monotonic_ms: 0,
             seq: 0,
+            latest: None,
         }
     }
     pub fn schema(&self) -> &Schema {
@@ -131,6 +134,12 @@ impl Engine {
     }
     pub fn history(&self) -> &History {
         &self.history
+    }
+    /// Snapshot and quality of the latest tick; `None` before the first.
+    pub fn latest(&self) -> Option<(&Snapshot, &[Quality])> {
+        self.latest
+            .as_ref()
+            .map(|(snapshot, quality)| (snapshot, quality.as_slice()))
     }
     pub fn sequence(&self) -> u64 {
         self.seq
@@ -306,13 +315,25 @@ impl Engine {
             monotonic_ms,
             timestamp_ms,
         );
+        let snapshot = Snapshot {
+            revision: self.schema.revision,
+            seq: self.seq,
+            timestamp_ms,
+            values,
+        };
+        // Reuses the buffers of the previous tick.
+        match &mut self.latest {
+            Some((last, last_quality)) => {
+                last.revision = snapshot.revision;
+                last.seq = snapshot.seq;
+                last.timestamp_ms = snapshot.timestamp_ms;
+                last.values.clone_from(&snapshot.values);
+                last_quality.clone_from(&quality);
+            }
+            None => self.latest = Some((snapshot.clone(), quality.clone())),
+        }
         TickOutput {
-            snapshot: Snapshot {
-                revision: self.schema.revision,
-                seq: self.seq,
-                timestamp_ms,
-                values,
-            },
+            snapshot,
             schema: changed.then(|| self.schema.clone()),
             quality,
             health: evaluation.report,
@@ -423,6 +444,20 @@ mod tests {
 
     fn failed() -> ProviderError {
         ProviderError::Failed("boom".into())
+    }
+
+    #[test]
+    fn latest_returns_last_tick_snapshot() {
+        let (p, _) = fake("a", inventory("dev/a", &["x", "y"]));
+        let mut e = Engine::new(vec![p], 10);
+        assert!(e.latest().is_none());
+        e.tick(1_000, 1_000);
+        let out = e.tick(2_000, 2_000);
+        let (snapshot, quality) = e.latest().expect("latest after a tick");
+        assert_eq!(snapshot, &out.snapshot);
+        assert_eq!(snapshot.revision, out.snapshot.revision);
+        assert_eq!(snapshot.seq, 2);
+        assert_eq!(quality, out.quality.as_slice());
     }
 
     #[test]

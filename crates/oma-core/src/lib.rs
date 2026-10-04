@@ -9,6 +9,7 @@ pub mod merge;
 pub mod model;
 pub mod provider;
 pub mod rate;
+pub mod report;
 pub mod rules;
 pub mod sampler;
 pub mod sanitize;

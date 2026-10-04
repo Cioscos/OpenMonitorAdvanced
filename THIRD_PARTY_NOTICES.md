@@ -120,7 +120,9 @@ The "Sensori avanzati" installer component redistributes Intel's official
 PresentMon console `PresentMon-2.6.0-x64.exe` unmodified
 (https://github.com/GameTechDev/PresentMon/releases/tag/v2.6.0), installed as
 `service\presentmon\PresentMon-2.6.0-x64.exe` next to `oma-service`, which
-starts it to read the frame times of the game in the foreground. The console is
+starts it to read frame times. PresentMon traces every process that presents
+frames, not only the game in the foreground: the service passes the name,
+process ID and displayed FPS of each presenting process to the app. The console is
 Authenticode-signed by Intel (`CN=Intel Corporation, O=Intel Corporation,
 S=California, C=US`, certificate issued by Sectigo); we do not sign it. Its
 SHA-256 is pinned in `app/src-tauri/nsis/presentmon.sha256` (checked by

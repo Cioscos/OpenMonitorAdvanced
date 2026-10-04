@@ -245,6 +245,16 @@ Also owed with that setup: the installer's PresentMon paths in a VM or Windows S
 
 Open: after the setup rebuild, extend the real-lister test in `scripts/tests/VerifySignatures.Tests.ps1` ("the default lister reads a real setup") to `service\presentmon\PresentMon-2.6.0-x64.exe`; the setup on disk at the end of B12 predates PresentMon.
 
+Known, by design: a service that crashes (or is killed) leaves the `OpenMonitorAdvanced-Frames` ETW session running, with PresentMon's buffers (up to 1024 × 64 KB), until the next service start (which stops it by name) or the uninstall (`logman stop OpenMonitorAdvanced-Frames -ets`).
+
+Before M7c (review of the M7b branch, 2026-10-05):
+
+- Stutter median: computed from scratch for each window, O(n·w·log w); make it incremental before the overlay shows it every frame.
+- Sessions subscribed with `Enabled=false` still start the hub's timers and get empty summaries every second; with no session enabled the hub should stay idle (spec M7 §11, cost unchanged when the feature is off).
+- After a gap, rows beyond 512 per batch tick are dropped (`Dropped`); a bounded backlog would let the app catch up instead.
+- M7c UI: the retry after `failed` (`crashing`) must send `enabled: false` and then `enabled: true`.
+- `oma_core::frames::synthetic()`: add input guards (FPS, factors, seeds out of range) before the M7d editor preview feeds it user values.
+
 ## Manual checks after M7a
 
 The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are done (2026-10-04, published 0.4.1 setup, SHA-256 `d45c2eda...465c`, all passed):

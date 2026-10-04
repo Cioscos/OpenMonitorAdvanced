@@ -506,7 +506,7 @@ I sensori dei modelli si legano per **ruolo** (la prima GPU dedicata, la CPU) al
 | Scorciatoia in conflitto | stato come per il log M5c | — |
 | Due monitor con DPI diversi, gioco spostato | l'overlay segue il gioco e si ridisegna al DPI nuovo | `SetPlacement` |
 | Gioco UWP | come gli altri | PID della `CoreWindow` |
-| Più utenti interattivi | ognuno ha la sua app e il suo overlay; il servizio serve un client solo, come oggi | limite dichiarato |
+| Più utenti interattivi | ognuno ha la sua app e il suo overlay; il servizio serve fino a 8 client, combina le loro richieste in una sola cattura e segue un bersaglio per client; la richiesta di un client disconnesso vale ancora per 30 s | limite dichiarato |
 
 ## 10. Sicurezza e privacy
 
@@ -516,7 +516,7 @@ I sensori dei modelli si legano per **ruolo** (la prima GPU dedicata, la CPU) al
   - hash ricontrollato dal servizio prima di ogni avvio;
   - cartella non scrivibile dagli utenti, argomenti fissi;
   - CSV con limiti di riga e di lotto (§4.1, §4.2).
-- **Protocollo v4:** il servizio valida il PID (diverso da 0 e 4, al massimo un bersaglio) e non usa mai il PID per aprire processi.
+- **Protocollo v4:** il servizio valida il PID (diverso da 0 e 4, al massimo un bersaglio per client) e non usa mai il PID per aprire processi.
 - **Pipe dell'overlay:** nome casuale, prima istanza, DACL solo per l'utente corrente, niente client remoti, controllo del PID del figlio (§5.4).
 - **Profili importati:** sono dati, mai codice; vale lo schema rigido del §6.5.
 - **Privacy:** nessun dato esce dal PC. Benchmark e profili restano locali.
@@ -596,7 +596,7 @@ Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,
 - **G-Sync/FreeSync e latenza:** mentre l'overlay è visibile, Windows può comporre il gioco invece di usare il flip indipendente; può succedere su hardware senza piani MPO liberi (SD10: su RTX 4080 la finestra, visibile, vuota o nascosta, non toglie né il flip indipendente né G-Sync). Nascondere l'overlay ripristina il flip indipendente.
 - **Anti-cheat che bloccano anche le finestre esterne** (caso noto: Battlefield 6 con FrameView 2.0): si usa l'elenco dei giochi esclusi.
 - **HDR:** il contenuto dell'overlay è SDR composto da DWM.
-- **Più utenti interattivi:** il servizio segue un client solo.
+- **Più utenti interattivi:** il servizio serve fino a 8 client; le richieste si combinano in una sola cattura (PCL e GPU attivi se un client li chiede), con un bersaglio per client e 30 s di tolleranza dopo la disconnessione.
 - **Disinstallazione della 0.4.0 durante l'aggiornamento:** la sua istanza in esecuzione si chiude in modo forzato, perché non conosce `--quit`.
 
 ## 15. Punti che i piani devono fissare

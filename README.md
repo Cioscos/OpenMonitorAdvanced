@@ -176,9 +176,11 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
 
 The Advanced sensors component also installs Intel's
 [PresentMon](https://github.com/GameTechDev/PresentMon) 2.6.0 console, unmodified and signed by
-Intel, next to the service. The service runs it to read the frame times of the game in the
-foreground: displayed and rendered FPS, frametimes, 1% and 0.1% lows, stutter, latency. They are
-meant for an in-game overlay, which is still being built.
+Intel, next to the service. The service runs it to read frame times: displayed and rendered FPS,
+frametimes, 1% and 0.1% lows, stutter, latency. They are meant for an in-game overlay, which is
+still being built. PresentMon traces every process that presents frames, not only the game: the
+name, process ID and displayed FPS of each presenting process go to the app, which picks the game
+among them; the detailed frame data is sent only for the process the app asks for.
 
 - **Off unless asked.** PresentMon runs only while the app asks for frame metrics. In this
   version only a diagnostic switch does: set the environment variable `OMA_FRAMES_DEBUG` to `1`,

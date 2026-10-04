@@ -6,6 +6,7 @@ fn main() {
             "get_stats",
             "reset_stats",
             "get_session",
+            "get_disk_states",
             "get_gpu_processes",
             "get_startup_status",
             "enable_vendor_libraries",

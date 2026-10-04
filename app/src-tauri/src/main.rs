@@ -475,6 +475,41 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Every command in `generate_handler!` must be listed in the build
+    /// manifest and allowed by the main window capability, or the UI gets
+    /// "not allowed. Command not found" at run time.
+    #[test]
+    fn every_registered_command_is_in_the_manifest_and_the_capability() {
+        let main_src = include_str!("main.rs");
+        let build_src = include_str!("../build.rs");
+        let capability = include_str!("../capabilities/default.json");
+
+        // The first occurrence is the real invocation, not this test.
+        let start = main_src
+            .find("generate_handler![")
+            .expect("generate_handler!")
+            + 18;
+        let end = start + main_src[start..].find(']').expect("closing bracket");
+        let commands: Vec<&str> = main_src[start..end]
+            .split(',')
+            .map(|entry| entry.trim().rsplit("::").next().unwrap())
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(commands.len() > 20, "parsed too few commands: {commands:?}");
+
+        let mut missing = Vec::new();
+        for name in commands {
+            if !build_src.contains(&format!("\"{name}\"")) {
+                missing.push(format!("{name}: missing from build.rs"));
+            }
+            let permission = format!("\"allow-{}\"", name.replace('_', "-"));
+            if !capability.contains(&permission) {
+                missing.push(format!("{name}: missing from capabilities/default.json"));
+            }
+        }
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
+
     #[test]
     fn generation_changed_reports_each_new_generation_once() {
         let mut last = 0;

@@ -29,18 +29,41 @@ pub trait StartupEntry: Send + Sync {
     fn configured(&self) -> io::Result<bool>;
     /// Creates (`true`) or removes (`false`) the entry.
     fn set(&self, on: bool) -> io::Result<()>;
-    /// Rewrites the entry when it points at another executable than this one
-    /// (the app was reinstalled elsewhere). `true` when it rewrote.
+    /// Rewrites the entry when it points at an executable that no longer
+    /// exists (the app was reinstalled elsewhere). `true` when it rewrote.
     fn repair(&self) -> io::Result<bool>;
     /// Whether Windows will start the entry.
     fn effective(&self) -> Effective;
 }
 
-/// Whether a stored `Run` command is out of date: there is one, and it differs
-/// from the command for this executable (ASCII case aside, as Windows paths).
+/// Whether a stored `Run` command is out of date: there is one, it differs
+/// from the command for this executable (ASCII case aside, as Windows paths),
+/// and the executable it names no longer exists (the app moved). A command
+/// naming an exe that still exists, such as the installed app seen from a
+/// `target\release` build or a portable copy, is left alone, and so is one
+/// not in the form [`oma_win::autostart::command_line`] writes.
 #[cfg(any(windows, test))]
-fn needs_repair(stored: Option<&str>, expected: &str) -> bool {
-    stored.is_some_and(|stored| !stored.eq_ignore_ascii_case(expected))
+fn needs_repair(
+    stored: Option<&str>,
+    expected: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    if stored.eq_ignore_ascii_case(expected) {
+        return false;
+    }
+    quoted_exe(stored).is_some_and(|exe| !exists(std::path::Path::new(exe)))
+}
+
+/// The exe path of a `"<exe>" <args>` command, or `None` when the command does
+/// not start with a non-empty quoted path.
+#[cfg(any(windows, test))]
+fn quoted_exe(command: &str) -> Option<&str> {
+    let rest = command.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end]).filter(|exe| !exe.is_empty())
 }
 
 /// What the Settings screen shows about the start-up entry.
@@ -202,7 +225,7 @@ impl StartupEntry for RunEntry {
     fn repair(&self) -> io::Result<bool> {
         let stored = self.key.read()?;
         let expected = oma_win::autostart::command_line(&self.exe);
-        if needs_repair(stored.as_deref(), &expected) {
+        if needs_repair(stored.as_deref(), &expected, std::path::Path::exists) {
             self.key.write(&self.exe)?;
             Ok(true)
         } else {
@@ -254,6 +277,7 @@ pub fn system_entry() -> io::Result<Arc<dyn StartupEntry>> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -420,15 +444,63 @@ mod tests {
     }
 
     #[test]
-    fn needs_repair_only_for_a_stale_path() {
+    fn needs_repair_only_when_the_stored_exe_is_gone() {
         let expected = r#""C:\Program Files\OpenMonitor Advanced\oma-app.exe" --minimized"#;
-        assert!(!needs_repair(None, expected));
-        assert!(!needs_repair(Some(expected), expected));
-        assert!(!needs_repair(Some(&expected.to_lowercase()), expected));
+        let gone = |_: &Path| false;
+        let there = |_: &Path| true;
+        assert!(!needs_repair(None, expected, gone));
+        assert!(!needs_repair(Some(expected), expected, gone));
+        assert!(!needs_repair(
+            Some(&expected.to_lowercase()),
+            expected,
+            gone
+        ));
+        // The app moved: the stored exe no longer exists.
         assert!(needs_repair(
             Some(r#""D:\Old\oma-app.exe" --minimized"#),
-            expected
+            expected,
+            gone
         ));
+        // Another copy that still exists (an installed app seen from a
+        // target\release build or a portable copy): left alone.
+        assert!(!needs_repair(
+            Some(r#""D:\Old\oma-app.exe" --minimized"#),
+            expected,
+            there
+        ));
+    }
+
+    #[test]
+    fn needs_repair_checks_the_quoted_exe_of_the_stored_command() {
+        let expected = r#""C:\Program Files\OpenMonitor Advanced\oma-app.exe" --minimized"#;
+        let seen = Mutex::new(Vec::new());
+        let exists = |p: &Path| {
+            seen.lock().unwrap().push(p.to_path_buf());
+            false
+        };
+        assert!(needs_repair(
+            Some(r#""D:\Old dir\oma-app.exe" --minimized"#),
+            expected,
+            exists
+        ));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![std::path::PathBuf::from(r"D:\Old dir\oma-app.exe")]
+        );
+    }
+
+    #[test]
+    fn needs_repair_leaves_an_unparsable_command_alone() {
+        let expected = r#""C:\Program Files\OpenMonitor Advanced\oma-app.exe" --minimized"#;
+        let gone = |_: &Path| false;
+        for stored in [
+            r"D:\Old\oma-app.exe --minimized",
+            r#""D:\Old\oma-app.exe --minimized"#,
+            r#""" --minimized"#,
+            "",
+        ] {
+            assert!(!needs_repair(Some(stored), expected, gone), "{stored:?}");
+        }
     }
 
     fn stale_rig(repair: bool) -> (Arc<SettingsStore>, Arc<FakeEntry>) {

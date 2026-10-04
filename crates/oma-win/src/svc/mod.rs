@@ -1,13 +1,15 @@
 //! Client side of the `oma-service` sensor service: the overlapped named-pipe
 //! client ([`pipe`]), the service control wrapper over the SCM ([`scm`]), the
 //! link thread that drives both ([`link`]), and what it publishes: the
-//! service status ([`status`]) and the latest schema and snapshot ([`feed`]).
+//! service status ([`status`]), the latest schema and snapshot ([`feed`]) and
+//! the frame data of protocol v4 ([`frames_feed`]).
 //! `drives` holds the rules that tell a service disk and a core disk apart.
 
 pub(crate) mod drives;
 #[cfg(test)]
 mod fake_server;
 pub mod feed;
+pub mod frames_feed;
 pub mod link;
 pub mod pipe;
 pub mod provider;
@@ -15,6 +17,7 @@ pub mod scm;
 pub mod status;
 
 pub use feed::{FeedView, SourceRequest, SvcFeed};
+pub use frames_feed::{FramesEvent, FramesFeed, FramesUpdate, MAX_QUEUED_BATCHES};
 pub use link::{
     pipe_connector, validate_schema, Connection, Connector, LinkBusy, LinkCommand, LinkSettings,
     ServiceLink, LINK_QUEUE_CAPACITY,

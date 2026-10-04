@@ -14,6 +14,7 @@ pub mod memory;
 pub mod network;
 pub mod os_version;
 mod pdh;
+pub mod qpc;
 pub mod shell_open;
 pub mod storage;
 mod storage_gate;
@@ -25,6 +26,8 @@ pub mod svc;
 pub mod toast;
 
 use oma_core::provider::Provider;
+
+pub use qpc::qpc_frequency;
 
 /// Handles shared with the sensor service link (spec §M4), owned by the
 /// caller and cloned into the providers that need them: the `svc` provider

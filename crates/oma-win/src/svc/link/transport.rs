@@ -26,13 +26,15 @@ const FULL_QUEUE_POLL: Duration = Duration::from_millis(2);
 /// The queue is bounded ([`LINK_QUEUE_CAPACITY`](super::LINK_QUEUE_CAPACITY)),
 /// so a link thread stuck in a long call (a pipe write, the SCM) cannot make
 /// it grow without limit. When it is full:
-/// - a `Snapshot` is dropped (the next interval brings a new one); the
+/// - a `Snapshot` is dropped (the next interval brings a new one), and so
+///   are frame data (`FrameBatch`, `PresentingProcesses`: the next 100 ms
+///   bring more, and a late frame is worth less than a free queue); the
 ///   drops are counted and logged once per episode;
-/// - any other message and the close wait for room, on the reader's own
-///   thread. The wait ends when the link drops this connection or goes away,
-///   so the link thread may join the reader while the queue is full. On the
-///   link thread itself (a connector that reports at once) nothing waits:
-///   what does not fit is dropped and logged.
+/// - any other message (`FramesStatus` among them) and the close wait for
+///   room, on the reader's own thread. The wait ends when the link drops
+///   this connection or goes away, so the link thread may join the reader
+///   while the queue is full. On the link thread itself (a connector that
+///   reports at once) nothing waits: what does not fit is dropped and logged.
 #[derive(Clone)]
 pub struct LinkSink {
     pub(super) id: u64,
@@ -47,9 +49,9 @@ pub(super) struct SinkShared {
     /// Set by the link before it drops the connection: a reader waiting for
     /// room gives up, so joining the reader cannot deadlock.
     cancelled: AtomicBool,
-    /// Inside an episode of dropped snapshots.
+    /// Inside an episode of dropped snapshots or frame data.
     dropping: AtomicBool,
-    /// Snapshots dropped on this connection.
+    /// Snapshots and frame data dropped on this connection.
     dropped: AtomicU64,
 }
 
@@ -81,11 +83,14 @@ impl LinkSink {
     }
 
     /// Hands over a message; `false` when the link is gone (or is dropping
-    /// this connection). A snapshot that finds the queue full is dropped
-    /// and still counts as delivered.
+    /// this connection). A snapshot or frame data that finds the queue full
+    /// is dropped and still counts as delivered.
     pub fn message(&self, msg: Message) -> bool {
-        if matches!(msg, Message::Snapshot(_)) {
-            return self.offer_snapshot(msg);
+        if matches!(
+            msg,
+            Message::Snapshot(_) | Message::FrameBatch(_) | Message::PresentingProcesses(_)
+        ) {
+            return self.offer_droppable(msg);
         }
         self.deliver(Input::Message(self.id, msg))
     }
@@ -95,20 +100,20 @@ impl LinkSink {
         let _ = self.deliver(Input::Closed(self.id, reason));
     }
 
-    /// Snapshots dropped so far on this connection.
+    /// Snapshots and frame data dropped so far on this connection.
     #[cfg(test)]
-    pub(super) fn dropped_snapshots(&self) -> u64 {
+    pub(super) fn dropped_messages(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
 
-    fn offer_snapshot(&self, msg: Message) -> bool {
+    fn offer_droppable(&self, msg: Message) -> bool {
         let shared = &self.shared;
         match self.tx.try_send(Input::Message(self.id, msg)) {
             Ok(()) => {
                 if shared.dropping.swap(false, Ordering::Relaxed) {
                     let total = shared.dropped.load(Ordering::Relaxed);
                     tracing::info!(
-                        "sensor service link caught up; {total} snapshots dropped on this connection"
+                        "sensor service link caught up; {total} snapshots or frame messages dropped on this connection"
                     );
                 }
                 true
@@ -116,7 +121,9 @@ impl LinkSink {
             Err(TrySendError::Full(_)) => {
                 shared.dropped.fetch_add(1, Ordering::Relaxed);
                 if !shared.dropping.swap(true, Ordering::Relaxed) {
-                    tracing::warn!("sensor service link is busy; dropping snapshots");
+                    tracing::warn!(
+                        "sensor service link is busy; dropping snapshots and frame data"
+                    );
                 }
                 true
             }
@@ -196,5 +203,62 @@ impl Drop for PipeConnection {
         if let Some(reader) = self.reader.take() {
             reader.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use oma_ipc::{FrameBatch, FramesStatus, PresentingProcesses};
+
+    use super::*;
+
+    fn status() -> Message {
+        Message::FramesStatus(FramesStatus {
+            state: oma_ipc::frames_state::RUNNING.to_owned(),
+            detail: None,
+            presentmon_version: None,
+        })
+    }
+
+    #[test]
+    fn full_queue_drops_frame_batches() {
+        let (tx, inbox) = mpsc::sync_channel(1);
+        let sink = LinkSink::new(5, tx);
+        assert!(sink.message(status()));
+        assert_eq!(sink.dropped_messages(), 0);
+
+        // The queue is full: frame data is dropped (and counted) at once.
+        let batch = Message::FrameBatch(FrameBatch {
+            pid: 7,
+            frames: Vec::new(),
+            dropped: 0,
+        });
+        let processes = Message::PresentingProcesses(PresentingProcesses {
+            at_qpc: 1,
+            processes: Vec::new(),
+        });
+        assert!(sink.message(batch));
+        assert!(sink.message(processes));
+        assert_eq!(sink.dropped_messages(), 2);
+
+        // A status waits for room instead, on the reader's own thread.
+        let reader = {
+            let sink = sink.clone();
+            std::thread::spawn(move || sink.message(status()))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!reader.is_finished(), "the status waits for room");
+        assert!(matches!(
+            inbox.recv().unwrap(),
+            Input::Message(5, Message::FramesStatus(_))
+        ));
+        assert!(reader.join().unwrap());
+        assert!(matches!(
+            inbox.recv().unwrap(),
+            Input::Message(5, Message::FramesStatus(_))
+        ));
+        assert!(inbox.try_recv().is_err(), "nothing else was queued");
     }
 }

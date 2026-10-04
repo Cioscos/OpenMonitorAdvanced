@@ -5,6 +5,7 @@ use crate::svc::link::tests::{
     subscribe_request, subscribed, wire_schema, wire_snapshot, PID,
 };
 use crate::svc::link::{pipe_connector, Input, LinkSink, LINK_QUEUE_CAPACITY};
+use oma_ipc::{FrameBatch, FramesStatus, PresentingProcesses};
 use std::sync::mpsc;
 
 #[test]
@@ -660,5 +661,282 @@ fn held_pid_mismatch_shows_stopped_when_the_service_stops() {
     assert_eq!(
         m.decide(Event::Timer, t1 + Duration::from_millis(20)),
         vec![Effect::Query]
+    );
+}
+
+// ---- frames (protocol v4) ----
+
+fn frames(enabled: bool, track_pc_latency: bool) -> FramesConfigure {
+    FramesConfigure {
+        enabled,
+        track_pc_latency,
+        track_gpu: false,
+    }
+}
+
+fn send_configure(config: FramesConfigure) -> Effect {
+    Effect::Send(Message::FramesConfigure(config))
+}
+
+fn send_target(pid: Option<u32>) -> Effect {
+    Effect::Send(Message::FramesTarget(FramesTarget { pid }))
+}
+
+fn command(m: &mut Machine, command: LinkCommand, now: Instant) -> Vec<Effect> {
+    m.decide(Event::Command(command), now)
+}
+
+/// Schema and first snapshot on a subscribed machine: what the snapshot asked for.
+fn first_snapshot(m: &mut Machine, now: Instant) -> Vec<Effect> {
+    m.decide(Event::Message(schema(2)), now);
+    m.decide(Event::Message(snapshot(1, 2)), now)
+}
+
+/// A machine streaming with frames enabled and following `pid`.
+fn streaming_frames(now: Instant, pid: Option<u32>) -> Machine {
+    let mut m = subscribed(now);
+    command(
+        &mut m,
+        LinkCommand::ConfigureFrames(frames(true, false)),
+        now,
+    );
+    command(&mut m, LinkCommand::SetFramesTarget(pid), now);
+    assert_eq!(
+        first_snapshot(&mut m, now),
+        vec![
+            Effect::SetSnapshot(wire_snapshot(1, 2)),
+            send_configure(frames(true, false)),
+            send_target(pid),
+        ]
+    );
+    assert_eq!(m.decide(Event::Sent(true), now), vec![]);
+    assert_eq!(m.decide(Event::Sent(true), now), vec![]);
+    m
+}
+
+#[test]
+fn frames_configuration_is_sent_after_the_first_snapshot() {
+    let (mut m, t0) = machine(false);
+    // Long before a connection: only remembered.
+    assert_eq!(
+        command(&mut m, LinkCommand::ConfigureFrames(frames(true, true)), t0),
+        vec![]
+    );
+    // Subscribed but no snapshot yet: the configuration waits for the stream.
+    let mut m = subscribed(t0);
+    assert_eq!(
+        command(&mut m, LinkCommand::ConfigureFrames(frames(true, true)), t0),
+        vec![]
+    );
+    assert_eq!(
+        first_snapshot(&mut m, t0),
+        vec![
+            Effect::SetSnapshot(wire_snapshot(1, 2)),
+            send_configure(frames(true, true)),
+            send_target(None),
+        ]
+    );
+    assert_eq!(m.decide(Event::Sent(true), t0), vec![]);
+    assert_eq!(m.decide(Event::Sent(true), t0), vec![]);
+    // Later snapshots send nothing more.
+    assert_eq!(
+        m.decide(Event::Message(snapshot(2, 2)), t0),
+        vec![Effect::SetSnapshot(wire_snapshot(2, 2))]
+    );
+    assert_eq!(shows(&m.status), shows(&connected()));
+}
+
+#[test]
+fn frames_target_follows_configuration() {
+    let t0 = Instant::now();
+    // A target chosen before the stream follows the configuration.
+    let mut m = subscribed(t0);
+    command(&mut m, LinkCommand::SetFramesTarget(Some(1234)), t0);
+    command(
+        &mut m,
+        LinkCommand::ConfigureFrames(frames(true, false)),
+        t0,
+    );
+    assert_eq!(
+        first_snapshot(&mut m, t0),
+        vec![
+            Effect::SetSnapshot(wire_snapshot(1, 2)),
+            send_configure(frames(true, false)),
+            send_target(Some(1234)),
+        ]
+    );
+
+    // Streaming with frames off: a target waits for the configuration.
+    let mut m = subscribed(t0);
+    first_snapshot(&mut m, t0);
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(Some(5)), t0),
+        vec![]
+    );
+    assert_eq!(
+        command(
+            &mut m,
+            LinkCommand::ConfigureFrames(frames(true, false)),
+            t0
+        ),
+        vec![send_configure(frames(true, false)), send_target(Some(5))]
+    );
+}
+
+#[test]
+fn same_frames_command_is_not_resent() {
+    let t0 = Instant::now();
+    let mut m = streaming_frames(t0, None);
+    assert_eq!(
+        command(
+            &mut m,
+            LinkCommand::ConfigureFrames(frames(true, false)),
+            t0
+        ),
+        vec![]
+    );
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(None), t0),
+        vec![]
+    );
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(Some(7)), t0),
+        vec![send_target(Some(7))]
+    );
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(Some(7)), t0),
+        vec![]
+    );
+    // Another option goes out alone: the target did not change.
+    assert_eq!(
+        command(&mut m, LinkCommand::ConfigureFrames(frames(true, true)), t0),
+        vec![send_configure(frames(true, true))]
+    );
+    // Turned off: said once; a target chosen meanwhile waits.
+    assert_eq!(
+        command(
+            &mut m,
+            LinkCommand::ConfigureFrames(frames(false, true)),
+            t0
+        ),
+        vec![send_configure(frames(false, true))]
+    );
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(Some(8)), t0),
+        vec![]
+    );
+    assert_eq!(
+        command(&mut m, LinkCommand::ConfigureFrames(frames(true, true)), t0),
+        vec![send_configure(frames(true, true)), send_target(Some(8))]
+    );
+}
+
+#[test]
+fn frames_configuration_is_resent_after_reconnect() {
+    let t0 = Instant::now();
+    let mut m = streaming_frames(t0, Some(7));
+    assert_eq!(
+        m.decide(Event::Closed(CloseReason::Disconnected), t0),
+        vec![Effect::Close, Effect::ClearFeed]
+    );
+    // Remembered across the gap, a change made meanwhile too.
+    assert_eq!(
+        command(&mut m, LinkCommand::SetFramesTarget(Some(9)), t0),
+        vec![]
+    );
+    let t1 = t0 + Duration::from_millis(20);
+    assert_eq!(m.decide(Event::Timer, t1), vec![Effect::Connect]);
+    assert_eq!(
+        m.decide(Event::Connected(Ok(Some(PID))), t1),
+        vec![Effect::Query]
+    );
+    assert_eq!(m.decide(Event::Queried(running()), t1), vec![]);
+    assert_eq!(
+        m.decide(Event::Message(hello(PROTOCOL_VERSION)), t1),
+        vec![
+            Effect::SetInterval(Duration::from_millis(1000)),
+            Effect::Send(Message::Subscribe(subscribe_request(1000))),
+        ]
+    );
+    m.decide(Event::Sent(true), t1);
+    // The new service session knows nothing: everything goes out again.
+    assert_eq!(
+        first_snapshot(&mut m, t1),
+        vec![
+            Effect::SetSnapshot(wire_snapshot(1, 2)),
+            send_configure(frames(true, false)),
+            send_target(Some(9)),
+        ]
+    );
+}
+
+#[test]
+fn frame_messages_become_frames_effects_not_a_disconnect() {
+    let t0 = Instant::now();
+    let mut m = streaming_frames(t0, Some(7));
+    let status = FramesStatus {
+        state: "running".to_owned(),
+        detail: None,
+        presentmon_version: Some("2.6.0".to_owned()),
+    };
+    let processes = PresentingProcesses {
+        at_qpc: 10,
+        processes: Vec::new(),
+    };
+    let batch = FrameBatch {
+        pid: 7,
+        frames: Vec::new(),
+        dropped: 3,
+    };
+    assert_eq!(
+        m.decide(Event::Message(Message::FramesStatus(status.clone())), t0),
+        vec![Effect::Frames(FramesEvent::Status(status))]
+    );
+    assert_eq!(
+        m.decide(
+            Event::Message(Message::PresentingProcesses(processes.clone())),
+            t0
+        ),
+        vec![Effect::Frames(FramesEvent::Processes(processes))]
+    );
+    assert_eq!(
+        m.decide(Event::Message(Message::FrameBatch(batch.clone())), t0),
+        vec![Effect::Frames(FramesEvent::Batch(batch))]
+    );
+    assert_eq!(shows(&m.status), shows(&connected()));
+    assert!(matches!(m.phase, Phase::Streaming { .. }));
+    // Frame data does not stand in for snapshots: the silence limit stays.
+    assert_eq!(m.deadline, Some(t0 + Duration::from_millis(3000)));
+}
+
+#[test]
+fn disabled_frames_send_nothing_at_start() {
+    let t0 = Instant::now();
+    // Never configured: nothing, whatever the target.
+    let mut m = subscribed(t0);
+    command(&mut m, LinkCommand::SetFramesTarget(Some(9)), t0);
+    assert_eq!(
+        first_snapshot(&mut m, t0),
+        vec![Effect::SetSnapshot(wire_snapshot(1, 2))]
+    );
+    // Configured off: nothing either, before or during the stream.
+    let mut m = subscribed(t0);
+    command(
+        &mut m,
+        LinkCommand::ConfigureFrames(frames(false, true)),
+        t0,
+    );
+    command(&mut m, LinkCommand::SetFramesTarget(Some(9)), t0);
+    assert_eq!(
+        first_snapshot(&mut m, t0),
+        vec![Effect::SetSnapshot(wire_snapshot(1, 2))]
+    );
+    assert_eq!(
+        command(
+            &mut m,
+            LinkCommand::ConfigureFrames(frames(false, false)),
+            t0
+        ),
+        vec![]
     );
 }

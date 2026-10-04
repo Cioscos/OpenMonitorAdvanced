@@ -324,6 +324,7 @@ fn bare_driver(machine: Machine) -> (Driver, SyncSender<Input>) {
         connector: Script::with(vec![]).connector(),
         status: ServiceStatusTable::default(),
         feed: SvcFeed::default(),
+        frames: FramesFeed::default(),
         inbox: rx,
         sender: tx.clone(),
         stop: Arc::new(AtomicBool::new(false)),
@@ -556,11 +557,11 @@ fn a_full_queue_drops_snapshots_but_keeps_the_schema() {
     for seq in 2..2 + capacity {
         ctl.push(snapshot(seq, 2));
     }
-    assert_eq!(ctl.dropped_snapshots(), 0);
+    assert_eq!(ctl.dropped_messages(), 0);
     // ...and the next ones are dropped, without blocking it.
     ctl.push(snapshot(2 + capacity, 2));
     ctl.push(snapshot(3 + capacity, 2));
-    assert_eq!(ctl.dropped_snapshots(), 2);
+    assert_eq!(ctl.dropped_messages(), 2);
 
     // A schema waits for room instead: the reader blocks until the link
     // drains its queue.
@@ -617,4 +618,66 @@ fn the_link_thread_never_waits_for_room() {
     assert!(!sink.message(schema(1)), "no room: dropped, not waited for");
     sink.closed(CloseReason::Disconnected);
     assert!(t.elapsed() < Duration::from_millis(50));
+}
+
+// ---- frame data (protocol v4) ----
+
+#[test]
+fn frame_data_reaches_the_frames_feed_and_a_disconnect_clears_it() {
+    use crate::svc::FramesUpdate;
+    use oma_ipc::{FrameBatch, FramesConfigure, FramesStatus, FramesTarget};
+
+    let control = FakeControl::new(running());
+    let (conn, ctl) = streaming_conn(Some(PID));
+    let h = Harness::spawn(control, Script::with(vec![conn]), false);
+    h.wait_for(is(connected()));
+
+    let config = FramesConfigure {
+        enabled: true,
+        track_pc_latency: true,
+        track_gpu: false,
+    };
+    // The target first: it waits for the configuration, then follows it.
+    h.send(LinkCommand::SetFramesTarget(Some(77)));
+    h.send(LinkCommand::ConfigureFrames(config.clone()));
+    assert_eq!(
+        wait_for_sent(&ctl, 3)[1..],
+        [
+            Message::FramesConfigure(config),
+            Message::FramesTarget(FramesTarget { pid: Some(77) }),
+        ]
+    );
+
+    let status = FramesStatus {
+        state: oma_ipc::frames_state::RUNNING.to_owned(),
+        detail: None,
+        presentmon_version: Some("2.6.0".to_owned()),
+    };
+    let batch = FrameBatch {
+        pid: 77,
+        frames: Vec::new(),
+        dropped: 2,
+    };
+    ctl.push(Message::FramesStatus(status.clone()));
+    ctl.push(Message::FrameBatch(batch.clone()));
+    let end = Instant::now() + WAIT;
+    let mut batches = Vec::new();
+    let update = loop {
+        let update = h.frames.drain();
+        batches.extend(update.batches.iter().cloned());
+        if !batches.is_empty() {
+            break update;
+        }
+        assert!(Instant::now() < end, "the batch never arrived");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(batches, vec![batch]);
+    assert_eq!(update.status, Some(status));
+    assert!(update.connected);
+    assert_eq!(h.status().state, ServiceState::Connected);
+
+    // The service goes away: the frame data goes with it.
+    ctl.close();
+    h.wait_for(is(disconnected()));
+    assert_eq!(h.frames.drain(), FramesUpdate::default());
 }

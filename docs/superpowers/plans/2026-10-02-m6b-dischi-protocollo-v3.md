@@ -911,4 +911,49 @@ Prove del 2026-10-02 sul PC di sviluppo: disco 0 = HDD SATA ST2000DM008 (`D:`), 
 
 ## Esito dell'esecuzione
 
-Da compilare.
+Eseguito tra il 2026-10-02 e il 2026-10-04 in modalità subagent-driven sul branch `feat/m6b-dischi-protocollo-v3` (base `c222a97`): un implementer e una revisione per ciascun task, le revisioni dedicate di FFI e parità del protocollo, poi la revisione dell'intero branch con un'unica ondata di correzioni prima della build per le verifiche dal vivo (ruling R17). Le prove dal vivo sono state fatte con l'utente sul PC di sviluppo, senza input sintetico; log e strumenti in `target/spike/m6b/` (non tracciati).
+
+**Esito: M6b completata.** Con l'app aperta, con o senza servizio, Windows spegne l'HDD inattivo (V3 in entrambe le modalità) e uno standby forzato resta tale (V1, V2); con la chiavetta USB collegata lo SMART degli altri dischi resta acceso (V4). Il filtro del Task 10 è stato deciso (stato di alimentazione di Windows e attività del disco) e V3 è passata in entrambe le modalità, quindi la condizione del Task 15 per dichiarare completata la M6b è soddisfatta.
+
+| Passo | Esito |
+|---|---|
+| Task 0 e Task 4 (punto di controllo) | Vedi «Esito del punto di controllo». Il servizio 0.3.0 da solo impediva lo spegnimento anche senza leggere lo SMART: `CHECK POWER MODE` azzera il timer di inattività di Windows e riaccende un disco spento da Windows. Da qui il Task 10 riscritto (spec §4.4, approvato dall'utente il 2026-10-02). |
+| Task 1-14 | Completati, ciascuno rivisto; Task 6 anche con la revisione di parità del protocollo. |
+| Revisione finale (`c222a97..1372dea`) | «Con correzioni», nessun Critical. Corretti I1 (temperatura principale persa da un SSD/NVMe associato al servizio), I2 (un tick senza sensori del servizio a ogni cambio della tabella dei dischi), I3 (SMART vuoto di un HDD quieto dopo una ripresa o un giro tardivo), più README delle fixture, `smartOn` e un test di `DevicePage` (`1372dea..820b880`); riesame mirato senza nuovi rilievi. Revisione FFI: nessun nuovo `unsafe`. Parità del protocollo: rispettata. |
+| Task 16 (`130d854`) | Finestra di attività del servizio estesa a tutto l'intervallo tra due giri: riferimento dei contatori preso alla fine del giro precedente (decisione dell'utente, spec §4.4). |
+| Task 17 (`8a62521`, `4608bed`) | Valori `Suspended` fuori da storico e statistiche, cella `suspended` nel log CSV, interruzione della serie dal vivo (decisione dell'utente). |
+| Build per l'utente | Installer di `4608bed` (`OpenMonitor Advanced_0.3.0_x64-setup.exe`, 12,6 MB); installato ed eseguito dall'utente. |
+| Prova 1, servizio da solo | Hello con protocollo 3, gate aperto, chiavetta `smartOff` senza blocco; disco 0 `idle` dal secondo giro, spento da Windows alle 22:10:36 e rimasto spento. |
+| Prova 2, servizio da solo con I/O su `D:` | Avvio con l'HDD spento: `standby`, gate chiuso, schema senza dispositivi. Accesso a `D:`: `active`, gate aperto, nuova lettura; poi `idle`, e di nuovo `active` all'apertura di un file: i contatori `IOCTL_DISK_PERFORMANCE` vedono l'I/O di altri handle. |
+| V3, app e servizio (prova 3) | Prima corsa dopo un avvio a freddo: spegnimento dopo circa 11 minuti, per I/O di terzi (la temperatura massima registrata prova una lettura su attività vera). Corsa pulita: contatori fermi dalle 01:36:06, disco spento alle 01:41:51 e rimasto spento. **Superata.** |
+| V3 e V8, app senza servizio (anti-cheat) | Prima corsa con la build `4608bed` e servizio fermo: disco spento alle 22:36:14 e rimasto spento, HDD «Inattivo» senza temperatura (mai letto senza attività). V8 del 2026-10-04: contatori fermi dalle 02:07:29, disco spento alle 02:12:44 e rimasto spento. **Superate.** |
+| V1, standby forzato, app e servizio (prova 4) | Contatori fermi dalle 01:51:11; Windows ha spento il disco alle 01:56:11, circa 5,5 minuti dopo l'ultimo comando della sonda: nessun comando del servizio ha azzerato il timer. **Superata.** |
+| V2, standby forzato, anti-cheat | Due scritture subito dopo lo standby (con ogni probabilità scritture differite di NTFS dovute all'accesso dell'utente alla cartella), poi nessun I/O né risveglio; l'app non scrive su `D:`. **Superata per il nostro software, con riserva**: da ripetere aspettando un minuto tra l'accesso e lo `STANDBY IMMEDIATE`. |
+| V4, chiavetta all'avvio del servizio | La chiavetta (PhysicalDrive4, bus 0x07) dà ancora gli errori Win32 1 e 50 sulle vie native ma non tiene più spento lo storage; SMART degli altri dischi acceso. **Superata.** |
+| V5, vista Semplificata con l'HDD in standby | Banner «Tutto in ordine», nessun allarme sul disco. **Superata.** |
+| V6, chiavetta nel log | Con il servizio 0.3.0 LibreHardwareMonitor la identificava (`SanDisk pSSD` con spazi e NUL nel nome); con il servizio v3 è `smartOff` e LHM non la costruisce. Annotata. |
+| V7, budget | Finestra 0,92 % (7 processi; nucleo 0,05 %), 166,9 MB; tray 0,05 %, 18,2 MB; servizio 0,03-0,09 %, 57,1-62,5 MB. **Superata** (`docs/perf-budget.md`, M6b). |
+| V9, HDD «Inattivo», anti-cheat acceso e spento | Avviso della modalità base, tag «Inattivo», 35 °C «Ultima lettura», righe del solo servizio rimosse; al ritorno del servizio una sola riga «Temperatura», lettura fresca al primo giro dell'episodio (R11), nessun nuovo allarme. **Superata.** I «—» visti una volta in min/max/media subito dopo la riconnessione erano il transitorio delle revisioni dello schema: verificato a parte, chiuso. |
+| Verifica completa su `4608bed` più la correzione del commento di `SensorHub.cs` | `cargo fmt --check` e `cargo clippy -D warnings` puliti; `cargo test --workspace` 1063 superati, 0 falliti; `dotnet test` 532 superati; `check-trim-warnings.ps1` OK; Vitest 630 superati in 44 file; `svelte-check` 0 errori e 0 avvisi; `pnpm build` riuscita; `cargo test -p oma-win -- --include-ignored` (esclusi `reads_disk_temperatures_on_this_machine` e `records_this_machine_schema`) 511 superati, 0 falliti. |
+| Pulizia | `crates/oma-win/examples/m6b_wake.rs` archiviato in `target/spike/m6b/` e rimosso, mai committato; grafo aggiornato. |
+| Merge e release | Revisione dell'intero branch e chiusura del branch a cura del controller. La release 0.4.0 (D6) segue `docs/release.md` dopo il merge, su richiesta dell'utente. |
+
+**Decisioni prese durante l'esecuzione** (il registro completo è nel ledger SDD):
+
+- **Task 10 obbligatorio e riscritto** (2026-10-02, approvato dall'utente): il servizio non chiede nulla a un disco che Windows ha spento o che non ha avuto attività di lettura/scrittura; nuovo stato `idle` nel protocollo. R11 e R13: un disco che Windows riporta acceso si interroga una volta, senza attività, la prima volta che è osservato (inizio di episodio, SMART acceso, disco nuovo), con l'occasione consumata prima della domanda; un passaggio da spento ad acceso conta come attività.
+- **Task 16** (decisione dell'utente): la finestra di attività del servizio copre tutto l'intervallo tra due giri, non solo gli ultimi 10 s (era il ruling R19, portato all'utente invece di correggerlo in silenzio).
+- **Task 17** (decisione dell'utente): un valore sospeso non entra in storico e statistiche e nel CSV è la parola `suspended`; il formato del CSV cambia senza compatibilità con i file precedenti.
+- **R3:** dopo una disconnessione la temperatura storica di un disco inattivo è `Suspended`, non `Held`.
+- **R7:** il poll di riscaldamento PDH dopo una rediscovery non apre né chiude la finestra di attività.
+- **R8:** un disco senza modello e seriale non conserva la via del controllo di stato e riceve entrambi i comandi a ogni giro in cui viene interrogato.
+- **R9:** con `SenseInfoLength = 0` il sense data si limita ai byte restituiti.
+- **R10:** i valori conservati passano solo da un giro iniziato entro due intervalli; con I3 un giro scaduto riapre l'interrogazione una tantum.
+- **R15:** sotto il servizio i sensori di temperatura aggiuntivi di un disco seguono da soli la regola dell'attività locale.
+- **R17:** revisione finale e correzioni prima della build per le verifiche dal vivo, così l'utente ha provato la build corretta.
+- **R18:** un'unica ondata di correzioni (I1-I3 e tre minori); tutto il resto in `docs/follow-ups.md`.
+
+**Non verificato:**
+
+- `cargo test -p oma-win reads_disk_temperatures_on_this_machine -- --ignored`, da eseguire dall'utente con i dischi svegli dopo le prove di standby: **dovuto**.
+- V2 senza riserva (ripetizione con un minuto di attesa), un hard disk USB dietro un bridge (manca l'hardware), le verifiche suggerite dalla revisione finale (SSD senza sensore locale con il servizio, HDD che alterna attivo e inattivo con un grafico della CPU aperto, sospensione e ripresa con un HDD quieto), l'hot-plug di un disco con lo storage acceso: in `docs/follow-ups.md`, «Manual checks owed after M6b».
+- Limiti dichiarati (spec §8 e quelli emersi dal vivo, tra cui l'HDD addormentato all'avvio del servizio che tiene chiuso il gate per tutti i dischi): «Limits declared in M6b» in `docs/follow-ups.md` e «Known limits» nei README. La segnalazione a DiskInfoToolkit è in bozza nello stesso file e si pubblica solo su richiesta dell'utente.

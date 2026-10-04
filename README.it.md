@@ -150,12 +150,18 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   noti blocchi da parte di Vanguard, EAC o BattlEye. Nulla di questo è ancora stato provato con un
   gioco protetto da un anti-cheat reale.
 - **Limiti noti.** Su un PC con più utenti collegati, ognuno di loro può fermare il servizio per
-  tutti. Un disco che Windows segnala in standby non viene interrogato, quindi non mostra dati di
-  salute mentre dorme. Se un disco collegato non conferma il proprio stato di alimentazione
-  all'avvio del servizio (per esempio una chiavetta USB), la lettura SMART resta spenta per tutti
-  i dischi finché non viene scollegato. Mentre un disco dorme, il banner può segnalare dati
-  incompleti. Il throttling termico della CPU non è disponibile con LibreHardwareMonitor 0.9.6,
-  quindi quella regola non ha un sensore. Il critical warning dei dischi c'è solo per gli NVMe. Il
+  tutti. Per lasciar dormire gli hard disk, un hard disk in standby o inattivo non viene
+  interrogato: temperatura e valori SMART non si aggiornano finché non torna a lavorare, con o
+  senza il servizio, e la pagina mostra l'ultimo valore, in grigio, come *Ultima lettura*. Uno
+  standby deciso dal disco per conto suo (timer del firmware), che Windows non conosce, appare
+  come *Inattivo* e non come *In standby*. Se un hard disk dorme all'avvio del servizio, nessun
+  disco (NVMe compresi) mostra i valori SMART finché quell'hard disk non si sveglia. La lettura
+  SMART dei dischi USB è spenta di default, perché lo standby dietro un adattatore USB non è
+  stato verificato: la puoi accendere per disco in *Fonti dati*, ma alcuni adattatori possono
+  allora tenere sveglio il disco. Un disco collegato con la lettura SMART accesa, che
+  LibreHardwareMonitor non riesce a identificare, può essere svegliato ogni volta che si collega
+  o si scollega un altro dispositivo. Il throttling termico della CPU non è disponibile con
+  LibreHardwareMonitor 0.9.6, quindi quella regola non ha un sensore. Il critical warning dei dischi c'è solo per gli NVMe. Il
   TjMax del processore è noto per le CPU Intel e per i modelli AMD desktop della tabella
   integrata; le altre CPU usano le soglie di ripiego (85/95 °C). Excel con il punto e virgola come
   separatore di elenco (molte impostazioni regionali europee) mostra il log CSV in una sola

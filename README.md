@@ -144,10 +144,16 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   (such as FanControl) may share. FACEIT accepts PawnIO 2.2.0; no block by Vanguard, EAC or
   BattlEye is known. None of this has been tested against a real anti-cheat-protected game yet.
 - **Known limits.** On a PC with several signed-in users, any of them can stop the service for
-  everyone. A disk that Windows reports in standby is not queried, so it shows no health data while
-  asleep. If a connected disk cannot confirm its power state when the service starts (a USB
-  stick, for example), SMART reads stay off for all disks until it is unplugged. While a disk
-  sleeps, the banner can say that some data is incomplete. CPU thermal throttling is not
+  everyone. To let hard disks sleep, a hard disk that is asleep or idle is not queried: its
+  temperature and SMART values are not updated until it works again, with or without the
+  service, and the page shows the last value, greyed out, as *Last reading*. A standby that the
+  disk chooses by itself (its own firmware timer), which Windows does not know about, shows as
+  *Idle* rather than *In standby*. If a hard disk is asleep when the service starts, no disk's
+  SMART values (NVMe included) appear until that disk wakes up. SMART reads of USB disks are off
+  by default, because standby behind a USB adapter could not be tested: you can switch them on
+  per disk in *Data sources*, but some adapters may then keep the disk awake. A disk plugged in
+  while SMART reads are on, that LibreHardwareMonitor cannot identify, may be woken whenever
+  another device is plugged in or removed. CPU thermal throttling is not
   available from LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
   warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel

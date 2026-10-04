@@ -23,9 +23,10 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// <c>oma-storage</c> owns every disk access: every 30 s (only while someone is subscribed) it
 /// applies the D6 gate, lists the drives, resolves each new disk's identity
 /// (<see cref="IDiskPowerProbe.Describe"/>), updates each disk that is known to be spinning and
-/// publishes the outcome as one immutable <see cref="StorageRound"/>; ten seconds before a
-/// round it wakes once more, only to read the counters of the disks that round may ask
-/// (<see cref="ActivityWatch"/>). A round is: the state of every drive,
+/// publishes the outcome as one immutable <see cref="StorageRound"/>; at the end of each
+/// round's disk work it reads the disks' counters once more as the reference the next round
+/// compares with (<see cref="ActivityWatch"/>, <c>TakeReference</c>), so it wakes only once per
+/// round. A round is: the state of every drive,
 /// the resolved disks, the storage part of the request it applied and the raw values keyed by LHM
 /// sensor identifier, which the sampler only looks up (values older than two rounds, or from
 /// before an idle period, count as absent). A

@@ -15,7 +15,7 @@ CPU, RAM, dischi, rete e GPU (NVIDIA, AMD, Intel) si leggono **senza privilegi d
 amministratore**. Un servizio Windows facoltativo aggiunge i sensori che li richiedono:
 temperature, tensioni, ventole e dati SMART.
 
-> **Stato:** sviluppo iniziale (versione 0.4.0). Aspettati imperfezioni e cambiamenti
+> **Stato:** sviluppo iniziale (versione 0.4.1). Aspettati imperfezioni e cambiamenti
 > incompatibili tra una versione e l'altra.
 
 ## Funzionalità
@@ -94,6 +94,12 @@ Windows 11). I privilegi di amministratore servono solo durante l'installazione.
 
 Per le installazioni automatiche, `/S` avvia l'installer in modalità silenziosa e `/NOSENSORS`
 esclude il componente Sensori avanzati.
+
+L'aggiornamento non chiede conferme: eseguendo un setup più recente sopra una versione installata,
+l'app in esecuzione viene chiusa da sola (le si chiede di uscire e la si forza solo dopo 10
+secondi) e poi riaperta. Con un'installazione silenziosa (`/S`) l'app torna ridotta nel tray, e
+solo se era in esecuzione. La disinstallazione da *Impostazioni › App* chiede ancora conferma prima
+di chiudere l'app. Per chiudere l'app da un terminale c'è `oma-app.exe --quit`.
 
 ## Verifica il download
 

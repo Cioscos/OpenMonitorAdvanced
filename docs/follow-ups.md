@@ -1,23 +1,20 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M6c).
+Updated at the end of every milestone (last update: M7a).
 
 ## Open: code
 
 | Item | Where | Pick up |
 |---|---|---|
-| LibreHardwareMonitor hardware names can carry trailing spaces and NUL bytes: with the 0.3.0 service the USB stick was identified as `/ssd/4 (Storage, SanDisk pSSD <spaces>\0)`, which put 3 NUL bytes in `oma-service-20261002.log` (M6b live check V6). Trim spaces and control characters from LHM names before logging and before publishing them in the schema. | `service/OpenMonitorAdvanced.Service/Sensors/` (`SchemaBuilder.cs`, logging of hardware names) | when touched |
 | The service logs no SAT detail at Information level: the M6b live checks had to read the SCSI status and the sense bytes from the probe (`target/spike/m6b/sat-probe.ps1`), which showed SCSI status 0x00 with an ATA Status Return descriptor (`72 .. 09 0C`) in the sense buffer for both STANDBY IMMEDIATE and CHECK POWER MODE. Log once per drive and route (Debug or once at Information) the SCSI status, the returned bytes and `SenseInfoLength`, so the next bridge can be diagnosed from the log alone. | `service/OpenMonitorAdvanced.Service/Sensors/DiskPowerProbe.cs` (SAT path) | when touched |
-| Upgrade over an installed version (user check, 2026-10-02, 0.3.0 setup downloaded from GitHub): the installer uninstalls the old version first, and during that step a message says the product is still running. The app was running (it starts at login and lives in the tray), so the check itself is right. The raw placeholder in the Italian text is fixed (see "Closed in M6a"). The upgrade behaviour stays as it is (user ruling, 2026-10-02): the installer asks, and the user clicks OK to let it close the running app. Still open: report the malformed placeholders to Tauri upstream. SmartScreen also appeared on that download, as expected for an unsigned setup. | `app/src-tauri/nsis/` | upstream report: when convenient |
+| Report the malformed `{product_name}`-style placeholders of the Tauri NSIS template to Tauri upstream (the upgrade behaviour itself is closed, see "Closed in M7a"). SmartScreen also appears on an unsigned setup, as expected. | `app/src-tauri/nsis/` | upstream report: when convenient |
 | On a machine with more than one interactive user, any of them can stop `oma-service` for the others: the service has no notion of "who asked". | `app/src-tauri/src/service.rs` | accepted |
 | DDR5 SPD page stays on whichever page it was left on (e.g. page 4) after the service stops, instead of resetting; stock LHM behaves the same way (found in Task 15, 2026-09-27). Optional bounded reset for parity, otherwise accepted. | `app/src/` (RAM/SPD page) | accepted; revisit if a user reports it |
 | Confirm on the first real SignPath request: whether the `file-version` constraint of the artifact configurations matches the string `X.Y.Z` or the fixed `0.2.0.0` resource of the NSIS files; that the Integration Pester tests actually run (not skip) in the CI `scripts` job; the 8.3 short `TEMP` path of the runner against the uninstaller directory check of `sign-shim.ps1`; the English line `The signature is timestamped:` of signtool with SignPath's RFC 3161 timestamps. | `.signpath/`, `scripts/verify-signatures.ps1`, `scripts/sign-shim.ps1`, `.github/workflows/ci.yml` | first signed release |
 | A third-party folder inside `Program Files` that grants `Users` Modify rights passes the Advanced-sensors-component install-path check, which only verifies the path is under `Program Files` and free of reparse points, not its ACL. | `app/src-tauri/nsis/oma.nsh` (install-path check) | accepted; verify/document |
 | A silent install refused for a reason other than the path check (for example a missing `/NOSENSORS` outside `Program Files`) may still have created an empty `$INSTDIR` and installed the WebView2 runtime before refusing. | `app/src-tauri/nsis/installer.nsi` | accepted; verify/document |
 | Redistributing the official PawnIO setup is common practice (LibreHardwareMonitor and FanControl both do it), but the PawnIO author has not been asked to confirm it for this project. The request is drafted below ("Draft: request to the PawnIO author"), to be sent only on the user's request. | `THIRD_PARTY_NOTICES.md`, `scripts/build-installer-payload.ps1` | before 1.0 |
-| `used_pct` is duplicated in the memory and storage providers. | `crates/oma-win/src/memory.rs`, `crates/oma-win/src/storage.rs` | when touched |
-| PDH: the item count returned by the API goes unchecked into `from_raw_parts`, and a null `szName` is not guarded. | `crates/oma-win/src/pdh.rs` | when touched |
 | The label-key test keeps a hand-written list: only GPU keys are cross-checked against the code (`GpuField` self-test); CPU, memory, storage and network keys are not. | `crates/oma-win/tests/labels.rs` | when touched |
 | The CSP has no `devCsp` with `ws://localhost:1420`, so Vite hot reload inside `pnpm tauri dev` may be blocked. | `app/src-tauri/tauri.conf.json` | when touched |
 | NVML is not initialised again after the NVIDIA driver is updated or unloaded while the app runs; its fields fall back to D3DKMT until a restart (README, "Known limits"). | `crates/oma-win/src/gpu/nvml.rs` | M6 |
@@ -26,19 +23,16 @@ Updated at the end of every milestone (last update: M6c).
 | Discovery reads every disk's temperature in one tick; with several NVMe drives waking from a low-power state this can exceed the 200 ms tick budget, so the value arrives one tick late. | `crates/oma-win/src/storage.rs` | when touched |
 | `gpu/pnp.rs` `display_interfaces` has no retry on `CR_BUFFER_SMALL`: a GPU hot-plugged between the two calls gets no maximum link on that discovery. | `crates/oma-win/src/gpu/pnp.rs` | M6 (hardware matrix) |
 | Re-identification at hot-plug. DiskInfoToolkit's hot-plug thread re-identifies the not-yet-identified disks on every `DBT_DEVNODES_CHANGED`, which can wake them (F1.1). Declared limit since M6b (spec M6b §8, decision D4): no code on our side; the upstream report is drafted below ("Draft: DiskInfoToolkit upstream report"). | `service/OpenMonitorAdvanced.Service/Sensors/` (storage) | upstream report, published only on the user's request |
+| Over-the-shoulder elevation (setup started by a standard user, elevated with another account) gives no relaunch of the app in silent or passive mode: the elevated account is not the one that had the app open. | `app/src-tauri/nsis/oma.nsh` | when touched |
+| GUI reinstall of the same version: the page that closes the app can look frozen for up to 10 s (the wait for `--quit`), and a Cancel after the app was closed leaves it closed. `OmaCloseApp` also waits 10 s when `OmaAppWasRunning` is empty (app only in another session) and leaves the error flag set when `DisplayVersion` is missing (add `ClearErrors`). | `app/src-tauri/nsis/oma.nsh` | when touched |
+| `oma-app.exe --quit` with no instance running holds the single-instance mutex for a few milliseconds: a normal launch in that instant is lost. Its process behaviour (no window, no tray, no Run write) has no automated test: U7 checks it. | `app/src-tauri/src/main.rs` | accepted; U7 |
 | A rapid off/on of the memory module may delay the SMBus through the `~SPDAccessor` finalizers (F2.3). Measure when the module is switched back on quickly. | `service/OpenMonitorAdvanced.Service/Sensors/ModuleApplier.cs` | when touched |
-| An unknown module name or message `type` is echoed unbounded in `bad_request` and in the log, and can exceed `MaxFrameBytes`. Truncate. | `service/OpenMonitorAdvanced.Service/Protocol/`, `Sensors/` | when touched |
-| `shell_open` joins the shell thread without a timeout, uses `ShellExecuteW` without `SEE_MASK_NOASYNC`/`FLAG_NO_UI` (use `ShellExecuteExW`), and does not check that a folder exists before opening it. | `app/src-tauri/src/` (shell commands) | when touched |
-| The installer is perMachine, so the uninstaller deletes the HKCU Run value in the elevating admin's hive: a standard user's own Run value survives. The Run value also keeps a stale exe path if the exe moves (compare with the current path at startup and repair). | `app/src-tauri/nsis/oma.nsh`, `app/src-tauri/src/autostart.rs` | M6 |
-| Service link: the command queue is unbounded in production, and the status stays stale while `Held` (`NotInstalled`/`Stopped` are not shown after `Incompatible`/`PidMismatch` until Start). | `crates/oma-win/src/svc/link.rs` | when touched |
+| The installer is perMachine, so the uninstaller deletes the HKCU Run value in the elevating admin's hive: a standard user's own Run value survives (documented in the README, "Known limits"). | `app/src-tauri/nsis/oma.nsh` | accepted |
 | A second launch opens the settings store before single-instance exits it, and the interval listener may take the engine lock on the main thread. | `app/src-tauri/src/main.rs` | when touched |
-| Flaky timing assert: `reads_disk_temperatures_on_this_machine` (pre-existing hardware test) fails its 200 ms bound under parallel load (1-17 ms in isolation). Loosen or serialize. | `crates/oma-win/` (storage tests) | when touched |
 | `SvcProvider::poll` clones the whole snapshot and the drive list every tick only to compare generations; generation accessors would avoid the per-tick allocation. | `crates/oma-win/src/svc/provider.rs` | when touched |
 | Pipe listener: after a failed connect, the replacement instance is created after the old one is disposed and without `FILE_FLAG_FIRST_PIPE_INSTANCE`, a brief zero-instance gap (the client-side PID check protects the app). Cheap hardening: create it with `first: Volatile.Read(ref _busy) == 0`, so a squatter makes it fail loudly (R20) instead of being joined. | `service/OpenMonitorAdvanced.Service/Pipe/PipeListener.cs` | when touched |
 | The service's logs live in `$INSTDIR\service\logs` (ruling R30). Any future service-owned path (settings, rules) must stay under a folder no user can create first, with the same service-side check (`LogDirectoryGuard`), never under `%ProgramData%`. | `service/OpenMonitorAdvanced.Service/Logging/LogDirectoryGuard.cs`, `app/src-tauri/nsis/oma.nsh` | M5 (settings) |
-| `THIRD_PARTY_LICENSES.txt` includes the .NET runtime's `THIRD-PARTY-NOTICES.TXT`, but not the `THIRD-PARTY-NOTICES` files of the other Microsoft NuGet packages in the service publish (`Microsoft.Extensions.*`, `System.*`). They largely overlap with the runtime notices; add them to `scripts/generate-licenses.ps1` when it is next touched. | `scripts/generate-licenses.ps1`, `THIRD_PARTY_LICENSES.txt` | when touched |
 | Update check: WinHTTP does not check certificate revocation (M6c ruling). Revisit if the check ever downloads anything. | `crates/oma-win/src/http.rs` | accepted |
-| Pre-existing M5c `log::session` tests use 100-200 ms timeouts and can fail under parallel CPU load (seen once during M6c, passed on rerun). Widen the timeouts or wait on a condition instead of sleeping. | `app/src-tauri/src/log/session/tests.rs` | when touched |
 | CPU thermal throttling has no sensor in LibreHardwareMonitor 0.9.6 (S1 §1), so `cpu-throttle` has no instances. On Intel the service could read bit 0 of `IA32_PACKAGE_THERM_STATUS` itself through the public `LibreHardwareMonitor.PawnIo.IntelMsr`: new code, Intel only, not testable on this PC. | `service/OpenMonitorAdvanced.Service/Sensors/` | when Intel hardware is available |
 | TjMax: the AMD table (`AmdTjMaxTable.cs`, 164 entries) covers desktop Ryzen only. Mobile and Ryzen AI (in the same AMD table, e.g. 7840HS at 100 °C), Threadripper, Zen/Zen+ with the offset Tctl, engineering samples and the Ryzen 3 3100/3300X (no published value) use the 85/95 °C fallback. The entries were checked against AMD's specifications table only (31 also against the product page). | `service/OpenMonitorAdvanced.Service/Sensors/AmdTjMaxTable.cs` | M6 (hardware matrix) |
 | Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
@@ -110,7 +104,6 @@ Small findings the task reviews and the final review accepted and deferred. The 
 
 | Item | Where | Pick up |
 |---|---|---|
-| UI: a chart window in which the whole series is suspended shows a blank plot without y-axis labels (seen live, 2026-10-04, 1 min window on a standby HDD). Visible to the user. | `app/src/` (charts) | when touched |
 | UI: `seedHistory` resets quality to `[]`, so a suspended sensor reads fresh until the next tick; one tick with an empty current value after a history seed; the state tag sits on its own row above the KPIs (the heading belongs to `AdvancedView`); the `.tag` CSS is duplicated from `SensorTable` and the stale rule from `KpiRow`; the tray icon can show a chosen disk temperature as current while it is suspended. | `app/src/`, `app/src-tauri/src/tray_icon.rs` | when touched |
 | History and log (Task 17): the mock backend's statistics come from raw snapshot values (they would diverge if the mock suspended a value); no assert pins `size_of::<Cell>()`; no allocation guard on the history/log path; a decimated window widens the gap to the bucket boundary. | `app/src/` (mock), `crates/oma-core/` | when touched |
 | Core storage, decisions: `idle` from the service overrides local activity in the label (`decide` returns `DiskPower::Idle` with recent activity, so the page can say «Idle» for up to a round while its own throughput shows I/O; reporting `Active` there would read better); a rediscovery at a 5 s interval closes the activity window (R7's benefit is lost at the longest interval only); one tick without authority on a drive-table change (a `Standby`→`Idle` flap, safe side); the disk class is cached for the life of an id, so a transient failed seek-penalty query freezes an SSD as rotational until restart; `parse_seek_penalty` ignores `Version`/`Size`. | `crates/oma-win/src/storage.rs`, `storage_gate.rs` | when touched |
@@ -188,6 +181,32 @@ The hand-written part of the 0.4.0 draft release (above the block that `render-r
 >
 > This release is not code-signed yet: Windows SmartScreen may warn you (see the README, "Verify your download").
 
+## Draft: release notes for 0.4.1
+
+The hand-written part of the 0.4.1 draft release (above the block that `render-release-notes.ps1` generates), to be pasted into the draft **only when the user prepares the release**.
+
+> ## What's new
+>
+> ### Upgrading without prompts (M7a)
+>
+> - **The installer closes the app for you.** Running a newer setup over an installed version no longer shows the "product is still running" message. The installer asks the running app to quit, waits up to 10 seconds, forces it closed only if it does not, and starts it again afterwards (with *Run* ticked in the interface, or minimized to the tray in a silent install). The service restarts with the app. Uninstalling from *Settings › Apps* still asks.
+> - Upgrading **from 0.4.0** closes the app by force, because 0.4.0 does not know `--quit`; from 0.4.1 on the app quits in an orderly way. `oma-app.exe --quit` can also be run by hand.
+> - *Start with Windows* repairs itself: if the program moved, the entry is rewritten at the next start.
+>
+> ### Fixes
+>
+> - **Charts of a disk in standby** keep the y-axis and say "No reading while the device is idle or in standby" instead of showing a blank plot.
+> - **Opening a file or folder** (log folder, licences, report) shows a clear message when it does not exist, and no longer hangs the app if the shell is slow.
+> - **Disk names** no longer carry trailing spaces or control characters in the log and in the sensor list.
+> - The service link no longer queues commands without limit, and shows *Not installed* or *Stopped* after an incompatible version.
+> - `THIRD_PARTY_LICENSES.txt` now includes the notices of the Microsoft NuGet packages.
+>
+> ### Upgrading
+>
+> **App and service must be the same version (protocol v3); the installer updates both.**
+>
+> This release is not code-signed yet: Windows SmartScreen may warn you (see the README, "Verify your download").
+
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
 - NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick. The M5c CSV log does not need them (it logs what the tick already has), so they wait for a request.
@@ -207,6 +226,18 @@ The hand-written part of the 0.4.0 draft release (above the block that `render-r
 - D6 (disk standby detection) checks on real hardware: hot-plug of a disk while storage is on; empty card readers' error codes; the R17 bus-class exclusions (virtual disks, Storage Spaces). First open, the sampling cadence, NVMe and a USB stick at service start were exercised in the M6b live checks (2026-10-02/04, SATA HDD, SATA SSD, two NVMe, USB stick).
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
+
+## Manual checks owed after M7a
+
+The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are owed by the user, with the 0.4.1 setup.
+
+- U1: with 0.4.0 installed and the app in the tray, run the 0.4.1 setup in graphical mode and keep «Uninstall first»: no «running» message; at the end, with «Run» ticked, the app opens and the service starts with it.
+- U2: with 0.4.1 installed and the app in the tray, `setup.exe /S` (same version): no window, no question; the app quits in an orderly way (`--quit`) and returns to the tray (`--minimized`).
+- U3: as U2 with the app closed: the app stays closed.
+- U4: uninstall from Settings › Apps with the app open: the «running» question is still there.
+- U5: delete the log folder, then *Open folder*: «the file or folder does not exist»; the other *About* buttons work.
+- U6: chart of a standby HDD with a 1 min window: the y-axis is visible and the «No reading while the device is idle or in standby» text appears.
+- U7: `oma-app.exe --quit` from a terminal with the app open (it exits), then with the app closed (the process ends without a window). In both cases the Run value and the crash marker stay unchanged.
 
 ## Manual checks owed after M6c
 
@@ -258,6 +289,22 @@ To settle on the first signed run (deferred from the M6a reviews):
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M7a
+
+- Split of the large files with no change of behaviour: `storage.rs` into a module directory (`4b88fca`), the service link into machine, transport and driver (`fbee564`), the display-key formatter out of `health.rs` (`7d5a650`, tests `1653e60`), `SensorHub` into partial files with `GateEpisode` in its own file (`0dfdb90`).
+- LibreHardwareMonitor names with trailing spaces and NUL bytes: the service cleans display names before logging and publishing them (`d1508af`).
+- An unknown module name or message `type` echoed unbounded in `bad_request` and in the log: client text is now clipped (`d1508af`).
+- Upgrade over an installed version: the user's decision of 2026-10-04 replaces the ruling of 2026-10-02. The installer no longer asks: it closes the running app by itself (`--quit`, with a forced kill after 10 s, or at once if `DisplayVersion` is unreadable) and reopens it afterwards; from 0.4.0 the app is closed by force, from 0.4.1 in an orderly way (`08daff0`, `12d6445`). Only the upstream report of the malformed placeholders stays open.
+- `used_pct` duplicated in the memory and storage providers: one shared function (`0df0c00`).
+- PDH item count unchecked before `from_raw_parts` and a null `szName` unguarded: the arrays are bounded and `item_name` is an `unsafe fn` with a documented contract (`0df0c00`, `ad147f6`).
+- `shell_open` without a timeout, without `SEE_MASK_NOASYNC`/`FLAG_NO_UI` and without an existence check: it now uses `ShellExecuteExW` on a bounded thread, reports a missing path, and the log folder button shows a translated message (`e42b819`, `8cb9f75`).
+- Stale autostart path: at startup a release build rewrites a Run value that points to another executable; a debug build never does (`a977a65`). The standard-user Run value left by an uninstall stays open as a documented limit.
+- Service link: the command queue is bounded (a full queue returns an error at once) and the held state shows `NotInstalled`/`Stopped` (`f7ea18e`).
+- Flaky timing assert of `reads_disk_temperatures_on_this_machine` under parallel load: the test no longer depends on the timing of other tests (`0df0c00`).
+- `THIRD_PARTY_LICENSES.txt` now includes the third-party notices of the Microsoft NuGet packages (`6181767`).
+- M5c `log::session` timing tests flaky under CPU load: they wait on conditions instead of sleeping (`98bd9f7`, with two more found under load).
+- Chart window with the whole series suspended: the y-axis stays and the text "No reading while the device is idle or in standby" explains the blank plot (`1e957a5`).
 
 ## Closed in M6c
 

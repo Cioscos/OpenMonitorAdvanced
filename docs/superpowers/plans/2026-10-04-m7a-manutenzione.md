@@ -636,4 +636,51 @@ Le esegue l'utente. L'agente prepara il setup e annota l'esito nel piano.
 
 ## Esito dell'esecuzione
 
-Da compilare a fine piano: commit, decisioni prese durante l'esecuzione, esito delle verifiche U1–U7.
+Branch `feat/m7a-manutenzione` (da `main` ad8f744), eseguito task per task con revisione dedicata; nessun tag e nessun push.
+
+### Commit per task
+
+| Task | Commit |
+|---|---|
+| 1 | `4b88fca` split di `storage.rs` in una cartella di moduli |
+| 2 | `fbee564` split del link al servizio in macchina a stati, trasporto e driver |
+| 3 | `7d5a650` formatter della chiave di visualizzazione fuori da `health.rs`; `1653e60` test di arrotondamento, segno e joule |
+| 4 | `0dfdb90` split di `SensorHub` in file parziali, `GateEpisode` in un file proprio |
+| 5 | `12d6445` `--quit` per chiudere l'istanza in esecuzione |
+| 6 | `08daff0` l'installer chiude l'app prima dell'aggiornamento e la riapre dopo |
+| 7 | `a977a65` riparazione del percorso dell'avvio automatico all'avvio |
+| 8 | `e42b819` apertura con timeout e messaggio per percorso mancante; `8cb9f75` messaggi tradotti nel pulsante della cartella dei log |
+| 9 | `f7ea18e` coda del link limitata e stato del servizio visibile in `Held` |
+| 10 | `0df0c00` array PDH limitati, `used_pct` condiviso, test di tempo dei dischi stabilizzato; `ad147f6` `item_name` diventa `unsafe` con i suoi invarianti |
+| 11 | `98bd9f7` test di sessione del log che aspettano condizioni |
+| 12 | `1e957a5` asse mantenuto e spiegazione nel grafico tutto sospeso |
+| 13 | `d1508af` testo del client troncato in `bad_request` e nomi LHM puliti |
+| 14 | `6181767` avvisi di terze parti dei pacchetti NuGet Microsoft nelle licenze |
+| 15 | documentazione (`docs: record the M7a outcome`) e bump alla 0.4.1 (`chore: release 0.4.1`) |
+
+### Decisioni prese durante l'esecuzione
+
+- I trailer dei commit nominano il modello che ha scritto il commit, non la stringa fissa del piano; la storia non è stata riscritta.
+- Task 2: gli helper di test `machine()`, `subscribed()` e `subscribed_with()` stanno in `link/tests/mod.rs`, usati sia dai test della macchina sia da quelli del driver: è l'allargamento minimo per uno spostamento puro.
+- Task 5: `main()` controlla `--quit` per prima e lancia `run_quit_only` (solo il plugin single-instance) invece di uscire nel `setup` dell'app completa. È più rigoroso sul punto di revisione 2: niente log, niente marcatore di crash, niente scritture delle impostazioni. Se U7 rivelasse un blocco, la correzione è piccola.
+- Task 6: le quattro preoccupazioni dell'implementer sono accettate senza modifiche. La reinstallazione grafica della stessa versione chiude l'app senza domanda, la pagina di reinstallazione può attendere fino a 10 s e la casella «Avvia» apre la finestra senza minimizzarla, come da decisione dell'utente e §2.1 della spec. Il kill per nome di `oma-app.exe` chiude anche una build di sviluppo in esecuzione, come prescrive il piano (`KillProcess`).
+- Task 7: la frase sul limite noto dell'avvio automatico nel README è in inglese, perché il README è interamente in inglese.
+- Task 8: `open_target` restituisce `Option<OpenTarget>`, perché alcune cartelle note possono mancare; serve ai casi di percorso assente già esistenti.
+- Task 9: il lettore usa un nuovo tentativo di 2 ms, annullabile, per i messaggi che non sono snapshot, invece di un invio bloccante, che andrebbe in stallo perché il thread del link attende il lettore alla chiusura. Con «stopped» in stato `Held` si mostra `disconnected()`, perché `ServiceState` non ha `Stopped` (come nel ciclo di connessione).
+- Task 10: `item_name` è una `unsafe fn` con contratto `# Safety` e commenti `SAFETY` nei punti di chiamata. La regola della spec (`SAFETY` su ogni `unsafe`) prevale sulla firma del piano.
+- Task 11: accettate le correzioni di due ulteriori test instabili sotto carico (`old_writer_events_cannot_mutate_a_new_session`, `busy_lock_ticks_keep_the_every_n_spacing`), oltre ai quattro del piano. Le prove di stress hanno saturato la CPU: da allora niente generatori di carico né cicli lunghi senza chiedere.
+- Step 6 del Task 15 (build del setup 0.4.1 e SHA-256) rinviato a dopo la revisione finale dell'intero branch e le sue correzioni, altrimenti il setup sarebbe precedente alle correzioni.
+
+### Verifiche dal vivo
+
+| # | Esito |
+|---|---|
+| U1 | da fare (utente) |
+| U2 | da fare (utente) |
+| U3 | da fare (utente) |
+| U4 | da fare (utente) |
+| U5 | da fare (utente) |
+| U6 | da fare (utente) |
+| U7 | da fare (utente): oltre alla chiusura e al processo senza finestra, il valore Run e il marcatore di crash devono restare invariati |
+
+Il setup 0.4.1 e il suo SHA-256 si preparano dopo la revisione finale del branch.

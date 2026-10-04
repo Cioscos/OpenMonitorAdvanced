@@ -15,7 +15,7 @@ CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) are read **without admini
 An optional Windows service adds the sensors that need them: temperatures, voltages, fans and
 SMART data.
 
-> **Status:** early development (version 0.4.0). Expect rough edges and breaking changes between
+> **Status:** early development (version 0.4.1). Expect rough edges and breaking changes between
 > versions.
 
 ## Features
@@ -89,6 +89,12 @@ Windows 11). Administrator rights are needed only during setup.
 
 For unattended installs, `/S` runs the installer silently and `/NOSENSORS` leaves out the
 Advanced sensors component.
+
+Upgrading needs no confirmation: running a newer setup over an installed version closes the
+running app by itself (it asks it to quit and forces it only after 10 seconds) and starts it again
+afterwards. A silent install (`/S`) brings the app back minimized to the tray, and only if it was
+running. Uninstalling from *Settings › Apps* still asks before closing the app. You can also
+close the running app from a terminal with `oma-app.exe --quit`.
 
 ## Verify your download
 

@@ -1,7 +1,7 @@
 import { t } from './i18n/index.svelte';
 
 /** The backend's i18n keys for a target that could not be opened. */
-const OPEN_ERROR_KEYS = ['shell.error.missing', 'shell.error.timeout', 'log.error.folderMissing'];
+export const OPEN_ERROR_KEYS = ['shell.error.missing', 'shell.error.timeout', 'log.error.folderMissing'];
 
 /**
  * The text shown next to a button whose "open" failed. The backend rejects with one of

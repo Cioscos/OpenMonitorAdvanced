@@ -1,4 +1,5 @@
 import { catalogs, type Translate } from '../i18n/index.svelte';
+import { OPEN_ERROR_KEYS } from '../openFailure';
 import type { LogError } from '../types';
 
 /** The translated reason of a log in `error` (`{detail}` is the system's message for `log.error.other`). */
@@ -13,6 +14,7 @@ export function logErrorText(error: LogError | null | undefined, t: Translate): 
  */
 export function folderErrorText(reason: unknown, t: Translate): string {
   if (typeof reason === 'string' && reason.startsWith('log.error.') && reason in catalogs.en) return t(reason);
+  if (typeof reason === 'string' && OPEN_ERROR_KEYS.includes(reason)) return t(reason);
   if (reason instanceof Error) return reason.message;
   return String(reason);
 }

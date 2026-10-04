@@ -59,7 +59,7 @@ L'ordine è vincolante: la M7c consuma le metriche della M7b, e la M7d consuma i
 
 ### 2.1 Aggiornamento sopra una versione installata
 
-**Oggi.** Il messaggio «il prodotto è ancora in esecuzione» lo mostra il **disinstallatore della versione vecchia**: il nuovo setup lo lancia (`reinst_uninstall` in `installer.nsi`, con `/UPDATE`) mentre l'app è nel tray. Poi `CheckIfAppIsRunning` della sezione `-Install` lo chiederebbe di nuovo.
+**Oggi.** Il messaggio «il prodotto è ancora in esecuzione» lo mostra il **disinstallatore della versione vecchia**: il nuovo setup lo lancia (`reinst_uninstall` in `installer.nsi`; nella pratica senza `/UPDATE`, che il template salta, e con `/P` solo in modalità passiva) mentre l'app è nel tray. Se l'utente sceglie di non disinstallare prima, `CheckIfAppIsRunning` della sezione `-Install` chiede la stessa cosa. Con `/S` e `/P` la macro chiude l'app senza chiedere, ma non la riapre.
 
 **Dopo.** Prima di lanciare il disinstallatore vecchio, e comunque prima di `CheckIfAppIsRunning`, il nuovo setup:
 1. **Ricorda se l'app era in esecuzione** nella sessione dell'utente che installa (variabile `OmaAppWasRunning`).
@@ -71,9 +71,9 @@ L'ordine è vincolante: la M7c consuma le metriche della M7b, e la M7d consuma i
 
 A questo punto il disinstallatore vecchio non trova nulla in esecuzione e non chiede niente. Il comando `--quit` entra nell'app con la 0.4.1: dalla 0.4.1 in poi la chiusura è sempre ordinata.
 
-**Fine installazione.** Se `OmaAppWasRunning = 1`, `.onInstSuccess` riapre l'app con `RunAsUser`, cioè senza elevazione, anche in modalità silenziosa e passiva. La casella «Avvia» della pagina finale non deve produrre un secondo avvio; il plugin single-instance renderebbe comunque innocuo un doppio lancio. Il servizio riparte come oggi.
+**Fine installazione.** Se `OmaAppWasRunning = 1`, `.onInstSuccess` riapre l'app con `RunAsUser`, cioè senza elevazione, anche in modalità silenziosa e passiva. In modalità grafica la riapertura la fa la casella «Avvia» della pagina finale, già spuntata di predefinito, quindi `.onInstSuccess` non avvia una seconda volta. In modalità silenziosa e passiva l'app si riapre con `--minimized`, cioè nel tray come era, e non si riapre se c'è già `/R`, che la avvia da sé. Il servizio non lo avvia l'installer: lo avvia l'app quando si apre, come oggi, quindi riparte con l'app.
 
-**Disinstallazione da sola**, dal Pannello di controllo: il disinstallatore nuovo **continua a chiedere**, perché lì la domanda ha senso. Con `/UPDATE`, cioè dentro un aggiornamento, chiude senza chiedere come al passo 2. Questo vale per gli aggiornamenti dalla 0.4.1 in poi.
+**Disinstallazione da sola**, dal Pannello di controllo: il disinstallatore **continua a chiedere**, perché lì la domanda ha senso. Dentro un aggiornamento non chiede comunque niente, perché il nuovo setup ha già chiuso l'app prima di lanciarlo.
 
 **Dove:**
 - `app/src-tauri/nsis/installer.nsi`, solo sulle righe marcate `; OMA`;
@@ -108,7 +108,7 @@ Spostamenti meccanici, **senza cambi di comportamento né di API pubblica**. I t
 |---|---|
 | `crates/oma-win/src/storage.rs` (≈3100) | `storage/gate.rs` (`DiskGate`), `storage/temperatures.rs` (`DiskTemperatures`), `storage/identity_cache.rs` (classe del disco e cache), `storage/mod.rs` (provider) |
 | `crates/oma-win/src/svc/link.rs` (≈4300, test compresi) | stato e transizioni, coda dei comandi, I/O della pipe, test in un file a parte |
-| `service/…/Sensors/SensorHub.cs` (≈1900) | `GateEpisode.cs`, lettura e stato dei dischi (`DriveStates.cs`), hub |
+| `service/…/Sensors/SensorHub.cs` (≈1900) | `partial class` su più file (campionatore, worker dei dischi, piano e schema), `SchemaComparer.cs`; `GateEpisode` esce da `DiskPowerProbe.cs` in un suo file (`DriveStates.cs` è già separato) |
 | `crates/oma-core/src/rules/health.rs` (≈2000) | formattatore delle chiavi di visualizzazione in un suo modulo |
 | `service/…Tests/Sensors/SensorHubTests.cs` (≈4400) | seguendo gli split del codice: gate, dischi, hub |
 

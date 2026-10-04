@@ -383,6 +383,7 @@
   "advanced.chart.series": "Series",
   "advanced.chart.maxSeries": "Up to 8 series with at most 2 units.",
   "advanced.chart.empty": "Choose at least one series.",
+  "chart.suspended": "No readings while the device is idle or in standby",
   "advanced.table.sensor": "Sensor",
   "advanced.table.current": "Current",
   "advanced.table.min": "Min",

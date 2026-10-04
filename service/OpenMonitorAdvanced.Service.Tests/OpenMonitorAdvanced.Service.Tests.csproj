@@ -35,6 +35,7 @@
       <Link>Fixtures\drive_key.json</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\testdata\presentmon\*.csv" Link="Fixtures\PresentMon\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

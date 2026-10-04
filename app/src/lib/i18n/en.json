@@ -206,6 +206,8 @@
   "log.toast.errorTitle": "Recording stopped",
   "log.toast.started": "Recording started",
   "log.toast.stopped": "Recording finished",
+  "updates.toast.title": "OpenMonitor Advanced {version} available",
+  "updates.toast.body": "Open About to download it",
   "log.hotkey.inUse": "Already used by another app",
   "log.hotkey.failed": "The shortcut could not be registered",
   "log.recorder.idle": "CSV log, not recording",

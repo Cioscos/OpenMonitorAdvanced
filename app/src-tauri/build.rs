@@ -32,6 +32,9 @@ fn main() {
             "open_log_folder",
             "pick_log_folder",
             "set_log_hotkeys_suspended",
+            "check_updates",
+            "get_update_status",
+            "open_release_page",
         ]),
     ))
     .expect("Tauri build")

@@ -12,6 +12,7 @@ mod service;
 mod settings;
 mod tray;
 mod tray_icon;
+mod updates;
 mod window;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -276,6 +277,9 @@ fn main() {
             log::commands::open_log_folder,
             log::commands::pick_log_folder,
             hotkeys::set_log_hotkeys_suspended,
+            updates::check_updates,
+            updates::get_update_status,
+            updates::open_release_page,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -333,6 +337,8 @@ fn main() {
             // fetch it from the managed state.
             let toaster = Arc::new(notifier::system_toaster(app.handle()));
             app.manage(toaster.clone());
+            // Update checks: on request, or daily with `updates.checkAutomatically`.
+            app.manage(updates::install(app.handle(), &store, toaster.clone()));
             let log_service = log::LogService::new(
                 store.clone(),
                 Arc::new(log::fs::RealFs),

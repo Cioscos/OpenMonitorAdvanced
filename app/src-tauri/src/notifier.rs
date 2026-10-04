@@ -183,6 +183,11 @@ pub fn launch_for_main() -> String {
     serde_json::json!({ "open": "main" }).to_string()
 }
 
+/// The launch string of a toast that opens Settings › About (updates).
+pub fn launch_for_about() -> String {
+    serde_json::json!({ "open": "about" }).to_string()
+}
+
 /// The target of a clicked toast; `None` for anything but a launch string
 /// made by [`launch_for`] or [`launch_for_main`].
 pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
@@ -585,6 +590,7 @@ mod tests {
         );
         assert_eq!(launch_for_main(), r#"{"open":"main"}"#);
         assert_eq!(launch_target(&launch_for_main()), Some(LaunchTarget::Main));
+        assert_eq!(launch_for_about(), r#"{"open":"about"}"#);
         for unknown in [
             r#"{"open":"settings"}"#,
             r#"{"open":"main","device":"gpu/0"}"#,

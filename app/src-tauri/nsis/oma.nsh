@@ -51,6 +51,12 @@ Var OmaPath
 Var OmaAttr
 ; OmaCheckDirInside: the directory $INSTDIR must be strictly inside.
 Var OmaBase
+; OmaCloseApp: "1" when the app ran in the session of the installing user, so
+; OMA_RELAUNCH_APP reopens it; "1" in OmaAppClosed after the first call.
+Var OmaAppWasRunning
+Var OmaAppClosed
+; OMA_RUN_AS_USER: scratch for the stack marker.
+Var OmaStack
 
 ; Strings for our section. Inserted after the MUI_LANGUAGE macros.
 !macro OMA_LANGSTRINGS
@@ -404,6 +410,47 @@ FunctionEnd
   ${If} $OmaResult != "0"
     !insertmacro OMA_FAIL "$(omaSensorsNeedProgramFiles)" "$OmaResult"
   ${EndIf}
+  !insertmacro OMA_CLOSE_APP
+!macroend
+
+; Closes the running app before its files are replaced (OmaCloseApp, defined in
+; OMA_SECTIONS). Inserted on the template's reinstall page right before the old
+; uninstaller runs (line marked OMA) and at the end of NSIS_HOOK_PREINSTALL for
+; /S, /P and the reinstalls that skip the uninstaller; only the first call acts.
+!macro OMA_CLOSE_APP
+  Call OmaCloseApp
+!macroend
+
+; Starts an exe de-elevated in the interactive user's session, without waiting.
+; nsis_tauri_utils::RunAsUser pushes 0 (started) or 1 (failed) in current plugin
+; versions, and the template never pops it; the marker keeps the stack balanced
+; whether or not a result is there. Clobbers only $OmaStack.
+!macro OMA_RUN_AS_USER exe args
+  Push "OmaRunAsUserMark"
+  nsis_tauri_utils::RunAsUser "${exe}" "${args}"
+  Pop $OmaStack
+  ${If} $OmaStack != "OmaRunAsUserMark"
+    Pop $OmaStack
+  ${EndIf}
+!macroend
+
+; Inserted right after OMA_ONINSTSUCCESS in .onInstSuccess (line marked OMA).
+; Reopens the app, minimized to the tray, when OmaCloseApp found it running for
+; the installing user and the install was silent or passive: the GUI has the
+; finish page's "Run" checkbox (checked by default) and /R starts the app itself.
+; The reopened app starts the service again, as at every launch.
+!macro OMA_RELAUNCH_APP
+  Push $0
+  ${If} $OmaAppWasRunning == "1"
+    ${If} $PassiveMode = 1
+    ${OrIf} ${Silent}
+      ${GetOptions} $CMDLINE "/R" $0
+      ${If} ${Errors}
+        !insertmacro OMA_RUN_AS_USER "$INSTDIR\${MAINBINARYNAME}.exe" "--minimized"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  Pop $0
 !macroend
 
 ; Makes $INSTDIR\service a directory that only SYSTEM and Administrators can
@@ -688,6 +735,70 @@ Function OmaInitComponents
   ${IfNot} ${Errors}
     !insertmacro UnselectSection ${SecSensors}
   ${EndIf}
+  Pop $0
+FunctionEnd
+
+; Closes the app without prompts (OMA_CLOSE_APP; here because it needs the
+; template's MAINBINARYNAME, UNINSTKEY and PRODUCTNAME). The installed version
+; (DisplayVersion) decides how: 0.4.1 and later are asked to exit through
+; `--quit`, the tray's Exit path (settings and CSV log saved, service link
+; closed), and get 10 s; 0.4.0 does not know `--quit` (it would open its
+; window), so it, an unreadable version and anything still running afterwards
+; (other sessions included) are killed, as CheckIfAppIsRunning would do. A
+; failed kill is left to CheckIfAppIsRunning, which reports it later.
+; nsis_tauri_utils: FindProcess (all sessions) and FindProcessCurrentUser push
+; 0 = found, 1 = not found; KillProcess pushes 0 = killed, 1 = some not killed,
+; 2 = none found; SemverCompare a b pushes 1 (a newer), 0 or -1 (b newer; an
+; unparsable a counts as older). Preserves $0-$2; never touches $R0-$R6, which
+; the reinstall page relies on.
+Function OmaCloseApp
+  ${If} $OmaAppClosed == "1"
+    Return
+  ${EndIf}
+  StrCpy $OmaAppClosed "1"
+  Push $0
+  Push $1
+  Push $2
+  nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 = 0
+    StrCpy $OmaAppWasRunning "1"
+  ${EndIf}
+  nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 <> 0
+    Goto oma_close_done
+  ${EndIf}
+  ClearErrors
+  ReadRegStr $1 SHCTX "${UNINSTKEY}" "DisplayVersion"
+  ${If} $1 != ""
+    nsis_tauri_utils::SemverCompare "$1" "0.4.1"
+    Pop $0
+    ${If} $0 >= 0
+    ${AndIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+      !insertmacro OMA_RUN_AS_USER "$INSTDIR\${MAINBINARYNAME}.exe" "--quit"
+      StrCpy $2 0
+      ${Do}
+        Sleep 250
+        nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+        Pop $0
+        ${If} $0 <> 0
+          Goto oma_close_done
+        ${EndIf}
+        IntOp $2 $2 + 1
+      ${LoopUntil} $2 >= 40
+    ${EndIf}
+  ${EndIf}
+  nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
+  Pop $0
+  Sleep 500
+  ${If} $0 <> 0
+  ${AndIf} $0 <> 2
+    DetailPrint "Could not close ${PRODUCTNAME}"
+  ${EndIf}
+  oma_close_done:
+  Pop $2
+  Pop $1
   Pop $0
 FunctionEnd
 !macroend

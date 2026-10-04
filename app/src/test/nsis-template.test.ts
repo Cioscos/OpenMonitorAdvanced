@@ -635,3 +635,133 @@ describe('custom Italian language file', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 });
+
+// M7a: the installer closes the app before an upgrade (graceful `--quit` from 0.4.1 on, a
+// forced kill otherwise) and reopens it after a silent or passive install.
+describe('closing and reopening the app around an upgrade', () => {
+  const nsh = existsSync(resolve(nsisDir, 'oma.nsh')) ? read(resolve(nsisDir, 'oma.nsh')) : '';
+  const all = statements(nsh);
+  const tpl = read(resolve(nsisDir, 'installer.nsi')).split('\n');
+
+  /** The trimmed template line right after the only line whose trimmed text is `line`. */
+  function lineAfterTheOnly(line: string) {
+    const at = tpl.flatMap((l, i) => (l.trim() === line ? [i] : []));
+    expect(at, line).toHaveLength(1);
+    return tpl[at[0] + 1].trim();
+  }
+
+  it('closes the app right before the old uninstaller runs', () => {
+    expect(tpl.filter((l) => l.includes('OMA_CLOSE_APP'))).toHaveLength(1);
+    expect(lineAfterTheOnly('reinst_uninstall:')).toBe('!insertmacro OMA_CLOSE_APP ; OMA');
+  });
+
+  it('reopens the app from .onInstSuccess, after the reboot exit code', () => {
+    expect(tpl.filter((l) => l.includes('OMA_RELAUNCH_APP'))).toHaveLength(1);
+    expect(lineAfterTheOnly('!insertmacro OMA_ONINSTSUCCESS ; OMA')).toBe('!insertmacro OMA_RELAUNCH_APP ; OMA');
+  });
+
+  it('closes the app last in the pre-install hook, for the paths that skip the reinstall page', () => {
+    const pre = block(all, /^!macro NSIS_HOOK_PREINSTALL$/, /^!macroend$/);
+    expect(pre.slice(1, 4)).toEqual([
+      'Call OmaCheckSensorsInstallDir',
+      '${If} $OmaResult != "0"',
+      expect.stringMatching(/^!insertmacro OMA_FAIL "\$\(omaSensorsNeedProgramFiles\)" /),
+    ]);
+    expect(pre[pre.length - 2]).toBe('!insertmacro OMA_CLOSE_APP');
+    const close = block(all, /^!macro OMA_CLOSE_APP$/, /^!macroend$/);
+    expect(close).toEqual(['!macro OMA_CLOSE_APP', 'Call OmaCloseApp', '!macroend']);
+  });
+
+  it('closes the app once, remembering whether it ran for the installing user', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    expect(fn.slice(1, 5)).toEqual(['${If} $OmaAppClosed == "1"', 'Return', '${EndIf}', 'StrCpy $OmaAppClosed "1"']);
+    const mine = indexOf(fn, /^nsis_tauri_utils::FindProcessCurrentUser "\$\{MAINBINARYNAME\}\.exe"$/);
+    expect(mine).toBeGreaterThan(0);
+    expect(fn.slice(mine + 1, mine + 4)).toEqual(['Pop $0', '${If} $0 = 0', 'StrCpy $OmaAppWasRunning "1"']);
+    expect(mine).toBeLessThan(indexOf(fn, /KillProcess/));
+    expect(mine).toBeLessThan(indexOf(fn, /RUN_AS_USER|RunAsUser/));
+    // Nothing running anywhere: nothing to do.
+    const any = indexOf(fn, /^nsis_tauri_utils::FindProcess "\$\{MAINBINARYNAME\}\.exe"$/, mine);
+    expect(fn.slice(any + 1, any + 4)).toEqual(['Pop $0', '${If} $0 <> 0', 'Goto oma_close_done']);
+  });
+
+  it('asks only 0.4.1 or newer to quit, and kills a missing or older version (Review Focus 3)', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    const quits = fn.flatMap((s, i) => (/--quit/.test(s) ? [i] : []));
+    expect(quits).toHaveLength(1);
+    expect(fn[quits[0]]).toBe('!insertmacro OMA_RUN_AS_USER "$INSTDIR\\${MAINBINARYNAME}.exe" "--quit"');
+    const version = indexOf(fn, /^ReadRegStr \$1 SHCTX "\$\{UNINSTKEY\}" "DisplayVersion"$/);
+    expect(version).toBeGreaterThan(0);
+    expect(fn.slice(version + 1, version + 7)).toEqual([
+      '${If} $1 != ""',
+      'nsis_tauri_utils::SemverCompare "$1" "0.4.1"',
+      'Pop $0',
+      '${If} $0 >= 0',
+      '${AndIf} ${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"',
+      fn[quits[0]],
+    ]);
+    // Then up to 40 x 250 ms for it to go, leaving as soon as no instance is left.
+    expect(fn.slice(quits[0] + 1, quits[0] + 11)).toEqual([
+      'StrCpy $2 0',
+      '${Do}',
+      'Sleep 250',
+      'nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"',
+      'Pop $0',
+      '${If} $0 <> 0',
+      'Goto oma_close_done',
+      '${EndIf}',
+      'IntOp $2 $2 + 1',
+      '${LoopUntil} $2 >= 40',
+    ]);
+    // The forced kill comes after the wait (and after both version blocks close).
+    const kill = indexOf(fn, /^nsis_tauri_utils::KillProcess "\$\{MAINBINARYNAME\}\.exe"$/);
+    expect(kill).toBe(quits[0] + 13);
+    expect(fn.slice(kill - 2, kill)).toEqual(['${EndIf}', '${EndIf}']);
+    expect(fn.slice(kill + 1, kill + 6)).toEqual(['Pop $0', 'Sleep 500', '${If} $0 <> 0', '${AndIf} $0 <> 2', expect.stringMatching(/^DetailPrint /)]);
+    expect(fn.filter((s) => /KillProcess/.test(s))).toHaveLength(1);
+  });
+
+  it('preserves the registers it uses (the reinstall page relies on $R0-$R6)', () => {
+    const fn = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    const pushes = fn.filter((s) => /^Push /.test(s)).map((s) => s.slice(5));
+    const pops = fn.filter((s) => /^Pop /.test(s)).map((s) => s.slice(4));
+    expect(pushes).toEqual(['$0', '$1', '$2']);
+    // Every plugin result is popped into $0; the three saved registers come back in reverse order.
+    expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
+    expect(fn.slice(-5)).toEqual(['oma_close_done:', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
+    expect(fn.join('\n')).not.toMatch(/\$R\d/);
+  });
+
+  it('keeps the stack balanced whether or not RunAsUser leaves a result on it', () => {
+    const run = block(all, /^!macro OMA_RUN_AS_USER exe args$/, /^!macroend$/);
+    expect(run).toEqual([
+      '!macro OMA_RUN_AS_USER exe args',
+      'Push "OmaRunAsUserMark"',
+      'nsis_tauri_utils::RunAsUser "${exe}" "${args}"',
+      'Pop $OmaStack',
+      '${If} $OmaStack != "OmaRunAsUserMark"',
+      'Pop $OmaStack',
+      '${EndIf}',
+      '!macroend',
+    ]);
+  });
+
+  it('reopens the app minimized only if it ran, only when silent or passive, and not with /R', () => {
+    const relaunch = block(all, /^!macro OMA_RELAUNCH_APP$/, /^!macroend$/);
+    expect(relaunch).toEqual([
+      '!macro OMA_RELAUNCH_APP',
+      'Push $0',
+      '${If} $OmaAppWasRunning == "1"',
+      '${If} $PassiveMode = 1',
+      '${OrIf} ${Silent}',
+      '${GetOptions} $CMDLINE "/R" $0',
+      '${If} ${Errors}',
+      '!insertmacro OMA_RUN_AS_USER "$INSTDIR\\${MAINBINARYNAME}.exe" "--minimized"',
+      '${EndIf}',
+      '${EndIf}',
+      '${EndIf}',
+      'Pop $0',
+      '!macroend',
+    ]);
+  });
+});

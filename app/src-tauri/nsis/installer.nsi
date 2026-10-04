@@ -345,6 +345,7 @@ Function PageLeaveReinstall
   ${EndIf}
 
   reinst_uninstall:
+    !insertmacro OMA_CLOSE_APP ; OMA
     HideWindow
     ClearErrors
 
@@ -748,6 +749,7 @@ SectionEnd
 !insertmacro OMA_SECTIONS ; OMA
 Function .onInstSuccess
   !insertmacro OMA_ONINSTSUCCESS ; OMA
+  !insertmacro OMA_RELAUNCH_APP ; OMA
   ; Check for `/R` flag only in silent and passive installers because
   ; GUI installer has a toggle for the user to (re)start the app
   ${If} $PassiveMode = 1

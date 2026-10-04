@@ -884,16 +884,69 @@ Function OmaCloseApp
 FunctionEnd
 !macroend
 
+; Our copy of Tauri's CheckIfAppIsRunning for the uninstaller: same detection
+; and texts, but a clean exit instead of Abort. Inside a section Abort only
+; stops the section and leaves the instfiles page open on an empty progress bar,
+; so Cancel (and a failed kill) set the exit code and Quit at once. Nothing has
+; been touched yet: this runs before anything else in the hook. Silent and
+; passive runs kill without asking, as before.
+; Exit codes: 1 = cancelled by the user (the reinstall page of an update goes
+; back to its choice page on 1); OMA_FAILED_EXIT_CODE = the app could not be
+; closed (the reinstall page shows its generic "unable to uninstall" message).
+!macro OMA_UN_CHECK_APP executableName productName
+  !define UniqueID ${__LINE__}
+
+  nsis_tauri_utils::StrReplace "$(appRunning)" "{{product_name}}" "${productName}"
+  Pop $R1
+  nsis_tauri_utils::StrReplace "$(appRunningOkKill)" "{{product_name}}" "${productName}"
+  Pop $R2
+  nsis_tauri_utils::StrReplace "$(failedToKillApp)" "{{product_name}}" "${productName}"
+  Pop $R3
+
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::FindProcessCurrentUser "${executableName}"
+  !else
+    nsis_tauri_utils::FindProcess "${executableName}"
+  !endif
+  Pop $R0
+  ${If} $R0 = 0
+    IfSilent kill_${UniqueID} 0
+    ${IfThen} $PassiveMode != 1 ${|} MessageBox MB_OKCANCEL $R2 IDOK kill_${UniqueID} IDCANCEL cancel_${UniqueID} ${|}
+    kill_${UniqueID}:
+      !if "${INSTALLMODE}" == "currentUser"
+        nsis_tauri_utils::KillProcessCurrentUser "${executableName}"
+      !else
+        nsis_tauri_utils::KillProcess "${executableName}"
+      !endif
+      Pop $R0
+      Sleep 500
+      ${If} $R0 = 0
+      ${OrIf} $R0 = 2
+        Goto app_check_done_${UniqueID}
+      ${EndIf}
+      DetailPrint "$R3"
+      MessageBox MB_ICONSTOP|MB_OK "$R3" /SD IDOK
+      SetErrorLevel ${OMA_FAILED_EXIT_CODE}
+      Quit
+    cancel_${UniqueID}:
+      SetErrorLevel 1
+      Quit
+  ${EndIf}
+  app_check_done_${UniqueID}:
+    !undef UniqueID
+!macroend
+
 ; Tauri hook: runs at the top of the Uninstall section, before any file is
 ; deleted, so a failure here leaves the installation intact. It closes the app
 ; first (the template's own check, repeated later, then finds nothing): if the
-; user cancels the "app is running" prompt, the uninstall stops before the
-; service is touched. Keeps the uninstaller diff at zero.
+; user cancels the "app is running" prompt, the uninstaller closes at once
+; (OMA_UN_CHECK_APP) before the service is touched. Keeps the uninstaller diff
+; at zero.
 ; PawnIO is never touched: it can be shared with other programs. The service's
 ; logs go with the service, except on an upgrade (ruling R30). PresentMon goes
 ; with the service, and the frames ETW session is stopped once the service is.
 !macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro OMA_UN_CHECK_APP "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Call un.OmaStopService
   ${If} $OmaResult != "0"
     !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"

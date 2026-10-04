@@ -239,6 +239,7 @@ Owed: the live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-mo
 - V5: alt-tab out of the game and back: the target holds for 3 s, then drops; back in the game, it is followed again.
 - V6: `scripts/measure-footprint.ps1 -Service` with the frame engine on and no game: PresentMon plus the service's extra work under 0.5 % of the total CPU (spec M7 §11, `docs/perf-budget.md`).
 - V7: restart the service from `services.msc` with the app open: after the reconnection the `frames:` lines resume by themselves.
+- V8: with OMA running, start the uninstall and press «Annulla» on the "app is running" prompt: the uninstaller closes at once and OMA stays installed and working; then uninstall again and press OK: it works as before.
 
 Also owed with that setup: the installer's PresentMon paths in a VM or Windows Sandbox (`service\presentmon\PresentMon-2.6.0-x64.exe` installed and protected, removed on deselection and uninstall, `logman stop OpenMonitorAdvanced-Frames -ets` run by the uninstaller), and `scripts/verify-signatures.ps1 -Policy none` on the new setup (exactly one PresentMon, Intel signature).
 

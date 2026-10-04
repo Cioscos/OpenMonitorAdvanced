@@ -389,7 +389,30 @@ describe('oma.nsh failure paths', () => {
 
   it('the uninstall hook closes the app before touching the service', () => {
     const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
-    expect(hook[1]).toBe('!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"');
+    expect(hook[1]).toBe('!insertmacro OMA_UN_CHECK_APP "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"');
+    // Not Tauri's macro: its Cancel is an Abort, which inside a section leaves the page open.
+    expect(hook.some((s) => /CheckIfAppIsRunning/.test(s))).toBe(false);
+  });
+
+  it('cancelling the running-app prompt closes the uninstaller at once, without Abort', () => {
+    const mac = block(all, /^!macro OMA_UN_CHECK_APP /, /^!macroend$/);
+    expect(mac.some((s) => /^Abort/.test(s))).toBe(false);
+    const prompt = indexOf(mac, /^\$\{IfThen\} \$PassiveMode != 1 \$\{\|\} MessageBox MB_OKCANCEL /);
+    expect(prompt).toBeGreaterThanOrEqual(0);
+    expect(mac[prompt]).toMatch(/IDCANCEL cancel_/);
+    const cancel = indexOf(mac, /^cancel_\$\{UniqueID\}:$/);
+    expect(cancel).toBeGreaterThan(prompt);
+    expect(mac[cancel + 1]).toBe('SetErrorLevel 1');
+    expect(mac[cancel + 2]).toBe('Quit');
+    // A failed kill also ends cleanly, with the failure code (not the cancel code).
+    const fail = indexOf(mac, /^SetErrorLevel \$\{OMA_FAILED_EXIT_CODE\}$/);
+    expect(fail).toBeGreaterThan(0);
+    expect(mac[fail + 1]).toBe('Quit');
+    // Same detection and texts as the Tauri macro.
+    expect(mac.some((s) => /FindProcessCurrentUser/.test(s))).toBe(true);
+    expect(mac.some((s) => /FindProcess "/.test(s))).toBe(true);
+    expect(mac.some((s) => /\$\(appRunningOkKill\)/.test(s))).toBe(true);
+    expect(mac.some((s) => /\$\(failedToKillApp\)/.test(s))).toBe(true);
   });
 
   it('refuses to compile with a PawnIO setup that does not match the pinned hash', () => {

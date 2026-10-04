@@ -283,10 +283,8 @@ pub fn reveal_sensor_report(state: tauri::State<'_, ReportState>) -> Result<(), 
     let folder = state
         .folder()
         .ok_or_else(|| "no report exported yet".to_owned())?;
-    crate::commands::shell_open(&folder).map_err(|err| {
-        tracing::warn!(%err, "cannot open the report folder");
-        err.to_string()
-    })
+    crate::commands::open_path(&folder)
+        .inspect_err(|err| tracing::warn!(%err, "cannot open the report folder"))
 }
 #[cfg(test)]
 mod tests {

@@ -84,6 +84,8 @@
   "rules.error.unknownRule": "No built-in rule has this id.",
   "settings.applyFailed": "Could not apply the change: {reason}",
   "settings.openFailed": "Could not open it: {reason}",
+  "shell.error.missing": "The file or folder does not exist",
+  "shell.error.timeout": "Windows did not respond in time",
   "settings.reason.reconfigurationFailed": "the service could not reconfigure its sensors (see its log)",
   "settings.general.group.display": "Language and units",
   "settings.general.group.refresh": "Updates",

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { Backend } from '../../lib/backend';
   import { i18n, t } from '../../lib/i18n/index.svelte';
+  import { openFailureText } from '../../lib/openFailure';
   import { settings } from '../../lib/settings.svelte';
   import { updates } from '../../lib/updates.svelte';
   import type { AppInfo, KnownPath } from '../../lib/types';
@@ -55,7 +56,7 @@
     try {
       await backend.openReleasePage();
     } catch (error) {
-      releaseFailure = t('settings.openFailed', { reason: String(error) });
+      releaseFailure = openFailureText(error);
     }
   }
 
@@ -82,7 +83,7 @@
     try {
       await backend.revealSensorReport();
     } catch (error) {
-      revealFailure = t('settings.openFailed', { reason: String(error) });
+      revealFailure = openFailureText(error);
     }
   }
 
@@ -91,7 +92,7 @@
     try {
       await backend.openKnownPath(target);
     } catch (error) {
-      failure = { target, text: t('settings.openFailed', { reason: String(error) }) };
+      failure = { target, text: openFailureText(error) };
     }
   }
 </script>

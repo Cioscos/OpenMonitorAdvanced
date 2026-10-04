@@ -84,6 +84,8 @@
   "rules.error.unknownRule": "Nessuna regola predefinita ha questo id.",
   "settings.applyFailed": "Impossibile applicare la modifica: {reason}",
   "settings.openFailed": "Impossibile aprire: {reason}",
+  "shell.error.missing": "Il file o la cartella non esiste",
+  "shell.error.timeout": "Windows non ha risposto in tempo",
   "settings.reason.reconfigurationFailed": "il servizio non è riuscito a riconfigurare i sensori (vedi il suo log)",
   "settings.general.group.display": "Lingua e unità",
   "settings.general.group.refresh": "Aggiornamento",

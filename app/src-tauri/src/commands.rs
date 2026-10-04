@@ -1,7 +1,9 @@
 //! Tauri commands called by the UI (see app/src/lib/backend/tauri.ts).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use oma_core::engine::Engine;
 use oma_core::history::{History, HistoryWindow};
@@ -445,27 +447,63 @@ pub fn get_app_info(app: AppHandle, service: State<'_, ServiceShell>) -> AppInfo
     )
 }
 
+/// What `open_known_path` hands to the shell.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OpenTarget {
+    /// A file or folder: checked for existence before the shell sees it.
+    Path(PathBuf),
+    /// A URI: the shell resolves it; there is no file to check.
+    Uri(&'static str),
+}
+
+/// What `target` opens on this machine; `None` when it has no such place.
+pub(crate) fn open_target(target: KnownPath, dirs: &KnownDirs) -> Option<OpenTarget> {
+    match target {
+        KnownPath::StartupAppsSettings => Some(OpenTarget::Uri(STARTUP_APPS_SETTINGS)),
+        other => dirs.target(other).map(OpenTarget::Path),
+    }
+}
+
 /// Opens one of the fixed [`KnownPath`] targets with the shell. The error is
-/// the system's text, shown next to the button.
+/// an i18n key (`shell.error.*`) or the system's text, shown next to the button.
 #[tauri::command(async)]
 pub fn open_known_path(app: AppHandle, target: KnownPath) -> Result<(), String> {
-    let path = KnownDirs::current(&app)
-        .target(target)
-        .ok_or_else(|| "not available on this system".to_owned())?;
-    shell_open(&path).map_err(|err| {
-        tracing::warn!(?target, %err, "cannot open a known path");
-        err.to_string()
-    })
+    let opened = match open_target(target, &KnownDirs::current(&app))
+        .ok_or_else(|| "not available on this system".to_owned())?
+    {
+        OpenTarget::Path(path) => open_path(&path),
+        OpenTarget::Uri(uri) => open_uri(uri),
+    };
+    opened.inspect_err(|err| tracing::warn!(?target, %err, "cannot open a known path"))
+}
+
+/// How long the shell has to take an open request before the UI gets an error.
+pub(crate) const SHELL_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Opens a file or folder; a path that does not exist is `shell.error.missing`.
+pub(crate) fn open_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("shell.error.missing".to_owned());
+    }
+    shell_open(path.as_os_str())
+}
+
+/// Opens a URI (`https:`, `ms-settings:`); it is not a file, so nothing is checked.
+pub(crate) fn open_uri(uri: &str) -> Result<(), String> {
+    shell_open(OsStr::new(uri))
 }
 
 #[cfg(windows)]
-pub(crate) fn shell_open(path: &Path) -> std::io::Result<()> {
-    oma_win::shell_open::open(path)
+fn shell_open(target: &OsStr) -> Result<(), String> {
+    oma_win::shell_open::open(target, SHELL_OPEN_TIMEOUT).map_err(|err| match err {
+        oma_win::shell_open::OpenError::TimedOut => "shell.error.timeout".to_owned(),
+        oma_win::shell_open::OpenError::Os(err) => err.to_string(),
+    })
 }
 
 #[cfg(not(windows))]
-pub(crate) fn shell_open(_path: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("not supported on this system"))
+fn shell_open(_target: &OsStr) -> Result<(), String> {
+    Err("not supported on this system".to_owned())
 }
 
 /// Per-process GPU usage, published by the GPU provider every tick (decision D5).
@@ -937,6 +975,35 @@ mod tests {
             switch.effective(),
             only(&[Vendor::Nvapi, Vendor::Adl, Vendor::Igcl])
         );
+    }
+
+    #[test]
+    fn open_known_path_sends_uris_without_an_existence_check() {
+        let dirs = KnownDirs {
+            settings_file: None,
+            logs: None,
+            resources: None,
+        };
+        assert_eq!(
+            open_target(KnownPath::StartupAppsSettings, &dirs),
+            Some(OpenTarget::Uri("ms-settings:startupapps"))
+        );
+        let dirs = KnownDirs {
+            settings_file: None,
+            logs: Some(PathBuf::from(r"C:\logs")),
+            resources: None,
+        };
+        assert_eq!(
+            open_target(KnownPath::LogsFolder, &dirs),
+            Some(OpenTarget::Path(PathBuf::from(r"C:\logs")))
+        );
+        assert_eq!(open_target(KnownPath::SettingsFolder, &dirs), None);
+    }
+
+    #[test]
+    fn open_path_reports_a_missing_path() {
+        let missing = std::env::temp_dir().join("oma-no-such-folder-8f3a1c");
+        assert_eq!(open_path(&missing), Err("shell.error.missing".to_owned()));
     }
 
     #[test]

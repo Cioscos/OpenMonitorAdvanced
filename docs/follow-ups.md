@@ -294,8 +294,8 @@ Items left open by the M7c reviews (plan `docs/superpowers/plans/` M7c, tasks C1
 
 - The overlay client could also check the pipe server's PID against its parent process (`GetNamedPipeServerProcessId`), mirroring the app's check on the child. `crates/oma-overlay/src/link.rs`; when touched.
 - Pipe handoff when a process of the same user reuses the child's PID (C8 security review, M1): the user is outside the threat model and the data are only sensors and profiles; harden it with a nonce passed on the child's stdin. `app/src-tauri/src/overlay/host.rs`; before 1.0.
-- Cost of the `EVENT_OBJECT_LOCATIONCHANGE` events followed for the game window: not measured in C20 (W8 ran with a still window; W6 moved it without a measure). `crates/oma-win` (foreground); with M7d.
-- Frame state `starting` on an idle desktop: not checked explicitly in C20. App (`overlay/controller.rs`) and service (`FrameCapture`); with M7d.
+- Cost of the `EVENT_OBJECT_LOCATIONCHANGE` events followed for the game window: not measured in C20 (W8 ran with a still window; W6 moved it without a measure). `crates/oma-win` (foreground); measured in M7d (X8): 0.26 % CPU for `oma-app` while dragging a windowed game for 20 s, against 0.07 % idle. Closed.
+- Frame state `starting` on an idle desktop: not checked explicitly in C20. Checked in M7d (X8): Settings › Overlay shows running and never sticks on starting; the engine stays on while the overlay is enabled, by design. Closed.
 - Overlay memory: shown in game it uses 56-65 MB private, almost all the discrete GPU driver (D3D11 device about 51 MB); the in-game limit was raised from 40 to 70 MB by the user "this once" (W8). WARP would stay at about 3 MB with nearly the same CPU on a small window; the integrated GPU does not help when the screen is on the discrete one (both drivers load, 78-87 MB). Measure WARP at high scale before switching. `crates/oma-overlay/src/compose.rs`; when memory matters again.
 - A foreground window already gone when the runner reads its monitor (the alt-tab switcher) counts as on the game's monitor: the overlay can hide for one step and show again. The desktop window spans all monitors, so a click on the wallpaper of the other monitor may hide the overlay. `app/src-tauri/src/overlay/runner.rs` and `controller.rs`; when touched.
 - The app log names the foreground executable at each focus change while the overlay is on (diagnostics added in C20): consider debug level before 1.0, since users attach logs to reports. `app/src-tauri/src/overlay/runner.rs`.
@@ -324,6 +324,8 @@ Editor commands and files:
 - `export_file_name` edge cases (trailing dots, reserved names such as `CON`, empty), importing a folder says "not found", crash-left `.tmp` files of a process id are not cleaned, and saving with an unknown uuid creates a file (unbounded files from a compromised WebView). `app/src-tauri/src/overlay/store.rs`; before 1.0.
 - A tray *Quit* with a dirty editor never exits if the editor script hangs. `app/src-tauri/src/`; when touched.
 - `preview_failure` is not cleared when the editor opens again. `app/src-tauri/src/overlay/`.
+- Closing the preview logs a WARN "stopped unexpectedly code=5" before the INFO "the preview was closed": log noise. `app/src-tauri/src/overlay/host.rs`; when touched.
+- The overlay hides about 3 s into a drag of the game window: the game stops presenting in Windows' modal move loop and the 3 s tolerance runs out. The user finds it acceptable (X8). Possible fix: ignore the timeout between `EVENT_SYSTEM_MOVESIZESTART` and `EVENT_SYSTEM_MOVESIZEEND`. `crates/oma-win` (foreground), `app/src-tauri/src/overlay/target.rs`.
 
 Editor interface:
 
@@ -335,13 +337,11 @@ Editor interface:
 
 ## Manual checks owed after M7d
 
-Task D18, with the user (never by an agent on this PC), on a build of the 0.5.0 branch:
+Task D18 done on 2026-10-05/06 with the user (setup 0.5.0, SHA-256 `14d15424...f2f8`, God of War and Windows Terminal): X1-X8 all passed, two after fixes (`2101dbf` dismissible error banner, `4b9bea6` spacing in the benchmark sessions); results in the plan's «Esito dell'esecuzione», numbers in `docs/perf-budget.md`. Covered: editor bounds while maximized, edit and close with the preview open, the usual editor run, a benchmark with the shortcut, the footprint of editor and preview, and the two M7c items (window-drag cost, `starting` on an idle desktop). Still owed:
 
-- Editor bounds while maximized: the window reopens at the normal size and position, not at the maximized rectangle.
 - Preview at 1366x768 and 150% scaling: the window fits the work area and the profile is drawn whole.
-- Edit and close the editor within 100 ms with the preview open: no preview process is left and no late preview starts.
 - Kill the preview process (`oma-overlay.exe --preview`) 3-5 times from Task Manager: the editor button returns to *Preview*, the in-game overlay is not touched, no restart loop.
-- The usual run of the editor (open, drag, save, duplicate, import, export, unsaved-changes prompt on window close and tray *Quit*) and of a benchmark with the shortcut over a game, with the footprint numbers of the editor and the preview for `docs/perf-budget.md`.
+- The installer paths of 0.5.0 (as for M7c, in a VM or Windows Sandbox).
 
 ## Manual checks after M7c
 

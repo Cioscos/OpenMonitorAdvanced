@@ -524,6 +524,12 @@ mod tests {
         let server = OverlayPipeServer::create(&name).unwrap();
         let sid = current_user_sid().expect("current user SID");
         assert!(sid.starts_with("S-1-5-"), "{sid}");
+        // SDDL writes the built-in Administrator (RID 500, the CI runner's account) as `LA`.
+        let sid = if sid.ends_with("-500") {
+            "LA".to_owned()
+        } else {
+            sid
+        };
 
         let info =
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;

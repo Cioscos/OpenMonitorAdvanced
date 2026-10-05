@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod provider;
 pub mod rate;
 pub mod report;
+pub mod roles;
 pub mod rules;
 pub mod sampler;
 pub mod sanitize;

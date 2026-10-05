@@ -4,7 +4,8 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oma_core::model::{DeviceKind, Schema, Snapshot, Unit};
+use oma_core::model::{Schema, Snapshot, Unit};
+use oma_core::roles::{role_sensor, Role};
 use oma_core::rules::HealthReport;
 use oma_core::settings::{Language, Settings, ViewKind};
 use tauri::image::Image;
@@ -23,10 +24,6 @@ use crate::tray_icon::{
     ICON_SIZE, PRODUCT_NAME,
 };
 use crate::window;
-
-const CPU_TEMPERATURES: [&str; 2] = ["cpu/0/temperature/package", "cpu/0/temperature/tctl"];
-const CPU_LOAD: &str = "cpu/0/load/total";
-const MEMORY_LOAD: &str = "memory/0/load/used";
 
 /// What the controller needs from the real tray, so its decisions can be
 /// tested without a window. Implementations must not block the caller.
@@ -96,28 +93,31 @@ fn index_of(schema: &Schema, id: &str) -> Option<usize> {
     schema.sensors.iter().position(|sensor| sensor.id == id)
 }
 
-/// Core temperature of the first dedicated (non-integrated) GPU that has one.
-fn dedicated_gpu_temperature(schema: &Schema) -> Option<usize> {
-    schema
-        .devices
-        .iter()
-        .filter(|device| {
-            device.kind == DeviceKind::Gpu
-                && device.properties.get("integrated").map(String::as_str) != Some("true")
-        })
-        .find_map(|device| index_of(schema, &format!("{}/temperature/core", device.id)))
+/// Position of the sensor playing `role`, if the schema has one.
+fn role_index(schema: &Schema, role: Role) -> Option<usize> {
+    role_sensor(schema, role).and_then(|id| index_of(schema, id))
 }
 
-fn cpu_temperature(schema: &Schema) -> Option<usize> {
-    CPU_TEMPERATURES.iter().find_map(|id| index_of(schema, id))
+/// The GPU temperature of a dedicated GPU. `role_sensor` falls back to an
+/// integrated GPU when it is alone; the tray prefers the CPU in that case.
+fn dedicated_gpu_temperature(schema: &Schema) -> Option<usize> {
+    role_index(schema, Role::GpuTemperature).filter(|&index| {
+        schema
+            .devices
+            .iter()
+            .find(|device| device.id == schema.sensors[index].device_id)
+            .is_some_and(|device| {
+                device.properties.get("integrated").map(String::as_str) != Some("true")
+            })
+    })
 }
 
 fn icon_index(schema: &Schema, chosen: Option<&str>) -> Option<usize> {
     chosen
         .and_then(|id| index_of(schema, id))
         .or_else(|| dedicated_gpu_temperature(schema))
-        .or_else(|| cpu_temperature(schema))
-        .or_else(|| index_of(schema, CPU_LOAD))
+        .or_else(|| role_index(schema, Role::CpuTemperature))
+        .or_else(|| role_index(schema, Role::CpuLoad))
 }
 
 /// The sensor shown on the icon: `chosen` when the schema has it, otherwise
@@ -147,9 +147,10 @@ impl Resolved {
             revision: schema.revision,
             chosen: chosen.map(str::to_owned),
             icon: icon_index(schema, chosen),
-            cpu: cpu_temperature(schema).or_else(|| index_of(schema, CPU_LOAD)),
+            cpu: role_index(schema, Role::CpuTemperature)
+                .or_else(|| role_index(schema, Role::CpuLoad)),
             gpu: dedicated_gpu_temperature(schema),
-            ram: index_of(schema, MEMORY_LOAD),
+            ram: role_index(schema, Role::RamLoad),
         }
     }
 

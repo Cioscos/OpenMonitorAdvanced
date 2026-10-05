@@ -21,6 +21,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  OverlayStatus,
   UpdateStatus,
 } from '../types';
 
@@ -115,6 +116,16 @@ export interface Backend {
    * keys) and their presses ignored; false registers them again.
    */
   setLogHotkeysSuspended(suspended: boolean): Promise<void>;
+  /** The overlay's current status; null where the shell has no overlay (off Windows). */
+  getOverlayStatus(): Promise<OverlayStatus | null>;
+  /** Emitted at every change, already in order: the last event is the newest status. */
+  onOverlayStatus(cb: (status: OverlayStatus) => void): Promise<Unsubscribe>;
+  /** «Try again» on a failed frame engine or overlay process; the outcome arrives as an event. */
+  overlayRetry(): Promise<void>;
+  /** Reads the profile folder again; the new catalog arrives as an event. */
+  overlayReloadProfiles(): Promise<void>;
+  /** Hides or shows the overlay like the hotkey and the tray (not saved); the outcome arrives as an event. */
+  setOverlayHidden(hidden: boolean): Promise<void>;
   /** Asks GitHub for the latest release now; replies with the resulting status (rejects only if the background task panics). */
   checkUpdates(): Promise<UpdateStatus>;
   getUpdateStatus(): Promise<UpdateStatus>;

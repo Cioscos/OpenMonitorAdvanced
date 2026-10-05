@@ -228,7 +228,7 @@ Da quali colonne del CSV derivano i campi (SD3), senza altri campi:
   - i nostri processi (confermato dallo spike, SD11: la finestra dell'overlay presenta come ogni altra);
   - `dwm.exe` e i processi di sistema noti (SD11: `dwm.exe` presenta come `Hardware: Legacy Flip` quando c'è una finestra sopra il gioco);
   - l'elenco «non mostrare l'overlay in questo gioco» (§5.6).
-- **Tolleranza:** se il bersaglio perde il primo piano o smette di presentare, resta tale per 3 s, per reggere alt-tab e schermate di caricamento.
+- **Tolleranza:** il bersaglio resta tale finché presenta almeno 1 FPS (molti giochi si limitano a pochi FPS senza il fuoco), anche quando una finestra o un altro gioco su un **altro monitor** prende il primo piano (decisione dell'utente del 2026-10-05, dalla verifica W1 con due monitor). Un gioco portato in primo piano sullo **stesso monitor** del bersaglio (o su un monitor sconosciuto) lo sostituisce subito, così l'alt-tab fra due giochi su un solo schermo funziona. Se smette di presentare, il gioco in primo piano lo sostituisce subito; senza un gioco in primo piano resta per 3 s, per reggere alt-tab e schermate di caricamento.
 - **Finestra del gioco:** la finestra principale in primo piano del PID; la sua posizione si segue con `EVENT_OBJECT_LOCATIONCHANGE`, filtrato su quella finestra.
 - **Swapchain:** fra quelle del bersaglio si usa quella con più frame mostrati nell'ultimo secondo (`oma-core::frames`).
 
@@ -293,7 +293,7 @@ I risultati vanno in `docs/superpowers/references/m7/spike-findings.md`; le corr
 - **Disegno:** contenuto composto con DirectComposition su una swapchain `DXGI_ALPHA_MODE_PREMULTIPLIED` (D3D11 + Direct2D), senza `UpdateLayeredWindow`.
 - **DPI:** Per-Monitor v2.
 - **Nascondi alla cattura:** con `hideFromCapture`, `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`; dove non è supportato (Windows 10 prima della 2004), `WDA_MONITOR` e una riga nel log.
-- **Visibilità:** `SW_HIDE` quando non c'è un bersaglio, quando l'utente nasconde l'overlay, quando il gioco è nell'elenco escluso e quando l'overlay è spento.
+- **Visibilità:** `SW_HIDE` quando non c'è un bersaglio, quando un'altra finestra in primo piano sta sullo stesso monitor del gioco (su un altro monitor l'overlay resta sul gioco), quando l'utente nasconde l'overlay, quando il gioco è nell'elenco escluso e quando l'overlay è spento.
 
 ### 5.2 Disegno
 
@@ -529,7 +529,7 @@ Si aggiungono a `docs/perf-budget.md` e si misurano con `measure-footprint.ps1`,
 |---|---|
 | Overlay spento | nessun processo in più, costo invariato |
 | Overlay acceso, nessun gioco | PresentMon + `oma-overlay` < 0,5% della CPU totale; `oma-overlay` < 40 MB privati |
-| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB |
+| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 70 MB (alzato da 40 MB il 2026-10-05, verifica W8: il driver di una GPU discreta costa da solo circa 51 MB al dispositivo D3D11, vedi `docs/perf-budget.md`) |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) |
 
 Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,05% della CPU totale, con 5–6,5 MB privati; il lavoro di lettura nel servizio è stimato dallo 0,04% allo 0,1% (sonda dello spike). I limiti della tabella restano invariati. Il ritardo dei dati (SD7) è di solito 200–400 ms dalla presentazione all'arrivo, con buchi occasionali fino a circa 2,3 s: l'overlay disegna per tempo del dato. Se un limite non si rispetta, il piano se ne occupa prima del merge.

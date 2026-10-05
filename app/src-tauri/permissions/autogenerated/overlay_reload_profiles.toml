@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-reload-profiles"
+description = "Enables the overlay_reload_profiles command without any pre-configured scope."
+commands.allow = ["overlay_reload_profiles"]
+
+[[permission]]
+identifier = "deny-overlay-reload-profiles"
+description = "Denies the overlay_reload_profiles command without any pre-configured scope."
+commands.deny = ["overlay_reload_profiles"]

@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M7a).
+Updated at the end of every milestone (last update: M7c).
 
 ## Open: code
 
@@ -247,13 +247,43 @@ Open: after the setup rebuild, extend the real-lister test in `scripts/tests/Ver
 
 Known, by design: a service that crashes (or is killed) leaves the `OpenMonitorAdvanced-Frames` ETW session running, with PresentMon's buffers (up to 1024 × 64 KB), until the next service start (which stops it by name) or the uninstall (`logman stop OpenMonitorAdvanced-Frames -ets`).
 
-Before M7c (review of the M7b branch, 2026-10-05):
+The five "Before M7c" items from the review of the M7b branch are closed: see "Closed in M7c".
 
-- Stutter median: computed from scratch for each window, O(n·w·log w); make it incremental before the overlay shows it every frame.
-- Sessions subscribed with `Enabled=false` still start the hub's timers and get empty summaries every second; with no session enabled the hub should stay idle (spec M7 §11, cost unchanged when the feature is off).
-- After a gap, rows beyond 512 per batch tick are dropped (`Dropped`); a bounded backlog would let the app catch up instead.
-- M7c UI: the retry after `failed` (`crashing`) must send `enabled: false` and then `enabled: true`.
-- `oma_core::frames::synthetic()`: add input guards (FPS, factors, seeds out of range) before the M7d editor preview feeds it user values.
+## Open: overlay (M7c)
+
+Items left open by the M7c reviews (plan `docs/superpowers/plans/` M7c, tasks C1-C19).
+
+- The overlay client could also check the pipe server's PID against its parent process (`GetNamedPipeServerProcessId`), mirroring the app's check on the child. `crates/oma-overlay/src/link.rs`; when touched.
+- Pipe handoff when a process of the same user reuses the child's PID (C8 security review, M1): the user is outside the threat model and the data are only sensors and profiles; harden it with a nonce passed on the child's stdin. `app/src-tauri/src/overlay/host.rs`; before 1.0.
+- `meter` and `gauge` blocks with an automatic full scale: the peak never decays, so after a single spike the scale stays wide. `crates/oma-overlay/src/render/`; with the editor (M7d).
+- Cost of the `EVENT_OBJECT_LOCATIONCHANGE` events followed for the game window: not measured in C20 (W8 ran with a still window; W6 moved it without a measure). `crates/oma-win` (foreground); with M7d.
+- Frame state `starting` on an idle desktop: not checked explicitly in C20. App (`overlay/controller.rs`) and service (`FrameCapture`); with M7d.
+- Overlay memory: shown in game it uses 56-65 MB private, almost all the discrete GPU driver (D3D11 device about 51 MB); the in-game limit was raised from 40 to 70 MB by the user "this once" (W8). WARP would stay at about 3 MB with nearly the same CPU on a small window; the integrated GPU does not help when the screen is on the discrete one (both drivers load, 78-87 MB). Measure WARP at high scale before switching. `crates/oma-overlay/src/compose.rs`; when memory matters again.
+- A foreground window already gone when the runner reads its monitor (the alt-tab switcher) counts as on the game's monitor: the overlay can hide for one step and show again. The desktop window spans all monitors, so a click on the wallpaper of the other monitor may hide the overlay. `app/src-tauri/src/overlay/runner.rs` and `controller.rs`; when touched.
+- The app log names the foreground executable at each focus change while the overlay is on (diagnostics added in C20): consider debug level before 1.0, since users attach logs to reports. `app/src-tauri/src/overlay/runner.rs`.
+- Any change to `gameProfiles` (even for another game) ends the *Next profile* choice. `app/src-tauri/src/overlay/controller.rs`; if users notice.
+- Exclusive-fullscreen notice (DP16) not verified live: Control in DX12 never reports a `Legacy` present mode. Needs a DX9/DX11 game in true exclusive fullscreen.
+- Not tried live: God of War 2018 (DX11), a Vulkan and an OpenGL game with the overlay (W1).
+- `FrameReadout::read()` with low windows of up to 300 s requested by a profile: the per-tick cost on long windows is unmeasured (no built-in profile uses them). `crates/oma-core/src/frames/readout.rs`; with the editor (M7d), which lets users pick them.
+- Overlay settings UI: errors from *Try again* and *Reload profiles* are swallowed without a message. `app/src/components/settings/OverlaySection.svelte`; when touched.
+
+## Manual checks after M7c
+
+The live checks of the M7c plan (Task C20, W1-W9) are done (2026-10-05, local 0.4.1 setups rebuilt after each fix, last from `8c6fb8d`, SHA-256 `7564952d...6ad4a`; Control Resonant DX12, RTX 4080, two monitors). All passed, some after fixes; results in the plan's «Esito dell'esecuzione» and the budget numbers in `docs/perf-budget.md`.
+
+- W1: FPS match the Steam overlay; GPU % and VRAM are lower than Steam's by method (busiest engine as Task Manager; NVML v2 without the driver reserve). Fixed: a terminal on the second monitor took the overlay away from the game.
+- W3: fixed the «Minimal FPS» label and the *Next profile* choice outliving a settings change.
+- W7: fixed the overlay staying hidden after alt-tab (late foreground event of the switcher).
+- W8: overlay 0.39 % CPU and 65.1 MB in game, CPU total 0.65 % < 1 %; memory limit raised to 70 MB.
+
+## Manual checks owed after M7c
+
+The overlay's installer paths, on a setup built with C19 (in a VM or Windows Sandbox, or by the user; never by an agent on this PC):
+
+- Fresh install: `C:\Program Files\OpenMonitor Advanced\oma-overlay.exe` present, with the product name and version in its properties.
+- Upgrade over a running app with the overlay visible over a game: the setup stops the overlay (`OMA_STOP_OVERLAY` in `OmaCloseApp`), copies the new one without a Retry/Ignore prompt, and the reopened app starts it again.
+- Uninstall: `oma-overlay.exe` is removed (or scheduled for removal at the next restart if it was locked); with the service stop failing, no file is deleted, the overlay included.
+- `scripts/verify-signatures.ps1 -Policy none` on the new setup: exactly one `oma-overlay.exe`, with the collect-pass hash and the product metadata.
 
 ## Manual checks after M7a
 
@@ -319,6 +349,14 @@ To settle on the first signed run (deferred from the M6a reviews):
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M7c
+
+- Live checks C20: target kept across monitors (`7b908b6`, `829dab4`), «Minimal FPS» label, settings ending the profile choice and the hidden-overlay row (`c0c90dd`), foreground taken from Windows and checked every second (`d3edbef`), diagnostic log lines (`83a006d`, `504dc1a`).
+
+- Frame hub idle when no session is enabled (no timers and no empty summaries with `Enabled=false`), and a bounded backlog for the rows beyond 512 per tick instead of counting them in `Dropped`: task C1 (`e6c2859`).
+- Stutter median computed incrementally instead of from scratch for each window, and input guards in `oma_core::frames::synthetic()` (FPS, factors and seeds out of range): task C2 (`4572f04`).
+- *Try again* after `failed` (`crashing`): the overlay controller sends `enabled: false` and then `enabled: true` (test `retry_after_failed_sends_disabled_then_enabled`): task C15 (`200f5e9`).
 
 ## Closed in M7a
 

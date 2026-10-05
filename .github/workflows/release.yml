@@ -95,15 +95,16 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Publishes oma-service (trim gate) and fetches the pinned, signature-checked PawnIO setup
-      # and PresentMon console.
+      # Publishes oma-service (trim gate), builds oma-overlay (cargo --locked) and fetches the
+      # pinned, signature-checked PawnIO setup and PresentMon console.
       - name: Build installer payload
         run: |
           ./scripts/build-installer-payload.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Recreates target/signing empty (never cached, never reused) and records the payload
-      # service. The run context comes from GitHub, not from the manifest being checked.
+      # Recreates target/signing empty (never cached, never reused) and records the two payload
+      # executables, service and overlay. The run context comes from GitHub, not from the
+      # manifest being checked.
       - name: Initialise the signing state
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -112,9 +113,11 @@ jobs:
           $context = @{ Commit = $env:GITHUB_SHA; Version = $env:VERSION; RunId = $env:GITHUB_RUN_ID; RunAttempt = $env:GITHUB_RUN_ATTEMPT }
           ./scripts/sign-shim.ps1 -Mode init -StateRoot $state @context
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $service = Join-Path $env:GITHUB_WORKSPACE 'target\installer-payload\service\oma-service.exe'
-          ./scripts/sign-shim.ps1 -Mode register-service -StateRoot $state -Path $service @context
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe') {
+            $exe = Join-Path $env:GITHUB_WORKSPACE "target\installer-payload\$rel"
+            ./scripts/sign-shim.ps1 -Mode register-payload -StateRoot $state -Path $exe @context
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       # First pass (plan L8): the shim collects the patched oma-app.exe and the uninstaller. From
       # pwsh a bare -- is eaten by pnpm.ps1, so it is quoted; the -v log must show that cargo
@@ -164,7 +167,7 @@ jobs:
           $setup = New-Item -ItemType Directory -Path (Join-Path $root 'returned-setup')
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "returned-binaries=$($binaries.FullName)", "returned-setup=$($setup.FullName)"
 
-      # Flat ZIP: the three files share one folder, so they sit at the root of the artifact.
+      # Flat ZIP: the four files share one folder, so they sit at the root of the artifact.
       - name: Upload the binaries to sign
         id: upload-binaries
         if: steps.pre.outputs.signing == 'enabled'
@@ -175,6 +178,7 @@ jobs:
             target/signing/unsigned/oma-app.exe
             target/signing/unsigned/uninstall.exe
             target/signing/unsigned/oma-service.exe
+            target/signing/unsigned/oma-overlay.exe
           if-no-files-found: error
 
       # Same inputs as sign-setup except the artifact id, the configuration and the output folder.
@@ -196,7 +200,7 @@ jobs:
           parameters: |
             version: ${{ toJSON(steps.version.outputs.version) }}
 
-      # Before anything uses them: exactly the three files, each signed with the approved
+      # Before anything uses them: exactly the four files, each signed with the approved
       # certificate of the policy, timestamped, with the expected product metadata.
       - name: Verify the signed binaries
         if: steps.pre.outputs.signing == 'enabled'
@@ -216,19 +220,23 @@ jobs:
           ./scripts/sign-shim.ps1 -Mode import-signed -StateRoot (Join-Path $env:GITHUB_WORKSPACE 'target\signing') -From $env:RETURNED_BINARIES
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # oma-service.exe does not pass through Tauri: the NSIS script takes it from the payload.
-      - name: Put the signed service into the payload
+      # oma-service.exe and oma-overlay.exe do not pass through Tauri: the NSIS script takes
+      # them from the payload.
+      - name: Put the signed service and overlay into the payload
         if: steps.pre.outputs.signing == 'enabled'
         run: |
           Import-Module ./scripts/lib/OmaCommon.psm1
           $state = Join-Path $env:GITHUB_WORKSPACE 'target\signing'
-          $signed = Join-Path $state 'signed\oma-service.exe'
-          $payload = Join-Path $env:GITHUB_WORKSPACE 'target\installer-payload\service\oma-service.exe'
-          $want = (Get-Content -Raw -LiteralPath (Join-Path $state 'manifest.json') | ConvertFrom-Json -AsHashtable)['signed']['oma-service.exe']
-          if (-not $want) { throw 'the manifest has no imported signed oma-service.exe' }
-          Copy-Item -LiteralPath $signed -Destination $payload -Force
-          $got = Get-OmaSha256 $payload
-          if ($got -ne $want) { throw "payload oma-service.exe has SHA-256 $got, expected the signed $want" }
+          $signedHashes = (Get-Content -Raw -LiteralPath (Join-Path $state 'manifest.json') | ConvertFrom-Json -AsHashtable)['signed']
+          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe') {
+            $name = Split-Path -Leaf $rel
+            $want = $signedHashes[$name]
+            if (-not $want) { throw "the manifest has no imported signed $name" }
+            $payload = Join-Path $env:GITHUB_WORKSPACE "target\installer-payload\$rel"
+            Copy-Item -LiteralPath (Join-Path $state "signed\$name") -Destination $payload -Force
+            $got = Get-OmaSha256 $payload
+            if ($got -ne $want) { throw "payload $name has SHA-256 $got, expected the signed $want" }
+          }
 
       # Second pass: no recompilation; the shim checks that the app and the uninstaller are the
       # collected ones, byte for byte, and swaps in the signed copies.

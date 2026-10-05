@@ -2,7 +2,8 @@
 # Two-pass signing shim behind Tauri's bundle.windows.signCommand (spec M6a §3.2, plan L2/L9).
 #
 # collect (tauri build):  copies the patched oma-app.exe and the NSIS uninstaller to unsigned/,
-#                         records the setup and leaves the NSIS plugins alone;
+#                         records the setup and leaves the NSIS plugins alone; register-payload
+#                         adds oma-service.exe and oma-overlay.exe from the installer payload;
 # apply   (tauri bundle): checks that app and uninstaller are byte for byte what collect saw and
 #                         overwrites them with the signed copies imported into signed/.
 # Everything is recorded in <StateRoot>/manifest.json. The recognition rules below hold for
@@ -16,7 +17,10 @@ Import-Module (Join-Path $PSScriptRoot 'OmaPawnIoPins.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OmaPresentMonPins.psm1')
 
 $ProductName = 'OpenMonitor Advanced'
-$SignedNames = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe')
+$SignedNames = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe')
+# The executables of target\installer-payload that NSIS embeds without passing them to
+# signCommand (register-payload): manifest key and role, then file name.
+$PayloadExes = [ordered]@{ service = 'oma-service.exe'; overlay = 'oma-overlay.exe' }
 # The five plugins the Tauri NSIS bundler passes to signCommand (spec §3.1); third-party code,
 # never modified and never sent to SignPath.
 $PluginNames = @('NSISdl.dll', 'StartMenu.dll', 'System.dll', 'nsDialogs.dll', 'additional\nsis_tauri_utils.dll')
@@ -231,6 +235,7 @@ function Initialize-OmaSigningState {
             setupDir  = Join-Path $repo 'target\release\bundle\nsis'
             setupName = "${ProductName}_${Version}_x64-setup.exe"
             service   = Join-Path $repo 'target\installer-payload\service\oma-service.exe'
+            overlay   = Join-Path $repo 'target\installer-payload\overlay\oma-overlay.exe'
         }
         collect    = @()
         apply      = @()
@@ -322,10 +327,11 @@ function Invoke-OmaSignShim {
 
 <#
 .SYNOPSIS
-  Records the payload oma-service.exe (role 'service') in the collect pass and copies it to unsigned/.
-  Same run context checks as Invoke-OmaSignShim.
+  Records one payload executable in the collect pass and copies it to unsigned/: oma-service.exe
+  (role 'service') or oma-overlay.exe (role 'overlay'), each only at its expected path under
+  target\installer-payload. Same run context checks as Invoke-OmaSignShim.
 #>
-function Register-OmaService {
+function Register-OmaPayload {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$StateRoot,
@@ -338,14 +344,20 @@ function Register-OmaService {
     Assert-OmaGitHubContext $m
     Assert-OmaCollectOpen $m
     $p = Resolve-OmaPath $Path
-    if ($p -ine $m['expected']['service']) { throw "unexpected service path: $Path (expected $($m['expected']['service']))" }
-    if (@(Get-OmaEntries $m['collect'] 'service').Count -gt 0) { throw 'duplicate service call' }
-    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "service not found: $p" }
+    $role = @($PayloadExes.Keys | Where-Object { $p -ieq $m['expected'][$_] })
+    if ($role.Count -ne 1) {
+        $wanted = @($PayloadExes.Keys | ForEach-Object { $m['expected'][$_] }) -join ' or '
+        throw "unexpected payload path: $Path (expected $wanted)"
+    }
+    $role = $role[0]
+    $name = $PayloadExes[$role]
+    if (@(Get-OmaEntries $m['collect'] $role).Count -gt 0) { throw "duplicate $role call" }
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "$role not found: $p" }
     $sha = Get-OmaSha256 $p
-    $copy = Join-Path $state 'unsigned\oma-service.exe'
+    $copy = Join-Path $state "unsigned\$name"
     Copy-OmaFile $p $copy
-    if ((Get-OmaSha256 $copy) -ne $sha) { throw 'the copy of oma-service.exe in unsigned/ does not match the payload' }
-    $entry = New-OmaEntry 'service' $p 'oma-service.exe' $sha (Get-OmaSha256 $p)
+    if ((Get-OmaSha256 $copy) -ne $sha) { throw "the copy of $name in unsigned/ does not match the payload" }
+    $entry = New-OmaEntry $role $p $name $sha (Get-OmaSha256 $p)
     $m['collect'] = @($m['collect']) + @($entry)
     Write-OmaManifest $state $m
     [pscustomobject]$entry
@@ -353,9 +365,9 @@ function Register-OmaService {
 
 <#
 .SYNOPSIS
-  Copies the three signed files from -From into signed/ and records their hashes.
+  Copies the four signed files from -From into signed/ and records their hashes.
 .DESCRIPTION
-  -From must hold exactly oma-app.exe, uninstall.exe and oma-service.exe, nothing more and
+  -From must hold exactly oma-app.exe, uninstall.exe, oma-service.exe and oma-overlay.exe, nothing more and
   nothing less. Signature verification is separate (verify-signatures.ps1) and runs before.
 #>
 function Import-OmaSignedFiles {
@@ -379,7 +391,7 @@ function Import-OmaSignedFiles {
     if ($m['signed'].Count -gt 0 -or @(Get-ChildItem -LiteralPath $signedDir -Force).Count -gt 0) {
         throw 'signed files are already imported'
     }
-    foreach ($role in 'app', 'uninstaller', 'service') {
+    foreach ($role in 'app', 'uninstaller', 'service', 'overlay') {
         if (@(Get-OmaEntries $m['collect'] $role).Count -ne 1) { throw "cannot import signed files: the collect pass has no $role" }
     }
     $signed = [ordered]@{}
@@ -399,8 +411,8 @@ function Import-OmaSignedFiles {
 .DESCRIPTION
   The run context (GITHUB_SHA, validated version, run id/attempt) and the repository root come
   from the caller, never from the manifest being checked; the manifest's expected paths are
-  rebuilt from them. collect needs one app, uninstaller, setup and service; apply one app,
-  uninstaller and setup. Both need one call for each of the five NSIS plugins, intact.
+  rebuilt from them. collect needs one app, uninstaller, setup, service and overlay; apply one
+  app, uninstaller and setup. Both need one call for each of the five NSIS plugins, intact.
   -RepoRoot and -ExpectedContext are required (checked here, so a missing one fails instead of
   prompting).
 #>
@@ -426,6 +438,7 @@ function Assert-OmaSigningPass {
         setupDir  = Join-Path $repo 'target\release\bundle\nsis'
         setupName = "${ProductName}_$($ExpectedContext.Version)_x64-setup.exe"
         service   = Join-Path $repo 'target\installer-payload\service\oma-service.exe'
+        overlay   = Join-Path $repo 'target\installer-payload\overlay\oma-overlay.exe'
     }
     foreach ($k in $want.Keys) {
         $same = if ($k -eq 'setupName') { [string]$exp[$k] -ceq $want[$k] } else { [string]$exp[$k] -ieq $want[$k] }
@@ -433,12 +446,14 @@ function Assert-OmaSigningPass {
     }
 
     $entries = $m[$Pass]
-    $required = if ($Pass -eq 'collect') { 'app', 'uninstaller', 'setup', 'service' } else { 'app', 'uninstaller', 'setup' }
+    $required = if ($Pass -eq 'collect') { 'app', 'uninstaller', 'setup', 'service', 'overlay' } else { 'app', 'uninstaller', 'setup' }
     foreach ($role in $required) {
         $n = @(Get-OmaEntries $entries $role).Count
         if ($n -ne 1) { throw "check ${Pass}: expected exactly one $role call, found $n" }
     }
-    if ($Pass -eq 'apply' -and @(Get-OmaEntries $entries 'service').Count -gt 0) { throw 'check apply: the service is not part of the apply pass' }
+    foreach ($role in $PayloadExes.Keys) {
+        if ($Pass -eq 'apply' -and @(Get-OmaEntries $entries $role).Count -gt 0) { throw "check apply: the $role is not part of the apply pass" }
+    }
     foreach ($plugin in $PluginNames) {
         $n = @(Get-OmaEntries $entries 'plugin' $plugin).Count
         if ($n -ne 1) { throw "check ${Pass}: expected exactly one call for plugin $plugin, found $n" }
@@ -455,7 +470,7 @@ function Assert-OmaSigningPass {
     if (($unsigned -join '|') -ne (($SignedNames | Sort-Object) -join '|')) {
         throw "check ${Pass}: unsigned/ must hold exactly $($SignedNames -join ', '); found $($unsigned -join ', ')"
     }
-    foreach ($role in 'app', 'uninstaller', 'service') {
+    foreach ($role in 'app', 'uninstaller', 'service', 'overlay') {
         $c = @(Get-OmaEntries $m['collect'] $role)
         if ($c.Count -ne 1) { throw "check ${Pass}: the collect pass has no $role" }
         $h = Get-OmaSha256 (Join-Path $unsignedDir $c[0]['name'])
@@ -500,7 +515,7 @@ function Assert-OmaSigningPass {
 # scripts/verify-signatures.ps1 exposes no way to replace them.
 
 $script:SignPathFoundationCn = 'SignPath Foundation'
-$script:OwnPayloadNames = @('oma-app.exe', 'oma-service.exe')
+$script:OwnPayloadNames = @('oma-app.exe', 'oma-service.exe', 'oma-overlay.exe')
 # Intel's PresentMon console, shipped unmodified with the service (M7b): checked against its own
 # pins, never against our signing policy.
 $script:PresentMonName = 'PresentMon-2.6.0-x64.exe'
@@ -838,7 +853,8 @@ function Test-OmaSignature {
 .DESCRIPTION
   Formats recorded by the spike: ProductName 'OpenMonitor Advanced' and ProductVersion 'X.Y.Z'
   everywhere; FileVersion 'X.Y.Z' for the app, the uninstaller and the setup (Tauri/NSIS) and
-  'X.Y.Z.0' for oma-service.exe (.NET). -Name is the file name used in the messages and to
+  'X.Y.Z.0' for oma-service.exe (.NET); oma-overlay.exe has 'X.Y.Z' like the app (tauri-winres
+  in crates/oma-overlay/build.rs). -Name is the file name used in the messages and to
   recognise the service. Returns the problems.
 #>
 function Test-OmaVersionInfo {
@@ -890,7 +906,7 @@ function Get-OmaSingleEntry($List, [string]$Role, [string]$Pass) {
   Verifies a setup against the signing manifest and a policy; returns the problems.
 .DESCRIPTION
   All policies: non-empty setup, the manifest of this version, the 7-Zip archive listing and
-  extraction (exit codes checked), exactly one oma-app.exe, oma-service.exe, PawnIO_setup.exe and
+  extraction (exit codes checked), exactly one oma-app.exe, oma-service.exe, oma-overlay.exe, PawnIO_setup.exe and
   PresentMon-2.6.0-x64.exe among the listed entries (so two entries at the same path fail),
   PawnIO with the pinned hash, status Valid and pinned signer (OmaPawnIoPins.psm1), PresentMon
   with the pinned hash, status Valid and the Intel signer (OmaPresentMonPins.psm1), and the
@@ -948,7 +964,7 @@ function Test-OmaPayload {
 
     # What the extracted payload must match: the signed copies, or the collect pass when unsigned.
     $want = @{}
-    foreach ($pair in @(@('app', 'oma-app.exe'), @('uninstaller', 'uninstall.exe'), @('service', 'oma-service.exe'))) {
+    foreach ($pair in @(@('app', 'oma-app.exe'), @('uninstaller', 'uninstall.exe'), @('service', 'oma-service.exe'), @('overlay', 'oma-overlay.exe'))) {
         if ($signedPolicy) {
             $sha = [string]$m['signed'][$pair[1]]
             if (-not $sha) { $problems.Add("the manifest has no imported signed copy of $($pair[1])") }
@@ -1078,7 +1094,7 @@ function Test-OmaPayload {
 .SYNOPSIS
   Verifies the signed files returned by SignPath before they are imported; returns the problems.
 .DESCRIPTION
-  The directory must hold exactly oma-app.exe, uninstall.exe and oma-service.exe. Each must pass
+  The directory must hold exactly oma-app.exe, uninstall.exe, oma-service.exe and oma-overlay.exe. Each must pass
   Test-OmaSignature and Test-OmaVersionInfo. Hashes are not compared here: the signed copies are
   not in the manifest until import-signed records them.
 #>
@@ -1116,7 +1132,7 @@ function Test-OmaSignedFiles {
     $problems.ToArray()
 }
 
-Export-ModuleMember -Function Initialize-OmaSigningState, Invoke-OmaSignShim, Register-OmaService,
+Export-ModuleMember -Function Initialize-OmaSigningState, Invoke-OmaSignShim, Register-OmaPayload,
     Import-OmaSignedFiles, Assert-OmaSigningPass, Get-OmaPluginPathPattern,
     Assert-OmaVersionString, Test-OmaVersionInfo, Test-OmaSignature, Test-OmaPayload, Test-OmaSignedFiles,
     Get-OmaSignToolPath, Get-OmaEmbeddedSignature, Get-OmaCertificateChain, Get-Oma7ZipPath, ConvertFrom-Oma7ZipListing,

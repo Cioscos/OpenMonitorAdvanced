@@ -7,19 +7,21 @@
     init              recreates the empty state under <repo>\target\ and writes manifest.json,
                       tauri.sign.collect.json and tauri.sign.apply.json (needs the run context);
     collect | apply   one signCommand call (-Path %1), from the generated Tauri configs;
-    register-service  records target\installer-payload\service\oma-service.exe in collect;
-    import-signed     copies exactly the three signed files from -From into signed/;
+    register-payload  records one payload exe in collect: target\installer-payload\service\oma-service.exe
+                      or target\installer-payload\overlay\oma-overlay.exe (one call each);
+    import-signed     copies exactly the four signed files from -From into signed/;
     check             gate after a bundle (-Pass collect|apply, needs the run context).
 
     pwsh scripts/sign-shim.ps1 -Mode init -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     cd app; pnpm tauri build --bundles nsis --config ../target/signing/tauri.sign.collect.json -v '--' --locked
-    pwsh scripts/sign-shim.ps1 -Mode register-service -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\service\oma-service.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
+    pwsh scripts/sign-shim.ps1 -Mode register-payload -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\service\oma-service.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
+    pwsh scripts/sign-shim.ps1 -Mode register-payload -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\overlay\oma-overlay.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     pwsh scripts/sign-shim.ps1 -Mode check -Pass collect -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
 
   The run context (-Commit, -Version, -RunId, -RunAttempt) comes from the caller, never from the
   manifest being checked, and every mode but import-signed requires it (the generated configs
   pass it to collect/apply). In GitHub Actions (GITHUB_ACTIONS=true) collect, apply and
-  register-service also compare the manifest with GITHUB_SHA, GITHUB_RUN_ID and
+  register-payload also compare the manifest with GITHUB_SHA, GITHUB_RUN_ID and
   GITHUB_RUN_ATTEMPT, and fail if any is missing. check compares the manifest's repository root
   with -RepoRoot (default: the repository holding this script). Paths must be absolute: Tauri
   runs the shim from app\src-tauri, makensis from target\release\nsis\x64.
@@ -30,7 +32,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('init', 'collect', 'apply', 'register-service', 'import-signed', 'check')]
+    [ValidateSet('init', 'collect', 'apply', 'register-payload', 'import-signed', 'check')]
     [string]$Mode,
     [string]$StateRoot,
     [string]$Path,
@@ -75,10 +77,10 @@ try {
                 Write-Output "sign-shim ${Mode}: $($e.role) $($e.name) $($e.sha256) -> $($e.after)"
             }
         }
-        'register-service' {
+        'register-payload' {
             Assert-Given 'Path' $Path
-            $e = Register-OmaService -StateRoot $StateRoot -Path $Path -ExpectedContext (Get-RunContext)
-            Write-Output "sign-shim register-service: $($e.name) $($e.sha256)"
+            $e = Register-OmaPayload -StateRoot $StateRoot -Path $Path -ExpectedContext (Get-RunContext)
+            Write-Output "sign-shim register-payload: $($e.name) $($e.sha256)"
         }
         'import-signed' {
             Assert-Given 'From' $From

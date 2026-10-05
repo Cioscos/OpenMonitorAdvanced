@@ -25,6 +25,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  OverlayStatus,
   UpdateStatus,
 } from '../lib/types';
 import defaultRulesFixture from './fixtures/default-rules.json';
@@ -46,6 +47,28 @@ export function makeLogStatus(over: Partial<LogStatus> = {}): LogStatus {
     dropped: 0,
     error: null,
     hotkeys: { toggle: { ...NO_HOTKEY }, pause: { ...NO_HOTKEY } },
+    ...over,
+  };
+}
+
+/** An overlay status for tests: off, no game, the four built-in profiles; override what matters. */
+export function makeOverlayStatus(over: Partial<OverlayStatus> = {}): OverlayStatus {
+  return {
+    enabled: false,
+    process: 'off',
+    processReason: null,
+    frames: 'off',
+    framesDetail: null,
+    target: null,
+    activeProfile: null,
+    profiles: ['builtin-minimal-fps', 'builtin-gaming', 'builtin-full', 'builtin-bar'].map((id) => ({
+      id,
+      name: `overlay.template.${id}`,
+      builtin: true,
+    })),
+    diagnostics: [],
+    hiddenByUser: false,
+    hotkeys: { toggle: { ...NO_HOTKEY }, nextProfile: { ...NO_HOTKEY } },
     ...over,
   };
 }
@@ -127,6 +150,10 @@ export class FakeBackend implements Backend {
   openLogFolderError: string | null = null;
   /** What `pickLogFolder` returns. */
   pickedLogFolder: string | null = null;
+  /** What `getOverlayStatus` returns; `emitOverlayStatus` replaces it and notifies listeners. */
+  overlayStatus: OverlayStatus = makeOverlayStatus();
+  /** Every overlay call in order (`onOverlayStatus`, `getOverlayStatus`, `overlayRetry`, ...). */
+  overlayCalls: string[] = [];
   /** Every `setLogHotkeysSuspended` call, in order. */
   hotkeySuspensions: boolean[] = [];
   /** What `getUpdateStatus` returns; `emitUpdateStatus` replaces it and notifies listeners. */
@@ -145,6 +172,7 @@ export class FakeBackend implements Backend {
   revealSensorReportCalls = 0;
   #updateListeners = new Set<(s: UpdateStatus) => void>();
   #logListeners = new Set<(s: LogStatus) => void>();
+  #overlayListeners = new Set<(s: OverlayStatus) => void>();
   /** What `getDiskStates` answers. */
   diskStates: DiskStateEntry[] = [];
   #diskListeners = new Set<(s: DiskStateEntry[]) => void>();
@@ -384,6 +412,29 @@ export class FakeBackend implements Backend {
     this.hotkeySuspensions.push(suspended);
   }
 
+  async getOverlayStatus(): Promise<OverlayStatus | null> {
+    this.overlayCalls.push('getOverlayStatus');
+    return this.overlayStatus;
+  }
+
+  async onOverlayStatus(cb: (s: OverlayStatus) => void): Promise<Unsubscribe> {
+    this.overlayCalls.push('onOverlayStatus');
+    this.#overlayListeners.add(cb);
+    return () => this.#overlayListeners.delete(cb);
+  }
+
+  async overlayRetry(): Promise<void> {
+    this.overlayCalls.push('overlayRetry');
+  }
+
+  async overlayReloadProfiles(): Promise<void> {
+    this.overlayCalls.push('overlayReloadProfiles');
+  }
+
+  async setOverlayHidden(hidden: boolean): Promise<void> {
+    this.overlayCalls.push(`setOverlayHidden:${hidden}`);
+  }
+
   async checkUpdates(): Promise<UpdateStatus> {
     this.checkUpdatesCalls++;
     if (this.checkError !== null) throw this.checkError;
@@ -427,6 +478,16 @@ export class FakeBackend implements Backend {
   emitLogStatus(status: LogStatus): void {
     this.logStatus = status;
     this.#logListeners.forEach((cb) => cb(status));
+  }
+
+  /** Number of live `overlay-status` listeners. */
+  get overlayListenerCount(): number {
+    return this.#overlayListeners.size;
+  }
+
+  emitOverlayStatus(status: OverlayStatus): void {
+    this.overlayStatus = status;
+    this.#overlayListeners.forEach((cb) => cb(status));
   }
 
   /** Delivers an arbitrary state to the `onSettings` listeners (e.g. a stale one). */

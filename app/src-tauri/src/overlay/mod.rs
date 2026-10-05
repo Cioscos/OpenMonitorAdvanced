@@ -1,6 +1,36 @@
-//! The game overlay's app side (M7). In M7b there is no overlay window yet:
-//! [`target`] picks the game to follow and [`frames`] logs its frame metrics
-//! when `OMA_FRAMES_DEBUG` asks for it.
+//! The game overlay's app side (M7): [`target`] picks the game to follow,
+//! [`controller`] decides what the frame engine and the overlay do,
+//! [`runner`] runs it on the `oma-overlay-ctl` thread with the service link,
+//! the foreground watcher and the sampler, [`forward`] builds the messages
+//! for `oma-overlay.exe`, [`host`] runs it, [`profiles`] reads the profile
+//! catalog and [`frames`] formats the `OMA_FRAMES_DEBUG` line.
 
+#[cfg(windows)]
+pub mod controller;
+pub mod forward;
 pub mod frames;
+pub mod host;
+pub mod profiles;
+#[cfg(windows)]
+pub mod runner;
 pub mod target;
+
+/// The overlay's Tauri commands off Windows, where there is no overlay.
+#[cfg(not(windows))]
+pub mod runner {
+    #[tauri::command]
+    pub fn get_overlay_status() -> Option<()> {
+        None
+    }
+
+    #[tauri::command]
+    pub fn overlay_retry() {}
+
+    #[tauri::command]
+    pub fn overlay_reload_profiles() {}
+
+    #[tauri::command]
+    pub fn set_overlay_hidden(hidden: bool) {
+        let _ = hidden;
+    }
+}

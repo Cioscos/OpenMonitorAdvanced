@@ -20,6 +20,7 @@
 !define OMA_PAYLOAD "${__FILEDIR__}\..\..\..\target\installer-payload"
 !define OMA_SERVICE_NAME "oma-service"
 !define OMA_SERVICE_EXE "oma-service.exe"
+!define OMA_OVERLAY_EXE "oma-overlay.exe"
 !define OMA_REGKEY "Software\OpenMonitorAdvanced\Installer"
 !define OMA_REGVALUE "AdvancedSensors"
 !define OMA_PAWNIO_MIN "2.2.0"
@@ -31,6 +32,11 @@
 !if /FileExists "${OMA_PAYLOAD}\service\${OMA_SERVICE_EXE}"
 !else
   !error "Missing ${OMA_PAYLOAD}\service\${OMA_SERVICE_EXE}: run scripts/build-installer-payload.ps1 first"
+!endif
+; The overlay process (M7c, plan DP7), installed next to the app in the main section.
+!if /FileExists "${OMA_PAYLOAD}\overlay\${OMA_OVERLAY_EXE}"
+!else
+  !error "Missing ${OMA_PAYLOAD}\overlay\${OMA_OVERLAY_EXE}: run scripts/build-installer-payload.ps1 first"
 !endif
 !if /FileExists "${OMA_PAYLOAD}\PawnIO_setup.exe"
 !else
@@ -75,12 +81,14 @@ Var OmaStack
   LangString omaSensorsFailed ${LANG_ENGLISH} "Advanced sensors could not be set up ($OmaDetail).$\r$\n$\r$\nSetup stopped before finishing. Run it again, or clear the Advanced sensors option to install without them."
   LangString omaSensorsNeedProgramFiles ${LANG_ENGLISH} "Advanced sensors can only be installed inside $PROGRAMFILES64, which only administrators can change ($OmaDetail).$\r$\n$\r$\nChoose a folder there, or go back and clear the Advanced sensors option (/NOSENSORS when silent)."
   LangString omaServiceRemoveFailed ${LANG_ENGLISH} "The Advanced sensors service could not be removed ($OmaDetail).$\r$\n$\r$\nNo files were deleted. Close OpenMonitor Advanced and try again."
+  LangString omaOverlayFailed ${LANG_ENGLISH} "The in-game overlay could not be installed ($OmaDetail).$\r$\n$\r$\nSetup stopped before finishing. Close OpenMonitor Advanced and run setup again."
   !ifdef LANG_ITALIAN
     LangString omaSensorsSection ${LANG_ITALIAN} "Sensori avanzati"
     LangString omaSensorsDesc ${LANG_ITALIAN} "Servizio Windows e driver PawnIO per temperature, tensioni e ventole della CPU e dati SMART, con Intel PresentMon per gli FPS dei giochi. Servono i privilegi di amministratore solo ora, durante l'installazione."
     LangString omaSensorsFailed ${LANG_ITALIAN} "Non è stato possibile configurare i sensori avanzati ($OmaDetail).$\r$\n$\r$\nL'installazione si è fermata prima della fine. Riprova, oppure togli l'opzione Sensori avanzati per installare senza."
     LangString omaSensorsNeedProgramFiles ${LANG_ITALIAN} "I sensori avanzati si possono installare solo dentro $PROGRAMFILES64, che solo gli amministratori possono modificare ($OmaDetail).$\r$\n$\r$\nScegli una cartella lì, oppure torna indietro e togli l'opzione Sensori avanzati (/NOSENSORS in modalità silenziosa)."
     LangString omaServiceRemoveFailed ${LANG_ITALIAN} "Non è stato possibile rimuovere il servizio dei sensori avanzati ($OmaDetail).$\r$\n$\r$\nNessun file è stato eliminato. Chiudi OpenMonitor Advanced e riprova."
+    LangString omaOverlayFailed ${LANG_ITALIAN} "Non è stato possibile installare l'overlay in-game ($OmaDetail).$\r$\n$\r$\nL'installazione si è fermata prima della fine. Chiudi OpenMonitor Advanced e riavvia l'installazione."
   !endif
 !macroend
 
@@ -433,11 +441,21 @@ FunctionEnd
 !macroend
 
 ; Tauri hook: end of the template's Install section, after the reinstall page
-; ran the old uninstaller (if it did) and after NSIS_HOOK_PREINSTALL. That
-; uninstaller runs without /UPDATE, so it deletes the user's start-with-Windows
-; value: put back the command OmaCloseApp read, unchanged (the app repairs the
-; path at startup if it moved). A value present now is left alone.
+; ran the old uninstaller (if it did) and after NSIS_HOOK_PREINSTALL.
+; First the overlay process (M7c, plan DP7), next to the app: OmaCloseApp closed
+; the app and stopped any running overlay before.
+; A failed copy (a locked file the user chose to ignore) ends the install, since
+; the app would start an old or missing overlay.
+; Then the start-with-Windows value: the old uninstaller runs without /UPDATE,
+; so it deletes it; put back the command OmaCloseApp read, unchanged (the app
+; repairs the path at startup if it moved). A value present now is left alone.
 !macro NSIS_HOOK_POSTINSTALL
+  SetOutPath $INSTDIR
+  ClearErrors
+  File "${OMA_PAYLOAD}\overlay\${OMA_OVERLAY_EXE}"
+  ${If} ${Errors}
+    !insertmacro OMA_FAIL "$(omaOverlayFailed)" "copy of ${OMA_OVERLAY_EXE} failed"
+  ${EndIf}
   ${If} $OmaRunValue != ""
     Push $0
     ClearErrors
@@ -456,6 +474,22 @@ FunctionEnd
 ; /S, /P and the reinstalls that skip the uninstaller; only the first call acts.
 !macro OMA_CLOSE_APP
   Call OmaCloseApp
+!macroend
+
+; Stops every running oma-overlay.exe (M7c), for any user, like the app itself
+; in OmaCloseApp. The overlay exits by itself once the app's pipe closes; this
+; makes the copy over it (and its deletion) deterministic even if one is stuck.
+; Registers preserved.
+!macro OMA_STOP_OVERLAY
+  Push $0
+  nsis_tauri_utils::FindProcess "${OMA_OVERLAY_EXE}"
+  Pop $0
+  ${If} $0 = 0
+    nsis_tauri_utils::KillProcess "${OMA_OVERLAY_EXE}"
+    Pop $0
+    Sleep 500
+  ${EndIf}
+  Pop $0
 !macroend
 
 ; Starts an exe de-elevated in the interactive user's session, without waiting.
@@ -877,6 +911,8 @@ Function OmaCloseApp
     DetailPrint "Could not close ${PRODUCTNAME}"
   ${EndIf}
   oma_close_done:
+  ; The app's overlay process, whether or not the app was running.
+  !insertmacro OMA_STOP_OVERLAY
   ClearErrors
   Pop $2
   Pop $1
@@ -967,6 +1003,11 @@ FunctionEnd
       ${EndIf}
     ${EndIf}
   ${EndIf}
+  ; The overlay (M7c) with the other files, once nothing can fail any more: it
+  ; exits when the app is gone; a leftover one is stopped, and a file still
+  ; locked goes at the next restart. On an update the new setup copies it again.
+  !insertmacro OMA_STOP_OVERLAY
+  Delete /REBOOTOK "$INSTDIR\${OMA_OVERLAY_EXE}"
   Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
   Delete "$INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe"
   RMDir "$INSTDIR\service\presentmon"

@@ -3,6 +3,7 @@
 use serde_json::{Map, Value};
 
 use super::decode::{decode_lenient, Diagnostic, DiagnosticKind, TYPE_ERROR};
+use super::overlay::normalize_exe;
 use super::{encode, Settings};
 use crate::hotkey::parse_hotkey;
 use crate::rules::{is_builtin, validate_rules, RulesSettings};
@@ -118,6 +119,24 @@ const SCHEMA: &[(&str, Node)] = &[
         ]),
     ),
     (
+        "overlay",
+        Node::Object(&[
+            ("enabled", leaf()),
+            ("chartFps", leaf()),
+            ("textHz", leaf()),
+            ("hideFromCapture", leaf()),
+            ("attach", leaf()),
+            ("trackPcLatency", leaf()),
+            ("trackGpu", leaf()),
+            ("defaultProfile", leaf()),
+            ("gameProfiles", Node::Free),
+            ("blockedGames", leaf()),
+            ("hotkeyToggle", nullable()),
+            ("hotkeyNextProfile", nullable()),
+            ("hotkeyBenchmark", nullable()),
+        ]),
+    ),
+    (
         "rules",
         Node::Object(&[
             (
@@ -136,9 +155,10 @@ const SCHEMA: &[(&str, Node)] = &[
 ];
 
 /// Whether the object at `path` is replaced whole instead of merged: the
-/// fields of a rule override (R5).
+/// fields of a rule override (R5) and the overlay game-to-profile map.
 fn replaced_whole(path: &[String]) -> bool {
     matches!(path, [rules, overrides, _, _] if rules == "rules" && overrides == "overrides")
+        || matches!(path, [overlay, map] if overlay == "overlay" && map == "gameProfiles")
 }
 
 fn join(parent: &str, key: &str) -> String {
@@ -246,16 +266,20 @@ fn strict_rules(merged: &Value, diagnostics: &[Diagnostic]) -> Result<RulesSetti
     Ok(rules)
 }
 
-/// i18n key of a value the decoder had to correct: the log fields have their
-/// own, everything else is out of range.
+/// i18n key of a value the decoder had to correct: the log and overlay
+/// fields have their own, everything else is out of range.
 fn corrected_key(merged: &Value, path: &str) -> &'static str {
     match path {
         "log.folder" => "settings.error.folder",
         "log.sensors" => "settings.error.sensors",
         "log.hotkeyToggle" => "settings.error.hotkey",
-        // A pause hotkey that reads fine was only corrected for being the toggle's twin.
-        "log.hotkeyPause" => {
-            let readable = merged["log"]["hotkeyPause"]
+        // A hotkey that reads fine was only corrected for being another one's twin.
+        "log.hotkeyPause"
+        | "overlay.hotkeyToggle"
+        | "overlay.hotkeyNextProfile"
+        | "overlay.hotkeyBenchmark" => {
+            let (section, key) = path.split_once('.').unwrap_or_default();
+            let readable = merged[section][key]
                 .as_str()
                 .is_some_and(|text| parse_hotkey(text).is_ok());
             if readable {
@@ -264,10 +288,16 @@ fn corrected_key(merged: &Value, path: &str) -> &'static str {
                 "settings.error.hotkey"
             }
         }
-        _ => "settings.error.range",
+        "overlay.defaultProfile" => "settings.error.profileId",
+        _ => match path.strip_prefix("overlay.gameProfiles.") {
+            // A name that is not an executable, otherwise its profile id.
+            Some(name) if normalize_exe(name).is_none() => "settings.error.exe",
+            Some(_) => "settings.error.profileId",
+            None if path.starts_with("overlay.blockedGames.") => "settings.error.exe",
+            None => "settings.error.range",
+        },
     }
 }
-
 /// Applies `patch` to `current` and validates the whole result strictly: any
 /// value the tolerant decoder would have had to fix is an error instead.
 /// Pure: on error nothing is changed.
@@ -762,5 +792,136 @@ mod tests {
             round.as_object_mut().unwrap().remove(key);
         }
         assert_eq!(round, patch);
+    }
+
+    #[test]
+    fn patch_rules_for_overlay() {
+        let base = Settings::default();
+        for (patch, want) in [
+            (
+                json!({"overlay": {"chartFps": 45}}),
+                err("overlay.chartFps", "settings.error.range"),
+            ),
+            (
+                json!({"overlay": {"textHz": 3}}),
+                err("overlay.textHz", "settings.error.range"),
+            ),
+            (
+                json!({"overlay": {"textHz": "2"}}),
+                err("overlay.textHz", "settings.error.type"),
+            ),
+            (
+                json!({"overlay": {"attach": "screen"}}),
+                err("overlay.attach", "settings.error.type"),
+            ),
+            (
+                json!({"overlay": {"enabled": null}}),
+                err("overlay.enabled", "settings.error.null"),
+            ),
+            (
+                json!({"overlay": {"nope": 1}}),
+                err("overlay.nope", "settings.error.unknownField"),
+            ),
+            (
+                json!({"overlay": null}),
+                err("overlay", "settings.error.null"),
+            ),
+            (
+                json!({"overlay": {"gameProfiles": null}}),
+                err("overlay.gameProfiles", "settings.error.null"),
+            ),
+            (
+                json!({"overlay": {"defaultProfile": "builtin-nope"}}),
+                err("overlay.defaultProfile", "settings.error.profileId"),
+            ),
+            (
+                json!({"overlay": {"defaultProfile": null}}),
+                err("overlay.defaultProfile", "settings.error.null"),
+            ),
+            (
+                json!({"overlay": {"gameProfiles": {"game.exe": "nope"}}}),
+                err("overlay.gameProfiles.game.exe", "settings.error.profileId"),
+            ),
+            (
+                json!({"overlay": {"gameProfiles": {"C:\\game.exe": "builtin-bar"}}}),
+                err("overlay.gameProfiles.C:\\game.exe", "settings.error.exe"),
+            ),
+            (
+                json!({"overlay": {"gameProfiles": {"game.exe": 3}}}),
+                err("overlay.gameProfiles.game.exe", "settings.error.type"),
+            ),
+            (
+                json!({"overlay": {"blockedGames": ["game"]}}),
+                err("overlay.blockedGames.0", "settings.error.exe"),
+            ),
+            (
+                json!({"overlay": {"blockedGames": [1]}}),
+                err("overlay.blockedGames.0", "settings.error.type"),
+            ),
+            (
+                json!({"overlay": {"hotkeyToggle": "Ctrl+R"}}),
+                err("overlay.hotkeyToggle", "settings.error.hotkey"),
+            ),
+            (
+                json!({"overlay": {"hotkeyBenchmark": "Ctrl+Alt+Shift+R"}}),
+                err("overlay.hotkeyBenchmark", "settings.error.hotkeyDuplicate"),
+            ),
+            (
+                json!({"overlay": {"hotkeyNextProfile": "Ctrl+Alt+F1", "hotkeyToggle": "alt+ctrl+f1"}}),
+                err(
+                    "overlay.hotkeyNextProfile",
+                    "settings.error.hotkeyDuplicate",
+                ),
+            ),
+        ] {
+            assert_eq!(apply_patch(&base, &patch), Err(want), "{patch}");
+        }
+        let many: Vec<String> = (0..257).map(|i| format!("g{i}.exe")).collect();
+        assert_eq!(
+            apply_patch(&base, &json!({"overlay": {"blockedGames": many}})),
+            Err(err("overlay.blockedGames", "settings.error.range"))
+        );
+
+        let ok = apply_patch(
+            &base,
+            &json!({"overlay": {
+                "enabled": true, "chartFps": 60, "textHz": 4, "attach": "monitor",
+                "defaultProfile": "builtin-bar", "blockedGames": ["Game.EXE"],
+                "hotkeyToggle": "shift+ctrl+o",
+            }}),
+        )
+        .unwrap();
+        assert!(ok.overlay.enabled);
+        assert_eq!(ok.overlay.blocked_games, vec!["game.exe".to_string()]);
+        assert_eq!(ok.overlay.hotkey_toggle.as_deref(), Some("Ctrl+Shift+O"));
+        // Moving the log toggle onto an overlay hotkey makes the overlay one the duplicate.
+        assert_eq!(
+            apply_patch(&ok, &json!({"log": {"hotkeyToggle": "Ctrl+Shift+O"}})),
+            Err(err(
+                "overlay.hotkeyToggle",
+                "settings.error.hotkeyDuplicate"
+            ))
+        );
+    }
+
+    #[test]
+    fn patch_replaces_game_profiles_whole() {
+        let start = everything_changed();
+        assert_eq!(start.overlay.game_profiles.len(), 2);
+        let next = apply_patch(
+            &start,
+            &json!({"overlay": {"gameProfiles": {"New.exe": "builtin-minimal-fps"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            next.overlay.game_profiles,
+            BTreeMap::from([("new.exe".to_string(), "builtin-minimal-fps".to_string())])
+        );
+        let next = apply_patch(&next, &json!({"overlay": {"gameProfiles": {}}})).unwrap();
+        assert!(next.overlay.game_profiles.is_empty());
+        let next =
+            apply_patch(&start, &json!({"overlay": {"blockedGames": ["only.exe"]}})).unwrap();
+        assert_eq!(next.overlay.blocked_games, vec!["only.exe".to_string()]);
+        assert_eq!(next.overlay.game_profiles, start.overlay.game_profiles);
     }
 }

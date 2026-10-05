@@ -201,6 +201,14 @@ const STOP_CHECK = /^\$\{If\} \$OmaResult != "0"$/;
 const HELPER = /^!insertmacro OMA_HELPER "(install|uninstall)"$/;
 const HELPER_CHECK = /^\$\{If\} \$0 != "0"$/;
 const FAIL = /^!insertmacro OMA_FAIL /;
+const OVERLAY_COPY = [
+  'SetOutPath $INSTDIR',
+  'ClearErrors',
+  'File "${OMA_PAYLOAD}\\overlay\\${OMA_OVERLAY_EXE}"',
+  '${If} ${Errors}',
+  '!insertmacro OMA_FAIL "$(omaOverlayFailed)" "copy of ${OMA_OVERLAY_EXE} failed"',
+  '${EndIf}',
+];
 const TOUCHES_SERVICE_FILES = /^(File|Delete|RMDir)\b.*(oma-service|OMA_SERVICE_EXE|\\service)/;
 
 /** Every `call` is immediately followed by `check` and then by OMA_FAIL. */
@@ -712,6 +720,52 @@ describe('oma.nsh failure paths', () => {
     expect(uses(book)).toEqual(stops.map((at) => at + 4));
   });
 
+  // M7c (plan DP7): oma-overlay.exe sits next to oma-app.exe, from the payload, copied in the
+  // template's Install section (after the app was closed) and deleted by the uninstaller.
+  it('installs oma-overlay.exe next to the app, checks the copy and removes it on uninstall', () => {
+    expect(nsh).toMatch(/^!define OMA_OVERLAY_EXE "oma-overlay\.exe"$/m);
+    expect(nsh).toMatch(
+      /!if \/FileExists "\$\{OMA_PAYLOAD\}\\overlay\\\$\{OMA_OVERLAY_EXE\}"\n!else\n\s*!error "Missing /,
+    );
+    const post = block(all, /^!macro NSIS_HOOK_POSTINSTALL$/, /^!macroend$/);
+    expect(post.slice(1, 1 + OVERLAY_COPY.length)).toEqual(OVERLAY_COPY);
+    expect(all.filter((s) => /^File .*OMA_OVERLAY_EXE/.test(s))).toHaveLength(1);
+
+    // Uninstall: with the other files, after the service stop and removal and their checks,
+    // so a failure there still deletes nothing («No files were deleted»).
+    const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
+    const del = hook.indexOf('Delete /REBOOTOK "$INSTDIR\\${OMA_OVERLAY_EXE}"');
+    expect(hook.filter((s) => /OMA_OVERLAY_EXE/.test(s))).toEqual([hook[del]]);
+    expect(hook[del - 1]).toBe('!insertmacro OMA_STOP_OVERLAY');
+    expect(hook[del + 1]).toBe('Delete "$INSTDIR\\service\\${OMA_SERVICE_EXE}"');
+    const lastFail = hook.reduce((at, s, i) => (FAIL.test(s) ? i : at), -1);
+    expect(lastFail).toBeGreaterThan(indexOf(hook, STOP));
+    expect(del).toBeGreaterThan(lastFail);
+    expect(del).toBeGreaterThan(indexOf(hook, HELPER));
+
+    // Upgrade: OmaCloseApp stops a running overlay on every path (after the label all paths
+    // reach), before the Install section copies the new one.
+    const close = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    expect(close[close.indexOf('oma_close_done:') + 1]).toBe('!insertmacro OMA_STOP_OVERLAY');
+    const stop = block(all, /^!macro OMA_STOP_OVERLAY$/, /^!macroend$/);
+    expect(stop).toEqual([
+      '!macro OMA_STOP_OVERLAY',
+      'Push $0',
+      'nsis_tauri_utils::FindProcess "${OMA_OVERLAY_EXE}"',
+      'Pop $0',
+      '${If} $0 = 0',
+      'nsis_tauri_utils::KillProcess "${OMA_OVERLAY_EXE}"',
+      'Pop $0',
+      'Sleep 500',
+      '${EndIf}',
+      'Pop $0',
+      '!macroend',
+    ]);
+
+    const strings = block(all, /^!macro OMA_LANGSTRINGS$/, /^!macroend$/);
+    expect(strings.filter((s) => /^LangString omaOverlayFailed \$\{LANG_(ENGLISH|ITALIAN)\} "/.test(s))).toHaveLength(2);
+  });
+
   it('turns the reboot flag into exit code 3010 only on success', () => {
     const lines = all.filter((s) => /SetErrorLevel 3010/.test(s));
     expect(lines).toHaveLength(1);
@@ -844,7 +898,16 @@ describe('closing and reopening the app around an upgrade', () => {
     // Every plugin result is popped into $0; the three saved registers come back in reverse order.
     expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
     // ClearErrors after the label: a missing DisplayVersion or Run value leaves no error flag behind.
-    expect(fn.slice(-6)).toEqual(['oma_close_done:', 'ClearErrors', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
+    // OMA_STOP_OVERLAY saves and restores $0 itself.
+    expect(fn.slice(-7)).toEqual([
+      'oma_close_done:',
+      '!insertmacro OMA_STOP_OVERLAY',
+      'ClearErrors',
+      'Pop $2',
+      'Pop $1',
+      'Pop $0',
+      'FunctionEnd',
+    ]);
     expect(fn.join('\n')).not.toMatch(/\$R\d/);
   });
 
@@ -865,6 +928,7 @@ describe('closing and reopening the app around an upgrade', () => {
     const post = block(all, /^!macro NSIS_HOOK_POSTINSTALL$/, /^!macroend$/);
     expect(post).toEqual([
       '!macro NSIS_HOOK_POSTINSTALL',
+      ...OVERLAY_COPY,
       '${If} $OmaRunValue != ""',
       'Push $0',
       'ClearErrors',

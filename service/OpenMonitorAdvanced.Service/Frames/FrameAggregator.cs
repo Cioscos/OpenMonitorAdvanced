@@ -13,8 +13,12 @@ namespace OpenMonitorAdvanced.Service.Frames;
 internal sealed class FrameAggregator(
     int maxFramesPerBatch = ProtocolConstants.MaxFramesPerBatch,
     int maxProcesses = ProtocolConstants.MaxPresentingProcesses,
-    long ticksPerSecond = 0)
+    long ticksPerSecond = 0,
+    int maxBacklogFrames = FrameAggregator.MaxBacklogFrames)
 {
+    /// <summary>Most frames of one process kept waiting for later batches; the rest is counted as dropped.</summary>
+    internal const int MaxBacklogFrames = 4096;
+
     private readonly object _lock = new();
     private readonly long _ticksPerSecond = ticksPerSecond > 0 ? ticksPerSecond : Stopwatch.Frequency;
     private readonly Dictionary<uint, Window> _windows = [];
@@ -35,7 +39,7 @@ internal sealed class FrameAggregator(
 
     private sealed class Pending
     {
-        public List<WireFrame> Frames = [];
+        public readonly Queue<WireFrame> Frames = new();
         public uint Dropped;
     }
 
@@ -103,9 +107,9 @@ internal sealed class FrameAggregator(
                     _pending[row.Pid] = pending;
                 }
 
-                if (pending.Frames.Count < maxFramesPerBatch)
+                if (pending.Frames.Count < maxBacklogFrames)
                 {
-                    pending.Frames.Add(frame);
+                    pending.Frames.Enqueue(frame);
                 }
                 else
                 {
@@ -130,17 +134,44 @@ internal sealed class FrameAggregator(
         }
     }
 
-    /// <summary>The frames gathered for <paramref name="pid"/> since the last call, or null when there are none.</summary>
+    /// <summary>
+    /// The oldest frames gathered for <paramref name="pid"/> (at most one batch), or null when there
+    /// are none. What a batch cannot hold waits in the backlog for the next calls; only frames beyond
+    /// the backlog's cap were lost, and they are counted in the <c>Dropped</c> of the next batch.
+    /// </summary>
     public FrameBatchMessage? TakeBatch(uint pid)
     {
         lock (_lock)
         {
-            if (!_pending.Remove(pid, out var pending) || pending.Frames.Count == 0)
+            if (!_pending.TryGetValue(pid, out var pending) || pending.Frames.Count == 0)
             {
                 return null;
             }
 
-            return new FrameBatchMessage(pid, pending.Frames, pending.Dropped);
+            var count = Math.Min(pending.Frames.Count, maxFramesPerBatch);
+            var frames = new List<WireFrame>(count);
+            for (var i = 0; i < count; i++)
+            {
+                frames.Add(pending.Frames.Dequeue());
+            }
+
+            var dropped = pending.Dropped;
+            pending.Dropped = 0;
+            if (pending.Frames.Count == 0)
+            {
+                _pending.Remove(pid);
+            }
+
+            return new FrameBatchMessage(pid, frames, dropped);
+        }
+    }
+
+    /// <summary>Discards the frames waiting for every target, for when nobody has been reading them.</summary>
+    public void DiscardPending()
+    {
+        lock (_lock)
+        {
+            _pending.Clear();
         }
     }
 

@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
   Builds the payload the NSIS installer embeds (spec §10): the published oma-service.exe, the
-  official PawnIO 2.2.0 setup and the official PresentMon 2.6.0 console, in
-  target/installer-payload/.
+  overlay process oma-overlay.exe (M7c), the official PawnIO 2.2.0 setup and the official
+  PresentMon 2.6.0 console, in target/installer-payload/.
 .DESCRIPTION
   Run it before `pnpm tauri build` (app/src-tauri/nsis/oma.nsh refuses to compile without it):
 
@@ -21,6 +21,10 @@
   4. Checks that the publish output holds nothing but oma-service.exe (and its .pdb), since the
      installer copies only the exe, and that oma-service.exe exists and carries the expected
      metadata: ProductName "OpenMonitor Advanced", ProductVersion X.Y.Z, FileVersion X.Y.Z.0.
+  4b. `cargo build --release --locked -p oma-overlay` and stages target/release/oma-overlay.exe as
+     overlay/oma-overlay.exe (plan M7c DP7; oma.nsh installs it as $INSTDIR\oma-overlay.exe),
+     after removing the previous copy, with the same metadata check as step 4 (FileVersion X.Y.Z,
+     like the app). The logic lives in scripts/lib/OmaOverlayPayload.psm1 (Save-OmaOverlayExe).
   5. Downloads PawnIO_setup.exe 2.2.0 (or reuses the cached copy) and verifies its SHA-256
      against the pinned hash (app/src-tauri/nsis/pawnio.sha256, the single source also read by
      oma.nsh at compile time) and its Authenticode signature (Valid, pinned signer). The pins
@@ -38,13 +42,19 @@
   The service project directory. Tests point it at a temp directory.
 .PARAMETER OutputRoot
   The payload directory. Defaults to target/installer-payload, where oma.nsh looks for it.
+.PARAMETER CargoExe
+  The cargo command. Tests inject a fake here.
+.PARAMETER CargoTargetDir
+  Cargo's target directory: CARGO_TARGET_DIR when set, else target/ in the repository.
+.PARAMETER OverlayOnly
+  Only step 4b: leaves the service payload, PawnIO and PresentMon alone. For tests.
 .PARAMETER PawnIoOnly
-  Only step 5: leaves the service payload and PresentMon alone. For tests.
+  Only step 5: leaves the service payload, the overlay and PresentMon alone. For tests.
 .PARAMETER PawnIoSource
   Where to fetch PawnIO_setup.exe from: the official URL (default) or a local file (tests).
   Whatever the source, the file must match the pinned hash and signer.
 .PARAMETER PresentMonOnly
-  Only step 6: leaves the service payload and PawnIO alone. For tests.
+  Only step 6: leaves the service payload, the overlay and PawnIO alone. For tests.
 .PARAMETER PresentMonSource
   Where to fetch PresentMon-2.6.0-x64.exe from: the official v2.6.0 release URL (default) or a
   local file (tests). Whatever the source, the file must match the pinned hash and signer.
@@ -55,6 +65,9 @@ param(
     [string]$DotnetExe = 'dotnet',
     [string]$ServiceProject,
     [string]$OutputRoot,
+    [string]$CargoExe = 'cargo',
+    [string]$CargoTargetDir,
+    [switch]$OverlayOnly,
     [switch]$PawnIoOnly,
     [string]$PawnIoSource = 'https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe',
     [switch]$PresentMonOnly,
@@ -65,6 +78,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $ServiceProject) { $ServiceProject = Join-Path $repoRoot 'service\OpenMonitorAdvanced.Service' }
 if (-not $OutputRoot) { $OutputRoot = Join-Path $repoRoot 'target\installer-payload' }
+if (-not $CargoTargetDir) { $CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repoRoot 'target' } }
 
 # The PawnIO pins (hash from app/src-tauri/nsis/pawnio.sha256, pinned signer, provenance) live in
 # scripts/lib/OmaPawnIoPins.psm1, shared with scripts/verify-signatures.ps1. Never update them
@@ -73,6 +87,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib\OmaPawnIoPins.psm1') -Force
 # Same for PresentMon (scripts/lib/OmaPresentMonPins.psm1, pinned hash in presentmon.sha256).
 Import-Module (Join-Path $PSScriptRoot 'lib\OmaPresentMonPins.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib\OmaSigning.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\OmaOverlayPayload.psm1') -Force
 $PawnIoPins = Get-OmaPawnIoPins -RepoRoot $repoRoot
 
 function Fail([string]$Message) {
@@ -149,15 +164,30 @@ function Build-ServicePayload {
 }
 
 New-Item -ItemType Directory -Force $OutputRoot | Out-Null
-if ($PawnIoOnly -and $PresentMonOnly) { Fail '-PawnIoOnly and -PresentMonOnly exclude each other' }
-if ($PawnIoOnly -or $PresentMonOnly) {
-    Write-Host "$(if ($PawnIoOnly) { 'PawnIO' } else { 'PresentMon' }) only: the service payload is left as it is"
-} else {
+$only = @(@{ Overlay = $OverlayOnly; PawnIO = $PawnIoOnly; PresentMon = $PresentMonOnly }.GetEnumerator() |
+        Where-Object { $_.Value } | ForEach-Object Key)
+if ($only.Count -gt 1) { Fail '-OverlayOnly, -PawnIoOnly and -PresentMonOnly exclude each other' }
+$all = $only.Count -eq 0
+if ($all) {
     Build-ServicePayload
+} else {
+    Write-Host "$($only[0]) only: the other parts of the payload are left as they are"
+}
+
+# --- 4b. overlay process ----------------------------------------------------------------------
+if ($all -or $OverlayOnly) {
+    $appVersion = (Get-Content -Raw (Join-Path $repoRoot 'app\src-tauri\tauri.conf.json') | ConvertFrom-Json).version
+    try {
+        $overlay = Save-OmaOverlayExe -CargoExe $CargoExe -RepoRoot $repoRoot -TargetDir $CargoTargetDir `
+            -Destination (Join-Path $OutputRoot 'overlay\oma-overlay.exe') -Version $appVersion
+    } catch {
+        Fail $_.Exception.Message
+    }
+    Write-Host ("oma-overlay.exe {0}, {1:n1} MB" -f $overlay.FileVersion, ((Get-Item -LiteralPath $overlay.Path).Length / 1MB))
 }
 
 # --- 5. PawnIO setup --------------------------------------------------------------------------
-if (-not $PresentMonOnly) {
+if ($all -or $PawnIoOnly) {
     $pawnIo = Join-Path $OutputRoot 'PawnIO_setup.exe'
     $reused = $false
     if (Test-Path -PathType Leaf $pawnIo) {
@@ -191,7 +221,7 @@ if (-not $PresentMonOnly) {
 
 # --- 6. PresentMon console --------------------------------------------------------------------
 # Where oma.nsh takes it from; installed as $INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe.
-if (-not $PawnIoOnly) {
+if ($all -or $PresentMonOnly) {
     try {
         $null = Save-OmaPresentMon -Source $PresentMonSource -Destination (Join-Path $OutputRoot 'presentmon\PresentMon-2.6.0-x64.exe')
     } catch {

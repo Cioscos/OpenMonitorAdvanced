@@ -3,12 +3,13 @@
 <!--
   Artifact configuration slug: binaries (first signing request of .github/workflows/release.yml).
   The artifact is the flat ZIP that actions/upload-artifact makes of target/signing/unsigned/:
-  exactly oma-app.exe, uninstall.exe and oma-service.exe, no wildcards. Every path must match
+  exactly oma-app.exe, uninstall.exe, oma-service.exe and oma-overlay.exe (M7c), no wildcards. Every path must match
   exactly one file (SignPath's default min/max-matches is 1). Third-party files (NSIS plugins,
   PawnIO_setup.exe) are never part of this artifact.
   Metadata constraints, as measured in the M6a spike (plan, "Esito dello spike"):
-    ProductName "OpenMonitor Advanced" and ProductVersion X.Y.Z for all three;
-    FileVersion X.Y.Z for the app and the NSIS uninstaller, X.Y.Z.0 for the .NET service.
+    ProductName "OpenMonitor Advanced" and ProductVersion X.Y.Z for all four;
+    FileVersion X.Y.Z for the app, the NSIS uninstaller and the overlay (tauri-winres in
+    crates/oma-overlay/build.rs), X.Y.Z.0 for the .NET service.
   The version parameter is the X.Y.Z of app/src-tauri/tauri.conf.json, passed by release.yml.
   SignPath adds the RFC 3161 timestamp itself: no timestamp settings here.
 -->
@@ -24,6 +25,9 @@
       <authenticode-sign />
     </pe-file>
     <pe-file path="oma-service.exe" product-name="OpenMonitor Advanced" product-version="${version}" file-version="${version}.0">
+      <authenticode-sign />
+    </pe-file>
+    <pe-file path="oma-overlay.exe" product-name="OpenMonitor Advanced" product-version="${version}" file-version="${version}">
       <authenticode-sign />
     </pe-file>
   </zip-file>

@@ -12,6 +12,44 @@ pub struct SyntheticProfile {
     pub gpu_busy_ratio: Option<f64>,
 }
 
+/// Why a [`SyntheticProfile`] was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SyntheticError {
+    #[error("base FPS must be finite and within 1..=1000")]
+    BaseFps,
+    #[error("frame generation factor must be within 1..=4")]
+    FgFactor,
+    #[error("jitter must be finite and not negative")]
+    Jitter,
+    #[error("GPU busy ratio must be finite and not negative")]
+    GpuBusyRatio,
+}
+
+impl SyntheticProfile {
+    /// Checks the inputs `synthetic` can safely turn into frames.
+    pub fn validate(&self) -> Result<(), SyntheticError> {
+        if !(self.base_fps.is_finite() && (1.0..=1000.0).contains(&self.base_fps)) {
+            return Err(SyntheticError::BaseFps);
+        }
+        if !(1..=4).contains(&self.fg_factor) {
+            return Err(SyntheticError::FgFactor);
+        }
+        if !(self.jitter_ms.is_finite() && self.jitter_ms >= 0.0) {
+            return Err(SyntheticError::Jitter);
+        }
+        if self
+            .gpu_busy_ratio
+            .is_some_and(|r| !(r.is_finite() && r >= 0.0))
+        {
+            return Err(SyntheticError::GpuBusyRatio);
+        }
+        Ok(())
+    }
+}
+
+/// The longest capture `synthetic` produces.
+const MAX_DURATION_S: f64 = 600.0;
+
 /// xorshift64* generator.
 struct Rng(u64);
 
@@ -36,13 +74,21 @@ const GENERATED_PRESENT_MS: f64 = 0.25;
 /// Frames for `duration_s` seconds of a made-up game. Each app frame is
 /// followed by `fg_factor - 1` generated frames (labelled `GeneratedOther`,
 /// or, with `pcl`, plain `App` frames without an id, like DLSS FG captures).
+/// An invalid profile, or a duration that is not finite, negative or over
+/// 600 s, gives no frames.
 pub fn synthetic(seed: u64, profile: &SyntheticProfile, duration_s: f64) -> Vec<FrameSample> {
+    if profile.validate().is_err()
+        || !duration_s.is_finite()
+        || !(0.0..=MAX_DURATION_S).contains(&duration_s)
+    {
+        return Vec::new();
+    }
     let mut rng = Rng(if seed == 0 {
         0x9E37_79B9_7F4A_7C15
     } else {
         seed
     });
-    let fg = profile.fg_factor.max(1);
+    let fg = profile.fg_factor;
     let base_ms = 1000.0 / profile.base_fps;
     let mut out = Vec::new();
     let (mut t, mut app_index, mut pcl_id) = (0.0_f64, 0u32, 1u64);
@@ -177,5 +223,48 @@ mod tests {
         let rough = synthetic(1, &p, 10.0);
         assert_eq!(stutter(&calm).count, 0);
         assert!(stutter(&rough).count >= 5);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn ok() -> SyntheticProfile {
+        SyntheticProfile {
+            base_fps: 60.0,
+            fg_factor: 1,
+            jitter_ms: 0.0,
+            stutter_every: None,
+            pcl: false,
+            gpu_busy_ratio: None,
+        }
+    }
+
+    #[test]
+    fn synthetic_rejects_out_of_range_inputs() {
+        assert!(ok().validate().is_ok());
+        assert!(!synthetic(1, &ok(), 1.0).is_empty());
+        for base_fps in [0.0, 1001.0, f64::NAN, f64::INFINITY, -5.0] {
+            let p = SyntheticProfile { base_fps, ..ok() };
+            assert!(p.validate().is_err(), "{base_fps}");
+            assert!(synthetic(1, &p, 1.0).is_empty(), "{base_fps}");
+        }
+        for fg_factor in [0, 5] {
+            let p = SyntheticProfile { fg_factor, ..ok() };
+            assert!(synthetic(1, &p, 1.0).is_empty(), "fg {fg_factor}");
+        }
+        for jitter_ms in [f64::NAN, -1.0, f64::INFINITY] {
+            let p = SyntheticProfile { jitter_ms, ..ok() };
+            assert!(synthetic(1, &p, 1.0).is_empty(), "jitter {jitter_ms}");
+        }
+        let p = SyntheticProfile {
+            gpu_busy_ratio: Some(f64::NAN),
+            ..ok()
+        };
+        assert!(synthetic(1, &p, 1.0).is_empty());
+        for duration in [-1.0, 601.0, f64::NAN, f64::INFINITY] {
+            assert!(synthetic(1, &ok(), duration).is_empty(), "{duration}");
+        }
     }
 }

@@ -7,9 +7,10 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
+use super::overlay::{is_profile_id, normalize_exe, CHART_FPS, MAX_GAMES, TEXT_HZ};
 use super::{
-    ChartFps, DefaultView, Language, LogSettings, Settings, TemperatureUnit, ThroughputUnit,
-    ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
+    Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, Settings,
+    TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
 };
 use crate::rules::{
     is_builtin, nested, validate_override, validate_rules, CustomRules, Rule, RuleOverride,
@@ -181,6 +182,7 @@ pub fn decode_lenient(value: &Value) -> Decoded {
         settings.rules = reader.rules(rules);
     }
     settings.log = reader.log(root);
+    settings.overlay = reader.overlay(root, &settings.log);
 
     let migrations = reader.section(root, "", "migrations");
     let m = &mut settings.migrations;
@@ -229,6 +231,14 @@ fn snap(x: f64, valid: &[u32]) -> u32 {
         }
     }
     best
+}
+
+/// A dropped entry: its text is `from`, there is no replacement.
+fn dropped(from: &str) -> DiagnosticKind {
+    DiagnosticKind::Corrected {
+        from: from.to_string(),
+        to: "removed".into(),
+    }
 }
 
 impl Reader {
@@ -531,8 +541,9 @@ impl Reader {
             Some(_) => self.push("log.maxFileMb".into(), DiagnosticKind::WrongType),
         }
 
-        (log.hotkey_toggle, _) = self.hotkey(&section, "hotkeyToggle", log.hotkey_toggle.clone());
-        let (pause, pause_text) = self.hotkey(&section, "hotkeyPause", None);
+        (log.hotkey_toggle, _) =
+            self.hotkey(&section, "log", "hotkeyToggle", log.hotkey_toggle.clone());
+        let (pause, pause_text) = self.hotkey(&section, "log", "hotkeyPause", None);
         log.hotkey_pause = pause;
         if log.hotkey_pause.is_some() && log.hotkey_pause == log.hotkey_toggle {
             self.push(
@@ -545,6 +556,199 @@ impl Reader {
             log.hotkey_pause = None;
         }
         log
+    }
+
+    /// The `overlay` section: values outside the rules become the default,
+    /// executable entries that are not valid are dropped, each with a
+    /// diagnostic. Hotkeys must differ from every earlier one in the order
+    /// `log.hotkeyToggle`, `log.hotkeyPause`, `overlay.hotkeyToggle`,
+    /// `overlay.hotkeyNextProfile`, `overlay.hotkeyBenchmark`.
+    fn overlay(&mut self, root: &Obj, log: &LogSettings) -> OverlaySettings {
+        let section = self.section(root, "", "overlay");
+        let mut overlay = OverlaySettings::default();
+
+        overlay.enabled = self.boolean(&section, "overlay", "enabled", overlay.enabled);
+        if let Some(v) = self.exact(&section, "chartFps", &CHART_FPS, overlay.chart_fps.as_u32()) {
+            overlay.chart_fps = ChartFps::from_u32(v).unwrap_or(overlay.chart_fps);
+        }
+        if let Some(v) = self.exact(&section, "textHz", &TEXT_HZ, overlay.text_hz) {
+            overlay.text_hz = v;
+        }
+        overlay.hide_from_capture = self.boolean(
+            &section,
+            "overlay",
+            "hideFromCapture",
+            overlay.hide_from_capture,
+        );
+        if let Some(v) = self.variant(&section, "overlay", "attach", false, Attach::parse) {
+            overlay.attach = v;
+        }
+        overlay.track_pc_latency = self.boolean(
+            &section,
+            "overlay",
+            "trackPcLatency",
+            overlay.track_pc_latency,
+        );
+        overlay.track_gpu = self.boolean(&section, "overlay", "trackGpu", overlay.track_gpu);
+
+        match lookup(&section, "defaultProfile", false) {
+            None => {}
+            Some(Value::String(id)) if is_profile_id(id) => overlay.default_profile = id.clone(),
+            Some(Value::String(id)) => self.push(
+                "overlay.defaultProfile".into(),
+                DiagnosticKind::Corrected {
+                    from: id.clone(),
+                    to: overlay.default_profile.clone(),
+                },
+            ),
+            Some(_) => self.push("overlay.defaultProfile".into(), DiagnosticKind::WrongType),
+        }
+        overlay.game_profiles = self.game_profiles(&section);
+        overlay.blocked_games = self.blocked_games(&section);
+
+        let mut taken: Vec<String> = [&log.hotkey_toggle, &log.hotkey_pause]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        for (key, slot) in [
+            ("hotkeyToggle", &mut overlay.hotkey_toggle),
+            ("hotkeyNextProfile", &mut overlay.hotkey_next_profile),
+            ("hotkeyBenchmark", &mut overlay.hotkey_benchmark),
+        ] {
+            let (hotkey, text) = self.hotkey(&section, "overlay", key, None);
+            *slot = match hotkey {
+                Some(canonical) if taken.contains(&canonical) => {
+                    self.push(
+                        join("overlay", key),
+                        DiagnosticKind::Corrected {
+                            from: text.unwrap_or_default(),
+                            to: "null".into(),
+                        },
+                    );
+                    None
+                }
+                Some(canonical) => {
+                    taken.push(canonical.clone());
+                    Some(canonical)
+                }
+                None => None,
+            };
+        }
+        overlay
+    }
+
+    /// A number that must be one of `valid`; any other number becomes
+    /// `default` with a `Corrected` diagnostic (`None` when missing or not a
+    /// number, the latter with a diagnostic).
+    fn exact(&mut self, obj: &Obj, key: &str, valid: &[u32], default: u32) -> Option<u32> {
+        let path = join("overlay", key);
+        match lookup(obj, key, false)? {
+            Value::Number(n) => {
+                let hit = n
+                    .as_u64()
+                    .and_then(|x| u32::try_from(x).ok())
+                    .filter(|x| valid.contains(x));
+                if hit.is_none() {
+                    self.push(
+                        path,
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: default.to_string(),
+                        },
+                    );
+                }
+                Some(hit.unwrap_or(default))
+            }
+            _ => {
+                self.push(path, DiagnosticKind::WrongType);
+                None
+            }
+        }
+    }
+
+    /// `overlay.gameProfiles`: executable (lowercased) -> profile id. Entries
+    /// with an invalid name, id or type are dropped; the map is cut at
+    /// [`MAX_GAMES`].
+    fn game_profiles(&mut self, section: &Obj) -> BTreeMap<String, String> {
+        let mut profiles = BTreeMap::new();
+        let entries = match lookup(section, "gameProfiles", false) {
+            None => return profiles,
+            Some(Value::Object(entries)) => entries,
+            Some(_) => {
+                self.push("overlay.gameProfiles".into(), DiagnosticKind::WrongType);
+                return profiles;
+            }
+        };
+        let mut cut = false;
+        for (name, value) in entries {
+            let path = join("overlay.gameProfiles", name);
+            let Some(exe) = normalize_exe(name) else {
+                self.push(path, dropped(name));
+                continue;
+            };
+            match value {
+                Value::String(id) if is_profile_id(id) => {
+                    if profiles.len() >= MAX_GAMES && !profiles.contains_key(&exe) {
+                        cut = true;
+                    } else {
+                        profiles.insert(exe, id.clone());
+                    }
+                }
+                Value::String(id) => self.push(path, dropped(id)),
+                _ => self.push(path, DiagnosticKind::WrongType),
+            }
+        }
+        if cut {
+            self.push(
+                "overlay.gameProfiles".into(),
+                DiagnosticKind::Corrected {
+                    from: format!("{} entries", entries.len()),
+                    to: format!("{} entries", profiles.len()),
+                },
+            );
+        }
+        profiles
+    }
+
+    /// `overlay.blockedGames`: executables lowercased; invalid entries are
+    /// dropped one by one, repeats and entries past [`MAX_GAMES`] together.
+    fn blocked_games(&mut self, section: &Obj) -> Vec<String> {
+        let items = match lookup(section, "blockedGames", false) {
+            None => return Vec::new(),
+            Some(Value::Array(items)) => items,
+            Some(_) => {
+                self.push("overlay.blockedGames".into(), DiagnosticKind::WrongType);
+                return Vec::new();
+            }
+        };
+        let mut games: Vec<String> = Vec::new();
+        let mut valid = 0;
+        for (i, item) in items.iter().enumerate() {
+            let path = join("overlay.blockedGames", &i.to_string());
+            match item {
+                Value::String(text) => match normalize_exe(text) {
+                    Some(exe) => {
+                        valid += 1;
+                        if !games.contains(&exe) && games.len() < MAX_GAMES {
+                            games.push(exe);
+                        }
+                    }
+                    None => self.push(path, dropped(text)),
+                },
+                _ => self.push(path, DiagnosticKind::WrongType),
+            }
+        }
+        if games.len() != valid {
+            self.push(
+                "overlay.blockedGames".into(),
+                DiagnosticKind::Corrected {
+                    from: format!("{valid} entries"),
+                    to: format!("{} entries", games.len()),
+                },
+            );
+        }
+        games
     }
 
     /// `log.sensors`: `null` or missing = every sensor; empty and repeated ids
@@ -590,10 +794,11 @@ impl Reader {
     fn hotkey(
         &mut self,
         section: &Obj,
+        parent: &str,
         key: &str,
         default: Option<String>,
     ) -> (Option<String>, Option<String>) {
-        let path = join("log", key);
+        let path = join(parent, key);
         match section.get(key) {
             None => (default, None),
             Some(Value::Null) => (None, None),
@@ -1154,6 +1359,109 @@ mod tests {
         assert_eq!(d.settings.advanced.window, None);
         assert_eq!(d.settings.advanced.series.len(), 1);
         assert_eq!(d.settings.view.last, Some(ViewKind::Advanced));
+        assert_eq!(d.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn decode_corrects_out_of_range_values() {
+        let d = decode(json!({"version": 1, "overlay": {
+            "chartFps": 45, "textHz": 3, "attach": "x", "defaultProfile": "builtin-nope",
+        }}));
+        let overlay = &d.settings.overlay;
+        assert_eq!(overlay.chart_fps, ChartFps::Fps30);
+        assert_eq!(overlay.text_hz, 2);
+        assert_eq!(overlay.attach, Attach::Window);
+        assert_eq!(overlay.default_profile, "builtin-gaming");
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                corrected("overlay.chartFps", "45", "30"),
+                corrected("overlay.textHz", "3", "2"),
+                Diagnostic {
+                    path: "overlay.attach".into(),
+                    kind: DiagnosticKind::UnknownVariant
+                },
+                corrected("overlay.defaultProfile", "builtin-nope", "builtin-gaming"),
+            ]
+        );
+        // Valid values pass untouched; an unknown but well-formed UUID is kept.
+        let id = "12345678-90ab-4cde-8f01-234567890abc";
+        let d = decode(json!({"version": 1, "overlay": {
+            "chartFps": 15, "textHz": 4, "attach": "monitor", "defaultProfile": id,
+        }}));
+        assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+        assert_eq!(d.settings.overlay.default_profile, id);
+        let d = decode(json!({"version": 1, "overlay": {"enabled": 1, "textHz": "2"}}));
+        assert!(d
+            .diagnostics
+            .iter()
+            .all(|x| x.kind == DiagnosticKind::WrongType));
+        assert_eq!(d.diagnostics.len(), 2);
+        assert_eq!(d.settings.overlay, OverlaySettings::default());
+    }
+
+    #[test]
+    fn exe_names_are_normalised_or_dropped() {
+        let profile = "00000000-0000-4000-8000-000000000002";
+        let d = decode(json!({"version": 1, "overlay": {
+            "blockedGames": ["Game.EXE", "C:\\g.exe", "game", "game.exe", "a/b.exe", "x:y.exe", ".exe"],
+            "gameProfiles": {
+                "Other.EXE": "builtin-bar", "game": "builtin-bar", "ok.exe": "builtin-nope",
+                "fine.exe": profile, "bad.exe": 3,
+            },
+        }}));
+        let overlay = &d.settings.overlay;
+        assert_eq!(overlay.blocked_games, vec!["game.exe".to_string()]);
+        assert_eq!(
+            overlay.game_profiles,
+            BTreeMap::from([
+                ("fine.exe".to_string(), profile.to_string()),
+                ("other.exe".to_string(), "builtin-bar".to_string()),
+            ])
+        );
+        // Lower-casing is silent; dropped entries have a diagnostic (five bad blocked
+        // names, one for the repeated game.exe, three bad game profile entries).
+        assert_eq!(d.diagnostics.len(), 9, "{:?}", d.diagnostics);
+        assert!(d.diagnostics.iter().all(|x| x.path.starts_with("overlay.")));
+
+        let d = decode(json!({"version": 1, "overlay": {"blockedGames": ["A.exe"]}}));
+        assert!(d.diagnostics.is_empty());
+        let d = decode(json!({"version": 1, "overlay": {"blockedGames": 3, "gameProfiles": []}}));
+        assert_eq!(d.diagnostics.len(), 2);
+        let many: Vec<String> = (0..300).map(|i| format!("g{i}.exe")).collect();
+        let d = decode(json!({"version": 1, "overlay": {"blockedGames": many}}));
+        assert_eq!(d.settings.overlay.blocked_games.len(), 256);
+        assert_eq!(d.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn hotkeys_unique_across_log_and_overlay() {
+        // The lowest in the precedence order loses: log.hotkeyToggle, log.hotkeyPause,
+        // overlay.hotkeyToggle, overlay.hotkeyNextProfile, overlay.hotkeyBenchmark.
+        let d = decode(json!({"version": 1,
+        "log": {"hotkeyToggle": "Ctrl+Alt+F1", "hotkeyPause": "Ctrl+Alt+F2"},
+        "overlay": {
+            "hotkeyToggle": "ctrl+alt+f1", "hotkeyNextProfile": "Ctrl+Alt+F3",
+            "hotkeyBenchmark": "alt+ctrl+f3",
+        }}));
+        let overlay = &d.settings.overlay;
+        assert_eq!(overlay.hotkey_toggle, None);
+        assert_eq!(overlay.hotkey_next_profile.as_deref(), Some("Ctrl+Alt+F3"));
+        assert_eq!(overlay.hotkey_benchmark, None);
+        assert_eq!(d.settings.log.hotkey_toggle.as_deref(), Some("Ctrl+Alt+F1"));
+        assert_eq!(
+            d.diagnostics,
+            vec![
+                corrected("overlay.hotkeyToggle", "ctrl+alt+f1", "null"),
+                corrected("overlay.hotkeyBenchmark", "alt+ctrl+f3", "null"),
+            ]
+        );
+        // The log default (Ctrl+Alt+Shift+R) counts too.
+        let d = decode(json!({"version": 1, "overlay": {"hotkeyToggle": "Ctrl+Alt+Shift+R"}}));
+        assert_eq!(d.settings.overlay.hotkey_toggle, None);
+        // Unreadable text is dropped, with a diagnostic.
+        let d = decode(json!({"version": 1, "overlay": {"hotkeyNextProfile": "nonsense"}}));
+        assert_eq!(d.settings.overlay.hotkey_next_profile, None);
         assert_eq!(d.diagnostics.len(), 1);
     }
 }

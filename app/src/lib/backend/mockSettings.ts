@@ -21,6 +21,10 @@ const FPS = [15, 30, 60];
 const EVERY_TICKS = [1, 2, 5, 10, 30, 60];
 const MAX_FILE_MB = [10, 2048] as const;
 const MAX_LOG_SENSORS = 4096;
+const TEXT_HZ = [2, 4];
+const MAX_GAMES = 256;
+const MAX_EXE_BYTES = 260;
+const BUILTIN_PROFILES = ['builtin-minimal-fps', 'builtin-gaming', 'builtin-full', 'builtin-bar'];
 
 const ENUMS: Record<string, readonly string[]> = {
   'general.language': ['system', 'en', 'it'],
@@ -28,12 +32,15 @@ const ENUMS: Record<string, readonly string[]> = {
   'general.throughputUnit': ['bits', 'bytes'],
   'general.defaultView': ['simple', 'advanced', 'last'],
   'view.last': ['simple', 'advanced'],
+  'overlay.attach': ['window', 'monitor'],
 };
 const NUMBERS: Record<string, readonly number[]> = {
   'general.intervalMs': INTERVALS,
   'general.chartFps': FPS,
   'advanced.window': WINDOWS,
   'log.everyTicks': EVERY_TICKS,
+  'overlay.chartFps': FPS,
+  'overlay.textHz': TEXT_HZ,
 };
 
 /** The built-in rules, from the fixture that a Rust test keeps equal to `oma_core::rules::default_rules`. */
@@ -63,6 +70,21 @@ const SHAPE: { [key: string]: Node } = {
   advanced: { section: 'nullable', window: 'nullable', series: 'free' },
   view: { last: 'nullable' },
   log: { folder: 'nullable', sensors: 'nullable', everyTicks: 'leaf', maxFileMb: 'leaf', hotkeyToggle: 'nullable', hotkeyPause: 'nullable' },
+  overlay: {
+    enabled: 'leaf',
+    chartFps: 'leaf',
+    textHz: 'leaf',
+    hideFromCapture: 'leaf',
+    attach: 'leaf',
+    trackPcLatency: 'leaf',
+    trackGpu: 'leaf',
+    defaultProfile: 'leaf',
+    gameProfiles: 'free',
+    blockedGames: 'leaf',
+    hotkeyToggle: 'nullable',
+    hotkeyNextProfile: 'nullable',
+    hotkeyBenchmark: 'nullable',
+  },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
 const READ_ONLY = ['version', 'migrations'];
@@ -180,6 +202,60 @@ function checkLog(log: Record<string, unknown>): void {
   void hotkeyPause;
 }
 
+const OVERLAY_HOTKEYS = ['hotkeyToggle', 'hotkeyNextProfile', 'hotkeyBenchmark'] as const;
+
+/** `normalize_exe`: lowercase, `.exe` after a stem, no backslash, slash or colon, 260 bytes at most; null when invalid. */
+const normalizeExe = (name: string): string | null => {
+  const lower = name.toLowerCase();
+  const valid = lower.length > 4 && lower.endsWith('.exe') && !/[\\/:]/.test(lower) && new TextEncoder().encode(lower).length <= MAX_EXE_BYTES;
+  return valid ? lower : null;
+};
+
+/** `is_profile_id`: a built-in id or a lowercase `8-4-4-4-12` UUID. */
+const isProfileId = (id: string) => BUILTIN_PROFILES.includes(id) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);
+
+/** The overlay checks of the strict decoder; names and hotkeys are stored normalised. */
+function checkOverlay(overlay: Record<string, unknown>, log: Record<string, unknown>): void {
+  for (const key of ['enabled', 'hideFromCapture', 'trackPcLatency', 'trackGpu']) {
+    if (typeof overlay[key] !== 'boolean') fail(`overlay.${key}`, 'settings.error.type');
+  }
+  if (typeof overlay.defaultProfile !== 'string') fail('overlay.defaultProfile', 'settings.error.type');
+  if (!isProfileId(overlay.defaultProfile as string)) fail('overlay.defaultProfile', 'settings.error.profileId');
+  const profiles = overlay.gameProfiles;
+  if (!isObject(profiles)) return fail('overlay.gameProfiles', 'settings.error.type');
+  const normalised: Record<string, string> = {};
+  for (const [name, id] of Object.entries(profiles)) {
+    const path = `overlay.gameProfiles.${name}`;
+    const exe = normalizeExe(name);
+    if (exe === null) fail(path, 'settings.error.exe');
+    if (typeof id !== 'string') fail(path, 'settings.error.type');
+    if (!isProfileId(id as string)) fail(path, 'settings.error.profileId');
+    normalised[exe as string] = id as string;
+  }
+  if (Object.keys(normalised).length > MAX_GAMES) fail('overlay.gameProfiles', 'settings.error.range');
+  overlay.gameProfiles = normalised;
+  const blocked = overlay.blockedGames;
+  if (!Array.isArray(blocked)) return fail('overlay.blockedGames', 'settings.error.type');
+  const games = blocked.map((name, i) => {
+    if (typeof name !== 'string') fail(`overlay.blockedGames.${i}`, 'settings.error.type');
+    return normalizeExe(name as string) ?? fail(`overlay.blockedGames.${i}`, 'settings.error.exe');
+  });
+  if (games.length > MAX_GAMES || new Set(games).size !== games.length) fail('overlay.blockedGames', 'settings.error.range');
+  overlay.blockedGames = games;
+  // Hotkeys differ from every earlier one: log toggle, log pause, then these in order.
+  const taken = [log.hotkeyToggle, log.hotkeyPause].filter((x): x is string => typeof x === 'string');
+  for (const key of OVERLAY_HOTKEYS) {
+    const value = overlay[key];
+    if (value === null) continue;
+    if (typeof value !== 'string') fail(`overlay.${key}`, 'settings.error.type');
+    const canonical = canonicalHotkey(value as string);
+    if (!canonical) fail(`overlay.${key}`, 'settings.error.hotkey');
+    if (taken.includes(canonical as string)) fail(`overlay.${key}`, 'settings.error.hotkeyDuplicate');
+    taken.push(canonical as string);
+    overlay[key] = canonical;
+  }
+}
+
 /** The only rule checks of the mock: level shape, durations, threshold order and hysteresis. */
 function checkLevels(path: string, rule: { warn?: LevelSpec | null; crit?: LevelSpec | null; hysteresis?: unknown }): void {
   for (const name of ['warn', 'crit'] as const) {
@@ -244,7 +320,8 @@ function merge(base: Record<string, unknown>, patch: Record<string, unknown>, pa
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
     const existing = base[key];
-    const wholeField = path.length === 3 && path[0] === 'rules' && path[1] === 'overrides';
+    const wholeField =
+      (path.length === 3 && path[0] === 'rules' && path[1] === 'overrides') || (path.length === 1 && path[0] === 'overlay' && key === 'gameProfiles');
     if (isObject(existing) && isObject(value) && !wholeField) merge(existing, value, [...path, key]);
     else base[key] = clone(value);
   }
@@ -268,6 +345,21 @@ export function defaultSettings(): Settings {
     view: {},
     rules: { overrides: {}, custom: [] },
     log: { folder: null, sensors: null, everyTicks: 1, maxFileMb: 100, hotkeyToggle: 'Ctrl+Alt+Shift+R', hotkeyPause: null },
+    overlay: {
+      enabled: false,
+      chartFps: 30,
+      textHz: 2,
+      hideFromCapture: false,
+      attach: 'window',
+      trackPcLatency: false,
+      trackGpu: false,
+      defaultProfile: 'builtin-gaming',
+      gameProfiles: {},
+      blockedGames: [],
+      hotkeyToggle: null,
+      hotkeyNextProfile: null,
+      hotkeyBenchmark: null,
+    },
     migrations: { serviceV1: false, webviewV1: false },
   };
 }
@@ -331,6 +423,7 @@ export class MockSettings {
     merge(merged, patch as Record<string, unknown>);
     checkTypes(merged);
     checkLog(merged.log as Record<string, unknown>);
+    checkOverlay(merged.overlay as Record<string, unknown>, merged.log as Record<string, unknown>);
     checkRules(merged.rules);
     // An unset field is absent, never null (the Rust encoding).
     const advanced = merged.advanced as Record<string, unknown>;

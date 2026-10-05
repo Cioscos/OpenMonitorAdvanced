@@ -3,15 +3,17 @@
   Verifies the signatures and the payload of the installer (spec M6a §5.1, plan L4/L5).
 .DESCRIPTION
     pwsh scripts/verify-signatures.ps1 -Policy release|test|none -Version X.Y.Z -Setup <setup.exe> -Manifest <target\signing\manifest.json>
-    pwsh scripts/verify-signatures.ps1 -Policy release|test -Version X.Y.Z -Files <dir with the three signed files>
+    pwsh scripts/verify-signatures.ps1 -Policy release|test -Version X.Y.Z -Files <dir with the four signed files>
 
   -Setup (the manifest is required with every policy): extracts the setup with 7-Zip and checks
   the payload, PawnIO, PresentMon, the product metadata and, for release|test, the signatures
   and the hashes of the imported signed copies; for none, the hashes of the collect pass. 7-Zip
   does not list the uninstaller: its imported copy and its replacement are checked in the
   manifest and the summary says that the installed uninstaller still needs the manual check.
-  -Files: before import-signed, the directory must hold exactly oma-app.exe, uninstall.exe and
-  oma-service.exe, each with an accepted signature and the expected metadata.
+  The payload must hold exactly one each of oma-app.exe, oma-overlay.exe (next to the app, M7c),
+  oma-service.exe, PawnIO_setup.exe and PresentMon-2.6.0-x64.exe.
+  -Files: before import-signed, the directory must hold exactly oma-app.exe, uninstall.exe,
+  oma-service.exe and oma-overlay.exe, each with an accepted signature and the expected metadata.
 
   release: ordinary Windows trust, signer from .signpath/certificates.json (exact subject and an
   approved thumbprint), embedded signature and timestamp verified by signtool (Windows SDK).

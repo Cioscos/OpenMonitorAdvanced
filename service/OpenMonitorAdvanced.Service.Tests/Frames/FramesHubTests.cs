@@ -181,6 +181,46 @@ public sealed class FramesHubTests : IDisposable
     }
 
     [Fact]
+    public void SessionsSubscribedDisabledStartNoTimers()
+    {
+        var a = Subscribe(1);
+        var b = Subscribe(2);
+        _hub.OnConfigure(1, new FramesConfigureMessage(Enabled: false, TrackPcLatency: false, TrackGpu: false));
+        _hub.OnConfigure(2, new FramesConfigureMessage(Enabled: false, TrackPcLatency: false, TrackGpu: false));
+
+        _time.Advance(TimeSpan.FromSeconds(5));
+
+        foreach (var client in new[] { a, b })
+        {
+            Assert.Empty(client.Of<PresentingProcessesMessage>());
+            Assert.Empty(client.Of<FrameBatchMessage>());
+            Assert.Single(client.Of<FramesStatusMessage>()); // only the one on subscribing
+        }
+    }
+
+    [Fact]
+    public void EnablingASessionStartsTheTimersAndDisablingStopsThem()
+    {
+        var client = Subscribe(1);
+        _hub.OnTarget(1, new FramesTargetMessage(10));
+        _time.Advance(TimeSpan.FromSeconds(2));
+        Assert.Empty(client.Of<PresentingProcessesMessage>());
+
+        _hub.OnConfigure(1, On);
+        _aggregator.Add(Row(10, 100), 0);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        Assert.NotEmpty(client.Of<PresentingProcessesMessage>());
+        int summaries = client.Of<PresentingProcessesMessage>().Count;
+        Assert.Single(client.Of<FrameBatchMessage>());
+
+        _hub.OnConfigure(1, new FramesConfigureMessage(Enabled: false, TrackPcLatency: false, TrackGpu: false));
+        _aggregator.Add(Row(10, 200), 0);
+        _time.Advance(TimeSpan.FromSeconds(5));
+        Assert.Equal(summaries, client.Of<PresentingProcessesMessage>().Count);
+        Assert.Single(client.Of<FrameBatchMessage>());
+    }
+
+    [Fact]
     public async Task StatusChangesAreBroadcast()
     {
         var a = Subscribe(1);
@@ -262,6 +302,7 @@ public sealed class FramesHubTests : IDisposable
     public void StallsAreLoggedAtMostOncePerMinute()
     {
         Subscribe(1);
+        _hub.OnConfigure(1, On);
         long second = _time.TimestampFrequency;
 
         _aggregator.Add(Row(10, 100), 0);

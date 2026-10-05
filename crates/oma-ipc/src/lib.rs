@@ -7,10 +7,13 @@
 mod drive_key;
 mod frame;
 mod message;
+pub mod overlay;
 mod status;
 
 pub use drive_key::drive_key;
-pub use frame::{decode_payload, encode_frame, encode_payload, FrameDecoder};
+pub use frame::{
+    decode_payload, decode_payload_of, encode_frame, encode_frame_of, encode_payload, FrameDecoder,
+};
 pub use message::{
     FrameBatch, FramesConfigure, FramesStatus, FramesTarget, Hello, IdentityHint, Message,
     PresentingProcess, PresentingProcesses, Subscribe, WireDevice, WireDrive, WireError, WireFrame,

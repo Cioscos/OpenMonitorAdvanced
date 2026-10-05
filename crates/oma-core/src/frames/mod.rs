@@ -4,14 +4,16 @@
 
 pub mod generation;
 pub mod metrics;
+pub mod readout;
 pub mod swapchain;
 pub mod synthetic;
 
 pub use generation::{
     fg_multiplier, fg_suspected, rendered_fps, source_label, Rendered, RenderedSource,
 };
+pub use readout::{read, FrameReadout, LowReadout};
 pub use swapchain::pick_swapchain;
-pub use synthetic::{synthetic, SyntheticProfile};
+pub use synthetic::{synthetic, SyntheticError, SyntheticProfile};
 
 use std::collections::VecDeque;
 
@@ -19,6 +21,8 @@ use std::collections::VecDeque;
 pub const FPS_WINDOW_S: f64 = 1.0;
 /// Window used for the 1% / 0.1% lows and the stutter count.
 pub const LOWS_WINDOW_S: f64 = 10.0;
+/// Window frame generation is suspected over.
+pub const FG_WINDOW_S: f64 = 2.0;
 
 /// Where a frame comes from: the application or a frame generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +109,12 @@ impl FrameWindow {
         self.frames.iter().skip(start).copied().collect()
     }
 
+    /// Frames with `t_s > after_t_s`, oldest first.
+    pub fn since(&self, after_t_s: f64) -> Vec<FrameSample> {
+        let start = self.frames.partition_point(|x| x.t_s <= after_t_s);
+        self.frames.iter().skip(start).copied().collect()
+    }
+
     pub fn clear(&mut self) {
         self.frames.clear();
     }
@@ -173,6 +183,18 @@ mod tests {
         assert_eq!(got.len(), 11);
         assert!((got[0].t_s - 2.0).abs() < 1e-9);
         assert!(FrameWindow::new(1.0).last(1.0).is_empty());
+    }
+
+    #[test]
+    fn window_since_returns_only_later_frames() {
+        let mut w = FrameWindow::new(10.0);
+        for i in 0..=10 {
+            w.push(sample(f64::from(i)));
+        }
+        let ts: Vec<f64> = w.since(7.0).iter().map(|f| f.t_s).collect();
+        assert_eq!(ts, vec![8.0, 9.0, 10.0]);
+        assert!(w.since(10.0).is_empty());
+        assert_eq!(w.since(f64::NEG_INFINITY).len(), 11);
     }
 
     #[test]

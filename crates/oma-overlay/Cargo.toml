@@ -1,0 +1,49 @@
+[package]
+name = "oma-overlay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenMonitor Advanced overlay"
+
+[build-dependencies]
+tauri-winres = "0.3"
+
+[dependencies]
+oma-core.workspace = true
+oma-ipc.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+oma-win.workspace = true
+# Already in the build through `windows`: `#[implement]` (the outline text
+# renderer, DP5) expands to `::windows_core` paths, and the Direct2D calls
+# take `windows_numerics` vectors and matrices.
+windows-core = "0.62"
+windows-numerics = "0.3"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_DirectComposition",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+]
+
+[dev-dependencies]
+serde_json.workspace = true

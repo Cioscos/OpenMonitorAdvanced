@@ -33,7 +33,7 @@ public sealed class FrameAggregatorTests
     }
 
     [Fact]
-    public void BatchCapsAtFiveHundredTwelveAndCountsDropped()
+    public void BatchCapsAtFiveHundredTwelveAndTheRestWaitsInTheBacklog()
     {
         var agg = NewAggregator();
         agg.SetTargets([10u]);
@@ -46,13 +46,74 @@ public sealed class FrameAggregatorTests
         Assert.NotNull(first);
         Assert.Equal(512, first.Frames.Count);
         Assert.Equal(1000UL, first.Frames[0].Qpc);
-        Assert.Equal(88u, first.Dropped);
+        Assert.Equal(0u, first.Dropped);
 
         agg.Add(Row(10, 5000), 0);
         var second = agg.TakeBatch(10);
         Assert.NotNull(second);
-        Assert.Single(second.Frames);
+        Assert.Equal(89, second.Frames.Count);
+        Assert.Equal(1512UL, second.Frames[0].Qpc);
+        Assert.Equal(5000UL, second.Frames[^1].Qpc);
         Assert.Equal(0u, second.Dropped);
+        Assert.Null(agg.TakeBatch(10));
+    }
+
+    [Fact]
+    public void ABurstBeyondOneBatchIsDeliveredOverTheNextTicks()
+    {
+        var agg = NewAggregator();
+        agg.SetTargets([10u]);
+        for (ulong i = 0; i < 1200; i++)
+        {
+            agg.Add(Row(10, 1000 + i), 0);
+        }
+
+        var sizes = new List<int>();
+        while (agg.TakeBatch(10) is { } batch)
+        {
+            sizes.Add(batch.Frames.Count);
+            Assert.Equal(0u, batch.Dropped);
+        }
+
+        Assert.Equal([512, 512, 176], sizes);
+    }
+
+    [Fact]
+    public void BacklogBeyondTheCapCountsDropped()
+    {
+        var agg = NewAggregator();
+        agg.SetTargets([10u]);
+        for (ulong i = 0; i < 5000; i++)
+        {
+            agg.Add(Row(10, 1000 + i), 0);
+        }
+
+        int delivered = 0;
+        uint dropped = 0;
+        while (agg.TakeBatch(10) is { } batch)
+        {
+            delivered += batch.Frames.Count;
+            dropped += batch.Dropped;
+        }
+
+        Assert.Equal(FrameAggregator.MaxBacklogFrames, delivered);
+        Assert.Equal(904u, dropped);
+    }
+
+    [Fact]
+    public void ClearEmptiesTheBacklog()
+    {
+        var agg = NewAggregator();
+        agg.SetTargets([10u]);
+        for (ulong i = 0; i < 1200; i++)
+        {
+            agg.Add(Row(10, 1000 + i), 0);
+        }
+
+        _ = agg.TakeBatch(10);
+        agg.Clear();
+
+        Assert.Null(agg.TakeBatch(10));
     }
 
     [Fact]

@@ -39,6 +39,15 @@
   $false with the reason "not running" when the service has not started it
   (no app is asking for frame metrics). Spec M7 §11 budgets PresentMon plus
   the service's own work together.
+  The overlay process (M7c) is measured in every mode, inside the same window
+  and by the same raw-counter method: the direct child of the app named
+  oma-overlay.exe, reported as OverlayCpuPercent and OverlayPrivateBytesMB
+  (Private Bytes), or OverlayValid $false with the reason ("not running" when
+  the overlay is off or no game is in the foreground with the overlay shown).
+  It runs as the user, so no elevation is needed. It is not part of
+  TotalAppPercentCpu (host and WebView2 only); spec M7 §11 budgets it on its
+  own (< 40 MB without a game, < 70 MB shown in game) and together with
+  PresentMon (< 0.5 % without a game).
 .EXAMPLE
   ./scripts/measure-footprint.ps1                            # window open
   ./scripts/measure-footprint.ps1 -Minimized                 # tray only
@@ -157,6 +166,35 @@ function Get-PresentMonProcessId {
             $_.Name -eq 'PresentMon-2.6.0-x64.exe' -and [int]$_.ParentProcessId -eq [int]$ServicePid })
     if ($children.Count -ne 1) { return $null }
     [int]$children[0].ProcessId
+}
+
+# The PID of the overlay process (M7c): the direct child of the app ($AppPid)
+# named oma-overlay.exe; $null when there is not exactly one (overlay off, or a
+# restart caught half-way). $ProcessProvider returns Win32_Process-shaped
+# objects, so tests use a fake process list.
+function Get-OverlayProcessId {
+    param(
+        $AppPid,
+        [scriptblock]$ProcessProvider = { Get-CimInstance Win32_Process -Filter "Name='oma-overlay.exe'" -ErrorAction SilentlyContinue }
+    )
+    if (-not $AppPid) { return $null }
+    $children = @(& $ProcessProvider | Where-Object {
+            $_.Name -eq 'oma-overlay.exe' -and [int]$_.ParentProcessId -eq [int]$AppPid })
+    if ($children.Count -ne 1) { return $null }
+    [int]$children[0].ProcessId
+}
+
+# The report fields of the overlay from a Measure-ChildSample result: values
+# only when valid, otherwise nulls and the reason (a missing result is invalid,
+# never a zero reading).
+function ConvertTo-OverlayFields($Result) {
+    $valid = $null -ne $Result -and [bool]$Result.Valid
+    [ordered]@{
+        OverlayValid          = $valid
+        OverlayCpuPercent     = if ($valid) { $Result.CpuPercent } else { $null }
+        OverlayPrivateBytesMB = if ($valid) { $Result.PrivateBytesMB } else { $null }
+        OverlayInvalidReason  = if ($valid) { $null } elseif ($null -eq $Result) { 'not measured' } else { $Result.Reason }
+    }
 }
 
 # Measure-ServiceSample for a process that may legitimately be absent (the
@@ -280,24 +318,31 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
     $cpuStart = $Proc.TotalProcessorTime
 
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
-    # The service's PresentMon child (M7b) is sampled inside the service window.
+    # The overlay child of the app (M7c) wraps the window; the service's
+    # PresentMon child (M7b) is sampled inside the service window.
     $presentMon = @{ Result = $null }
+    $service = @{ Result = $null }
+    $overlay = @{ Result = $null }
     $appCpu = Measure-AppCpuSample -RootProcessId $Proc.Id -RequireWebView:($Mode -eq 'window') `
         -ProcessProvider { Get-CimInstance Win32_Process } `
         -CounterProvider { Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction SilentlyContinue } `
         -SampleAction {
-            if ($MeasureService) {
-                Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } -ServiceLabel $ServiceName `
-                    -SampleAction {
-                        $presentMon.Result = Measure-ChildSample `
-                            -PidProvider { Get-PresentMonProcessId -ServicePid (Get-ServiceProcessId -Name $ServiceName) } `
-                            -SampleAction { Start-Sleep -Seconds $SampleSeconds }
+            $overlay.Result = Measure-ChildSample -Label 'oma-overlay.exe' `
+                -PidProvider { Get-OverlayProcessId -AppPid $Proc.Id } `
+                -SampleAction {
+                    if ($MeasureService) {
+                        $service.Result = Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } -ServiceLabel $ServiceName `
+                            -SampleAction {
+                                $presentMon.Result = Measure-ChildSample `
+                                    -PidProvider { Get-PresentMonProcessId -ServicePid (Get-ServiceProcessId -Name $ServiceName) } `
+                                    -SampleAction { Start-Sleep -Seconds $SampleSeconds }
+                            }
+                    } else {
+                        Start-Sleep -Seconds $SampleSeconds
                     }
-            } else {
-                Start-Sleep -Seconds $SampleSeconds
-            }
+                }
         }
-    $svcResult = $appCpu.SampleResult
+    $svcResult = $service.Result
     # Measure-ServiceSample returns before sampling when the service is not running: then so is PresentMon.
     $pmResult = if ($presentMon.Result) { $presentMon.Result } else { [pscustomobject]@{ Valid = $false; Reason = 'not running' } }
     $Proc.Refresh()
@@ -342,6 +387,8 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
         TotalPrivateMB    = [math]::Round($totalPrivate / 1MB, 1)
         VendorModules     = if ($vendorModules.Count) { $vendorModules -join ', ' } else { '(none)' }
     }
+    # Spec M7 §11: the overlay process on its own (< 40 MB private without a game, < 70 MB shown in game), and with PresentMon for the CPU lines.
+    foreach ($field in (ConvertTo-OverlayFields $overlay.Result).GetEnumerator()) { $result[$field.Key] = $field.Value }
     if ($MeasureService) {
         if ($svcResult.Valid) {
             $result['ServiceValid']         = $true

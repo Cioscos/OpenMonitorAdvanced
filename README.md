@@ -68,6 +68,8 @@ SMART data.
   sensors. *Settings › CSV log* sets the folder, the sensors, the interval, the size limit and
   the hotkeys. A failure such as a removed USB drive stops the recording with a notification and
   the reason in the deck.
+- **In-game overlay.** FPS, frame times, lows and sensors over a game, from a separate
+  click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -172,43 +174,78 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   installer and then points at a program that is gone: remove it in *Settings › Apps › Startup*
   (or turn the option off before uninstalling).
 
-## Frame metrics (preview)
+## In-game overlay
 
-The Advanced sensors component also installs Intel's
-[PresentMon](https://github.com/GameTechDev/PresentMon) 2.6.0 console, unmodified and signed by
-Intel, next to the service. The service runs it to read frame times: displayed and rendered FPS,
-frametimes, 1% and 0.1% lows, stutter, latency. They are meant for an in-game overlay, which is
-still being built. PresentMon traces every process that presents frames, not only the game: the
-name, process ID and displayed FPS of each presenting process go to the app, which picks the game
-among them; the detailed frame data is sent only for the process the app asks for.
+The overlay shows FPS, frame times and sensors over a game, in a separate window that does not take
+the focus and lets every click through to the game. It draws with Direct2D and DirectComposition,
+from its own small process, `oma-overlay.exe`, installed next to the app.
 
-- **Off unless asked.** PresentMon runs only while the app asks for frame metrics. In this
-  version only a diagnostic switch does: set the environment variable `OMA_FRAMES_DEBUG` to `1`,
-  `pcl` or `all` before starting the app, and it writes one `frames:` line per second to its log
-  in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`. PresentMon traces through its own ETW session,
-  `OpenMonitorAdvanced-Frames`, and never stops the sessions of other tools.
-- **The game is not touched.** No handle on the game's process, no reads of its memory, no input
-  sent to it. The service checks PresentMon's SHA-256 before every start and refuses a modified
-  copy.
-- **PC latency is not entirely passive.** Measuring PC latency (`pcl` or `all`) turns on
-  NVIDIA's PCL Stats events. A game that supports Reflex then starts a ping every 100–300 ms
-  while it is in the foreground: a window message to its own window or, if the game is set up
-  that way, synthesized F13–F15 key presses. This is how NVIDIA designed it (FrameView and
-  PresentMon rely on it) and it is harmless, but a program that reacts to F13–F15 may see those
-  keys. It is never on unless you ask for it.
-- **Known limits.**
-  - Frame generation: with PC latency on, the rendered FPS are known for DLSS FG, FSR FG and
-    NVIDIA Smooth Motion in games with Reflex, and for Intel XeSS-FG and AMD AFMF from the
-    driver. Without Reflex, or with PC latency off, the rendered FPS are unknown: DLSS FG and
-    Smooth Motion show *FG?* instead of a number, FSR FG only the displayed FPS.
-  - G-Sync/FreeSync: a visible overlay window may make Windows compose the game instead of
-    using independent flip, on hardware without a free MPO plane. On an RTX 4080 it did not:
-    independent flip and G-Sync stayed on with the window visible, empty or hidden.
-  - Exclusive fullscreen: the overlay will not be visible over a game in true exclusive
-    fullscreen; the measurement works.
-  - Anti-cheat: some anti-cheat systems refuse the ETW session if it starts after the game
-    (turn the frame metrics on before starting the game), and some block external windows too.
-  - HDR: the overlay content is SDR, composed by the desktop window manager.
+- **What it measures.** Displayed, rendered and presented FPS, displayed and app frame times
+  (also as a chart), 1% and 0.1% lows, stutter, the frame generation multiplier, PC and display
+  latency, whether the game is CPU or GPU bound, and any sensor of the app (GPU and CPU load and
+  temperature, VRAM, RAM, clocks, power...). Frame data comes from Intel's
+  [PresentMon](https://github.com/GameTechDev/PresentMon) 2.6.0 console, which the Advanced
+  sensors component installs next to the service, unmodified and signed by Intel; the service
+  runs it while the overlay is on. Without the service the sensor blocks still work and the
+  frame blocks show *—*.
+- **How to turn it on.** *Settings › Overlay › Show the in-game overlay*. The overlay follows the
+  game in the foreground that presents at least 10 FPS, and shows only while that game's window is
+  in the foreground; it hides as soon as you switch to another window. The same page sets the
+  chart and text refresh, the position (game window or whole monitor), *Hide from screen
+  capture* for OBS and screenshots, PC latency and GPU tracking, game profiles and excluded
+  games, and shows the state of the measurement.
+- **Shortcuts.** *Show/hide overlay* and *Next profile* are global shortcuts, **not set by
+  default**: pick them in *Settings › Overlay › Shortcuts*. A combination already used by
+  another program, or by the CSV log, is reported there. The tray menu has *Show/hide overlay*
+  too. Hiding it lasts until the app restarts.
+- **Built-in profiles.** *Minimal FPS* (FPS in a corner), *Gaming* (the default: displayed and
+  rendered FPS, frame time chart, 1% low, GPU and CPU load and temperature, VRAM), *Full* (Gaming
+  plus RAM, clocks, GPU power, latency, bound and FG multiplier) and *Horizontal bar* (one
+  compact row at the top). They are read-only and bind to the first dedicated GPU and to the CPU,
+  like the tray. *Use the active profile for the current game* remembers a profile per game
+  executable; *Exclude the current game* never shows the overlay over that game (the
+  measurement goes on).
+- **Your own profiles.** Profiles are JSON files named `<uuid>.json` in
+  `%APPDATA%\OpenMonitorAdvanced\overlay\profiles\`. In this version you write them by hand (the
+  editor comes in a later version); *Reload profiles* reads the folder again, and an invalid file
+  is listed with the reason while the default profile is used. The app never changes those files.
+- **The game is not touched.** No injection, no hook inside the game, no handle on its process,
+  no reads of its memory, no input sent to it. The service checks PresentMon's SHA-256 before
+  every start and refuses a modified copy. PresentMon traces through its own ETW session,
+  `OpenMonitorAdvanced-Frames`, and never stops the sessions of other tools. It traces every
+  process that presents frames, not only the game: the name, process ID and displayed FPS of each
+  presenting process go to the app, which picks the game among them; the detailed frame data is
+  sent only for that game. The app and the overlay talk through a named pipe that only your user
+  can open. Nothing leaves the PC.
+- **PC latency is not entirely passive.** *Measure PC latency (Reflex markers)* turns on NVIDIA's
+  PCL Stats events. A game that supports Reflex then starts a ping every 100–300 ms while it is
+  in the foreground: a window message to its own window or, if the game is set up that way,
+  synthesized F13–F15 key presses. This is how NVIDIA designed it (FrameView and PresentMon rely
+  on it) and it is harmless, but a program that reacts to F13–F15 may see those keys. It is off
+  unless you turn it on.
+- **Diagnostics.** With the environment variable `OMA_FRAMES_DEBUG` set to `1`, `pcl` or `all`
+  before starting the app, the app writes one `frames:` line per second to its log in
+  `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`, with or without the overlay.
+
+### Known limits
+
+- **Exclusive fullscreen:** the overlay is not visible over a game in true exclusive
+  fullscreen (the app says so once per game); use borderless mode. The measurement works.
+- **Frame generation:** with PC latency on, the rendered FPS are known for DLSS FG, FSR FG and
+  NVIDIA Smooth Motion in games with Reflex, and for Intel XeSS-FG and AMD AFMF from the
+  driver. Without Reflex, or with PC latency off, the rendered FPS are unknown: DLSS FG and
+  Smooth Motion show *FG?* instead of a number, FSR FG only the displayed FPS.
+- **Anti-cheat:** some anti-cheat systems refuse the ETW session if it starts after the game
+  (turn the overlay on before starting the game), and some block external windows too: add
+  those games to the excluded games.
+- **G-Sync/FreeSync:** a visible overlay window may make Windows compose the game instead of
+  using independent flip, on hardware without a free MPO plane. On an RTX 4080 it did not:
+  independent flip and G-Sync stayed on with the window visible, empty or hidden. Hiding the
+  overlay restores independent flip.
+- **HDR:** the overlay content is SDR, composed by the desktop window manager; in an HDR game its
+  white follows Windows' *SDR content brightness*.
+- **Several signed-in users:** each has their own app and overlay; the service serves up to 8
+  of them and combines their requests in one capture.
 
 ## Update check
 
@@ -266,6 +303,7 @@ The Tauri bundler downloads NSIS by itself the first time you build the installe
 ### Run in development
 
 ```bash
+cargo build -p oma-overlay   # the overlay process; the app looks for it next to its own exe
 cd app
 pnpm install
 pnpm tauri dev    # the full app
@@ -293,7 +331,7 @@ pnpm tauri build --bundles nsis
 ```
 
 The payload script publishes `oma-service` (self-contained, trimmed, single file, win-x64),
-downloads the official PawnIO 2.2.0 setup, checked against the SHA-256 in
+builds `oma-overlay.exe` (`cargo build --release --locked -p oma-overlay`), downloads the official PawnIO 2.2.0 setup, checked against the SHA-256 in
 `app/src-tauri/nsis/pawnio.sha256`, and the official PresentMon 2.6.0 console, checked against
 `app/src-tauri/nsis/presentmon.sha256` and Intel's signature. Neither is ever committed to this
 repository. The installer
@@ -305,7 +343,8 @@ ends up in `target/release/bundle/nsis/`.
 |---|---|
 | `crates/oma-core` | Data model, sampling scheduler, per-source merge, history. No Windows code. |
 | `crates/oma-win` | Windows providers: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, disks, network |
-| `crates/oma-ipc` | Protocol types, MessagePack encoding and framing for talking to `oma-service` |
+| `crates/oma-ipc` | Protocol types, MessagePack encoding and framing for talking to `oma-service` and to the overlay |
+| `crates/oma-overlay` | `oma-overlay.exe`, the in-game overlay window (Direct2D, DirectWrite, DirectComposition) |
 | `app/src-tauri` | Tauri 2 shell (`oma-app`): commands, tray, window, safe mode, NSIS template and hooks |
 | `app/src` | Svelte 5 + TypeScript UI, English and Italian translations |
 | `service/` | `oma-service`, a .NET 10 Windows service built on LibreHardwareMonitorLib, with its tests |

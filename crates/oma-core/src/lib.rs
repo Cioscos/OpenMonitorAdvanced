@@ -3,14 +3,17 @@
 
 pub mod csv;
 pub mod engine;
+pub mod format;
 pub mod frames;
 pub mod history;
 pub mod hotkey;
 pub mod merge;
 pub mod model;
+pub mod overlay;
 pub mod provider;
 pub mod rate;
 pub mod report;
+pub mod roles;
 pub mod rules;
 pub mod sampler;
 pub mod sanitize;

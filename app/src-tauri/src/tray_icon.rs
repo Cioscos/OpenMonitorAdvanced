@@ -1,6 +1,7 @@
 //! Dynamic tray icon (a number on a rounded square in the color of the health
 //! level), tooltip and alert texts, as pure functions.
 
+use oma_core::format::FormatOptions;
 use oma_core::model::{DeviceKind, Schema, Unit};
 use oma_core::rules::{Alert, HealthReport, OverallLevel};
 use oma_core::settings::{TemperatureUnit, ThroughputUnit};
@@ -448,14 +449,12 @@ fn alert_value(
     rate: ThroughputUnit,
 ) -> String {
     match value.filter(|v| v.is_finite()) {
-        Some(v) if unit == Unit::Percent => format!("{} %", number(v, 0, lang)),
+        Some(v) if unit == Unit::Percent => {
+            format!("{} %", oma_core::format::number(v, 0, lang == Lang::It))
+        }
         _ => format_value(lang, value, unit, temperature, rate),
     }
 }
-
-const BYTE_UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-const BIT_UNITS: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
-const JOULE_UNITS: [&str; 4] = ["J", "kJ", "MJ", "GJ"];
 
 /// A sensor value as `formatValue` in `app/src/lib/format.ts` shows it, with
 /// `rate` for bytes per second; "—" when absent or not finite.
@@ -466,98 +465,16 @@ fn format_value(
     temperature: TemperatureUnit,
     rate: ThroughputUnit,
 ) -> String {
-    let Some(v) = value.filter(|v| v.is_finite()) else {
-        return DASH.to_owned();
+    let opts = FormatOptions {
+        decimal_comma: lang == Lang::It,
+        temperature,
+        rate,
+        flag_on: t(lang, "flag.on", &[]),
+        flag_off: t(lang, "flag.off", &[]),
+        ..FormatOptions::default()
     };
-    let n = |value: f64, digits: usize| number(value, digits, lang);
-    match unit {
-        Unit::Celsius => {
-            let symbol = match temperature {
-                TemperatureUnit::C => "\u{b0}C",
-                TemperatureUnit::F => "\u{b0}F",
-            };
-            format!("{} {symbol}", n(display_value(v, unit, temperature), 0))
-        }
-        Unit::Percent => format!("{}%", n(v, 0)),
-        Unit::Megahertz if v >= 1000.0 => format!("{} GHz", n(v / 1000.0, 2)),
-        Unit::Megahertz => format!("{} MHz", n(v, 0)),
-        Unit::Watt => format!("{} W", n(v, 0)),
-        Unit::Volt => format!("{} V", n(v, 3)),
-        Unit::Ampere => format!("{} A", n(v, 1)),
-        Unit::Rpm => format!("{} RPM", n(v, 0)),
-        Unit::Bytes => stepped(v, 1024.0, &BYTE_UNITS, lang),
-        Unit::BytesPerSecond => throughput(v, rate, lang),
-        Unit::BitsPerSecond => throughput(v / 8.0, ThroughputUnit::Bits, lang),
-        Unit::Joule => stepped(v, 1000.0, &JOULE_UNITS, lang),
-        Unit::Boolean => t(lang, if v >= 0.5 { "flag.on" } else { "flag.off" }, &[]),
-        // `Math.round`: half up.
-        Unit::PcieGeneration => format!("Gen {}", (v + 0.5).floor()),
-        Unit::Lanes => format!("x{}", (v + 0.5).floor()),
-        Unit::Hours => format!("{} h", n(v, 0)),
-        Unit::Count => n(v, 0),
-    }
-}
-
-/// `value` divided by `step` while it reaches it, with the matching unit.
-fn scaled(mut value: f64, step: f64, units: &[&str]) -> (f64, usize) {
-    let mut unit = 0;
-    while value.abs() >= step && unit < units.len() - 1 {
-        value /= step;
-        unit += 1;
-    }
-    (value, unit)
-}
-
-/// `formatBytes` and `formatEnergy`: a decimal only between the first step
-/// and 100.
-fn stepped(value: f64, step: f64, units: &[&str], lang: Lang) -> String {
-    let (value, unit) = scaled(value, step, units);
-    let digits = usize::from(unit != 0 && value < 100.0);
-    format!("{} {}", number(value, digits, lang), units[unit])
-}
-
-/// `formatRate`: bits with decimal steps, or bytes with binary steps.
-fn throughput(bytes_per_second: f64, rate: ThroughputUnit, lang: Lang) -> String {
-    match rate {
-        ThroughputUnit::Bytes => {
-            format!("{}/s", stepped(bytes_per_second, 1024.0, &BYTE_UNITS, lang))
-        }
-        ThroughputUnit::Bits => {
-            let (value, unit) = scaled(bytes_per_second * 8.0, 1000.0, &BIT_UNITS);
-            let digits = usize::from(value < 10.0);
-            format!("{} {}", number(value, digits, lang), BIT_UNITS[unit])
-        }
-    }
-}
-
-/// `Intl.NumberFormat` for `en` and `it`: `digits` decimals rounded half away
-/// from zero (`format!` would round ties to even), the language's decimal
-/// separator, and thousands grouped from four digits in English, five in
-/// Italian. A value rounded to zero has no sign.
-fn number(value: f64, digits: usize, lang: Lang) -> String {
-    let scale = 10f64.powi(digits as i32);
-    let rounded = (value * scale).round() / scale;
-    let text = format!("{:.*}", digits, rounded.abs());
-    let (int, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
-    let (group, decimal, grouping_from) = match lang {
-        Lang::En => (',', '.', 4),
-        Lang::It => ('.', ',', 5),
-    };
-    let mut out = String::with_capacity(text.len() + 4);
-    if rounded < 0.0 {
-        out.push('-');
-    }
-    for (i, c) in int.chars().enumerate() {
-        if int.len() >= grouping_from && i > 0 && (int.len() - i) % 3 == 0 {
-            out.push(group);
-        }
-        out.push(c);
-    }
-    if !frac.is_empty() {
-        out.push(decimal);
-        out.push_str(frac);
-    }
-    out
+    let (number, unit) = oma_core::format::format_value(value, unit, &opts);
+    oma_core::format::join(&number, &unit)
 }
 
 fn tooltip_value(value: f64, unit: Unit, temperature: TemperatureUnit) -> String {

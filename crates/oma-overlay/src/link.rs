@@ -43,6 +43,8 @@ impl<F: Fn() + Send + 'static> Wake for F {
 #[derive(Debug)]
 pub(crate) enum Route {
     Deliver(Box<OverlayMessage>),
+    /// Handled here (a compatible `Hello`): nothing else to do.
+    Handled,
     /// Dropped: the reason goes to the log.
     Drop(String),
     Exit(i32),
@@ -57,7 +59,7 @@ pub(crate) fn route(msg: OverlayMessage) -> Route {
     match msg {
         OverlayMessage::Hello(hello) if overlay_compatible(&hello) => {
             tracing::info!(app_version = %hello.version, "app hello received");
-            Route::Drop("hello handled by the link".into())
+            Route::Handled
         }
         OverlayMessage::Hello(hello) => {
             tracing::error!(
@@ -129,6 +131,7 @@ mod imp {
                         }
                         waker.wake();
                     }
+                    Route::Handled => {}
                     Route::Drop(reason) => tracing::warn!(%reason, "overlay message dropped"),
                     Route::Exit(code) => break code,
                 },
@@ -180,7 +183,7 @@ mod tests {
         ));
         assert!(matches!(
             route(hello(OVERLAY_PROTOCOL_VERSION)),
-            Route::Drop(_)
+            Route::Handled
         ));
     }
 

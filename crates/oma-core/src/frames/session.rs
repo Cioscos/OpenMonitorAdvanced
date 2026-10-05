@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::frames::generation::generated_label;
-use crate::frames::metrics::{lows, LowDefinition, StutterCounter};
+use crate::frames::metrics::{lows_of_sorted, LowDefinition, StutterCounter};
 use crate::frames::{fg_multiplier, FrameKind, FrameSample, Rendered, RenderedSource};
 
 /// Displayed frames kept per session: one hour at 1000 FPS.
@@ -151,10 +151,13 @@ impl SessionAccumulator {
             return None;
         }
         let fps_displayed = 1000.0 * n as f64 / self.sum_ms;
-        let fts: Vec<f64> = self.frametimes.iter().map(|&v| f64::from(v)).collect();
+        // One sorted `f32` copy for both definitions: ~14 MB at the cap
+        // ([`MAX_SESSION_FRAMES`]) instead of ~58 MB of `f64` copies.
+        let mut sorted = self.frametimes.clone();
+        sorted.sort_by(f32::total_cmp);
         // `lows` needs two values; a one-frame session reports its own rate.
         let low = |def| {
-            lows(&fts, def).map_or(
+            lows_of_sorted(&sorted, def).map_or(
                 SummaryLows {
                     one_percent: fps_displayed,
                     point_one_percent: fps_displayed,
@@ -241,6 +244,33 @@ mod tests {
         assert!(s.push(&frame(0.0, false)));
         assert_eq!(s.frames(), 1);
         assert!(s.summary().is_none());
+    }
+
+    #[test]
+    fn summary_lows_match_the_live_definitions() {
+        let mut s = SessionAccumulator::new();
+        let times: Vec<f64> = (0..2_000)
+            .map(|i| f64::from((i * 7919) % 97) * 0.37 + 4.0)
+            .collect();
+        let mut t = 0.0;
+        for &ms in &times {
+            t += ms / 1000.0;
+            s.push(&FrameSample {
+                ms_between_display_change: Some(ms),
+                ..frame(t, true)
+            });
+        }
+        let summary = s.summary().unwrap();
+        // The session keeps `f32`: compare with the same values.
+        let kept: Vec<f64> = times.iter().map(|&v| f64::from(v as f32)).collect();
+        for (def, got) in [
+            (LowDefinition::Integral, summary.lows_integral),
+            (LowDefinition::Percentile, summary.lows_percentile),
+        ] {
+            let want = crate::frames::metrics::lows(&kept, def).unwrap();
+            assert_eq!(got.one_percent, want.one_percent, "{def:?}");
+            assert_eq!(got.point_one_percent, want.point_one_percent, "{def:?}");
+        }
     }
 
     #[test]

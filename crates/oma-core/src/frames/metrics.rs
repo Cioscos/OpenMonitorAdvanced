@@ -48,12 +48,18 @@ pub fn lows(frametimes_ms: &[f64], def: LowDefinition) -> Option<Lows> {
     }
     let mut sorted = frametimes_ms.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
+    lows_of_sorted(&sorted, def)
+}
+
+/// [`lows`] of frametimes already sorted shortest first, so a long session
+/// sorts one (`f32`) copy for both definitions.
+pub fn lows_of_sorted<T: Copy + Into<f64>>(sorted: &[T], def: LowDefinition) -> Option<Lows> {
+    if sorted.len() < 2 {
+        return None;
+    }
     let (one, point_one) = match def {
-        LowDefinition::Integral => (integral_low(&sorted, 0.01), integral_low(&sorted, 0.001)),
-        LowDefinition::Percentile => (
-            percentile_low(&sorted, 0.99),
-            percentile_low(&sorted, 0.999),
-        ),
+        LowDefinition::Integral => (integral_low(sorted, 0.01), integral_low(sorted, 0.001)),
+        LowDefinition::Percentile => (percentile_low(sorted, 0.99), percentile_low(sorted, 0.999)),
     };
     Some(Lows {
         one_percent: one,
@@ -62,24 +68,24 @@ pub fn lows(frametimes_ms: &[f64], def: LowDefinition) -> Option<Lows> {
 }
 
 /// `ascending` is sorted shortest first.
-fn integral_low(ascending: &[f64], p: f64) -> f64 {
-    let threshold = p * ascending.iter().sum::<f64>();
+fn integral_low<T: Copy + Into<f64>>(ascending: &[T], p: f64) -> f64 {
+    let threshold = p * ascending.iter().map(|&v| v.into()).sum::<f64>();
     let mut acc = 0.0;
-    for &ft in ascending.iter().rev() {
+    for ft in ascending.iter().rev().map(|&v| v.into()) {
         acc += ft;
         if acc >= threshold {
             return 1000.0 / ft;
         }
     }
     // Unreachable for p <= 1; fall back to the shortest frame.
-    1000.0 / ascending[0]
+    1000.0 / ascending[0].into()
 }
 
-fn percentile_low(ascending: &[f64], q: f64) -> f64 {
+fn percentile_low<T: Copy + Into<f64>>(ascending: &[T], q: f64) -> f64 {
     let n = ascending.len();
     // The epsilon keeps products like 0.99 * 1000 from rounding up a rank.
     let rank = ((q * n as f64 - 1e-9).ceil() as usize).clamp(1, n);
-    1000.0 / ascending[rank - 1]
+    1000.0 / ascending[rank - 1].into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

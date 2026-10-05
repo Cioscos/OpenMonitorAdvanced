@@ -147,7 +147,9 @@ pub fn profile_to_json(profile: &Profile) -> String {
 }
 
 /// `wanted` if free, else `wanted (2)`, `wanted (3)`...; case-insensitive.
-/// A `wanted` already ending in ` (n)` continues from `n + 1`.
+/// A `wanted` already ending in ` (n)` continues from `n + 1`. The base is
+/// shortened (on a character boundary) so the result fits
+/// [`MAX_TEXT_BYTES`].
 pub fn unique_name(existing: &[&str], wanted: &str) -> String {
     let taken = |n: &str| {
         existing
@@ -159,7 +161,14 @@ pub fn unique_name(existing: &[&str], wanted: &str) -> String {
     }
     let (base, start) = split_suffix(wanted);
     (start..)
-        .map(|n| format!("{base} ({n})"))
+        .map(|n| {
+            let suffix = format!(" ({n})");
+            let mut end = base.len().min(MAX_TEXT_BYTES - suffix.len());
+            while !base.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}{suffix}", &base[..end])
+        })
         .find(|c| !taken(c))
         .expect("unbounded range")
 }
@@ -261,6 +270,15 @@ mod tests {
         );
         assert_eq!(unique_name(&["Gaming"], "Nuovo"), "Nuovo");
         assert_eq!(unique_name(&["Gaming (2)"], "Gaming (2)"), "Gaming (3)");
+    }
+
+    #[test]
+    fn unique_name_fits_the_name_limit() {
+        // Two-byte characters: the cut must fall on a character boundary.
+        let long = "é".repeat(MAX_TEXT_BYTES / 2);
+        let name = unique_name(&[long.as_str()], &long);
+        assert!(name.len() <= MAX_TEXT_BYTES, "{}", name.len());
+        assert!(name.ends_with("é (2)"));
     }
 
     #[test]

@@ -273,7 +273,7 @@ mod runner {
     use std::time::{Duration, Instant};
 
     use oma_ipc::FramesConfigure;
-    use oma_win::foreground::ForegroundWatcher;
+    use oma_win::foreground::{ForegroundEvent, ForegroundWatcher};
     use oma_win::svc::{FramesFeed, LinkCommand};
 
     use super::{options_from_env, Diagnostics, ENV_VAR};
@@ -326,8 +326,10 @@ mod runner {
         let foreground = Arc::new(AtomicU32::new(0));
         let watcher = {
             let foreground = Arc::clone(&foreground);
-            match ForegroundWatcher::spawn(Box::new(move |pid| {
-                foreground.store(pid, Ordering::Relaxed);
+            match ForegroundWatcher::spawn(Box::new(move |event| {
+                if let ForegroundEvent::Foreground(fg) = event {
+                    foreground.store(fg.pid, Ordering::Relaxed);
+                }
             })) {
                 Ok(watcher) => Some(watcher),
                 Err(err) => {

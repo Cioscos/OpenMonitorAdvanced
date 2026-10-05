@@ -11,9 +11,14 @@
 //!   [`Controller::step`] every 100 ms, and after every input. Otherwise no
 //!   watcher and no process run, and the thread waits on the channel without
 //!   a timeout, stepping once per input (§11).
+//!   With the overlay editor open the thread also steps every 100 ms, for the
+//!   canvas's data (`overlay-editor-data`), without the engine or the watcher.
+//! - **Preview (M7d, DD2):** a second [`OverlayHost`] in
+//!   [`OverlayMode::Preview`], created at the first preview; the controller's
+//!   `want_preview` turns its process on and off.
 //! - **Sampler:** [`OverlayHandle::on_tick`] builds `Values` from the plan the
 //!   controller last published (ruling R2) and queues them for the overlay
-//!   without ever blocking the tick.
+//!   and the preview without ever blocking the tick.
 //! - **Shutdown** ([`OverlayRunner::stop`]): the engine is turned off if the
 //!   controller had turned it on, then the host closes the overlay, then the
 //!   watcher goes.
@@ -27,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use oma_core::engine::TickOutput;
 use oma_core::model::Schema;
-use oma_core::overlay::{Foreground, PxRect};
+use oma_core::overlay::{parse_profile, Foreground, Profile, PxRect};
 use oma_core::settings::Settings;
 use oma_ipc::overlay::OverlayMessage;
 use oma_ipc::FramesConfigure;
@@ -37,11 +42,14 @@ use oma_win::foreground::{
 use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
+use super::editor::CommandError;
+use super::editor_feed::EditorData;
+
 use super::controller::{
     tick_values, Controller, Outputs, OverlayHotkeys, OverlayStatus, ToastRequest, ValuesPlan,
 };
 use super::frames::{options_from_env, ENV_VAR};
-use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlaySender};
+use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlayMode, OverlaySender};
 use super::profiles::{app_profiles_dir, load_catalog, ProfileCatalog};
 use crate::hotkeys::OverlayActions;
 use crate::i18n::{t, Lang};
@@ -52,6 +60,10 @@ use crate::tray::language_for;
 
 /// The UI event carrying every new [`OverlayStatus`].
 pub const EVENT_OVERLAY_STATUS: &str = "overlay-status";
+/// The editor's canvas data ([`EditorData`]).
+pub const EVENT_EDITOR_DATA: &str = "overlay-editor-data";
+/// The preview opened or closed: `{ open: bool }`.
+pub const EVENT_PREVIEW: &str = "overlay-preview";
 /// The controller's period while the frame engine is wanted.
 const STEP: Duration = Duration::from_millis(100);
 /// How often the tracked window's geometry is read without a move, so a
@@ -65,6 +77,8 @@ const FOREGROUND_CHECK_MS: u64 = 1_000;
 pub type LinkSink = Box<dyn Fn(LinkCommand) + Send + Sync>;
 /// Receives every new status, on the controller's thread; must not block.
 pub type StatusSink = Box<dyn Fn(&OverlayStatus) + Send>;
+/// Receives the editor's canvas data, on the controller's thread; must not block.
+pub type EditorDataSink = Box<dyn Fn(&EditorData) + Send>;
 
 /// What the controller's thread reacts to.
 pub(crate) enum Input {
@@ -80,6 +94,16 @@ pub(crate) enum Input {
     ToggleHidden,
     NextProfile,
     Hotkeys(OverlayHotkeys),
+    /// The editor window opened or closed.
+    Editor(bool),
+    /// The profile the preview draws; `None` closes it.
+    Preview(Option<Profile>),
+    /// The preview process's state.
+    PreviewHost(HostState),
+    /// «Use now» in the editor (DD9).
+    UseNow(String),
+    /// The profile open in the editor.
+    EditorProfile(Option<Profile>),
     Shutdown,
 }
 
@@ -124,6 +148,7 @@ pub(crate) fn watcher_sink(
 struct Tap {
     plan: ValuesPlan,
     sender: Option<OverlaySender>,
+    preview: Option<OverlaySender>,
 }
 
 /// The side of the controller the rest of the app talks to: the sampler,
@@ -145,7 +170,9 @@ impl OverlayHandle {
         }
         let Some(schema) = schema else { return };
         let tap = self.tap.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(sender) = &tap.sender else { return };
+        if tap.sender.is_none() && tap.preview.is_none() {
+            return;
+        }
         if let Some(msg) = tick_values(
             &tap.plan,
             schema,
@@ -153,7 +180,12 @@ impl OverlayHandle {
             &out.quality,
             out.snapshot.timestamp_ms,
         ) {
-            sender.send(msg);
+            if let Some(preview) = &tap.preview {
+                preview.send(msg.clone());
+            }
+            if let Some(sender) = &tap.sender {
+                sender.send(msg);
+            }
         }
     }
 
@@ -167,6 +199,11 @@ impl OverlayHandle {
     /// Reads the profile folder again.
     pub fn reload_profiles(&self) {
         self.send(Input::ReloadProfiles);
+    }
+
+    /// The editor window opened or closed; closing it ends the preview.
+    pub fn editor_open(&self, open: bool) {
+        self.send(Input::Editor(open));
     }
 
     fn send(&self, input: Input) {
@@ -200,6 +237,7 @@ pub struct OverlayDeps {
     pub feed: FramesFeed,
     pub toaster: Box<dyn ToastSink>,
     pub on_status: StatusSink,
+    pub on_editor_data: EditorDataSink,
 }
 
 /// The running controller thread; [`Self::stop`] (or dropping it) ends it in
@@ -258,6 +296,7 @@ impl OverlayRunner {
             feed: deps.feed,
             toaster: deps.toaster,
             on_status: deps.on_status,
+            on_editor_data: deps.on_editor_data,
             tap: Arc::clone(&handle.tap),
             status: Arc::clone(&handle.status),
             env,
@@ -269,6 +308,9 @@ impl OverlayRunner {
             host: None,
             host_wanted: false,
             host_start_failed: false,
+            preview_host: None,
+            preview_wanted: false,
+            editor_open: false,
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
@@ -334,6 +376,7 @@ struct Ctl {
     feed: FramesFeed,
     toaster: Box<dyn ToastSink>,
     on_status: StatusSink,
+    on_editor_data: EditorDataSink,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
     env: Option<FramesConfigure>,
@@ -349,6 +392,12 @@ struct Ctl {
     /// The host could not start: not tried again (nor logged) until the
     /// overlay's settings change or «Retry»; the status shows the failure meanwhile.
     host_start_failed: bool,
+    /// The preview's host, from the first preview on.
+    preview_host: Option<OverlayHost>,
+    /// The last `set_wanted` sent to the preview's host.
+    preview_wanted: bool,
+    /// The editor window is open: the thread steps for its canvas.
+    editor_open: bool,
     /// The window whose geometry is read.
     tracked: Option<Foreground>,
     geometry_ms: u64,
@@ -379,13 +428,19 @@ impl Ctl {
         self.settings.overlay.enabled || self.env.is_some()
     }
 
+    /// The thread steps every 100 ms: the engine is wanted or the editor is
+    /// open (its canvas and preview).
+    fn stepping(&self) -> bool {
+        self.active() || self.editor_open
+    }
+
     fn run(mut self) {
         self.load_catalog(read_catalog());
         // The first step runs at once, so the engine starts without waiting
         // (as in M7b, DP13).
         let mut next_step_ms: u64 = 0;
         loop {
-            let first = if self.active() {
+            let first = if self.stepping() {
                 let wait = next_step_ms.saturating_sub(self.now_ms());
                 match self.rx.recv_timeout(Duration::from_millis(wait)) {
                     Ok(input) => Some(input),
@@ -468,6 +523,21 @@ impl Ctl {
             Input::ToggleHidden => self.controller.toggle_hidden(),
             Input::NextProfile => self.controller.next_profile(),
             Input::Hotkeys(hotkeys) => self.controller.on_hotkeys(hotkeys),
+            Input::Editor(open) => {
+                self.editor_open = open;
+                self.controller.on_editor(open);
+            }
+            Input::Preview(profile) => self.controller.set_preview(profile),
+            Input::PreviewHost(state) => {
+                // Off by itself (the user closed it): the next preview must
+                // turn the host on again.
+                if state == HostState::Off {
+                    self.preview_wanted = false;
+                }
+                self.controller.on_preview_host(state);
+            }
+            Input::UseNow(id) => self.controller.use_now(id),
+            Input::EditorProfile(profile) => self.controller.set_editor_profile(profile),
             Input::Shutdown => {}
         }
     }
@@ -590,6 +660,15 @@ impl Ctl {
                 host.send(msg);
             }
         }
+        self.sync_preview(out.want_preview);
+        if let Some(preview) = &self.preview_host {
+            for msg in out.preview {
+                preview.send(msg);
+            }
+        }
+        if let Some(data) = &out.editor_data {
+            (self.on_editor_data)(data);
+        }
         if let Some(plan) = out.values_plan {
             self.tap.lock().unwrap_or_else(PoisonError::into_inner).plan = plan;
         }
@@ -650,7 +729,7 @@ impl Ctl {
                 }
             };
             let tx = self.tx.clone();
-            match OverlayHost::start(exe, move |state| {
+            match OverlayHost::start(exe, OverlayMode::Overlay, move |state| {
                 let _ = tx.send(Input::Host(state));
             }) {
                 Ok(host) => {
@@ -671,6 +750,44 @@ impl Ctl {
             host.set_wanted(wanted);
         }
         self.host_wanted = wanted;
+    }
+
+    /// Starts the preview's host at the first preview, then turns its
+    /// process on and off. A host that cannot start is logged and not tried
+    /// again until the preview is wanted anew.
+    fn sync_preview(&mut self, wanted: bool) {
+        if wanted == self.preview_wanted {
+            return;
+        }
+        self.preview_wanted = wanted;
+        if wanted && self.preview_host.is_none() {
+            let exe = match std::env::current_exe() {
+                Ok(current) => overlay_exe(&current),
+                Err(err) => {
+                    tracing::warn!(%err, "preview: the app's own path is unknown");
+                    return;
+                }
+            };
+            let tx = self.tx.clone();
+            match OverlayHost::start(exe, OverlayMode::Preview, move |state| {
+                let _ = tx.send(Input::PreviewHost(state));
+            }) {
+                Ok(host) => {
+                    self.tap
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .preview = Some(host.sender());
+                    self.preview_host = Some(host);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "preview: the host thread could not start");
+                    return;
+                }
+            }
+        }
+        if let Some(host) = &self.preview_host {
+            host.set_wanted(wanted);
+        }
     }
 
     /// Latches a failed host start: the status shows a failed overlay
@@ -704,6 +821,9 @@ impl Ctl {
             }));
         }
         *self.tap.lock().unwrap_or_else(PoisonError::into_inner) = Tap::default();
+        if let Some(host) = self.preview_host.take() {
+            host.stop();
+        }
         if let Some(host) = self.host.take() {
             host.stop();
         }
@@ -733,6 +853,50 @@ pub fn overlay_reload_profiles(state: State<'_, OverlayHandle>) {
 #[tauri::command]
 pub fn set_overlay_hidden(state: State<'_, OverlayHandle>, hidden: bool) {
     state.send(Input::SetHidden(hidden));
+}
+
+/// A profile from the editor, checked like a profile file.
+fn editor_profile(json: Option<String>) -> Result<Option<Profile>, CommandError> {
+    json.map(|json| {
+        parse_profile(&json).map_err(|e| CommandError {
+            key: "editor.error.invalid".to_owned(),
+            detail: Some(e.to_string()),
+        })
+    })
+    .transpose()
+}
+
+/// Opens (or redraws) the preview with the editor's profile; `None` closes it.
+#[tauri::command]
+pub fn overlay_preview(
+    state: State<'_, OverlayHandle>,
+    json: Option<String>,
+) -> Result<(), CommandError> {
+    state.send(Input::Preview(editor_profile(json)?));
+    Ok(())
+}
+
+/// The profile open in the editor, for the canvas's lows windows.
+#[tauri::command]
+pub fn overlay_editor_profile(
+    state: State<'_, OverlayHandle>,
+    json: Option<String>,
+) -> Result<(), CommandError> {
+    state.send(Input::EditorProfile(editor_profile(json)?));
+    Ok(())
+}
+
+/// «Use now»: the saved profile `id` until the target changes (DD9).
+#[tauri::command]
+pub fn overlay_use_now(state: State<'_, OverlayHandle>, id: String) -> Result<(), CommandError> {
+    if !oma_core::settings::overlay::is_profile_id(&id) {
+        return Err(CommandError {
+            key: "editor.error.invalidId".to_owned(),
+            detail: None,
+        });
+    }
+    state.send(Input::UseNow(id));
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -765,6 +929,7 @@ mod tests {
             feed: FramesFeed::default(),
             toaster: Box::new(NoToasts),
             on_status: Box::new(|_| {}),
+            on_editor_data: Box::new(|_| {}),
             tap: Arc::default(),
             status,
             env: None,
@@ -776,6 +941,9 @@ mod tests {
             host: None,
             host_wanted: false,
             host_start_failed: false,
+            preview_host: None,
+            preview_wanted: false,
+            editor_open: false,
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
@@ -861,6 +1029,27 @@ mod tests {
         assert_eq!(status.diagnostics, catalog.diagnostics);
         assert_eq!(status.profiles, catalog.entries);
         assert_eq!(published.lock().unwrap().last(), Some(&status));
+    }
+
+    #[test]
+    fn closing_the_editor_stops_the_preview() {
+        let mut ctl = ctl(Settings::default());
+        assert!(!ctl.stepping(), "overlay off, editor closed: no steps");
+        ctl.handle(Input::Editor(true));
+        assert!(
+            ctl.stepping(),
+            "the canvas needs steps with the overlay off"
+        );
+        let (_, profile) = ProfileCatalog::builtins().resolve("builtin-gaming", &Schema::default());
+        ctl.handle(Input::Preview(Some(profile)));
+        assert!(ctl.controller.step(0).want_preview);
+        ctl.handle(Input::Editor(false));
+        assert!(!ctl.controller.step(100).want_preview);
+        assert!(!ctl.stepping());
+        // The preview host's own `Off` (a close) lets the next preview start it.
+        ctl.preview_wanted = true;
+        ctl.handle(Input::PreviewHost(HostState::Off));
+        assert!(!ctl.preview_wanted);
     }
 
     #[test]

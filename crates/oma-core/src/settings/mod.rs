@@ -478,6 +478,12 @@ pub(crate) mod test_support {
                 hotkey_toggle: Some("Ctrl+Alt+F1".into()),
                 hotkey_next_profile: Some("Ctrl+Alt+F2".into()),
                 hotkey_benchmark: Some("Ctrl+Alt+F3".into()),
+                editor_bounds: Some(overlay::WindowBounds {
+                    x: -1280,
+                    y: 40,
+                    width: 1400,
+                    height: 900,
+                }),
             },
             migrations: Migrations {
                 service_v1: true,
@@ -517,7 +523,7 @@ mod tests {
                         "attach": "window", "trackPcLatency": false, "trackGpu": false,
                         "defaultProfile": "builtin-gaming", "gameProfiles": {},
                         "blockedGames": [], "hotkeyToggle": null, "hotkeyNextProfile": null,
-                        "hotkeyBenchmark": null},
+                        "hotkeyBenchmark": null, "editorBounds": null},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: sensor reads, statistics and session, reading the disk power states, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders, the CSV log commands, opening and choosing the log folder, suspending the log hotkeys while one is captured, checking for updates and opening the page of the available release, and exporting the anonymous sensor report and opening the folder of the last one; the overlay editor's profile commands and font list.",
+  "description": "Main window: sensor reads, statistics and session, reading the disk power states, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders, the CSV log commands, opening and choosing the log folder, suspending the log hotkeys while one is captured, checking for updates and opening the page of the available release, and exporting the anonymous sensor report and opening the folder of the last one; opening the overlay editor.",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
@@ -47,12 +47,6 @@
     "allow-overlay-retry",
     "allow-overlay-reload-profiles",
     "allow-set-overlay-hidden",
-    "allow-overlay-load-profile",
-    "allow-overlay-save-profile",
-    "allow-overlay-delete-profile",
-    "allow-overlay-duplicate-profile",
-    "allow-overlay-import-profile",
-    "allow-overlay-export-profile",
-    "allow-overlay-font-families"
+    "allow-open-overlay-editor"
   ]
 }

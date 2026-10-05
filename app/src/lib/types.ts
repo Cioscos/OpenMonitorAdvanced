@@ -280,6 +280,8 @@ export interface OverlaySettings {
   hotkeyToggle: string | null;
   hotkeyNextProfile: string | null;
   hotkeyBenchmark: string | null;
+  /** Where the overlay editor was last closed, in physical pixels; null centers it. */
+  editorBounds: { x: number; y: number; width: number; height: number } | null;
 }
 
 export interface Settings {

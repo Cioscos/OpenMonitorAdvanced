@@ -162,8 +162,6 @@ pub struct Outputs {
     pub overlay: Vec<OverlayMessage>,
     /// Whether the overlay process should run.
     pub want_process: bool,
-    // Used by the runner from D10 on; drop the allow then.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// Whether the preview process should run: there is a preview profile.
     pub want_preview: bool,
     /// Messages for the preview process, in order (only while it is
@@ -487,8 +485,6 @@ impl Controller {
         self.choice_dirty = true;
     }
 
-    // Used by the runner from D10 on; drop the allow then.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// The editor window opened or closed. Closing it ends the preview.
     pub fn on_editor(&mut self, open: bool) {
         if open == self.editor.is_some() {
@@ -506,8 +502,6 @@ impl Controller {
         }
     }
 
-    // Used by the runner from D10 on; drop the allow then.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// The profile the preview draws; `None` closes the preview.
     pub fn set_preview(&mut self, profile: Option<Profile>) {
         self.preview = profile;
@@ -515,16 +509,12 @@ impl Controller {
         self.refresh_needs();
     }
 
-    // Used by the runner from D10 on; drop the allow then.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// The profile open in the editor: the canvas gets its lows windows.
     pub fn set_editor_profile(&mut self, profile: Option<Profile>) {
         self.editor_profile = profile;
         self.refresh_needs();
     }
 
-    // Used by the runner from D10 on; drop the allow then.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// The preview process's state. Going off by itself (it was wanted at
     /// the last step and had started) means the user closed its window: the
     /// preview ends rather than restarting. A stop we asked for keeps a

@@ -285,7 +285,7 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
             |app, args, _cwd| match second_launch(&args) {
-                SecondLaunch::Quit => app.exit(0),
+                SecondLaunch::Quit => window::quit(app, window::QuitSource::Flag),
                 SecondLaunch::ShowWindow => window::show_main(app),
                 SecondLaunch::Nothing => {}
             },
@@ -294,6 +294,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(window::NavState::default())
+        .manage(window::EditorState::default())
         .manage(AppState {
             engine: engine.clone(),
             interval: interval.clone(),
@@ -353,6 +354,12 @@ fn main() {
             overlay::editor::overlay_import_profile,
             overlay::editor::overlay_export_profile,
             overlay::editor::overlay_font_families,
+            overlay::runner::overlay_preview,
+            overlay::runner::overlay_use_now,
+            overlay::runner::overlay_editor_profile,
+            window::open_overlay_editor,
+            window::overlay_editor_dirty,
+            window::app_quit_confirmed,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -379,7 +386,7 @@ fn main() {
             let settings_handle = app.handle().clone();
             app.state::<Arc<SettingsStore>>()
                 .subscribe(Box::new(move |_, state| {
-                    if settings_handle.get_webview_window(window::MAIN).is_some() {
+                    if window::any_open(&settings_handle) {
                         let _ = settings_handle.emit(EVENT_SETTINGS, state);
                     }
                 }));
@@ -431,7 +438,10 @@ fn main() {
             let overlay = {
                 let shell = app.state::<ServiceShell>();
                 let status_handle = app.handle().clone();
+                let data_handle = app.handle().clone();
                 let status_tray = tray.clone();
+                // `overlay-preview` only when the preview opens or closes.
+                let preview_open = std::sync::atomic::AtomicBool::new(false);
                 let runner = overlay::runner::OverlayRunner::start(overlay::runner::OverlayDeps {
                     store: store.clone(),
                     link: shell.link_commands(),
@@ -440,6 +450,21 @@ fn main() {
                     on_status: Box::new(move |status| {
                         status_tray.set_overlay(status.enabled, !status.hidden_by_user);
                         let _ = status_handle.emit(overlay::runner::EVENT_OVERLAY_STATUS, status);
+                        let open = status.preview;
+                        if preview_open.swap(open, std::sync::atomic::Ordering::Relaxed) != open {
+                            let _ = status_handle.emit_to(
+                                window::EDITOR,
+                                overlay::runner::EVENT_PREVIEW,
+                                serde_json::json!({ "open": open }),
+                            );
+                        }
+                    }),
+                    on_editor_data: Box::new(move |data| {
+                        let _ = data_handle.emit_to(
+                            window::EDITOR,
+                            overlay::runner::EVENT_EDITOR_DATA,
+                            data,
+                        );
                     }),
                 })?;
                 let handle = runner.handle();
@@ -480,8 +505,8 @@ fn main() {
                 // Sensor values for the overlay; never waits on it.
                 #[cfg(windows)]
                 overlay.on_tick(out, alerts.schema());
-                // Nobody listens while the window is closed: skip serialization.
-                if handle.get_webview_window(window::MAIN).is_none() {
+                // Nobody listens while the windows are closed: skip serialization.
+                if !window::any_open(&handle) {
                     return;
                 }
                 if let Some(schema) = &out.schema {
@@ -591,13 +616,17 @@ mod tests {
     use super::*;
 
     /// Every command in `generate_handler!` must be listed in the build
-    /// manifest and allowed by the main window capability, or the UI gets
-    /// "not allowed. Command not found" at run time.
+    /// manifest and allowed by a window's capability, or the UI gets
+    /// "not allowed. Command not found" at run time; and every command a
+    /// capability allows must be registered.
     #[test]
     fn every_registered_command_is_in_the_manifest_and_the_capability() {
         let main_src = include_str!("main.rs");
         let build_src = include_str!("../build.rs");
-        let capability = include_str!("../capabilities/default.json");
+        let capabilities = [
+            ("default.json", include_str!("../capabilities/default.json")),
+            ("editor.json", include_str!("../capabilities/editor.json")),
+        ];
 
         // The first occurrence is the real invocation, not this test.
         let start = main_src
@@ -611,15 +640,27 @@ mod tests {
             .filter(|name| !name.is_empty())
             .collect();
         assert!(commands.len() > 20, "parsed too few commands: {commands:?}");
+        let permission = |name: &str| format!("allow-{}", name.replace('_', "-"));
 
         let mut missing = Vec::new();
-        for name in commands {
+        for name in &commands {
             if !build_src.contains(&format!("\"{name}\"")) {
                 missing.push(format!("{name}: missing from build.rs"));
             }
-            let permission = format!("\"allow-{}\"", name.replace('_', "-"));
-            if !capability.contains(&permission) {
-                missing.push(format!("{name}: missing from capabilities/default.json"));
+            let quoted = format!("\"{}\"", permission(name));
+            if !capabilities.iter().any(|(_, json)| json.contains(&quoted)) {
+                missing.push(format!("{name}: in no capability"));
+            }
+        }
+        for (file, json) in capabilities {
+            let parsed: serde_json::Value = serde_json::from_str(json).expect(file);
+            for allowed in parsed["permissions"].as_array().expect(file) {
+                let allowed = allowed.as_str().expect(file);
+                if allowed.starts_with("allow-")
+                    && !commands.iter().any(|name| permission(name) == allowed)
+                {
+                    missing.push(format!("{file}: {allowed} is not a registered command"));
+                }
             }
         }
         assert!(missing.is_empty(), "{missing:#?}");

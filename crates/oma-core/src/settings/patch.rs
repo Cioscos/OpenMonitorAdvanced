@@ -134,6 +134,7 @@ const SCHEMA: &[(&str, Node)] = &[
             ("hotkeyToggle", nullable()),
             ("hotkeyNextProfile", nullable()),
             ("hotkeyBenchmark", nullable()),
+            ("editorBounds", nullable()),
         ]),
     ),
     (
@@ -155,10 +156,12 @@ const SCHEMA: &[(&str, Node)] = &[
 ];
 
 /// Whether the object at `path` is replaced whole instead of merged: the
-/// fields of a rule override (R5) and the overlay game-to-profile map.
+/// fields of a rule override (R5), the overlay game-to-profile map and the
+/// editor's bounds.
 fn replaced_whole(path: &[String]) -> bool {
     matches!(path, [rules, overrides, _, _] if rules == "rules" && overrides == "overrides")
-        || matches!(path, [overlay, map] if overlay == "overlay" && map == "gameProfiles")
+        || matches!(path, [overlay, key] if overlay == "overlay"
+            && (key == "gameProfiles" || key == "editorBounds"))
 }
 
 fn join(parent: &str, key: &str) -> String {
@@ -923,5 +926,80 @@ mod tests {
             apply_patch(&start, &json!({"overlay": {"blockedGames": ["only.exe"]}})).unwrap();
         assert_eq!(next.overlay.blocked_games, vec!["only.exe".to_string()]);
         assert_eq!(next.overlay.game_profiles, start.overlay.game_profiles);
+    }
+
+    #[test]
+    fn editor_bounds_decode_and_patch_rules() {
+        use super::super::overlay::WindowBounds;
+        use super::super::{decode_lenient, DiagnosticKind};
+
+        let good = json!({"x": -1920, "y": 0, "width": 1280, "height": 800});
+        let bounds = WindowBounds {
+            x: -1920,
+            y: 0,
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(Settings::default().overlay.editor_bounds, None);
+        let decoded = decode_lenient(&json!({"version": 1, "overlay": {"editorBounds": good}}));
+        assert!(decoded.diagnostics.is_empty(), "{:?}", decoded.diagnostics);
+        assert_eq!(decoded.settings.overlay.editor_bounds, Some(bounds));
+        assert_eq!(encode(&decoded.settings)["overlay"]["editorBounds"], good);
+        assert!(encode(&Settings::default())["overlay"]["editorBounds"].is_null());
+
+        let bad = [
+            json!({"x": 0, "y": 0, "width": 1099, "height": 800}),
+            json!({"x": 0, "y": 0, "width": 1280, "height": 699}),
+            json!({"x": 40_000, "y": 0, "width": 1280, "height": 800}),
+            json!({"x": 0, "y": -40_000, "width": 1280, "height": 800}),
+            json!({"x": 0, "y": 0, "width": 40_000, "height": 800}),
+            json!({"x": 0, "y": 0, "width": 1280}),
+            json!({"x": 0.5, "y": 0, "width": 1280, "height": 800}),
+        ];
+        for value in bad {
+            // The decoder drops them to null, with a diagnostic.
+            let decoded =
+                decode_lenient(&json!({"version": 1, "overlay": {"editorBounds": value}}));
+            assert_eq!(decoded.settings.overlay.editor_bounds, None, "{value}");
+            assert!(
+                matches!(
+                    decoded.diagnostics.as_slice(),
+                    [d] if d.path == "overlay.editorBounds"
+                        && matches!(d.kind, DiagnosticKind::Corrected { .. })
+                ),
+                "{value}: {:?}",
+                decoded.diagnostics
+            );
+            // A patch is refused.
+            assert_eq!(
+                apply_patch(
+                    &Settings::default(),
+                    &json!({"overlay": {"editorBounds": value}})
+                ),
+                Err(err("overlay.editorBounds", "settings.error.range")),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            apply_patch(
+                &Settings::default(),
+                &json!({"overlay": {"editorBounds": "x"}})
+            ),
+            Err(err("overlay.editorBounds", "settings.error.type"))
+        );
+
+        // A patch sets, replaces whole (no merge with the old bounds) and clears.
+        let set = apply_patch(
+            &Settings::default(),
+            &json!({"overlay": {"editorBounds": good}}),
+        )
+        .unwrap();
+        assert_eq!(set.overlay.editor_bounds, Some(bounds));
+        assert_eq!(
+            apply_patch(&set, &json!({"overlay": {"editorBounds": {"x": 5}}})),
+            Err(err("overlay.editorBounds", "settings.error.range"))
+        );
+        let cleared = apply_patch(&set, &json!({"overlay": {"editorBounds": null}})).unwrap();
+        assert_eq!(cleared.overlay.editor_bounds, None);
     }
 }

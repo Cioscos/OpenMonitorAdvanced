@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-editor-profile"
+description = "Enables the overlay_editor_profile command without any pre-configured scope."
+commands.allow = ["overlay_editor_profile"]
+
+[[permission]]
+identifier = "deny-overlay-editor-profile"
+description = "Denies the overlay_editor_profile command without any pre-configured scope."
+commands.deny = ["overlay_editor_profile"]

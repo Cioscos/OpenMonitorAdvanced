@@ -49,6 +49,12 @@ fn main() {
             "overlay_import_profile",
             "overlay_export_profile",
             "overlay_font_families",
+            "open_overlay_editor",
+            "overlay_preview",
+            "overlay_use_now",
+            "overlay_editor_dirty",
+            "overlay_editor_profile",
+            "app_quit_confirmed",
         ]),
     ))
     .expect("Tauri build")

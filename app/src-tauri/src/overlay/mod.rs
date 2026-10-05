@@ -38,4 +38,22 @@ pub mod runner {
     pub fn set_overlay_hidden(hidden: bool) {
         let _ = hidden;
     }
+
+    #[tauri::command]
+    pub fn overlay_preview(json: Option<String>) -> Result<(), super::editor::CommandError> {
+        let _ = json;
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn overlay_editor_profile(json: Option<String>) -> Result<(), super::editor::CommandError> {
+        let _ = json;
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn overlay_use_now(id: String) -> Result<(), super::editor::CommandError> {
+        let _ = id;
+        Ok(())
+    }
 }

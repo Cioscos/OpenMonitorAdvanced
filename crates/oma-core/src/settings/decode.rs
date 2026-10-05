@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
-use super::overlay::{is_profile_id, normalize_exe, CHART_FPS, MAX_GAMES, TEXT_HZ};
+use super::overlay::{is_profile_id, normalize_exe, WindowBounds, CHART_FPS, MAX_GAMES, TEXT_HZ};
 use super::{
     Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, Settings,
     TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
@@ -605,6 +605,20 @@ impl Reader {
         }
         overlay.game_profiles = self.game_profiles(&section);
         overlay.blocked_games = self.blocked_games(&section);
+        match lookup(&section, "editorBounds", true) {
+            None => {}
+            Some(value @ Value::Object(_)) => match WindowBounds::from_json(value) {
+                Some(bounds) => overlay.editor_bounds = Some(bounds),
+                None => self.push(
+                    "overlay.editorBounds".into(),
+                    DiagnosticKind::Corrected {
+                        from: value.to_string(),
+                        to: "null".into(),
+                    },
+                ),
+            },
+            Some(_) => self.push("overlay.editorBounds".into(), DiagnosticKind::WrongType),
+        }
 
         let mut taken: Vec<String> = [&log.hotkey_toggle, &log.hotkey_pause]
             .into_iter()

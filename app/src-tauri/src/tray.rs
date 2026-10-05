@@ -52,6 +52,20 @@ pub fn overlay_item_clicked(id: &str, overlay: &dyn OverlayActions) -> bool {
     true
 }
 
+/// The overlay editor's item, always enabled (M7d).
+pub const EDITOR_ITEM_ID: &str = "overlay-editor";
+pub const EDITOR_ITEM_LABEL: &str = "tray.overlay.editor";
+
+/// A click on the menu item `id`: the editor item calls `open`. Whether `id`
+/// was the editor item.
+pub fn editor_item_clicked(id: &str, open: impl FnOnce()) -> bool {
+    if id != EDITOR_ITEM_ID {
+        return false;
+    }
+    open();
+    true
+}
+
 /// The log items of the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogMenuItem {
@@ -341,6 +355,7 @@ struct MenuItems {
     simple: MenuItem<Wry>,
     advanced: MenuItem<Wry>,
     overlay: CheckMenuItem<Wry>,
+    editor: MenuItem<Wry>,
     anti_cheat: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
 }
@@ -374,6 +389,7 @@ impl MenuItems {
         entries.extend([
             &separators[1] as &dyn IsMenuItem<Wry>,
             &self.overlay,
+            &self.editor,
             &self.anti_cheat,
             &separators[2],
             &self.quit,
@@ -412,6 +428,7 @@ impl TrayBackend for TauriBackend {
             let _ = items.simple.set_text(t(lang, "tray.viewSimple", &[]));
             let _ = items.advanced.set_text(t(lang, "tray.viewAdvanced", &[]));
             let _ = items.overlay.set_text(t(lang, OVERLAY_ITEM_LABEL, &[]));
+            let _ = items.editor.set_text(t(lang, EDITOR_ITEM_LABEL, &[]));
             let _ = items.anti_cheat.set_text(t(lang, "tray.antiCheat", &[]));
             let _ = items.quit.set_text(t(lang, "tray.quit", &[]));
             if let Ok(menu) = items.menu(&app, lang, log) {
@@ -512,6 +529,13 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         true,
         None::<&str>,
     )?;
+    let editor = MenuItem::with_id(
+        app,
+        EDITOR_ITEM_ID,
+        t(lang, EDITOR_ITEM_LABEL, &[]),
+        true,
+        None::<&str>,
+    )?;
     let initial_anti_cheat = app.state::<ServiceShell>().anti_cheat_enabled();
     let anti_cheat = CheckMenuItem::with_id(
         app,
@@ -527,6 +551,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         simple,
         advanced,
         overlay,
+        editor,
         anti_cheat,
         quit,
     };
@@ -557,11 +582,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
                 let enabled = !shell.anti_cheat_enabled();
                 let _ = shell.set_anti_cheat(enabled);
             }
-            "quit" => app.exit(0),
+            "quit" => window::quit(app, window::QuitSource::Tray),
             id => {
                 if let Some(item) = LogMenuItem::from_id(id) {
                     run_log_command(app, item);
-                } else {
+                } else if !editor_item_clicked(id, || window::show_editor(app)) {
                     overlay_menu_event(app, id);
                 }
             }
@@ -806,6 +831,20 @@ mod tests {
             assert!(!overlay_item_clicked(id, &overlay));
         }
         assert_eq!(overlay.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tray_editor_item_opens_the_editor() {
+        let opened = std::cell::Cell::new(0);
+        assert!(editor_item_clicked("overlay-editor", || opened.set(opened.get() + 1)));
+        assert_eq!(opened.get(), 1);
+        for id in ["open", "overlay-visible", "log_start", "quit"] {
+            assert!(!editor_item_clicked(id, || opened.set(opened.get() + 1)));
+        }
+        assert_eq!(opened.get(), 1);
+        assert_eq!(EDITOR_ITEM_ID, "overlay-editor");
+        assert_eq!(text("en-US", EDITOR_ITEM_LABEL), "Overlay editor");
+        assert_eq!(text("it-IT", EDITOR_ITEM_LABEL), "Editor overlay");
     }
 
     #[test]

@@ -303,7 +303,7 @@ quella con il motore spento. Dalla M7c lo script riporta anche, in ogni modo
 e senza `-Service`, il processo `oma-overlay.exe` figlio dell'app
 (`OverlayCpuPercent` e `OverlayPrivateBytesMB`, dai contatori grezzi come
 PresentMon, oppure `OverlayValid = False` con il motivo, `not running` quando
-l'overlay è spento o nascosto senza processo). `oma-overlay` non entra in
+l'overlay è spento; da nascosto il processo resta in esecuzione). `oma-overlay` non entra in
 `TotalAppPercentCpu` (solo l'app e WebView2).
 
 | Stato | Limite | Punto di partenza (spike M7b, SD9) |

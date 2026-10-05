@@ -255,7 +255,22 @@ unsafe extern "system" fn on_foreground_event(
     _thread: u32,
     _time: u32,
 ) {
-    report_guarded(hwnd);
+    // Out-of-context events arrive late and may cross: the alt-tab
+    // switcher's activation can be delivered after the game's. The window
+    // that holds the foreground now is the truth.
+    // SAFETY: trivial query of the foreground window handle.
+    let now = unsafe { GetForegroundWindow() };
+    report_guarded(reported_window(hwnd, now));
+}
+
+/// The window to report for a foreground event: the current foreground
+/// window, or the event's while there is none (a transition).
+pub(crate) fn reported_window(event: HWND, now: HWND) -> HWND {
+    if now.0.is_null() {
+        event
+    } else {
+        now
+    }
 }
 
 unsafe extern "system" fn on_location_event(
@@ -297,14 +312,29 @@ fn report_guarded(hwnd: HWND) {
 /// Resolves the window to a PID and hands it to the sink; null windows and
 /// PID 0 are skipped.
 fn report(hwnd: HWND) {
-    if hwnd.0.is_null() {
-        return;
+    if let Some(fg) = resolve(hwnd) {
+        emit(ForegroundEvent::Foreground(fg));
     }
-    let Some(pid) = window_pid(hwnd) else { return };
-    emit(ForegroundEvent::Foreground(Foreground {
+}
+
+/// A window and the PID of the game behind it; `None` for a null window or
+/// PID 0.
+fn resolve(hwnd: HWND) -> Option<Foreground> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let pid = window_pid(hwnd)?;
+    Some(Foreground {
         pid,
         hwnd: hwnd.0 as isize,
-    }));
+    })
+}
+
+/// The foreground window now, resolved as the watcher reports it; for a
+/// periodic check that catches an event lost or delivered out of order.
+pub fn current_foreground() -> Option<Foreground> {
+    // SAFETY: trivial query of the foreground window handle.
+    resolve(unsafe { GetForegroundWindow() })
 }
 
 fn emit(event: ForegroundEvent) {
@@ -519,6 +549,14 @@ mod tests {
         let started = Instant::now();
         drop(watcher);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn reported_window_prefers_the_current_foreground() {
+        let event = HWND(0x10 as *mut _);
+        let now = HWND(0x20 as *mut _);
+        assert_eq!(reported_window(event, now), now);
+        assert_eq!(reported_window(event, HWND::default()), event);
     }
 
     #[test]

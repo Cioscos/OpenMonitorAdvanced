@@ -32,7 +32,9 @@ use oma_core::overlay::Foreground;
 use oma_core::settings::Settings;
 use oma_ipc::overlay::OverlayMessage;
 use oma_ipc::FramesConfigure;
-use oma_win::foreground::{window_geometry, window_monitor, ForegroundEvent, ForegroundWatcher};
+use oma_win::foreground::{
+    current_foreground, window_geometry, window_monitor, ForegroundEvent, ForegroundWatcher,
+};
 use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
@@ -56,6 +58,8 @@ const STEP: Duration = Duration::from_millis(100);
 /// How often the tracked window's geometry is read without a move, so a
 /// closed window is noticed.
 const GEOMETRY_REFRESH_MS: u64 = 1_000;
+/// How often the foreground window is checked against Windows.
+const FOREGROUND_CHECK_MS: u64 = 1_000;
 
 /// Sends a command to the service link without blocking
 /// ([`crate::service::ServiceShell::link_commands`]).
@@ -264,6 +268,9 @@ impl OverlayRunner {
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
+            last_foreground: None,
+            foreground_ms: 0,
+            foreground_now: current_foreground,
             engine_on: false,
             epoch: Instant::now(),
         };
@@ -341,6 +348,12 @@ struct Ctl {
     geometry_ms: u64,
     /// The target last written to the log.
     logged_target: Option<(String, u32)>,
+    /// The foreground window as last handed to the controller.
+    last_foreground: Option<Foreground>,
+    /// When the foreground was last checked against Windows.
+    foreground_ms: u64,
+    /// The foreground window now (`current_foreground`; a fake in tests).
+    foreground_now: fn() -> Option<Foreground>,
     /// The last `ConfigureFrames` sent turned the engine on.
     engine_on: bool,
     epoch: Instant,
@@ -416,6 +429,7 @@ impl Ctl {
                 }
             }
             Input::Foreground(fg) => {
+                self.last_foreground = Some(fg);
                 self.controller.on_foreground(fg);
                 self.controller
                     .on_foreground_monitor(window_monitor(fg.hwnd));
@@ -478,6 +492,24 @@ impl Ctl {
         }
     }
 
+    /// Once a second while the overlay or the engine is wanted, the
+    /// foreground window is asked of Windows: an event lost or delivered out
+    /// of order (the alt-tab switcher after the game) would otherwise leave
+    /// the overlay hidden until the next one.
+    fn check_foreground(&mut self, now: u64) {
+        if !(self.host_wanted || self.engine_on)
+            || now.saturating_sub(self.foreground_ms) < FOREGROUND_CHECK_MS
+        {
+            return;
+        }
+        self.foreground_ms = now;
+        if let Some(fg) = (self.foreground_now)() {
+            if Some(fg) != self.last_foreground {
+                self.handle(Input::Foreground(fg));
+            }
+        }
+    }
+
     /// Reads the tracked window's geometry; a pending move is consumed.
     fn read_geometry(&mut self) {
         let Some(fg) = self.tracked else { return };
@@ -497,6 +529,7 @@ impl Ctl {
         if self.tracked.is_some() && now.saturating_sub(self.geometry_ms) >= GEOMETRY_REFRESH_MS {
             self.read_geometry();
         }
+        self.check_foreground(now);
         let out = self.controller.step(now);
         self.apply(out);
     }
@@ -727,9 +760,41 @@ mod tests {
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
+            last_foreground: None,
+            foreground_ms: 0,
+            foreground_now: current_foreground,
             engine_on: false,
             epoch: Instant::now(),
         }
+    }
+
+    #[test]
+    fn foreground_is_checked_once_a_second_while_the_overlay_is_wanted() {
+        static NOW: Mutex<Option<Foreground>> = Mutex::new(None);
+        let game = Foreground {
+            pid: 100,
+            hwnd: 0x1000,
+        };
+        let switcher = Foreground {
+            pid: 200,
+            hwnd: 0x2000,
+        };
+        let mut ctl = ctl(Settings::default());
+        ctl.foreground_now = || *NOW.lock().unwrap();
+        ctl.host_wanted = true;
+        // The last event named the alt-tab switcher; the game holds the
+        // foreground.
+        ctl.handle(Input::Foreground(switcher));
+        *NOW.lock().unwrap() = Some(game);
+        ctl.check_foreground(500);
+        assert_eq!(ctl.last_foreground, Some(switcher), "not due yet");
+        ctl.check_foreground(1_000);
+        assert_eq!(ctl.last_foreground, Some(game));
+        // Not wanted: no check.
+        ctl.host_wanted = false;
+        *NOW.lock().unwrap() = Some(switcher);
+        ctl.check_foreground(5_000);
+        assert_eq!(ctl.last_foreground, Some(game));
     }
 
     #[test]

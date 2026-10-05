@@ -95,6 +95,14 @@ const EXCLUSIVE_PRESENT_MODES: [&str; 2] = [
 const DEFAULT_DPI: u32 = 96;
 /// The profile id of the preview's `SetProfile`.
 const PREVIEW_ID: &str = "preview";
+
+/// A [`HostFailure`] as the status names it.
+fn failure_name(reason: HostFailure) -> &'static str {
+    match reason {
+        HostFailure::Crashing => "crashing",
+        HostFailure::Incompatible => "incompatible",
+    }
+}
 /// `FrameMetrics.state` and `OverlayStatus.frames` without the service.
 pub const FRAMES_UNAVAILABLE: &str = "unavailable";
 
@@ -193,6 +201,9 @@ pub struct OverlayStatus {
     pub hotkeys: OverlayHotkeys,
     /// The preview is open.
     pub preview: bool,
+    /// The preview's process gave up (`crashing` or `incompatible`), until
+    /// the next preview or the editor closes.
+    pub preview_failure: Option<String>,
     pub benchmark: BenchmarkStatus,
 }
 
@@ -302,6 +313,8 @@ pub struct Controller {
     editor: Option<SyntheticFeed>,
     preview: Option<Profile>,
     preview_host: HostState,
+    /// The preview's process gave up: the preview ended, the UI says why.
+    preview_failure: Option<HostFailure>,
     preview_was_running: bool,
     /// The preview's `SetProfile` may differ from the one sent.
     preview_dirty: bool,
@@ -398,6 +411,7 @@ impl Controller {
             editor: None,
             preview: None,
             preview_host: HostState::Off,
+            preview_failure: None,
             preview_was_running: false,
             preview_dirty: true,
             sent_preview: None,
@@ -568,19 +582,31 @@ impl Controller {
             self.editor = None;
             self.editor_metrics = None;
             self.editor_profile = None;
+            self.preview_failure = None;
             self.set_preview(None);
         }
     }
 
-    /// The profile the preview draws; `None` closes the preview.
+    /// The profile the preview draws; `None` closes the preview. A profile
+    /// arriving after the editor closed (a late debounced call) is ignored.
     pub fn set_preview(&mut self, profile: Option<Profile>) {
+        if profile.is_some() && self.editor.is_none() {
+            return;
+        }
+        if profile.is_some() {
+            self.preview_failure = None;
+        }
         self.preview = profile;
         self.preview_dirty = true;
         self.refresh_needs();
     }
 
     /// The profile open in the editor: the canvas gets its lows windows.
+    /// Ignored once the editor closed.
     pub fn set_editor_profile(&mut self, profile: Option<Profile>) {
+        if profile.is_some() && self.editor.is_none() {
+            return;
+        }
         self.editor_profile = profile;
         self.refresh_needs();
     }
@@ -588,10 +614,15 @@ impl Controller {
     /// The preview process's state. Going off by itself (it was wanted at
     /// the last step and had started) means the user closed its window: the
     /// preview ends rather than restarting. A stop we asked for keeps a
-    /// preview set since.
+    /// preview set since. A process given up on ends the preview too, and
+    /// the status says why.
     pub fn on_preview_host(&mut self, state: HostState) {
         let started = matches!(self.preview_host, HostState::Starting | HostState::Running);
         if state == HostState::Off && started && self.sent_want_preview && self.preview.is_some() {
+            self.set_preview(None);
+        }
+        if let HostState::Failed { reason } = state {
+            self.preview_failure = Some(reason);
             self.set_preview(None);
         }
         self.preview_host = state;
@@ -834,13 +865,7 @@ impl Controller {
             HostState::Off => ("off", None),
             HostState::Starting => ("starting", None),
             HostState::Running => ("running", None),
-            HostState::Failed { reason } => (
-                "failed",
-                Some(match reason {
-                    HostFailure::Crashing => "crashing",
-                    HostFailure::Incompatible => "incompatible",
-                }),
-            ),
+            HostState::Failed { reason } => ("failed", Some(failure_name(reason))),
         };
         OverlayStatus {
             enabled: self.settings.overlay.enabled,
@@ -862,6 +887,7 @@ impl Controller {
             hidden_by_user: self.hidden_by_user,
             hotkeys: self.hotkeys.clone(),
             preview: self.preview.is_some(),
+            preview_failure: self.preview_failure.map(|r| failure_name(r).to_owned()),
             benchmark: BenchmarkStatus {
                 state: if self.recorder.is_recording() {
                     "recording"
@@ -3042,6 +3068,41 @@ mod tests {
                 wanted: false
             })
         );
+    }
+
+    #[test]
+    fn late_editor_calls_after_close_are_ignored() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.on_editor(false);
+        let lows = c.lows.clone();
+        // Debounced calls that arrive after the editor closed.
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.set_editor_profile(Some(lows_profile()));
+        assert!(!c.step(200).want_preview, "no orphan preview");
+        assert_eq!(c.lows, lows, "the editor's lows are not pinned");
+    }
+
+    #[test]
+    fn a_failed_preview_ends_and_is_reported() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.on_preview_host(HostState::Starting);
+        c.step(200);
+        c.on_preview_host(HostState::Failed {
+            reason: HostFailure::Incompatible,
+        });
+        let out = c.step(300);
+        assert!(!out.want_preview);
+        let status = out.status.unwrap();
+        assert!(!status.preview);
+        assert_eq!(status.preview_failure.as_deref(), Some("incompatible"));
+        // A new preview clears the failure.
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let status = c.step(400).status.unwrap();
+        assert!(status.preview);
+        assert_eq!(status.preview_failure, None);
     }
 
     #[test]

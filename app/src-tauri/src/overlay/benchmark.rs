@@ -326,6 +326,8 @@ pub struct BenchmarkEntry {
 pub enum BenchmarkError {
     InvalidId,
     NotFound,
+    /// The capture in progress writes it.
+    Recording,
     Io(String),
 }
 
@@ -423,10 +425,14 @@ impl BenchmarkFiles {
         }
     }
 
-    /// Removes the CSV and the summary of `id`.
-    pub fn delete(&self, id: &str) -> Result<(), BenchmarkError> {
+    /// Removes the CSV and the summary of `id`, unless it is `recording`
+    /// (the capture in progress).
+    pub fn delete(&self, id: &str, recording: Option<&str>) -> Result<(), BenchmarkError> {
         if !is_benchmark_id(id) {
             return Err(BenchmarkError::InvalidId);
+        }
+        if recording == Some(id) {
+            return Err(BenchmarkError::Recording);
         }
         let mut found = false;
         for ext in ["csv", "json"] {
@@ -448,9 +454,10 @@ impl BenchmarkFiles {
 fn files(app: &AppHandle) -> Result<BenchmarkFiles, String> {
     let log = app.state::<Arc<LogService>>();
     let store = app.state::<Arc<SettingsStore>>();
-    let dir = log
-        .configured_dir(&store.snapshot())
-        .map_err(|err| err.to_string())?;
+    let dir = log.configured_dir(&store.snapshot()).map_err(|err| {
+        tracing::warn!(%err, "benchmarks: no log folder");
+        "log.error.folderMissing".to_owned()
+    })?;
     Ok(BenchmarkFiles::new(
         dir.join(BENCHMARKS_DIR),
         Arc::new(RealFs),
@@ -460,8 +467,8 @@ fn files(app: &AppHandle) -> Result<BenchmarkFiles, String> {
 /// An error for the UI: an i18n key, or the system's text.
 fn error_text(err: BenchmarkError) -> String {
     match err {
-        BenchmarkError::InvalidId => "invalid benchmark id".to_owned(),
-        BenchmarkError::NotFound => "shell.error.missing".to_owned(),
+        BenchmarkError::InvalidId | BenchmarkError::NotFound => "shell.error.missing".to_owned(),
+        BenchmarkError::Recording => "benchmark.error.recording".to_owned(),
         BenchmarkError::Io(text) => text,
     }
 }
@@ -495,7 +502,12 @@ pub fn benchmark_open_folder(app: AppHandle) -> Result<(), String> {
 /// Deletes the CSV and the summary of `id`.
 #[tauri::command(async)]
 pub fn benchmark_delete(app: AppHandle, id: String) -> Result<(), String> {
-    files(&app)?.delete(&id).map_err(error_text)
+    let recording = app
+        .try_state::<super::runner::OverlayHandle>()
+        .and_then(|h| h.benchmark_id());
+    files(&app)?
+        .delete(&id, recording.as_deref())
+        .map_err(error_text)
 }
 
 fn read_record(path: &Path) -> Option<BenchmarkRecord> {
@@ -523,6 +535,14 @@ pub struct BenchmarkWriter {
 }
 
 impl BenchmarkWriter {
+    /// The capture's id: the CSV's name, with its collision suffix.
+    pub fn id(&self) -> String {
+        self.csv
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Buffers the rows. The first write error is returned once and must end
     /// the capture (the caller stops with `EndReason::Error`); later rows are
     /// dropped and return `Ok`.
@@ -728,9 +748,17 @@ mod tests {
     fn name_collision_adds_a_suffix() {
         let fs = MemFs::new();
         let files = BenchmarkFiles::new("b".into(), fs.clone());
-        for _ in 0..3 {
-            files.begin("g-20261005-213000").unwrap();
-        }
+        let ids: Vec<String> = (0..3)
+            .map(|_| files.begin("g-20261005-213000").unwrap().id())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "g-20261005-213000",
+                "g-20261005-213000-2",
+                "g-20261005-213000-3"
+            ]
+        );
         let names: Vec<_> = fs
             .files()
             .iter()
@@ -853,7 +881,25 @@ mod tests {
         }
         let files = BenchmarkFiles::new(temp_dir(), Arc::new(RealFs));
         assert_eq!(files.csv_path("../x"), Err(BenchmarkError::InvalidId));
-        assert_eq!(files.delete("..\\x"), Err(BenchmarkError::InvalidId));
+        assert_eq!(files.delete("..\\x", None), Err(BenchmarkError::InvalidId));
+    }
+
+    #[test]
+    fn benchmark_errors_are_keys_of_both_catalogs() {
+        let catalogs: [serde_json::Value; 2] = [
+            serde_json::from_str(include_str!("../../../src/lib/i18n/en.json")).unwrap(),
+            serde_json::from_str(include_str!("../../../src/lib/i18n/it.json")).unwrap(),
+        ];
+        for e in [
+            BenchmarkError::InvalidId,
+            BenchmarkError::NotFound,
+            BenchmarkError::Recording,
+        ] {
+            let key = error_text(e);
+            for catalog in &catalogs {
+                assert!(catalog.get(&key).is_some(), "{key} missing");
+            }
+        }
     }
 
     #[test]
@@ -864,10 +910,17 @@ mod tests {
         w.append(&["1\r\n".to_owned()]).unwrap();
         w.finish(Some(&record(EndReason::User))).unwrap();
         assert!(files.csv_path("g-20261005-213000").unwrap().exists());
-        files.delete("g-20261005-213000").unwrap();
+        // Not the capture in progress.
+        assert_eq!(
+            files.delete("g-20261005-213000", Some("g-20261005-213000")),
+            Err(BenchmarkError::Recording)
+        );
+        files
+            .delete("g-20261005-213000", Some("g-20261005-213000-2"))
+            .unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         assert_eq!(
-            files.delete("g-20261005-213000"),
+            files.delete("g-20261005-213000", None),
             Err(BenchmarkError::NotFound)
         );
         assert_eq!(

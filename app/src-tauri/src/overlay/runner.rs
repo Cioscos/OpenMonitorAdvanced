@@ -171,6 +171,8 @@ pub struct OverlayHandle {
     tx: Sender<Input>,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
+    /// The id of the capture in progress.
+    bench_id: Arc<Mutex<Option<String>>>,
 }
 
 impl OverlayHandle {
@@ -200,6 +202,14 @@ impl OverlayHandle {
                 sender.send(msg);
             }
         }
+    }
+
+    /// The id of the capture in progress, which cannot be deleted.
+    pub fn benchmark_id(&self) -> Option<String> {
+        self.bench_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn status(&self) -> OverlayStatus {
@@ -308,6 +318,7 @@ impl OverlayRunner {
             tx: tx.clone(),
             tap: Arc::default(),
             status: Arc::new(Mutex::new(controller.current_status())),
+            bench_id: Arc::default(),
         };
         let ctl = Ctl {
             controller,
@@ -320,6 +331,7 @@ impl OverlayRunner {
             on_editor_data: deps.on_editor_data,
             benchmarks_dir: deps.benchmarks_dir,
             bench_writer: None,
+            bench_id: Arc::clone(&handle.bench_id),
             tap: Arc::clone(&handle.tap),
             status: Arc::clone(&handle.status),
             env,
@@ -403,6 +415,8 @@ struct Ctl {
     benchmarks_dir: BenchmarksDir,
     /// The capture's open CSV.
     bench_writer: Option<BenchmarkWriter>,
+    /// Its id, for [`OverlayHandle::benchmark_id`].
+    bench_id: Arc<Mutex<Option<String>>>,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
     env: Option<FramesConfigure>,
@@ -678,6 +692,8 @@ impl Ctl {
                 self.controller.on_benchmark_error(failure);
             }
         }
+        *self.bench_id.lock().unwrap_or_else(PoisonError::into_inner) =
+            self.bench_writer.as_ref().map(BenchmarkWriter::id);
     }
 
     fn apply(&mut self, out: Outputs) {
@@ -1026,6 +1042,7 @@ mod tests {
             on_editor_data: Box::new(|_| {}),
             benchmarks_dir: Box::new(|_| Err(io::ErrorKind::NotFound.into())),
             bench_writer: None,
+            bench_id: Arc::default(),
             tap: Arc::default(),
             status,
             env: None,

@@ -786,6 +786,7 @@
   "benchmark.openFolder": "Apri cartella",
   "benchmark.delete": "Elimina",
   "benchmark.delete.confirm": "Eliminare la sessione di {game} del {date}?",
+  "benchmark.error.recording": "Non si può eliminare la cattura in corso",
   "benchmark.duration": "Durata",
   "benchmark.frames": "Frame: {total} ({displayed} mostrati, {generated} generati)",
   "benchmark.fpsDisplayed": "FPS medi mostrati",

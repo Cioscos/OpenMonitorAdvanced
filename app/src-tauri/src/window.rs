@@ -238,12 +238,20 @@ pub fn show_editor(app: &AppHandle) {
     let handle = app.clone();
     window.on_window_event(move |event| {
         let state = handle.state::<EditorState>();
+        // A maximized window's bounds are the monitor's: the restored ones
+        // are kept.
+        let maximized = || {
+            handle
+                .get_webview_window(EDITOR)
+                .and_then(|w| w.is_maximized().ok())
+                .unwrap_or(false)
+        };
         match event {
             // A minimized window reports -32000 and a zero size: not kept.
-            WindowEvent::Moved(p) if p.x > -32_000 && p.y > -32_000 => {
+            WindowEvent::Moved(p) if p.x > -32_000 && p.y > -32_000 && !maximized() => {
                 state.update_bounds(|b| (b.x, b.y) = (p.x, p.y));
             }
-            WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
+            WindowEvent::Resized(s) if s.width > 0 && s.height > 0 && !maximized() => {
                 state.update_bounds(|b| (b.width, b.height) = (s.width, s.height));
             }
             WindowEvent::Destroyed => {

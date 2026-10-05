@@ -786,6 +786,7 @@
   "benchmark.openFolder": "Open folder",
   "benchmark.delete": "Delete",
   "benchmark.delete.confirm": "Delete the session of {game} from {date}?",
+  "benchmark.error.recording": "The capture in progress cannot be deleted",
   "benchmark.duration": "Duration",
   "benchmark.frames": "Frames: {total} ({displayed} shown, {generated} generated)",
   "benchmark.fpsDisplayed": "Average FPS shown",

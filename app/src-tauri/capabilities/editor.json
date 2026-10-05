@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "editor",
-  "description": "Overlay editor window: event subscriptions, closing itself after a save or discard, the sensor reads and settings it shows, the overlay status, the editor's profile commands and font list, the preview, «Use now», the unsaved-changes flag and confirming a quit.",
+  "description": "Overlay editor window: event subscriptions, closing itself after a save or discard, the sensor reads and the settings it reads, the overlay status, the editor's profile commands and font list, the preview, «Use now», the unsaved-changes flag and confirming a quit.",
   "windows": ["overlay-editor"],
   "permissions": [
     "core:event:allow-listen",
@@ -12,7 +12,6 @@
     "allow-get-history",
     "allow-get-disk-states",
     "allow-get-settings",
-    "allow-update-settings",
     "allow-get-overlay-status",
     "allow-overlay-load-profile",
     "allow-overlay-save-profile",

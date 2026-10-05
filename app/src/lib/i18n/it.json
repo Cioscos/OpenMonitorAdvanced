@@ -538,6 +538,7 @@
   "editor.useNow": "Usa ora",
   "editor.useNow.hint": "Salva il profilo e lo mostra in gioco fino al cambio di gioco.",
   "editor.error.preview": "Anteprima non disponibile: {detail}",
+  "editor.error.dismiss": "Chiudi",
   "editor.unsaved.title": "Modifiche non salvate",
   "editor.unsaved.body": "Salvare le modifiche a «{name}»?",
   "editor.unsaved.save": "Salva",

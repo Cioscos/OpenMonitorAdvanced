@@ -255,6 +255,21 @@ test('a failed save keeps the editor open and does not quit', async () => {
   expect(win.destroyed).toBe(0);
 });
 
+test('an editor error shows in a dismissible banner and a new one shows again', async () => {
+  const { backend, win } = await setup();
+  await edit();
+  await win.close();
+  backend.editorError = { key: 'editor.error.io', detail: 'disk full' };
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save' }));
+  const banner = await screen.findByRole('alert');
+  expect(banner.textContent).toContain('File error: disk full');
+  await fireEvent.click(within(banner).getByRole('button', { name: 'Dismiss' }));
+  expect(screen.queryByRole('alert')).toBeNull();
+  await win.close();
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('File error: disk full');
+});
+
 test('a quit during the close question still quits', async () => {
   const { backend, win } = await setup();
   await edit();

@@ -538,6 +538,7 @@
   "editor.useNow": "Use now",
   "editor.useNow.hint": "Saves the profile and shows it in game until the game changes.",
   "editor.error.preview": "Preview not available: {detail}",
+  "editor.error.dismiss": "Dismiss",
   "editor.unsaved.title": "Unsaved changes",
   "editor.unsaved.body": "Save the changes to «{name}»?",
   "editor.unsaved.save": "Save",

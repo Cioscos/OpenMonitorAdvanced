@@ -25,6 +25,7 @@
   import { LiveStore, connect } from '../lib/live.svelte';
   import { settings } from '../lib/settings.svelte';
   import type { OverlayProfileEntry, OverlayStatus } from '../lib/types';
+  import ErrorBanner from '../components/ErrorBanner.svelte';
   import Canvas from './Canvas.svelte';
   import { FrameFeed } from './feed.svelte';
   import Palette from './Palette.svelte';
@@ -217,10 +218,10 @@
     <p class="note">{t('editor.error.readOnly')}</p>
   {/if}
   {#if editor.error !== null}
-    <p class="error" role="alert">{t(editor.error.key, { detail: editor.error.detail ?? '' })}</p>
+    <ErrorBanner message={t(editor.error.key, { detail: editor.error.detail ?? '' })} onDismiss={() => (editor.error = null)} />
   {/if}
   {#if previewError !== null}
-    <p class="error" role="alert">{t('editor.error.preview', { detail: previewError })}</p>
+    <ErrorBanner message={t('editor.error.preview', { detail: previewError })} onDismiss={() => (previewError = null)} />
   {/if}
   {#if ready}
     <Toolbar {editor} {profiles} {previewOpen} {previewBusy} onSelect={(id) => ask(() => editor.load(id))} onGuarded={ask} onPreview={togglePreview} onUseNow={useNow} />
@@ -275,9 +276,5 @@
     grid-template-columns: 220px minmax(0, 1fr) 300px;
     gap: 16px;
     min-height: 0;
-  }
-  .error {
-    margin: 0;
-    color: var(--crit);
   }
 </style>

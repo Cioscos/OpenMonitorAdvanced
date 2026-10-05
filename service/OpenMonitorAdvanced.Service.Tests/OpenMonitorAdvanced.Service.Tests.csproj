@@ -35,6 +35,8 @@
       <Link>Fixtures\drive_key.json</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\testdata\presentmon\*.csv" Link="Fixtures\PresentMon\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\app\src-tauri\nsis\presentmon.sha256" Link="Fixtures\presentmon.sha256" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

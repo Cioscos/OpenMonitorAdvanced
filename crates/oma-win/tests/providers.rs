@@ -580,6 +580,7 @@ fn records_this_machine_schema() {
         false,
         status.clone(),
         handles.feed.clone(),
+        oma_win::svc::FramesFeed::default(),
     );
 
     // Opening LibreHardwareMonitor alone takes a few seconds after the start.

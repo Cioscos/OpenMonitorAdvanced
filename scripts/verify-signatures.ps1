@@ -6,10 +6,10 @@
     pwsh scripts/verify-signatures.ps1 -Policy release|test -Version X.Y.Z -Files <dir with the three signed files>
 
   -Setup (the manifest is required with every policy): extracts the setup with 7-Zip and checks
-  the payload, PawnIO, the product metadata and, for release|test, the signatures and the hashes
-  of the imported signed copies; for none, the hashes of the collect pass. 7-Zip does not list
-  the uninstaller: its imported copy and its replacement are checked in the manifest and the
-  summary says that the installed uninstaller still needs the manual check.
+  the payload, PawnIO, PresentMon, the product metadata and, for release|test, the signatures
+  and the hashes of the imported signed copies; for none, the hashes of the collect pass. 7-Zip
+  does not list the uninstaller: its imported copy and its replacement are checked in the
+  manifest and the summary says that the installed uninstaller still needs the manual check.
   -Files: before import-signed, the directory must hold exactly oma-app.exe, uninstall.exe and
   oma-service.exe, each with an accepted signature and the expected metadata.
 

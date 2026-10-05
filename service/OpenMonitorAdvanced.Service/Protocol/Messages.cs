@@ -95,3 +95,41 @@ public sealed record WireSensor(
     string LabelKey,
     string? LabelArg,
     string Category);
+
+/// <summary>App to service: switches the frame engine on or off and picks its optional columns.</summary>
+public sealed record FramesConfigureMessage(bool Enabled, bool TrackPcLatency, bool TrackGpu) : IMessage;
+
+/// <summary>App to service: the process whose frames the app wants (<see langword="null"/> for none).</summary>
+public sealed record FramesTargetMessage(uint? Pid) : IMessage;
+
+/// <summary>Service to app: state of the frame engine (a <see cref="FramesStates"/> value).</summary>
+public sealed record FramesStatusMessage(string State, string? Detail, string? PresentMonVersion) : IMessage;
+
+/// <summary>A process that presented recently, as seen by the frame engine.</summary>
+public sealed record PresentingProcess(uint Pid, string Name, double DisplayedFps, string PresentMode, uint Swapchains);
+
+/// <summary>Service to app: the processes presenting now (at most <see cref="ProtocolConstants.MaxPresentingProcesses"/>).</summary>
+public sealed record PresentingProcessesMessage(ulong AtQpc, IReadOnlyList<PresentingProcess> Processes) : IMessage;
+
+/// <summary>
+/// One presented frame of the target process. <c>FrameType</c> is <c>app</c>, <c>generated_intel_xefg</c>,
+/// <c>generated_amd_afmf</c>, <c>generated_other</c> or <c>unknown</c>.
+/// </summary>
+public sealed record WireFrame(
+    ulong Qpc,
+    ulong Swapchain,
+    string FrameType,
+    bool Displayed,
+    double MsBetweenPresents,
+    double? MsBetweenDisplayChange,
+    double? MsUntilDisplayed,
+    double? MsAppFrametime,
+    double? MsPcLatency,
+    double? MsGpuBusy,
+    ulong? PclFrameId);
+
+/// <summary>
+/// Service to app: frames of the target since the last batch (at most
+/// <see cref="ProtocolConstants.MaxFramesPerBatch"/>); <c>Dropped</c> counts the ones left out.
+/// </summary>
+public sealed record FrameBatchMessage(uint Pid, IReadOnlyList<WireFrame> Frames, uint Dropped) : IMessage;

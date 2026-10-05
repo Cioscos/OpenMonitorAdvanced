@@ -52,6 +52,7 @@ features = [
   "Win32_System_Time",
   "Win32_System_Threading",
   "Win32_System_WinRT",
+  "Win32_UI_Accessibility",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ]

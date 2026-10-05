@@ -41,6 +41,13 @@
 ; stops the compilation. pwsh (PowerShell 7), which the payload script requires anyway:
 ; Windows PowerShell started from pwsh inherits its PSModulePath and cannot load Get-FileHash.
 !system `pwsh.exe -NoProfile -NonInteractive -Command "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '${OMA_PAYLOAD}\PawnIO_setup.exe').Hash -ne (Get-Content -Raw -LiteralPath '${__FILEDIR__}\pawnio.sha256').Trim()) { Write-Host 'PawnIO_setup.exe does not match pawnio.sha256: run scripts/build-installer-payload.ps1'; exit 1 }"` = 0
+; The same for Intel's PresentMon console (M7b), which the service starts for the frame
+; metrics: presentmon.sha256 is also the hash the payload script and the service check.
+!if /FileExists "${OMA_PAYLOAD}\presentmon\PresentMon-2.6.0-x64.exe"
+!else
+  !error "Missing ${OMA_PAYLOAD}\presentmon\PresentMon-2.6.0-x64.exe: run scripts/build-installer-payload.ps1 first"
+!endif
+!system `pwsh.exe -NoProfile -NonInteractive -Command "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '${OMA_PAYLOAD}\presentmon\PresentMon-2.6.0-x64.exe').Hash -ne (Get-Content -Raw -LiteralPath '${__FILEDIR__}\presentmon.sha256').Trim()) { Write-Host 'PresentMon-2.6.0-x64.exe does not match presentmon.sha256: run scripts/build-installer-payload.ps1'; exit 1 }"` = 0
 
 ; "0" on success, otherwise a short English description (OmaStopService).
 Var OmaResult
@@ -64,13 +71,13 @@ Var OmaStack
 ; Strings for our section. Inserted after the MUI_LANGUAGE macros.
 !macro OMA_LANGSTRINGS
   LangString omaSensorsSection ${LANG_ENGLISH} "Advanced sensors"
-  LangString omaSensorsDesc ${LANG_ENGLISH} "Windows service and PawnIO driver for CPU temperatures, voltages, fans and SMART data. Requires administrator rights only now, during setup."
+  LangString omaSensorsDesc ${LANG_ENGLISH} "Windows service and PawnIO driver for CPU temperatures, voltages, fans and SMART data, with Intel PresentMon for the frame rate of games. Requires administrator rights only now, during setup."
   LangString omaSensorsFailed ${LANG_ENGLISH} "Advanced sensors could not be set up ($OmaDetail).$\r$\n$\r$\nSetup stopped before finishing. Run it again, or clear the Advanced sensors option to install without them."
   LangString omaSensorsNeedProgramFiles ${LANG_ENGLISH} "Advanced sensors can only be installed inside $PROGRAMFILES64, which only administrators can change ($OmaDetail).$\r$\n$\r$\nChoose a folder there, or go back and clear the Advanced sensors option (/NOSENSORS when silent)."
   LangString omaServiceRemoveFailed ${LANG_ENGLISH} "The Advanced sensors service could not be removed ($OmaDetail).$\r$\n$\r$\nNo files were deleted. Close OpenMonitor Advanced and try again."
   !ifdef LANG_ITALIAN
     LangString omaSensorsSection ${LANG_ITALIAN} "Sensori avanzati"
-    LangString omaSensorsDesc ${LANG_ITALIAN} "Servizio Windows e driver PawnIO per temperature, tensioni e ventole della CPU e dati SMART. Servono i privilegi di amministratore solo ora, durante l'installazione."
+    LangString omaSensorsDesc ${LANG_ITALIAN} "Servizio Windows e driver PawnIO per temperature, tensioni e ventole della CPU e dati SMART, con Intel PresentMon per gli FPS dei giochi. Servono i privilegi di amministratore solo ora, durante l'installazione."
     LangString omaSensorsFailed ${LANG_ITALIAN} "Non è stato possibile configurare i sensori avanzati ($OmaDetail).$\r$\n$\r$\nL'installazione si è fermata prima della fine. Riprova, oppure togli l'opzione Sensori avanzati per installare senza."
     LangString omaSensorsNeedProgramFiles ${LANG_ITALIAN} "I sensori avanzati si possono installare solo dentro $PROGRAMFILES64, che solo gli amministratori possono modificare ($OmaDetail).$\r$\n$\r$\nScegli una cartella lì, oppure torna indietro e togli l'opzione Sensori avanzati (/NOSENSORS in modalità silenziosa)."
     LangString omaServiceRemoveFailed ${LANG_ITALIAN} "Non è stato possibile rimuovere il servizio dei sensori avanzati ($OmaDetail).$\r$\n$\r$\nNessun file è stato eliminato. Chiudi OpenMonitor Advanced e riprova."
@@ -229,6 +236,15 @@ FunctionEnd
 !macroend
 !insertmacro OMA_DELETE_SERVICE ""
 !insertmacro OMA_DELETE_SERVICE "un."
+
+; Stops the ETW session of the frame engine (M7b), which PresentMon leaves
+; running when it is killed with the service. Only our own session name, never
+; PresentMon or PMService, which belong to other tools. Best effort: the result
+; is ignored (no session is the normal case). Use after the service has stopped.
+!macro OMA_STOP_FRAMES_SESSION
+  nsExec::ExecToLog '"$SYSDIR\logman.exe" stop OpenMonitorAdvanced-Frames -ets'
+  Pop $0
+!macroend
 
 ; Removes $INSTDIR\service\logs, the service's logs (ruling R30: they go with
 ; the service on uninstall or deselection; an upgrade keeps them). A junction or
@@ -478,7 +494,8 @@ FunctionEnd
 ; write. Defence in depth: OmaCheckInstallDir already requires Program Files,
 ; where no user can race us; this also covers a folder left behind with a
 ; different ACL. The service folder holds a LocalSystem service binary and the
-; PawnIO setup, both run elevated. SIDs, not names, so it works in every language:
+; PawnIO setup, both run elevated, and PresentMon, which the service starts.
+; SIDs, not names, so it works in every language:
 ;   owner Administrators; explicit ACEs dropped (/reset); inheritance removed and
 ;   exactly SYSTEM (S-1-5-18) F, Administrators (S-1-5-32-544) F,
 ;   Users (S-1-5-32-545) RX granted, inherited by files and subfolders.
@@ -488,7 +505,10 @@ FunctionEnd
 ; logs folder (ruling R30: the logs live here, where no user can create a folder
 ; first): on an upgrade a real logs folder is kept with its files and reset to
 ; inherit the ACL just granted, while a junction or link in its place is removed
-; as a link, never followed. Called after the service is stopped.
+; as a link, never followed. The presentmon subfolder of a previous install is
+; emptied and removed (a link in its place goes as a link): it is written again
+; afterwards and inherits the protected ACL. Anything left in it fails the
+; emptiness check. Called after the service is stopped.
 ; Sets $OmaResult to "0" or to a description of the failure.
 Function OmaProtectServiceDir
   Push $0
@@ -541,6 +561,28 @@ Function OmaProtectServiceDir
         IntOp $2 $OmaAttr & 0x10
         ${If} $2 <> 0
           !insertmacro OMA_ICACLS_PATH "$1\logs" "/reset /T"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ${If} $OmaResult == "0"
+    StrCpy $OmaPath "$1\presentmon"
+    Call OmaPathAttributes
+    ${If} $OmaResult == "0"
+    ${AndIf} $OmaAttr != "absent"
+      IntOp $2 $OmaAttr & 0x400
+      ${If} $2 <> 0
+        IntOp $2 $OmaAttr & 0x10
+        ${If} $2 <> 0
+          RMDir "$1\presentmon"
+        ${Else}
+          Delete "$1\presentmon"
+        ${EndIf}
+      ${Else}
+        IntOp $2 $OmaAttr & 0x10
+        ${If} $2 <> 0
+          Delete "$1\presentmon\*.*"
+          RMDir "$1\presentmon"
         ${EndIf}
       ${EndIf}
     ${EndIf}
@@ -625,6 +667,15 @@ Section "$(omaSensorsSection)" SecSensors
   ${If} ${Errors}
     !insertmacro OMA_FAIL "$(omaSensorsFailed)" "copy of ${OMA_SERVICE_EXE} failed"
   ${EndIf}
+  ; 3b. Intel's PresentMon console, which the service starts for the frame
+  ;     metrics (M7b), in the protected folder before the service can start.
+  ;     Never run by the installer.
+  SetOutPath "$INSTDIR\service\presentmon"
+  ClearErrors
+  File "${OMA_PAYLOAD}\presentmon\PresentMon-2.6.0-x64.exe"
+  ${If} ${Errors}
+    !insertmacro OMA_FAIL "$(omaSensorsFailed)" "copy of PresentMon-2.6.0-x64.exe failed"
+  ${EndIf}
   SetOutPath $INSTDIR
 
   ; 4. install: create or update the service (demand start, quoted path,
@@ -693,11 +744,14 @@ Section -OmaSensorsBookkeeping
       ${If} $OmaResult != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
       ${EndIf}
+      !insertmacro OMA_STOP_FRAMES_SESSION
       !insertmacro OMA_HELPER "uninstall"
       ${If} $0 != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "${OMA_SERVICE_EXE} uninstall exited with $0"
       ${EndIf}
       Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
+      Delete "$INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe"
+      RMDir "$INSTDIR\service\presentmon"
       Call OmaRemoveServiceLogs
       RMDir "$INSTDIR\service"
     ${Else}
@@ -707,10 +761,13 @@ Section -OmaSensorsBookkeeping
       ${If} $OmaResult != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
       ${EndIf}
+      !insertmacro OMA_STOP_FRAMES_SESSION
       Call OmaDeleteService
       ${If} $OmaResult != "0"
         !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "delete: $OmaResult"
       ${EndIf}
+      Delete "$INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe"
+      RMDir "$INSTDIR\service\presentmon"
       Call OmaRemoveServiceLogs
       RMDir "$INSTDIR\service"
     ${EndIf}
@@ -827,19 +884,74 @@ Function OmaCloseApp
 FunctionEnd
 !macroend
 
+; Our copy of Tauri's CheckIfAppIsRunning for the uninstaller: same detection
+; and texts, but a clean exit instead of Abort. Inside a section Abort only
+; stops the section and leaves the instfiles page open on an empty progress bar,
+; so Cancel (and a failed kill) set the exit code and Quit at once. Nothing has
+; been touched yet: this runs before anything else in the hook. Silent and
+; passive runs kill without asking, as before.
+; Exit codes: 1 = cancelled by the user (the reinstall page of an update goes
+; back to its choice page on 1); OMA_FAILED_EXIT_CODE = the app could not be
+; closed (the reinstall page shows its generic "unable to uninstall" message).
+!macro OMA_UN_CHECK_APP executableName productName
+  !define UniqueID ${__LINE__}
+
+  nsis_tauri_utils::StrReplace "$(appRunning)" "{{product_name}}" "${productName}"
+  Pop $R1
+  nsis_tauri_utils::StrReplace "$(appRunningOkKill)" "{{product_name}}" "${productName}"
+  Pop $R2
+  nsis_tauri_utils::StrReplace "$(failedToKillApp)" "{{product_name}}" "${productName}"
+  Pop $R3
+
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::FindProcessCurrentUser "${executableName}"
+  !else
+    nsis_tauri_utils::FindProcess "${executableName}"
+  !endif
+  Pop $R0
+  ${If} $R0 = 0
+    IfSilent kill_${UniqueID} 0
+    ${IfThen} $PassiveMode != 1 ${|} MessageBox MB_OKCANCEL $R2 IDOK kill_${UniqueID} IDCANCEL cancel_${UniqueID} ${|}
+    kill_${UniqueID}:
+      !if "${INSTALLMODE}" == "currentUser"
+        nsis_tauri_utils::KillProcessCurrentUser "${executableName}"
+      !else
+        nsis_tauri_utils::KillProcess "${executableName}"
+      !endif
+      Pop $R0
+      Sleep 500
+      ${If} $R0 = 0
+      ${OrIf} $R0 = 2
+        Goto app_check_done_${UniqueID}
+      ${EndIf}
+      DetailPrint "$R3"
+      MessageBox MB_ICONSTOP|MB_OK "$R3" /SD IDOK
+      SetErrorLevel ${OMA_FAILED_EXIT_CODE}
+      Quit
+    cancel_${UniqueID}:
+      SetErrorLevel 1
+      Quit
+  ${EndIf}
+  app_check_done_${UniqueID}:
+    !undef UniqueID
+!macroend
+
 ; Tauri hook: runs at the top of the Uninstall section, before any file is
 ; deleted, so a failure here leaves the installation intact. It closes the app
 ; first (the template's own check, repeated later, then finds nothing): if the
-; user cancels the "app is running" prompt, the uninstall stops before the
-; service is touched. Keeps the uninstaller diff at zero.
+; user cancels the "app is running" prompt, the uninstaller closes at once
+; (OMA_UN_CHECK_APP) before the service is touched. Keeps the uninstaller diff
+; at zero.
 ; PawnIO is never touched: it can be shared with other programs. The service's
-; logs go with the service, except on an upgrade (ruling R30).
+; logs go with the service, except on an upgrade (ruling R30). PresentMon goes
+; with the service, and the frames ETW session is stopped once the service is.
 !macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro OMA_UN_CHECK_APP "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Call un.OmaStopService
   ${If} $OmaResult != "0"
     !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
   ${EndIf}
+  !insertmacro OMA_STOP_FRAMES_SESSION
   ${If} $UpdateMode <> 1
     ${If} ${FileExists} "$INSTDIR\service\${OMA_SERVICE_EXE}"
       ; stop + delete the service
@@ -856,6 +968,8 @@ FunctionEnd
     ${EndIf}
   ${EndIf}
   Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
+  Delete "$INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe"
+  RMDir "$INSTDIR\service\presentmon"
   ${If} $UpdateMode <> 1
     Call un.OmaRemoveServiceLogs
   ${EndIf}

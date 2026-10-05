@@ -67,7 +67,7 @@ static int RunHost(bool console)
             typeof(ServiceHost).Assembly.GetName().Version?.ToString(3),
             console ? "console" : "Windows service",
             Environment.ProcessId);
-        using IHost host = ServiceHost.Build(console, fileLogs, new PipeListenerOptions(), ServiceHost.IdleAfter, ServiceHost.CreateSensorHub);
+        using IHost host = ServiceHost.Build(console, fileLogs, new PipeListenerOptions(), ServiceHost.IdleAfter, ServiceHost.CreateSensorHub, ServiceHost.CreateFrameCapture);
         int exitCode = ServiceHost.Run(host, log);
         log.LogInformation("oma-service stopped with exit code {ExitCode}", exitCode);
         return exitCode;

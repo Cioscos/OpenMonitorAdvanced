@@ -32,6 +32,13 @@
   Reading another account's (LocalSystem) process counters can require an
   elevated PowerShell session on some machines; an invalid reading whose
   cause looks like a permissions issue says so.
+  -Service also measures, inside the same window and by the same method,
+  the PresentMon console the service runs for the frame metrics (M7b): the
+  child of the service PID named PresentMon-2.6.0-x64.exe, reported as
+  PresentMonCpuPercent and PresentMonPrivateBytesMB, or PresentMonValid
+  $false with the reason "not running" when the service has not started it
+  (no app is asking for frame metrics). Spec M7 §11 budgets PresentMon plus
+  the service's own work together.
 .EXAMPLE
   ./scripts/measure-footprint.ps1                            # window open
   ./scripts/measure-footprint.ps1 -Minimized                 # tray only
@@ -136,6 +143,45 @@ function Measure-ServiceSample {
     }
 }
 
+# The PID of the PresentMon console the service started (M7b), found as the
+# direct child of $ServicePid named PresentMon-2.6.0-x64.exe; $null when the
+# service has no PID or not exactly one such child. $ProcessProvider returns
+# Win32_Process-shaped objects, so tests use a fake process list.
+function Get-PresentMonProcessId {
+    param(
+        $ServicePid,
+        [scriptblock]$ProcessProvider = { Get-CimInstance Win32_Process -Filter "Name='PresentMon-2.6.0-x64.exe'" -ErrorAction SilentlyContinue }
+    )
+    if (-not $ServicePid) { return $null }
+    $children = @(& $ProcessProvider | Where-Object {
+            $_.Name -eq 'PresentMon-2.6.0-x64.exe' -and [int]$_.ParentProcessId -eq [int]$ServicePid })
+    if ($children.Count -ne 1) { return $null }
+    [int]$children[0].ProcessId
+}
+
+# Measure-ServiceSample for a process that may legitimately be absent (the
+# service starts PresentMon only while an app wants frame metrics): when
+# $PidProvider gives no PID, the result is invalid with the reason
+# "not running". $SampleAction always runs exactly once, so the shared sample
+# window keeps its length whatever happens to this process.
+function Measure-ChildSample {
+    param(
+        [Parameter(Mandatory)][scriptblock]$PidProvider,
+        [Parameter(Mandatory)][scriptblock]$SampleAction,
+        [string]$Label = 'PresentMon-2.6.0-x64.exe',
+        [int]$LogicalProcessors = [Environment]::ProcessorCount
+    )
+    if (-not (& $PidProvider)) {
+        $null = & $SampleAction
+        return [pscustomobject]@{ Valid = $false; Reason = 'not running' }
+    }
+    $ran = @{ Value = $false }
+    $action = { $null = & $SampleAction; $ran.Value = $true }.GetNewClosure()
+    $result = Measure-ServiceSample -PidProvider $PidProvider -SampleAction $action -ServiceLabel $Label -LogicalProcessors $LogicalProcessors
+    if (-not $ran.Value) { $null = & $SampleAction }
+    $result
+}
+
 # Measure the host and all WebView2 descendants over one common sample action.
 # Changed endpoint membership, missing counters or reused PIDs invalidate the result.
 # A child born and exited between the endpoint snapshots cannot be observed here.
@@ -234,18 +280,26 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
     $cpuStart = $Proc.TotalProcessorTime
 
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    # The service's PresentMon child (M7b) is sampled inside the service window.
+    $presentMon = @{ Result = $null }
     $appCpu = Measure-AppCpuSample -RootProcessId $Proc.Id -RequireWebView:($Mode -eq 'window') `
         -ProcessProvider { Get-CimInstance Win32_Process } `
         -CounterProvider { Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction SilentlyContinue } `
         -SampleAction {
             if ($MeasureService) {
-                Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } `
-                    -SampleAction { Start-Sleep -Seconds $SampleSeconds } -ServiceLabel $ServiceName
+                Measure-ServiceSample -PidProvider { Get-ServiceProcessId -Name $ServiceName } -ServiceLabel $ServiceName `
+                    -SampleAction {
+                        $presentMon.Result = Measure-ChildSample `
+                            -PidProvider { Get-PresentMonProcessId -ServicePid (Get-ServiceProcessId -Name $ServiceName) } `
+                            -SampleAction { Start-Sleep -Seconds $SampleSeconds }
+                    }
             } else {
                 Start-Sleep -Seconds $SampleSeconds
             }
         }
     $svcResult = $appCpu.SampleResult
+    # Measure-ServiceSample returns before sampling when the service is not running: then so is PresentMon.
+    $pmResult = if ($presentMon.Result) { $presentMon.Result } else { [pscustomobject]@{ Valid = $false; Reason = 'not running' } }
     $Proc.Refresh()
     $cpuEnd = $Proc.TotalProcessorTime
     $cpuPercent = ($cpuEnd - $cpuStart).TotalMilliseconds / $elapsed.Elapsed.TotalMilliseconds / [Environment]::ProcessorCount * 100
@@ -302,6 +356,11 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
             $result['ServicePrivateBytesMB'] = $null
             $result['ServiceInvalidReason']  = $svcResult.Reason
         }
+        # Spec M7 §11: PresentMon is measured on its own; add it to the service for the 0.5 % line.
+        $result['PresentMonValid']          = [bool]$pmResult.Valid
+        $result['PresentMonCpuPercent']     = if ($pmResult.Valid) { $pmResult.CpuPercent } else { $null }
+        $result['PresentMonPrivateBytesMB'] = if ($pmResult.Valid) { $pmResult.PrivateBytesMB } else { $null }
+        $result['PresentMonInvalidReason']  = if ($pmResult.Valid) { $null } else { $pmResult.Reason }
     }
     [pscustomobject]$result
 }

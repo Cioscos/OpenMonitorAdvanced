@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
+using OpenMonitorAdvanced.Service.Frames;
 using OpenMonitorAdvanced.Service.Protocol;
 using OpenMonitorAdvanced.Service.Sensors;
 
@@ -8,7 +9,9 @@ namespace OpenMonitorAdvanced.Service.Pipe;
 /// <summary>
 /// One connected pipe client (spec §6): sends <see cref="HelloMessage"/>, waits for a
 /// <see cref="SubscribeMessage"/>, then forwards every <see cref="FeedUpdate"/> as an optional
-/// <see cref="SchemaMessage"/> followed by its <see cref="SnapshotMessage"/>.
+/// <see cref="SchemaMessage"/> followed by its <see cref="SnapshotMessage"/>. After the subscribe it
+/// also accepts the frame requests (<see cref="FramesConfigureMessage"/>, <see cref="FramesTargetMessage"/>)
+/// and forwards what the <see cref="FramesHub"/> delivers (spec M7b §4.1).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -31,14 +34,22 @@ namespace OpenMonitorAdvanced.Service.Pipe;
 /// stays queued. A write that does not complete within the write timeout also closes the session.
 /// </para>
 /// <para>
+/// <b>Frame data</b> goes through the same outbox. The first <see cref="FramesConfigureMessage"/>
+/// subscribes the session to the frames hub; at most <see cref="MaxQueuedFrameMessages"/> of the
+/// hub's messages may wait in the outbox, and beyond that the hub's delivery is refused (the hub
+/// counts the frames as dropped) without closing the session: a slow reader loses frames, not the
+/// sensors. Sensor updates keep their own limit.
+/// </para>
+/// <para>
 /// <b>Cleanup.</b> <see cref="RunAsync"/> never throws and, on every exit path, disposes the feed
-/// subscription it holds exactly once. The pipe handle and the idle client count belong to the
+/// and frames subscriptions it holds exactly once and tells the frames hub the session ended. The pipe handle and the idle client count belong to the
 /// listener, which releases them once when <see cref="RunAsync"/> returns.
 /// </para>
 /// </remarks>
 internal sealed class ClientSession
 {
     internal const int MaxQueuedUpdates = 2;
+    internal const int MaxQueuedFrameMessages = 4;
 
     private static readonly string ServiceVersion =
         typeof(ClientSession).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
@@ -46,6 +57,7 @@ internal sealed class ClientSession
     private readonly Stream _pipe;
     private readonly ISensorFeed _feed;
     private readonly PawnIoState _pawnIo;
+    private readonly FramesHub _frames;
     private readonly PipeListenerOptions _options;
     private readonly ILogger _log;
     private readonly int _id;
@@ -61,19 +73,22 @@ internal sealed class ClientSession
 
     private readonly Lock _subscriptionGate = new();
     private IFeedSubscription? _subscription;
+    private IDisposable? _framesSubscription;
     private bool _closed;
 
     /// <summary>Current subscription generation; callbacks that arrive after the session closed are ignored.</summary>
     private int _generation;
 
     private int _queuedUpdates;
+    private int _queuedFrameMessages;
     private int _overflowed;
 
-    public ClientSession(Stream pipe, ISensorFeed feed, PawnIoState pawnIo, PipeListenerOptions options, ILogger log, int id)
+    public ClientSession(Stream pipe, ISensorFeed feed, PawnIoState pawnIo, FramesHub frames, PipeListenerOptions options, ILogger log, int id)
     {
         _pipe = pipe;
         _feed = feed;
         _pawnIo = pawnIo;
+        _frames = frames;
         _options = options;
         _log = log;
         _id = id;
@@ -163,8 +178,21 @@ internal sealed class ClientSession
 
                         subscribed = true;
                         break;
+                    case FramesConfigureMessage configure when subscribed:
+                        if (!TrySubscribeFrames())
+                        {
+                            return false;
+                        }
+
+                        _frames.OnConfigure(_id, configure);
+                        break;
+                    case FramesTargetMessage target when subscribed:
+                        _frames.OnTarget(_id, target);
+                        break;
                     default:
-                        return QueueError($"unexpected {message.GetType().Name} from the client; only subscribe is accepted");
+                        return QueueError(subscribed
+                            ? $"unexpected {message.GetType().Name} from the client; only subscribe, frames_configure and frames_target are accepted"
+                            : $"unexpected {message.GetType().Name} from the client; subscribe first");
                 }
             }
         }
@@ -262,6 +290,72 @@ internal sealed class ClientSession
         return true;
     }
 
+    /// <summary>Subscribes to the frames hub once (on the first frames_configure); false if the session closed.</summary>
+    private bool TrySubscribeFrames()
+    {
+        int generation;
+        lock (_subscriptionGate)
+        {
+            if (_closed)
+            {
+                return false;
+            }
+
+            if (_framesSubscription is not null)
+            {
+                return true;
+            }
+
+            generation = _generation;
+        }
+
+        IDisposable subscription = _frames.Subscribe(_id, message => DeliverFrames(generation, message));
+        bool adopted;
+        lock (_subscriptionGate)
+        {
+            adopted = !_closed;
+            if (adopted)
+            {
+                _framesSubscription = subscription;
+            }
+        }
+
+        if (!adopted)
+        {
+            // Closed while subscribing: cleanup already ran, so release the new subscription here.
+            subscription.Dispose();
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Frames hub callback, on a timer or capture thread under the hub's lock: queue only, never
+    /// block or write. Refused (false) while the session is closing or when too many wait.
+    /// </summary>
+    private bool DeliverFrames(int generation, IMessage message)
+    {
+        if (generation != Volatile.Read(ref _generation) || Volatile.Read(ref _overflowed) != 0)
+        {
+            return false;
+        }
+
+        if (Interlocked.Increment(ref _queuedFrameMessages) > MaxQueuedFrameMessages)
+        {
+            Interlocked.Decrement(ref _queuedFrameMessages);
+            return false;
+        }
+
+        if (!_outbox.Writer.TryWrite(new Outgoing(message, null, Final: false, Frames: true)))
+        {
+            Interlocked.Decrement(ref _queuedFrameMessages); // session already closing
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>Feed callback, on the hub's sampler thread: queue only, never block or write.</summary>
     private void OnUpdate(int generation, FeedUpdate update)
     {
@@ -299,6 +393,10 @@ internal sealed class ClientSession
                 if (item.Update is not null)
                 {
                     Interlocked.Decrement(ref _queuedUpdates);
+                }
+                else if (item.Frames)
+                {
+                    Interlocked.Decrement(ref _queuedFrameMessages);
                 }
 
                 if (Volatile.Read(ref _overflowed) != 0)
@@ -359,12 +457,15 @@ internal sealed class ClientSession
     private void CloseSubscription()
     {
         IFeedSubscription? subscription;
+        IDisposable? frames;
         lock (_subscriptionGate)
         {
             _closed = true;
             _generation++;
             subscription = _subscription;
             _subscription = null;
+            frames = _framesSubscription;
+            _framesSubscription = null;
         }
 
         try
@@ -375,8 +476,18 @@ internal sealed class ClientSession
         {
             _log.LogWarning(e, "Pipe client {Client}: unsubscribing failed", _id);
         }
+
+        try
+        {
+            frames?.Dispose();
+            _frames.OnDisconnected(_id);
+        }
+        catch (Exception e)
+        {
+            _log.LogWarning(e, "Pipe client {Client}: leaving the frames hub failed", _id);
+        }
     }
 
-    /// <summary>One writer work item: a control message, or a feed update.</summary>
-    private sealed record Outgoing(IMessage? Message, FeedUpdate? Update, bool Final);
+    /// <summary>One writer work item: a control message, a feed update, or a message of the frames hub.</summary>
+    private sealed record Outgoing(IMessage? Message, FeedUpdate? Update, bool Final, bool Frames = false);
 }

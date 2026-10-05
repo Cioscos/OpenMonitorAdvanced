@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OpenMonitorAdvanced.Service.Frames;
 using OpenMonitorAdvanced.Service.Pipe;
 using OpenMonitorAdvanced.Service.Sensors;
 using OpenMonitorAdvanced.Service.Setup;
@@ -11,7 +12,8 @@ namespace OpenMonitorAdvanced.Service;
 
 /// <summary>
 /// Composition of the service host (spec §5.3, §6, §8): the sensor hub as the singleton
-/// <see cref="ISensorFeed"/>, the pipe listener, the idle shutdown and the logging. The same host
+/// <see cref="ISensorFeed"/>, the frames hub (spec M7b §4.1), the pipe listener, the idle shutdown
+/// and the logging. The same host
 /// runs under the SCM (<c>oma-service.exe</c> with no arguments) and in a console
 /// (<c>oma-service.exe run</c>), with the same pipe security in both.
 /// </summary>
@@ -38,12 +40,16 @@ internal static class ServiceHost
     /// </summary>
     internal static string LogDirectory { get; } = Path.Combine(ServiceDirectory, "logs");
 
+    /// <summary>The pinned PresentMon, installed in <c>$INSTDIR\service\presentmon</c>.</summary>
+    internal static string PresentMonPath { get; } = Path.Combine(ServiceDirectory, "presentmon", PresentMonPin.FileName);
+
     internal static IHost Build(
         bool console,
         ILoggerProvider fileLogs,
         PipeListenerOptions pipeOptions,
         TimeSpan idleAfter,
-        Func<IServiceProvider, ISensorFeed> feed)
+        Func<IServiceProvider, ISensorFeed> feed,
+        Func<IServiceProvider, FrameCapture> frameCapture)
     {
         HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
         {
@@ -90,11 +96,23 @@ internal static class ServiceHost
             TimeProvider.System,
             idleAfter,
             sp.GetRequiredService<ILogger<IdleShutdown>>()));
+
+        // The frame engine: nothing runs until a client asks for frames (the capture's constructor
+        // only stops a session left over by a crashed service).
+        builder.Services.AddSingleton(frameCapture);
+        builder.Services.AddSingleton(_ => new FrameAggregator(ticksPerSecond: TimeProvider.System.TimestampFrequency));
+        builder.Services.AddSingleton(_ => new FrameRequests(TimeProvider.System));
+        builder.Services.AddSingleton(sp => new FramesHub(
+            sp.GetRequiredService<FrameCapture>(),
+            sp.GetRequiredService<FrameAggregator>(),
+            sp.GetRequiredService<FrameRequests>(),
+            TimeProvider.System,
+            sp.GetRequiredService<ILogger<FramesHub>>()));
         builder.Services.AddSingleton<PipeListener>();
 
         // Hosted services stop in reverse order: the pipe (and every session's subscription)
-        // first, then the feed, so the hub is disposed with no subscriber left and before the
-        // host reports itself stopped.
+        // first, then the feed and the frames hub, so both are disposed with no subscriber left
+        // and before the host reports itself stopped.
         builder.Services.AddHostedService<FeedShutdown>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<PipeListener>());
 
@@ -128,6 +146,17 @@ internal static class ServiceHost
     }
 
     /// <summary>
+    /// The production frame capture: the pinned PresentMon and the real ETW session control. Tests
+    /// pass fakes instead, so no test stops the product's live ETW session.
+    /// </summary>
+    internal static FrameCapture CreateFrameCapture(IServiceProvider services) => new(
+        new PresentMonProcess(PresentMonPath),
+        new EtwSessionControl(),
+        () => PresentMonPin.HashOf(PresentMonPath),
+        TimeProvider.System,
+        services.GetRequiredService<ILogger<FrameCapture>>());
+
+    /// <summary>
     /// Runs <paramref name="host"/> until it stops and returns the process exit code: 0 for a
     /// requested stop (SCM, Ctrl+C, idle shutdown), 1 if the host failed or the pipe listener
     /// faulted (for example, the pipe name is taken).
@@ -156,23 +185,29 @@ internal static class ServiceHost
         return 0;
     }
 
-    /// <summary>Disposes the feed while the host stops (after the pipe listener), within the shutdown timeout.</summary>
-    private sealed class FeedShutdown(ISensorFeed feed, ILogger<FeedShutdown> log) : IHostedService
+    /// <summary>
+    /// Disposes the feed and the frames hub while the host stops (after the pipe listener), within
+    /// the shutdown timeout. They stop side by side: the feed may take about 20 s and the frame
+    /// capture up to 15 s, which in sequence would not fit in <see cref="ShutdownTimeout"/>.
+    /// </summary>
+    private sealed class FeedShutdown(ISensorFeed feed, FramesHub frames, ILogger<FeedShutdown> log) : IHostedService
     {
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task StopAsync(CancellationToken cancellationToken)
+        public Task StopAsync(CancellationToken cancellationToken) => Task.WhenAll(
+            Task.Run(() => Stop(() => (feed as IDisposable)?.Dispose(), "the sensor feed"), CancellationToken.None),
+            Task.Run(() => Stop(frames.Dispose, "the frame capture"), CancellationToken.None));
+
+        private void Stop(Action dispose, string what)
         {
             try
             {
-                (feed as IDisposable)?.Dispose();
+                dispose();
             }
             catch (Exception e)
             {
-                log.LogError(e, "Stopping the sensor feed failed");
+                log.LogError(e, "Stopping {What} failed", what);
             }
-
-            return Task.CompletedTask;
         }
     }
 }

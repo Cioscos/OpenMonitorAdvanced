@@ -303,10 +303,10 @@ impl ConnCtl {
         }
     }
 
-    /// Snapshots the link's queue had no room for, on this connection.
-    fn dropped_snapshots(&self) -> u64 {
+    /// Snapshots and frame data the link's queue had no room for, on this connection.
+    fn dropped_messages(&self) -> u64 {
         let pipe = self.pipe.lock().unwrap();
-        pipe.sink.as_ref().map_or(0, LinkSink::dropped_snapshots)
+        pipe.sink.as_ref().map_or(0, LinkSink::dropped_messages)
     }
 
     fn push(&self, msg: Message) {
@@ -427,6 +427,7 @@ struct Harness {
     script: Arc<Script>,
     status: ServiceStatusTable,
     feed: SvcFeed,
+    frames: FramesFeed,
     link: Option<ServiceLink>,
 }
 
@@ -443,6 +444,7 @@ impl Harness {
     ) -> Self {
         let status = ServiceStatusTable::default();
         let feed = SvcFeed::default();
+        let frames = FramesFeed::default();
         let link = ServiceLink::spawn(
             Arc::clone(&control) as Arc<dyn ServiceControl>,
             script.connector(),
@@ -450,12 +452,14 @@ impl Harness {
             anti_cheat,
             status.clone(),
             feed.clone(),
+            frames.clone(),
         );
         Self {
             control,
             script,
             status,
             feed,
+            frames,
             link: Some(link),
         }
     }

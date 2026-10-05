@@ -4,6 +4,7 @@ using System.IO.Pipes;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
+using OpenMonitorAdvanced.Service.Frames;
 using OpenMonitorAdvanced.Service.Protocol;
 using OpenMonitorAdvanced.Service.Sensors;
 
@@ -49,7 +50,7 @@ public sealed class PipeListenerOptions
 /// <see cref="IdleShutdown.ClientDisconnected"/> and frees the slot, each exactly once.
 /// </para>
 /// </remarks>
-public sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, IdleShutdown idle, PawnIoState pawnIo, ILogger<PipeListener> log) : BackgroundService
+internal sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, IdleShutdown idle, PawnIoState pawnIo, FramesHub frames, ILogger<PipeListener> log) : BackgroundService
 {
     private static readonly TimeSpan CreateRetryDelay = TimeSpan.FromSeconds(1);
 
@@ -143,7 +144,7 @@ public sealed class PipeListener(ISensorFeed feed, PipeListenerOptions options, 
     {
         int id = Interlocked.Increment(ref _nextClientId);
         log.LogDebug("Pipe client {Client} connected", id);
-        var session = new ClientSession(pipe, feed, pawnIo, options, log, id);
+        var session = new ClientSession(pipe, feed, pawnIo, frames, options, log, id);
 
         // Registered before the session runs, so a session that ends at once is still removed.
         var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

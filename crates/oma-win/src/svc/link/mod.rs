@@ -1,7 +1,8 @@
 //! The app's link to the sensor service: one thread that starts the service
 //! once at launch, connects to its pipe, checks who serves it, subscribes,
-//! and hands schema and snapshots to the [`SvcFeed`]; or, in anti-cheat
-//! compatible mode, stops the service and keeps away from it (spec §2.2, §6).
+//! and hands schema and snapshots to the [`SvcFeed`] and frame data to the
+//! [`FramesFeed`]; or, in anti-cheat compatible mode, stops the service and
+//! keeps away from it (spec §2.2, §6).
 //!
 //! The rules live in [`Machine::decide`], a pure function of the current
 //! state, the event and the time, which returns the effects to run (SCM
@@ -17,9 +18,9 @@
 //! The queue holds at most [`LINK_QUEUE_CAPACITY`] inputs, so a thread stuck
 //! in a long call cannot make it grow without limit. With the queue full, a
 //! command fails at once with [`LinkBusy`] (the shell's main thread and its
-//! store listeners never wait for the link), a snapshot is dropped, and the
-//! connection's reader, a thread of its own, waits for room for anything
-//! else (see [`LinkSink`]).
+//! store listeners never wait for the link), a snapshot or frame data is
+//! dropped, and the connection's reader, a thread of its own, waits for room
+//! for anything else (see [`LinkSink`]).
 //!
 //! Limits, by design:
 //! - The anti-cheat preference is per user and only restrains this app: it
@@ -59,6 +60,7 @@ use std::time::{Duration, Instant};
 use oma_ipc::Message;
 
 use super::feed::SvcFeed;
+use super::frames_feed::{FramesEvent, FramesFeed};
 use super::pipe::CloseReason;
 use super::scm::ServiceControl;
 use super::status::ServiceStatusTable;
@@ -115,6 +117,7 @@ struct Driver {
     connector: Connector,
     status: ServiceStatusTable,
     feed: SvcFeed,
+    frames: FramesFeed,
     /// The one queue: commands, shutdown, and what the connection's reader
     /// forwards.
     inbox: Receiver<Input>,
@@ -283,11 +286,16 @@ impl Driver {
                     self.conn_id = None;
                     self.unread.clear();
                 }
-                Effect::ClearFeed => self.feed.clear(),
+                Effect::ClearFeed => {
+                    // The connection is gone: so is the frame data it brought.
+                    self.feed.clear();
+                    self.frames.apply(FramesEvent::Disconnected);
+                }
                 Effect::SetInterval(interval) => self.feed.set_interval(interval),
                 Effect::SetRequest(request) => self.feed.set_request(request),
                 Effect::SetSchema(schema) => self.feed.set_schema(schema),
                 Effect::SetSnapshot(snapshot) => self.feed.set_snapshot(snapshot, Instant::now()),
+                Effect::Frames(event) => self.frames.apply(event),
             }
         }
         // Before the status, so a reader woken by the status sees the version.
@@ -310,7 +318,7 @@ pub struct ServiceLink {
 
 impl ServiceLink {
     /// Sets the initial status (`AntiCheat` + `Stopping`, or `Starting`) and
-    /// starts the thread.
+    /// starts the thread, which writes `status`, `feed` and `frames`.
     pub fn spawn(
         control: Arc<dyn ServiceControl>,
         connector: Connector,
@@ -318,6 +326,7 @@ impl ServiceLink {
         anti_cheat: bool,
         status: ServiceStatusTable,
         feed: SvcFeed,
+        frames: FramesFeed,
     ) -> Self {
         feed.set_request(settings.sources.clone());
         let machine = Machine::new(settings, anti_cheat);
@@ -332,6 +341,7 @@ impl ServiceLink {
             connector,
             status,
             feed,
+            frames,
             inbox,
             sender: commands.clone(),
             stop: Arc::clone(&stop),

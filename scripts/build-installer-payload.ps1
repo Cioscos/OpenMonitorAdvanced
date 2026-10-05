@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  Builds the payload the NSIS installer embeds (spec §10): the published oma-service.exe and
-  the official PawnIO 2.2.0 setup, in target/installer-payload/.
+  Builds the payload the NSIS installer embeds (spec §10): the published oma-service.exe, the
+  official PawnIO 2.2.0 setup and the official PresentMon 2.6.0 console, in
+  target/installer-payload/.
 .DESCRIPTION
   Run it before `pnpm tauri build` (app/src-tauri/nsis/oma.nsh refuses to compile without it):
 
@@ -25,6 +26,11 @@
      oma.nsh at compile time) and its Authenticode signature (Valid, pinned signer). The pins
      live in scripts/lib/OmaPawnIoPins.psm1 and are never updated automatically: a mismatch
      fails the build and removes the file.
+  6. Downloads PresentMon-2.6.0-x64.exe (or reuses the cached copy) into presentmon/ and
+     verifies its SHA-256 against app/src-tauri/nsis/presentmon.sha256 (also read by oma.nsh at
+     compile time and by the service) and its Authenticode signature (Valid, signed by Intel).
+     The pins live in scripts/lib/OmaPresentMonPins.psm1, which also holds the staging logic
+     (Save-OmaPresentMon); a mismatch fails the build and leaves no file. PresentMon is never run.
   Exit code 0 only when all of the above succeeded.
 .PARAMETER DotnetExe
   The dotnet command. Tests inject a fake here.
@@ -33,10 +39,15 @@
 .PARAMETER OutputRoot
   The payload directory. Defaults to target/installer-payload, where oma.nsh looks for it.
 .PARAMETER PawnIoOnly
-  Only step 5: leaves the service payload alone. For tests.
+  Only step 5: leaves the service payload and PresentMon alone. For tests.
 .PARAMETER PawnIoSource
   Where to fetch PawnIO_setup.exe from: the official URL (default) or a local file (tests).
   Whatever the source, the file must match the pinned hash and signer.
+.PARAMETER PresentMonOnly
+  Only step 6: leaves the service payload and PawnIO alone. For tests.
+.PARAMETER PresentMonSource
+  Where to fetch PresentMon-2.6.0-x64.exe from: the official v2.6.0 release URL (default) or a
+  local file (tests). Whatever the source, the file must match the pinned hash and signer.
 #>
 #Requires -Version 7
 
@@ -45,7 +56,9 @@ param(
     [string]$ServiceProject,
     [string]$OutputRoot,
     [switch]$PawnIoOnly,
-    [string]$PawnIoSource = 'https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe'
+    [string]$PawnIoSource = 'https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe',
+    [switch]$PresentMonOnly,
+    [string]$PresentMonSource = 'https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +70,8 @@ if (-not $OutputRoot) { $OutputRoot = Join-Path $repoRoot 'target\installer-payl
 # scripts/lib/OmaPawnIoPins.psm1, shared with scripts/verify-signatures.ps1. Never update them
 # automatically. The service metadata rule is Test-OmaVersionInfo, shared with the verifier too.
 Import-Module (Join-Path $PSScriptRoot 'lib\OmaPawnIoPins.psm1') -Force
+# Same for PresentMon (scripts/lib/OmaPresentMonPins.psm1, pinned hash in presentmon.sha256).
+Import-Module (Join-Path $PSScriptRoot 'lib\OmaPresentMonPins.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib\OmaSigning.psm1') -Force
 $PawnIoPins = Get-OmaPawnIoPins -RepoRoot $repoRoot
 
@@ -134,41 +149,54 @@ function Build-ServicePayload {
 }
 
 New-Item -ItemType Directory -Force $OutputRoot | Out-Null
-if ($PawnIoOnly) {
-    Write-Host 'PawnIO only: the service payload is left as it is'
+if ($PawnIoOnly -and $PresentMonOnly) { Fail '-PawnIoOnly and -PresentMonOnly exclude each other' }
+if ($PawnIoOnly -or $PresentMonOnly) {
+    Write-Host "$(if ($PawnIoOnly) { 'PawnIO' } else { 'PresentMon' }) only: the service payload is left as it is"
 } else {
     Build-ServicePayload
 }
 
 # --- 5. PawnIO setup --------------------------------------------------------------------------
-$pawnIo = Join-Path $OutputRoot 'PawnIO_setup.exe'
-$reused = $false
-if (Test-Path -PathType Leaf $pawnIo) {
-    $problem = Test-OmaPawnIoSetup -Path $pawnIo -Pins $PawnIoPins
-    if ($null -eq $problem) {
-        $reused = $true
-        Write-Host 'PawnIO_setup.exe: cached copy verified'
-    } else {
-        Write-Host "PawnIO_setup.exe: cached copy rejected ($problem), downloading again"
-        Remove-Item -Force $pawnIo
+if (-not $PresentMonOnly) {
+    $pawnIo = Join-Path $OutputRoot 'PawnIO_setup.exe'
+    $reused = $false
+    if (Test-Path -PathType Leaf $pawnIo) {
+        $problem = Test-OmaPawnIoSetup -Path $pawnIo -Pins $PawnIoPins
+        if ($null -eq $problem) {
+            $reused = $true
+            Write-Host 'PawnIO_setup.exe: cached copy verified'
+        } else {
+            Write-Host "PawnIO_setup.exe: cached copy rejected ($problem), downloading again"
+            Remove-Item -Force $pawnIo
+        }
+    }
+    if (-not $reused) {
+        $partial = "$pawnIo.partial"
+        if ($PawnIoSource -match '^https://') {
+            Write-Host "Downloading $PawnIoSource"
+            Invoke-WebRequest -Uri $PawnIoSource -OutFile $partial
+        } else {
+            Write-Host "Copying $PawnIoSource"
+            Copy-Item -LiteralPath $PawnIoSource -Destination $partial
+        }
+        $problem = Test-OmaPawnIoSetup -Path $partial -Pins $PawnIoPins
+        if ($null -ne $problem) {
+            Remove-Item -Force $partial
+            Fail "downloaded PawnIO_setup.exe rejected: $problem"
+        }
+        Move-Item -Force $partial $pawnIo
+        Write-Host 'PawnIO_setup.exe: fetched and verified'
     }
 }
-if (-not $reused) {
-    $partial = "$pawnIo.partial"
-    if ($PawnIoSource -match '^https://') {
-        Write-Host "Downloading $PawnIoSource"
-        Invoke-WebRequest -Uri $PawnIoSource -OutFile $partial
-    } else {
-        Write-Host "Copying $PawnIoSource"
-        Copy-Item -LiteralPath $PawnIoSource -Destination $partial
+
+# --- 6. PresentMon console --------------------------------------------------------------------
+# Where oma.nsh takes it from; installed as $INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe.
+if (-not $PawnIoOnly) {
+    try {
+        $null = Save-OmaPresentMon -Source $PresentMonSource -Destination (Join-Path $OutputRoot 'presentmon\PresentMon-2.6.0-x64.exe')
+    } catch {
+        Fail $_.Exception.Message
     }
-    $problem = Test-OmaPawnIoSetup -Path $partial -Pins $PawnIoPins
-    if ($null -ne $problem) {
-        Remove-Item -Force $partial
-        Fail "downloaded PawnIO_setup.exe rejected: $problem"
-    }
-    Move-Item -Force $partial $pawnIo
-    Write-Host 'PawnIO_setup.exe: fetched and verified'
 }
 
 Write-Host ''

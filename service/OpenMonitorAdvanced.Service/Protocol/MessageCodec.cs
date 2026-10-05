@@ -167,8 +167,117 @@ public static class MessageCodec
                 w.Write("message");
                 w.Write(error.Message);
                 break;
+            case FramesConfigureMessage configure:
+                WriteEnvelopeHeader(ref w, "frames_configure", 3);
+                w.Write("enabled");
+                w.Write(configure.Enabled);
+                w.Write("track_pc_latency");
+                w.Write(configure.TrackPcLatency);
+                w.Write("track_gpu");
+                w.Write(configure.TrackGpu);
+                break;
+            case FramesTargetMessage target:
+                WriteEnvelopeHeader(ref w, "frames_target", 1);
+                w.Write("pid");
+                if (target.Pid is { } pid)
+                {
+                    w.Write(pid);
+                }
+                else
+                {
+                    w.WriteNil();
+                }
+
+                break;
+            case FramesStatusMessage status:
+                WriteEnvelopeHeader(ref w, "frames_status", 3);
+                w.Write("state");
+                w.Write(status.State);
+                w.Write("detail");
+                WriteNullableString(ref w, status.Detail);
+                w.Write("presentmon_version");
+                WriteNullableString(ref w, status.PresentMonVersion);
+                break;
+            case PresentingProcessesMessage list:
+                WriteEnvelopeHeader(ref w, "presenting_processes", 2);
+                w.Write("at_qpc");
+                w.Write(list.AtQpc);
+                w.Write("processes");
+                w.WriteArrayHeader(list.Processes.Count);
+                foreach (var process in list.Processes)
+                {
+                    w.WriteMapHeader(5);
+                    w.Write("pid");
+                    w.Write(process.Pid);
+                    w.Write("name");
+                    w.Write(process.Name);
+                    w.Write("displayed_fps");
+                    w.Write(process.DisplayedFps);
+                    w.Write("present_mode");
+                    w.Write(process.PresentMode);
+                    w.Write("swapchains");
+                    w.Write(process.Swapchains);
+                }
+
+                break;
+            case FrameBatchMessage batch:
+                WriteEnvelopeHeader(ref w, "frame_batch", 3);
+                w.Write("pid");
+                w.Write(batch.Pid);
+                w.Write("frames");
+                w.WriteArrayHeader(batch.Frames.Count);
+                foreach (var frame in batch.Frames)
+                {
+                    WriteFrame(ref w, frame);
+                }
+
+                w.Write("dropped");
+                w.Write(batch.Dropped);
+                break;
             default:
                 throw new ProtocolException($"unsupported message type {message.GetType()}");
+        }
+    }
+
+    private static void CheckCount(int count, int max, string what)
+    {
+        if (count > max)
+        {
+            throw new ProtocolException($"{what} has {count} entries, the maximum is {max}");
+        }
+    }
+
+    private static void WriteFrame(ref MessagePackWriter w, WireFrame frame)
+    {
+        w.WriteMapHeader(11);
+        w.Write("qpc");
+        w.Write(frame.Qpc);
+        w.Write("swapchain");
+        w.Write(frame.Swapchain);
+        w.Write("frame_type");
+        w.Write(frame.FrameType);
+        w.Write("displayed");
+        w.Write(frame.Displayed);
+        w.Write("ms_between_presents");
+        w.Write(frame.MsBetweenPresents);
+        w.Write("ms_between_display_change");
+        WriteNullableDouble(ref w, frame.MsBetweenDisplayChange);
+        w.Write("ms_until_displayed");
+        WriteNullableDouble(ref w, frame.MsUntilDisplayed);
+        w.Write("ms_app_frametime");
+        WriteNullableDouble(ref w, frame.MsAppFrametime);
+        w.Write("ms_pc_latency");
+        WriteNullableDouble(ref w, frame.MsPcLatency);
+        w.Write("ms_gpu_busy");
+        WriteNullableDouble(ref w, frame.MsGpuBusy);
+        w.Write("pcl_frame_id");
+        if (frame.PclFrameId is { } id)
+        {
+            w.Write(id);
+        }
+        else
+        {
+            w.WriteNil();
         }
     }
 
@@ -407,6 +516,11 @@ public static class MessageCodec
             "schema" => ReadSchema(ref bodyReader),
             "snapshot" => ReadSnapshot(ref bodyReader),
             "error" => ReadError(ref bodyReader),
+            "frames_configure" => ReadFramesConfigure(ref bodyReader),
+            "frames_target" => ReadFramesTarget(ref bodyReader),
+            "frames_status" => ReadFramesStatus(ref bodyReader),
+            "presenting_processes" => ReadPresentingProcesses(ref bodyReader),
+            "frame_batch" => ReadFrameBatch(ref bodyReader),
             _ => throw new ProtocolException($"unknown message type \"{ProtocolText.Clip(type)}\""),
         };
     }
@@ -1157,6 +1271,330 @@ public static class MessageCodec
         }
 
         return new ErrorMessage(code, message);
+    }
+
+    private static ProtocolException Missing(string field) => new($"missing required field \"{field}\"");
+
+    private static double? ReadNullableDouble(ref MessagePackReader reader)
+    {
+        if (reader.TryReadNil())
+        {
+            return null;
+        }
+
+        // A non-finite optional value becomes nil, as on the Rust side.
+        var value = reader.ReadDouble();
+        return double.IsFinite(value) ? value : null;
+    }
+
+    private static double ReadFiniteDouble(ref MessagePackReader reader, string field)
+    {
+        var value = reader.ReadDouble();
+        if (!double.IsFinite(value))
+        {
+            throw new ProtocolException($"non-finite {field}");
+        }
+
+        return value;
+    }
+
+    private static FramesConfigureMessage ReadFramesConfigure(ref MessagePackReader reader)
+    {
+        bool? enabled = null;
+        bool? trackPcLatency = null;
+        bool? trackGpu = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "frames_configure body key");
+            switch (key)
+            {
+                case "enabled":
+                    enabled = reader.ReadBoolean();
+                    break;
+                case "track_pc_latency":
+                    trackPcLatency = reader.ReadBoolean();
+                    break;
+                case "track_gpu":
+                    trackGpu = reader.ReadBoolean();
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        return new FramesConfigureMessage(
+            enabled ?? throw Missing("enabled"),
+            trackPcLatency ?? throw Missing("track_pc_latency"),
+            trackGpu ?? throw Missing("track_gpu"));
+    }
+
+    private static FramesTargetMessage ReadFramesTarget(ref MessagePackReader reader)
+    {
+        uint? pid = null;
+        var seen = false;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "frames_target body key");
+            if (key == "pid")
+            {
+                pid = reader.TryReadNil() ? null : reader.ReadUInt32();
+                seen = true;
+            }
+            else
+            {
+                reader.Skip();
+            }
+        }
+
+        return seen ? new FramesTargetMessage(pid) : throw Missing("pid");
+    }
+
+    private static FramesStatusMessage ReadFramesStatus(ref MessagePackReader reader)
+    {
+        string? state = null;
+        string? detail = null;
+        string? version = null;
+        var seenDetail = false;
+        var seenVersion = false;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "frames_status body key");
+            switch (key)
+            {
+                case "state":
+                    state = ReadRequiredString(ref reader, "\"state\"");
+                    break;
+                case "detail":
+                    detail = ReadNullableString(ref reader);
+                    seenDetail = true;
+                    break;
+                case "presentmon_version":
+                    version = ReadNullableString(ref reader);
+                    seenVersion = true;
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        if (!seenDetail)
+        {
+            throw Missing("detail");
+        }
+
+        if (!seenVersion)
+        {
+            throw Missing("presentmon_version");
+        }
+
+        return new FramesStatusMessage(state ?? throw Missing("state"), detail, version);
+    }
+
+    private static PresentingProcessesMessage ReadPresentingProcesses(ref MessagePackReader reader)
+    {
+        ulong? atQpc = null;
+        List<PresentingProcess>? processes = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "presenting_processes body key");
+            switch (key)
+            {
+                case "at_qpc":
+                    atQpc = reader.ReadUInt64();
+                    break;
+                case "processes":
+                    var length = reader.ReadArrayHeader();
+                    CheckCount(length, ProtocolConstants.MaxPresentingProcesses, "presenting process list");
+                    processes = new List<PresentingProcess>(length);
+                    for (var j = 0; j < length; j++)
+                    {
+                        processes.Add(ReadPresentingProcess(ref reader));
+                    }
+
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        return new PresentingProcessesMessage(atQpc ?? throw Missing("at_qpc"), processes ?? throw Missing("processes"));
+    }
+
+    private static PresentingProcess ReadPresentingProcess(ref MessagePackReader reader)
+    {
+        uint? pid = null;
+        string? name = null;
+        double? fps = null;
+        string? mode = null;
+        uint? swapchains = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "presenting process key");
+            switch (key)
+            {
+                case "pid":
+                    pid = reader.ReadUInt32();
+                    break;
+                case "name":
+                    name = ReadRequiredString(ref reader, "\"name\"");
+                    break;
+                case "displayed_fps":
+                    fps = ReadFiniteDouble(ref reader, "displayed_fps");
+                    break;
+                case "present_mode":
+                    mode = ReadRequiredString(ref reader, "\"present_mode\"");
+                    break;
+                case "swapchains":
+                    swapchains = reader.ReadUInt32();
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        return new PresentingProcess(
+            pid ?? throw Missing("pid"),
+            name ?? throw Missing("name"),
+            fps ?? throw Missing("displayed_fps"),
+            mode ?? throw Missing("present_mode"),
+            swapchains ?? throw Missing("swapchains"));
+    }
+
+    private static FrameBatchMessage ReadFrameBatch(ref MessagePackReader reader)
+    {
+        uint? pid = null;
+        List<WireFrame>? frames = null;
+        uint? dropped = null;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "frame_batch body key");
+            switch (key)
+            {
+                case "pid":
+                    pid = reader.ReadUInt32();
+                    break;
+                case "frames":
+                    var length = reader.ReadArrayHeader();
+                    CheckCount(length, ProtocolConstants.MaxFramesPerBatch, "frame batch");
+                    frames = new List<WireFrame>(length);
+                    for (var j = 0; j < length; j++)
+                    {
+                        frames.Add(ReadFrame(ref reader));
+                    }
+
+                    break;
+                case "dropped":
+                    dropped = reader.ReadUInt32();
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        return new FrameBatchMessage(pid ?? throw Missing("pid"), frames ?? throw Missing("frames"), dropped ?? throw Missing("dropped"));
+    }
+
+    private static WireFrame ReadFrame(ref MessagePackReader reader)
+    {
+        ulong? qpc = null;
+        ulong? swapchain = null;
+        string? frameType = null;
+        bool? displayed = null;
+        double? msBetweenPresents = null;
+        double? displayChange = null;
+        double? untilDisplayed = null;
+        double? appFrametime = null;
+        double? pcLatency = null;
+        double? gpuBusy = null;
+        ulong? pclFrameId = null;
+        // Optional fields must still be present on the wire (nil for absent), like the Rust decoder requires.
+        var optionalSeen = 0;
+
+        var count = reader.ReadMapHeader();
+        for (var i = 0; i < count; i++)
+        {
+            var key = ReadRequiredString(ref reader, "frame key");
+            switch (key)
+            {
+                case "qpc":
+                    qpc = reader.ReadUInt64();
+                    break;
+                case "swapchain":
+                    swapchain = reader.ReadUInt64();
+                    break;
+                case "frame_type":
+                    frameType = ReadRequiredString(ref reader, "\"frame_type\"");
+                    break;
+                case "displayed":
+                    displayed = reader.ReadBoolean();
+                    break;
+                case "ms_between_presents":
+                    msBetweenPresents = ReadFiniteDouble(ref reader, "ms_between_presents");
+                    break;
+                case "ms_between_display_change":
+                    displayChange = ReadNullableDouble(ref reader);
+                    optionalSeen |= 1;
+                    break;
+                case "ms_until_displayed":
+                    untilDisplayed = ReadNullableDouble(ref reader);
+                    optionalSeen |= 2;
+                    break;
+                case "ms_app_frametime":
+                    appFrametime = ReadNullableDouble(ref reader);
+                    optionalSeen |= 4;
+                    break;
+                case "ms_pc_latency":
+                    pcLatency = ReadNullableDouble(ref reader);
+                    optionalSeen |= 8;
+                    break;
+                case "ms_gpu_busy":
+                    gpuBusy = ReadNullableDouble(ref reader);
+                    optionalSeen |= 16;
+                    break;
+                case "pcl_frame_id":
+                    pclFrameId = reader.TryReadNil() ? null : reader.ReadUInt64();
+                    optionalSeen |= 32;
+                    break;
+                default:
+                    reader.Skip();
+                    break;
+            }
+        }
+
+        if (optionalSeen != 63)
+        {
+            throw new ProtocolException("frame is missing an optional field (it must be present as nil)");
+        }
+
+        return new WireFrame(
+            qpc ?? throw Missing("qpc"),
+            swapchain ?? throw Missing("swapchain"),
+            frameType ?? throw Missing("frame_type"),
+            displayed ?? throw Missing("displayed"),
+            msBetweenPresents ?? throw Missing("ms_between_presents"),
+            displayChange,
+            untilDisplayed,
+            appFrametime,
+            pcLatency,
+            gpuBusy,
+            pclFrameId);
     }
 
     private static List<T> ReadArray<T>(ref MessagePackReader reader, ReadItem<T> readItem)

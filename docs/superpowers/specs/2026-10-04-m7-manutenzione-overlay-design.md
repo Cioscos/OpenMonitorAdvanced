@@ -154,12 +154,12 @@ Il codice Windows nuovo (DirectWrite per l'elenco dei font, `SetWinEventHook`, p
 | Stato dell'impostazione | PresentMon | `oma-overlay` | Costo atteso |
 |---|---|---|---|
 | Overlay spento (predefinito) | non in esecuzione | non in esecuzione | zero |
-| Overlay acceso, nessun gioco | in esecuzione, prima del gioco, per gli anti-cheat tipo EA | in esecuzione, finestra **nascosta** | da misurare nello spike (§4.7) |
+| Overlay acceso, nessun gioco | in esecuzione, prima del gioco, per gli anti-cheat tipo EA | in esecuzione, finestra **nascosta** | PresentMon 0,006–0,023% della CPU totale, 5–6,5 MB privati (spike, SD9) |
 | Overlay acceso, gioco in primo piano | in esecuzione | finestra visibile sopra il gioco | §11 |
 | Overlay nascosto con la scorciatoia | in esecuzione | finestra **nascosta** (`SW_HIDE`), non solo vuota | come «nessun gioco» |
 | Anteprima dall'editor | come sopra | avviato anche con l'overlay spento, solo la finestra di anteprima | — |
 
-La finestra nascosta, e non solo trasparente, serve a lasciare intatti il flip indipendente e G-Sync/FreeSync quando l'overlay non si vede.
+La finestra nascosta, e non solo trasparente, serve a lasciare intatti il flip indipendente e G-Sync/FreeSync quando l'overlay non si vede. Su RTX 4080 lo spike ha visto che la finestra trasparente ai clic non toglie il flip indipendente (MPO) né G-Sync, che sia visibile, vuota o nascosta (SD10): la regola resta per l'hardware senza piani MPO liberi.
 
 ## 4. M7b — Motore dei frame
 
@@ -167,11 +167,15 @@ La finestra nascosta, e non solo trasparente, serve a lasciare intatti il flip i
 
 - **Componente:** `PresentMon-2.6.0-x64.exe`, firmato Intel. Lo scarica `build-installer-payload.ps1`, che lo accetta solo con lo SHA-256 fissato in `app/src-tauri/nsis/presentmon.sha256` e con la firma Authenticode di Intel verificata, come per PawnIO. Si installa in `$INSTDIR\service\presentmon\`, una cartella che nessun utente può scrivere.
 - **Avvio:** quando l'app chiede `FramesConfigure { enabled: true, … }`. Prima di ogni avvio il servizio ricalcola lo SHA-256 dell'eseguibile; se non coincide, rifiuta (stato `Tampered`).
-- **Argomenti fissi**, senza parti fornite dall'utente: `--output_stdout --no_console_stats --qpc_time --track_frame_type --session_name OpenMonitorAdvanced-Frames --stop_existing_session --no_track_input`, più `--track_pc_latency` se `trackPcLatency` e `--no_track_gpu` se **non** `trackGpu`. L'elenco definitivo, e la scelta delle colonne v1 o `--v2_metrics`, li fissa lo spike.
+- **Argomenti fissi**, senza parti fornite dall'utente (SD1): `--output_stdout --no_console_stats --qpc_time --track_frame_type --write_frame_id --session_name OpenMonitorAdvanced-Frames --stop_existing_session --no_track_input`, più `--track_pc_latency` se `trackPcLatency` e `--no_track_gpu` se **non** `trackGpu`. Colonne predefinite, senza `--v1_metrics` né `--v2_metrics`: `--v2_metrics` non ha `MsBetweenPresents`, `MsBetweenDisplayChange` e `MsUntilDisplayed`. `--write_frame_id` non compare nell'aiuto, ma senza di essa la colonna `PCLFrameId` non esiste.
 - **Processo:** figlio in un Job Object con `KILL_ON_JOB_CLOSE`, standard output letto in modo asincrono, standard error nel log (righe troncate).
-- **Svuotamento dei buffer ETW:** PresentMon non lo fa da sé, e senza svuotamento i dati arrivano circa una volta al secondo. Il servizio chiama `ControlTraceW(…, "OpenMonitorAdvanced-Frames", …, EVENT_TRACE_CONTROL_FLUSH)` ogni 100 ms mentre PresentMon gira.
+- **Svuotamento dei buffer ETW:** PresentMon non lo fa da sé, e senza svuotamento i dati arrivano circa una volta al secondo. Il servizio chiama `ControlTraceW(…, "OpenMonitorAdvanced-Frames", …, EVENT_TRACE_CONTROL_FLUSH)` ogni 100 ms mentre PresentMon gira; 50 ms non migliorano (SD7).
+  - **Ritardo misurato (SD7):** di solito 200–400 ms dalla presentazione all'arrivo, con buchi occasionali fino a circa 2,3 s in cui i frame arrivano in ritardo ma tutti; la causa non è isolata. Il servizio conta gli arrivi distanti più di 1 s e li scrive nel log a livello DEBUG; l'overlay (M7c) disegna per tempo del dato, non d'arrivo.
+  - **Buffer ETW (SD8):** con la console non si configurano. PresentMon usa 64 KB × 256 buffer (al massimo 1024) e `FlushTimer` di 1 s; nelle prove dello spike nessun evento è andato perso.
 - **Parser:**
   - legge per **nome di colonna** dall'intestazione, quindi l'ordine delle colonne non conta;
+  - colonne obbligatorie (SD2): `Application`, `ProcessID`, `SwapChainAddress`, `PresentMode`, `TimeInQPC`, `MsBetweenPresents`, `MsBetweenDisplayChange`, `MsUntilDisplayed`, `MsBetweenAppStart`; facoltative: `FrameType`, `MsPCLatency`, `PCLFrameId`, `MsGPUBusy` (se mancano, il campo è nil);
+  - `NA` vale nil; il BOM iniziale e il CR finale delle righe si tollerano; `SwapChainAddress` è esadecimale con `0x`;
   - ogni riga ha una lunghezza massima di 4 KiB; le righe oltre e i valori non numerici si scartano e si contano;
   - una colonna obbligatoria mancante porta allo stato `Failed("columns")`.
 - **Filtro:** solo le righe del PID bersaglio diventano frame. Per **tutti** i PID si tiene un riepilogo di 1 s: frame mostrati, `PresentMode`, nome del processo, swapchain.
@@ -201,14 +205,28 @@ La sorgente dei frame sta dietro un'interfaccia (`IFrameSource`), così che la v
   - `ms_pc_latency` (nil senza PCL), `ms_gpu_busy` (nil senza `trackGpu`);
   - `pcl_frame_id` (nil senza PCL).
 
-I campi esatti, e da quali colonne del CSV derivano, li fissa lo spike.
+Da quali colonne del CSV derivano i campi (SD3), senza altri campi:
+
+| Campo | Colonna |
+|---|---|
+| `qpc` | `TimeInQPC` |
+| `swapchain` | `SwapChainAddress` |
+| `frame_type` | `FrameType`: `Application` → `app`, `Intel XeSS-FG` → `generated_intel_xefg`, `AMD AFMF` → `generated_amd_afmf`, `Unknown`, `NA` o vuoto → `unknown`, altro testo → `generated_other`, colonna assente → `unknown` |
+| `displayed` | `MsBetweenDisplayChange` numerico |
+| `ms_between_presents` | `MsBetweenPresents` |
+| `ms_between_display_change` | `MsBetweenDisplayChange` |
+| `ms_until_displayed` | `MsUntilDisplayed` |
+| `ms_app_frametime` | `MsBetweenAppStart` |
+| `ms_pc_latency` | `MsPCLatency` |
+| `ms_gpu_busy` | `MsGPUBusy` |
+| `pcl_frame_id` | `PCLFrameId` (0 → nil) |
 
 ### 4.3 Scelta del bersaglio (app, `overlay::Target`)
 
 - **Primo piano:** `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` senza thread di polling. Ricava il PID con `GetWindowThreadProcessId`; per `ApplicationFrameHost.exe` (giochi UWP) prende il PID della `CoreWindow` figlia.
 - **È un gioco se** il PID in primo piano compare in `PresentingProcesses` con almeno 10 FPS mostrati, **e** non è escluso:
-  - i nostri processi;
-  - `dwm.exe` e i processi di sistema noti;
+  - i nostri processi (confermato dallo spike, SD11: la finestra dell'overlay presenta come ogni altra);
+  - `dwm.exe` e i processi di sistema noti (SD11: `dwm.exe` presenta come `Hardware: Legacy Flip` quando c'è una finestra sopra il gioco);
   - l'elenco «non mostrare l'overlay in questo gioco» (§5.6).
 - **Tolleranza:** se il bersaglio perde il primo piano o smette di presentare, resta tale per 3 s, per reggere alt-tab e schermate di caricamento.
 - **Finestra del gioco:** la finestra principale in primo piano del PID; la sua posizione si segue con `EVENT_OBJECT_LOCATIONCHANGE`, filtrato su quella finestra.
@@ -229,7 +247,7 @@ Funzioni pure su una finestra scorrevole di frame. Sia `ft` il frametime in ms e
 | **Stutter** | un frame con `ft > 2,5 × mediana scorrevole di 2 s` **e** `ft − mediana > 8 ms`. Si riporta come conteggio e come percentuale del tempo. |
 | **Latenza PC** | media di `ms_pc_latency` (solo con PCL e giochi con Reflex). |
 | **Latenza di visualizzazione** | media di `ms_until_displayed`. |
-| **Collo di bottiglia** (solo con `trackGpu`) | `gpu` se `ms_gpu_busy ≥ 0,9 × ft_app` per la maggior parte dei frame della finestra, altrimenti `cpu`; con meno di 30 frame `unknown`. La soglia la conferma lo spike. |
+| **Collo di bottiglia** (solo con `trackGpu`) | `gpu` se almeno il **75%** dei frame dell'app nella finestra ha `ms_gpu_busy ≥ 0,9 × ms_app_frametime`, altrimenti `cpu`; con meno di 30 frame dell'app `unknown`. Con FG i frame dell'app sono quelli con `pcl_frame_id`; con FG sospetta («FG?») e senza PCL, `unknown`. Misure dello spike (SD6): con il limite sulla GPU il 92–99% dei frame supera la soglia, con il limite sulla CPU il 40–54%. |
 
 La finestra predefinita è 1 s per gli FPS e 10 s per low e stutter. Ogni blocco può cambiarla (§6.3).
 
@@ -238,9 +256,9 @@ La finestra predefinita è 1 s per gli FPS e 10 s per low e stutter. Ogni blocco
 Gli FPS renderizzati si ricavano da questa cascata. L'origine si mostra, se il blocco lo chiede, come piccola etichetta («XeSS-FG», «AFMF», «Reflex», «FG?»).
 
 1. **Tipo di frame dal driver** (Intel XeSS-FG, AMD AFMF): i frame `app` sono quelli renderizzati. **Esatto.**
-2. **Marcatori Reflex/PCL** (DLSS FG/MFG e ogni gioco con Reflex), solo con `trackPcLatency`: gli FPS renderizzati sono gli `pcl_frame_id` distinti al secondo. **Quasi esatto; lo spike verifica che funzioni con DLSS FG.**
-3. **Nessuna prova** (FSR 3/4 FG, Smooth Motion finché lo spike non dice altro, DLSS senza PCL): FPS renderizzati nil, si mostrano solo gli FPS mostrati.
-   - **Euristica «FG?»:** se gli intervalli fra le presentazioni alternano in modo regolare brevi e lunghi (rapporto ≥ 1,8 per 2 s), un blocco di FPS renderizzati mostra «FG?» invece di un numero.
+2. **Marcatori Reflex/PCL**, solo con `trackPcLatency`: valgono per DLSS FG/MFG, FSR FG e Smooth Motion in ogni gioco con Reflex (SD4). Gli FPS renderizzati sono `(ultimo − primo pcl_frame_id) / tempo fra le due righe` nella finestra, non il conteggio degli id distinti, perché PresentMon lascia senza id circa il 5% dei frame dell'app. L'etichetta dell'origine resta «Reflex». **Quasi esatto.**
+3. **Nessuna prova** (FSR 3/4 FG, Smooth Motion e DLSS FG senza Reflex o con PCL spento): FPS renderizzati nil, si mostrano solo gli FPS mostrati.
+   - **Euristica «FG?»** (SD5): se in 2 s gli intervalli fra le presentazioni alternano brevi e lunghi (alternanza ≥ 0,9) **e** il rapporto fra lunghi e brevi è ≥ 1,8, un blocco di FPS renderizzati mostra «FG?» invece di un numero. Nello spike scatta per DLSS FG e Smooth Motion senza PCL (alternanza 1,00, rapporto 44–58), non senza FG (≤ 0,79 / ≤ 1,27) né con FSR FG senza PCL, che presenta a intervalli regolari.
    - Un numero ricavato da un'euristica non si presenta **mai** come FPS renderizzati.
 
 I frame `generated_*` restano nei frametime mostrati. Low e stutter si calcolano sui frame mostrati; il frametime dell'app ha un suo blocco.
@@ -265,7 +283,7 @@ Prima di scrivere il resto del piano M7b, su questo PC e con l'utente che avvia 
 | S4 | Cosa fa una finestra in primo piano, trasparente ai clic, sopra un gioco borderless? | prototipo D2D + DirectComposition; si osserva il `PresentMode` del gioco (flip indipendente → composto?) e la frequenza G-Sync mostrata dal monitor | se rompe sempre il flip indipendente: lo si scrive nei limiti e la finestra resta nascosta finché l'utente non la chiama |
 | S5 | `--stop_existing_session` tocca solo la nostra sessione? Convivenza con CapFrameX o FrameView, se l'utente li ha. | prova diretta | — |
 
-I risultati vanno in `docs/superpowers/references/m7/spike-findings.md`; le correzioni alla spec si annotano nel piano come decisioni.
+I risultati vanno in `docs/superpowers/references/m7/spike-findings.md`; le correzioni alla spec si annotano nel piano come decisioni. Esito (2026-10-04): decisioni SD1–SD12 del piano M7b, riportate nei paragrafi di questa spec; nessuna porta ha chiesto di fermarsi e D5 (console di PresentMon) resta.
 
 ## 5. M7c — `oma-overlay.exe`
 
@@ -488,7 +506,7 @@ I sensori dei modelli si legano per **ruolo** (la prima GPU dedicata, la CPU) al
 | Scorciatoia in conflitto | stato come per il log M5c | — |
 | Due monitor con DPI diversi, gioco spostato | l'overlay segue il gioco e si ridisegna al DPI nuovo | `SetPlacement` |
 | Gioco UWP | come gli altri | PID della `CoreWindow` |
-| Più utenti interattivi | ognuno ha la sua app e il suo overlay; il servizio serve un client solo, come oggi | limite dichiarato |
+| Più utenti interattivi | ognuno ha la sua app e il suo overlay; il servizio serve fino a 8 client, combina le loro richieste in una sola cattura e segue un bersaglio per client; la richiesta di un client disconnesso vale ancora per 30 s | limite dichiarato |
 
 ## 10. Sicurezza e privacy
 
@@ -498,7 +516,7 @@ I sensori dei modelli si legano per **ruolo** (la prima GPU dedicata, la CPU) al
   - hash ricontrollato dal servizio prima di ogni avvio;
   - cartella non scrivibile dagli utenti, argomenti fissi;
   - CSV con limiti di riga e di lotto (§4.1, §4.2).
-- **Protocollo v4:** il servizio valida il PID (diverso da 0 e 4, al massimo un bersaglio) e non usa mai il PID per aprire processi.
+- **Protocollo v4:** il servizio valida il PID (diverso da 0 e 4, al massimo un bersaglio per client) e non usa mai il PID per aprire processi.
 - **Pipe dell'overlay:** nome casuale, prima istanza, DACL solo per l'utente corrente, niente client remoti, controllo del PID del figlio (§5.4).
 - **Profili importati:** sono dati, mai codice; vale lo schema rigido del §6.5.
 - **Privacy:** nessun dato esce dal PC. Benchmark e profili restano locali.
@@ -514,16 +532,16 @@ Si aggiungono a `docs/perf-budget.md` e si misurano con `measure-footprint.ps1`,
 | Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) |
 
-Lo spike fissa i numeri di partenza. Se un limite non si rispetta, il piano se ne occupa prima del merge.
+Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,05% della CPU totale, con 5–6,5 MB privati; il lavoro di lettura nel servizio è stimato dallo 0,04% allo 0,1% (sonda dello spike). I limiti della tabella restano invariati. Il ritardo dei dati (SD7) è di solito 200–400 ms dalla presentazione all'arrivo, con buchi occasionali fino a circa 2,3 s: l'overlay disegna per tempo del dato. Se un limite non si rispetta, il piano se ne occupa prima del merge.
 
 ## 12. Licenze e documentazione
 
-- **`THIRD_PARTY_NOTICES.md`:** PresentMon (MIT) e i componenti compilati nell'eseguibile (Boost, BSL-1.0; cereal e CLI11, BSD-3-Clause; concurrentqueue), secondo `r4` §8. `generate-licenses.ps1` include i loro testi in `THIRD_PARTY_LICENSES.txt`.
+- **`THIRD_PARTY_NOTICES.md`:** PresentMon (MIT) e i componenti compilati nell'eseguibile, secondo `r4` §8. Nelle stringhe di `PresentMon-2.6.0-x64.exe` compare solo cereal 1.3.2 (BSD-3-Clause), non Boost, CLI11 né concurrentqueue (verifica del Task B12). `generate-licenses.ps1` include i loro testi in `THIRD_PARTY_LICENSES.txt`.
 - **Nessun header proprietario:** le costanti PCL non servono, perché le gestisce PresentMon.
 - **Font:** solo quelli di sistema, nessun file incluso.
 - **README:**
   - la sezione «Overlay in-game», con cosa misura, come attivarlo e scorciatoie;
-  - i «Known limits»: fullscreen esclusivo, frame generation non distinguibile per FSR e Smooth Motion (salvo esito dello spike), anti-cheat che bloccano anche le finestre, G-Sync con overlay visibile senza MPO, HDR;
+  - i «Known limits»: fullscreen esclusivo, frame generation senza FPS renderizzati soltanto senza Reflex o con PCL spento («FG?» per DLSS FG e Smooth Motion, solo FPS mostrati per FSR FG; §14, SD12), anti-cheat che bloccano anche le finestre, G-Sync con overlay visibile senza MPO, HDR;
   - la nota di privacy su PCL.
 - **`CODE_SIGNING.md`:** PresentMon è un binario firmato Intel che ridistribuiamo; i nuovi eseguibili `oma-overlay.exe` sono nella stessa politica di firma dell'app.
 - **`CLAUDE.md`:**
@@ -574,11 +592,11 @@ Lo spike fissa i numeri di partenza. Se un limite non si rispetta, il piano se n
 ## 14. Limiti dichiarati
 
 - **Fullscreen esclusivo vero:** l'overlay non si vede finché non arriva `uiAccess`, dopo la firma. La misura e il benchmark funzionano.
-- **FSR 3/4 FG e Smooth Motion:** gli FPS renderizzati non sono distinguibili via ETW (salvo esito diverso dello spike); DLSS FG solo con `trackPcLatency`.
-- **G-Sync/FreeSync e latenza:** mentre l'overlay è visibile, Windows può comporre il gioco invece di usare il flip indipendente, a meno che la scheda usi un piano MPO. Nascondere l'overlay ripristina il flip indipendente.
+- **FSR 3/4 FG e Smooth Motion:** gli FPS renderizzati sono indistinguibili soltanto senza Reflex o con PCL spento (SD12); con PCL e Reflex valgono i marcatori PCL anche per loro e per DLSS FG. Con PCL spento DLSS FG e Smooth Motion mostrano «FG?», FSR FG solo gli FPS mostrati.
+- **G-Sync/FreeSync e latenza:** mentre l'overlay è visibile, Windows può comporre il gioco invece di usare il flip indipendente; può succedere su hardware senza piani MPO liberi (SD10: su RTX 4080 la finestra, visibile, vuota o nascosta, non toglie né il flip indipendente né G-Sync). Nascondere l'overlay ripristina il flip indipendente.
 - **Anti-cheat che bloccano anche le finestre esterne** (caso noto: Battlefield 6 con FrameView 2.0): si usa l'elenco dei giochi esclusi.
 - **HDR:** il contenuto dell'overlay è SDR composto da DWM.
-- **Più utenti interattivi:** il servizio segue un client solo.
+- **Più utenti interattivi:** il servizio serve fino a 8 client; le richieste si combinano in una sola cattura (PCL e GPU attivi se un client li chiede), con un bersaglio per client e 30 s di tolleranza dopo la disconnessione.
 - **Disinstallazione della 0.4.0 durante l'aggiornamento:** la sua istanza in esecuzione si chiude in modo forzato, perché non conosce `--quit`.
 
 ## 15. Punti che i piani devono fissare
@@ -587,10 +605,10 @@ Lo spike fissa i numeri di partenza. Se un limite non si rispetta, il piano se n
   - come trovare le istanze di tutte le sessioni e chiuderle (`nsis_tauri_utils` o `taskkill /F /IM`), e il timeout esatto;
   - la gestione della casella «Avvia» della pagina finale;
   - i nomi dei file degli split, dopo una lettura con graphify.
-- **M7b:**
-  - esito dello spike: colonne del CSV, argomenti definitivi, soglia del collo di bottiglia, PCL con DLSS, Smooth Motion;
-  - dimensione dei buffer ETW;
-  - nomi esatti dei tipi del protocollo.
+- **M7b** (fissati dallo spike e dal piano, SD1–SD12):
+  - esito dello spike: colonne del CSV (§4.1, §4.2), argomenti definitivi (§4.1), soglia del collo di bottiglia (§4.4), PCL con DLSS, FSR e Smooth Motion (§4.5);
+  - dimensione dei buffer ETW (§4.1, non configurabile);
+  - nomi esatti dei tipi del protocollo (`FramesConfigure`, `FramesTarget`, `FramesStatus`, `PresentingProcesses`, `FrameBatch`, `WireFrame` in `crates/oma-ipc`).
 - **M7c:**
   - come disegnare contorno e ombra del testo (renderer DirectWrite personalizzato o geometria);
   - crate `windows` e feature necessarie;

@@ -22,6 +22,7 @@ public sealed class CodecTests
     public static readonly TheoryData<string> FixtureNames =
     [
         "hello", "subscribe", "schema", "snapshot", "snapshot_empty", "error",
+        "frames_configure", "frames_target", "frames_target_none", "frames_status", "presenting_processes", "frame_batch",
     ];
 
     [Theory]
@@ -54,6 +55,10 @@ public sealed class CodecTests
         {
             case "hello":
             case "error":
+            case "frames_configure":
+            case "frames_target":
+            case "frames_target_none":
+            case "frames_status":
                 Assert.Equal(Reference(name), decoded);
                 break;
             case "subscribe":
@@ -72,6 +77,19 @@ public sealed class CodecTests
                 Assert.Equal(expectedSnapshot.TimestampMs, actualSnapshot.TimestampMs);
                 Assert.Equal(expectedSnapshot.Values, actualSnapshot.Values);
                 Assert.Equal(expectedSnapshot.Held, actualSnapshot.Held);
+                break;
+            case "presenting_processes":
+                var expectedList = (PresentingProcessesMessage)Reference(name);
+                var actualList = Assert.IsType<PresentingProcessesMessage>(decoded);
+                Assert.Equal(expectedList.AtQpc, actualList.AtQpc);
+                Assert.Equal(expectedList.Processes, actualList.Processes);
+                break;
+            case "frame_batch":
+                var expectedBatch = (FrameBatchMessage)Reference(name);
+                var actualBatch = Assert.IsType<FrameBatchMessage>(decoded);
+                Assert.Equal(expectedBatch.Pid, actualBatch.Pid);
+                Assert.Equal(expectedBatch.Dropped, actualBatch.Dropped);
+                Assert.Equal(expectedBatch.Frames, actualBatch.Frames);
                 break;
             case "schema":
                 var expectedSchema = (SchemaMessage)Reference(name);
@@ -334,6 +352,76 @@ public sealed class CodecTests
         var payload = MessageCodec.EncodePayload(new HelloMessage(version, "0.1.0", "ok"));
         var decoded = Assert.IsType<HelloMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(payload)));
         Assert.Equal(version, decoded.ProtocolVersion);
+    }
+
+    [Fact]
+    public void ProtocolVersionIsFour()
+    {
+        Assert.Equal(4u, ProtocolConstants.Version);
+        Assert.Equal(512, ProtocolConstants.MaxFramesPerBatch);
+        Assert.Equal(32, ProtocolConstants.MaxPresentingProcesses);
+    }
+
+    private static WireFrame AFrame(double msBetweenPresents = 16.6, double? optional = 1.0) =>
+        new(1, 2, "app", true, msBetweenPresents, optional, optional, optional, optional, optional, null);
+
+    [Fact]
+    public void ABatchOfFiveHundredTwelveFramesRoundTrips()
+    {
+        var frames = Enumerable.Range(0, 512).Select(_ => AFrame()).ToList();
+        var bytes = MessageCodec.EncodePayload(new FrameBatchMessage(1, frames, 0));
+        var decoded = Assert.IsType<FrameBatchMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        Assert.Equal(512, decoded.Frames.Count);
+    }
+
+    [Fact]
+    public void ABatchOverFiveHundredTwelveFramesIsRejected()
+    {
+        var frames = Enumerable.Range(0, 513).Select(_ => AFrame()).ToList();
+        var bytes = MessageCodec.EncodePayload(new FrameBatchMessage(1, frames, 0));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void ThirtyThreeProcessesAreRejected()
+    {
+        var list = Enumerable.Range(0, 33).Select(i => new PresentingProcess((uint)i, "a.exe", 60.0, "m", 1)).ToList();
+        var ok = MessageCodec.EncodePayload(new PresentingProcessesMessage(1, list.Take(32).ToList()));
+        Assert.Equal(32, Assert.IsType<PresentingProcessesMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(ok))).Processes.Count);
+        var bad = MessageCodec.EncodePayload(new PresentingProcessesMessage(1, list));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bad)));
+    }
+
+    [Fact]
+    public void ANonFiniteRequiredFrameTimeIsRejected()
+    {
+        var bytes = MessageCodec.EncodePayload(new FrameBatchMessage(1, [AFrame(double.NaN)], 0));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void ANonFiniteDisplayedFpsIsRejected()
+    {
+        var bytes = MessageCodec.EncodePayload(
+            new PresentingProcessesMessage(1, [new PresentingProcess(1, "a.exe", double.PositiveInfinity, "m", 1)]));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+    }
+
+    [Fact]
+    public void ANonFiniteOptionalFrameTimeBecomesNil()
+    {
+        var bytes = MessageCodec.EncodePayload(new FrameBatchMessage(1, [AFrame(16.6, double.NaN)], 0));
+        var decoded = Assert.IsType<FrameBatchMessage>(MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
+        var frame = Assert.Single(decoded.Frames);
+        Assert.Null(frame.MsGpuBusy);
+        Assert.Null(frame.MsPcLatency);
+    }
+
+    [Fact]
+    public void AFramesTargetWithoutAPidIsRejected()
+    {
+        var bytes = BuildEnvelope("frames_target", (ref MessagePackWriter w) => w.WriteMapHeader(0));
+        Assert.Throws<ProtocolException>(() => MessageCodec.DecodePayload(new ReadOnlySequence<byte>(bytes)));
     }
 
     private static byte[] SnapshotBody(double?[] values, bool[] held) =>
@@ -918,7 +1006,7 @@ public sealed class CodecTests
     /// <summary>The logical message each fixture holds, per <c>protocol/fixtures/README.md</c>.</summary>
     private static IMessage Reference(string name) => name switch
     {
-        "hello" => new HelloMessage(3, "0.1.0", "rebootPending"),
+        "hello" => new HelloMessage(4, "0.1.0", "rebootPending"),
         "subscribe" => new SubscribeMessage(1000, ["memory", "psu"], [KeyA], [KeyB]),
         "schema" => new SchemaMessage(
             [
@@ -966,6 +1054,27 @@ public sealed class CodecTests
             [false, false, true, false]),
         "snapshot_empty" => new SnapshotMessage(1, 0, Array.Empty<double?>(), []),
         "error" => new ErrorMessage("bad_request", "Messaggio non valido: è atteso Subscribe"),
+        "frames_configure" => new FramesConfigureMessage(true, true, false),
+        "frames_target" => new FramesTargetMessage(25848),
+        "frames_target_none" => new FramesTargetMessage(null),
+        "frames_status" => new FramesStatusMessage(FramesStates.Running, null, "2.6.0"),
+        "presenting_processes" => new PresentingProcessesMessage(
+            380_058_775_270UL,
+            [
+                new PresentingProcess(25848, "CONTROLResonant.exe", 61.5, "Hardware Composed: Independent Flip", 1),
+                new PresentingProcess(1852, "dwm.exe", 20.0, "Hardware: Legacy Flip", 1),
+            ]),
+        "frame_batch" => new FrameBatchMessage(
+            25848,
+            [
+                new WireFrame(
+                    369_166_005_856UL, 0x022A_3569_E270UL, "app", true,
+                    17.1266, 7.1667, 11.7554, 17.1706, 35.5189, 16.1228, 43715UL),
+                new WireFrame(
+                    369_166_008_179UL, 0x022A_3569_E270UL, "app", true,
+                    0.2323, 10.4468, 21.9699, 0.1817, 45.9657, 0.2476, null),
+            ],
+            3),
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, "unknown fixture name"),
     };
 

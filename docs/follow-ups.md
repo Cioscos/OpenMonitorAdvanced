@@ -228,6 +228,33 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 - The service's memory footprint against the 80 MB budget on the rest of the hardware matrix (the dev machine is done, see "Closed in M4").
 - Task 15's VM fault-injection scenarios for the installer and service, still owed as of 2026-09-27 (not attempted on this PC): `/S /NOSENSORS`, the Components page in EN and IT, deselecting the Advanced sensors component, an upgrade from the interface, an uninstall that leaves PawnIO, the reboot PawnIO requests (exit code 3010), STOP stuck, the uninstall helper exiting 1, PawnIO setup exiting neither 0 nor 3010, a refused custom install directory outside `Program Files`, an upgrade with a leftover `service\logs` holding a junction (recursive `icacls /reset /T` must not follow it), and a third-party writable folder inside `Program Files`.
 
+## Manual checks after M7b
+
+The live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-motore-frame.md`, Task B12 step 8, V1-V8) are done (2026-10-05, local 0.4.1 setup with PresentMon, SHA-256 `FC650CEF...C5F5`, all passed; games: Control Resonant DX12, God of War 2018 DX11, RTX 4080). The agent read the `frames:` lines in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`.
+
+- V1: Control without FG: 68.6-68.8 displayed FPS against 67 on the Steam overlay (about 2.5 %); Reflex rendered 68.7, `mult=1.00`. `bottleneck=-` because `pcl` does not track the GPU (only `all` does).
+- V2: DLSS FG with PCL: 116-117 displayed (Steam 118), 58 rendered (Steam 59), `source=Reflex`, `mult=2.00`; without PCL (`1`): 117 displayed, `source=FG?`.
+- V3: FSR FG without PCL: 120 displayed (Steam 120), `source=-`; with PCL: 120 / 60, `source=Reflex`, `mult=2.00`.
+- V4: Smooth Motion in God of War with PCL: 157 displayed (NVIDIA overlay 157), 78.5 rendered, `mult=2.00`; without PCL `source=FG?`. `pc_lat_ms=-` in this DX11 game: PresentMon gives frame ids but no PC latency.
+- V5: alt-tab: the target dropped 3 s after leaving the game and came back on return; a short exit (about 2 s) kept it. Noted: Windows Terminal, while typing, presents 15-22 FPS and became the target (rule "foreground with at least 10 FPS", as Afterburner); per-profile exclusions are an M7c/M7d topic.
+- V6: tray with `OMA_FRAMES_DEBUG=1`, no game: app 0.05 % CPU and 17.9 MB; service 0.03 % CPU and 63.3 MB private; PresentMon 0.003 % CPU and 6.1 MB. Service plus PresentMon about 0.03 %, under the 0.5 % of spec M7 §11.
+- V7: `Restart-Service oma-service` with the app open: link back in 7 s, capture `starting` then `running`, target followed again after about 10 s in all.
+- V8: with OMA running, «Annulla» on the "app is running" prompt closes the uninstaller at once; OMA and the service keep running.
+
+Also owed with that setup: the installer's PresentMon paths in a VM or Windows Sandbox (`service\presentmon\PresentMon-2.6.0-x64.exe` installed and protected, removed on deselection and uninstall, `logman stop OpenMonitorAdvanced-Frames -ets` run by the uninstaller), and `scripts/verify-signatures.ps1 -Policy none` on the new setup (exactly one PresentMon, Intel signature).
+
+Open: after the setup rebuild, extend the real-lister test in `scripts/tests/VerifySignatures.Tests.ps1` ("the default lister reads a real setup") to `service\presentmon\PresentMon-2.6.0-x64.exe`; the setup on disk at the end of B12 predates PresentMon.
+
+Known, by design: a service that crashes (or is killed) leaves the `OpenMonitorAdvanced-Frames` ETW session running, with PresentMon's buffers (up to 1024 × 64 KB), until the next service start (which stops it by name) or the uninstall (`logman stop OpenMonitorAdvanced-Frames -ets`).
+
+Before M7c (review of the M7b branch, 2026-10-05):
+
+- Stutter median: computed from scratch for each window, O(n·w·log w); make it incremental before the overlay shows it every frame.
+- Sessions subscribed with `Enabled=false` still start the hub's timers and get empty summaries every second; with no session enabled the hub should stay idle (spec M7 §11, cost unchanged when the feature is off).
+- After a gap, rows beyond 512 per batch tick are dropped (`Dropped`); a bounded backlog would let the app catch up instead.
+- M7c UI: the retry after `failed` (`crashing`) must send `enabled: false` and then `enabled: true`.
+- `oma_core::frames::synthetic()`: add input guards (FPS, factors, seeds out of range) before the M7d editor preview feeds it user values.
+
 ## Manual checks after M7a
 
 The live checks of the M7a plan (`docs/superpowers/plans/2026-10-04-m7a-manutenzione.md`, U1-U7) are done (2026-10-04, published 0.4.1 setup, SHA-256 `d45c2eda...465c`, all passed):

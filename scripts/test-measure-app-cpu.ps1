@@ -5,9 +5,11 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "measure-footprint.ps1 has parser errors" }
-$function = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Measure-AppCpuSample' }, $true)
-if (-not $function) { throw 'Measure-AppCpuSample is missing: aggregate app and WebView2 CPU cannot be measured' }
-. ([scriptblock]::Create($function.Extent.Text))
+foreach ($name in @('Measure-AppCpuSample', 'Measure-ServiceSample', 'Measure-ChildSample', 'Get-PresentMonProcessId')) {
+    $function = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if (-not $function) { throw "$name is missing from measure-footprint.ps1" }
+    . ([scriptblock]::Create($function.Extent.Text))
+}
 
 function Assert-Equal($Actual, $Expected, [string]$Label) {
     if ($Actual -ne $Expected) { throw "$Label`: expected $Expected, got $Actual" }
@@ -84,4 +86,37 @@ foreach ($field in @('PercentProcessorTime', 'Timestamp_Sys100NS')) {
     }
 }
 
-Write-Output 'measure-app-cpu: 12 cases passed'
+# PresentMon, the service's child (M7b): found by name under the service PID only.
+$pmName = 'PresentMon-2.6.0-x64.exe'
+$services = @(
+    [pscustomobject]@{ ProcessId = 500; ParentProcessId = 4; Name = 'oma-service.exe' },
+    [pscustomobject]@{ ProcessId = 501; ParentProcessId = 500; Name = $pmName },
+    [pscustomobject]@{ ProcessId = 777; ParentProcessId = 9; Name = $pmName }
+)
+Assert-Equal (Get-PresentMonProcessId -ServicePid 500 -ProcessProvider { $services }) 501 'PresentMon child of the service'
+Assert-Equal $null (Get-PresentMonProcessId -ServicePid 9999 -ProcessProvider { $services }) 'no PresentMon under another PID'
+Assert-Equal $null (Get-PresentMonProcessId -ServicePid $null -ProcessProvider { $services }) 'no service, no PresentMon'
+
+# Not running: invalid with the reason "not running", and the sample window still elapses once.
+$script:pmSamples = 0
+$notRunning = Measure-ChildSample -PidProvider { $null } -SampleAction { $script:pmSamples++ } -Label $pmName
+Assert-Equal $notRunning.Valid $false 'PresentMon not running validity'
+Assert-Equal $notRunning.Reason 'not running' 'PresentMon not running reason'
+Assert-Equal $script:pmSamples 1 'sample action count when PresentMon is not running'
+
+# Running but without counters (a PID no process has): invalid before sampling, window still once.
+$script:pmSamples = 0
+$noCounters = Measure-ChildSample -PidProvider { 2147483000 } -SampleAction { $script:pmSamples++ } -Label $pmName
+Assert-Equal $noCounters.Valid $false 'PresentMon without counters validity'
+Assert-Equal ($noCounters.Reason -like 'No perf counters*') $true 'PresentMon without counters reason'
+Assert-Equal $script:pmSamples 1 'sample action count without counters'
+
+# A real process (this one): valid, measured over exactly one sample window.
+$script:pmSamples = 0
+$self = Measure-ChildSample -PidProvider { $PID } -SampleAction { $script:pmSamples++ } -Label 'pwsh'
+Assert-Equal $self.Valid $true 'measured child validity'
+Assert-Equal ($self.CpuPercent -ge 0) $true 'measured child CPU percent'
+Assert-Equal ($self.PrivateBytesMB -gt 0) $true 'measured child private bytes'
+Assert-Equal $script:pmSamples 1 'sample action count when measured'
+
+Write-Output 'measure-app-cpu: 21 cases passed'

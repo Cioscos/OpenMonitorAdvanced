@@ -3,20 +3,26 @@
 Monitor hardware open source per Windows 10/11 (GPL-3.0-or-later): vista Semplificata e vista Avanzata, palette Synthwave, nessun privilegio amministrativo per CPU/RAM/dischi/rete/GPU.
 
 - **Spec (fonte di verità):** `docs/superpowers/specs/2026-09-24-openmonitor-advanced-design.md`
-- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; M6 rifinitura in tre piani: M6a release e firma (implementata, ammissione e collaudo della firma pendenti), M6b dischi e protocollo v3 (completata), M6c report, aggiornamenti e licenze (implementata e documentata; verifiche dal vivo e bump alla 0.4.0 pendenti). La M6 chiude con la release 0.4.0 (M6b e M6c insieme, pubblicata, non firmata). M7 manutenzione e overlay: M7a manutenzione (completata, release 0.4.1; verifiche dal vivo U1–U7 e build del setup pendenti), M7b–d da fare (overlay e resto). La 1.0 aspetta firma SignPath, conferma dell'autore di PawnIO e matrice hardware)
+- **Piani per milestone:** `docs/superpowers/plans/` (M1 Fondamenta, M2 GPU, M3 vista Avanzata, M4 servizio e M5 regole e integrazione (M5a impostazioni e tray, M5b regole, M5c log CSV) completate; M6 rifinitura in tre piani: M6a release e firma (implementata, ammissione e collaudo della firma pendenti), M6b dischi e protocollo v3 (completata), M6c report, aggiornamenti e licenze (implementata e documentata; verifiche dal vivo e bump alla 0.4.0 pendenti). La M6 chiude con la release 0.4.0 (M6b e M6c insieme, pubblicata, non firmata). M7 manutenzione e overlay: M7a manutenzione (completata, release 0.4.1; verifiche dal vivo U1–U7 e build del setup pendenti), M7b motore dei frame (completata, verifiche dal vivo V1–V8 superate il 2026-10-05; restano i percorsi di PresentMon in VM, in `docs/follow-ups.md`), M7c–d da fare (overlay, editor e benchmark). La 1.0 aspetta firma SignPath, conferma dell'autore di PawnIO e matrice hardware)
 - **Budget prestazioni:** `docs/perf-budget.md` (nucleo a riposo < 1% CPU, tray < 30 MB, finestra < 200 MB WebView2 compresa); si misura a ogni milestone con `scripts/measure-footprint.ps1`
 
 ## Struttura
 
 - `crates/oma-core`: modello dati, scheduler/worker, merge per fonte, storico. Niente codice Windows.
+  - `frames/` (M7b): metriche pure dei frame (`metrics`: FPS mostrati e presentati, low integrali e percentili, stutter, latenze, collo di bottiglia; `generation`: FPS renderizzati dalla cascata della frame generation, moltiplicatore ed euristica «FG?»; `swapchain`: swapchain principale; `synthetic`: generatore deterministico per test e anteprima).
 - `crates/oma-win`: provider Windows (PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete). Tutto il codice specifico di Windows sta qui.
   - `storage/` (modulo: `disk_gate`, `tables`, `temperatures`) e `svc/link/` (`machine`, `transport` e i test, con il driver in `link/mod.rs`) sono moduli divisi dalla M7a, senza cambi di comportamento.
+  - `foreground` (M7b): hook WinEvent `EVENT_SYSTEM_FOREGROUND` su un thread suo, che riporta il PID della finestra in primo piano (giochi UWP risolti dalla `CoreWindow`), senza aprire processi.
+  - `svc/frames_feed` (M7b): i dati dei frame ricevuti dal servizio (stato, processi che presentano, coda dei `FrameBatch`), scritti dal thread del link e svuotati dall'app.
 - `crates/oma-ipc`: tipi del protocollo, codifica MessagePack e framing verso `oma-service`; portabile, senza codice Windows.
 - `app/src-tauri` (crate `oma-app`): shell Tauri 2.11 (comandi, tray, finestra, modalità sicura).
-- `app/src-tauri/nsis`: template NSIS proprio (`installer.nsi`, copiato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5 e modificato solo sulle righe marcate `; OMA`), i nostri hook e le sezioni dei sensori avanzati in `oma.nsh`, i testi italiani dell'installer in `Italian.nsh` (copia corretta di quello di Tauri, da confrontare a ogni aggiornamento di tauri-cli), e lo SHA-256 fissato di PawnIO (`pawnio.sha256`).
+  - `overlay/` (M7b): `target` sceglie il gioco da seguire (primo piano che presenta almeno 10 FPS, esclusi i nostri processi e quelli di sistema; tolleranza di 3 s); `frames` è la diagnostica dei frame, attiva solo con `OMA_FRAMES_DEBUG` (vedi sotto).
+- `app/src-tauri/nsis`: template NSIS proprio (`installer.nsi`, copiato da `upstream-2.11.5.nsi` di tauri-cli 2.11.5 e modificato solo sulle righe marcate `; OMA`), i nostri hook e le sezioni dei sensori avanzati in `oma.nsh`, i testi italiani dell'installer in `Italian.nsh` (copia corretta di quello di Tauri, da confrontare a ogni aggiornamento di tauri-cli), lo SHA-256 fissato di PawnIO (`pawnio.sha256`) e quello di PresentMon 2.6.0 (`presentmon.sha256`, letto anche da `scripts/lib/OmaPresentMonPins.psm1` e da `PresentMonPin` nel servizio). PresentMon si installa in `$INSTDIR\service\presentmon\` con il servizio; il disinstallatore ferma la sessione ETW `OpenMonitorAdvanced-Frames`.
 - `app/`: UI Svelte 5 + TypeScript 6, test Vitest, i18n `en.json`/`it.json` con le stesse chiavi.
 - `service/`: servizio Windows `oma-service` (.NET 10) con LibreHardwareMonitorLib e i suoi test (`OpenMonitorAdvanced.Service`, `OpenMonitorAdvanced.Service.Tests`).
+  - `Frames/` (M7b): `FrameCapture` avvia e sorveglia PresentMon (Job Object, backoff, stati `Off`/`Starting`/`Running`/`Denied`/`Tampered`/`Missing`/`Failed`), `PresentMonCsv` legge il CSV per nome di colonna, `FrameAggregator` fa i lotti e il riepilogo, `EtwSessionControl` svuota e ferma la sola sessione `OpenMonitorAdvanced-Frames`, `PresentMonPin` ha hash e versione fissati.
 - `protocol/fixtures/`: messaggi MessagePack di riferimento condivisi tra i test Rust e .NET del protocollo.
+- `testdata/presentmon/`: fixture CSV anonime di PresentMon dello spike M7b (senza FG, DLSS FG, FSR FG, Smooth Motion, limite CPU; con e senza PCL), con i valori attesi nel `README.md`; le leggono i test Rust (`oma-core::frames`) e .NET (`PresentMonCsv`).
 
 ## Comandi
 
@@ -28,14 +34,17 @@ cargo test -p oma-win -- --include-ignored   # test hardware (RTX 4080 + iGPU AM
 cd app && pnpm test && pnpm check && pnpm build
 cd app && pnpm tauri dev                     # app in sviluppo; pnpm dev = solo UI nel browser con backend finto
 dotnet test service/OpenMonitorAdvanced.slnx # test del servizio, dalla radice del repository
-pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in staging il setup di PawnIO
+pwsh scripts/build-installer-payload.ps1     # pubblica oma-service e mette in staging il setup di PawnIO e PresentMon (hash e firma verificati)
 pwsh scripts/check-trim-warnings.ps1         # confronta gli avvisi di trimming del servizio con service/trim-allowlist.txt
 pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] # le cinque versioni e Cargo.lock coincidono (con -Tag: il tag è vX.Y.Z, su HEAD e in main)
 pwsh scripts/bump-version.ps1 X.Y.Z          # aggiorna le cinque versioni e Cargo.lock; non fa commit né tag, stampa i comandi
 pwsh scripts/generate-licenses.ps1 [-Check]  # rigenera THIRD_PARTY_LICENSES.txt (con -Check: fallisce se non è aggiornato, come in CI); serve cargo-about 0.9.2
 Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester -Path scripts/tests -ExcludeTagFilter Integration -CI   # test degli script (Pester 5.7.1)
-cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio e PawnIO
+cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio, PawnIO e PresentMon
+$env:OMA_FRAMES_DEBUG='1'                     # (o 'pcl', o 'all') prima di avviare l'app: diagnostica dei frame, una riga `frames:` al secondo nel log dell'app
 ```
+
+- **`OMA_FRAMES_DEBUG` (M7b):** con `1` (FPS mostrati), `pcl` (più la latenza PC con i marcatori Reflex/PCL) o `all` (più il GPU busy e il collo di bottiglia) l'app accende il motore dei frame del servizio, segue il gioco in primo piano e scrive una riga `frames:` al secondo nel suo log (`%LOCALAPPDATA%\OpenMonitorAdvanced\logs`). Ogni altro valore, o nessuno, non avvia niente. Il formato della riga (coppie `chiave=valore`, `-` per i valori assenti) è documentato in testa a `app/src-tauri/src/overlay/frames.rs`. Serve alle verifiche dal vivo finché l'overlay (M7c) non c'è.
 
 ## Tecniche e convenzioni
 
@@ -44,7 +53,7 @@ cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio 
 - **FFI:** binding scritti a mano. Un commento `// SAFETY:` su ogni blocco `unsafe`; un assert di dimensione a compile time per ogni struct FFI. Le DLL dei vendor si caricano solo da System32 (`dynlib::Library`) e non si scaricano mai.
 - **Licenze:** nessun header proprietario (NVML, ADL, IGCL) e nessun testo copiato da essi. Le attribuzioni vanno in `THIRD_PARTY_NOTICES.md`; nei nostri sorgenti niente tag SPDX di terzi.
 - **Contratto Rust↔UI:** id dei sensori nella forma `<device_id>/<kind>/<name>`, etichette come chiavi i18n.
-- **Protocollo IPC (`crates/oma-ipc`, `service/OpenMonitorAdvanced.Service/Protocol/`):** mai `skip_serializing_if` sui tipi del protocollo, perché le chiavi devono essere sempre presenti (`nil` per gli assenti, §6 della spec); le fixture di `protocol/fixtures/` si rigenerano solo con `OMA_WRITE_FIXTURES=1`, a thread singolo. Versione corrente: **v3** (M6b): tabella `drives` per disco nel blocco `service` dello schema (al posto di `smart_blocked_by`), `smart_enabled_drives` in `Subscribe` e `held` nello snapshot, allineato a `values`; versioni diverse danno `Incompatible`.
+- **Protocollo IPC (`crates/oma-ipc`, `service/OpenMonitorAdvanced.Service/Protocol/`):** mai `skip_serializing_if` sui tipi del protocollo, perché le chiavi devono essere sempre presenti (`nil` per gli assenti, §6 della spec); le fixture di `protocol/fixtures/` si rigenerano solo con `OMA_WRITE_FIXTURES=1`, a thread singolo. Versione corrente: **v4** (M7b): ai messaggi della v3 (M6b: tabella `drives` per disco nel blocco `service` dello schema, `smart_enabled_drives` in `Subscribe`, `held` nello snapshot) si aggiungono quelli dei frame, dall'app `FramesConfigure { enabled, track_pc_latency, track_gpu }` e `FramesTarget { pid }`, dal servizio `FramesStatus { state, detail, presentmon_version }`, `PresentingProcesses` (1 Hz, al massimo 32 processi) e `FrameBatch` (10 Hz, al massimo 512 `WireFrame` per lotto, gli altri contati in `dropped`); i valori enumerati viaggiano come stringhe. Dopo una riconnessione l'app rimanda da sola configurazione e bersaglio. Versioni diverse danno `Incompatible`.
 - **Stile:** codice, commenti e commit in inglese (conventional commits); documentazione e prosa dei piani in italiano con gli accenti corretti.
 - Fine riga LF ovunque (`.gitattributes`).
 - **Release e firma (M6a):** guida in `docs/release.md`, politica pubblica in `CODE_SIGNING.md`, design in `docs/superpowers/specs/2026-09-30-m6a-release-firma-design.md`. Flusso: `bump-version.ps1 X.Y.Z`, commit, tag `vX.Y.Z`, push (su richiesta dell'utente); il tag avvia `.github/workflows/release.yml`, che crea una **bozza** da rivedere e pubblicare a mano, mai durante il run. Senza SignPath la release è non firmata; l'ammissione alla Foundation non è ancora stata chiesta. I test Pester `Integration` modificano gli store dei certificati: solo su un runner GitHub o in una VM/Sandbox con `OMA_ISOLATED_TRUST=1`, mai su questo PC.

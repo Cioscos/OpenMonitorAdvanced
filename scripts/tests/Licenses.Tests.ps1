@@ -66,6 +66,16 @@ Describe 'Merge-OmaLicenseSections' {
         $m.Texts[0].Body | Should -BeLike 'Copyright A*'
     }
 
+    It 'puts the programs shipped with the service last, under their own title' {
+        $sections = @(
+            [pscustomobject]@{ Ecosystem = 'Programs'; Entries = @((New-Entry 'Programs' 'PresentMon' '2.6.0' 'MIT' @((Text 'MIT' "Copyright Intel`n$mit")))) },
+            [pscustomobject]@{ Ecosystem = '.NET'; Entries = @((New-Entry '.NET' 'm' '1.0.0' 'MIT' @((Text 'MIT' $mit)))) }
+        )
+        $m = Merge-OmaLicenseSections -Sections $sections
+        ($m.Sections | ForEach-Object Ecosystem) -join ',' | Should -BeExactly '.NET,Programs'
+        $m.Sections[1].Title | Should -BeExactly 'Programs shipped with the service'
+    }
+
     It 'keeps existing labels when a dependency is added' {
         $base = @(
             (New-Entry 'Rust' 'm' '1.0.0' 'MIT' @((Text 'MIT' "Copyright M`n$mit"))),

@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use oma_ipc::{
-    DriveState, Message, PawnIoStatus, Reconfiguration, ServiceSources, SourceDrive, Subscribe,
-    WireError, WireSchema, WireServiceState, WireSnapshot, PROTOCOL_VERSION,
+    DriveState, FramesConfigure, FramesTarget, Message, PawnIoStatus, Reconfiguration,
+    ServiceSources, SourceDrive, Subscribe, WireError, WireSchema, WireServiceState, WireSnapshot,
+    PROTOCOL_VERSION,
 };
 
 use super::super::drives::{request_keys, wire_drive_for};
 use super::super::feed::SourceRequest;
+use super::super::frames_feed::FramesEvent;
 use super::super::pipe::{CloseReason, ConnectError};
 use super::super::scm::{RunState, ServiceQuery};
 use super::super::status::{ServiceDetail, ServiceState, ServiceStatus};
@@ -26,7 +28,7 @@ pub(super) const LAUNCH_QUERY_RETRIES: u8 = 3;
 pub(super) const UNSUPPORTED_VERSION: &str = "unsupported_version";
 
 /// What the shell asks of the link.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LinkCommand {
     /// Turns the anti-cheat compatible mode on (stop the service and keep
     /// away) or off (start it once and connect).
@@ -40,6 +42,14 @@ pub enum LinkCommand {
     /// The sources the user turned off changed: a connected link subscribes
     /// again at once, any other link uses them on its next connection.
     SetSources(SourceRequest),
+    /// The frame engine's configuration changed: sent once the link streams
+    /// (after the first snapshot of each connection), and at once while it
+    /// does, unless it equals the last one sent on this connection.
+    ConfigureFrames(FramesConfigure),
+    /// The process whose frames the app wants (`None` for none): sent like
+    /// [`ConfigureFrames`](Self::ConfigureFrames), and only while frames are
+    /// enabled.
+    SetFramesTarget(Option<u32>),
 }
 
 /// Timing and target of the link.
@@ -167,6 +177,8 @@ pub(super) enum Effect {
     SetRequest(SourceRequest),
     SetSchema(WireSchema),
     SetSnapshot(WireSnapshot),
+    /// Frame data for the [`FramesFeed`](super::super::FramesFeed).
+    Frames(FramesEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +305,20 @@ pub(super) struct Machine {
     drive_generation: u64,
     /// The drive keys of the last `Subscribe`: those switched off, then those switched on.
     sent_keys: (Vec<String>, Vec<String>),
+    /// The last frame configuration the shell asked for (`None` until it asks:
+    /// frames off).
+    frames_config: Option<FramesConfigure>,
+    /// The last frame target the shell asked for.
+    frames_target: Option<u32>,
+    /// What this connection's service session has been told about frames.
+    frames_sent: FramesSent,
+}
+
+/// The frame requests sent on the current connection (`None`: not yet).
+#[derive(Debug, Default)]
+struct FramesSent {
+    config: Option<FramesConfigure>,
+    target: Option<Option<u32>>,
 }
 
 impl Machine {
@@ -317,6 +343,9 @@ impl Machine {
             awaiting: false,
             drive_generation: 0,
             sent_keys: (Vec::new(), Vec::new()),
+            frames_config: None,
+            frames_target: None,
+            frames_sent: FramesSent::default(),
         }
     }
 
@@ -424,6 +453,14 @@ impl Machine {
             }
             LinkCommand::SetInterval(ms) => self.set_interval(ms, now),
             LinkCommand::SetSources(request) => self.set_sources(request),
+            LinkCommand::ConfigureFrames(config) => {
+                self.frames_config = Some(config);
+                self.frames_if_streaming()
+            }
+            LinkCommand::SetFramesTarget(pid) => {
+                self.frames_target = pid;
+                self.frames_if_streaming()
+            }
             // Same preference again, or Start while anti-cheat, connected or
             // already due after a pending stop.
             _ => Vec::new(),
@@ -473,6 +510,41 @@ impl Machine {
             effects.push(Effect::Send(self.subscribe_message(&drives)));
             self.awaiting = true;
             self.refresh_sources(&drives);
+        }
+        effects
+    }
+
+    /// The frame requests still owed to the service, if the link streams; the
+    /// rest waits for the first snapshot (the service takes them only after
+    /// `Subscribe`).
+    fn frames_if_streaming(&mut self) -> Vec<Effect> {
+        if matches!(self.phase, Phase::Streaming { .. }) {
+            self.sync_frames()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Sends what the service session has not been told yet: the
+    /// configuration when it changed (a first one only if enabled: a session
+    /// starts with frames off), then the target when it changed, only while
+    /// frames are enabled (the target means nothing otherwise, and the next
+    /// enabling sends it).
+    fn sync_frames(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let Some(config) = &self.frames_config else {
+            return effects;
+        };
+        let sent = &mut self.frames_sent;
+        if sent.config.as_ref() != Some(config) && (config.enabled || sent.config.is_some()) {
+            sent.config = Some(config.clone());
+            effects.push(Effect::Send(Message::FramesConfigure(config.clone())));
+        }
+        if config.enabled && sent.target != Some(self.frames_target) {
+            sent.target = Some(self.frames_target);
+            effects.push(Effect::Send(Message::FramesTarget(FramesTarget {
+                pid: self.frames_target,
+            })));
         }
         effects
     }
@@ -884,10 +956,14 @@ impl Machine {
                 self.status.detail = None;
                 let len = snapshot.values.len();
                 let silence = self.settings.interval() * 3;
+                let first = matches!(self.phase, Phase::FirstSample { .. });
                 self.go(Phase::Streaming { schema_len: len }, Some(now + silence));
                 let mut effects = vec![Effect::SetSnapshot(snapshot)];
                 if self.settings.drives.generation() != self.drive_generation {
                     effects.extend(self.on_drives_changed());
+                }
+                if first {
+                    effects.extend(self.sync_frames());
                 }
                 effects
             }
@@ -899,6 +975,11 @@ impl Machine {
                 self.close(disconnected(), now)
             }
             Message::Error(error) => self.on_error(error, now),
+            Message::FramesStatus(status) => vec![Effect::Frames(FramesEvent::Status(status))],
+            Message::PresentingProcesses(list) => {
+                vec![Effect::Frames(FramesEvent::Processes(list))]
+            }
+            Message::FrameBatch(batch) => vec![Effect::Frames(FramesEvent::Batch(batch))],
             other => {
                 tracing::warn!("unexpected message from the sensor service: {other:?}");
                 self.close(disconnected(), now)
@@ -926,6 +1007,8 @@ impl Machine {
                 self.status.pawn_io = Some(PawnIoStatus::from_wire(&hello.pawn_io));
                 self.service = None;
                 self.awaiting = true;
+                // A new service session: it knows nothing of our frames.
+                self.frames_sent = FramesSent::default();
                 self.go(Phase::Subscribing, None);
                 let drives = self.settings.drives.get();
                 vec![

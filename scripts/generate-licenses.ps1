@@ -17,6 +17,8 @@
      .NET runtime, which the self-contained single-file service carries (MIT), with its
      third-party notices from a pinned copy (a warning, not a failure, when the restored
      runtime pack has different ones).
+  4. Programs: Intel PresentMon 2.6.0, shipped unmodified with the service, and cereal 1.3.2,
+     compiled into it; texts from pinned copies in scripts/licenses/.
   Every licence expression must be satisfiable with the `accepted` list of about.toml. The
   output is UTF-8 without BOM, LF, with no date and no local path, so it is deterministic.
   -Check writes to a temporary folder and compares; exit code 1 lists the differing lines.
@@ -186,6 +188,35 @@ function Get-NuGetEntries([string[]]$Accepted) {
     }
 }
 
+# Intel's PresentMon console, which the installer ships unmodified next to the service (M7b), and
+# the third-party code compiled into it. Entries added by hand, like the .NET runtime: the texts
+# are copies (LF, no BOM) under scripts/licenses/, reviewed when the pinned PresentMon changes
+# (scripts/lib/OmaPresentMonPins.psm1).
+#   - PresentMon: LICENSE.txt of tag v2.6.0 of GameTechDev/PresentMon (MIT).
+#   - cereal: the strings of PresentMon-2.6.0-x64.exe name cereal and none of boost, CLI11 or
+#     moodycamel (concurrentqueue); vcpkg.json of v2.6.0 takes cereal from the vcpkg baseline
+#     120deac3, i.e. cereal 1.3.2, whose LICENSE (tag v1.3.2 of USCiLab/cereal) is BSD-3-Clause.
+function Get-ProgramEntries([string[]]$Accepted) {
+    $programs = @(
+        [pscustomobject]@{
+            Ecosystem = 'Programs'; Name = 'PresentMon'; Version = '2.6.0'; License = 'MIT'
+            Copyright = '2017-2024 Intel Corporation'; TextTitle = 'MIT'; File = 'PresentMon-2.6.0-LICENSE.txt'
+        }
+        [pscustomobject]@{
+            Ecosystem = 'Programs'; Name = 'cereal (in PresentMon)'; Version = '1.3.2'; License = 'BSD-3-Clause'
+            Copyright = '2013-2022, Randolph Voorhies, Shane Grant'; TextTitle = 'BSD-3-Clause'; File = 'cereal-1.3.2-LICENSE.txt'
+        }
+    )
+    foreach ($p in $programs) {
+        Assert-Accepted "$($p.Name) $($p.Version)" $p.License $Accepted
+        [pscustomobject]@{
+            Ecosystem = $p.Ecosystem; Name = $p.Name; Version = $p.Version; License = $p.License
+            Copyright = $p.Copyright
+            Texts = @([pscustomobject]@{ Title = $p.TextTitle; Body = [IO.File]::ReadAllText((Join-Path $licensesDir $p.File)) })
+        }
+    }
+}
+
 # Warns (never fails, so the output stays the same on every machine) when the THIRD-PARTY-NOTICES
 # of the restored runtime pack differ from the pinned copy, which then needs a review and update.
 function Test-RuntimeNotices($Assets, [string]$PackagesRoot) {
@@ -220,6 +251,7 @@ try {
         Get-RustEntries $temp
         Get-JsEntries $temp $accepted
         Get-NuGetEntries $accepted
+        Get-ProgramEntries $accepted
     )
     $text = ConvertTo-OmaLicenseText -Entries $entries
     $target = Join-Path $RepoRoot 'THIRD_PARTY_LICENSES.txt'

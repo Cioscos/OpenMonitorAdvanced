@@ -283,13 +283,18 @@ fn follow_service_effect(store: &Arc<SettingsStore>, table: &oma_win::svc::Servi
 }
 
 /// Shared state the three commands and the tray read: the toggle above, and
-/// on Windows the running link and the status table it writes.
+/// on Windows the running link, the status table it writes and the frame
+/// data it receives.
 pub struct ServiceShell {
     toggle: ToggleState,
     #[cfg(windows)]
     link: Arc<Mutex<Option<oma_win::svc::ServiceLink>>>,
     #[cfg(windows)]
     status_table: oma_win::svc::ServiceStatusTable,
+    /// Written by the link from [`Self::spawn_link`] on; read through
+    /// [`Self::frames_feed`].
+    #[cfg(windows)]
+    frames: oma_win::svc::FramesFeed,
 }
 
 impl ServiceShell {
@@ -321,6 +326,7 @@ impl ServiceShell {
             ),
             link,
             status_table,
+            frames: oma_win::svc::FramesFeed::default(),
         }
     }
 
@@ -356,6 +362,7 @@ impl ServiceShell {
             self.toggle.enabled(),
             self.status_table.clone(),
             feed,
+            self.frames.clone(),
         ));
     }
 
@@ -443,6 +450,24 @@ impl ServiceShell {
 
     fn send_link(&self, command: oma_win::svc::LinkCommand) {
         send_to_link(&self.link, command);
+    }
+
+    /// The frame data the link receives (protocol v4): the same feed before
+    /// and after [`Self::spawn_link`], empty until the service sends some.
+    pub(crate) fn frames_feed(&self) -> oma_win::svc::FramesFeed {
+        self.frames.clone()
+    }
+
+    /// What sends a command (for the frames: `ConfigureFrames`,
+    /// `SetFramesTarget`) to the running link. Never blocks: it only takes
+    /// the link lock and tries the bounded queue, and a command that finds
+    /// the queue full is dropped and logged. Before [`Self::spawn_link`] and
+    /// after [`Self::shutdown`] there is no link and the command is dropped,
+    /// so call it once the link is spawned; the link itself remembers the
+    /// last frame configuration and target across reconnections.
+    pub(crate) fn link_commands(&self) -> Box<dyn Fn(oma_win::svc::LinkCommand) + Send + Sync> {
+        let link = Arc::clone(&self.link);
+        Box::new(move |command| send_to_link(&link, command))
     }
 
     pub(crate) fn start(&self) -> ServiceStatus {

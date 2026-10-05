@@ -541,6 +541,15 @@ impl Ctl {
         if let Some(plan) = out.values_plan {
             self.tap.lock().unwrap_or_else(PoisonError::into_inner).plan = plan;
         }
+        if let Some(note) = &out.foreground_note {
+            let exe = note.name.as_deref().unwrap_or("-");
+            match &note.presenting {
+                Some((fps, mode)) => {
+                    tracing::info!(pid = note.pid, %exe, fps = %format!("{fps:.1}"), %mode, "foreground")
+                }
+                None => tracing::info!(pid = note.pid, %exe, "foreground: not presenting"),
+            }
+        }
         if let Some(mode) = &out.present_mode {
             tracing::info!(%mode, "target present mode");
         }

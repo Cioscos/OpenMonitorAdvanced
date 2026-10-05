@@ -50,7 +50,7 @@ use super::forward::{
 use super::frames::{detail_label, line, sample_of, state_label, LineContext};
 use super::host::{HostFailure, HostState};
 use super::profiles::{ProfileCatalog, ProfileDiagnostic, ProfileEntry};
-use super::target::{ProcessInfo, TargetPicker, OWN_PROCESS_NAMES, SYSTEM_EXCLUDED};
+use super::target::{ProcessInfo, TargetPicker, MIN_GAME_FPS, OWN_PROCESS_NAMES, SYSTEM_EXCLUDED};
 use crate::i18n::Lang;
 use crate::log::HotkeyStatus;
 
@@ -161,6 +161,19 @@ pub struct Outputs {
     pub values_plan: Option<ValuesPlan>,
     /// The target's present mode, when it changed (for the log).
     pub present_mode: Option<String>,
+    /// The foreground window as the service sees it, when the window or
+    /// its standing (listed, game rate, mode) changed (for the log).
+    pub foreground_note: Option<ForegroundNote>,
+}
+
+/// What the service says about the foreground process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForegroundNote {
+    pub pid: u32,
+    /// From the last process list, while known.
+    pub name: Option<String>,
+    /// Displayed FPS and present mode, `None` when it is not presenting.
+    pub presenting: Option<(f64, String)>,
 }
 
 pub struct Controller {
@@ -241,6 +254,8 @@ pub struct Controller {
     sent_plan: Option<ValuesPlan>,
     /// The target's present mode last reported.
     sent_present_mode: Option<String>,
+    /// Window, listed, at a game's rate, mode: of the last foreground note.
+    sent_foreground: Option<(Foreground, bool, bool, String)>,
 }
 
 impl Controller {
@@ -296,6 +311,7 @@ impl Controller {
             sent_status: None,
             sent_plan: None,
             sent_present_mode: None,
+            sent_foreground: None,
         }
     }
 
@@ -449,6 +465,7 @@ impl Controller {
             self.sent_present_mode.clone_from(&mode);
             out.present_mode = mode;
         }
+        out.foreground_note = self.foreground_note();
 
         let status = self.current_status();
         if self.sent_status.as_ref() != Some(&status) {
@@ -891,6 +908,28 @@ impl Controller {
                 out.overlay.push(msg);
             }
         }
+    }
+
+    /// A note when the foreground window or its standing in the service's
+    /// list changed; the FPS value alone does not count.
+    fn foreground_note(&mut self) -> Option<ForegroundNote> {
+        let fg = self.foreground?;
+        let listed = self.processes.iter().find(|p| p.pid == fg.pid);
+        let key = (
+            fg,
+            listed.is_some(),
+            listed.is_some_and(|p| p.displayed_fps >= MIN_GAME_FPS),
+            listed.map(|p| p.present_mode.clone()).unwrap_or_default(),
+        );
+        if self.sent_foreground.as_ref() == Some(&key) {
+            return None;
+        }
+        self.sent_foreground = Some(key);
+        Some(ForegroundNote {
+            pid: fg.pid,
+            name: self.known_names.get(&fg.pid).cloned(),
+            presenting: listed.map(|p| (p.displayed_fps, p.present_mode.clone())),
+        })
     }
 
     /// The exclusive-fullscreen notice, once per executable (DP16).
@@ -1739,6 +1778,34 @@ mod tests {
             c.step(200).present_mode.as_deref(),
             Some("Hardware: Legacy Flip")
         );
+    }
+
+    #[test]
+    fn foreground_note_on_change_of_window_or_standing() {
+        let mut c = enabled_with(&settings(true));
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(BROWSER_FG);
+        let note = c.step(0).foreground_note.unwrap();
+        assert_eq!(note.pid, 300);
+        assert_eq!(note.presenting, None, "not in the list");
+        assert_eq!(c.step(100).foreground_note, None, "unchanged");
+        c.on_foreground(GAME_FG);
+        let note = c.step(200).foreground_note.unwrap();
+        assert_eq!(note.name.as_deref(), Some("my game.exe"));
+        assert_eq!(
+            note.presenting,
+            Some((100.0, "Hardware: Independent Flip".to_owned()))
+        );
+        // Still presenting at another rate: no new note.
+        let mut slower = processes();
+        slower.processes[0].displayed_fps = 90.0;
+        c.on_frames(Some(&status("running")), Some(&slower), &[]);
+        assert_eq!(c.step(300).foreground_note, None);
+        // Below a game's rate: a note.
+        slower.processes[0].displayed_fps = 3.0;
+        c.on_frames(Some(&status("running")), Some(&slower), &[]);
+        let note = c.step(400).foreground_note.unwrap();
+        assert_eq!(note.presenting.map(|(fps, _)| fps), Some(3.0));
     }
 
     #[test]

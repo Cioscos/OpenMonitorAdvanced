@@ -298,7 +298,9 @@ mod runner {
         let start = Instant::now();
         let mut controller = Controller::new(std::process::id(), qpc_frequency);
         controller.on_settings(&Settings::default(), Lang::En, Some(config));
-        while let Err(mpsc::RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
+        // The first step runs at once, so the engine starts without waiting
+        // a tick (as in M7b, DP13).
+        loop {
             let now_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             let update = feed.drain();
             controller.on_service(update.connected);
@@ -317,6 +319,9 @@ mod runner {
             }
             if let Some(line) = out.diagnostics_line {
                 tracing::info!("{line}");
+            }
+            if let Err(mpsc::RecvTimeoutError::Disconnected) = stop.recv_timeout(TICK) {
+                break;
             }
         }
     }

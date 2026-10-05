@@ -13,6 +13,10 @@
 //! - **Target:** a [`TargetPicker`] over the presenting processes and the
 //!   foreground PID. A new target activates `gameProfiles[exe]`, else
 //!   `defaultProfile`, and ends a `next_profile` choice.
+//!   Without frame data (service down or incompatible, engine not running)
+//!   the target is kept while its window exists, and a foreground process
+//!   whose last known name has a `gameProfiles` entry can become one, so
+//!   sensor blocks keep working (spec §9).
 //! - **Visibility (DP9–DP11):** the overlay shows only while it is on, its
 //!   process runs, the target's window is the foreground one, visible and
 //!   not minimized, the game is not in `blockedGames` and the user has not
@@ -22,7 +26,7 @@
 //!   `FrameTimes` at 10 Hz with the new frames only, sensor values through
 //!   [`ValuesPlan`]; no data while the overlay is hidden.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use oma_core::frames::metrics::LowDefinition;
@@ -44,7 +48,7 @@ use super::forward::{
 use super::frames::{detail_label, line, sample_of, state_label, LineContext};
 use super::host::{HostFailure, HostState};
 use super::profiles::{ProfileCatalog, ProfileDiagnostic, ProfileEntry};
-use super::target::{ProcessInfo, TargetPicker, SYSTEM_EXCLUDED};
+use super::target::{ProcessInfo, TargetPicker, OWN_PROCESS_NAMES, SYSTEM_EXCLUDED};
 use crate::i18n::Lang;
 use crate::log::HotkeyStatus;
 
@@ -170,6 +174,14 @@ pub struct Controller {
     batches: Vec<FrameBatch>,
     foreground: Option<Foreground>,
     geometry: Option<WindowGeometry>,
+    /// A geometry arrived for the tracked window: a `None` after it means
+    /// the window is gone.
+    geometry_seen: bool,
+    /// Names of the processes of the last list received, kept without the
+    /// service.
+    known_names: BTreeMap<u32, String>,
+    /// The link came back since the last step.
+    reconnected: bool,
     catalog: ProfileCatalog,
     schema: Arc<Schema>,
     host: HostState,
@@ -236,6 +248,9 @@ impl Controller {
             batches: Vec::new(),
             foreground: None,
             geometry: None,
+            geometry_seen: false,
+            known_names: BTreeMap::new(),
+            reconnected: false,
             catalog: ProfileCatalog::default(),
             schema: Arc::new(Schema::default()),
             host: HostState::Off,
@@ -295,11 +310,19 @@ impl Controller {
     ) {
         self.status = status.cloned();
         self.processes = processes.map(|p| p.processes.clone()).unwrap_or_default();
+        if processes.is_some() {
+            self.known_names = self
+                .processes
+                .iter()
+                .map(|p| (p.pid, p.name.clone()))
+                .collect();
+        }
         self.batches.extend_from_slice(batches);
     }
 
     /// Whether the service link is up.
     pub fn on_service(&mut self, connected: bool) {
+        self.reconnected |= connected && !self.connected;
         self.connected = connected;
         if !connected {
             self.status = None;
@@ -313,6 +336,7 @@ impl Controller {
 
     /// The tracked window's geometry (`None`: unknown or gone).
     pub fn on_geometry(&mut self, geometry: Option<WindowGeometry>) {
+        self.geometry_seen |= geometry.is_some();
         self.geometry = geometry;
     }
 
@@ -414,8 +438,7 @@ impl Controller {
         quality: &[Quality],
         at_ms: u64,
     ) -> Option<OverlayMessage> {
-        (self.shown && !self.used.is_empty())
-            .then(|| values_message(schema, snapshot, quality, &self.used, at_ms))
+        tick_values(&self.values_plan(), schema, snapshot, quality, at_ms)
     }
 
     pub fn current_status(&self) -> OverlayStatus {
@@ -486,12 +509,25 @@ impl Controller {
         }
     }
 
-    /// A command that met a full link queue is lost: the configuration and
-    /// the target go again once a second (the link drops unchanged values).
+    /// A command that met a full link queue is lost: while the engine is
+    /// on, the configuration and the target go again once a second (the
+    /// link drops unchanged values); an engine turned off is told again only
+    /// after a reconnection.
     fn step_resend(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
-        if self.sent_config.as_ref() != Some(config)
-            || now_ms.saturating_sub(self.config_sent_ms) < RESEND_MS
-        {
+        let reconnected = std::mem::take(&mut self.reconnected);
+        if self.sent_config.as_ref() != Some(config) {
+            return;
+        }
+        let config_sent = out
+            .link
+            .iter()
+            .any(|c| matches!(c, LinkCommand::ConfigureFrames(_)));
+        let due = if config.enabled {
+            now_ms.saturating_sub(self.config_sent_ms) >= RESEND_MS
+        } else {
+            reconnected && !config_sent
+        };
+        if !due {
             return;
         }
         self.config_sent_ms = now_ms;
@@ -518,6 +554,25 @@ impl Controller {
             }
             return;
         }
+        if self.frames_available() {
+            self.pick_target(now_ms, out);
+        } else {
+            self.hold_target(out);
+        }
+        for batch in std::mem::take(&mut self.batches) {
+            self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
+            // A batch of the previous target may still arrive after a change.
+            if self.qpc_frequency == 0 || Some(batch.pid) != self.target.as_ref().map(|t| t.pid) {
+                continue;
+            }
+            for frame in &batch.frames {
+                self.window.push(sample_of(frame, self.qpc_frequency));
+            }
+        }
+    }
+
+    /// The normal choice: the [`TargetPicker`] over the service's list.
+    fn pick_target(&mut self, now_ms: u64, out: &mut Outputs) {
         let list: Vec<ProcessInfo> = self
             .processes
             .iter()
@@ -531,21 +586,63 @@ impl Controller {
         if let Some(fg) = self.foreground {
             self.picker.on_foreground(fg.pid, now_ms);
         }
-        if let Some(change) = self.picker.tick(now_ms) {
-            let target = change.and_then(|pid| self.picker.current().filter(|p| p.pid == pid));
-            self.set_target(target.cloned());
-            out.link.push(LinkCommand::SetFramesTarget(change));
+        self.picker.tick(now_ms);
+        // Compared with our own target, which `hold_target` may have kept
+        // or chosen while the picker was not fed.
+        let current = self.picker.current().cloned();
+        let pid = current.as_ref().map(|p| p.pid);
+        if pid != self.target.as_ref().map(|t| t.pid) {
+            self.set_target(current);
+            out.link.push(LinkCommand::SetFramesTarget(pid));
         }
-        for batch in std::mem::take(&mut self.batches) {
-            self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
-            // A batch of the previous target may still arrive after a change.
-            if self.qpc_frequency == 0 || Some(batch.pid) != self.target.as_ref().map(|t| t.pid) {
-                continue;
+    }
+
+    /// Without frame data (service down or incompatible, engine not
+    /// running) sensor blocks must keep working (spec §9): the target is
+    /// kept, without the grace limit, while its window exists; without one,
+    /// the foreground process becomes the target if its name, known from the
+    /// last process list, has a profile in `gameProfiles`. Without any list
+    /// (service down since the start) no game is recognised. Any other
+    /// window (a browser) is never a target.
+    fn hold_target(&mut self, out: &mut Outputs) {
+        if self.target.is_some() {
+            if !self.target_window_alive() {
+                self.set_target(None);
+                out.link.push(LinkCommand::SetFramesTarget(None));
             }
-            for frame in &batch.frames {
-                self.window.push(sample_of(frame, self.qpc_frequency));
-            }
+            return;
         }
+        let Some(fg) = self.foreground.filter(|fg| fg.pid != self.own_pid) else {
+            return;
+        };
+        let Some(name) = self.known_names.get(&fg.pid) else {
+            return;
+        };
+        let exe = name.to_lowercase();
+        let excluded =
+            OWN_PROCESS_NAMES.contains(&exe.as_str()) || SYSTEM_EXCLUDED.contains(&exe.as_str());
+        if excluded || !self.settings.overlay.game_profiles.contains_key(&exe) {
+            return;
+        }
+        self.set_target(Some(ProcessInfo {
+            pid: fg.pid,
+            name: name.clone(),
+            displayed_fps: 0.0,
+        }));
+        out.link.push(LinkCommand::SetFramesTarget(Some(fg.pid)));
+    }
+
+    /// The target's window is watched and has not been reported gone.
+    fn target_window_alive(&self) -> bool {
+        self.sent_track.is_some() && !(self.geometry_seen && self.geometry.is_none())
+    }
+
+    /// The frame engine gives data (or is about to).
+    fn frames_available(&self) -> bool {
+        matches!(
+            self.frames_state(),
+            frames_state::RUNNING | frames_state::STARTING
+        )
     }
 
     fn set_target(&mut self, target: Option<ProcessInfo>) {
@@ -573,6 +670,7 @@ impl Controller {
             self.sent_track = wanted;
             // The previous window's geometry does not apply.
             self.geometry = None;
+            self.geometry_seen = false;
             out.track = Some(wanted);
         }
     }
@@ -1456,6 +1554,129 @@ mod tests {
         // Both off: the engine is turned off.
         c.on_settings(&settings(false), Lang::En, None);
         assert_eq!(configs(&c.step(1_200)), vec![config(false, false, false)]);
+    }
+
+    #[test]
+    fn service_down_from_startup_keeps_the_overlay_hidden() {
+        // Documented limitation: without the service there is no process
+        // name, so no game is ever recognised (never the browser either).
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(true), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_host(HostState::Running);
+        c.on_foreground(GAME_FG);
+        let out = c.step(0);
+        assert!(placements(&out).iter().all(is_hidden));
+        assert_eq!(out.track, None);
+        c.on_geometry(Some(geometry(96)));
+        assert!(placements(&c.step(5_000)).is_empty());
+        let status = c.current_status();
+        assert_eq!(status.target, None);
+        assert_eq!(status.frames, FRAMES_UNAVAILABLE);
+        assert!(!c.values_plan().wanted);
+    }
+
+    #[test]
+    fn service_drop_during_a_game_keeps_the_overlay_on_the_game() {
+        let mut c = showing();
+        c.on_service(false);
+        c.on_frames(None, None, &[]);
+        for now in [1_100, 3_500, 10_500, 20_000] {
+            let out = c.step(now);
+            assert!(placements(&out).is_empty(), "{now}: still shown");
+            // Only the once-a-second re-send of the same target.
+            assert!(targets(&out).iter().all(|t| *t == Some(GAME)), "{now}");
+            for m in metrics(&out) {
+                assert_eq!(m.state, FRAMES_UNAVAILABLE);
+            }
+        }
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        assert!(c.values_plan().wanted);
+        // The frame engine down with the service up behaves the same.
+        c.on_service(true);
+        c.on_frames(Some(&status("missing")), None, &[]);
+        let out = c.step(30_000);
+        assert!(placements(&out).is_empty());
+        assert!(targets(&out).iter().all(|t| *t == Some(GAME)));
+        // The service back with the game in front: the same target, kept.
+        c.next_profile();
+        c.step(30_100);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        let out = c.step(30_200);
+        assert!(targets(&out).iter().all(|t| *t == Some(GAME)));
+        assert!(profiles_sent(&out).is_empty(), "the choice survives");
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-full")
+        );
+    }
+
+    #[test]
+    fn game_window_closing_while_service_down_hides() {
+        let mut c = showing();
+        c.on_service(false);
+        c.on_frames(None, None, &[]);
+        c.step(200);
+        c.on_geometry(None);
+        let out = c.step(300);
+        let p = placements(&out);
+        assert_eq!(p.len(), 1);
+        assert!(is_hidden(&p[0]));
+        assert_eq!(out.track, Some(None));
+        assert_eq!(c.current_status().target, None);
+        // The game's window again, unknown to `gameProfiles`: not picked.
+        c.on_foreground(GAME_FG);
+        assert_eq!(c.step(400).track, None);
+        assert_eq!(c.current_status().target, None);
+    }
+
+    #[test]
+    fn service_down_picks_a_known_game_with_a_profile() {
+        let mut s = settings(true);
+        s.overlay
+            .game_profiles
+            .insert("my game.exe".into(), "builtin-full".into());
+        let mut c = showing_with(&s);
+        c.on_service(false);
+        c.on_frames(None, None, &[]);
+        c.on_geometry(None);
+        c.step(200);
+        assert_eq!(c.current_status().target, None);
+        // Its name is known from the last process list.
+        c.on_foreground(GAME_FG);
+        let out = c.step(300);
+        assert_eq!(out.track, Some(Some(GAME_FG)));
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        c.on_geometry(Some(geometry(96)));
+        assert_eq!(placements(&c.step(400)), vec![shown(area(CLIENT), 96)]);
+        // A known process without a profile of its own is never picked.
+        c.on_geometry(None);
+        c.step(500);
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        c.step(600);
+        assert_eq!(c.current_status().target, None);
+    }
+
+    #[test]
+    fn engine_off_is_not_resent_every_second() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(true), Lang::En, None);
+        c.on_service(true);
+        c.step(0);
+        c.on_settings(&settings(false), Lang::En, None);
+        assert_eq!(configs(&c.step(100)), vec![config(false, false, false)]);
+        for now in [1_100, 2_100, 5_000] {
+            assert!(c.step(now).link.is_empty(), "{now}");
+        }
+        // After a reconnection, once.
+        c.on_service(false);
+        c.step(5_100);
+        c.on_service(true);
+        assert_eq!(configs(&c.step(5_200)), vec![config(false, false, false)]);
+        assert!(c.step(6_300).link.is_empty());
     }
 
     fn field<'a>(line: &'a str, key: &str) -> &'a str {

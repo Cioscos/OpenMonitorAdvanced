@@ -207,7 +207,7 @@
   .bar {
     display: flex;
     justify-content: flex-end;
-    padding: 8px 16px 0;
+    padding: 8px 16px;
   }
   .action {
     flex: none;

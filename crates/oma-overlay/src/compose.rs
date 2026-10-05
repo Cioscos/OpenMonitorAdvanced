@@ -163,6 +163,7 @@ impl Compositor {
     }
 
     /// The swapchain size in pixels.
+    #[cfg(test)]
     pub fn size(&self) -> (u32, u32) {
         self.size
     }

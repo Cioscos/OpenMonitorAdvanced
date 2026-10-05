@@ -5,8 +5,8 @@
 //! The main thread owns the click-through window (`window`) and its
 //! composition surface (`compose`); it sleeps in the message wait until the
 //! link posts data or a deferred redraw is due (`Cadence::next_wake`), and
-//! presents nothing without changes (§5.2). In this task only the panel is
-//! drawn; the blocks come with the renderer (C12).
+//! presents nothing without changes (§5.2). The renderer (`render`) draws
+//! the profile from its cache, refreshing texts and charts at their rates.
 
 #![windows_subsystem = "windows"]
 
@@ -16,6 +16,7 @@ mod cadence;
 mod compose;
 mod link;
 mod log;
+mod render;
 mod state;
 #[cfg(windows)]
 mod window;
@@ -96,13 +97,6 @@ fn release_in_s(hidden_since_s: f64, now_s: f64) -> f64 {
     hidden_since_s + HIDDEN_RELEASE_S - now_s
 }
 
-/// The panel's corner radius in pixels: `radius` is in 96-DPI pixels at
-/// scale 1, and never more than half the shorter side.
-fn panel_radius_px(radius: f64, scale: f64, dpi: u32, w: u32, h: u32) -> f32 {
-    let r = radius.max(0.0) * scale * f64::from(dpi) / 96.0;
-    r.min(f64::from(w.min(h)) / 2.0) as f32
-}
-
 #[cfg(windows)]
 fn run_window(pipe: String) -> i32 {
     use std::sync::atomic::Ordering;
@@ -142,6 +136,8 @@ fn run_window(pipe: String) -> i32 {
     // Built at the first visible frame, dropped on a lost device and after
     // `HIDDEN_RELEASE_S` hidden.
     let mut gfx: Option<Compositor> = None;
+    // Brushes, text layouts and geometries, bound to `gfx`'s device.
+    let mut cache = render::RenderCache::default();
     let mut failures = 0u32;
     // A frame failed: draw everything again at this time.
     let mut retry_at: Option<f64> = None;
@@ -228,6 +224,9 @@ fn run_window(pipe: String) -> i32 {
         if changes.layout || changes.placement {
             rect = placement_rect(&state);
         }
+        if changes.layout || changes.placement || changes.settings {
+            cache.invalidate();
+        }
 
         let due = cadence.due(now_s, &changes);
         let Some(r) = rect else {
@@ -236,9 +235,11 @@ fn run_window(pipe: String) -> i32 {
                 window::apply_placement(hwnd, None);
             }
             retry_at = None;
+            failures = 0;
             let since = *hidden_since.get_or_insert(now_s);
             if gfx.is_some() && release_in_s(since, now_s) <= 0.0 {
                 tracing::debug!("overlay hidden for a while; releasing the graphics device");
+                cache.release_device();
                 gfx = None;
             }
             continue;
@@ -250,7 +251,7 @@ fn run_window(pipe: String) -> i32 {
         };
         let mut place_now = reassert && shown == Some(r);
         if wants_draw {
-            match draw_frame(&mut gfx, hwnd, r, &state) {
+            match draw_frame(&mut gfx, &mut cache, hwnd, r, &state, due) {
                 Ok(()) => {
                     failures = 0;
                     retry_at = None;
@@ -259,8 +260,12 @@ fn run_window(pipe: String) -> i32 {
                 }
                 Err(e) => {
                     failures += 1;
+                    // The retry rebuilds everything: the due texts and charts
+                    // of this frame may be half updated.
+                    cache.invalidate();
                     if needs_recreate(e.code()) {
                         tracing::warn!(error = %e, failures, "graphics device lost; recreating");
+                        cache.release_device();
                         gfx = None;
                     } else {
                         tracing::warn!(error = %e, failures, "overlay frame failed");
@@ -280,55 +285,27 @@ fn run_window(pipe: String) -> i32 {
     }
 }
 
-/// Draws one frame at the size of `r`: for now only the profile's panel.
+/// Draws one frame at the size of `r`: the profile, from the cache.
 #[cfg(windows)]
 fn draw_frame(
     gfx: &mut Option<compose::Compositor>,
+    cache: &mut render::RenderCache,
     hwnd: windows::Win32::Foundation::HWND,
     r: PxRect,
     state: &OverlayState,
+    due: cadence::Due,
 ) -> windows::core::Result<()> {
-    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
-    use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
-
     let (w, h) = (r.w.max(1) as u32, r.h.max(1) as u32);
     let g = match gfx {
         Some(g) => g,
         None => gfx.insert(compose::Compositor::new(hwnd, w, h)?),
     };
     g.resize(w, h)?;
-    let (w, h) = g.size();
-    {
-        let dc = g.begin();
-        if let (Some(profile), Some((_, dpi))) = (&state.profile, &state.placement) {
-            let p = &profile.panel;
-            let color = D2D1_COLOR_F {
-                r: f32::from(p.color.r) / 255.0,
-                g: f32::from(p.color.g) / 255.0,
-                b: f32::from(p.color.b) / 255.0,
-                a: (f64::from(p.color.a) / 255.0 * p.opacity.clamp(0.0, 1.0)) as f32,
-            };
-            let radius = panel_radius_px(p.radius, profile.scale, *dpi, w, h);
-            let panel = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: w as f32,
-                    bottom: h as f32,
-                },
-                radiusX: radius,
-                radiusY: radius,
-            };
-            // SAFETY: drawing on the context between `begin` and
-            // `end_and_present`, from the thread that owns it; the inputs are
-            // locals that outlive the calls.
-            unsafe {
-                let brush = dc.CreateSolidColorBrush(&color, None)?;
-                dc.FillRoundedRectangle(&panel, &brush);
-            }
-        }
-    }
-    g.end_and_present()
+    let drawn = render::draw(g.begin(), cache, state, due);
+    // The frame is closed (and presented) even after a drawing error, so the
+    // context is not left inside `BeginDraw`.
+    let presented = g.end_and_present();
+    drawn.and(presented)
 }
 
 #[cfg(not(windows))]
@@ -406,13 +383,5 @@ mod tests {
         assert_eq!(release_in_s(10.0, 25.0), 15.0);
         assert!(release_in_s(10.0, 40.0) <= 0.0);
         assert!(release_in_s(10.0, 100.0) <= 0.0);
-    }
-
-    #[test]
-    fn panel_radius_scales_with_dpi_and_fits_the_panel() {
-        assert_eq!(panel_radius_px(4.0, 1.0, 96, 100, 100), 4.0);
-        assert_eq!(panel_radius_px(4.0, 1.5, 192, 100, 100), 12.0);
-        assert_eq!(panel_radius_px(40.0, 1.0, 96, 100, 20), 10.0);
-        assert_eq!(panel_radius_px(-1.0, 1.0, 96, 100, 20), 0.0);
     }
 }

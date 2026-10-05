@@ -34,6 +34,11 @@ impl StatRing {
         }
     }
 
+    /// The kept samples as `(t_s, value)`, oldest first (for the charts).
+    pub fn samples(&self) -> impl DoubleEndedIterator<Item = (f64, f64)> + '_ {
+        self.samples.iter().copied()
+    }
+
     /// `current` is the last value; `min`, `avg` and `max` cover the samples
     /// of the last `stat.window` seconds before the newest one (inclusive).
     pub fn value(&self, stat: &Stat) -> Option<f64> {
@@ -141,6 +146,18 @@ mod tests {
         // Beyond the ring's window nothing older is kept.
         r.push(11.0, Some(1.0));
         assert_eq!(r.value(&st(StatOp::Max, 600)), Some(30.0));
+    }
+
+    #[test]
+    fn stat_ring_samples_oldest_first() {
+        let mut r = StatRing::new(5);
+        assert_eq!(r.samples().count(), 0);
+        for (t, v) in [(0.0, 1.0), (3.0, 2.0), (6.0, 3.0)] {
+            r.push(t, Some(v));
+        }
+        // The sample at 0 is older than the 5 s window and is gone.
+        let s: Vec<_> = r.samples().collect();
+        assert_eq!(s, vec![(3.0, 2.0), (6.0, 3.0)]);
     }
 
     #[test]

@@ -8,6 +8,8 @@ import type {
   Label,
   LogState,
   LogStatus,
+  OverlayFramesState,
+  OverlayStatus,
   UpdateStatus,
   Rule,
   RuleStatus,
@@ -305,6 +307,65 @@ function mockRuleStatus(level: HealthReport['level']): RuleStatus[] {
   });
 }
 
+const OVERLAY_FRAMES: readonly OverlayFramesState[] = ['off', 'starting', 'running', 'denied', 'tampered', 'missing', 'failed', 'unavailable'];
+
+/** The frame engine state of the mock overlay while it is on, from `?overlay=` in the URL; `running` otherwise. */
+export function parseOverlayFrames(search: string): OverlayFramesState {
+  const raw = new URLSearchParams(search).get('overlay');
+  return OVERLAY_FRAMES.find((state) => state === raw) ?? 'running';
+}
+
+/**
+ * A fake overlay controller: off until `overlay.enabled`, then measuring a fixed game with the
+ * profile its settings pick. The catalog has the four built-ins, one user profile and one
+ * rejected file, so every part of the settings page has something to show.
+ */
+function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
+  const listeners = new Set<(s: OverlayStatus) => void>();
+  const unset = { requested: null, effective: null, state: 'unset', reason: null } as const;
+  let engine = frames;
+  const status = (): OverlayStatus => {
+    const overlay = settings.state().settings.overlay;
+    const target = overlay.enabled ? { name: 'cyberpunk2077.exe', pid: 14_320 } : null;
+    const hotkey = (value: string | null) => (value === null ? { ...unset } : { requested: value, effective: value, state: 'active' as const, reason: null });
+    return {
+      enabled: overlay.enabled,
+      process: overlay.enabled ? 'running' : 'off',
+      processReason: null,
+      frames: overlay.enabled ? engine : 'off',
+      framesDetail: null,
+      target,
+      activeProfile: target === null ? null : (overlay.gameProfiles[target.name] ?? overlay.defaultProfile),
+      profiles: [
+        ...['builtin-minimal-fps', 'builtin-gaming', 'builtin-full', 'builtin-bar'].map((id) => ({ id, name: `overlay.template.${id}`, builtin: true })),
+        { id: '6f1c2a9e-3b47-4d8a-9e15-0c2b7d4f8a31', name: 'Stream (1440p)', builtin: false },
+      ],
+      diagnostics: [{ file: 'old-layout.json', reason: 'unknown field `colour` at line 12 column 7' }],
+      hiddenByUser: false,
+      hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile) },
+    };
+  };
+  const emit = () => {
+    const next = status();
+    listeners.forEach((cb) => cb(next));
+  };
+  settings.subscribe(emit);
+  return {
+    get: status,
+    subscribe(cb: (s: OverlayStatus) => void) {
+      listeners.add(cb);
+      return () => {
+        listeners.delete(cb);
+      };
+    },
+    retry() {
+      engine = 'running';
+      emit();
+    },
+    reload: emit,
+  };
+}
+
 /** Bytes of a fake part before the mock recorder opens the next one. */
 export const MOCK_LOG_PART_BYTES = 50_000;
 
@@ -423,6 +484,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
   const recorder = mockLogRecorder(parseLogState(typeof location === 'undefined' ? '' : location.search));
+  const overlay = mockOverlay(settings, parseOverlayFrames(typeof location === 'undefined' ? '' : location.search));
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -547,6 +609,11 @@ export function createMockBackend(intervalMs = 1000): Backend {
     pickLogFolder: async () => 'C:\\Users\\mock\\Documents\\OpenMonitorAdvanced\\logs',
     // No global hotkeys in the browser.
     setLogHotkeysSuspended: async () => {},
+    getOverlayStatus: async () => overlay.get(),
+    onOverlayStatus: async (cb) => overlay.subscribe(cb),
+    overlayRetry: async () => overlay.retry(),
+    // No profile folder in the browser: the catalog stays the same.
+    overlayReloadProfiles: async () => overlay.reload(),
     // The browser has no network access to GitHub: the check always finds nothing to report.
     checkUpdates: async () => MOCK_UPDATE_STATUS,
     getUpdateStatus: async () => MOCK_UPDATE_STATUS,

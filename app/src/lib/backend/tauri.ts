@@ -20,6 +20,7 @@ import type {
   Rule,
   RuleStatus,
   LogStatus,
+  OverlayStatus,
   UpdateStatus,
 } from '../types';
 import type { Backend } from './backend';
@@ -72,6 +73,10 @@ export function createTauriBackend(): Backend {
     openLogFolder: () => invoke<void>('open_log_folder'),
     pickLogFolder: () => invoke<string | null>('pick_log_folder'),
     setLogHotkeysSuspended: (suspended) => invoke<void>('set_log_hotkeys_suspended', { suspended }),
+    getOverlayStatus: () => invoke<OverlayStatus | null>('get_overlay_status'),
+    onOverlayStatus: (cb) => listen<OverlayStatus>('overlay-status', (e) => cb(e.payload)),
+    overlayRetry: () => invoke<void>('overlay_retry'),
+    overlayReloadProfiles: () => invoke<void>('overlay_reload_profiles'),
     checkUpdates: () => invoke<UpdateStatus>('check_updates'),
     getUpdateStatus: () => invoke<UpdateStatus>('get_update_status'),
     openReleasePage: () => invoke<void>('open_release_page'),

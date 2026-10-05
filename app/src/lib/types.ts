@@ -559,3 +559,39 @@ export interface LogStatus {
   error: LogError | null;
   hotkeys: { toggle: HotkeyStatus; pause: HotkeyStatus };
 }
+
+/** One profile the overlay can use; a built-in's `name` is the i18n key `overlay.template.<id>`. */
+export interface OverlayProfileEntry {
+  id: string;
+  name: string;
+  builtin: boolean;
+}
+
+/** A profile file that could not be used, with the reason it was rejected. */
+export interface OverlayProfileDiagnostic {
+  file: string;
+  reason: string;
+}
+
+/** The overlay process: `failed` carries `crashing` or `incompatible` in `processReason`. */
+export type OverlayProcessState = 'off' | 'starting' | 'running' | 'failed';
+
+/** The frame engine as the overlay sees it: the service's states, or `unavailable` without the service. */
+export type OverlayFramesState = 'off' | 'starting' | 'running' | 'denied' | 'tampered' | 'missing' | 'failed' | 'unavailable';
+
+/** The overlay's state (`overlay-status`, `get_overlay_status`); mirrors `OverlayStatus` in app/src-tauri/src/overlay/controller.rs. */
+export interface OverlayStatus {
+  enabled: boolean;
+  process: OverlayProcessState;
+  processReason: 'crashing' | 'incompatible' | null;
+  frames: OverlayFramesState;
+  framesDetail: string | null;
+  /** The followed game: its executable name and PID. */
+  target: { name: string; pid: number } | null;
+  activeProfile: string | null;
+  profiles: OverlayProfileEntry[];
+  diagnostics: OverlayProfileDiagnostic[];
+  /** Hidden with the hotkey or the tray; not saved. */
+  hiddenByUser: boolean;
+  hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus };
+}

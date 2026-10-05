@@ -102,3 +102,16 @@ test('the disk state command and event match the Rust shell', async () => {
   await backend.onDiskStates(vi.fn());
   expect(listen).toHaveBeenLastCalledWith('oma:disk-states', expect.any(Function));
 });
+
+test('overlay commands and event match the Rust shell', async () => {
+  const { listen } = await import('@tauri-apps/api/event');
+  const backend = createTauriBackend();
+  await backend.getOverlayStatus();
+  expect(invoke).toHaveBeenLastCalledWith('get_overlay_status');
+  await backend.overlayRetry();
+  expect(invoke).toHaveBeenLastCalledWith('overlay_retry');
+  await backend.overlayReloadProfiles();
+  expect(invoke).toHaveBeenLastCalledWith('overlay_reload_profiles');
+  await backend.onOverlayStatus(vi.fn());
+  expect(listen).toHaveBeenLastCalledWith('overlay-status', expect.any(Function));
+});

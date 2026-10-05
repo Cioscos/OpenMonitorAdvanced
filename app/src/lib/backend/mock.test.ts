@@ -6,11 +6,12 @@ import {
   createMockBackend,
   mockGpuProcesses,
   mockValues,
+  parseOverlayFrames,
   parsePawnIoStatus,
   parseServiceState,
   sortGpuProcesses,
 } from './mock';
-import type { Snapshot } from '../types';
+import type { OverlayStatus, Snapshot } from '../types';
 
 const GPU = 'gpu/pci-0000:01:00.0';
 const CPU_LOAD = 'cpu/0/load/total';
@@ -513,4 +514,30 @@ test('the mock without the service has no disk states and no quality', async () 
     off();
     expect(seen[0].quality).toBeUndefined();
   }
+});
+
+test('mock overlay follows the settings and offers a retry', async () => {
+  const backend = createMockBackend();
+  const seen: OverlayStatus[] = [];
+  const off = await backend.onOverlayStatus((s) => seen.push(s));
+  const off0 = await backend.getOverlayStatus();
+  expect(off0).toMatchObject({ enabled: false, process: 'off', frames: 'off', target: null });
+  expect(off0!.profiles.filter((p) => p.builtin).map((p) => p.name)).toEqual(
+    ['builtin-minimal-fps', 'builtin-gaming', 'builtin-full', 'builtin-bar'].map((id) => `overlay.template.${id}`),
+  );
+  await backend.updateSettings({ overlay: { enabled: true } });
+  const on = seen.at(-1)!;
+  expect(on).toMatchObject({ enabled: true, process: 'running', frames: 'running', activeProfile: 'builtin-gaming' });
+  expect(on.target?.name).toMatch(/\.exe$/);
+  await backend.updateSettings({ overlay: { gameProfiles: { [on.target!.name]: 'builtin-bar' } } });
+  expect(seen.at(-1)!.activeProfile).toBe('builtin-bar');
+  await backend.overlayRetry();
+  expect(seen.at(-1)!.frames).toBe('running');
+  off();
+});
+
+test('?overlay= simulates a frame engine state', () => {
+  expect(parseOverlayFrames('?overlay=denied')).toBe('denied');
+  expect(parseOverlayFrames('?overlay=bogus')).toBe('running');
+  expect(parseOverlayFrames('')).toBe('running');
 });

@@ -10,6 +10,7 @@
   import { health } from './lib/health.svelte';
   import { LiveStore, connect } from './lib/live.svelte';
   import { log } from './lib/log.svelte';
+  import { overlay } from './lib/overlay.svelte';
   import { updates } from './lib/updates.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
@@ -69,6 +70,7 @@
     let offService: (() => void) | undefined;
     let offHealth: (() => void) | undefined;
     let offLog: (() => void) | undefined;
+    let offOverlay: (() => void) | undefined;
     let offUpdates: (() => void) | undefined;
     let cancelled = false;
     // Ordering race (spec §6): a late `getServiceStatus` reply must never overwrite a status
@@ -99,6 +101,13 @@
         else offLog = unsubscribe;
       })
       .catch((error) => console.error('log status unavailable', error));
+    overlay
+      .connect(backend)
+      .then((unsubscribe) => {
+        if (cancelled) unsubscribe();
+        else offOverlay = unsubscribe;
+      })
+      .catch((error) => console.error('overlay status unavailable', error));
     updates
       .connect(backend)
       .then((unsubscribe) => {
@@ -174,6 +183,7 @@
       off?.();
       offHealth?.();
       offLog?.();
+      offOverlay?.();
       offUpdates?.();
       offService?.();
       offSettings?.();

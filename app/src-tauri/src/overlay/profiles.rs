@@ -116,7 +116,8 @@ fn profile_file_id(name: &str) -> Option<&str> {
 }
 
 /// Reads and validates one profile file without ever reading more than
-/// [`MAX_PROFILE_BYTES`] + 1 bytes. `Ok(None)` when it is not a regular file.
+/// [`MAX_PROFILE_BYTES`] + 1 bytes, and checks that the overlay will accept
+/// it as well. `Ok(None)` when it is not a regular file.
 fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
     let meta = fs::metadata(path).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -132,7 +133,18 @@ fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
         .map_err(|e| e.to_string())?;
     let text =
         String::from_utf8(bytes).map_err(|e| ProfileError::Json(e.to_string()).to_string())?;
-    parse_profile(&text).map(Some).map_err(|e| e.to_string())
+    let profile = parse_profile(&text).map_err(|e| e.to_string())?;
+    // `SetProfile` carries the profile written out again, defaults included,
+    // and the overlay parses it under the same limit: a file that grows past
+    // it would be accepted here and refused there.
+    let written = serde_json::to_string(&profile).map_or(usize::MAX, |json| json.len());
+    if written > MAX_PROFILE_BYTES {
+        return Err(format!(
+            "{} once written out for the overlay",
+            ProfileError::TooLarge
+        ));
+    }
+    Ok(Some(profile))
 }
 
 impl ProfileCatalog {
@@ -306,6 +318,44 @@ mod tests {
             }]
         );
         assert_eq!(fs::metadata(&path).unwrap().len(), text.len() as u64);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 256 text blocks whose texts bring the file to just under the limit.
+    fn profile_near_the_limit() -> String {
+        let with_text = |len: usize| {
+            let blocks: Vec<serde_json::Value> = (0..256)
+                .map(|i| {
+                    serde_json::json!({
+                        "id": format!("b{i}"),
+                        "rect": {"x": 0, "y": 0, "w": 4, "h": 1},
+                        "source": {"text": "x".repeat(len)},
+                        "kind": "text"
+                    })
+                })
+                .collect();
+            serde_json::json!({ "format": 1, "name": "big", "blocks": blocks }).to_string()
+        };
+        let len = (MAX_PROFILE_BYTES - with_text(0).len()) / 256;
+        with_text(len)
+    }
+
+    #[test]
+    fn profile_too_large_for_the_overlay_once_written_is_rejected() {
+        let text = profile_near_the_limit();
+        assert!(text.len() <= MAX_PROFILE_BYTES);
+        // The defaults written out for `SetProfile` push it past the limit.
+        let profile = parse_profile(&text).unwrap();
+        assert!(serde_json::to_string(&profile).unwrap().len() > MAX_PROFILE_BYTES);
+        let dir = temp_dir("too-large-written");
+        fs::write(dir.join(format!("{UUID_A}.json")), &text).unwrap();
+        let catalog = load_catalog(&dir);
+        assert_eq!(ids(&catalog), builtin_ids());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics[0].file, format!("{UUID_A}.json"));
+        // Asked for, it falls back to «Gaming».
+        let (id, _) = catalog.resolve(UUID_A, &Schema::default());
+        assert_eq!(id, FALLBACK_PROFILE);
         fs::remove_dir_all(&dir).unwrap();
     }
 

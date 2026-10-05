@@ -256,6 +256,16 @@ fn stamp_of(id: &str) -> Option<&str> {
     ends_with_stamp(id)
 }
 
+/// Sort key: time stamp, then the collision suffix as a number.
+fn rank(id: &str) -> (Option<&str>, u32) {
+    let n = id
+        .rsplit_once('-')
+        .filter(|(head, _)| ends_with_stamp(head).is_some())
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(1);
+    (stamp_of(id), n)
+}
+
 /// Trust boundary for ids coming from the UI: only what [`file_stem`] and the
 /// collision suffix can produce, so no path leaves the benchmarks folder.
 pub fn is_benchmark_id(id: &str) -> bool {
@@ -348,13 +358,14 @@ impl BenchmarkFiles {
             head.extend_from_slice(CSV_HEADER.as_bytes());
             if let Err(e) = file.write_all(&head) {
                 drop(file);
-                let _ = std::fs::remove_file(&csv);
+                let _ = self.fs.remove_file(&csv);
                 return Err(WriteFailure::from_io(&e));
             }
             return Ok(BenchmarkWriter {
                 file,
                 json: self.dir.join(format!("{name}.json")),
                 csv,
+                fs: self.fs.clone(),
                 buf: Vec::with_capacity(FLUSH_BYTES + 1024),
                 rows: 0,
                 failed: false,
@@ -377,7 +388,7 @@ impl BenchmarkFiles {
                 is_benchmark_id(id).then(|| id.to_owned())
             })
             .collect();
-        ids.sort_by(|a, b| (stamp_of(b), b).cmp(&(stamp_of(a), a)));
+        ids.sort_by(|a, b| rank(b).cmp(&rank(a)));
         ids.truncate(MAX_HISTORY);
         ids.into_iter()
             .filter_map(|id| {
@@ -437,6 +448,7 @@ fn read_record(path: &Path) -> Option<BenchmarkRecord> {
 /// An open CSV. After a write error the rest of the rows is dropped.
 pub struct BenchmarkWriter {
     file: Box<dyn LogFile>,
+    fs: Arc<dyn LogFs>,
     csv: PathBuf,
     json: PathBuf,
     buf: Vec<u8>,
@@ -445,7 +457,9 @@ pub struct BenchmarkWriter {
 }
 
 impl BenchmarkWriter {
-    /// Buffers the rows; the first write error is returned once.
+    /// Buffers the rows. The first write error is returned once and must end
+    /// the capture (the caller stops with `EndReason::Error`); later rows are
+    /// dropped and return `Ok`.
     pub fn append(&mut self, lines: &[String]) -> Result<(), WriteFailure> {
         if self.failed {
             return Ok(());
@@ -472,8 +486,9 @@ impl BenchmarkWriter {
         })
     }
 
-    /// Flushes and, with a summary, writes the `.json` atomically. Without
-    /// rows and summary the CSV is removed. Returns the first error.
+    /// Flushes and, with a summary, writes the `.json` atomically. Without a
+    /// summary the CSV is removed (it would never show in the history).
+    /// Returns the first error.
     pub fn finish(mut self, summary: Option<&BenchmarkRecord>) -> Result<(), WriteFailure> {
         let flushed = if self.failed { Ok(()) } else { self.flush() };
         let mut written = Ok(());
@@ -485,11 +500,10 @@ impl BenchmarkWriter {
                         .map_err(|e| WriteFailure::from_io(&e))
                 });
         }
-        let empty = summary.is_none() && self.rows == 0;
-        let csv = self.csv.clone();
-        drop(self);
-        if empty {
-            let _ = std::fs::remove_file(csv);
+        let Self { fs, csv, file, .. } = self;
+        drop(file);
+        if summary.is_none() {
+            let _ = fs.remove_file(&csv);
         }
         flushed.and(written)
     }
@@ -680,6 +694,7 @@ mod tests {
             files.begin("g-20261005-213000").err(),
             Some(WriteFailure::DiskFull)
         );
+        assert!(fs.files().is_empty());
         // A data write fails: one error, the rest is dropped, no .json.
         let mut w = files.begin("h-20261005-213000").unwrap();
         fs.fail_write(3, Fault::Error(112));
@@ -687,7 +702,7 @@ mod tests {
         assert_eq!(w.append(&big), Err(WriteFailure::DiskFull));
         assert_eq!(w.append(&big), Ok(()));
         assert_eq!(w.finish(None), Ok(()));
-        assert!(fs.files().iter().all(|p| p.extension().unwrap() == "csv"));
+        assert!(fs.files().is_empty());
     }
 
     #[test]
@@ -727,6 +742,7 @@ mod tests {
         std::fs::write(dir.join("z-20261001-100000.json"), &json).unwrap();
         std::fs::write(dir.join("a-20261005-100000.json"), &json).unwrap();
         std::fs::write(dir.join("a-20261005-100000-2.json"), &json).unwrap();
+        std::fs::write(dir.join("a-20261005-100000-10.json"), &json).unwrap();
         std::fs::write(dir.join("broken-20261006-100000.json"), b"{").unwrap();
         std::fs::write(dir.join("not an id.json"), &json).unwrap();
         std::fs::write(
@@ -739,6 +755,7 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "a-20261005-100000-10",
                 "a-20261005-100000-2",
                 "a-20261005-100000",
                 "z-20261001-100000"

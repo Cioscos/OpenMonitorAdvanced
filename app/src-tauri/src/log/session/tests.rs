@@ -178,6 +178,10 @@ impl LogFs for GatedFs {
             gate: self.gate.clone(),
         }))
     }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        LogFs::remove_file(&*self.mem, path)
+    }
 }
 
 struct GatedFile {

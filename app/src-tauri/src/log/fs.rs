@@ -9,6 +9,8 @@ pub trait LogFs: Send + Sync + 'static {
     /// Creates `path` exclusively: fails with `AlreadyExists` when it is
     /// there, never truncates.
     fn create_new(&self, path: &Path) -> io::Result<Box<dyn LogFile>>;
+    /// Removes a file.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
 }
 
 /// An open log file part.
@@ -31,6 +33,10 @@ impl LogFs for RealFs {
             .create_new(true)
             .open(path)?;
         Ok(Box::new(RealFile(file)))
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
     }
 }
 
@@ -165,6 +171,20 @@ pub mod fake {
                 state: self.state.clone(),
                 path: path.to_path_buf(),
             }))
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.remove(path)
+        }
+    }
+
+    impl MemFs {
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            lock(&self.state)
+                .files
+                .remove(path)
+                .map(|_| ())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
         }
     }
 

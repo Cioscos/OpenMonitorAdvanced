@@ -2,7 +2,7 @@
   import { sensorLabel } from '../lib/advanced/labels';
   import { sidebarEntries } from '../lib/advanced/nav';
   import { categoryLabel, groupSensors } from '../lib/advanced/pages';
-  import type { FrameMetric, Source } from '../lib/editor/profile';
+  import { FRAME_METRICS, type Source } from '../lib/editor/profile';
   import { t } from '../lib/i18n/index.svelte';
   import type { Schema } from '../lib/types';
 
@@ -20,21 +20,6 @@
     /** An item released at a point of the page; the canvas decides whether it lands on it. */
     onDrop: (source: Source, clientX: number, clientY: number) => unknown;
   } = $props();
-
-  const METRICS: FrameMetric[] = [
-    'fps-displayed',
-    'fps-rendered',
-    'fps-presented',
-    'frametime-displayed',
-    'frametime-app',
-    'low-1',
-    'low-01',
-    'fg-multiplier',
-    'stutter',
-    'latency-pc',
-    'latency-display',
-    'bound',
-  ];
 
   let query = $state('');
   const needle = $derived(query.trim().toLocaleLowerCase());
@@ -129,7 +114,7 @@
     <section role="group" aria-labelledby="palette-frames">
       <h2 id="palette-frames">{t('editor.palette.frames')}</h2>
       <ul>
-        {#each METRICS as metric (metric)}
+        {#each FRAME_METRICS as metric (metric)}
           {@render item({ frames: metric }, t(`overlay.text.metric.${metric}`))}
         {/each}
       </ul>

@@ -115,3 +115,18 @@ export function firstFreeCell(blocks: readonly Block[], w: number, h: number): {
   const free = cells.find((c) => c.x <= LIMITS.rect.x[1] && c.y <= LIMITS.rect.y[1] && !blocks.some((b) => overlaps({ ...c, w, h }, b.rect)));
   return free ?? { x: 0, y: 0 };
 }
+
+/**
+ * `wanted`, or the first free `<base> (n)` when another profile has that name, compared without
+ * case (DD11). Same rule as `unique_name` in crates/oma-core/src/overlay/write.rs: a name already
+ * ending in « (n)» continues from n + 1.
+ */
+export function uniqueName(existing: readonly string[], wanted: string): string {
+  const taken = new Set(existing.map((n) => n.toLowerCase()));
+  if (!taken.has(wanted.toLowerCase())) return wanted;
+  const m = /^(.*) \((\d+)\)$/.exec(wanted);
+  const base = m ? m[1] : wanted;
+  let n = m ? Number(m[2]) + 1 : 2;
+  while (taken.has(`${base} (${n})`.toLowerCase())) n++;
+  return `${base} (${n})`;
+}

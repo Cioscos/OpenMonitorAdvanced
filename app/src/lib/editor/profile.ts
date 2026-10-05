@@ -17,6 +17,22 @@ export type FrameMetric =
   | 'latency-display'
   | 'bound';
 
+/** Every frame metric, in the order the editor lists them. */
+export const FRAME_METRICS: readonly FrameMetric[] = [
+  'fps-displayed',
+  'fps-rendered',
+  'fps-presented',
+  'frametime-displayed',
+  'frametime-app',
+  'low-1',
+  'low-01',
+  'fg-multiplier',
+  'stutter',
+  'latency-pc',
+  'latency-display',
+  'bound',
+];
+
 /** What a block shows: a JSON object with exactly one key. */
 export type Source = { sensor: string } | { frames: FrameMetric } | { text: string };
 

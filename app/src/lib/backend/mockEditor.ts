@@ -1,6 +1,7 @@
 // The overlay editor's side of the mock backend: an in-memory profile store, fake frames for the
 // canvas and a fixed benchmark history, so `pnpm dev` with `?window=overlay-editor` shows the editor.
 
+import { uniqueName } from '../editor/ops';
 import { newBlock, withDefaults, type Profile, type Source } from '../editor/profile';
 import { t } from '../i18n/index.svelte';
 import type { BenchmarkEntry, CommandError, EditableProfile, EditorData, OverlayProfileEntry } from '../types';
@@ -33,13 +34,6 @@ function builtin(id: string): Profile {
         ? [fps, { frames: 'low-1' }, { sensor: 'cpu/0/load/total' }, { sensor: 'gpu/pci-0000:01:00.0/load/core' }, { frames: 'frametime-displayed' }]
         : [fps, { frames: 'low-1' }, { frames: 'fg-multiplier' }, { sensor: 'cpu/0/load/total' }, { sensor: 'memory/0/load/used' }];
   return stacked(t(`overlay.template.${id}`), sources);
-}
-
-function uniqueName(taken: string[], wanted: string): string {
-  const lower = new Set(taken.map((n) => n.toLowerCase()));
-  let name = wanted;
-  for (let n = 2; lower.has(name.toLowerCase()); n++) name = `${wanted} (${n})`;
-  return name;
 }
 
 /** The user profiles in memory; `onChange` runs after every write (the catalog changed). */

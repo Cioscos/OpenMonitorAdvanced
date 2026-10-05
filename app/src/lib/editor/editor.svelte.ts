@@ -8,7 +8,7 @@ import { emptyProfile, withDefaults, type Block, type Profile } from './profile'
 export const EDITOR_PROFILE_DEBOUNCE_MS = 250;
 
 const isCommandError = (e: unknown): e is CommandError => typeof e === 'object' && e !== null && typeof (e as CommandError).key === 'string';
-const asCommandError = (e: unknown): CommandError => (isCommandError(e) ? { key: e.key, detail: e.detail ?? null } : { key: 'editor.error.io', detail: String(e) });
+export const asCommandError = (e: unknown): CommandError => (isCommandError(e) ? { key: e.key, detail: e.detail ?? null } : { key: 'editor.error.io', detail: String(e) });
 
 /**
  * The profile open in the overlay editor: its edits with undo and redo, the selection, the

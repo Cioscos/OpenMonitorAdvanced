@@ -8,6 +8,7 @@ import {
   moveBlocks,
   pasteBlocks,
   resizeBlocks,
+  uniqueName,
   sendBackward,
   setPath,
   snap,
@@ -154,4 +155,11 @@ test('firstFreeCell finds the top-left-most free cell', () => {
   expect(firstFreeCell([], 12, 2)).toEqual({ x: 0, y: 0 });
   expect(firstFreeCell([a], 12, 2)).toEqual({ x: 12, y: 0 });
   expect(firstFreeCell([a, b], 12, 2)).toEqual({ x: 24, y: 0 });
+});
+
+test('unique names follow the shell rule', () => {
+  expect(uniqueName(['Gaming', 'gaming (2)'], 'Gaming')).toBe('Gaming (3)');
+  expect(uniqueName(['Gaming'], 'Nuovo')).toBe('Nuovo');
+  expect(uniqueName(['Gaming (2)'], 'Gaming (2)')).toBe('Gaming (3)');
+  expect(uniqueName(['MINE'], 'mine')).toBe('mine (2)');
 });

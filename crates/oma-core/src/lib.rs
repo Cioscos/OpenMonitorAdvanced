@@ -8,6 +8,7 @@ pub mod history;
 pub mod hotkey;
 pub mod merge;
 pub mod model;
+pub mod overlay;
 pub mod provider;
 pub mod rate;
 pub mod report;

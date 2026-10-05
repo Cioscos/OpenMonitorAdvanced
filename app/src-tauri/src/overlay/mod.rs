@@ -3,16 +3,19 @@
 //! [`runner`] runs it on the `oma-overlay-ctl` thread with the service link,
 //! the foreground watcher and the sampler, [`forward`] builds the messages
 //! for `oma-overlay.exe`, [`host`] runs it, [`profiles`] reads the profile
-//! catalog and [`frames`] formats the `OMA_FRAMES_DEBUG` line.
+//! catalog, [`store`] writes the editor's profile files and [`frames`]
+//! formats the `OMA_FRAMES_DEBUG` line.
 
 #[cfg(windows)]
 pub mod controller;
+pub mod editor;
 pub mod forward;
 pub mod frames;
 pub mod host;
 pub mod profiles;
 #[cfg(windows)]
 pub mod runner;
+pub mod store;
 pub mod target;
 
 /// The overlay's Tauri commands off Windows, where there is no overlay.

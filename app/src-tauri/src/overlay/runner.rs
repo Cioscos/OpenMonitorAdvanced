@@ -19,7 +19,6 @@
 //!   watcher goes.
 
 use std::io;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -43,7 +42,7 @@ use super::controller::{
 };
 use super::frames::{options_from_env, ENV_VAR};
 use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlaySender};
-use super::profiles::{load_catalog, profiles_dir, ProfileCatalog};
+use super::profiles::{app_profiles_dir, load_catalog, ProfileCatalog};
 use crate::hotkeys::OverlayActions;
 use crate::i18n::{t, Lang};
 use crate::log::HotkeyStatus;
@@ -163,6 +162,11 @@ impl OverlayHandle {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Reads the profile folder again.
+    pub fn reload_profiles(&self) {
+        self.send(Input::ReloadProfiles);
     }
 
     fn send(&self, input: Input) {
@@ -311,8 +315,8 @@ impl Drop for OverlayRunner {
 
 /// The profile catalog from `%APPDATA%`; the built-ins only without it.
 fn read_catalog() -> ProfileCatalog {
-    match std::env::var_os("APPDATA") {
-        Some(app_data) => load_catalog(&profiles_dir(&PathBuf::from(app_data))),
+    match app_profiles_dir() {
+        Some(dir) => load_catalog(&dir),
         None => {
             tracing::warn!("no APPDATA: only the built-in overlay profiles");
             ProfileCatalog::builtins()
@@ -722,7 +726,7 @@ pub fn overlay_retry(state: State<'_, OverlayHandle>) {
 /// Reads the profile folder again (DP17).
 #[tauri::command]
 pub fn overlay_reload_profiles(state: State<'_, OverlayHandle>) {
-    state.send(Input::ReloadProfiles);
+    state.reload_profiles();
 }
 
 /// Hides or shows the overlay; not saved (DP11).

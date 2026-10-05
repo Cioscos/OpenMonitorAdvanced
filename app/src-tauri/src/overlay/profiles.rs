@@ -93,7 +93,10 @@ pub fn load_catalog(dir: &Path) -> ProfileCatalog {
                 });
                 catalog.user.insert(id, profile);
             }
-            Err(reason) => catalog.diagnostics.push(ProfileDiagnostic { file, reason }),
+            Err(e) => catalog.diagnostics.push(ProfileDiagnostic {
+                file,
+                reason: e.to_string(),
+            }),
         }
     }
     if let Some((first, _)) = skipped.first() {
@@ -115,25 +118,48 @@ fn profile_file_id(name: &str) -> Option<&str> {
     (is_profile_id(id) && BuiltinId::parse(id).is_none()).then_some(id)
 }
 
+/// Why a profile file could not be read: the file itself, or its content.
+#[derive(Debug)]
+pub(crate) enum ReadError {
+    Io(io::Error),
+    /// The text of the `ProfileError` that rejected it.
+    Invalid(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => e.fmt(f),
+            Self::Invalid(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Reads and validates one profile file without ever reading more than
 /// [`MAX_PROFILE_BYTES`] + 1 bytes, and checks that the overlay will accept
 /// it as well. `Ok(None)` when it is not a regular file.
-fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
-    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+pub(crate) fn read_profile(path: &Path) -> Result<Option<Profile>, ReadError> {
+    let meta = fs::metadata(path).map_err(ReadError::Io)?;
     if !meta.is_file() {
         return Ok(None);
     }
     if meta.len() > MAX_PROFILE_BYTES as u64 {
-        return Err(ProfileError::TooLarge.to_string());
+        return Err(ReadError::Invalid(ProfileError::TooLarge.to_string()));
     }
     // The file may grow between the size check and the read: bound the read too.
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     File::open(path)
         .and_then(|f| f.take(MAX_PROFILE_BYTES as u64 + 1).read_to_end(&mut bytes))
-        .map_err(|e| e.to_string())?;
-    let text =
-        String::from_utf8(bytes).map_err(|e| ProfileError::Json(e.to_string()).to_string())?;
-    let profile = parse_profile(&text).map_err(|e| e.to_string())?;
+        .map_err(ReadError::Io)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| ReadError::Invalid(ProfileError::Json(e.to_string()).to_string()))?;
+    check_profile(&text).map(Some).map_err(ReadError::Invalid)
+}
+
+/// Parses `text` and checks that the overlay will accept the profile once
+/// written out again; the error is the text of the `ProfileError`.
+pub(crate) fn check_profile(text: &str) -> Result<Profile, String> {
+    let profile = parse_profile(text).map_err(|e| e.to_string())?;
     // `SetProfile` carries the profile written out again, defaults included,
     // and the overlay parses it under the same limit: a file that grows past
     // it would be accepted here and refused there.
@@ -144,7 +170,12 @@ fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
             ProfileError::TooLarge
         ));
     }
-    Ok(Some(profile))
+    Ok(profile)
+}
+
+/// The profile folder under `%APPDATA%`; `None` without it.
+pub fn app_profiles_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| profiles_dir(Path::new(&app_data)))
 }
 
 impl ProfileCatalog {

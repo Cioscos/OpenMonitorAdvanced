@@ -346,6 +346,13 @@ fn main() {
             overlay::runner::overlay_retry,
             overlay::runner::overlay_reload_profiles,
             overlay::runner::set_overlay_hidden,
+            overlay::editor::overlay_load_profile,
+            overlay::editor::overlay_save_profile,
+            overlay::editor::overlay_delete_profile,
+            overlay::editor::overlay_duplicate_profile,
+            overlay::editor::overlay_import_profile,
+            overlay::editor::overlay_export_profile,
+            overlay::editor::overlay_font_families,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

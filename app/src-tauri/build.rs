@@ -42,6 +42,13 @@ fn main() {
             "overlay_retry",
             "overlay_reload_profiles",
             "set_overlay_hidden",
+            "overlay_load_profile",
+            "overlay_save_profile",
+            "overlay_delete_profile",
+            "overlay_duplicate_profile",
+            "overlay_import_profile",
+            "overlay_export_profile",
+            "overlay_font_families",
         ]),
     ))
     .expect("Tauri build")

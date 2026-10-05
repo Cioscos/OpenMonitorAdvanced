@@ -293,6 +293,10 @@ impl Controller {
     /// configuration `OMA_FRAMES_DEBUG` asks for.
     pub fn on_settings(&mut self, settings: &Settings, lang: Lang, env: Option<FramesConfigure>) {
         if *settings != self.settings || lang != self.lang {
+            // Turned on: the overlay starts visible (DP11).
+            if settings.overlay.enabled && !self.settings.overlay.enabled {
+                self.hidden_by_user = false;
+            }
             self.settings = settings.clone();
             self.lang = lang;
             self.choice_dirty = true;
@@ -358,8 +362,12 @@ impl Controller {
         self.host = state;
     }
 
-    /// The «show/hide» hotkey or tray item; not saved (DP11).
+    /// The «show/hide» hotkey or tray item; not saved (DP11). Nothing
+    /// while the overlay is off.
     pub fn toggle_hidden(&mut self) {
+        if !self.settings.overlay.enabled {
+            return;
+        }
         self.hidden_by_user = !self.hidden_by_user;
     }
 
@@ -1386,6 +1394,44 @@ mod tests {
         assert_eq!(metrics(&out).len(), 1);
         assert_eq!(times(&out).len(), 1);
         assert!(!out.status.unwrap().hidden_by_user);
+    }
+
+    #[test]
+    fn toggle_with_the_overlay_off_does_nothing() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_service(true);
+        c.step(0);
+        c.toggle_hidden();
+        let out = c.step(100);
+        assert!(!c.current_status().hidden_by_user);
+        assert!(out.status.is_none(), "nothing changed");
+        // Turned on later: the overlay shows over the game.
+        c.on_settings(&settings(true), Lang::En, None);
+        c.on_host(HostState::Running);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        let out = c.step(200);
+        assert!(!out.status.unwrap().hidden_by_user);
+        c.on_geometry(Some(geometry(96)));
+        assert_eq!(placements(&c.step(300)), vec![shown(area(CLIENT), 96)]);
+    }
+
+    #[test]
+    fn turning_the_overlay_on_clears_a_user_hide() {
+        let mut c = showing();
+        c.toggle_hidden();
+        assert!(c.step(200).status.unwrap().hidden_by_user);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.step(300);
+        c.on_settings(&settings(true), Lang::En, None);
+        let out = c.step(400);
+        assert!(!out.status.unwrap().hidden_by_user);
+        // The game's window is watched again, then the overlay shows on it.
+        assert_eq!(out.track, Some(Some(GAME_FG)));
+        c.on_geometry(Some(geometry(96)));
+        assert_eq!(placements(&c.step(500)), vec![shown(area(CLIENT), 96)]);
     }
 
     #[test]

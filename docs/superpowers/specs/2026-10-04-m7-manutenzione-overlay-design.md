@@ -228,7 +228,7 @@ Da quali colonne del CSV derivano i campi (SD3), senza altri campi:
   - i nostri processi (confermato dallo spike, SD11: la finestra dell'overlay presenta come ogni altra);
   - `dwm.exe` e i processi di sistema noti (SD11: `dwm.exe` presenta come `Hardware: Legacy Flip` quando c'è una finestra sopra il gioco);
   - l'elenco «non mostrare l'overlay in questo gioco» (§5.6).
-- **Tolleranza:** se il bersaglio perde il primo piano o smette di presentare, resta tale per 3 s, per reggere alt-tab e schermate di caricamento.
+- **Tolleranza:** il bersaglio resta tale finché presenta almeno 10 FPS, anche quando un'altra finestra (su un altro monitor, o un altro gioco) prende il primo piano: per passare a un altro gioco il primo deve chiudersi, ridursi a icona o smettere di presentare (decisione dell'utente del 2026-10-05, dalla verifica W1 con due monitor). Se smette di presentare, il gioco in primo piano lo sostituisce subito; senza un gioco in primo piano resta per 3 s, per reggere alt-tab e schermate di caricamento.
 - **Finestra del gioco:** la finestra principale in primo piano del PID; la sua posizione si segue con `EVENT_OBJECT_LOCATIONCHANGE`, filtrato su quella finestra.
 - **Swapchain:** fra quelle del bersaglio si usa quella con più frame mostrati nell'ultimo secondo (`oma-core::frames`).
 
@@ -293,7 +293,7 @@ I risultati vanno in `docs/superpowers/references/m7/spike-findings.md`; le corr
 - **Disegno:** contenuto composto con DirectComposition su una swapchain `DXGI_ALPHA_MODE_PREMULTIPLIED` (D3D11 + Direct2D), senza `UpdateLayeredWindow`.
 - **DPI:** Per-Monitor v2.
 - **Nascondi alla cattura:** con `hideFromCapture`, `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`; dove non è supportato (Windows 10 prima della 2004), `WDA_MONITOR` e una riga nel log.
-- **Visibilità:** `SW_HIDE` quando non c'è un bersaglio, quando l'utente nasconde l'overlay, quando il gioco è nell'elenco escluso e quando l'overlay è spento.
+- **Visibilità:** `SW_HIDE` quando non c'è un bersaglio, quando un'altra finestra in primo piano sta sullo stesso monitor del gioco (su un altro monitor l'overlay resta sul gioco), quando l'utente nasconde l'overlay, quando il gioco è nell'elenco escluso e quando l'overlay è spento.
 
 ### 5.2 Disegno
 

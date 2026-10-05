@@ -14,7 +14,8 @@ use oma_core::overlay::{Foreground, PxRect, WindowGeometry};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -320,21 +321,53 @@ fn emit(event: ForegroundEvent) {
 /// physical pixels whatever the calling thread's DPI awareness. `None` if
 /// the window no longer exists.
 pub fn window_geometry(hwnd: isize) -> Option<WindowGeometry> {
+    per_monitor_v2(hwnd, read_geometry)
+}
+
+/// The monitor rectangle (physical pixels) of the monitor nearest to a
+/// window, `None` if the window no longer exists.
+pub fn window_monitor(hwnd: isize) -> Option<PxRect> {
+    per_monitor_v2(hwnd, |hwnd| {
+        // SAFETY: plain query; any handle value is accepted.
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return None;
+        }
+        monitor_info(hwnd).map(|(_, info)| rect_to_px(info.rcMonitor))
+    })
+}
+
+/// Runs `query` on a non-null window with the thread in Per-Monitor v2 for
+/// its duration, then restores the previous awareness.
+fn per_monitor_v2<T>(hwnd: isize, query: impl FnOnce(HWND) -> Option<T>) -> Option<T> {
     if hwnd == 0 {
         return None;
     }
     let hwnd = HWND(hwnd as *mut _);
-    // Per-monitor v2 for the duration of the queries, then restored.
     // SAFETY: plain call with a predefined context constant; the previous
     // context it returns is restored below.
     let previous =
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let geometry = read_geometry(hwnd);
+    let result = query(hwnd);
     if !previous.0.is_null() {
         // SAFETY: `previous` is the context this thread had a moment ago.
         let _ = unsafe { SetThreadDpiAwarenessContext(previous) };
     }
-    geometry
+    result
+}
+
+/// The monitor nearest to a window and its information.
+fn monitor_info(hwnd: HWND) -> Option<(HMONITOR, MONITORINFO)> {
+    // SAFETY: plain call; MONITOR_DEFAULTTONEAREST always yields a monitor.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a valid MONITORINFO with `cbSize` set.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return None;
+    }
+    Some((monitor, info))
 }
 
 fn read_geometry(hwnd: HWND) -> Option<WindowGeometry> {
@@ -361,16 +394,7 @@ fn read_geometry(hwnd: HWND) -> Option<WindowGeometry> {
     if !mapped {
         return None;
     }
-    // SAFETY: plain call; MONITOR_DEFAULTTONEAREST always yields a monitor.
-    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: `info` is a valid MONITORINFO with `cbSize` set.
-    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-        return None;
-    }
+    let (monitor, info) = monitor_info(hwnd)?;
     // The monitor's effective DPI, not GetDpiForWindow: that one answers 96
     // for a DPI-unaware game (the system DPI for a system-aware one), which
     // would shrink the overlay on a scaled monitor.
@@ -510,6 +534,8 @@ mod tests {
         }
         assert!(geo.dpi >= 96, "{geo:?}");
         assert_eq!(window_geometry(0), None);
+        assert_eq!(window_monitor(hwnd.0 as isize), Some(geo.monitor));
+        assert_eq!(window_monitor(0), None);
     }
 
     #[test]

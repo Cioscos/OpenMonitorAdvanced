@@ -11,15 +11,17 @@
 //!   (while it is on) and the variable's (DP13); sent on change and again
 //!   once a second, as M7b did, with the target.
 //! - **Target:** a [`TargetPicker`] over the presenting processes and the
-//!   foreground PID. A new target activates `gameProfiles[exe]`, else
+//!   foreground PID; a target that keeps presenting is never replaced. A
+//!   new target activates `gameProfiles[exe]`, else
 //!   `defaultProfile`, and ends a `next_profile` choice.
 //!   Without frame data (service down or incompatible, engine starting or
 //!   not running) the target is kept while its window exists, and a
 //!   foreground process whose last known name has a `gameProfiles` entry can become one, so
 //!   sensor blocks keep working (spec §9).
 //! - **Visibility (DP9–DP11):** the overlay shows only while it is on, its
-//!   process runs, the target's window is the foreground one, visible and
-//!   not minimized, the game is not in `blockedGames` and the user has not
+//!   process runs, the target's window is visible and not minimized and
+//!   either is the foreground one or the foreground window is on another
+//!   monitor, the game is not in `blockedGames` and the user has not
 //!   hidden it. `SetPlacement` is sent only when it changes.
 //! - **Data:** `SetProfile` on a change of profile, drawing settings or
 //!   schema, and after every new `Running`; `FrameMetrics` at `textHz`,
@@ -32,7 +34,7 @@ use std::sync::Arc;
 use oma_core::frames::metrics::LowDefinition;
 use oma_core::frames::{pick_swapchain, read, FrameReadout, FrameWindow, LOWS_WINDOW_S};
 use oma_core::model::{Schema, Snapshot};
-use oma_core::overlay::{Foreground, Profile, WindowGeometry};
+use oma_core::overlay::{Foreground, Profile, PxRect, WindowGeometry};
 use oma_core::provider::Quality;
 use oma_core::settings::{Attach, Settings};
 use oma_ipc::overlay::{OverlayMessage, PxArea, SetPlacement};
@@ -173,6 +175,8 @@ pub struct Controller {
     /// Received since the last step.
     batches: Vec<FrameBatch>,
     foreground: Option<Foreground>,
+    /// The monitor of the foreground window, when known.
+    foreground_monitor: Option<PxRect>,
     geometry: Option<WindowGeometry>,
     /// A geometry arrived for the tracked window: a `None` after it means
     /// the window is gone.
@@ -248,6 +252,7 @@ impl Controller {
             processes: Vec::new(),
             batches: Vec::new(),
             foreground: None,
+            foreground_monitor: None,
             geometry: None,
             geometry_seen: false,
             known_names: BTreeMap::new(),
@@ -336,8 +341,16 @@ impl Controller {
         }
     }
 
+    /// A new foreground window; its monitor follows with
+    /// [`Self::on_foreground_monitor`], unknown until then.
     pub fn on_foreground(&mut self, fg: Foreground) {
         self.foreground = Some(fg);
+        self.foreground_monitor = None;
+    }
+
+    /// The monitor of the foreground window (`None`: unknown).
+    pub fn on_foreground_monitor(&mut self, monitor: Option<PxRect>) {
+        self.foreground_monitor = monitor;
     }
 
     /// The tracked window's geometry (`None`: unknown or gone).
@@ -752,10 +765,14 @@ impl Controller {
             return None;
         }
         let fg = self.foreground?;
-        if fg.pid != target.pid || self.tracked != Some(fg) {
+        let g = self.geometry.filter(|g| g.visible && !g.minimized)?;
+        // Another window in front of the game hides it; one on another
+        // monitor (a second screen) leaves the game in view.
+        let in_game = fg.pid == target.pid && self.tracked == Some(fg);
+        let elsewhere = self.foreground_monitor.is_some_and(|m| m != g.monitor);
+        if !in_game && !elsewhere {
             return None;
         }
-        let g = self.geometry.filter(|g| g.visible && !g.minimized)?;
         let r = match overlay.attach {
             Attach::Window => g.client,
             Attach::Monitor => g.monitor,
@@ -907,7 +924,6 @@ fn new_picker(own_pid: u32) -> TargetPicker {
 mod tests {
     use super::*;
     use oma_core::model::{Label, Sensor, SensorKind, Source as SensorSource, Unit};
-    use oma_core::overlay::PxRect;
     use oma_ipc::overlay::{FrameMetrics, FrameTimes, SetProfile, Values};
     use oma_ipc::{PresentingProcess, WireFrame};
 
@@ -977,6 +993,14 @@ mod tests {
                 process(GAME, "my game.exe", "Hardware: Independent Flip"),
                 process(OTHER, "other.exe", "Hardware: Independent Flip"),
             ],
+        }
+    }
+
+    /// The game closed: only the other one presents.
+    fn other_only() -> PresentingProcesses {
+        PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![process(OTHER, "other.exe", "Hardware: Independent Flip")],
         }
     }
 
@@ -1259,6 +1283,52 @@ mod tests {
         assert!(targets(&out).is_empty());
     }
 
+    /// A monitor to the right of [`MONITOR`].
+    const SECOND: PxRect = PxRect {
+        x: 1920,
+        y: 0,
+        w: 2560,
+        h: 1440,
+    };
+
+    #[test]
+    fn window_on_another_monitor_keeps_the_overlay_on_the_game() {
+        let mut c = showing();
+        c.on_foreground(BROWSER_FG);
+        c.on_foreground_monitor(Some(SECOND));
+        let out = c.step(200);
+        assert!(placements(&out).is_empty(), "still shown on the game");
+        assert_eq!(out.values_plan, None, "data keeps flowing");
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        // Long after the grace: the game still presents, still the target.
+        assert!(placements(&c.step(10_000)).is_empty());
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+    }
+
+    #[test]
+    fn window_on_the_game_monitor_hides_the_overlay() {
+        let mut c = showing();
+        c.on_foreground(BROWSER_FG);
+        c.on_foreground_monitor(Some(MONITOR));
+        let p = placements(&c.step(200));
+        assert_eq!(p.len(), 1);
+        assert!(is_hidden(&p[0]));
+    }
+
+    #[test]
+    fn another_game_does_not_take_a_presenting_target() {
+        let mut c = showing();
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        c.on_foreground_monitor(Some(SECOND));
+        let out = c.step(200);
+        assert!(targets(&out).is_empty());
+        assert!(placements(&out).is_empty(), "still shown on the game");
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+    }
+
     #[test]
     fn minimized_game_hides_the_overlay() {
         let mut c = showing();
@@ -1324,7 +1394,9 @@ mod tests {
             out.status.unwrap().active_profile.as_deref(),
             Some("builtin-full")
         );
-        // Another game without a profile of its own: back to the default.
+        // The game closes and another one without a profile of its own
+        // comes to the foreground: back to the default.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
         c.on_foreground(Foreground {
             pid: OTHER,
             hwnd: 0x2000,
@@ -1366,7 +1438,8 @@ mod tests {
         assert!(profiles_sent(&c.step(400)).is_empty());
         c.on_foreground(GAME_FG);
         assert!(profiles_sent(&c.step(500)).is_empty());
-        // Another game: the choice ends.
+        // The game closes, another one comes: the choice ends.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
         c.on_foreground(Foreground {
             pid: OTHER,
             hwnd: 0x2000,
@@ -1533,14 +1606,26 @@ mod tests {
             })
         );
         assert_eq!(c.step(100).toast, None);
-        // Elsewhere until the target drops, then back: no second toast.
+        // Elsewhere while it stops presenting until the target drops, then
+        // back: no second toast.
+        let other_only = PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![process(
+                OTHER,
+                "other.exe",
+                "Hardware: Legacy Copy to front buffer",
+            )],
+        };
+        c.on_frames(Some(&status("running")), Some(&other_only), &[]);
         c.on_foreground(BROWSER_FG);
         c.step(200);
         c.step(3_300);
         assert_eq!(c.current_status().target, None);
+        c.on_frames(Some(&status("running")), Some(&legacy), &[]);
         c.on_foreground(GAME_FG);
         assert_eq!(c.step(3_400).toast, None);
-        // Another game in exclusive fullscreen gets its own.
+        // The game closes; another game in exclusive fullscreen gets its own.
+        c.on_frames(Some(&status("running")), Some(&other_only), &[]);
         c.on_foreground(Foreground {
             pid: OTHER,
             hwnd: 0x2000,

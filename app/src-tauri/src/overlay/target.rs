@@ -1,8 +1,11 @@
 //! Which game to follow: the foreground process, when the service sees it
 //! present at least [`MIN_GAME_FPS`] frames per second and it is neither one
-//! of ours nor a system process. A target that stops qualifying (alt-tab, a
-//! loading screen) is kept for [`TARGET_GRACE_MS`] before it drops. Pure: the
-//! caller supplies a monotonic clock in milliseconds.
+//! of ours nor a system process. The target stays while it keeps presenting
+//! at that rate, whatever has the foreground (a window on another monitor,
+//! another game): only a target that stops presenting (closed, minimized, a
+//! loading screen) gives way, to the foreground game at once or, without
+//! one, after [`TARGET_GRACE_MS`]. Pure: the caller supplies a monotonic
+//! clock in milliseconds.
 
 /// Fewest displayed frames per second for a process to count as a game.
 pub const MIN_GAME_FPS: f64 = 10.0;
@@ -46,7 +49,7 @@ pub struct TargetPicker {
     foreground: Option<u32>,
     processes: Vec<ProcessInfo>,
     current: Option<ProcessInfo>,
-    /// When `current` last qualified as the candidate.
+    /// When `current` last qualified (as the candidate or still presenting).
     last_candidate_ms: u64,
     /// The target the last [`Self::tick`] reported.
     reported: Option<u32>,
@@ -106,13 +109,29 @@ impl TargetPicker {
         if self.own_pids.contains(&pid) {
             return None;
         }
-        self.processes.iter().find(|p| {
-            p.pid == pid && p.displayed_fps >= MIN_GAME_FPS && !is_excluded(&self.excluded, &p.name)
-        })
+        self.processes
+            .iter()
+            .find(|p| p.pid == pid && self.qualifies(p))
+    }
+
+    /// The current target as it shows in the latest list, while it still
+    /// presents at a game's rate.
+    fn presenting(&self) -> Option<&ProcessInfo> {
+        let pid = self.current.as_ref()?.pid;
+        self.processes
+            .iter()
+            .find(|p| p.pid == pid && self.qualifies(p))
+    }
+
+    fn qualifies(&self, p: &ProcessInfo) -> bool {
+        p.displayed_fps >= MIN_GAME_FPS && !is_excluded(&self.excluded, &p.name)
     }
 
     fn evaluate(&mut self, now_ms: u64) {
-        if let Some(candidate) = self.candidate().cloned() {
+        if let Some(still) = self.presenting().cloned() {
+            self.current = Some(still);
+            self.last_candidate_ms = now_ms;
+        } else if let Some(candidate) = self.candidate().cloned() {
             self.current = Some(candidate);
             self.last_candidate_ms = now_ms;
         } else if self.current.is_some()
@@ -231,9 +250,28 @@ mod tests {
     }
 
     #[test]
-    fn target_drops_after_three_seconds() {
+    fn presenting_target_survives_losing_the_foreground() {
+        // A window on another monitor takes the foreground: the game keeps
+        // presenting and stays the target.
         let mut p = following_game();
         p.on_foreground(300, 1_000);
+        assert_eq!(p.tick(10_000), None);
+        assert_eq!(p.current(), Some(&game()));
+    }
+
+    #[test]
+    fn presenting_target_is_not_replaced_by_another_game() {
+        let mut p = following_game();
+        p.on_foreground(200, 500);
+        assert_eq!(p.current(), Some(&game()));
+        assert_eq!(p.tick(500), None);
+    }
+
+    #[test]
+    fn target_that_stops_presenting_drops_after_three_seconds() {
+        let mut p = following_game();
+        p.on_foreground(300, 1_000);
+        p.on_processes(&[other_game()], 1_000);
         assert_eq!(p.tick(3_999), None);
         assert_eq!(p.current(), Some(&game()));
         assert_eq!(p.tick(4_000), Some(None));
@@ -241,10 +279,19 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_another_game_is_immediate() {
+    fn stopped_target_is_replaced_by_the_foreground_game_at_once() {
         let mut p = following_game();
+        p.on_processes(&[other_game()], 500);
         p.on_foreground(200, 500);
         assert_eq!(p.current(), Some(&other_game()));
+        assert_eq!(p.tick(500), Some(Some(200)));
+    }
+
+    #[test]
+    fn target_below_the_game_rate_counts_as_stopped() {
+        let mut p = following_game();
+        p.on_processes(&[proc(100, "game.exe", 5.0), other_game()], 500);
+        p.on_foreground(200, 500);
         assert_eq!(p.tick(500), Some(Some(200)));
     }
 

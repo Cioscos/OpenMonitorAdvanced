@@ -31,7 +31,7 @@ use oma_core::model::Schema;
 use oma_core::overlay::Foreground;
 use oma_core::settings::Settings;
 use oma_ipc::FramesConfigure;
-use oma_win::foreground::{window_geometry, ForegroundEvent, ForegroundWatcher};
+use oma_win::foreground::{window_geometry, window_monitor, ForegroundEvent, ForegroundWatcher};
 use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
@@ -413,6 +413,8 @@ impl Ctl {
             }
             Input::Foreground(fg) => {
                 self.controller.on_foreground(fg);
+                self.controller
+                    .on_foreground_monitor(window_monitor(fg.hwnd));
                 // Back to the game: its state (minimized, visible) may differ.
                 if self.tracked.is_some_and(|t| t.hwnd == fg.hwnd) {
                     self.read_geometry();

@@ -7,6 +7,10 @@
 //! link posts data or a deferred redraw is due (`Cadence::next_wake`), and
 //! presents nothing without changes (§5.2). The renderer (`render`) draws
 //! the profile from its cache, refreshing texts and charts at their rates.
+//!
+//! With `--preview` (M7d) the same loop draws in a normal window for the
+//! overlay editor: the area is the client area, `SetPlacement` is ignored,
+//! and closing the window ends the process with `EXIT_CLOSED`.
 
 #![windows_subsystem = "windows"]
 
@@ -22,6 +26,7 @@ mod state;
 mod window;
 
 use oma_core::overlay::geometry::{place, PxRect};
+use oma_ipc::overlay::PxArea;
 
 use crate::link::EXIT_USAGE;
 use crate::state::OverlayState;
@@ -45,7 +50,34 @@ fn run() -> i32 {
         }
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "overlay starting");
-    run_window(args.pipe)
+    run_window(args.pipe, args.preview)
+}
+
+/// The preview window's title before the first profile brings
+/// `strings["previewTitle"]`.
+const PREVIEW_TITLE: &str = "OpenMonitor Advanced";
+
+/// The translation that draws the profile placed at `placed` on a surface
+/// covering `client`.
+fn preview_origin(client: PxRect, placed: PxRect) -> (f32, f32) {
+    ((placed.x - client.x) as f32, (placed.y - client.y) as f32)
+}
+
+/// In preview the placement is the client area at the window's DPI; true if
+/// it changed.
+fn set_preview_area(state: &mut OverlayState, client: PxRect, dpi: u32) -> bool {
+    let placement = Some((
+        PxArea {
+            x: client.x,
+            y: client.y,
+            width: client.w,
+            height: client.h,
+        },
+        dpi,
+    ));
+    let changed = state.placement != placement;
+    state.placement = placement;
+    changed
 }
 
 /// Where the window goes: the profile placed in the target area (C3), or
@@ -98,7 +130,7 @@ fn release_in_s(hidden_since_s: f64, now_s: f64) -> f64 {
 }
 
 #[cfg(windows)]
-fn run_window(pipe: String) -> i32 {
+fn run_window(pipe: String, preview: bool) -> i32 {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::{self, TryRecvError};
     use std::time::Instant;
@@ -116,7 +148,12 @@ fn run_window(pipe: String) -> i32 {
     use oma_ipc::overlay::OverlayMessage;
 
     window::set_dpi_awareness();
-    let hwnd = match window::create() {
+    let created = if preview {
+        window::create_preview(PREVIEW_TITLE)
+    } else {
+        window::create()
+    };
+    let hwnd = match created {
         Ok(hwnd) => hwnd,
         Err(e) => {
             tracing::error!(error = %e, "cannot create the overlay window");
@@ -148,6 +185,8 @@ fn run_window(pipe: String) -> i32 {
     let mut shown: Option<PxRect> = None;
     // The window starts with `WDA_NONE`.
     let mut hidden_from_capture = false;
+    // The preview window's title as last set.
+    let mut title = PREVIEW_TITLE.to_owned();
     loop {
         let now_s = start.elapsed().as_secs_f64();
         let mut wake = cadence.next_wake(now_s);
@@ -173,8 +212,11 @@ fn run_window(pipe: String) -> i32 {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             match msg.message {
                 WM_QUIT => {
-                    tracing::info!("overlay window closed");
-                    return EXIT_OK;
+                    // `EXIT_OK` from the overlay window, `EXIT_CLOSED` from
+                    // the preview's close button.
+                    let code = msg.wParam.0 as i32;
+                    tracing::info!(code, "overlay window closed");
+                    return code;
                 }
                 // Only a wake: the channel is drained below in any case.
                 WM_APP_DATA => {}
@@ -199,6 +241,9 @@ fn run_window(pipe: String) -> i32 {
         let mut reassert = false;
         loop {
             match rx.try_recv() {
+                // The preview's area is its client area.
+                Ok(LinkEvent::Message(msg))
+                    if preview && matches!(*msg, OverlayMessage::SetPlacement(_)) => {}
                 Ok(LinkEvent::Message(msg)) => {
                     reassert |= matches!(*msg, OverlayMessage::SetPlacement(_));
                     changes.merge(state.apply(*msg, now_s));
@@ -214,9 +259,25 @@ fn run_window(pipe: String) -> i32 {
         if changes.any() {
             tracing::debug!(?changes, "overlay messages applied");
         }
+        let mut client = None;
+        if preview {
+            let (area, dpi) = window::client_area(hwnd);
+            changes.placement |= set_preview_area(&mut state, area, dpi);
+            client = (area.w > 0 && area.h > 0).then_some(area);
+            if changes.layout {
+                let wanted = state
+                    .strings
+                    .get("previewTitle")
+                    .map_or(PREVIEW_TITLE, String::as_str);
+                if wanted != title {
+                    title = wanted.to_owned();
+                    window::set_title(hwnd, &title);
+                }
+            }
+        }
         if changes.settings {
             cadence.set_rates(state.draw.chart_fps, state.draw.text_hz);
-            if state.draw.hide_from_capture != hidden_from_capture {
+            if !preview && state.draw.hide_from_capture != hidden_from_capture {
                 hidden_from_capture = state.draw.hide_from_capture;
                 window::apply_capture_affinity(hwnd, hidden_from_capture);
             }
@@ -224,13 +285,31 @@ fn run_window(pipe: String) -> i32 {
         if changes.layout || changes.placement {
             rect = placement_rect(&state);
         }
+        // The preview draws on its whole client area, the profile inside it.
+        let (surface, view) = match client {
+            Some(c) => (
+                Some(c),
+                render::View {
+                    origin: rect.map_or((0.0, 0.0), |p| preview_origin(c, p)),
+                    background: Some(render::PREVIEW_BACKGROUND),
+                },
+            ),
+            None if preview => (None, render::View::default()),
+            None => (rect, render::View::default()),
+        };
         if changes.layout || changes.placement || changes.settings {
             cache.invalidate();
         }
 
         let due = cadence.due(now_s, &changes);
-        let Some(r) = rect else {
+        let Some(r) = surface else {
             // Hidden: nothing to draw, and nothing to retry.
+            if preview {
+                // Minimized: the preview keeps its surface while it exists.
+                retry_at = None;
+                failures = 0;
+                continue;
+            }
             if shown.take().is_some() {
                 window::apply_placement(hwnd, None);
             }
@@ -251,7 +330,7 @@ fn run_window(pipe: String) -> i32 {
         };
         let mut place_now = reassert && shown == Some(r);
         if wants_draw {
-            match draw_frame(&mut gfx, &mut cache, hwnd, r, &state, due) {
+            match draw_frame(&mut gfx, &mut cache, hwnd, r, &state, due, view) {
                 Ok(()) => {
                     failures = 0;
                     retry_at = None;
@@ -278,14 +357,16 @@ fn run_window(pipe: String) -> i32 {
                 }
             }
         }
-        if place_now {
+        // The user places the preview window.
+        if place_now && !preview {
             window::apply_placement(hwnd, Some(r));
             shown = Some(r);
         }
     }
 }
 
-/// Draws one frame at the size of `r`: the profile, from the cache.
+/// Draws one frame at the size of `r`: the profile, from the cache, as
+/// `view` says.
 #[cfg(windows)]
 fn draw_frame(
     gfx: &mut Option<compose::Compositor>,
@@ -294,6 +375,7 @@ fn draw_frame(
     r: PxRect,
     state: &OverlayState,
     due: cadence::Due,
+    view: render::View,
 ) -> windows::core::Result<()> {
     let (w, h) = (r.w.max(1) as u32, r.h.max(1) as u32);
     let g = match gfx {
@@ -301,7 +383,7 @@ fn draw_frame(
         None => gfx.insert(compose::Compositor::new(hwnd, w, h)?),
     };
     g.resize(w, h)?;
-    let drawn = render::draw(g.begin(), cache, state, due);
+    let drawn = render::draw(g.begin(), cache, state, due, view);
     // The frame is closed (and presented) even after a drawing error, so the
     // context is not left inside `BeginDraw`.
     let presented = g.end_and_present();
@@ -309,7 +391,7 @@ fn draw_frame(
 }
 
 #[cfg(not(windows))]
-fn run_window(_pipe: String) -> i32 {
+fn run_window(_pipe: String, _preview: bool) -> i32 {
     tracing::error!("the overlay runs on Windows only");
     link::EXIT_CONNECT
 }
@@ -355,6 +437,58 @@ mod tests {
             0.0,
         );
         assert_eq!(placement_rect(&state), None);
+    }
+
+    #[test]
+    fn preview_origin_is_the_placed_offset() {
+        let client = PxRect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        };
+        let placed = PxRect {
+            x: 1100,
+            y: 16,
+            w: 164,
+            h: 80,
+        };
+        assert_eq!(preview_origin(client, placed), (1100.0, 16.0));
+        assert_eq!(preview_origin(client, client), (0.0, 0.0));
+        // Relative to the client rectangle, whatever its origin.
+        let shifted = PxRect {
+            x: 10,
+            y: 20,
+            ..client
+        };
+        assert_eq!(preview_origin(shifted, placed), (1090.0, -4.0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn preview_window_draws_the_gaming_profile() {
+        // The test's own window, shown briefly without activation; no input
+        // is sent to it or to anything else.
+        let hwnd = window::create_preview("OMA preview test").expect("preview window");
+        let mut state = render::tests::gaming_state();
+        let (client, dpi) = window::client_area(hwnd);
+        assert!(client.w > 0 && client.h > 0, "{client:?}");
+        set_preview_area(&mut state, client, dpi);
+        let placed = placement_rect(&state).expect("placed in the client area");
+        let view = render::View {
+            origin: preview_origin(client, placed),
+            background: Some(render::PREVIEW_BACKGROUND),
+        };
+        let mut gfx = None;
+        let mut cache = render::RenderCache::default();
+        let due = cadence::Due {
+            text: true,
+            charts: true,
+        };
+        let drawn = draw_frame(&mut gfx, &mut cache, hwnd, client, &state, due, view);
+        window::destroy(hwnd);
+        drawn.expect("one preview frame presented");
     }
 
     #[test]

@@ -4,33 +4,45 @@
 //! taskbar (`WS_EX_TOOLWINDOW`). Its content is a DirectComposition swapchain
 //! (`compose`), so it has no redirection bitmap. It starts hidden and shows
 //! only at the rectangle the app's `SetPlacement` gives.
+//!
+//! With `--preview` (M7d) the window is instead a normal, resizable one
+//! ([`create_preview`]) that the user moves and closes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use oma_core::overlay::geometry::PxRect;
-use windows::core::{w, Error, Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{w, Error, Result, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    AdjustWindowRectExForDpi, GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HTTRANSPARENT,
-    HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, LoadCursorW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+    SetWindowPos, SetWindowTextW, ShowWindow, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
     WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE,
-    WM_APP, WM_DESTROY, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST,
+    WM_SIZE, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
-use crate::link::Wake;
+use crate::link::{Wake, EXIT_CLOSED};
 
 /// Posted by the link thread: there are events in the channel.
 pub const WM_APP_DATA: u32 = WM_APP + 1;
 
 const CLASS_NAME: PCWSTR = w!("OmaOverlayWindow");
+const PREVIEW_CLASS_NAME: PCWSTR = w!("OmaOverlayPreview");
+
+/// The client size of a new preview window, in logical pixels.
+const PREVIEW_CLIENT: (i32, i32) = (1280, 720);
 
 /// Makes the process Per-Monitor v2 aware, so the rectangles of
 /// `SetPlacement` (physical pixels) are taken as they are.
@@ -75,29 +87,43 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     }
 }
 
-/// Registers the window class once per process (tests create several windows).
+/// Registers a window class once per process (tests create several
+/// windows); `arrow` gives it the arrow cursor.
+fn register_class_once(
+    once: &'static OnceLock<std::result::Result<(), Error>>,
+    name: PCWSTR,
+    proc: WNDPROC,
+    arrow: bool,
+) -> Result<()> {
+    once.get_or_init(|| {
+        // SAFETY: the class name is a static string and the procedure a free
+        // function, so both outlive the class; the module handle is our own
+        // executable's; the arrow is a shared system cursor.
+        unsafe {
+            let instance = GetModuleHandleW(None)?;
+            let class = WNDCLASSW {
+                lpfnWndProc: proc,
+                hInstance: instance.into(),
+                lpszClassName: name,
+                hCursor: if arrow {
+                    LoadCursorW(None, IDC_ARROW)?
+                } else {
+                    Default::default()
+                },
+                ..Default::default()
+            };
+            if RegisterClassW(&class) == 0 {
+                return Err(Error::from_thread());
+            }
+        }
+        Ok(())
+    })
+    .clone()
+}
+
 fn register_class() -> Result<()> {
     static CLASS: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
-    CLASS
-        .get_or_init(|| {
-            // SAFETY: the class name is a static string and the procedure a
-            // free function, so both outlive the class; the module handle
-            // is our own executable's.
-            unsafe {
-                let instance = GetModuleHandleW(None)?;
-                let class = WNDCLASSW {
-                    lpfnWndProc: Some(wndproc),
-                    hInstance: instance.into(),
-                    lpszClassName: CLASS_NAME,
-                    ..Default::default()
-                };
-                if RegisterClassW(&class) == 0 {
-                    return Err(Error::from_thread());
-                }
-            }
-            Ok(())
-        })
-        .clone()
+    register_class_once(&CLASS, CLASS_NAME, Some(wndproc), false)
 }
 
 /// Creates the overlay window, hidden. The calling thread owns it and must
@@ -131,6 +157,164 @@ pub fn create() -> Result<HWND> {
         return Err(e);
     }
     Ok(hwnd)
+}
+
+/// The extended styles of the preview window: none of the overlay's (not
+/// topmost, not click-through, on the taskbar), only no redirection bitmap
+/// for the composition swapchain.
+pub(crate) fn preview_ex_style() -> WINDOW_EX_STYLE {
+    WS_EX_NOREDIRECTIONBITMAP
+}
+
+/// The styles of the preview window: a normal, resizable top-level window.
+pub(crate) fn preview_style() -> WINDOW_STYLE {
+    WS_OVERLAPPEDWINDOW
+}
+
+extern "system" fn preview_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        // Closed by the user: the process ends with `EXIT_CLOSED`, which the
+        // app does not take as a crash. The window goes with the process.
+        WM_CLOSE => {
+            // SAFETY: called on the window's own thread, from its procedure.
+            unsafe { PostQuitMessage(EXIT_CLOSED) };
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            // A wake for the loop, which reads the new client size. A full
+            // queue only drops the wake: the loop runs after the pump anyway.
+            // SAFETY: posting to our own window, from its thread.
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_DATA, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            // SAFETY: for `WM_DPICHANGED`, `lparam` points to the suggested
+            // window rectangle, valid for the duration of the message.
+            let r = unsafe { *(lparam.0 as *const RECT) };
+            // SAFETY: our own window, from its thread; plain values. The
+            // resulting `WM_SIZE` wakes the loop.
+            let moved = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            };
+            if let Err(e) = moved {
+                tracing::warn!(error = %e, "cannot move the preview window to the new DPI");
+            }
+            LRESULT(0)
+        }
+        // SAFETY: forwarding the unmodified message to the default procedure,
+        // on the window's thread.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Creates the preview window (`--preview`, M7d) and shows it without
+/// activating it: 1280×720 logical pixels of client area at the primary
+/// monitor's DPI, centred in its work area. The calling thread owns it and
+/// must pump its messages.
+pub fn create_preview(title: &str) -> Result<HWND> {
+    static CLASS: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
+    register_class_once(&CLASS, PREVIEW_CLASS_NAME, Some(preview_wndproc), true)?;
+    // SAFETY: the primary monitor always exists; `info` (with `cbSize` set)
+    // and the DPI values are valid locals.
+    let (work, dpi) = unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            info.rcWork
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }
+        };
+        let (mut dpi, mut dpi_y) = (96u32, 96u32);
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y).is_err() {
+            dpi = 96;
+        }
+        (work, dpi)
+    };
+    let scale = |v: i32| (i64::from(v) * i64::from(dpi) / 96) as i32;
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: scale(PREVIEW_CLIENT.0),
+        bottom: scale(PREVIEW_CLIENT.1),
+    };
+    // SAFETY: `r` is a valid local; plain style values.
+    unsafe { AdjustWindowRectExForDpi(&mut r, preview_style(), false, preview_ex_style(), dpi)? };
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let x = work.left + ((work.right - work.left - w) / 2).max(0);
+    let y = work.top + ((work.bottom - work.top - h) / 2).max(0);
+    let title = HSTRING::from(title);
+    // SAFETY: the class is registered above; `title` outlives the call; no
+    // parent, menu or creation data. Created without `WS_VISIBLE`.
+    let hwnd = unsafe {
+        let instance = GetModuleHandleW(None)?;
+        CreateWindowExW(
+            preview_ex_style(),
+            PREVIEW_CLASS_NAME,
+            &title,
+            preview_style(),
+            x,
+            y,
+            w,
+            h,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )?
+    };
+    // SAFETY: the window just created on this thread; the return value is
+    // the previous visibility, not an error.
+    let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    Ok(hwnd)
+}
+
+/// Sets the title of the preview window.
+pub fn set_title(hwnd: HWND, title: &str) {
+    let title = HSTRING::from(title);
+    // SAFETY: our own window, from its thread; `title` outlives the call.
+    if let Err(e) = unsafe { SetWindowTextW(hwnd, &title) } {
+        tracing::warn!(error = %e, "cannot set the preview window title");
+    }
+}
+
+/// The client rectangle of the window (origin 0,0, physical pixels) and its
+/// DPI; an empty rectangle when minimized or on an error.
+pub fn client_area(hwnd: HWND) -> (PxRect, u32) {
+    let mut r = RECT::default();
+    // SAFETY: our own window; `r` is a valid local out-pointer.
+    if unsafe { GetClientRect(hwnd, &mut r) }.is_err() {
+        r = RECT::default();
+    }
+    // SAFETY: our own window; returns 0 only for an invalid handle.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let rect = PxRect {
+        x: 0,
+        y: 0,
+        w: (r.right - r.left).max(0),
+        h: (r.bottom - r.top).max(0),
+    };
+    (rect, if dpi == 0 { 96 } else { dpi })
 }
 
 /// Destroys the window (from its own thread).
@@ -284,6 +468,24 @@ mod tests {
                 | WS_EX_TOOLWINDOW
                 | WS_EX_NOREDIRECTIONBITMAP
         );
+    }
+
+    #[test]
+    fn preview_window_is_not_topmost_nor_click_through() {
+        let ex = preview_ex_style();
+        assert_eq!(ex, WS_EX_NOREDIRECTIONBITMAP);
+        for flag in [
+            WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT,
+            WS_EX_LAYERED,
+            WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW,
+        ] {
+            assert!(!ex.contains(flag), "{flag:?} in {ex:?}");
+        }
+        // A normal window: caption, frame, system menu, resizable.
+        assert_eq!(preview_style(), WS_OVERLAPPEDWINDOW);
+        assert!(!preview_style().contains(WS_POPUP));
     }
 
     #[test]

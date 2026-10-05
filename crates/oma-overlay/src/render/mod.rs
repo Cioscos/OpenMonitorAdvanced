@@ -28,6 +28,8 @@ use oma_core::overlay::{
 #[cfg(windows)]
 use windows::core::Result;
 #[cfg(windows)]
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Factory, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_ALIASED,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -58,15 +60,42 @@ const GRID: Rgba = Rgba {
     a: 0x30,
 };
 
+/// The opaque background of the preview window (`#140F1E`).
+#[cfg(windows)]
+pub const PREVIEW_BACKGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0x14 as f32 / 255.0,
+    g: 0x0f as f32 / 255.0,
+    b: 0x1e as f32 / 255.0,
+    a: 1.0,
+};
+
+/// Where the profile goes on the target: the overlay draws at the origin
+/// on a transparent surface; the preview (M7d) clears to a background and
+/// draws the profile at its placed offset in the client area.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct View {
+    /// The translation of the profile, in pixels.
+    pub origin: (f32, f32),
+    /// Cleared to this colour before the profile is drawn.
+    pub background: Option<D2D1_COLOR_F>,
+}
+
 /// Draws the profile of `state` on `rt`, between its `BeginDraw` and
-/// `EndDraw`; `due` says which cached parts may be refreshed.
+/// `EndDraw`, as `view` says; `due` says which cached parts may be refreshed.
 #[cfg(windows)]
 pub fn draw(
     rt: &ID2D1RenderTarget,
     cache: &mut RenderCache,
     state: &OverlayState,
     due: Due,
+    view: View,
 ) -> Result<()> {
+    if let Some(color) = &view.background {
+        // SAFETY: drawing on the target between BeginDraw and EndDraw, from
+        // its thread; `color` outlives the call.
+        unsafe { rt.Clear(Some(color)) };
+    }
     cache.bind(rt)?;
     let (Some(profile), Some((_, dpi))) = (&state.profile, &state.placement) else {
         return Ok(());
@@ -106,7 +135,7 @@ pub fn draw(
     // SAFETY: drawing on the target between BeginDraw and EndDraw, from its
     // thread. Grayscale: ClearType needs an opaque background.
     unsafe {
-        rt.SetTransform(&Matrix3x2::identity());
+        rt.SetTransform(&Matrix3x2::translation(view.origin.0, view.origin.1));
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     }
     let brushes = &mut parts.brushes;
@@ -396,7 +425,7 @@ fn paint_block(
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
@@ -426,7 +455,7 @@ mod tests {
 
     use crate::state::default_draw;
 
-    fn gaming_state() -> OverlayState {
+    pub(crate) fn gaming_state() -> OverlayState {
         let schema: Schema = serde_json::from_str(include_str!(
             "../../../oma-core/tests/fixtures/this-machine-schema.json"
         ))
@@ -610,7 +639,7 @@ mod tests {
         };
         // SAFETY: a frame on our target, from this thread.
         unsafe { rt.BeginDraw() };
-        draw(rt, cache, state, due).expect("draw");
+        draw(rt, cache, state, due, View::default()).expect("draw");
         // SAFETY: closes the frame; no tags.
         unsafe { rt.EndDraw(None, None) }.expect("end draw");
     }

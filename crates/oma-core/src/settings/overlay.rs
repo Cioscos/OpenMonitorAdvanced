@@ -15,6 +15,11 @@ pub const CHART_FPS: [u32; 3] = ChartFps::VALUES;
 pub const MAX_GAMES: usize = 256;
 /// Longest executable name, in bytes.
 pub const MAX_EXE_BYTES: usize = 260;
+/// Smallest stored editor window, in physical pixels.
+pub const EDITOR_MIN_WIDTH: u32 = 1100;
+pub const EDITOR_MIN_HEIGHT: u32 = 700;
+/// Largest coordinate or size of the stored editor window.
+const MAX_COORDINATE: i64 = 32_768;
 /// Default of `overlay.defaultProfile`: the built-in «Gaming» template.
 pub const DEFAULT_PROFILE: &str = "builtin-gaming";
 
@@ -39,6 +44,52 @@ pub struct OverlaySettings {
     pub hotkey_toggle: Option<String>,
     pub hotkey_next_profile: Option<String>,
     pub hotkey_benchmark: Option<String>,
+    /// Where the editor window was last closed (DD12), `None` to center it.
+    pub editor_bounds: Option<WindowBounds>,
+}
+
+/// A window's outer position and inner size, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowBounds {
+    /// At least 1100×700 and nothing beyond ±32768.
+    pub fn is_valid(&self) -> bool {
+        let within = |v: i64| (-MAX_COORDINATE..=MAX_COORDINATE).contains(&v);
+        self.width >= EDITOR_MIN_WIDTH
+            && self.height >= EDITOR_MIN_HEIGHT
+            && [
+                self.x.into(),
+                self.y.into(),
+                self.width.into(),
+                self.height.into(),
+            ]
+            .into_iter()
+            .all(within)
+    }
+
+    /// From its JSON spelling; `None` unless every field is an integer in
+    /// range, there are exactly these four and [`Self::is_valid`] holds.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let obj = value.as_object().filter(|o| o.len() == 4)?;
+        let int = |key: &str| obj.get(key)?.as_i64();
+        let bounds = Self {
+            x: i32::try_from(int("x")?).ok()?,
+            y: i32::try_from(int("y")?).ok()?,
+            width: u32::try_from(int("width")?).ok()?,
+            height: u32::try_from(int("height")?).ok()?,
+        };
+        bounds.is_valid().then_some(bounds)
+    }
+
+    fn to_json(self) -> Value {
+        json!({"x": self.x, "y": self.y, "width": self.width, "height": self.height})
+    }
 }
 
 impl Default for OverlaySettings {
@@ -57,6 +108,7 @@ impl Default for OverlaySettings {
             hotkey_toggle: None,
             hotkey_next_profile: None,
             hotkey_benchmark: None,
+            editor_bounds: None,
         }
     }
 }
@@ -78,6 +130,7 @@ impl OverlaySettings {
             "hotkeyToggle": self.hotkey_toggle,
             "hotkeyNextProfile": self.hotkey_next_profile,
             "hotkeyBenchmark": self.hotkey_benchmark,
+            "editorBounds": self.editor_bounds.map(WindowBounds::to_json),
         })
     }
 }

@@ -79,6 +79,25 @@ pub fn low_windows(profile: &Profile) -> Vec<(u32, LowDefinition)> {
     out
 }
 
+/// The sensors and lows windows of several profiles together (the active
+/// one and the preview): sensors unique and sorted, lows unique and within
+/// the limit [`low_windows`] keeps.
+pub fn union_needs<'a>(
+    profiles: impl IntoIterator<Item = &'a Profile>,
+) -> (Vec<String>, Vec<(u32, LowDefinition)>) {
+    let mut used = BTreeSet::new();
+    let mut lows: Vec<(u32, LowDefinition)> = Vec::new();
+    for p in profiles {
+        used.extend(used_sensors(p));
+        for pair in low_windows(p) {
+            if !lows.contains(&pair) && lows.len() < MAX_LOWS - 1 {
+                lows.push(pair);
+            }
+        }
+    }
+    (used.into_iter().collect(), lows)
+}
+
 /// Translated label and unit of each `used` sensor present in `schema`.
 pub fn sensor_infos(schema: &Schema, used: &[String], lang: Lang) -> Vec<SensorInfo> {
     used.iter()
@@ -108,7 +127,17 @@ fn serde_name<T: serde::Serialize>(v: T) -> String {
 pub fn overlay_strings(lang: Lang) -> BTreeMap<String, String> {
     let text = |key: &str| t(lang, &format!("overlay.text.{key}"), &[]);
     let mut out = BTreeMap::new();
-    for key in ["sensorAbsent", "fgSuspected", "bound.gpu", "bound.cpu"] {
+    for key in [
+        "sensorAbsent",
+        "fgSuspected",
+        "bound.gpu",
+        "bound.cpu",
+        "previewTitle",
+        "bench.avg",
+        "bench.low1",
+        "bench.low01",
+        "bench.stutter",
+    ] {
         out.insert(key.to_owned(), text(key));
     }
     for key in ["low.integral", "low.percentile"] {
@@ -214,11 +243,7 @@ pub fn metrics_message(readout: Option<&FrameReadout>, state: &str) -> OverlayMe
         .take(MAX_LOWS)
         .map(|l| WireLow {
             window_s: l.window_s,
-            definition: match l.definition {
-                LowDefinition::Integral => "integral",
-                LowDefinition::Percentile => "percentile",
-            }
-            .to_owned(),
+            definition: wire_definition(l.definition).to_owned(),
             one_percent: finite(l.lows.map(|x| x.one_percent)),
             point_one_percent: finite(l.lows.map(|x| x.point_one_percent)),
         })
@@ -248,6 +273,25 @@ pub fn metrics_message(readout: Option<&FrameReadout>, state: &str) -> OverlayMe
         bound: bound.map(str::to_owned),
         lows,
     })
+}
+
+/// The protocol spelling of a lows definition.
+fn wire_definition(d: LowDefinition) -> &'static str {
+    match d {
+        LowDefinition::Integral => "integral",
+        LowDefinition::Percentile => "percentile",
+    }
+}
+
+/// Keeps in `m` only the lows of `lows` and the `(10, Integral)` entry
+/// [`oma_core::frames::read`] always computes.
+pub fn keep_lows(m: &mut FrameMetrics, lows: &[(u32, LowDefinition)]) {
+    let always = (LOWS_WINDOW_S as u32, LowDefinition::Integral);
+    m.lows.retain(|l| {
+        std::iter::once(&always)
+            .chain(lows)
+            .any(|&(w, d)| w == l.window_s && wire_definition(d) == l.definition)
+    });
 }
 
 /// `FrameTimes` with the frames of `swapchain` newer than `after_t_s`, and the
@@ -304,6 +348,13 @@ mod tests {
         "flag.off",
         "low.integral",
         "low.percentile",
+        // The preview window's title (`--preview`).
+        "previewTitle",
+        // The benchmark summary box.
+        "bench.avg",
+        "bench.low1",
+        "bench.low01",
+        "bench.stutter",
     ];
 
     fn profile(blocks: serde_json::Value) -> Profile {

@@ -18,6 +18,9 @@ pub const EXIT_INCOMPATIBLE: i32 = 3;
 /// The window or its drawing surface failed three frames in a row (device
 /// lost, C11); the app restarts the overlay.
 pub const EXIT_DEVICE_LOST: i32 = 4;
+/// The user closed the preview window (`--preview`, M7d); the app does not
+/// restart it.
+pub const EXIT_CLOSED: i32 = 5;
 
 /// What the link hands to the window.
 #[derive(Debug)]
@@ -185,6 +188,11 @@ mod tests {
             route(hello(OVERLAY_PROTOCOL_VERSION)),
             Route::Handled
         ));
+    }
+
+    #[test]
+    fn exit_closed_is_five() {
+        assert_eq!(EXIT_CLOSED, 5);
     }
 
     #[test]

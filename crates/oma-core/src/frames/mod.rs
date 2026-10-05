@@ -5,6 +5,7 @@
 pub mod generation;
 pub mod metrics;
 pub mod readout;
+pub mod session;
 pub mod swapchain;
 pub mod synthetic;
 
@@ -12,6 +13,7 @@ pub use generation::{
     fg_multiplier, fg_suspected, rendered_fps, source_label, Rendered, RenderedSource,
 };
 pub use readout::{read, FrameReadout, LowReadout};
+pub use session::{SessionAccumulator, SessionSummary, SummaryLows, MAX_SESSION_FRAMES};
 pub use swapchain::pick_swapchain;
 pub use synthetic::{synthetic, SyntheticError, SyntheticProfile};
 

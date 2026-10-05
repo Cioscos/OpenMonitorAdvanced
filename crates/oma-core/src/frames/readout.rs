@@ -135,3 +135,36 @@ pub fn read(
         swapchain,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frames::synthetic::{synthetic, SyntheticProfile};
+
+    /// Measurement, not a check: prints the cost of one `read` on a full
+    /// 300 s window at 240 FPS (72 000 frames) with a 300 s low window.
+    #[test]
+    #[ignore = "measurement"]
+    fn readout_cost_on_a_300_s_window() {
+        let profile = SyntheticProfile {
+            base_fps: 240.0,
+            fg_factor: 1,
+            jitter_ms: 0.5,
+            stutter_every: Some(90),
+            pcl: false,
+            gpu_busy_ratio: None,
+        };
+        let mut window = FrameWindow::new(300.0);
+        for f in synthetic(7, &profile, 300.0) {
+            window.push(f);
+        }
+        let lows = [(300, LowDefinition::Integral)];
+        let runs = 20u32;
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(read(&window, &lows, false));
+        }
+        let per_call = start.elapsed() / runs;
+        println!("read() on 300 s at 240 FPS: {per_call:?} per call");
+    }
+}

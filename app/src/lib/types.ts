@@ -280,6 +280,8 @@ export interface OverlaySettings {
   hotkeyToggle: string | null;
   hotkeyNextProfile: string | null;
   hotkeyBenchmark: string | null;
+  /** Where the overlay editor was last closed, in physical pixels; null centers it. */
+  editorBounds: { x: number; y: number; width: number; height: number } | null;
 }
 
 export interface Settings {
@@ -593,5 +595,112 @@ export interface OverlayStatus {
   diagnostics: OverlayProfileDiagnostic[];
   /** Hidden with the hotkey or the tray; not saved. */
   hiddenByUser: boolean;
-  hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus };
+  hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus; benchmark: HotkeyStatus };
+  /** The editor's preview window is open. */
+  preview: boolean;
+  /** The preview's process gave up, which closed the preview; until the next preview. */
+  previewFailure: 'crashing' | 'incompatible' | null;
+  benchmark: BenchmarkStatus;
+}
+
+/** The benchmark capture (`OverlayStatus.benchmark`); `elapsedS` is the time when the status was sent. */
+export interface BenchmarkStatus {
+  state: 'idle' | 'recording' | 'error';
+  /** The recorded game's executable. */
+  game: string | null;
+  elapsedS: number | null;
+  error: LogError | null;
+}
+
+/** A profile opened in the editor (`overlay_load_profile`); `json` is the whole profile, defaults included. */
+export interface EditableProfile {
+  id: string;
+  builtin: boolean;
+  json: string;
+}
+
+/** How an editor or overlay command rejects: an i18n key and the `{detail}` of its message. */
+export interface CommandError {
+  key: string;
+  detail: string | null;
+}
+
+/** One low of `FrameMetrics`; snake_case like the overlay protocol (crates/oma-ipc/src/overlay.rs). */
+export interface WireLow {
+  window_s: number;
+  definition: string;
+  one_percent: number | null;
+  point_one_percent: number | null;
+}
+
+/** The frame metrics as the overlay protocol carries them (snake_case, `FrameMetrics` in crates/oma-ipc/src/overlay.rs). */
+export interface FrameMetrics {
+  state: string;
+  fps_displayed: number | null;
+  fps_rendered: number | null;
+  fps_presented: number | null;
+  rendered_source: string | null;
+  fg_suspected: boolean;
+  frametime_displayed_ms: number | null;
+  frametime_app_ms: number | null;
+  fg_multiplier: number | null;
+  stutter_count: number | null;
+  stutter_percent: number | null;
+  latency_pc_ms: number | null;
+  latency_display_ms: number | null;
+  /** `gpu`, `cpu` or `unknown`. */
+  bound: string | null;
+  lows: WireLow[];
+}
+
+/** One frame for the frametime chart (snake_case, `WireFrameTime`). */
+export interface WireFrameTime {
+  t_s: number;
+  displayed_ms: number | null;
+  app_ms: number | null;
+}
+
+/** The `overlay-editor-data` payload (app/src-tauri/src/overlay/editor_feed.rs): the latest metrics and the new frame times. */
+export interface EditorData {
+  metrics: FrameMetrics;
+  frameTimes: WireFrameTime[];
+}
+
+export interface SummaryLows {
+  onePercent: number;
+  pointOnePercent: number;
+}
+
+/** Final figures of a benchmark session (`SessionSummary` in crates/oma-core/src/frames/session.rs). */
+export interface SessionSummary {
+  durationS: number;
+  framesTotal: number;
+  framesDisplayed: number;
+  framesGenerated: number;
+  fpsDisplayed: number;
+  fpsRendered: number | null;
+  /** `XeSS-FG`, `AFMF`, `FG` or `Reflex`. */
+  renderedSource: string | null;
+  lowsIntegral: SummaryLows;
+  lowsPercentile: SummaryLows;
+  frametimeMinMs: number;
+  frametimeMaxMs: number;
+  stutterCount: number;
+  stutterPercent: number;
+  fgMultiplier: number | null;
+  latencyPcMs: number | null;
+  latencyDisplayMs: number | null;
+}
+
+/** One saved benchmark (`benchmark_list`): the `.json` next to its CSV. */
+export interface BenchmarkEntry {
+  id: string;
+  record: {
+    format: number;
+    game: string;
+    /** Local time, `YYYY-MM-DDTHH:MM:SS`. */
+    startedAt: string;
+    endReason: 'user' | 'noTarget' | 'limit' | 'error' | 'shutdown';
+    summary: SessionSummary;
+  };
 }

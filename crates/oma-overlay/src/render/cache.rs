@@ -102,8 +102,6 @@ pub struct BlockCache {
     pub fill: Option<ID2D1Geometry>,
     /// The data generation the chart was built from; `None` to build it.
     pub chart_stamp: Option<u64>,
-    /// The highest value seen: the automatic top of a meter or gauge.
-    pub peak: f64,
     /// A meter's fullness, 0–1.
     pub fraction: f32,
     /// A gauge's arcs: the whole track and the value's sweep.
@@ -124,6 +122,9 @@ pub struct RenderCache {
     pub valid: bool,
     /// Reused for the samples of one chart.
     pub samples: Vec<(f64, f64)>,
+    /// The benchmark box's rows of label, value and unit (the badge uses
+    /// the first: the dot and the clock).
+    pub bench: [[TextItem; 3]; 4],
 }
 
 fn color_key(c: Rgba) -> u32 {
@@ -184,6 +185,7 @@ impl RenderCache {
             blocks: &mut self.blocks,
             order: &self.order,
             samples: &mut self.samples,
+            bench: &mut self.bench,
         })
     }
 }
@@ -195,6 +197,7 @@ pub struct Parts<'a> {
     pub blocks: &'a mut Vec<BlockCache>,
     pub order: &'a [usize],
     pub samples: &'a mut Vec<(f64, f64)>,
+    pub bench: &'a mut [[TextItem; 3]; 4],
 }
 
 /// The brushes while the blocks are borrowed.

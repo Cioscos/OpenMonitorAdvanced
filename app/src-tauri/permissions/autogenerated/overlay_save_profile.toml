@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-save-profile"
+description = "Enables the overlay_save_profile command without any pre-configured scope."
+commands.allow = ["overlay_save_profile"]
+
+[[permission]]
+identifier = "deny-overlay-save-profile"
+description = "Denies the overlay_save_profile command without any pre-configured scope."
+commands.deny = ["overlay_save_profile"]

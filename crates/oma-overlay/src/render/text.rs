@@ -345,22 +345,25 @@ impl TextItem {
             None => None,
         };
         // SAFETY: as above; the geometry comes from the target's factory
-        // (the cache drops it with the device), and the transform is reset
-        // to identity before the block ends.
+        // (the cache drops it with the device), and the transform is put
+        // back to the caller's (`base`, the preview's offset or identity)
+        // before the block ends.
         unsafe {
+            let mut base = Matrix3x2::identity();
+            rt.GetTransform(&mut base);
             if let Some((dx, dy, b)) = &shadow {
-                rt.SetTransform(&Matrix3x2::translation(at.0 + dx, at.1 + dy));
+                rt.SetTransform(&(Matrix3x2::translation(at.0 + dx, at.1 + dy) * base));
                 if let Some((width, _)) = &outline {
                     rt.DrawGeometry(geometry, b, *width, None);
                 }
                 rt.FillGeometry(geometry, b, None);
             }
-            rt.SetTransform(&Matrix3x2::translation(at.0, at.1));
+            rt.SetTransform(&(Matrix3x2::translation(at.0, at.1) * base));
             if let Some((width, b)) = &outline {
                 rt.DrawGeometry(geometry, b, *width, None);
             }
             rt.FillGeometry(geometry, &fill_brush, None);
-            rt.SetTransform(&Matrix3x2::identity());
+            rt.SetTransform(&base);
         }
         Ok(())
     }

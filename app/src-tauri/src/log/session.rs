@@ -61,7 +61,7 @@ pub enum LogState {
 
 /// Why the log is in `error`: an i18n key and the `{detail}` of
 /// `log.error.other`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogError {
     pub key: String,
@@ -593,7 +593,7 @@ impl LogService {
         })
     }
 
-    fn configured_dir(&self, settings: &Settings) -> io::Result<PathBuf> {
+    pub(crate) fn configured_dir(&self, settings: &Settings) -> io::Result<PathBuf> {
         match &settings.log.folder {
             Some(folder) => Ok(PathBuf::from(folder)),
             None => Ok(self

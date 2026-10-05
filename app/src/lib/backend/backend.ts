@@ -23,6 +23,9 @@ import type {
   LogStatus,
   OverlayStatus,
   UpdateStatus,
+  BenchmarkEntry,
+  EditableProfile,
+  EditorData,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -126,6 +129,45 @@ export interface Backend {
   overlayReloadProfiles(): Promise<void>;
   /** Hides or shows the overlay like the hotkey and the tray (not saved); the outcome arrives as an event. */
   setOverlayHidden(hidden: boolean): Promise<void>;
+  /** Opens the editor's profile: a built-in (read-only, name translated) or a user profile. Editor commands reject with a `CommandError`. */
+  overlayLoadProfile(id: string): Promise<EditableProfile>;
+  /** Validates and writes the profile; without `id` under a new id with a unique name. Replies with the id. */
+  overlaySaveProfile(id: string | null, json: string): Promise<string>;
+  overlayDeleteProfile(id: string): Promise<void>;
+  /** A user copy of a profile (a built-in bound to this PC by role); replies with the new id. */
+  overlayDuplicateProfile(id: string): Promise<string>;
+  /** File dialog and import; null when the dialog is cancelled. */
+  overlayImportProfile(): Promise<string | null>;
+  /** Save dialog and export; false when the dialog is cancelled. */
+  overlayExportProfile(id: string): Promise<boolean>;
+  /** The installed font families, read once per session. */
+  overlayFontFamilies(): Promise<string[]>;
+  /** Shows `json` in the preview window (opening it), or closes it with null. */
+  overlayPreview(json: string | null): Promise<void>;
+  /** The profile on the editor's canvas, for its low windows; null when the editor closes. */
+  overlayEditorProfile(json: string | null): Promise<void>;
+  /** Makes a saved profile the active one until the target changes (DD9). */
+  overlayUseNow(id: string): Promise<void>;
+  /** Tells the shell whether the editor holds unsaved changes (the tray's «Quit» asks first). */
+  overlayEditorDirty(dirty: boolean): Promise<void>;
+  openOverlayEditor(): Promise<void>;
+  /** The editor's answer to `overlay-editor-quit` after «Save» or «Discard»: the app exits. */
+  appQuitConfirmed(): Promise<void>;
+  /** Metrics and new frame times for the canvas, only while the editor is open. */
+  onOverlayEditorData(cb: (data: EditorData) => void): Promise<Unsubscribe>;
+  /** The preview window opened or closed. */
+  onOverlayPreview(cb: (event: { open: boolean }) => void): Promise<Unsubscribe>;
+  /** The tray's «Quit» waits for the editor to save or discard its changes. */
+  onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe>;
+  /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */
+  benchmarkToggle(): Promise<void>;
+  /** The saved benchmarks, newest first. */
+  benchmarkList(): Promise<BenchmarkEntry[]>;
+  /** Opens a benchmark's CSV; rejects with the system's text. */
+  benchmarkOpenCsv(id: string): Promise<void>;
+  /** Opens the benchmarks folder; rejects with `log.error.folderMissing` or the system's text. */
+  benchmarkOpenFolder(): Promise<void>;
+  benchmarkDelete(id: string): Promise<void>;
   /** Asks GitHub for the latest release now; replies with the resulting status (rejects only if the background task panics). */
   checkUpdates(): Promise<UpdateStatus>;
   getUpdateStatus(): Promise<UpdateStatus>;

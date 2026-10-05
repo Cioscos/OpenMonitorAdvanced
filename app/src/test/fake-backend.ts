@@ -27,6 +27,10 @@ import type {
   LogStatus,
   OverlayStatus,
   UpdateStatus,
+  BenchmarkEntry,
+  CommandError,
+  EditableProfile,
+  EditorData,
 } from '../lib/types';
 import defaultRulesFixture from './fixtures/default-rules.json';
 
@@ -68,7 +72,10 @@ export function makeOverlayStatus(over: Partial<OverlayStatus> = {}): OverlaySta
     })),
     diagnostics: [],
     hiddenByUser: false,
-    hotkeys: { toggle: { ...NO_HOTKEY }, nextProfile: { ...NO_HOTKEY } },
+    hotkeys: { toggle: { ...NO_HOTKEY }, nextProfile: { ...NO_HOTKEY }, benchmark: { ...NO_HOTKEY } },
+    preview: false,
+    previewFailure: null,
+    benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
     ...over,
   };
 }
@@ -170,6 +177,28 @@ export class FakeBackend implements Backend {
   exportError: string | null = null;
   exportSensorReportCalls = 0;
   revealSensorReportCalls = 0;
+  /** The profile files by id; the editor commands read and write them. */
+  profiles: Record<string, EditableProfile> = {};
+  /** Set to reject every editor profile command with this error. */
+  editorError: CommandError | null = null;
+  /** Editor calls in order (`overlaySaveProfile:<id>`, `overlayEditorDirty:true`, ...), without `overlayEditorProfile`. */
+  editorCalls: string[] = [];
+  /** Every `overlayEditorProfile` argument, in order. */
+  editorProfiles: (string | null)[] = [];
+  /** Every `overlayPreview` argument, in order. */
+  previews: (string | null)[] = [];
+  /** What `overlayImportProfile` imports (stored under a new id); null is a cancelled dialog. */
+  importProfileJson: string | null = null;
+  /** What `overlayExportProfile` answers. */
+  exportProfileResult = true;
+  fontFamilies: string[] = ['Segoe UI', 'Consolas'];
+  /** What `benchmarkList` returns; `benchmarkCalls` records the benchmark commands. */
+  benchmarks: BenchmarkEntry[] = [];
+  benchmarkCalls: string[] = [];
+  #nextProfile = 1;
+  #editorDataListeners = new Set<(d: EditorData) => void>();
+  #previewListeners = new Set<(e: { open: boolean }) => void>();
+  #editorQuitListeners = new Set<() => void>();
   #updateListeners = new Set<(s: UpdateStatus) => void>();
   #logListeners = new Set<(s: LogStatus) => void>();
   #overlayListeners = new Set<(s: OverlayStatus) => void>();
@@ -433,6 +462,130 @@ export class FakeBackend implements Backend {
 
   async setOverlayHidden(hidden: boolean): Promise<void> {
     this.overlayCalls.push(`setOverlayHidden:${hidden}`);
+  }
+
+  #editor(call: string): void {
+    this.editorCalls.push(call);
+    if (this.editorError !== null) throw this.editorError;
+  }
+
+  #store(json: string): string {
+    const id = `00000000-0000-4000-8000-${String(1000 + this.#nextProfile++).padStart(12, '0')}`;
+    this.profiles[id] = { id, builtin: false, json };
+    return id;
+  }
+
+  async overlayLoadProfile(id: string): Promise<EditableProfile> {
+    this.#editor(`overlayLoadProfile:${id}`);
+    const profile = this.profiles[id];
+    if (profile === undefined) throw { key: 'editor.error.notFound', detail: null } satisfies CommandError;
+    return { ...profile };
+  }
+
+  async overlaySaveProfile(id: string | null, json: string): Promise<string> {
+    this.#editor(`overlaySaveProfile:${id}`);
+    if (id === null) return this.#store(json);
+    this.profiles[id] = { id, builtin: false, json };
+    return id;
+  }
+
+  async overlayDeleteProfile(id: string): Promise<void> {
+    this.#editor(`overlayDeleteProfile:${id}`);
+    delete this.profiles[id];
+  }
+
+  async overlayDuplicateProfile(id: string): Promise<string> {
+    this.#editor(`overlayDuplicateProfile:${id}`);
+    const from = this.profiles[id];
+    if (from === undefined) throw { key: 'editor.error.notFound', detail: null } satisfies CommandError;
+    return this.#store(from.json);
+  }
+
+  async overlayImportProfile(): Promise<string | null> {
+    this.#editor('overlayImportProfile');
+    return this.importProfileJson === null ? null : this.#store(this.importProfileJson);
+  }
+
+  async overlayExportProfile(id: string): Promise<boolean> {
+    this.#editor(`overlayExportProfile:${id}`);
+    return this.exportProfileResult;
+  }
+
+  async overlayFontFamilies(): Promise<string[]> {
+    return [...this.fontFamilies];
+  }
+
+  async overlayPreview(json: string | null): Promise<void> {
+    this.previews.push(json);
+  }
+
+  async overlayEditorProfile(json: string | null): Promise<void> {
+    this.editorProfiles.push(json);
+  }
+
+  async overlayUseNow(id: string): Promise<void> {
+    this.editorCalls.push(`overlayUseNow:${id}`);
+  }
+
+  async overlayEditorDirty(dirty: boolean): Promise<void> {
+    this.editorCalls.push(`overlayEditorDirty:${dirty}`);
+  }
+
+  async openOverlayEditor(): Promise<void> {
+    this.editorCalls.push('openOverlayEditor');
+  }
+
+  async appQuitConfirmed(): Promise<void> {
+    this.editorCalls.push('appQuitConfirmed');
+  }
+
+  async onOverlayEditorData(cb: (d: EditorData) => void): Promise<Unsubscribe> {
+    this.#editorDataListeners.add(cb);
+    return () => this.#editorDataListeners.delete(cb);
+  }
+
+  async onOverlayPreview(cb: (e: { open: boolean }) => void): Promise<Unsubscribe> {
+    this.#previewListeners.add(cb);
+    return () => this.#previewListeners.delete(cb);
+  }
+
+  async onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe> {
+    this.#editorQuitListeners.add(cb);
+    return () => this.#editorQuitListeners.delete(cb);
+  }
+
+  emitEditorData(data: EditorData): void {
+    this.#editorDataListeners.forEach((cb) => cb(data));
+  }
+
+  emitPreview(open: boolean): void {
+    this.#previewListeners.forEach((cb) => cb({ open }));
+  }
+
+  emitEditorQuit(): void {
+    this.#editorQuitListeners.forEach((cb) => cb());
+  }
+
+  async benchmarkToggle(): Promise<void> {
+    this.benchmarkCalls.push('benchmarkToggle');
+  }
+
+  async benchmarkList(): Promise<BenchmarkEntry[]> {
+    this.benchmarkCalls.push('benchmarkList');
+    return structuredClone(this.benchmarks);
+  }
+
+  async benchmarkOpenCsv(id: string): Promise<void> {
+    this.benchmarkCalls.push(`benchmarkOpenCsv:${id}`);
+  }
+
+  async benchmarkOpenFolder(): Promise<void> {
+    this.benchmarkCalls.push('benchmarkOpenFolder');
+  }
+
+  async benchmarkDelete(id: string): Promise<void> {
+    this.benchmarkCalls.push(`benchmarkDelete:${id}`);
+    this.benchmarks = this.benchmarks.filter((b) => b.id !== id);
   }
 
   async checkUpdates(): Promise<UpdateStatus> {

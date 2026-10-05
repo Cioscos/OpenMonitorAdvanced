@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Backend } from '../../lib/backend';
   import { t } from '../../lib/i18n/index.svelte';
+  import { folderErrorText } from '../../lib/log/messages';
   import { overlay, retryVisible } from '../../lib/overlay.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { ChartFps, OverlayProfileEntry, OverlaySettings, OverlayStatus, SettingsPatch } from '../../lib/types';
@@ -30,6 +31,16 @@
     const key = settings.errors[field];
     return key === undefined ? null : t(key);
   };
+  /** Why «Try again» or «Reload profiles» did not work, under their buttons. */
+  let errors = $state<{ retry: string | null; reload: string | null }>({ retry: null, reload: null });
+  async function attempt(which: 'retry' | 'reload', call: () => Promise<void>) {
+    errors[which] = null;
+    try {
+      await call();
+    } catch (error) {
+      errors[which] = t('overlay.error', { detail: folderErrorText(error, t) });
+    }
+  }
   const send = (patch: { overlay: Partial<OverlaySettings> }) => settings.update(patch as SettingsPatch);
   /** A failed call leaves the hotkeys as they were: nothing to show for it. */
   const suspendHotkeys = (suspended: boolean) => backend.setLogHotkeysSuspended(suspended).catch(() => {});
@@ -122,9 +133,12 @@
           {/each}
         </div>
         {#if retryVisible(status)}
-          <button type="button" class="action" onclick={() => overlay.retry().catch(() => {})}>{t('overlay.retry')}</button>
+          <button type="button" class="action" onclick={() => attempt('retry', () => overlay.retry())}>{t('overlay.retry')}</button>
         {/if}
       </div>
+      {#if errors.retry}
+        <p class="error" role="alert">{errors.retry}</p>
+      {/if}
       <!-- Hidden with the hotkey or the tray: not saved, so a restart shows it again. -->
       {#if status.hiddenByUser}
         <div class="status" data-tone="idle">
@@ -165,7 +179,13 @@
       onChange={(defaultProfile) => send({ overlay: { defaultProfile } })}
     />
     <div class="reload">
-      <button type="button" class="action" onclick={() => overlay.reloadProfiles().catch(() => {})}>{t('overlay.reload')}</button>
+      <div class="buttons">
+        <button type="button" class="action" onclick={() => attempt('reload', () => overlay.reloadProfiles())}>{t('overlay.reload')}</button>
+        <button type="button" class="action" onclick={() => backend.openOverlayEditor().catch(() => {})}>{t('overlay.openEditor')}</button>
+      </div>
+      {#if errors.reload}
+        <p class="error flush" role="alert">{errors.reload}</p>
+      {/if}
       {#if status && status.diagnostics.length > 0}
         <ul class="diagnostics">
           {#each status.diagnostics as d (d.file)}
@@ -285,6 +305,15 @@
       status={status?.hotkeys.nextProfile ?? null}
       error={errorOf('overlay.hotkeyNextProfile')}
       onChange={(hotkeyNextProfile) => send({ overlay: { hotkeyNextProfile } })}
+      onCapture={suspendHotkeys}
+    />
+    <HotkeyInput
+      id="overlay-hotkey-benchmark"
+      label={t('overlay.hotkeyBenchmark')}
+      value={current.hotkeyBenchmark}
+      status={status?.hotkeys.benchmark ?? null}
+      error={errorOf('overlay.hotkeyBenchmark')}
+      onChange={(hotkeyBenchmark) => send({ overlay: { hotkeyBenchmark } })}
       onCapture={suspendHotkeys}
     />
     <p class="hint">{t('settings.log.hotkey.hint')}</p>
@@ -428,6 +457,9 @@
     padding: 10px 16px;
     font-size: 12.5px;
     color: var(--text-muted);
+  }
+  .error.flush {
+    padding: 0;
   }
   .error {
     margin: 0;

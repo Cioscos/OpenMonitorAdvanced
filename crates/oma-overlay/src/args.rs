@@ -1,5 +1,5 @@
-//! Command line of `oma-overlay.exe`: the app passes `--pipe <name>` and
-//! nothing else.
+//! Command line of `oma-overlay.exe`: the app passes `--pipe <name>`, and
+//! `--preview` for the editor's preview window (M7d); nothing else.
 
 use oma_ipc::overlay::OVERLAY_PIPE_PREFIX;
 
@@ -10,6 +10,8 @@ pub const MAX_PIPE_NAME_BYTES: usize = 256;
 pub struct Args {
     /// Full pipe path, starting with [`OVERLAY_PIPE_PREFIX`].
     pub pipe: String,
+    /// `--preview`: draw in a normal window instead of over the game.
+    pub preview: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +22,8 @@ pub enum ArgsError {
     MissingValue,
     /// `--pipe` was given more than once.
     DuplicatePipe,
+    /// `--preview` was given more than once.
+    DuplicatePreview,
     /// The name lacks the overlay prefix, names nothing after it, or is too long.
     BadPipeName(String),
     /// Any other argument.
@@ -32,6 +36,7 @@ impl std::fmt::Display for ArgsError {
             Self::MissingPipe => write!(f, "--pipe <name> is required"),
             Self::MissingValue => write!(f, "--pipe needs a value"),
             Self::DuplicatePipe => write!(f, "--pipe given more than once"),
+            Self::DuplicatePreview => write!(f, "--preview given more than once"),
             Self::BadPipeName(name) => write!(f, "{name:?} is not an overlay pipe name"),
             Self::Unknown(arg) => write!(f, "unknown argument {arg:?}"),
         }
@@ -50,6 +55,7 @@ fn is_valid_pipe_name(name: &str) -> bool {
 /// Parses the arguments after the program name.
 pub fn parse_args(args: &[String]) -> Result<Args, ArgsError> {
     let mut pipe = None;
+    let mut preview = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -63,10 +69,17 @@ pub fn parse_args(args: &[String]) -> Result<Args, ArgsError> {
                 }
                 pipe = Some(value.clone());
             }
+            "--preview" => {
+                if preview {
+                    return Err(ArgsError::DuplicatePreview);
+                }
+                preview = true;
+            }
             other => return Err(ArgsError::Unknown(other.to_owned())),
         }
     }
-    pipe.map(|pipe| Args { pipe }).ok_or(ArgsError::MissingPipe)
+    pipe.map(|pipe| Args { pipe, preview })
+        .ok_or(ArgsError::MissingPipe)
 }
 
 #[cfg(test)]
@@ -87,7 +100,10 @@ mod tests {
         assert_eq!(parse_args(&v(&["--pipe"])), Err(ArgsError::MissingValue));
         assert_eq!(
             parse_args(&[String::from("--pipe"), name()]),
-            Ok(Args { pipe: name() })
+            Ok(Args {
+                pipe: name(),
+                preview: false
+            })
         );
         assert_eq!(
             parse_args(&[
@@ -134,6 +150,46 @@ mod tests {
         assert_eq!(
             parse_args(&[String::from("--PIPE"), name()]),
             Err(ArgsError::Unknown("--PIPE".into()))
+        );
+    }
+
+    #[test]
+    fn preview_flag_parses() {
+        let pipe = || String::from("--pipe");
+        let preview = || String::from("--preview");
+        assert_eq!(
+            parse_args(&[pipe(), name()]),
+            Ok(Args {
+                pipe: name(),
+                preview: false
+            })
+        );
+        for argv in [
+            vec![pipe(), name(), preview()],
+            vec![preview(), pipe(), name()],
+        ] {
+            assert_eq!(
+                parse_args(&argv),
+                Ok(Args {
+                    pipe: name(),
+                    preview: true
+                })
+            );
+        }
+        // `--preview` alone still needs the pipe.
+        assert_eq!(parse_args(&[preview()]), Err(ArgsError::MissingPipe));
+    }
+
+    #[test]
+    fn preview_flag_twice_is_an_error() {
+        assert_eq!(
+            parse_args(&[
+                String::from("--preview"),
+                String::from("--pipe"),
+                name(),
+                String::from("--preview")
+            ]),
+            Err(ArgsError::DuplicatePreview)
         );
     }
 }

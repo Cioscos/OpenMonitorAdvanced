@@ -3,7 +3,7 @@ export type View = 'simple' | 'advanced' | 'settings';
 
 /** A place inside the settings screen: the rules, optionally with "New rule" filled in for a sensor. */
 export interface SettingsTarget {
-  section: 'rules' | 'log' | 'about';
+  section: 'rules' | 'log' | 'benchmark' | 'about';
   newRuleSensor?: string;
 }
 

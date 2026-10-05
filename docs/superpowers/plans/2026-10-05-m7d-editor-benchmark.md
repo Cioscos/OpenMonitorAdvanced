@@ -905,3 +905,24 @@ Prima di scrivere i componenti di D13–D16: skill `frontend-design:frontend-des
 - [ ] **Step 5: commit** `docs: record the M7d live checks`.
 
 ## Esito dell'esecuzione
+
+D1–D17 eseguiti subagent-driven il 2026-10-05, ognuno con la sua revisione, poi la revisione dell'intero branch con un giro di correzioni e la riscrittura del trailer dei commit. La versione è la 0.5.0 (non taggata, non pubblicata). Le prove dal vivo D18 si sono fatte con l'utente il 2026-10-05 e il 2026-10-06 su questo PC (God of War in finestra, Windows Terminal), con il setup locale 0.5.0, SHA-256 `14d154241266ae4358818897d93b435e3d40b59ffa10a551a73a2e1d07f1f2f8`.
+
+| # | Esito |
+|---|---|
+| X1 | Superata (2026-10-05), compresi i limiti della finestra dell'editor da massimizzata: si riapre alla dimensione e alla posizione normali. |
+| X2 | Superata (2026-10-06). |
+| X3 | Superata (2026-10-06), compreso modificare e chiudere l'editor con l'anteprima aperta. |
+| X4 | Superata (2026-10-06), dopo una correzione richiesta dall'utente: gli errori dell'editor stanno in un banner rosso che si chiude, non in testo rosso semplice (`2101dbf`). |
+| X5 | Superata (2026-10-06). |
+| X6 | Superata (2026-10-06), dopo una correzione richiesta dall'utente: spazio sotto «Apri cartella» nella lista delle sessioni del benchmark (`4b9bea6`, un solo valore CSS). |
+| X7 | Superata (2026-10-06). Solo editor (finestra principale chiusa): app con WebView2 154 MB, CPU circa 0,15%. Editor e anteprima: `oma-overlay --preview` 21 MB e 0,08% di CPU, app 154 MB. Nel tray: app 26,7 MB, WebView2 e anteprima spariti; overlay in gioco nascosto 9,9 MB. Numeri in `docs/perf-budget.md`. |
+| X8 | Superata (2026-10-06). (a) Trascinare per 20 s la finestra di God of War: `oma-app` 0,26% di CPU contro 0,07% a riposo nel tray. (b) Desktop senza giochi: Impostazioni › Overlay mostra «Misura attiva» e non resta su «Avvio…»; il motore resta acceso finché l'overlay è abilitato (progetto della M7c). |
+
+**Correzioni nate dalle prove.** `2101dbf` banner di errore chiudibile nell'editor (X4); `4b9bea6` spazio sotto «Apri cartella» nelle sessioni del benchmark (X6). Entrambe riviste.
+
+**Voci aperte nuove.** Il log scrive un WARN «stopped unexpectedly code=5» prima dell'INFO «the preview was closed» quando si chiude l'anteprima (rumore). L'overlay si nasconde dopo circa 3 s in un trascinamento della finestra del gioco, perché il gioco smette di presentare nel ciclo modale di spostamento di Windows: l'utente lo ritiene accettabile. Entrambe in `docs/follow-ups.md`.
+
+**Prove aggiunte il 2026-10-06.** Chiusura forzata del processo dell'anteprima cinque volte: riavvii dopo 1, 2, 4 e 8 s, nessun riavvio dopo la quinta caduta, «Anteprima non disponibile: overlay interrotto» nell'editor, overlay in gioco intatto, riapertura manuale riuscita. Anteprima spostata su un secondo monitor a 1920×1080 con scala 150%: il cambio di DPI ridimensiona e ridisegna correttamente.
+
+**Non provate dal vivo (restano dovute).** Apertura dell'anteprima su un monitor principale piccolo (saltata dall'utente; coperta dal test `preview_bounds`); i percorsi dell'installer (VM).

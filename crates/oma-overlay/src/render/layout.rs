@@ -10,9 +10,9 @@ use oma_core::overlay::{
 };
 use oma_core::settings::{TemperatureUnit, ThroughputUnit};
 
-use oma_ipc::overlay::WireFrameTime;
+use oma_ipc::overlay::{WireBenchmarkSummary, WireFrameTime};
 
-use crate::state::{metric_value, OverlayState, SourceKey};
+use crate::state::{metric_value, range_key, OverlayState, SourceKey, AUTO_RANGE_S};
 
 /// A rectangle in physical pixels, as Direct2D takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -490,16 +490,28 @@ pub fn gauge_sweep(value: f64, min: f64, max: f64) -> f32 {
     meter_fraction(value, min, max) * 270.0
 }
 
+/// The highest value of the block's source in the last [`AUTO_RANGE_S`]
+/// seconds (DD16), from its ring; `None` without samples.
+pub fn auto_max(block: &Block, state: &OverlayState) -> Option<f64> {
+    let ring = state.rings.get(&range_key(&block.source)?)?;
+    ring.value(&Stat {
+        op: StatOp::Max,
+        window: AUTO_RANGE_S,
+        ..Stat::default()
+    })
+}
+
 /// The range of a meter or gauge: each bound fixed, or automatic. The
 /// automatic range of a percentage is 0 to 100; otherwise it runs from 0
-/// (or the value, when negative) up to the highest value seen, `peak`, so a
-/// reading is never shown as always full.
+/// (or the value, when negative) up to the highest recent value,
+/// `recent_max` (see [`auto_max`]), so a reading is never shown as always
+/// full and an old spike does not keep the scale wide.
 pub fn value_range(
     min: RangeBound,
     max: RangeBound,
     percent: bool,
     value: Option<f64>,
-    peak: f64,
+    recent_max: Option<f64>,
 ) -> (f64, f64) {
     let v = value.unwrap_or(0.0);
     let lo = match min {
@@ -510,9 +522,59 @@ pub fn value_range(
     let hi = match max {
         RangeBound::Fixed(m) => m,
         RangeBound::Auto if percent => 100.0,
-        RangeBound::Auto => v.max(peak).max(0.0).max(lo),
+        RangeBound::Auto => v.max(recent_max.unwrap_or(v)).max(0.0).max(lo),
     };
     (lo, hi)
+}
+
+/// The benchmark badge: `● REC mm:ss`, stopping at `60:00` (the capture's
+/// limit).
+pub fn rec_text(seconds: u32) -> String {
+    let s = seconds.min(3600);
+    format!("\u{25cf} REC {:02}:{:02}", s / 60, s % 60)
+}
+
+/// The four rows of the benchmark summary: average FPS, 1% and 0.1% lows
+/// and stutters, with the labels from `strings` (English without them).
+pub fn bench_rows(sum: &WireBenchmarkSummary, state: &OverlayState) -> [TextParts; 4] {
+    let opts = FormatOptions {
+        decimal_comma: state.draw.decimal_comma,
+        ..FormatOptions::default()
+    };
+    let row = |key: &str, default: &str, metric: FrameMetric, v: f64| {
+        let (value, unit) = format_frame_metric(metric, Some(v), &opts);
+        TextParts {
+            label: string(state, key).unwrap_or_else(|| default.to_owned()),
+            value,
+            unit,
+        }
+    };
+    [
+        row(
+            "bench.avg",
+            "Avg FPS",
+            FrameMetric::FpsDisplayed,
+            sum.fps_displayed,
+        ),
+        row(
+            "bench.low1",
+            "1% low",
+            FrameMetric::Low1,
+            sum.low_one_percent,
+        ),
+        row(
+            "bench.low01",
+            "0.1% low",
+            FrameMetric::Low01,
+            sum.low_point_one_percent,
+        ),
+        row(
+            "bench.stutter",
+            "Stutter",
+            FrameMetric::Stutter,
+            f64::from(sum.stutter_count),
+        ),
+    ]
 }
 
 /// The size of one laid-out text: width, ascent (top to baseline) and
@@ -1027,24 +1089,134 @@ mod tests {
     fn value_range_auto_and_fixed() {
         use oma_core::overlay::RangeBound::{Auto, Fixed};
         assert_eq!(
-            value_range(Auto, Auto, true, Some(40.0), 90.0),
+            value_range(Auto, Auto, true, Some(40.0), Some(90.0)),
             (0.0, 100.0)
         );
-        // Not a percentage: up to the highest value seen, so it is not
+        // Not a percentage: up to the highest recent value, so it is not
         // always full.
         assert_eq!(
-            value_range(Auto, Auto, false, Some(40.0), 90.0),
+            value_range(Auto, Auto, false, Some(40.0), Some(90.0)),
             (0.0, 90.0)
         );
-        assert_eq!(value_range(Auto, Auto, false, Some(40.0), 0.0), (0.0, 40.0));
         assert_eq!(
-            value_range(Auto, Auto, false, Some(-5.0), -5.0),
+            value_range(Auto, Auto, false, Some(40.0), None),
+            (0.0, 40.0)
+        );
+        assert_eq!(
+            value_range(Auto, Auto, false, Some(-5.0), Some(-5.0)),
             (-5.0, 0.0)
         );
         assert_eq!(
-            value_range(Fixed(10.0), Fixed(90.0), true, None, 0.0),
+            value_range(Fixed(10.0), Fixed(90.0), true, None, None),
             (10.0, 90.0)
         );
+    }
+
+    #[test]
+    fn auto_range_forgets_a_spike_after_sixty_seconds() {
+        use oma_core::overlay::RangeBound::Auto;
+        use oma_ipc::overlay::{OverlayMessage, SetProfile, Values, WireValue};
+        let meter = json!({ "id": "m", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 },
+            "source": { "sensor": CPU }, "kind": "meter" });
+        let mut s = OverlayState::default();
+        s.apply(
+            OverlayMessage::SetProfile(SetProfile {
+                profile_id: "p".into(),
+                profile_json: json!({ "format": 1, "name": "t", "blocks": [meter] }).to_string(),
+                sensors: vec![SensorInfo {
+                    id: CPU.into(),
+                    label: "CPU".into(),
+                    unit: "celsius".into(),
+                }],
+                strings: BTreeMap::new(),
+                draw: crate::state::default_draw(),
+            }),
+            0.0,
+        );
+        let push = |s: &mut OverlayState, t: u32, v: f64| {
+            s.apply(
+                OverlayMessage::Values(Values {
+                    at_ms: u64::from(t) * 1000,
+                    values: vec![WireValue {
+                        id: CPU.into(),
+                        value: Some(v),
+                        quality: "fresh".into(),
+                    }],
+                }),
+                f64::from(t),
+            );
+        };
+        push(&mut s, 0, 100.0);
+        for t in 1..=30 {
+            push(&mut s, t, 10.0);
+        }
+        let b = s.profile.as_ref().expect("profile").blocks[0].clone();
+        let range =
+            |s: &OverlayState| value_range(Auto, Auto, false, block_value(&b, s), auto_max(&b, s));
+        assert_eq!(range(&s), (0.0, 100.0), "the spike is recent");
+        for t in 31..=61 {
+            push(&mut s, t, 10.0);
+        }
+        assert_eq!(range(&s), (0.0, 10.0), "the spike is forgotten");
+    }
+
+    #[test]
+    fn auto_range_on_a_low_is_not_always_full() {
+        use oma_core::overlay::RangeBound::Auto;
+        use oma_ipc::overlay::{OverlayMessage, SetProfile};
+        let meter = json!({ "id": "m", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 },
+            "source": { "frames": "low-1" }, "kind": "meter",
+            "stat": { "window": 10, "definition": "percentile" } });
+        let mut s = OverlayState::default();
+        s.apply(
+            OverlayMessage::SetProfile(SetProfile {
+                profile_id: "p".into(),
+                profile_json: json!({ "format": 1, "name": "t", "blocks": [meter] }).to_string(),
+                sensors: vec![],
+                strings: BTreeMap::new(),
+                draw: crate::state::default_draw(),
+            }),
+            0.0,
+        );
+        // fps-displayed 100.4, 1% low 61.2 (see `metrics`).
+        s.apply(OverlayMessage::FrameMetrics(metrics("running")), 1.0);
+        let b = s.profile.as_ref().expect("profile").blocks[0].clone();
+        let v = block_value(&b, &s);
+        assert_eq!(v, Some(61.2));
+        let (lo, hi) = value_range(Auto, Auto, false, v, auto_max(&b, &s));
+        assert_eq!((lo, hi), (0.0, 100.4), "scaled to the recent FPS");
+        assert!(meter_fraction(61.2, lo, hi) < 1.0);
+    }
+
+    #[test]
+    fn bench_rows_use_strings_or_english() {
+        let sum = WireBenchmarkSummary {
+            fps_displayed: 119.6,
+            low_one_percent: 80.0,
+            low_point_one_percent: 60.0,
+            stutter_count: 4,
+            stutter_percent: 0.5,
+        };
+        let mut s = OverlayState::default();
+        let rows = bench_rows(&sum, &s);
+        assert_eq!(rows[0].label, "Avg FPS");
+        assert_eq!(
+            (rows[0].value.as_str(), rows[0].unit.as_str()),
+            ("120", "FPS")
+        );
+        assert_eq!(rows[3].label, "Stutter");
+        assert_eq!((rows[3].value.as_str(), rows[3].unit.as_str()), ("4", ""));
+        s.strings.insert("bench.avg".into(), "FPS medi".into());
+        assert_eq!(bench_rows(&sum, &s)[0].label, "FPS medi");
+    }
+
+    #[test]
+    fn rec_text_formats_minutes_and_seconds() {
+        assert_eq!(rec_text(0), "\u{25cf} REC 00:00");
+        assert_eq!(rec_text(187), "\u{25cf} REC 03:07");
+        assert_eq!(rec_text(3599), "\u{25cf} REC 59:59");
+        assert_eq!(rec_text(3600), "\u{25cf} REC 60:00");
+        assert_eq!(rec_text(5000), "\u{25cf} REC 60:00");
     }
 
     #[test]

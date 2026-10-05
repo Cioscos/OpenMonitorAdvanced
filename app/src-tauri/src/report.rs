@@ -177,13 +177,13 @@ fn os_version() -> Option<String> {
 }
 
 #[cfg(windows)]
-fn local_now(now_ms: u64) -> LocalTime {
+pub(crate) fn local_now(now_ms: u64) -> LocalTime {
     let offset = oma_win::local_time::utc_offset_minutes(now_ms).unwrap_or(0);
     oma_core::csv::local_time(now_ms, offset)
 }
 
 #[cfg(not(windows))]
-fn local_now(now_ms: u64) -> LocalTime {
+pub(crate) fn local_now(now_ms: u64) -> LocalTime {
     oma_core::csv::local_time(now_ms, 0)
 }
 

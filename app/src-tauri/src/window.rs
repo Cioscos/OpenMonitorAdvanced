@@ -1,13 +1,30 @@
-//! Main window lifecycle: created on demand, destroyed on close so WebView2
-//! releases its memory while the app keeps sampling in the tray.
+//! Window lifecycle: the main window and the overlay editor (M7d) are
+//! created on demand and destroyed on close, so WebView2 releases its memory
+//! while the app keeps sampling in the tray. Also the app's exit from the
+//! tray, which asks the editor first when it holds unsaved changes (DD13).
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use oma_core::overlay::PxRect;
+use oma_core::settings::overlay::WindowBounds;
 use oma_core::settings::ViewKind;
 use serde::{Serialize, Serializer};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
+};
+
+use crate::i18n::t;
+use crate::settings::SettingsStore;
+use crate::tray::language_for;
 
 pub const MAIN: &str = "main";
+/// The overlay editor's window.
+pub const EDITOR: &str = "overlay-editor";
+/// Sent to the editor when the tray's «Quit» waits for its answer; the
+/// editor calls `app_quit_confirmed` after «Save» or «Discard».
+pub const EVENT_EDITOR_QUIT: &str = "overlay-editor-quit";
 /// Sent to an already open window; the payload is a [`NavigationTarget`].
 pub const EVENT_NAVIGATE: &str = "oma:navigate";
 
@@ -102,6 +119,226 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// The open editor's state: whether it holds unsaved changes, and where its
+/// window is (saved once, when it closes, DD12).
+#[derive(Default)]
+pub struct EditorState {
+    dirty: AtomicBool,
+    bounds: Mutex<Option<WindowBounds>>,
+}
+
+impl EditorState {
+    fn update_bounds(&self, change: impl FnOnce(&mut WindowBounds)) {
+        if let Some(bounds) = self
+            .bounds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            change(bounds);
+        }
+    }
+}
+
+/// Whether `bounds` overlaps one of the `monitors` (an unplugged monitor
+/// would leave the editor out of sight).
+pub(crate) fn bounds_visible(bounds: WindowBounds, monitors: &[PxRect]) -> bool {
+    let (left, top) = (i64::from(bounds.x), i64::from(bounds.y));
+    let (right, bottom) = (
+        left + i64::from(bounds.width),
+        top + i64::from(bounds.height),
+    );
+    monitors.iter().any(|m| {
+        let (m_left, m_top) = (i64::from(m.x), i64::from(m.y));
+        left < m_left + i64::from(m.w)
+            && m_left < right
+            && top < m_top + i64::from(m.h)
+            && m_top < bottom
+    })
+}
+
+/// Whether the main window or the editor is open: someone listens to the
+/// app's events.
+pub fn any_open(app: &AppHandle) -> bool {
+    app.get_webview_window(MAIN).is_some() || app.get_webview_window(EDITOR).is_some()
+}
+
+/// Tells the overlay's controller that the editor opened or closed.
+fn tell_overlay(app: &AppHandle, open: bool) {
+    #[cfg(windows)]
+    if let Some(overlay) = app.try_state::<crate::overlay::runner::OverlayHandle>() {
+        overlay.editor_open(open);
+    }
+    #[cfg(not(windows))]
+    let _ = (app, open);
+}
+
+/// Shows the overlay editor, creating it if it is closed: where it was last
+/// closed if that is still on a monitor, centered otherwise.
+pub fn show_editor(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(EDITOR) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let store = app.state::<Arc<SettingsStore>>();
+    let settings = store.snapshot();
+    let lang = language_for(settings.general.language);
+    let monitors: Vec<PxRect> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| PxRect {
+            x: m.position().x,
+            y: m.position().y,
+            w: i32::try_from(m.size().width).unwrap_or(i32::MAX),
+            h: i32::try_from(m.size().height).unwrap_or(i32::MAX),
+        })
+        .collect();
+    let saved = settings
+        .overlay
+        .editor_bounds
+        .filter(|b| bounds_visible(*b, &monitors));
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        EDITOR,
+        WebviewUrl::App("index.html?window=overlay-editor".into()),
+    )
+    .title(t(lang, "editor.title", &[]))
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(1100.0, 700.0)
+    .visible(false);
+    if saved.is_none() {
+        builder = builder.center();
+    }
+    let window = match builder.build() {
+        Ok(window) => window,
+        Err(err) => {
+            tracing::error!(%err, "cannot create the overlay editor window");
+            return;
+        }
+    };
+    if let Some(b) = saved {
+        let _ = window.set_position(PhysicalPosition::new(b.x, b.y));
+        let _ = window.set_size(PhysicalSize::new(b.width, b.height));
+    }
+    let state = app.state::<EditorState>();
+    state.dirty.store(false, Ordering::Release);
+    *state.bounds.lock().unwrap_or_else(PoisonError::into_inner) =
+        match (window.outer_position(), window.inner_size()) {
+            (Ok(p), Ok(s)) => Some(WindowBounds {
+                x: p.x,
+                y: p.y,
+                width: s.width,
+                height: s.height,
+            }),
+            _ => None,
+        };
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        let state = handle.state::<EditorState>();
+        // A maximized window's bounds are the monitor's: the restored ones
+        // are kept.
+        let maximized = || {
+            handle
+                .get_webview_window(EDITOR)
+                .and_then(|w| w.is_maximized().ok())
+                .unwrap_or(false)
+        };
+        match event {
+            // A minimized window reports -32000 and a zero size: not kept.
+            WindowEvent::Moved(p) if p.x > -32_000 && p.y > -32_000 && !maximized() => {
+                state.update_bounds(|b| (b.x, b.y) = (p.x, p.y));
+            }
+            WindowEvent::Resized(s) if s.width > 0 && s.height > 0 && !maximized() => {
+                state.update_bounds(|b| (b.width, b.height) = (s.width, s.height));
+            }
+            WindowEvent::Destroyed => {
+                state.dirty.store(false, Ordering::Release);
+                let bounds = state
+                    .bounds
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                    .filter(WindowBounds::is_valid);
+                if bounds.is_some() {
+                    handle
+                        .state::<Arc<SettingsStore>>()
+                        .update_with(|s| s.overlay.editor_bounds = bounds);
+                }
+                // Closing the editor also ends the preview.
+                tell_overlay(&handle, false);
+            }
+            _ => {}
+        }
+    });
+    let _ = window.show();
+    let _ = window.set_focus();
+    tell_overlay(app, true);
+}
+
+/// Who asks the app to exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitSource {
+    /// «Quit» in the tray menu.
+    Tray,
+    /// `oma-app.exe --quit` (the installer).
+    Flag,
+}
+
+/// What a quit request does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitAction {
+    Exit,
+    /// Show the editor and let it ask: save, discard or cancel.
+    AskEditor,
+}
+
+/// The tray asks first while the editor holds unsaved changes; `--quit`
+/// never asks, so the installer can always close the app (DD13).
+pub fn quit_action(source: QuitSource, editor_open: bool, editor_dirty: bool) -> QuitAction {
+    if source == QuitSource::Tray && editor_open && editor_dirty {
+        QuitAction::AskEditor
+    } else {
+        QuitAction::Exit
+    }
+}
+
+/// Exits the app, or asks the editor first (see [`quit_action`]).
+pub fn quit(app: &AppHandle, source: QuitSource) {
+    let open = app.get_webview_window(EDITOR).is_some();
+    let dirty = app
+        .try_state::<EditorState>()
+        .is_some_and(|s| s.dirty.load(Ordering::Acquire));
+    match quit_action(source, open, dirty) {
+        QuitAction::Exit => app.exit(0),
+        QuitAction::AskEditor => {
+            show_editor(app);
+            let _ = app.emit_to(EDITOR, EVENT_EDITOR_QUIT, ());
+        }
+    }
+}
+
+/// Opens the overlay editor. Async: a window created in a synchronous
+/// command deadlocks on Windows.
+#[tauri::command]
+pub async fn open_overlay_editor(app: AppHandle) {
+    show_editor(&app);
+}
+
+/// The editor holds unsaved changes (or no longer does).
+#[tauri::command]
+pub fn overlay_editor_dirty(state: State<'_, EditorState>, dirty: bool) {
+    state.dirty.store(dirty, Ordering::Release);
+}
+
+/// The editor answered the tray's «Quit» with «Save» or «Discard».
+#[tauri::command]
+pub fn app_quit_confirmed(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Shows the main window on `view`.
 pub fn show_main_on(app: &AppHandle, view: ViewKind) {
     navigate(app, NavigationTarget::view(view));
@@ -177,6 +414,62 @@ mod tests {
             json(NavigationTarget::device("storage/a\"b")),
             r#"{"view":"advanced","deviceId":"storage/a\"b"}"#
         );
+    }
+
+    #[test]
+    fn bounds_visible_needs_an_intersecting_monitor() {
+        let bounds = |x, y| WindowBounds {
+            x,
+            y,
+            width: 1280,
+            height: 800,
+        };
+        let primary = PxRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let left = PxRect {
+            x: -2560,
+            y: 0,
+            w: 2560,
+            h: 1440,
+        };
+        assert!(bounds_visible(bounds(100, 100), &[primary]));
+        // Partly off the edge still intersects.
+        assert!(bounds_visible(bounds(1800, 1000), &[primary]));
+        // On a monitor that was unplugged.
+        assert!(bounds_visible(bounds(-2000, 200), &[primary, left]));
+        assert!(!bounds_visible(bounds(-2000, 200), &[primary]));
+        // Touching an edge is not intersecting.
+        assert!(!bounds_visible(bounds(1920, 0), &[primary]));
+        assert!(!bounds_visible(bounds(0, 0), &[]));
+    }
+
+    #[test]
+    fn tray_quit_with_a_dirty_editor_asks_first() {
+        assert_eq!(
+            quit_action(QuitSource::Tray, true, true),
+            QuitAction::AskEditor
+        );
+        assert_eq!(quit_action(QuitSource::Tray, true, false), QuitAction::Exit);
+        assert_eq!(quit_action(QuitSource::Tray, false, true), QuitAction::Exit);
+        assert_eq!(
+            quit_action(QuitSource::Tray, false, false),
+            QuitAction::Exit
+        );
+    }
+
+    #[test]
+    fn quit_flag_never_asks() {
+        for (open, dirty) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(
+                quit_action(QuitSource::Flag, open, dirty),
+                QuitAction::Exit,
+                "{open} {dirty}"
+            );
+        }
     }
 
     #[test]

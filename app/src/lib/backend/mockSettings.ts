@@ -84,6 +84,7 @@ const SHAPE: { [key: string]: Node } = {
     hotkeyToggle: 'nullable',
     hotkeyNextProfile: 'nullable',
     hotkeyBenchmark: 'nullable',
+    editorBounds: 'nullable',
   },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
@@ -254,6 +255,21 @@ function checkOverlay(overlay: Record<string, unknown>, log: Record<string, unkn
     taken.push(canonical as string);
     overlay[key] = canonical;
   }
+  checkEditorBounds(overlay.editorBounds);
+}
+
+/** `WindowBounds::from_json`: four integers, at least 1100×700, nothing beyond ±32768. */
+function checkEditorBounds(bounds: unknown): void {
+  if (bounds === null) return;
+  if (!isObject(bounds)) return fail('overlay.editorBounds', 'settings.error.type');
+  const keys = ['x', 'y', 'width', 'height'];
+  const values = keys.map((key) => bounds[key]);
+  const valid =
+    Object.keys(bounds).length === 4 &&
+    values.every((v) => Number.isInteger(v) && Math.abs(v as number) <= 32768) &&
+    (bounds.width as number) >= 1100 &&
+    (bounds.height as number) >= 700;
+  if (!valid) fail('overlay.editorBounds', 'settings.error.range');
 }
 
 /** The only rule checks of the mock: level shape, durations, threshold order and hysteresis. */
@@ -321,7 +337,7 @@ function merge(base: Record<string, unknown>, patch: Record<string, unknown>, pa
     if (value === undefined) continue;
     const existing = base[key];
     const wholeField =
-      (path.length === 3 && path[0] === 'rules' && path[1] === 'overrides') || (path.length === 1 && path[0] === 'overlay' && key === 'gameProfiles');
+      (path.length === 3 && path[0] === 'rules' && path[1] === 'overrides') || (path.length === 1 && path[0] === 'overlay' && (key === 'gameProfiles' || key === 'editorBounds'));
     if (isObject(existing) && isObject(value) && !wholeField) merge(existing, value, [...path, key]);
     else base[key] = clone(value);
   }
@@ -359,6 +375,7 @@ export function defaultSettings(): Settings {
       hotkeyToggle: null,
       hotkeyNextProfile: null,
       hotkeyBenchmark: null,
+      editorBounds: null,
     },
     migrations: { serviceV1: false, webviewV1: false },
   };

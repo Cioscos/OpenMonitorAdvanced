@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use oma_core::frames::metrics::{bottleneck, displayed_fps, stutter, Bottleneck, LowDefinition};
+use oma_core::frames::metrics::{
+    bottleneck, displayed_fps, lows, stutter, Bottleneck, LowDefinition, StutterCounter,
+};
 use oma_core::frames::{
     fg_multiplier, fg_suspected, pick_swapchain, read, rendered_fps, synthetic, FrameKind,
-    FrameSample, FrameWindow, Rendered, RenderedSource, SyntheticProfile,
+    FrameSample, FrameWindow, Rendered, RenderedSource, SessionAccumulator, SyntheticProfile,
 };
 
 /// Reads a fixture by column name. Absent column or `NA` gives `None`;
@@ -317,4 +319,105 @@ fn readout_without_track_gpu_has_no_bottleneck() {
     let w = window_of(&load("nofg"), 10.0);
     assert_eq!(read(&w, &[], false).bottleneck, None);
     assert!(read(&w, &[], true).bottleneck.is_some());
+}
+
+fn session_of(frames: &[FrameSample]) -> SessionAccumulator {
+    let mut s = SessionAccumulator::new();
+    for f in frames {
+        assert!(s.push(f));
+    }
+    s
+}
+
+#[test]
+fn stutter_counter_matches_stutter_on_fixtures() {
+    let profile = SyntheticProfile {
+        base_fps: 60.0,
+        fg_factor: 2,
+        jitter_ms: 3.0,
+        stutter_every: Some(37),
+        pcl: false,
+        gpu_busy_ratio: Some(0.9),
+    };
+    let mut inputs: Vec<(String, Vec<FrameSample>)> = ALL_FIXTURES
+        .iter()
+        .map(|n| ((*n).to_owned(), load(n)))
+        .collect();
+    inputs.push(("synthetic".to_owned(), synthetic(7, &profile, 30.0)));
+    for (name, frames) in inputs {
+        let (count, pct) = stutter_reference(&frames);
+        let got = session_of(&frames).summary().unwrap();
+        assert_eq!(got.stutter_count, count, "{name}");
+        assert!((got.stutter_percent - pct).abs() < 1e-9, "{name}");
+        let mut c = StutterCounter::new();
+        for f in frames.iter().filter(|f| f.displayed) {
+            c.push(f.t_s, f.ms_between_display_change.unwrap());
+        }
+        assert_eq!(c.result(), stutter(&frames), "{name}");
+    }
+}
+
+#[test]
+fn summary_matches_window_metrics_on_a_fixture() {
+    let frames = load("nofg");
+    let sum = session_of(&frames).summary().unwrap();
+    near(
+        sum.fps_displayed,
+        displayed_fps(&frames).unwrap(),
+        1e-9,
+        "fps",
+    );
+    let fts: Vec<f64> = frames
+        .iter()
+        .map(|f| f.ms_between_display_change.unwrap())
+        .collect();
+    // The session stores the frametimes as f32.
+    for (def, got) in [
+        (LowDefinition::Integral, sum.lows_integral),
+        (LowDefinition::Percentile, sum.lows_percentile),
+    ] {
+        let want = lows(&fts, def).unwrap();
+        near(
+            got.one_percent,
+            want.one_percent,
+            want.one_percent * 1e-5,
+            "1%",
+        );
+        near(
+            got.point_one_percent,
+            want.point_one_percent,
+            want.point_one_percent * 1e-5,
+            "0.1%",
+        );
+    }
+    assert_eq!(sum.frames_total, frames.len() as u64);
+    assert_eq!(sum.fps_rendered, None);
+}
+
+#[test]
+fn summary_rendered_from_pcl_ids() {
+    let sum = session_of(&load("dlssfg-pcl")).summary().unwrap();
+    assert_eq!(sum.rendered_source.as_deref(), Some("Reflex"));
+    near(sum.fps_rendered.unwrap(), 65.3, 1.0, "rendered");
+    near(sum.fg_multiplier.unwrap(), 130.5 / 65.3, 0.05, "multiplier");
+}
+
+#[test]
+fn summary_uses_the_frame_type_when_the_driver_gives_it() {
+    let mut frames = load("nofg");
+    for f in frames.iter_mut().skip(1).step_by(2) {
+        f.kind = FrameKind::GeneratedAmdAfmf;
+    }
+    let sum = session_of(&frames).summary().unwrap();
+    assert_eq!(sum.rendered_source.as_deref(), Some("AFMF"));
+    assert_eq!(sum.frames_generated, (frames.len() / 2) as u64);
+    near(sum.fg_multiplier.unwrap(), 2.0, 0.05, "multiplier");
+}
+
+#[test]
+fn summary_rendered_none_without_evidence() {
+    let sum = session_of(&load("fsrfg")).summary().unwrap();
+    assert_eq!(sum.fps_rendered, None);
+    assert_eq!(sum.rendered_source, None);
+    assert_eq!(sum.fg_multiplier, None);
 }

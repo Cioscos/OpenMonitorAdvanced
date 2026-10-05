@@ -117,3 +117,43 @@ test('overlay commands and event match the Rust shell', async () => {
   await backend.onOverlayStatus(vi.fn());
   expect(listen).toHaveBeenLastCalledWith('overlay-status', expect.any(Function));
 });
+
+// Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs and window.rs.
+test('editor and benchmark commands match the Rust shell', async () => {
+  const { listen } = await import('@tauri-apps/api/event');
+  const backend = createTauriBackend();
+  const calls: [() => Promise<unknown>, string, Record<string, unknown>?][] = [
+    [() => backend.overlayLoadProfile('builtin-gaming'), 'overlay_load_profile', { id: 'builtin-gaming' }],
+    [() => backend.overlaySaveProfile(null, '{}'), 'overlay_save_profile', { id: null, json: '{}' }],
+    [() => backend.overlayDeleteProfile('x'), 'overlay_delete_profile', { id: 'x' }],
+    [() => backend.overlayDuplicateProfile('x'), 'overlay_duplicate_profile', { id: 'x' }],
+    [() => backend.overlayImportProfile(), 'overlay_import_profile'],
+    [() => backend.overlayExportProfile('x'), 'overlay_export_profile', { id: 'x' }],
+    [() => backend.overlayFontFamilies(), 'overlay_font_families'],
+    [() => backend.overlayPreview(null), 'overlay_preview', { json: null }],
+    [() => backend.overlayEditorProfile('{}'), 'overlay_editor_profile', { json: '{}' }],
+    [() => backend.overlayUseNow('x'), 'overlay_use_now', { id: 'x' }],
+    [() => backend.overlayEditorDirty(true), 'overlay_editor_dirty', { dirty: true }],
+    [() => backend.openOverlayEditor(), 'open_overlay_editor'],
+    [() => backend.appQuitConfirmed(), 'app_quit_confirmed'],
+    [() => backend.benchmarkToggle(), 'benchmark_toggle'],
+    [() => backend.benchmarkList(), 'benchmark_list'],
+    [() => backend.benchmarkOpenCsv('x'), 'benchmark_open_csv', { id: 'x' }],
+    [() => backend.benchmarkOpenFolder(), 'benchmark_open_folder'],
+    [() => backend.benchmarkDelete('x'), 'benchmark_delete', { id: 'x' }],
+  ];
+  for (const [call, name, args] of calls) {
+    await call();
+    if (args === undefined) expect(invoke).toHaveBeenLastCalledWith(name);
+    else expect(invoke).toHaveBeenLastCalledWith(name, args);
+  }
+  await backend.onOverlayEditorData(() => {});
+  expect(listen).toHaveBeenLastCalledWith('overlay-editor-data', expect.any(Function));
+  await backend.onOverlayPreview(() => {});
+  expect(listen).toHaveBeenLastCalledWith('overlay-preview', expect.any(Function));
+  const onQuit = vi.fn();
+  await backend.onOverlayEditorQuit(onQuit);
+  expect(listen).toHaveBeenLastCalledWith('overlay-editor-quit', expect.any(Function));
+  (vi.mocked(listen).mock.lastCall![1] as (e: { payload: unknown }) => void)({ payload: null });
+  expect(onQuit).toHaveBeenCalledOnce();
+});

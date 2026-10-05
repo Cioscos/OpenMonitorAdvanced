@@ -25,8 +25,13 @@
 //! `Running` it is told about.
 //!
 //! The overlay's exit codes: 0 pipe closed, 1 bad arguments, 2 connection
-//! failed, 3 incompatible `Hello`, 4 device lost or window failure. Every
-//! exit we did not ask for is a crash, except 3, which is `Incompatible`.
+//! failed, 3 incompatible `Hello`, 4 device lost or window failure, 5 the
+//! user closed the preview window. Every exit we did not ask for is a crash,
+//! except 3, which is `Incompatible`, and 5, which turns the process off
+//! without counting (M7d, DD2).
+//!
+//! In [`OverlayMode::Preview`] the child also gets `--preview`: the editor's
+//! preview, a normal window of its own.
 //!
 //! [`OverlayPipeServer::create`]: oma_win::overlay_pipe::OverlayPipeServer::create
 
@@ -54,6 +59,24 @@ const QUEUE_CAPACITY: usize = 64;
 
 /// The overlay exits with this code after an incompatible `Hello`.
 const EXIT_INCOMPATIBLE: i32 = 3;
+/// The preview exits with this code when the user closes its window.
+const EXIT_CLOSED: i32 = 5;
+
+/// What the child process is: the in-game overlay or the editor's preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayMode {
+    Overlay,
+    Preview,
+}
+
+/// The child's command line after the executable.
+pub(crate) fn child_args(pipe: &str, mode: OverlayMode) -> Vec<&str> {
+    let mut args = vec!["--pipe", pipe];
+    if mode == OverlayMode::Preview {
+        args.push("--preview");
+    }
+    args
+}
 
 /// Why the overlay process stays down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +199,14 @@ impl Supervisor {
         self.running = false;
     }
 
+    /// The user closed the preview window: off, as if no longer wanted,
+    /// without a crash and without a restart.
+    pub fn on_closed(&mut self) {
+        self.alive = false;
+        self.running = false;
+        self.wanted = false;
+    }
+
     /// The process finished its handshake.
     pub fn on_running(&mut self) {
         if self.alive {
@@ -290,14 +321,16 @@ pub(crate) fn hello_outcome(msg: &OverlayMessage) -> HelloOutcome {
 pub(crate) enum ExitKind {
     Crash,
     Incompatible,
+    /// The user closed the preview.
+    Closed,
 }
 
 /// Classifies the overlay's exit code (`None`: unknown, or we killed it).
 pub(crate) fn exit_kind(code: Option<i32>) -> ExitKind {
-    if code == Some(EXIT_INCOMPATIBLE) {
-        ExitKind::Incompatible
-    } else {
-        ExitKind::Crash
+    match code {
+        Some(EXIT_INCOMPATIBLE) => ExitKind::Incompatible,
+        Some(EXIT_CLOSED) => ExitKind::Closed,
+        _ => ExitKind::Crash,
     }
 }
 
@@ -367,8 +400,8 @@ mod imp {
     };
 
     use super::{
-        check_client, exit_kind, hello_outcome, ExitKind, HelloOutcome, HostState, SendQueue,
-        Supervisor, SupervisorAction,
+        check_client, child_args, exit_kind, hello_outcome, ExitKind, HelloOutcome, HostState,
+        OverlayMode, SendQueue, Supervisor, SupervisorAction,
     };
 
     /// `CREATE_NO_WINDOW`: the child gets no console.
@@ -477,6 +510,7 @@ mod imp {
         /// every new state, and must not block.
         pub fn start(
             exe: PathBuf,
+            mode: OverlayMode,
             on_state: impl Fn(HostState) + Send + 'static,
         ) -> io::Result<Self> {
             let (events_tx, events) = mpsc::channel();
@@ -490,6 +524,7 @@ mod imp {
             let state = Arc::new(Mutex::new(HostState::Off));
             let runner = Runner {
                 exe,
+                mode,
                 events,
                 events_tx: events_tx.clone(),
                 outbox: Arc::clone(&outbox),
@@ -582,6 +617,7 @@ mod imp {
     /// The host thread's state.
     struct Runner {
         exe: PathBuf,
+        mode: OverlayMode,
         events: Receiver<Event>,
         events_tx: Sender<Event>,
         outbox: Arc<Outbox>,
@@ -732,6 +768,10 @@ mod imp {
                     tracing::error!("the overlay speaks another protocol version");
                     self.sup.on_incompatible();
                 }
+                ExitKind::Closed => {
+                    tracing::info!("the preview was closed");
+                    self.sup.on_closed();
+                }
             }
         }
 
@@ -780,8 +820,7 @@ mod imp {
                 }
             };
             let mut child = match Command::new(&self.exe)
-                .arg("--pipe")
-                .arg(&name)
+                .args(child_args(&name, self.mode))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1221,6 +1260,35 @@ mod tests {
     }
 
     #[test]
+    fn user_closing_the_preview_is_not_a_crash() {
+        assert_eq!(exit_kind(Some(EXIT_CLOSED)), ExitKind::Closed);
+        let mut s = started(0);
+        for i in 0..5 {
+            let now = i * S;
+            s.on_running();
+            s.on_closed();
+            assert_eq!(s.state(), HostState::Off, "close {i}");
+            assert_eq!(s.poll(now + 60 * MIN), None, "no restart after close {i}");
+            // The user asks for the preview again.
+            s.set_wanted(true, now + 1);
+            assert_eq!(s.poll(now + 1), Some(SupervisorAction::Start), "{i}");
+        }
+        assert_eq!(s.state(), HostState::Starting, "never Failed");
+    }
+
+    #[test]
+    fn preview_mode_passes_the_preview_flag() {
+        assert_eq!(
+            child_args("pipe-1", OverlayMode::Overlay),
+            ["--pipe", "pipe-1"]
+        );
+        assert_eq!(
+            child_args("pipe-1", OverlayMode::Preview),
+            ["--pipe", "pipe-1", "--preview"]
+        );
+    }
+
+    #[test]
     fn foreign_client_pid_is_rejected() {
         assert!(check_client(4242, 4242).is_ok());
         assert!(matches!(
@@ -1324,7 +1392,7 @@ mod tests {
         let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join(r"..\..\target\debug\oma-overlay.exe");
         assert!(exe.is_file(), "run `cargo build -p oma-overlay` first");
         let (tx, rx) = mpsc::channel();
-        let host = OverlayHost::start(exe, move |state| {
+        let host = OverlayHost::start(exe, OverlayMode::Overlay, move |state| {
             let _ = tx.send(state);
         })
         .unwrap();

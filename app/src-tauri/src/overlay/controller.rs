@@ -27,31 +27,54 @@
 //!   schema, and after every new `Running`; `FrameMetrics` at `textHz`,
 //!   `FrameTimes` at 10 Hz with the new frames only, sensor values through
 //!   [`ValuesPlan`]; no data while the overlay is hidden.
+//! - **Editor and preview (M7d):** with the editor open the same data goes
+//!   to the canvas ([`Outputs::editor_data`]) and, while it runs, to the
+//!   preview process, with its own `SetProfile`. Their frames are the
+//!   target's, or without a target the editor's [`SyntheticFeed`]; the
+//!   in-game overlay never gets synthetic frames. The metrics are computed
+//!   once per step; the overlay keeps its own cadence and frame position and
+//!   gets only the active profile's lows, so the editor changes nothing in
+//!   it.
+//! - **Benchmark (M7d, §8):** [`Controller::toggle_benchmark`] starts a
+//!   capture of the target (the overlay must be on, DD6) or stops it. The
+//!   frames of the target's main swapchain go to a [`Recorder`] too (DD7);
+//!   the files are the caller's ([`Outputs::benchmark`]). The overlay gets
+//!   `● REC` once a second and the summary for [`SUMMARY_SHOW_MS`], never
+//!   for a game in `blockedGames`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use oma_core::csv::LocalTime;
 use oma_core::frames::metrics::LowDefinition;
 use oma_core::frames::{pick_swapchain, read, FrameReadout, FrameWindow, LOWS_WINDOW_S};
 use oma_core::model::{Schema, Snapshot};
 use oma_core::overlay::{Foreground, Profile, PxRect, WindowGeometry};
 use oma_core::provider::Quality;
 use oma_core::settings::{Attach, Settings};
-use oma_ipc::overlay::{OverlayMessage, PxArea, SetPlacement};
+use oma_ipc::overlay::{
+    BenchmarkOverlay, FrameMetrics, OverlayMessage, PxArea, SetPlacement, WireBenchmarkSummary,
+    WireFrameTime,
+};
 use oma_ipc::{
     frames_state, FrameBatch, FramesConfigure, FramesStatus, PresentingProcess, PresentingProcesses,
 };
 use oma_win::svc::LinkCommand;
 use serde::Serialize;
 
+use super::benchmark::{file_stem, BenchmarkRecord, EndReason, Recorder, SUMMARY_SHOW_MS};
+use super::editor_feed::{EditorData, SyntheticFeed};
 use super::forward::{
-    frame_times_since, low_windows, metrics_message, set_profile, used_sensors, values_message,
+    frame_times_since, keep_lows, low_windows, metrics_message, set_profile, union_needs,
+    values_message,
 };
 use super::frames::{detail_label, line, sample_of, state_label, LineContext};
 use super::host::{HostFailure, HostState};
 use super::profiles::{ProfileCatalog, ProfileDiagnostic, ProfileEntry};
 use super::target::{ProcessInfo, TargetPicker, MIN_GAME_FPS, OWN_PROCESS_NAMES, SYSTEM_EXCLUDED};
 use crate::i18n::Lang;
+use crate::log::session::LogError;
+use crate::log::writer::WriteFailure;
 use crate::log::HotkeyStatus;
 
 /// How often the engine configuration and the target are sent again.
@@ -70,6 +93,16 @@ const EXCLUSIVE_PRESENT_MODES: [&str; 2] = [
 ];
 /// The DPI of a hidden placement, which the overlay ignores.
 const DEFAULT_DPI: u32 = 96;
+/// The profile id of the preview's `SetProfile`.
+const PREVIEW_ID: &str = "preview";
+
+/// A [`HostFailure`] as the status names it.
+fn failure_name(reason: HostFailure) -> &'static str {
+    match reason {
+        HostFailure::Crashing => "crashing",
+        HostFailure::Incompatible => "incompatible",
+    }
+}
 /// `FrameMetrics.state` and `OverlayStatus.frames` without the service.
 pub const FRAMES_UNAVAILABLE: &str = "unavailable";
 
@@ -79,6 +112,34 @@ pub enum ToastRequest {
     /// The target runs in exclusive fullscreen, where the overlay cannot
     /// show: once per executable and per app session (DP16).
     ExclusiveFullscreen { exe: String },
+    /// A capture was asked for without a game to measure.
+    BenchmarkNoTarget,
+    /// The capture stopped on a write error.
+    BenchmarkError { error: LogError },
+}
+
+/// What the caller does with the capture's files, in order.
+// One `Finish` per capture: its size does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkCommand {
+    /// Create the CSV.
+    Begin { stem: String },
+    /// Append these rows.
+    Rows(Vec<String>),
+    /// Close the CSV, with its summary (`None`: no frames, remove it).
+    Finish { record: Option<BenchmarkRecord> },
+}
+
+/// The capture, for the UI.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkStatus {
+    /// `idle`, `recording` or `error`.
+    pub state: String,
+    pub game: Option<String>,
+    pub elapsed_s: Option<u32>,
+    pub error: Option<LogError>,
 }
 
 /// What the sampler needs to send sensor values, published by the
@@ -117,6 +178,7 @@ pub struct TargetStatus {
 pub struct OverlayHotkeys {
     pub toggle: HotkeyStatus,
     pub next_profile: HotkeyStatus,
+    pub benchmark: HotkeyStatus,
 }
 
 /// The overlay's state, for the UI.
@@ -137,6 +199,12 @@ pub struct OverlayStatus {
     pub diagnostics: Vec<ProfileDiagnostic>,
     pub hidden_by_user: bool,
     pub hotkeys: OverlayHotkeys,
+    /// The preview is open.
+    pub preview: bool,
+    /// The preview's process gave up (`crashing` or `incompatible`), until
+    /// the next preview or the editor closes.
+    pub preview_failure: Option<String>,
+    pub benchmark: BenchmarkStatus,
 }
 
 /// What one [`Controller::step`] asks the caller to do.
@@ -148,9 +216,18 @@ pub struct Outputs {
     pub overlay: Vec<OverlayMessage>,
     /// Whether the overlay process should run.
     pub want_process: bool,
+    /// Whether the preview process should run: there is a preview profile.
+    pub want_preview: bool,
+    /// Messages for the preview process, in order (only while it is
+    /// `Running`): its `SetProfile` and the overlay's data.
+    pub preview: Vec<OverlayMessage>,
+    /// For the editor's canvas, only while it is open.
+    pub editor_data: Option<EditorData>,
     /// Watch this window's geometry (`Some(None)`: stop watching).
     pub track: Option<Option<Foreground>>,
     pub toast: Option<ToastRequest>,
+    /// The capture's file work, in order.
+    pub benchmark: Vec<BenchmarkCommand>,
     /// The new status, only when it changed.
     pub status: Option<OverlayStatus>,
     /// A `frames:` line to log (`OMA_FRAMES_DEBUG` only).
@@ -231,6 +308,42 @@ pub struct Controller {
     /// `SetProfile` may differ from the one sent.
     profile_dirty: bool,
 
+    // Editor and preview.
+    /// The editor's synthetic frames: `Some` exactly while it is open.
+    editor: Option<SyntheticFeed>,
+    preview: Option<Profile>,
+    preview_host: HostState,
+    /// The preview's process gave up: the preview ended, the UI says why.
+    preview_failure: Option<HostFailure>,
+    preview_was_running: bool,
+    /// The preview's `SetProfile` may differ from the one sent.
+    preview_dirty: bool,
+    sent_preview: Option<OverlayMessage>,
+    /// `want_preview` of the last step.
+    sent_want_preview: bool,
+    /// The profile being edited: its lows reach the canvas.
+    editor_profile: Option<Profile>,
+    /// The metrics last computed while the editor is open.
+    editor_metrics: Option<FrameMetrics>,
+    /// The lows of the active profile, the only ones the overlay gets.
+    overlay_lows: Vec<(u32, LowDefinition)>,
+
+    // Benchmark.
+    recorder: Recorder,
+    /// The recorded game's PID and start time.
+    bench_game: Option<(u32, LocalTime)>,
+    bench_error: Option<LogError>,
+    /// Queued between steps.
+    bench_commands: Vec<BenchmarkCommand>,
+    bench_toast: Option<ToastRequest>,
+    /// The summary box and when it goes.
+    bench_summary: Option<(WireBenchmarkSummary, u64)>,
+    sent_bench: BenchmarkOverlay,
+    /// The local wall clock, for the file name and the summary.
+    clock: fn() -> LocalTime,
+    /// The time of the last step.
+    now_ms: u64,
+
     // What was sent.
     sent_config: Option<FramesConfigure>,
     config_sent_ms: u64,
@@ -243,10 +356,10 @@ pub struct Controller {
     /// `Some(None)`: hidden; `None`: nothing sent since `Running`.
     sent_placement: Option<Option<(PxArea, u32)>>,
     shown: bool,
-    metrics_sent_ms: Option<u64>,
-    times_sent_ms: Option<u64>,
-    /// The newest frame time sent in `FrameTimes`.
-    times_after_s: f64,
+    /// The in-game overlay's data.
+    overlay_cursor: DataCursor,
+    /// The editor's and the preview's data.
+    side_cursor: DataCursor,
     line_ms: u64,
     /// Lowercase executables already toasted.
     toasted: BTreeSet<String>,
@@ -295,6 +408,26 @@ impl Controller {
             lows: Vec::new(),
             used: Vec::new(),
             profile_dirty: true,
+            editor: None,
+            preview: None,
+            preview_host: HostState::Off,
+            preview_failure: None,
+            preview_was_running: false,
+            preview_dirty: true,
+            sent_preview: None,
+            sent_want_preview: false,
+            editor_profile: None,
+            editor_metrics: None,
+            overlay_lows: Vec::new(),
+            recorder: Recorder::new(),
+            bench_game: None,
+            bench_error: None,
+            bench_commands: Vec::new(),
+            bench_toast: None,
+            bench_summary: None,
+            sent_bench: NO_BENCHMARK,
+            clock: wall_clock,
+            now_ms: 0,
             sent_config: None,
             config_sent_ms: 0,
             retry_frames: false,
@@ -304,9 +437,8 @@ impl Controller {
             sent_profile: None,
             sent_placement: None,
             shown: false,
-            metrics_sent_ms: None,
-            times_sent_ms: None,
-            times_after_s: f64::NEG_INFINITY,
+            overlay_cursor: DataCursor::NEW,
+            side_cursor: DataCursor::NEW,
             line_ms: 0,
             toasted: BTreeSet::new(),
             sent_status: None,
@@ -335,6 +467,7 @@ impl Controller {
             self.lang = lang;
             self.choice_dirty = true;
             self.profile_dirty = true;
+            self.preview_dirty = true;
         }
         self.env = env;
     }
@@ -398,6 +531,7 @@ impl Controller {
         self.schema = schema;
         self.choice_dirty = true;
         self.profile_dirty = true;
+        self.preview_dirty = true;
     }
 
     pub fn on_host(&mut self, state: HostState) {
@@ -424,8 +558,192 @@ impl Controller {
             .active
             .as_ref()
             .map_or_else(|| self.chosen_profile(), |(id, _)| id.clone());
-        self.choice = Some(self.catalog.next_after(&current));
+        let next = self.catalog.next_after(&current);
+        self.use_now(next);
+    }
+
+    /// «Use now» in the editor: the profile `id` until the target changes
+    /// (DD9).
+    pub fn use_now(&mut self, id: String) {
+        self.choice = Some(id);
         self.choice_dirty = true;
+    }
+
+    /// The editor window opened or closed. Closing it ends the preview.
+    pub fn on_editor(&mut self, open: bool) {
+        if open == self.editor.is_some() {
+            return;
+        }
+        if open {
+            self.editor = Some(SyntheticFeed::new());
+            // The canvas gets its data at once.
+            self.side_cursor = DataCursor::NEW;
+        } else {
+            self.editor = None;
+            self.editor_metrics = None;
+            self.editor_profile = None;
+            self.preview_failure = None;
+            self.set_preview(None);
+        }
+    }
+
+    /// The profile the preview draws; `None` closes the preview. A profile
+    /// arriving after the editor closed (a late debounced call) is ignored.
+    pub fn set_preview(&mut self, profile: Option<Profile>) {
+        if profile.is_some() && self.editor.is_none() {
+            return;
+        }
+        if profile.is_some() {
+            self.preview_failure = None;
+        }
+        self.preview = profile;
+        self.preview_dirty = true;
+        self.refresh_needs();
+    }
+
+    /// The profile open in the editor: the canvas gets its lows windows.
+    /// Ignored once the editor closed.
+    pub fn set_editor_profile(&mut self, profile: Option<Profile>) {
+        if profile.is_some() && self.editor.is_none() {
+            return;
+        }
+        self.editor_profile = profile;
+        self.refresh_needs();
+    }
+
+    /// The preview process's state. Going off by itself (it was wanted at
+    /// the last step and had started) means the user closed its window: the
+    /// preview ends rather than restarting. A stop we asked for keeps a
+    /// preview set since. A process given up on ends the preview too, and
+    /// the status says why.
+    pub fn on_preview_host(&mut self, state: HostState) {
+        let started = matches!(self.preview_host, HostState::Starting | HostState::Running);
+        if state == HostState::Off && started && self.sent_want_preview && self.preview.is_some() {
+            self.set_preview(None);
+        }
+        if let HostState::Failed { reason } = state {
+            self.preview_failure = Some(reason);
+            self.set_preview(None);
+        }
+        self.preview_host = state;
+    }
+
+    /// The benchmark hotkey or button: starts a capture of the target, which
+    /// needs the overlay on (DD6), or stops the one running.
+    pub fn toggle_benchmark(&mut self, now_ms: u64) {
+        if self.recorder.is_recording() {
+            self.end_benchmark(EndReason::User, now_ms);
+            return;
+        }
+        let target = self
+            .target
+            .clone()
+            .filter(|_| self.settings.overlay.enabled);
+        let Some(target) = target else {
+            self.bench_toast = Some(ToastRequest::BenchmarkNoTarget);
+            return;
+        };
+        self.recorder.on_target(true, now_ms);
+        if self.recorder.start(&target.name, now_ms).is_err() {
+            return;
+        }
+        let start = (self.clock)();
+        self.bench_game = Some((target.pid, start));
+        self.bench_error = None;
+        self.bench_summary = None;
+        self.bench_commands.push(BenchmarkCommand::Begin {
+            stem: file_stem(&target.name, start),
+        });
+    }
+
+    /// A capture is running.
+    pub fn recording(&self) -> bool {
+        self.recorder.is_recording()
+    }
+
+    /// The capture's files failed: it stops with `Error` and the reason
+    /// stays in the status. A failure after the end (the summary) is
+    /// reported only if the capture had none.
+    pub fn on_benchmark_error(&mut self, failure: WriteFailure) {
+        let recording = self.recorder.is_recording();
+        if !recording && self.bench_error.is_some() {
+            return;
+        }
+        if recording {
+            self.end_benchmark(EndReason::Error, self.now_ms);
+        }
+        let error = LogError::from(&failure);
+        self.bench_error = Some(error.clone());
+        self.bench_toast = Some(ToastRequest::BenchmarkError { error });
+    }
+
+    /// The app exits: a running capture ends with `Shutdown`; returns the
+    /// file work still due, to be done before the app goes.
+    pub fn shutdown_benchmark(&mut self, now_ms: u64) -> Vec<BenchmarkCommand> {
+        self.end_benchmark(EndReason::Shutdown, now_ms);
+        std::mem::take(&mut self.bench_commands)
+    }
+
+    fn end_benchmark(&mut self, reason: EndReason, now_ms: u64) {
+        let Some(game) = self.recorder.game().map(str::to_owned) else {
+            return;
+        };
+        let summary = self.recorder.stop(reason);
+        let start = self.bench_game.take().map_or_else(self.clock, |(_, t)| t);
+        let record = summary.map(|s| BenchmarkRecord::new(&game, start, reason, s));
+        if let Some(r) = record.as_ref().filter(|_| !self.blocked_exe(&game)) {
+            let s = &r.summary;
+            let summary = WireBenchmarkSummary {
+                fps_displayed: s.fps_displayed,
+                low_one_percent: s.lows_integral.one_percent,
+                low_point_one_percent: s.lows_integral.point_one_percent,
+                stutter_count: s.stutter_count,
+                stutter_percent: s.stutter_percent,
+            };
+            self.bench_summary = Some((summary, now_ms.saturating_add(SUMMARY_SHOW_MS)));
+        }
+        self.bench_commands
+            .push(BenchmarkCommand::Finish { record });
+    }
+
+    /// Whether the recorded game is the target; a capture that ran too long
+    /// or without its game ends.
+    fn step_benchmark(&mut self, now_ms: u64, out: &mut Outputs) {
+        if let Some((pid, _)) = self.bench_game {
+            let present = self.target.as_ref().is_some_and(|t| t.pid == pid);
+            self.recorder.on_target(present, now_ms);
+            if let Some(reason) = self.recorder.tick(now_ms) {
+                self.end_benchmark(reason, now_ms);
+            }
+        }
+        out.benchmark.append(&mut self.bench_commands);
+    }
+
+    /// The badge or the summary box, while the overlay runs.
+    fn step_bench_overlay(&mut self, now_ms: u64, out: &mut Outputs) {
+        if self
+            .bench_summary
+            .as_ref()
+            .is_some_and(|&(_, until)| now_ms >= until)
+        {
+            self.bench_summary = None;
+        }
+        if self.host != HostState::Running {
+            return;
+        }
+        let blocked = self.recorder.game().is_some_and(|g| self.blocked_exe(g));
+        let wanted = if blocked {
+            NO_BENCHMARK
+        } else {
+            BenchmarkOverlay {
+                recording_s: self.recorder.elapsed_s(now_ms),
+                summary: self.bench_summary.as_ref().map(|(s, _)| s.clone()),
+            }
+        };
+        if wanted != self.sent_bench {
+            self.sent_bench = wanted.clone();
+            out.overlay.push(OverlayMessage::Benchmark(wanted));
+        }
     }
 
     /// «Retry»: restarts a frame engine that failed or was denied, and an
@@ -445,17 +763,31 @@ impl Controller {
     pub fn step(&mut self, now_ms: u64) -> Outputs {
         let mut out = Outputs {
             want_process: self.settings.overlay.enabled,
+            want_preview: self.preview.is_some(),
             retry_host: std::mem::take(&mut self.retry_host),
             ..Outputs::default()
         };
+        self.now_ms = now_ms;
+        // Queued since the last step (a `Begin`), before this step's rows.
+        out.benchmark.append(&mut self.bench_commands);
         let config = self.wanted_config();
         self.step_config(&config, now_ms, &mut out);
         self.step_target(config.enabled, now_ms, &mut out);
+        self.step_benchmark(now_ms, &mut out);
         self.step_resend(&config, now_ms, &mut out);
         self.step_track(&mut out);
         self.refresh_profile();
-        self.step_overlay(&config, now_ms, &mut out);
-        out.toast = self.toast();
+        if self.target.is_none() {
+            if let Some(feed) = &mut self.editor {
+                feed.advance(now_ms as f64 / 1_000.0);
+            }
+        }
+        self.step_overlay();
+        self.step_overlay_messages(&mut out);
+        self.step_bench_overlay(now_ms, &mut out);
+        self.step_preview(&mut out);
+        self.step_data(&config, now_ms, &mut out);
+        out.toast = self.bench_toast.take().or_else(|| self.toast());
         let mode = self.target.as_ref().and_then(|t| {
             self.processes
                 .iter()
@@ -478,12 +810,9 @@ impl Controller {
             let readout = self.readout(config.track_gpu);
             out.diagnostics_line = Some(self.line(&readout));
         }
-        let plan_changed = self
-            .sent_plan
-            .as_ref()
-            .is_none_or(|p| p.wanted != self.shown || p.used != self.used);
-        if plan_changed {
-            let plan = self.values_plan();
+        self.sent_want_preview = out.want_preview;
+        let plan = self.values_plan();
+        if self.sent_plan.as_ref() != Some(&plan) {
             self.sent_plan = Some(plan.clone());
             out.values_plan = Some(plan);
         }
@@ -494,8 +823,28 @@ impl Controller {
     pub fn values_plan(&self) -> ValuesPlan {
         ValuesPlan {
             used: self.used.clone(),
-            wanted: self.shown,
+            wanted: self.shown || self.preview_running(),
         }
+    }
+
+    fn preview_running(&self) -> bool {
+        self.preview.is_some() && self.preview_host == HostState::Running
+    }
+
+    /// The editor's synthetic frames, used while there is no target.
+    fn synthetic(&self) -> Option<&SyntheticFeed> {
+        self.editor.as_ref().filter(|_| self.target.is_none())
+    }
+
+    /// The frames the overlay, the preview and the canvas show.
+    fn frames_source(&self) -> &FrameWindow {
+        self.synthetic().map_or(&self.window, SyntheticFeed::window)
+    }
+
+    fn reset_times(&mut self) {
+        self.swapchain = None;
+        self.overlay_cursor.after_s = f64::NEG_INFINITY;
+        self.side_cursor.after_s = f64::NEG_INFINITY;
     }
 
     /// `Values` for one sampler tick, under the plan of the last step. The
@@ -516,13 +865,7 @@ impl Controller {
             HostState::Off => ("off", None),
             HostState::Starting => ("starting", None),
             HostState::Running => ("running", None),
-            HostState::Failed { reason } => (
-                "failed",
-                Some(match reason {
-                    HostFailure::Crashing => "crashing",
-                    HostFailure::Incompatible => "incompatible",
-                }),
-            ),
+            HostState::Failed { reason } => ("failed", Some(failure_name(reason))),
         };
         OverlayStatus {
             enabled: self.settings.overlay.enabled,
@@ -543,6 +886,21 @@ impl Controller {
             diagnostics: self.catalog.diagnostics.clone(),
             hidden_by_user: self.hidden_by_user,
             hotkeys: self.hotkeys.clone(),
+            preview: self.preview.is_some(),
+            preview_failure: self.preview_failure.map(|r| failure_name(r).to_owned()),
+            benchmark: BenchmarkStatus {
+                state: if self.recorder.is_recording() {
+                    "recording"
+                } else if self.bench_error.is_some() {
+                    "error"
+                } else {
+                    "idle"
+                }
+                .to_owned(),
+                game: self.recorder.game().map(str::to_owned),
+                elapsed_s: self.recorder.elapsed_s(self.now_ms),
+                error: self.bench_error.clone(),
+            },
         }
     }
 
@@ -633,14 +991,33 @@ impl Controller {
         } else {
             self.hold_target(now_ms, out);
         }
+        let recorded = self.bench_game.map(|(pid, _)| pid);
+        let mut fresh = Vec::new();
         for batch in std::mem::take(&mut self.batches) {
             self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
             // A batch of the previous target may still arrive after a change.
             if self.qpc_frequency == 0 || Some(batch.pid) != self.target.as_ref().map(|t| t.pid) {
                 continue;
             }
+            let record = Some(batch.pid) == recorded;
             for frame in &batch.frames {
-                self.window.push(sample_of(frame, self.qpc_frequency));
+                let sample = sample_of(frame, self.qpc_frequency);
+                self.window.push(sample);
+                if record {
+                    fresh.push(sample);
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            // Only the main swapchain is measured (DD7).
+            let swapchain = self
+                .swapchain
+                .or_else(|| pick_swapchain(&self.window.last(LOWS_WINDOW_S)));
+            self.swapchain = swapchain;
+            fresh.retain(|f| Some(f.swapchain) == swapchain);
+            let rows = self.recorder.on_frames(&fresh, now_ms);
+            if !rows.is_empty() {
+                out.benchmark.push(BenchmarkCommand::Rows(rows));
             }
         }
     }
@@ -730,10 +1107,13 @@ impl Controller {
         self.tracked = target
             .as_ref()
             .and_then(|t| self.foreground.filter(|fg| fg.pid == t.pid));
+        // A synthetic run starts afresh, without a gap in its window.
+        if target.is_none() && self.editor.is_some() {
+            self.editor = Some(SyntheticFeed::new());
+        }
         self.target = target;
         self.window.clear();
-        self.swapchain = None;
-        self.times_after_s = f64::NEG_INFINITY;
+        self.reset_times();
         self.choice = None;
         self.choice_dirty = true;
         self.sent_present_mode = None;
@@ -782,8 +1162,23 @@ impl Controller {
         {
             return;
         }
-        self.lows = low_windows(&profile);
-        self.used = used_sensors(&profile);
+        self.active = Some((id, profile));
+        self.profile_dirty = true;
+        self.refresh_needs();
+    }
+
+    /// The sensors of the active and the preview profiles, the lows windows
+    /// of those and of the edited one, and the frame window long enough for
+    /// them.
+    fn refresh_needs(&mut self) {
+        let active = self.active.as_ref().map(|(_, p)| p);
+        (self.used, _) = union_needs(active.into_iter().chain(&self.preview));
+        let all = active
+            .into_iter()
+            .chain(&self.preview)
+            .chain(&self.editor_profile);
+        (_, self.lows) = union_needs(all);
+        self.overlay_lows = active.map(low_windows).unwrap_or_default();
         let window_s = self
             .lows
             .iter()
@@ -799,8 +1194,6 @@ impl Controller {
             self.window = window;
             self.window_s = window_s;
         }
-        self.active = Some((id, profile));
-        self.profile_dirty = true;
     }
 
     /// Where the overlay shows, if it does (DP9–DP11).
@@ -838,26 +1231,39 @@ impl Controller {
     }
 
     fn blocked(&self, target: &ProcessInfo) -> bool {
-        let exe = target.name.to_lowercase();
-        self.settings.overlay.blocked_games.contains(&exe)
+        self.blocked_exe(&target.name)
     }
 
-    /// `SetProfile`, `SetPlacement` and the data, while the overlay runs.
-    fn step_overlay(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
+    fn blocked_exe(&self, exe: &str) -> bool {
+        self.settings
+            .overlay
+            .blocked_games
+            .contains(&exe.to_lowercase())
+    }
+
+    /// Whether the overlay shows, and a fresh start for a new process.
+    fn step_overlay(&mut self) {
         let running = self.host == HostState::Running;
         if running && !self.was_running {
             // A new overlay process knows nothing yet.
             self.sent_profile = None;
             self.sent_placement = None;
             self.profile_dirty = true;
-            self.times_after_s = f64::NEG_INFINITY;
-            self.metrics_sent_ms = None;
-            self.times_sent_ms = None;
+            self.overlay_cursor = DataCursor::NEW;
+            self.sent_bench = NO_BENCHMARK;
         }
         self.was_running = running;
-        let placement = self.placement();
-        self.shown = placement.is_some();
-        if !running {
+        let was_shown = self.shown;
+        self.shown = self.placement().is_some();
+        if self.shown && !was_shown {
+            // Shown again: its data at once, the frames missed included.
+            self.overlay_cursor.pause();
+        }
+    }
+
+    /// `SetProfile` and `SetPlacement`, while the overlay runs.
+    fn step_overlay_messages(&mut self, out: &mut Outputs) {
+        if self.host != HostState::Running {
             return;
         }
         if std::mem::take(&mut self.profile_dirty) {
@@ -869,6 +1275,7 @@ impl Controller {
                 }
             }
         }
+        let placement = self.placement();
         if self.sent_placement != Some(placement) {
             self.sent_placement = Some(placement);
             out.overlay.push(OverlayMessage::SetPlacement(SetPlacement {
@@ -876,41 +1283,114 @@ impl Controller {
                 dpi: placement.map_or(DEFAULT_DPI, |(_, dpi)| dpi),
             }));
         }
-        if !self.shown {
-            self.metrics_sent_ms = None;
-            self.times_sent_ms = None;
+    }
+
+    /// The preview's `SetProfile`, while it runs; it ignores placements.
+    fn step_preview(&mut self, out: &mut Outputs) {
+        let running = self.preview_running();
+        if running && !self.preview_was_running {
+            self.sent_preview = None;
+            self.preview_dirty = true;
+        }
+        self.preview_was_running = running;
+        if !running || !std::mem::take(&mut self.preview_dirty) {
             return;
         }
-        let text_ms = 1_000 / u64::from(self.settings.overlay.text_hz.max(1));
-        if self
-            .metrics_sent_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= text_ms)
-        {
-            self.metrics_sent_ms = Some(now_ms);
-            let msg = if self.connected {
-                let readout = self.readout(config.track_gpu);
-                metrics_message(Some(&readout), self.frames_state())
-            } else {
-                metrics_message(None, FRAMES_UNAVAILABLE)
-            };
-            out.overlay.push(msg);
-        }
-        if self
-            .times_sent_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= FRAME_TIMES_MS)
-        {
-            self.times_sent_ms = Some(now_ms);
-            if self.swapchain.is_none() {
-                self.swapchain = pick_swapchain(&self.window.last(LOWS_WINDOW_S));
-            }
-            let (msg, newest) = frame_times_since(&self.window, self.swapchain, self.times_after_s);
-            self.times_after_s = newest;
-            if matches!(&msg, OverlayMessage::FrameTimes(t) if !t.frames.is_empty()) {
-                out.overlay.push(msg);
+        if let Some(profile) = &self.preview {
+            let msg = set_profile(PREVIEW_ID, profile, &self.schema, &self.settings, self.lang);
+            if self.sent_preview.as_ref() != Some(&msg) {
+                self.sent_preview = Some(msg.clone());
+                out.preview.push(msg);
             }
         }
     }
 
+    /// `FrameMetrics` at `textHz` and `FrameTimes` at 10 Hz for the overlay
+    /// (while shown) and, on a cursor of their own, for the preview (while
+    /// it runs) and the editor (while open). The metrics are computed once;
+    /// the overlay's carry only the active profile's lows.
+    fn step_data(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
+        let (shown, preview, editor) = (self.shown, self.preview_running(), self.editor.is_some());
+        let side = preview || editor;
+        if !shown {
+            self.overlay_cursor.pause();
+        }
+        if !side {
+            self.side_cursor.pause();
+        }
+        let text_ms = 1_000 / u64::from(self.settings.overlay.text_hz.max(1));
+        let overlay_metrics = shown && due(&mut self.overlay_cursor.metrics_ms, now_ms, text_ms);
+        let side_metrics = side && due(&mut self.side_cursor.metrics_ms, now_ms, text_ms);
+        let mut editor_due = false;
+        if overlay_metrics || side_metrics {
+            if let OverlayMessage::FrameMetrics(m) = self.metrics_now(config.track_gpu) {
+                if overlay_metrics {
+                    let mut own = m.clone();
+                    keep_lows(&mut own, &self.overlay_lows);
+                    out.overlay.push(OverlayMessage::FrameMetrics(own));
+                }
+                if side_metrics && preview {
+                    out.preview.push(OverlayMessage::FrameMetrics(m.clone()));
+                }
+                if side_metrics && editor {
+                    self.editor_metrics = Some(m);
+                    editor_due = true;
+                }
+            }
+        }
+        let overlay_times = shown && due(&mut self.overlay_cursor.times_ms, now_ms, FRAME_TIMES_MS);
+        let side_times = side && due(&mut self.side_cursor.times_ms, now_ms, FRAME_TIMES_MS);
+        let mut frame_times = Vec::new();
+        if overlay_times || side_times {
+            let swapchain = self
+                .swapchain
+                .or_else(|| pick_swapchain(&self.frames_source().last(LOWS_WINDOW_S)));
+            self.swapchain = swapchain;
+            if overlay_times {
+                let (msg, newest) =
+                    frame_times_since(self.frames_source(), swapchain, self.overlay_cursor.after_s);
+                self.overlay_cursor.after_s = newest;
+                if newest_frames(&msg).is_some() {
+                    out.overlay.push(msg);
+                }
+            }
+            if side_times {
+                let (msg, newest) =
+                    frame_times_since(self.frames_source(), swapchain, self.side_cursor.after_s);
+                self.side_cursor.after_s = newest;
+                if let Some(frames) = newest_frames(&msg) {
+                    if editor {
+                        frame_times = frames.to_vec();
+                    }
+                    if preview {
+                        out.preview.push(msg);
+                    }
+                }
+            }
+        }
+        if editor_due || !frame_times.is_empty() {
+            out.editor_data = self.editor_metrics.clone().map(|metrics| EditorData {
+                metrics,
+                frame_times,
+            });
+        }
+    }
+
+    /// `FrameMetrics` now: of the synthetic frames, the target's, or empty
+    /// without the service.
+    fn metrics_now(&mut self, track_gpu: bool) -> OverlayMessage {
+        if let Some(feed) = self.synthetic() {
+            // Every metric of the made-up game shows, the bottleneck too.
+            let readout = read(feed.window(), &self.lows, true);
+            return metrics_message(Some(&readout), frames_state::RUNNING);
+        }
+        if self.connected {
+            let readout = self.readout(track_gpu);
+            metrics_message(Some(&readout), self.frames_state())
+        } else {
+            metrics_message(None, FRAMES_UNAVAILABLE)
+        }
+    }
     /// A note when the foreground window or its standing in the service's
     /// list changed; the FPS value alone does not count.
     fn foreground_note(&mut self) -> Option<ForegroundNote> {
@@ -984,6 +1464,60 @@ impl Controller {
     }
 }
 
+/// When a consumer of the frame data last got metrics and frame times, and
+/// the newest frame time it got.
+#[derive(Debug, Clone, Copy)]
+struct DataCursor {
+    metrics_ms: Option<u64>,
+    times_ms: Option<u64>,
+    after_s: f64,
+}
+
+impl DataCursor {
+    const NEW: Self = Self {
+        metrics_ms: None,
+        times_ms: None,
+        after_s: f64::NEG_INFINITY,
+    };
+
+    /// Due at the next step; the frames not yet sent stay due too.
+    fn pause(&mut self) {
+        self.metrics_ms = None;
+        self.times_ms = None;
+    }
+}
+
+/// Whether `period_ms` passed since `*last`; if so `*last` becomes now.
+fn due(last: &mut Option<u64>, now_ms: u64, period_ms: u64) -> bool {
+    let due = last.is_none_or(|t| now_ms.saturating_sub(t) >= period_ms);
+    if due {
+        *last = Some(now_ms);
+    }
+    due
+}
+
+/// The frames of a `FrameTimes` with at least one.
+fn newest_frames(msg: &OverlayMessage) -> Option<&[WireFrameTime]> {
+    match msg {
+        OverlayMessage::FrameTimes(t) if !t.frames.is_empty() => Some(&t.frames),
+        _ => None,
+    }
+}
+
+/// The overlay's benchmark box when there is nothing to show.
+const NO_BENCHMARK: BenchmarkOverlay = BenchmarkOverlay {
+    recording_s: None,
+    summary: None,
+};
+
+/// The local time now.
+fn wall_clock() -> LocalTime {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    crate::report::local_now(now_ms)
+}
+
 fn new_picker(own_pid: u32) -> TargetPicker {
     TargetPicker::new(
         vec![own_pid],
@@ -994,7 +1528,7 @@ fn new_picker(own_pid: u32) -> TargetPicker {
 mod tests {
     use super::*;
     use oma_core::model::{Label, Sensor, SensorKind, Source as SensorSource, Unit};
-    use oma_ipc::overlay::{FrameMetrics, FrameTimes, SetProfile, Values};
+    use oma_ipc::overlay::{FrameTimes, SetProfile, Values};
     use oma_ipc::{PresentingProcess, WireFrame};
 
     use super::super::profiles::load_catalog;
@@ -1666,6 +2200,7 @@ mod tests {
                 state: HotkeyState::Failed,
                 reason: Some("log.hotkey.inUse".to_owned()),
             },
+            benchmark: HotkeyStatus::default(),
         };
         c.on_hotkeys(hotkeys.clone());
         let out = c.step(100);
@@ -2178,6 +2713,444 @@ mod tests {
         assert_eq!(field(&line, "dropped"), "1");
     }
 
+    /// A profile with a text block on `sensor`.
+    fn sensor_profile(sensor: &str) -> Profile {
+        oma_core::overlay::parse_profile(
+            &serde_json::json!({ "format": 1, "name": "p", "blocks": [{
+                "id": "a", "rect": { "x": 0, "y": 0, "w": 4, "h": 2 },
+                "source": { "sensor": sensor }, "kind": "text"
+            }] })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn preview_profiles(out: &Outputs) -> Vec<SetProfile> {
+        out.preview
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::SetProfile(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn data_of(messages: &[OverlayMessage]) -> Vec<OverlayMessage> {
+        messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    OverlayMessage::FrameMetrics(_) | OverlayMessage::FrameTimes(_)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn editor_without_target_gets_synthetic_running_metrics() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_service(true);
+        c.on_editor(true);
+        let out = c.step(60_000);
+        assert!(out.link.is_empty(), "the frame engine stays off");
+        assert!(out.overlay.is_empty());
+        assert_eq!(out.status.unwrap().frames, frames_state::OFF);
+        let data = out.editor_data.expect("editor data at once");
+        assert_eq!(data.metrics.state, frames_state::RUNNING);
+        let fps = data.metrics.fps_displayed.expect("displayed FPS");
+        assert!((fps - 144.0).abs() < 5.0, "{fps}");
+        assert_eq!(data.metrics.fg_multiplier.map(f64::round), Some(2.0));
+        assert!(!data.frame_times.is_empty());
+        // Frame times at 10 Hz (new ones only), metrics at textHz (2 Hz).
+        let (mut with_metrics, mut with_times) = (0, 0);
+        for i in 1..=20 {
+            if let Some(d) = c.step(60_000 + i * 100).editor_data {
+                with_metrics += 1;
+                with_times += usize::from(!d.frame_times.is_empty());
+            }
+        }
+        assert!(
+            with_metrics >= 4 && with_times >= 2,
+            "{with_metrics} {with_times}"
+        );
+        // The in-game overlay never gets synthetic frames.
+        c.on_settings(&settings(true), Lang::En, None);
+        c.on_host(HostState::Running);
+        for now in [63_000, 63_500, 64_000] {
+            let out = c.step(now);
+            assert!(data_of(&out.overlay).is_empty(), "{now}");
+            assert!(out.editor_data.is_some(), "{now}");
+        }
+    }
+
+    #[test]
+    fn editor_with_target_gets_the_target_metrics() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 101, 0)],
+        );
+        let out = c.step(600);
+        let data = out.editor_data.clone().expect("editor data");
+        assert_eq!(data.metrics.state, "running");
+        assert_eq!(data.metrics.fps_displayed, Some(100.0));
+        assert_eq!(data.frame_times.len(), 101);
+        assert!((data.frame_times[0].t_s - 5.0).abs() < 1e-6);
+        // The overlay gets the same data.
+        assert_eq!(metrics(&out), vec![data.metrics]);
+    }
+
+    #[test]
+    fn editor_closed_sends_no_editor_data() {
+        let mut c = showing();
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 50, 0)],
+        );
+        for now in [200, 600, 1_100] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+        c.on_editor(true);
+        assert!(c.step(1_600).editor_data.is_some());
+        c.on_editor(false);
+        for now in [1_700, 2_200, 3_000] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+        // Without a target either.
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        for now in [0, 5_000, 10_000] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+    }
+
+    /// A profile with a `low-1` block over 30 s, percentile.
+    fn lows_profile() -> Profile {
+        oma_core::overlay::parse_profile(
+            &serde_json::json!({ "format": 1, "name": "l", "blocks": [{
+                "id": "a", "rect": { "x": 0, "y": 0, "w": 4, "h": 2 },
+                "source": { "frames": "low-1" }, "kind": "text",
+                "stat": { "window": 30, "definition": "percentile" }
+            }] })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn low_keys(m: &FrameMetrics) -> Vec<(u32, String)> {
+        m.lows
+            .iter()
+            .map(|l| (l.window_s, l.definition.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn preview_does_not_change_the_in_game_overlay() {
+        let (mut plain, mut with_preview) = (showing(), showing());
+        with_preview.on_editor(true);
+        with_preview.set_editor_profile(Some(lows_profile()));
+        with_preview.set_preview(Some(lows_profile()));
+        with_preview.on_preview_host(HostState::Running);
+        let mut preview_lows = false;
+        let mut overlay_frames = BTreeSet::new();
+        for (i, now) in (2..60u64).map(|i| i * 100).enumerate() {
+            match now {
+                // Hidden for a while, then shown: the backlog reaches it.
+                1_000 | 2_500 => {
+                    plain.toggle_hidden();
+                    with_preview.toggle_hidden();
+                }
+                // A new overlay process.
+                3_500 => {
+                    plain.on_host(HostState::Starting);
+                    with_preview.on_host(HostState::Starting);
+                }
+                3_700 => {
+                    plain.on_host(HostState::Running);
+                    with_preview.on_host(HostState::Running);
+                }
+                _ => {}
+            }
+            let batches = [batch(GAME, 5.0 + i as f64 * 0.1, 10, 0)];
+            for c in [&mut plain, &mut with_preview] {
+                c.on_frames(Some(&status("running")), Some(&processes()), &batches);
+            }
+            let (a, b) = (plain.step(now), with_preview.step(now));
+            assert_eq!(a.overlay, b.overlay, "{now}");
+            for t in times(&a) {
+                overlay_frames.extend(t.frames.iter().map(|f| f.t_s.to_bits()));
+            }
+            for m in metrics(&a) {
+                assert!(
+                    low_keys(&m).iter().all(|k| k.0 == 10),
+                    "{now}: {:?}",
+                    m.lows
+                );
+            }
+            for m in b.preview.iter().filter_map(|m| match m {
+                OverlayMessage::FrameMetrics(f) => Some(f),
+                _ => None,
+            }) {
+                preview_lows |= low_keys(m).contains(&(30, "percentile".into()));
+            }
+        }
+        assert!(preview_lows, "the preview gets its own lows");
+        // A new process gets the window again; no frame is ever missed.
+        assert_eq!(overlay_frames.len(), 58 * 10, "the overlay misses no frame");
+    }
+
+    #[test]
+    fn opening_the_editor_sends_metrics_at_once() {
+        let mut c = showing();
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 50, 0)],
+        );
+        assert_eq!(metrics(&c.step(150)).len(), 0, "sent at 100");
+        c.on_editor(true);
+        let out = c.step(200);
+        assert!(out.editor_data.is_some());
+        assert!(metrics(&out).is_empty(), "the overlay keeps its cadence");
+    }
+
+    #[test]
+    fn editor_profile_lows_reach_the_canvas() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_editor(true);
+        c.set_editor_profile(Some(lows_profile()));
+        let out = c.step(60_000);
+        let data = out.editor_data.unwrap();
+        assert!(low_keys(&data.metrics).contains(&(30, "percentile".into())));
+        assert_eq!(out.values_plan.map(|p| p.wanted), Some(false));
+        c.set_editor_profile(None);
+        let data = c.step(60_500).editor_data.unwrap();
+        assert!(low_keys(&data.metrics).iter().all(|k| k.0 == 10));
+    }
+
+    #[test]
+    fn a_stop_we_asked_for_keeps_a_new_preview() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.on_preview_host(HostState::Starting);
+        c.step(200);
+        c.on_preview_host(HostState::Running);
+        c.step(300);
+        c.set_preview(None);
+        assert!(!c.step(400).want_preview);
+        c.set_preview(Some(sensor_profile("gpu0/temperature/core")));
+        // The stop of the first preview arrives late.
+        c.on_preview_host(HostState::Off);
+        let out = c.step(500);
+        assert!(out.want_preview, "the new preview is kept");
+        assert!(out.status.is_none_or(|s| s.preview));
+        assert!(c.current_status().preview);
+    }
+
+    #[test]
+    fn preview_gets_its_own_profile_and_shared_data() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let out = c.step(200);
+        assert!(out.want_preview);
+        assert!(out.preview.is_empty(), "nothing before the preview runs");
+        assert!(out.status.unwrap().preview);
+        c.on_preview_host(HostState::Running);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 101, 0)],
+        );
+        let out = c.step(600);
+        let profiles = preview_profiles(&out);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].profile_id, "preview");
+        assert_eq!(profiles[0].strings["previewTitle"], "Overlay preview");
+        assert!(matches!(out.preview[0], OverlayMessage::SetProfile(_)));
+        assert!(
+            !out.preview
+                .iter()
+                .any(|m| matches!(m, OverlayMessage::SetPlacement(_))),
+            "the preview ignores placements"
+        );
+        // The same frames, on the preview's own cadence.
+        assert_eq!(times(&out).len(), 1);
+        let preview_times: Vec<_> = out
+            .preview
+            .iter()
+            .filter(|m| matches!(m, OverlayMessage::FrameTimes(_)))
+            .cloned()
+            .collect();
+        assert_eq!(
+            preview_times,
+            vec![OverlayMessage::FrameTimes(times(&out)[0].clone())]
+        );
+        let out = c.step(700);
+        let preview_metrics: Vec<_> = out
+            .preview
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::FrameMetrics(f) => Some(f.fps_displayed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(preview_metrics, vec![Some(100.0)]);
+        // Not sent again while nothing changes; again after a restart.
+        assert!(preview_profiles(&c.step(700)).is_empty());
+        c.on_preview_host(HostState::Starting);
+        assert!(c.step(800).preview.is_empty());
+        c.on_preview_host(HostState::Running);
+        assert_eq!(preview_profiles(&c.step(900)).len(), 1);
+        // Closed by the editor.
+        c.set_preview(None);
+        let out = c.step(1_000);
+        assert!(!out.want_preview && out.preview.is_empty());
+    }
+
+    /// A catalog with one user profile reading `sensor`, and its id.
+    fn catalog_with(sensor: &str) -> (ProfileCatalog, String) {
+        let dir =
+            std::env::temp_dir().join(format!("oma-controller-tests-union-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "00000000-0000-4000-8000-0000000000c1";
+        let json = serde_json::to_string(&sensor_profile(sensor)).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+        let catalog = load_catalog(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        (catalog, id.to_owned())
+    }
+
+    #[test]
+    fn values_plan_is_the_union_of_active_and_preview() {
+        let (catalog, id) = catalog_with("gpu0/temperature/core");
+        let mut s = settings(false);
+        s.overlay.default_profile = id;
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&s, Lang::En, None);
+        c.on_catalog(catalog);
+        let plan = c.step(0).values_plan.unwrap();
+        assert_eq!(plan.used, vec!["gpu0/temperature/core"]);
+        assert!(!plan.wanted);
+        // The editor alone does not need values (its canvas reads the
+        // LiveStore), nor do the sensors of the profile being edited.
+        c.on_editor(true);
+        c.set_editor_profile(Some(sensor_profile("cpu/1/load/total")));
+        assert_eq!(c.step(100).values_plan, None);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let plan = c.step(200).values_plan.unwrap();
+        assert_eq!(plan.used, vec!["cpu/0/load/total", "gpu0/temperature/core"]);
+        assert!(!plan.wanted, "the preview is not running yet");
+        c.on_preview_host(HostState::Running);
+        assert_eq!(
+            c.step(300).values_plan,
+            Some(ValuesPlan {
+                used: vec!["cpu/0/load/total".into(), "gpu0/temperature/core".into()],
+                wanted: true
+            })
+        );
+        c.set_preview(None);
+        assert_eq!(
+            c.step(400).values_plan,
+            Some(ValuesPlan {
+                used: vec!["gpu0/temperature/core".into()],
+                wanted: false
+            })
+        );
+    }
+
+    #[test]
+    fn late_editor_calls_after_close_are_ignored() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.on_editor(false);
+        let lows = c.lows.clone();
+        // Debounced calls that arrive after the editor closed.
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.set_editor_profile(Some(lows_profile()));
+        assert!(!c.step(200).want_preview, "no orphan preview");
+        assert_eq!(c.lows, lows, "the editor's lows are not pinned");
+    }
+
+    #[test]
+    fn a_failed_preview_ends_and_is_reported() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.on_preview_host(HostState::Starting);
+        c.step(200);
+        c.on_preview_host(HostState::Failed {
+            reason: HostFailure::Incompatible,
+        });
+        let out = c.step(300);
+        assert!(!out.want_preview);
+        let status = out.status.unwrap();
+        assert!(!status.preview);
+        assert_eq!(status.preview_failure.as_deref(), Some("incompatible"));
+        // A new preview clears the failure.
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let status = c.step(400).status.unwrap();
+        assert!(status.preview);
+        assert_eq!(status.preview_failure, None);
+    }
+
+    #[test]
+    fn preview_closed_by_the_user_is_dropped() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        // Not started yet: an `Off` is not a close.
+        c.on_preview_host(HostState::Off);
+        assert!(c.step(200).want_preview);
+        c.on_preview_host(HostState::Starting);
+        c.step(300);
+        c.on_preview_host(HostState::Running);
+        assert!(c.step(400).want_preview);
+        // The user closed the window: the host is off.
+        c.on_preview_host(HostState::Off);
+        let out = c.step(500);
+        assert!(!out.want_preview);
+        assert!(out.preview.is_empty());
+        assert!(!out.status.unwrap().preview);
+        assert!(!c.step(600).want_preview, "not restarted");
+    }
+
+    #[test]
+    fn use_now_lasts_until_target_change() {
+        let mut c = showing();
+        c.use_now("builtin-bar".into());
+        assert_eq!(profiles_sent(&c.step(200)), vec!["builtin-bar"]);
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-bar")
+        );
+        // A short alt-tab keeps it.
+        c.on_foreground(BROWSER_FG);
+        assert!(profiles_sent(&c.step(300)).is_empty());
+        c.on_foreground(GAME_FG);
+        assert!(profiles_sent(&c.step(400)).is_empty());
+        // Another game: the settings' profile again.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        let out = c.step(500);
+        assert_eq!(targets(&out), vec![Some(OTHER)]);
+        assert_eq!(profiles_sent(&out), vec!["builtin-gaming"]);
+    }
+
     #[test]
     fn values_follow_the_plan() {
         let schema = Schema {
@@ -2217,5 +3190,288 @@ mod tests {
             tick_values(&ValuesPlan::default(), &schema, &snapshot, &[], 5),
             None
         );
+    }
+    // --- Benchmark (M7d, D12) ---------------------------------------------
+
+    fn fixed_clock() -> oma_core::csv::LocalTime {
+        // 2026-10-05 21:30:00 UTC
+        oma_core::csv::local_time(1_791_235_800_000, 0)
+    }
+
+    /// Like [`batch`], on another swapchain.
+    fn batch_on(pid: u32, swapchain: u64, first_s: f64, count: u32) -> FrameBatch {
+        let mut b = batch(pid, first_s, count, 0);
+        for f in &mut b.frames {
+            f.swapchain = swapchain;
+        }
+        b
+    }
+
+    fn bench_messages(out: &Outputs) -> Vec<BenchmarkOverlay> {
+        out.overlay
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::Benchmark(b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rows(out: &Outputs) -> usize {
+        out.benchmark
+            .iter()
+            .map(|c| match c {
+                BenchmarkCommand::Rows(r) => r.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn finished(out: &Outputs) -> Vec<Option<BenchmarkRecord>> {
+        out.benchmark
+            .iter()
+            .filter_map(|c| match c {
+                BenchmarkCommand::Finish { record } => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `c` with a capture started at `now_ms`, its `Begin` step done.
+    fn recording(mut c: Controller, now_ms: u64) -> Controller {
+        c.clock = fixed_clock;
+        c.toggle_benchmark(now_ms);
+        let out = c.step(now_ms);
+        assert_eq!(
+            out.benchmark,
+            vec![BenchmarkCommand::Begin {
+                stem: "my_game-20261005-213000".into()
+            }]
+        );
+        c
+    }
+
+    #[test]
+    fn benchmark_without_target_toasts() {
+        let mut c = enabled_with(&settings(true));
+        c.step(0);
+        c.toggle_benchmark(10);
+        let out = c.step(100);
+        assert_eq!(out.toast, Some(ToastRequest::BenchmarkNoTarget));
+        assert!(out.benchmark.is_empty());
+        assert_eq!(c.current_status().benchmark.state, "idle");
+        // A target with the overlay off (`OMA_FRAMES_DEBUG`): still no
+        // capture (DD6).
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, Some(config(true, false, false)));
+        c.on_catalog(builtins());
+        c.on_service(true);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        c.step(0);
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        c.toggle_benchmark(50);
+        let out = c.step(100);
+        assert_eq!(out.toast, Some(ToastRequest::BenchmarkNoTarget));
+        assert!(out.benchmark.is_empty());
+    }
+
+    #[test]
+    fn benchmark_records_only_the_target_main_swapchain() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[
+                batch(GAME, 1.0, 20, 0),
+                batch_on(GAME, 0xdef, 1.0, 2),
+                batch(OTHER, 1.0, 5, 0),
+            ],
+        );
+        let out = c.step(200);
+        assert_eq!(rows(&out), 20);
+        let bench = c.current_status().benchmark;
+        assert_eq!(bench.state, "recording");
+        assert_eq!(bench.game.as_deref(), Some("my game.exe"));
+        // Another target: its frames are not the recorded game's, and ten
+        // seconds without the game end the capture.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        let out = c.step(300);
+        assert_eq!(targets(&out), vec![Some(OTHER)]);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&other_only()),
+            &[batch(OTHER, 2.0, 5, 0)],
+        );
+        assert_eq!(rows(&c.step(400)), 0);
+        assert!(finished(&c.step(10_299)).is_empty());
+        let ended = finished(&c.step(10_300));
+        assert_eq!(ended.len(), 1);
+        let record = ended[0].clone().expect("frames were recorded");
+        assert_eq!(record.end_reason, EndReason::NoTarget);
+        assert_eq!(record.summary.frames_displayed, 20);
+    }
+
+    #[test]
+    fn benchmark_rec_seconds_go_to_the_overlay() {
+        let mut c = showing();
+        c.clock = fixed_clock;
+        c.toggle_benchmark(100);
+        assert_eq!(
+            bench_messages(&c.step(100)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(0),
+                summary: None
+            }]
+        );
+        assert!(bench_messages(&c.step(200)).is_empty());
+        assert!(bench_messages(&c.step(1_000)).is_empty());
+        assert_eq!(
+            bench_messages(&c.step(1_100)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(1),
+                summary: None
+            }]
+        );
+        assert_eq!(
+            c.current_status().benchmark,
+            BenchmarkStatus {
+                state: "recording".into(),
+                game: Some("my game.exe".into()),
+                elapsed_s: Some(1),
+                error: None,
+            }
+        );
+        // A new overlay process gets the badge again.
+        c.on_host(HostState::Starting);
+        c.step(1_200);
+        c.on_host(HostState::Running);
+        assert_eq!(
+            bench_messages(&c.step(1_300)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(1),
+                summary: None
+            }]
+        );
+    }
+
+    #[test]
+    fn summary_shows_for_ten_seconds_then_clears() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        c.toggle_benchmark(1_000);
+        let out = c.step(1_000);
+        let ended = finished(&out);
+        let record = ended[0].clone().expect("a summary");
+        assert_eq!(record.end_reason, EndReason::User);
+        assert_eq!(record.game, "my game.exe");
+        assert_eq!(record.started_at, "2026-10-05T21:30:00");
+        let shown = bench_messages(&out);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].recording_s, None);
+        let summary = shown[0].summary.clone().expect("the summary box");
+        assert!((summary.fps_displayed - 100.0).abs() < 1e-6, "{summary:?}");
+        assert_eq!(c.current_status().benchmark.state, "idle");
+        assert!(bench_messages(&c.step(1_000 + SUMMARY_SHOW_MS - 1)).is_empty());
+        assert_eq!(
+            bench_messages(&c.step(1_000 + SUMMARY_SHOW_MS)),
+            vec![BenchmarkOverlay {
+                recording_s: None,
+                summary: None
+            }]
+        );
+    }
+
+    #[test]
+    fn blocked_game_is_recorded_without_badge() {
+        let mut s = settings(true);
+        s.overlay.blocked_games = vec!["my game.exe".into()];
+        let mut c = enabled_with(&s);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        c.step(0);
+        c.on_geometry(Some(geometry(96)));
+        c.step(100);
+        let mut c = recording(c, 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        let out = c.step(200);
+        assert_eq!(rows(&out), 20);
+        assert!(bench_messages(&out).is_empty());
+        assert!(bench_messages(&c.step(1_500)).is_empty());
+        assert_eq!(c.current_status().benchmark.state, "recording");
+        c.toggle_benchmark(2_000);
+        let out = c.step(2_000);
+        assert!(finished(&out)[0].is_some());
+        assert!(bench_messages(&out).is_empty(), "no summary box either");
+    }
+
+    #[test]
+    fn write_error_stops_with_the_reason() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        c.on_benchmark_error(WriteFailure::DiskFull);
+        let out = c.step(300);
+        let ended = finished(&out);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].as_ref().unwrap().end_reason, EndReason::Error);
+        let error = LogError {
+            key: "log.error.diskFull".into(),
+            detail: None,
+        };
+        assert_eq!(
+            out.toast,
+            Some(ToastRequest::BenchmarkError {
+                error: error.clone()
+            })
+        );
+        let bench = c.current_status().benchmark;
+        assert_eq!(bench.state, "error");
+        assert_eq!(bench.error, Some(error));
+        assert_eq!(bench.game, None);
+        // The summary that then cannot be written: no second toast.
+        c.on_benchmark_error(WriteFailure::DiskFull);
+        assert_eq!(c.step(400).toast, None);
+        // A new capture clears the error.
+        c.toggle_benchmark(500);
+        c.step(500);
+        let bench = c.current_status().benchmark;
+        assert_eq!((bench.state.as_str(), bench.error), ("recording", None));
+    }
+
+    #[test]
+    fn shutdown_ends_the_capture_with_its_reason() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        let commands = c.shutdown_benchmark(300);
+        assert!(!c.recording());
+        let [BenchmarkCommand::Finish { record: Some(r) }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(r.end_reason, EndReason::Shutdown);
+        // Nothing running: nothing to do.
+        assert!(c.shutdown_benchmark(400).is_empty());
     }
 }

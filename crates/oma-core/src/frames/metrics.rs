@@ -1,5 +1,7 @@
 //! Frame metrics: FPS, lows, stutter, latency means and bottleneck.
 
+use std::collections::VecDeque;
+
 use crate::frames::{FrameKind, FrameSample};
 
 /// Displayed frames per second: `1000 * N / sum(ms_between_display_change)`
@@ -46,12 +48,18 @@ pub fn lows(frametimes_ms: &[f64], def: LowDefinition) -> Option<Lows> {
     }
     let mut sorted = frametimes_ms.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
+    lows_of_sorted(&sorted, def)
+}
+
+/// [`lows`] of frametimes already sorted shortest first, so a long session
+/// sorts one (`f32`) copy for both definitions.
+pub fn lows_of_sorted<T: Copy + Into<f64>>(sorted: &[T], def: LowDefinition) -> Option<Lows> {
+    if sorted.len() < 2 {
+        return None;
+    }
     let (one, point_one) = match def {
-        LowDefinition::Integral => (integral_low(&sorted, 0.01), integral_low(&sorted, 0.001)),
-        LowDefinition::Percentile => (
-            percentile_low(&sorted, 0.99),
-            percentile_low(&sorted, 0.999),
-        ),
+        LowDefinition::Integral => (integral_low(sorted, 0.01), integral_low(sorted, 0.001)),
+        LowDefinition::Percentile => (percentile_low(sorted, 0.99), percentile_low(sorted, 0.999)),
     };
     Some(Lows {
         one_percent: one,
@@ -60,24 +68,24 @@ pub fn lows(frametimes_ms: &[f64], def: LowDefinition) -> Option<Lows> {
 }
 
 /// `ascending` is sorted shortest first.
-fn integral_low(ascending: &[f64], p: f64) -> f64 {
-    let threshold = p * ascending.iter().sum::<f64>();
+fn integral_low<T: Copy + Into<f64>>(ascending: &[T], p: f64) -> f64 {
+    let threshold = p * ascending.iter().map(|&v| v.into()).sum::<f64>();
     let mut acc = 0.0;
-    for &ft in ascending.iter().rev() {
+    for ft in ascending.iter().rev().map(|&v| v.into()) {
         acc += ft;
         if acc >= threshold {
             return 1000.0 / ft;
         }
     }
     // Unreachable for p <= 1; fall back to the shortest frame.
-    1000.0 / ascending[0]
+    1000.0 / ascending[0].into()
 }
 
-fn percentile_low(ascending: &[f64], q: f64) -> f64 {
+fn percentile_low<T: Copy + Into<f64>>(ascending: &[T], q: f64) -> f64 {
     let n = ascending.len();
     // The epsilon keeps products like 0.99 * 1000 from rounding up a rank.
     let rank = ((q * n as f64 - 1e-9).ceil() as usize).clamp(1, n);
-    1000.0 / ascending[rank - 1]
+    1000.0 / ascending[rank - 1].into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,42 +103,64 @@ const STUTTER_MIN_EXTRA_MS: f64 = 8.0;
 /// displayed frames in the preceding 2 s and more than 8 ms above it.
 /// `frames` must be ordered by `t_s`.
 pub fn stutter(frames: &[FrameSample]) -> Stutter {
-    let shown: Vec<(f64, f64)> = frames
-        .iter()
-        .filter(|f| f.displayed)
-        .filter_map(|f| f.ms_between_display_change.map(|ms| (f.t_s, ms)))
-        .collect();
-    let total: f64 = shown.iter().map(|&(_, ms)| ms).sum();
-    let mut count = 0u32;
-    let mut stutter_ms = 0.0;
-    let mut start = 0;
-    // The frametimes of `shown[start..i]`, kept sorted: each step inserts the
-    // previous frame and evicts the ones that aged out, both by binary search.
-    let mut sorted: Vec<f64> = Vec::new();
-    for (i, &(t, ft)) in shown.iter().enumerate() {
-        if i > 0 {
-            sorted_insert(&mut sorted, shown[i - 1].1);
-        }
-        while shown[start].0 < t - STUTTER_HISTORY_S {
-            sorted_remove(&mut sorted, shown[start].1);
-            start += 1;
-        }
-        if i - start < STUTTER_MIN_HISTORY {
-            continue;
-        }
-        let median = median_of_sorted(&sorted);
-        if ft > STUTTER_RATIO * median && ft - median > STUTTER_MIN_EXTRA_MS {
-            count += 1;
-            stutter_ms += ft;
+    let mut counter = StutterCounter::new();
+    for f in frames.iter().filter(|f| f.displayed) {
+        if let Some(ms) = f.ms_between_display_change {
+            counter.push(f.t_s, ms);
         }
     }
-    Stutter {
-        count,
-        time_percent: if total > 0.0 {
-            stutter_ms / total * 100.0
-        } else {
-            0.0
-        },
+    counter.result()
+}
+
+/// Incremental form of [`stutter`]: feed the displayed frames in `t_s` order.
+#[derive(Debug, Clone, Default)]
+pub struct StutterCounter {
+    /// `(t_s, frametime)` of the last 2 s of frames before the next one.
+    history: VecDeque<(f64, f64)>,
+    /// The frametimes of `history`, kept sorted.
+    sorted: Vec<f64>,
+    count: u32,
+    stutter_ms: f64,
+    total_ms: f64,
+}
+
+impl StutterCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One displayed frame: its time and its frametime in milliseconds.
+    pub fn push(&mut self, t_s: f64, ft_ms: f64) {
+        self.total_ms += ft_ms;
+        while self
+            .history
+            .front()
+            .is_some_and(|&(t, _)| t < t_s - STUTTER_HISTORY_S)
+        {
+            if let Some((_, old)) = self.history.pop_front() {
+                sorted_remove(&mut self.sorted, old);
+            }
+        }
+        if self.history.len() >= STUTTER_MIN_HISTORY {
+            let median = median_of_sorted(&self.sorted);
+            if ft_ms > STUTTER_RATIO * median && ft_ms - median > STUTTER_MIN_EXTRA_MS {
+                self.count += 1;
+                self.stutter_ms += ft_ms;
+            }
+        }
+        self.history.push_back((t_s, ft_ms));
+        sorted_insert(&mut self.sorted, ft_ms);
+    }
+
+    pub fn result(&self) -> Stutter {
+        Stutter {
+            count: self.count,
+            time_percent: if self.total_ms > 0.0 {
+                self.stutter_ms / self.total_ms * 100.0
+            } else {
+                0.0
+            },
+        }
     }
 }
 

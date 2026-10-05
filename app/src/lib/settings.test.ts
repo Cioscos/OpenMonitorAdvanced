@@ -324,5 +324,6 @@ test('overlay defaults in the mock match the Rust defaults', () => {
     hotkeyToggle: null,
     hotkeyNextProfile: null,
     hotkeyBenchmark: null,
+    editorBounds: null,
   });
 });

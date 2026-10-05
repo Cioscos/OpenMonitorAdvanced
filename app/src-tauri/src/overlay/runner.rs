@@ -11,12 +11,21 @@
 //!   [`Controller::step`] every 100 ms, and after every input. Otherwise no
 //!   watcher and no process run, and the thread waits on the channel without
 //!   a timeout, stepping once per input (§11).
+//!   With the overlay editor open the thread also steps every 100 ms, for the
+//!   canvas's data (`overlay-editor-data`), without the engine or the watcher.
+//! - **Preview (M7d, DD2):** a second [`OverlayHost`] in
+//!   [`OverlayMode::Preview`], created at the first preview; the controller's
+//!   `want_preview` turns its process on and off.
 //! - **Sampler:** [`OverlayHandle::on_tick`] builds `Values` from the plan the
 //!   controller last published (ruling R2) and queues them for the overlay
-//!   without ever blocking the tick.
-//! - **Shutdown** ([`OverlayRunner::stop`]): the engine is turned off if the
-//!   controller had turned it on, then the host closes the overlay, then the
-//!   watcher goes.
+//!   and the preview without ever blocking the tick.
+//! - **Benchmark (M7d):** the controller's [`BenchmarkCommand`]s are carried
+//!   out here, on this thread, in the `benchmarks` folder of the CSV log; a
+//!   write error goes back to the controller. A capture keeps the thread
+//!   stepping, so its limits apply.
+//! - **Shutdown** ([`OverlayRunner::stop`]): a running capture is closed, the
+//!   engine is turned off if the controller had turned it on, then the host
+//!   closes the overlay, then the watcher goes.
 
 use std::io;
 use std::path::PathBuf;
@@ -28,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use oma_core::engine::TickOutput;
 use oma_core::model::Schema;
-use oma_core::overlay::{Foreground, PxRect};
+use oma_core::overlay::{parse_profile, Foreground, Profile, PxRect};
 use oma_core::settings::Settings;
 use oma_ipc::overlay::OverlayMessage;
 use oma_ipc::FramesConfigure;
@@ -38,14 +47,21 @@ use oma_win::foreground::{
 use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
+use super::benchmark::{BenchmarkFiles, BenchmarkWriter};
+use super::editor::CommandError;
+use super::editor_feed::EditorData;
+
 use super::controller::{
-    tick_values, Controller, Outputs, OverlayHotkeys, OverlayStatus, ToastRequest, ValuesPlan,
+    tick_values, BenchmarkCommand, Controller, Outputs, OverlayHotkeys, OverlayStatus,
+    ToastRequest, ValuesPlan,
 };
 use super::frames::{options_from_env, ENV_VAR};
-use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlaySender};
-use super::profiles::{load_catalog, profiles_dir, ProfileCatalog};
+use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlayMode, OverlaySender};
+use super::profiles::{app_profiles_dir, load_catalog, ProfileCatalog};
 use crate::hotkeys::OverlayActions;
 use crate::i18n::{t, Lang};
+use crate::log::fs::RealFs;
+use crate::log::writer::WriteFailure;
 use crate::log::HotkeyStatus;
 use crate::notifier::{launch_for_main, ToastSink};
 use crate::settings::SettingsStore;
@@ -53,6 +69,10 @@ use crate::tray::language_for;
 
 /// The UI event carrying every new [`OverlayStatus`].
 pub const EVENT_OVERLAY_STATUS: &str = "overlay-status";
+/// The editor's canvas data ([`EditorData`]).
+pub const EVENT_EDITOR_DATA: &str = "overlay-editor-data";
+/// The preview opened or closed: `{ open: bool }`.
+pub const EVENT_PREVIEW: &str = "overlay-preview";
 /// The controller's period while the frame engine is wanted.
 const STEP: Duration = Duration::from_millis(100);
 /// How often the tracked window's geometry is read without a move, so a
@@ -66,6 +86,10 @@ const FOREGROUND_CHECK_MS: u64 = 1_000;
 pub type LinkSink = Box<dyn Fn(LinkCommand) + Send + Sync>;
 /// Receives every new status, on the controller's thread; must not block.
 pub type StatusSink = Box<dyn Fn(&OverlayStatus) + Send>;
+/// Receives the editor's canvas data, on the controller's thread; must not block.
+pub type EditorDataSink = Box<dyn Fn(&EditorData) + Send>;
+/// The benchmarks folder for these settings.
+pub type BenchmarksDir = Box<dyn Fn(&Settings) -> io::Result<PathBuf> + Send>;
 
 /// What the controller's thread reacts to.
 pub(crate) enum Input {
@@ -80,7 +104,19 @@ pub(crate) enum Input {
     SetHidden(bool),
     ToggleHidden,
     NextProfile,
+    /// The benchmark hotkey or button.
+    ToggleBenchmark,
     Hotkeys(OverlayHotkeys),
+    /// The editor window opened or closed.
+    Editor(bool),
+    /// The profile the preview draws; `None` closes it.
+    Preview(Option<Profile>),
+    /// The preview process's state.
+    PreviewHost(HostState),
+    /// «Use now» in the editor (DD9).
+    UseNow(String),
+    /// The profile open in the editor.
+    EditorProfile(Option<Profile>),
     Shutdown,
 }
 
@@ -125,6 +161,7 @@ pub(crate) fn watcher_sink(
 struct Tap {
     plan: ValuesPlan,
     sender: Option<OverlaySender>,
+    preview: Option<OverlaySender>,
 }
 
 /// The side of the controller the rest of the app talks to: the sampler,
@@ -134,6 +171,8 @@ pub struct OverlayHandle {
     tx: Sender<Input>,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
+    /// The id of the capture in progress.
+    bench_id: Arc<Mutex<Option<String>>>,
 }
 
 impl OverlayHandle {
@@ -146,7 +185,9 @@ impl OverlayHandle {
         }
         let Some(schema) = schema else { return };
         let tap = self.tap.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(sender) = &tap.sender else { return };
+        if tap.sender.is_none() && tap.preview.is_none() {
+            return;
+        }
         if let Some(msg) = tick_values(
             &tap.plan,
             schema,
@@ -154,8 +195,21 @@ impl OverlayHandle {
             &out.quality,
             out.snapshot.timestamp_ms,
         ) {
-            sender.send(msg);
+            if let Some(preview) = &tap.preview {
+                preview.send(msg.clone());
+            }
+            if let Some(sender) = &tap.sender {
+                sender.send(msg);
+            }
         }
+    }
+
+    /// The id of the capture in progress, which cannot be deleted.
+    pub fn benchmark_id(&self) -> Option<String> {
+        self.bench_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn status(&self) -> OverlayStatus {
@@ -163,6 +217,16 @@ impl OverlayHandle {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Reads the profile folder again.
+    pub fn reload_profiles(&self) {
+        self.send(Input::ReloadProfiles);
+    }
+
+    /// The editor window opened or closed; closing it ends the preview.
+    pub fn editor_open(&self, open: bool) {
+        self.send(Input::Editor(open));
     }
 
     fn send(&self, input: Input) {
@@ -181,10 +245,17 @@ impl OverlayActions for OverlayHandle {
         self.send(Input::NextProfile);
     }
 
-    fn set_hotkeys(&self, toggle: HotkeyStatus, next_profile: HotkeyStatus) {
+    /// The benchmark hotkey and button.
+    fn toggle_benchmark(&self) {
+        self.send(Input::ToggleBenchmark);
+    }
+
+    fn set_hotkeys(&self, statuses: [HotkeyStatus; 3]) {
+        let [toggle, next_profile, benchmark] = statuses;
         self.send(Input::Hotkeys(OverlayHotkeys {
             toggle,
             next_profile,
+            benchmark,
         }));
     }
 }
@@ -196,6 +267,8 @@ pub struct OverlayDeps {
     pub feed: FramesFeed,
     pub toaster: Box<dyn ToastSink>,
     pub on_status: StatusSink,
+    pub on_editor_data: EditorDataSink,
+    pub benchmarks_dir: BenchmarksDir,
 }
 
 /// The running controller thread; [`Self::stop`] (or dropping it) ends it in
@@ -245,6 +318,7 @@ impl OverlayRunner {
             tx: tx.clone(),
             tap: Arc::default(),
             status: Arc::new(Mutex::new(controller.current_status())),
+            bench_id: Arc::default(),
         };
         let ctl = Ctl {
             controller,
@@ -254,6 +328,10 @@ impl OverlayRunner {
             feed: deps.feed,
             toaster: deps.toaster,
             on_status: deps.on_status,
+            on_editor_data: deps.on_editor_data,
+            benchmarks_dir: deps.benchmarks_dir,
+            bench_writer: None,
+            bench_id: Arc::clone(&handle.bench_id),
             tap: Arc::clone(&handle.tap),
             status: Arc::clone(&handle.status),
             env,
@@ -265,6 +343,9 @@ impl OverlayRunner {
             host: None,
             host_wanted: false,
             host_start_failed: false,
+            preview_host: None,
+            preview_wanted: false,
+            editor_open: false,
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
@@ -311,8 +392,8 @@ impl Drop for OverlayRunner {
 
 /// The profile catalog from `%APPDATA%`; the built-ins only without it.
 fn read_catalog() -> ProfileCatalog {
-    match std::env::var_os("APPDATA") {
-        Some(app_data) => load_catalog(&profiles_dir(&PathBuf::from(app_data))),
+    match app_profiles_dir() {
+        Some(dir) => load_catalog(&dir),
         None => {
             tracing::warn!("no APPDATA: only the built-in overlay profiles");
             ProfileCatalog::builtins()
@@ -330,6 +411,12 @@ struct Ctl {
     feed: FramesFeed,
     toaster: Box<dyn ToastSink>,
     on_status: StatusSink,
+    on_editor_data: EditorDataSink,
+    benchmarks_dir: BenchmarksDir,
+    /// The capture's open CSV.
+    bench_writer: Option<BenchmarkWriter>,
+    /// Its id, for [`OverlayHandle::benchmark_id`].
+    bench_id: Arc<Mutex<Option<String>>>,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
     env: Option<FramesConfigure>,
@@ -345,6 +432,12 @@ struct Ctl {
     /// The host could not start: not tried again (nor logged) until the
     /// overlay's settings change or «Retry»; the status shows the failure meanwhile.
     host_start_failed: bool,
+    /// The preview's host, from the first preview on.
+    preview_host: Option<OverlayHost>,
+    /// The last `set_wanted` sent to the preview's host.
+    preview_wanted: bool,
+    /// The editor window is open: the thread steps for its canvas.
+    editor_open: bool,
     /// The window whose geometry is read.
     tracked: Option<Foreground>,
     geometry_ms: u64,
@@ -375,13 +468,19 @@ impl Ctl {
         self.settings.overlay.enabled || self.env.is_some()
     }
 
+    /// The thread steps every 100 ms: the engine is wanted, the editor is
+    /// open (its canvas and preview) or a capture runs (its time limits).
+    fn stepping(&self) -> bool {
+        self.active() || self.editor_open || self.controller.recording()
+    }
+
     fn run(mut self) {
         self.load_catalog(read_catalog());
         // The first step runs at once, so the engine starts without waiting
         // (as in M7b, DP13).
         let mut next_step_ms: u64 = 0;
         loop {
-            let first = if self.active() {
+            let first = if self.stepping() {
                 let wait = next_step_ms.saturating_sub(self.now_ms());
                 match self.rx.recv_timeout(Duration::from_millis(wait)) {
                     Ok(input) => Some(input),
@@ -463,7 +562,26 @@ impl Ctl {
             }
             Input::ToggleHidden => self.controller.toggle_hidden(),
             Input::NextProfile => self.controller.next_profile(),
+            Input::ToggleBenchmark => {
+                let now = self.now_ms();
+                self.controller.toggle_benchmark(now);
+            }
             Input::Hotkeys(hotkeys) => self.controller.on_hotkeys(hotkeys),
+            Input::Editor(open) => {
+                self.editor_open = open;
+                self.controller.on_editor(open);
+            }
+            Input::Preview(profile) => self.controller.set_preview(profile),
+            Input::PreviewHost(state) => {
+                // Off by itself (the user closed it): the next preview must
+                // turn the host on again.
+                if state == HostState::Off {
+                    self.preview_wanted = false;
+                }
+                self.controller.on_preview_host(state);
+            }
+            Input::UseNow(id) => self.controller.use_now(id),
+            Input::EditorProfile(profile) => self.controller.set_editor_profile(profile),
             Input::Shutdown => {}
         }
     }
@@ -544,7 +662,44 @@ impl Ctl {
         self.apply(out);
     }
 
+    /// The capture's file work. A failure goes back to the controller,
+    /// which stops the capture; later rows are dropped by the writer.
+    fn run_benchmark(&mut self, commands: Vec<BenchmarkCommand>) {
+        for command in commands {
+            let result = match command {
+                BenchmarkCommand::Begin { stem } => (self.benchmarks_dir)(&self.settings)
+                    .map_err(|e| WriteFailure::from_io(&e))
+                    .and_then(|dir| BenchmarkFiles::new(dir, Arc::new(RealFs)).begin(&stem))
+                    .map(|writer| {
+                        tracing::info!(%stem, "benchmark started");
+                        self.bench_writer = Some(writer);
+                    }),
+                BenchmarkCommand::Rows(rows) => match &mut self.bench_writer {
+                    Some(writer) => writer.append(&rows),
+                    None => Ok(()),
+                },
+                BenchmarkCommand::Finish { record } => match self.bench_writer.take() {
+                    Some(writer) => {
+                        let reason = record.as_ref().map(|r| r.end_reason);
+                        tracing::info!(?reason, "benchmark finished");
+                        writer.finish(record.as_ref())
+                    }
+                    None => Ok(()),
+                },
+            };
+            if let Err(failure) = result {
+                tracing::warn!(?failure, "benchmark: write failed");
+                self.controller.on_benchmark_error(failure);
+            }
+        }
+        *self.bench_id.lock().unwrap_or_else(PoisonError::into_inner) =
+            self.bench_writer.as_ref().map(BenchmarkWriter::id);
+    }
+
     fn apply(&mut self, out: Outputs) {
+        // Before the status goes out, so a UI that reads the history on it
+        // finds the new files.
+        self.run_benchmark(out.benchmark);
         for command in out.link {
             if let LinkCommand::ConfigureFrames(config) = &command {
                 self.engine_on = config.enabled;
@@ -586,6 +741,15 @@ impl Ctl {
                 host.send(msg);
             }
         }
+        self.sync_preview(out.want_preview);
+        if let Some(preview) = &self.preview_host {
+            for msg in out.preview {
+                preview.send(msg);
+            }
+        }
+        if let Some(data) = &out.editor_data {
+            (self.on_editor_data)(data);
+        }
         if let Some(plan) = out.values_plan {
             self.tap.lock().unwrap_or_else(PoisonError::into_inner).plan = plan;
         }
@@ -601,13 +765,33 @@ impl Ctl {
         if let Some(mode) = &out.present_mode {
             tracing::info!(%mode, "target present mode");
         }
-        if let Some(ToastRequest::ExclusiveFullscreen { exe }) = out.toast {
-            tracing::info!(%exe, "the game runs in exclusive fullscreen: overlay not visible");
-            self.toaster.show(
-                t(self.lang, "overlay.exclusive.title", &[]),
-                t(self.lang, "overlay.exclusive.body", &[]),
+        match out.toast {
+            Some(ToastRequest::ExclusiveFullscreen { exe }) => {
+                tracing::info!(%exe, "the game runs in exclusive fullscreen: overlay not visible");
+                self.toaster.show(
+                    t(self.lang, "overlay.exclusive.title", &[]),
+                    t(self.lang, "overlay.exclusive.body", &[]),
+                    launch_for_main(),
+                );
+            }
+            Some(ToastRequest::BenchmarkNoTarget) => self.toaster.show(
+                t(self.lang, "benchmark.toast.title", &[]),
+                t(self.lang, "benchmark.noTarget", &[]),
                 launch_for_main(),
-            );
+            ),
+            Some(ToastRequest::BenchmarkError { error }) => {
+                let detail = t(
+                    self.lang,
+                    &error.key,
+                    &[("detail", error.detail.as_deref().unwrap_or(""))],
+                );
+                self.toaster.show(
+                    t(self.lang, "benchmark.toast.title", &[]),
+                    t(self.lang, "benchmark.toast.error", &[("detail", &detail)]),
+                    launch_for_main(),
+                );
+            }
+            None => {}
         }
         if let Some(status) = out.status {
             let target = status.target.as_ref().map(|t| (t.name.as_str(), t.pid));
@@ -646,7 +830,7 @@ impl Ctl {
                 }
             };
             let tx = self.tx.clone();
-            match OverlayHost::start(exe, move |state| {
+            match OverlayHost::start(exe, OverlayMode::Overlay, move |state| {
                 let _ = tx.send(Input::Host(state));
             }) {
                 Ok(host) => {
@@ -669,6 +853,44 @@ impl Ctl {
         self.host_wanted = wanted;
     }
 
+    /// Starts the preview's host at the first preview, then turns its
+    /// process on and off. A host that cannot start is logged and not tried
+    /// again until the preview is wanted anew.
+    fn sync_preview(&mut self, wanted: bool) {
+        if wanted == self.preview_wanted {
+            return;
+        }
+        self.preview_wanted = wanted;
+        if wanted && self.preview_host.is_none() {
+            let exe = match std::env::current_exe() {
+                Ok(current) => overlay_exe(&current),
+                Err(err) => {
+                    tracing::warn!(%err, "preview: the app's own path is unknown");
+                    return;
+                }
+            };
+            let tx = self.tx.clone();
+            match OverlayHost::start(exe, OverlayMode::Preview, move |state| {
+                let _ = tx.send(Input::PreviewHost(state));
+            }) {
+                Ok(host) => {
+                    self.tap
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .preview = Some(host.sender());
+                    self.preview_host = Some(host);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "preview: the host thread could not start");
+                    return;
+                }
+            }
+        }
+        if let Some(host) = &self.preview_host {
+            host.set_wanted(wanted);
+        }
+    }
+
     /// Latches a failed host start: the status shows a failed overlay
     /// process (through the channel, so it gets a step of its own).
     fn fail_host_start(&mut self) {
@@ -689,9 +911,12 @@ impl Ctl {
         }
     }
 
-    /// The exit order: the engine off (if we turned it on), then the overlay,
-    /// then the watcher.
+    /// The exit order: a running capture closed, the engine off (if we
+    /// turned it on), then the overlay, then the watcher.
     fn shutdown(mut self) {
+        let now = self.now_ms();
+        let commands = self.controller.shutdown_benchmark(now);
+        self.run_benchmark(commands);
         if self.engine_on {
             (self.link)(LinkCommand::ConfigureFrames(FramesConfigure {
                 enabled: false,
@@ -700,6 +925,9 @@ impl Ctl {
             }));
         }
         *self.tap.lock().unwrap_or_else(PoisonError::into_inner) = Tap::default();
+        if let Some(host) = self.preview_host.take() {
+            host.stop();
+        }
         if let Some(host) = self.host.take() {
             host.stop();
         }
@@ -722,13 +950,63 @@ pub fn overlay_retry(state: State<'_, OverlayHandle>) {
 /// Reads the profile folder again (DP17).
 #[tauri::command]
 pub fn overlay_reload_profiles(state: State<'_, OverlayHandle>) {
-    state.send(Input::ReloadProfiles);
+    state.reload_profiles();
 }
 
 /// Hides or shows the overlay; not saved (DP11).
 #[tauri::command]
 pub fn set_overlay_hidden(state: State<'_, OverlayHandle>, hidden: bool) {
     state.send(Input::SetHidden(hidden));
+}
+
+/// Starts or stops the benchmark capture (Settings › Benchmark).
+#[tauri::command]
+pub fn benchmark_toggle(state: State<'_, OverlayHandle>) {
+    state.toggle_benchmark();
+}
+
+/// A profile from the editor, checked like a profile file.
+fn editor_profile(json: Option<String>) -> Result<Option<Profile>, CommandError> {
+    json.map(|json| {
+        parse_profile(&json).map_err(|e| CommandError {
+            key: "editor.error.invalid".to_owned(),
+            detail: Some(e.to_string()),
+        })
+    })
+    .transpose()
+}
+
+/// Opens (or redraws) the preview with the editor's profile; `None` closes it.
+#[tauri::command]
+pub fn overlay_preview(
+    state: State<'_, OverlayHandle>,
+    json: Option<String>,
+) -> Result<(), CommandError> {
+    state.send(Input::Preview(editor_profile(json)?));
+    Ok(())
+}
+
+/// The profile open in the editor, for the canvas's lows windows.
+#[tauri::command]
+pub fn overlay_editor_profile(
+    state: State<'_, OverlayHandle>,
+    json: Option<String>,
+) -> Result<(), CommandError> {
+    state.send(Input::EditorProfile(editor_profile(json)?));
+    Ok(())
+}
+
+/// «Use now»: the saved profile `id` until the target changes (DD9).
+#[tauri::command]
+pub fn overlay_use_now(state: State<'_, OverlayHandle>, id: String) -> Result<(), CommandError> {
+    if !oma_core::settings::overlay::is_profile_id(&id) {
+        return Err(CommandError {
+            key: "editor.error.invalidId".to_owned(),
+            detail: None,
+        });
+    }
+    state.send(Input::UseNow(id));
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -761,6 +1039,10 @@ mod tests {
             feed: FramesFeed::default(),
             toaster: Box::new(NoToasts),
             on_status: Box::new(|_| {}),
+            on_editor_data: Box::new(|_| {}),
+            benchmarks_dir: Box::new(|_| Err(io::ErrorKind::NotFound.into())),
+            bench_writer: None,
+            bench_id: Arc::default(),
             tap: Arc::default(),
             status,
             env: None,
@@ -772,6 +1054,9 @@ mod tests {
             host: None,
             host_wanted: false,
             host_start_failed: false,
+            preview_host: None,
+            preview_wanted: false,
+            editor_open: false,
             tracked: None,
             geometry_ms: 0,
             logged_target: None,
@@ -860,6 +1145,27 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_editor_stops_the_preview() {
+        let mut ctl = ctl(Settings::default());
+        assert!(!ctl.stepping(), "overlay off, editor closed: no steps");
+        ctl.handle(Input::Editor(true));
+        assert!(
+            ctl.stepping(),
+            "the canvas needs steps with the overlay off"
+        );
+        let (_, profile) = ProfileCatalog::builtins().resolve("builtin-gaming", &Schema::default());
+        ctl.handle(Input::Preview(Some(profile)));
+        assert!(ctl.controller.step(0).want_preview);
+        ctl.handle(Input::Editor(false));
+        assert!(!ctl.controller.step(100).want_preview);
+        assert!(!ctl.stepping());
+        // The preview host's own `Off` (a close) lets the next preview start it.
+        ctl.preview_wanted = true;
+        ctl.handle(Input::PreviewHost(HostState::Off));
+        assert!(!ctl.preview_wanted);
+    }
+
+    #[test]
     fn moves_are_coalesced() {
         let (tx, rx) = mpsc::channel();
         let moves = Arc::new(MoveCoalescer::default());
@@ -906,10 +1212,96 @@ mod tests {
             "diagnostics",
             "hiddenByUser",
             "hotkeys",
+            "preview",
+            "benchmark",
         ] {
             assert!(json.get(key).is_some(), "{key} missing: {json}");
         }
         assert!(json["hotkeys"].get("nextProfile").is_some(), "{json}");
+        assert!(json["hotkeys"].get("benchmark").is_some(), "{json}");
+        assert_eq!(json["benchmark"]["state"], "idle");
+        assert!(json["benchmark"].get("elapsedS").is_some(), "{json}");
         assert_eq!(EVENT_OVERLAY_STATUS, "overlay-status");
+    }
+
+    #[test]
+    fn shutdown_finishes_a_running_capture() {
+        use oma_ipc::{
+            FrameBatch, FramesStatus, PresentingProcess, PresentingProcesses, WireFrame,
+        };
+        let dir = std::env::temp_dir().join(format!("oma-runner-bench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut settings = Settings::default();
+        settings.overlay.enabled = true;
+        let mut ctl = ctl(settings.clone());
+        let bench_dir = dir.clone();
+        ctl.benchmarks_dir = Box::new(move |_| Ok(bench_dir.clone()));
+        let c = &mut ctl.controller;
+        c.on_settings(&settings, Lang::En, None);
+        c.on_service(true);
+        let running = FramesStatus {
+            state: "running".into(),
+            detail: None,
+            presentmon_version: None,
+        };
+        let list = PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![PresentingProcess {
+                pid: 100,
+                name: "game.exe".into(),
+                displayed_fps: 100.0,
+                present_mode: "Hardware: Independent Flip".into(),
+                swapchains: 1,
+            }],
+        };
+        c.on_frames(Some(&running), Some(&list), &[]);
+        c.on_foreground(Foreground {
+            pid: 100,
+            hwnd: 0x1000,
+        });
+        c.step(0);
+        c.toggle_benchmark(0);
+        let frames = (0..20)
+            .map(|i| WireFrame {
+                qpc: 10_000_000 + i * 100_000,
+                swapchain: 1,
+                frame_type: "app".into(),
+                displayed: true,
+                ms_between_presents: 10.0,
+                ms_between_display_change: Some(10.0),
+                ms_until_displayed: None,
+                ms_app_frametime: None,
+                ms_pc_latency: None,
+                ms_gpu_busy: None,
+                pcl_frame_id: None,
+            })
+            .collect();
+        c.on_frames(
+            Some(&running),
+            Some(&list),
+            &[FrameBatch {
+                pid: 100,
+                frames,
+                dropped: 0,
+            }],
+        );
+        let out = c.step(100);
+        ctl.run_benchmark(out.benchmark);
+        assert!(ctl.stepping(), "a capture keeps the thread stepping");
+        ctl.shutdown();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names[0].starts_with("game-") && names[0].ends_with(".csv"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(&names[1])).unwrap()).unwrap();
+        assert_eq!(json["endReason"], "shutdown");
+        assert_eq!(json["summary"]["framesDisplayed"], 20);
+        let csv = std::fs::read_to_string(dir.join(&names[0])).unwrap();
+        assert_eq!(csv.lines().count(), 21, "header and 20 rows");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

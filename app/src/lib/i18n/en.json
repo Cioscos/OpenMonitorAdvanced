@@ -70,6 +70,8 @@
   "settings.error.hotkey": "Use two or more of Ctrl, Alt and Shift plus a letter, a digit or F1 to F24.",
   "settings.error.hotkeyDuplicate": "Pause needs a different shortcut from Start and stop.",
   "settings.error.sensors": "Pick up to 4096 different sensors.",
+  "settings.error.exe": "Enter an executable name such as game.exe, without a path.",
+  "settings.error.profileId": "Unknown overlay profile.",
   "rules.error.noLevel": "Set at least a warning or a critical level.",
   "rules.error.order": "The critical threshold must not be less severe than the warning one.",
   "rules.error.duration": "Durations go from 0 to 600 seconds.",

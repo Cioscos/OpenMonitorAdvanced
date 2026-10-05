@@ -262,6 +262,26 @@ export interface LogSettings {
   hotkeyPause: string | null;
 }
 
+/** The `overlay` section; names are lowercase executables, hotkeys canonical. */
+export interface OverlaySettings {
+  enabled: boolean;
+  chartFps: ChartFps;
+  /** 2 or 4. */
+  textHz: 2 | 4;
+  hideFromCapture: boolean;
+  attach: 'window' | 'monitor';
+  trackPcLatency: boolean;
+  trackGpu: boolean;
+  /** A `builtin-*` id or a lowercase UUID. */
+  defaultProfile: string;
+  /** Executable -> profile id; replaced whole by a patch. */
+  gameProfiles: Record<string, string>;
+  blockedGames: string[];
+  hotkeyToggle: string | null;
+  hotkeyNextProfile: string | null;
+  hotkeyBenchmark: string | null;
+}
+
 export interface Settings {
   version: number;
   general: {
@@ -298,6 +318,8 @@ export interface Settings {
   rules: RulesSettings;
   /** CSV sensor log; `null` folder = the default one, `null` sensors = all. */
   log: LogSettings;
+  /** In-game overlay. */
+  overlay: OverlaySettings;
   migrations: { serviceV1: boolean; webviewV1: boolean };
 }
 

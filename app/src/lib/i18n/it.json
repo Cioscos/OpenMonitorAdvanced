@@ -70,6 +70,8 @@
   "settings.error.hotkey": "Usa almeno due tra Ctrl, Alt e Maiusc più una lettera, una cifra o F1–F24.",
   "settings.error.hotkeyDuplicate": "La pausa richiede una scorciatoia diversa da quella di avvio e arresto.",
   "settings.error.sensors": "Scegli al massimo 4096 sensori diversi.",
+  "settings.error.exe": "Inserisci il nome di un eseguibile, per esempio game.exe, senza percorso.",
+  "settings.error.profileId": "Profilo dell'overlay sconosciuto.",
   "rules.error.noLevel": "Imposta almeno un livello di attenzione o critico.",
   "rules.error.order": "La soglia critica non può essere meno grave di quella di attenzione.",
   "rules.error.duration": "Le durate vanno da 0 a 600 secondi.",

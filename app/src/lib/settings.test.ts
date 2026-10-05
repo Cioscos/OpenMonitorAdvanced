@@ -1,4 +1,5 @@
 import { MOCK_SCHEMA } from './backend/mock';
+import { defaultSettings } from './backend/mockSettings';
 import type { Rule, SettingsState } from './types';
 import { i18n } from './i18n/index.svelte';
 import {
@@ -305,4 +306,23 @@ test('initial view: pending beats default beats last', () => {
   expect(initialView(withView('simple', 'advanced'), null)).toBe('simple');
   expect(initialView(withView('last', 'advanced'), null)).toBe('advanced');
   expect(initialView(withView('last'), null)).toBe('simple');
+});
+
+test('overlay defaults in the mock match the Rust defaults', () => {
+  // A literal copy of the `overlay` section in `defaults_match_the_spec` (crates/oma-core/src/settings/mod.rs).
+  expect(defaultSettings().overlay).toEqual({
+    enabled: false,
+    chartFps: 30,
+    textHz: 2,
+    hideFromCapture: false,
+    attach: 'window',
+    trackPcLatency: false,
+    trackGpu: false,
+    defaultProfile: 'builtin-gaming',
+    gameProfiles: {},
+    blockedGames: [],
+    hotkeyToggle: null,
+    hotkeyNextProfile: null,
+    hotkeyBenchmark: null,
+  });
 });

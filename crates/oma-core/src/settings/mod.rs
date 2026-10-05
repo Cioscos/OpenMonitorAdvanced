@@ -4,6 +4,7 @@
 
 mod decode;
 pub mod log;
+pub mod overlay;
 mod patch;
 
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use serde_json::{json, Map, Value};
 use crate::rules::RulesSettings;
 
 pub use log::LogSettings;
+pub use overlay::OverlaySettings;
 
 pub use decode::{decode_lenient, Decoded, Diagnostic, DiagnosticKind, VersionStatus};
 pub use patch::{apply_patch, reset_rule_override, PatchError};
@@ -57,6 +59,10 @@ string_enum!(
     DefaultView { Simple => "simple", Advanced => "advanced", Last => "last" }
 );
 string_enum!(
+    /// What the overlay window follows: the game window or its monitor.
+    Attach { Window => "window", Monitor => "monitor" }
+);
+string_enum!(
     /// A concrete view.
     ViewKind { Simple => "simple", Advanced => "advanced" }
 );
@@ -74,6 +80,11 @@ impl Default for TemperatureUnit {
 impl Default for ThroughputUnit {
     fn default() -> Self {
         Self::Bits
+    }
+}
+impl Default for Attach {
+    fn default() -> Self {
+        Self::Window
     }
 }
 impl Default for DefaultView {
@@ -270,6 +281,7 @@ pub struct Settings {
     /// [`crate::rules::validate_rules`].
     pub rules: RulesSettings,
     pub log: LogSettings,
+    pub overlay: OverlaySettings,
     pub migrations: Migrations,
 }
 
@@ -285,6 +297,7 @@ impl Default for Settings {
             view: ViewState::default(),
             rules: RulesSettings::default(),
             log: LogSettings::default(),
+            overlay: OverlaySettings::default(),
             migrations: Migrations::default(),
         }
     }
@@ -350,6 +363,7 @@ pub fn encode(settings: &Settings) -> Value {
         "view": view,
         "rules": serde_json::to_value(&settings.rules).unwrap_or_else(|_| json!({})),
         "log": settings.log.encode(),
+        "overlay": settings.overlay.encode(),
         "migrations": {
             "serviceV1": settings.migrations.service_v1,
             "webviewV1": settings.migrations.webview_v1,
@@ -444,6 +458,27 @@ pub(crate) mod test_support {
                 hotkey_toggle: Some("Ctrl+Shift+F9".into()),
                 hotkey_pause: Some("Ctrl+Alt+P".into()),
             },
+            overlay: OverlaySettings {
+                enabled: true,
+                chart_fps: ChartFps::Fps15,
+                text_hz: 4,
+                hide_from_capture: true,
+                attach: Attach::Monitor,
+                track_pc_latency: true,
+                track_gpu: true,
+                default_profile: "builtin-full".into(),
+                game_profiles: BTreeMap::from([
+                    (
+                        "game.exe".into(),
+                        "00000000-0000-4000-8000-000000000002".into(),
+                    ),
+                    ("other.exe".into(), "builtin-bar".into()),
+                ]),
+                blocked_games: vec!["launcher.exe".into(), "browser.exe".into()],
+                hotkey_toggle: Some("Ctrl+Alt+F1".into()),
+                hotkey_next_profile: Some("Ctrl+Alt+F2".into()),
+                hotkey_benchmark: Some("Ctrl+Alt+F3".into()),
+            },
             migrations: Migrations {
                 service_v1: true,
                 webview_v1: true,
@@ -478,6 +513,11 @@ mod tests {
             "rules": {"overrides": {}, "custom": []},
             "log": {"folder": null, "sensors": null, "everyTicks": 1, "maxFileMb": 100,
                     "hotkeyToggle": "Ctrl+Alt+Shift+R", "hotkeyPause": null},
+            "overlay": {"enabled": false, "chartFps": 30, "textHz": 2, "hideFromCapture": false,
+                        "attach": "window", "trackPcLatency": false, "trackGpu": false,
+                        "defaultProfile": "builtin-gaming", "gameProfiles": {},
+                        "blockedGames": [], "hotkeyToggle": null, "hotkeyNextProfile": null,
+                        "hotkeyBenchmark": null},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

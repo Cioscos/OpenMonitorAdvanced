@@ -185,6 +185,12 @@ extern "system" fn preview_wndproc(
             unsafe { PostQuitMessage(EXIT_CLOSED) };
             LRESULT(0)
         }
+        // Destroyed some other way: the loop ends the same way.
+        WM_DESTROY => {
+            // SAFETY: called on the window's own thread, from its procedure.
+            unsafe { PostQuitMessage(EXIT_CLOSED) };
+            LRESULT(0)
+        }
         WM_SIZE => {
             // A wake for the loop, which reads the new client size. A full
             // queue only drops the wake: the loop runs after the pump anyway.
@@ -192,9 +198,10 @@ extern "system" fn preview_wndproc(
             let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_DATA, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
         }
-        WM_DPICHANGED => {
-            // SAFETY: for `WM_DPICHANGED`, `lparam` points to the suggested
-            // window rectangle, valid for the duration of the message.
+        WM_DPICHANGED if lparam.0 != 0 => {
+            // SAFETY: for `WM_DPICHANGED`, a non-null `lparam` points to the
+            // suggested window rectangle, valid for the duration of the
+            // message.
             let r = unsafe { *(lparam.0 as *const RECT) };
             // SAFETY: our own window, from its thread; plain values. The
             // resulting `WM_SIZE` wakes the loop.
@@ -220,9 +227,18 @@ extern "system" fn preview_wndproc(
     }
 }
 
+/// The window's `(x, y, width, height)`: `w`×`h` clamped to the work area
+/// and centred in it.
+fn preview_bounds(work: RECT, w: i32, h: i32) -> (i32, i32, i32, i32) {
+    let (w, h) = (w.min(work.right - work.left), h.min(work.bottom - work.top));
+    let x = work.left + ((work.right - work.left - w) / 2).max(0);
+    let y = work.top + ((work.bottom - work.top - h) / 2).max(0);
+    (x, y, w, h)
+}
+
 /// Creates the preview window (`--preview`, M7d) and shows it without
 /// activating it: 1280×720 logical pixels of client area at the primary
-/// monitor's DPI, centred in its work area. The calling thread owns it and
+/// monitor's DPI (at most the work area), centred in its work area. The calling thread owns it and
 /// must pump its messages.
 pub fn create_preview(title: &str) -> Result<HWND> {
     static CLASS: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
@@ -260,9 +276,7 @@ pub fn create_preview(title: &str) -> Result<HWND> {
     };
     // SAFETY: `r` is a valid local; plain style values.
     unsafe { AdjustWindowRectExForDpi(&mut r, preview_style(), false, preview_ex_style(), dpi)? };
-    let (w, h) = (r.right - r.left, r.bottom - r.top);
-    let x = work.left + ((work.right - work.left - w) / 2).max(0);
-    let y = work.top + ((work.bottom - work.top - h) / 2).max(0);
+    let (x, y, w, h) = preview_bounds(work, r.right - r.left, r.bottom - r.top);
     let title = HSTRING::from(title);
     // SAFETY: the class is registered above; `title` outlives the call; no
     // parent, menu or creation data. Created without `WS_VISIBLE`.
@@ -444,6 +458,21 @@ mod tests {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowDisplayAffinity, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE,
     };
+
+    #[test]
+    fn preview_fits_and_centres_in_the_work_area() {
+        let work = RECT {
+            left: 100,
+            top: 50,
+            right: 1380,
+            bottom: 770,
+        };
+        // Smaller: centred.
+        assert_eq!(preview_bounds(work, 640, 360), (420, 230, 640, 360));
+        // Larger than the work area: clamped to it.
+        assert_eq!(preview_bounds(work, 2600, 1500), (100, 50, 1280, 720));
+        assert_eq!(preview_bounds(work, 2600, 300), (100, 260, 1280, 300));
+    }
 
     #[test]
     fn ex_style_is_click_through_topmost_tool_window() {

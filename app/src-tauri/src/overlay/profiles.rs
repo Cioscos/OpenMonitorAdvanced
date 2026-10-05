@@ -147,9 +147,14 @@ pub(crate) fn read_profile(path: &Path) -> Result<Option<Profile>, ReadError> {
         return Err(ReadError::Invalid(ProfileError::TooLarge.to_string()));
     }
     // The file may grow between the size check and the read: bound the read too.
+    let file = File::open(path).map_err(ReadError::Io)?;
+    // The path may have been swapped since the check: trust the open handle.
+    if !file.metadata().map_err(ReadError::Io)?.is_file() {
+        return Ok(None);
+    }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    File::open(path)
-        .and_then(|f| f.take(MAX_PROFILE_BYTES as u64 + 1).read_to_end(&mut bytes))
+    file.take(MAX_PROFILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(ReadError::Io)?;
     let text = String::from_utf8(bytes)
         .map_err(|e| ReadError::Invalid(ProfileError::Json(e.to_string()).to_string()))?;

@@ -17,7 +17,6 @@ use serde::Serialize;
 
 use super::profiles::{check_profile, load_catalog, read_profile, ReadError};
 use crate::i18n::{t, Lang};
-use crate::settings::{RealFs, SettingsFs};
 
 /// A profile opened in the editor. `json` is the whole profile, defaults
 /// included, so the UI reads it without knowing the defaults.
@@ -147,7 +146,7 @@ impl ProfileStore {
         path: &Path,
     ) -> Result<(), StoreError> {
         let profile = self.profile(id, schema, lang)?;
-        Ok(RealFs.write_atomic(path, profile_to_json(&profile).as_bytes())?)
+        Ok(write_file(path, profile_to_json(&profile).as_bytes())?)
     }
 
     /// The profile `id`: a built-in bound to `schema` and named in `lang`, or
@@ -202,7 +201,50 @@ fn builtin_name(lang: Lang, builtin: BuiltinId) -> String {
 fn write(path: &Path, profile: &Profile) -> Result<(), StoreError> {
     let json = profile_to_json(profile);
     check_profile(&json).map_err(StoreError::Invalid)?;
-    Ok(RealFs.write_atomic(path, json.as_bytes())?)
+    Ok(write_file(path, json.as_bytes())?)
+}
+
+/// Writes `bytes` to a temporary file of its own next to `path`, syncs it and
+/// replaces `path` with it. Concurrent writes to one target never share a
+/// temporary file, and it is removed on every failure (a profile has no
+/// leftover recovery, unlike `settings.json`).
+fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(name);
+    // `create_new`: never truncate a file someone else is writing.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written.and_then(|()| replace(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn replace(tmp: &Path, path: &Path) -> io::Result<()> {
+    oma_win::fsutil::replace_file(tmp, path)
+}
+
+#[cfg(not(windows))]
+fn replace(tmp: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(tmp, path)
 }
 
 #[cfg(windows)]
@@ -545,5 +587,54 @@ mod tests {
         want.name = "Completo".to_owned();
         assert_eq!(fs::read_to_string(&out).unwrap(), profile_to_json(&want));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file() {
+        let dir = temp_dir("failed-write");
+        let store = ProfileStore::new(dir.clone());
+        // A folder where the file should go: the replace fails.
+        fs::create_dir(dir.join(format!("{UUID_A}.json"))).unwrap();
+        let got = store.save(Some(UUID_A), &profile_json("Mine"));
+        assert!(matches!(got, Err(StoreError::Io(_))), "{got:?}");
+        assert_eq!(
+            listing(&dir).keys().collect::<Vec<_>>(),
+            [&format!("{UUID_A}.json")]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn each_write_uses_its_own_temp_file() {
+        let dir = temp_dir("own-temp");
+        let store = ProfileStore::new(dir.clone());
+        // A fixed `<id>.json.tmp` (a leftover, or another writer's) is not in the way.
+        fs::create_dir(dir.join(format!("{UUID_A}.json.tmp"))).unwrap();
+        assert_eq!(
+            store.save(Some(UUID_A), &profile_json("Mine")),
+            Ok(UUID_A.to_owned())
+        );
+        assert_eq!(name_of(&dir, UUID_A), "Mine");
+        assert_eq!(listing(&dir).len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_error_key_is_in_both_catalogs() {
+        let catalogs: [serde_json::Value; 2] = [
+            serde_json::from_str(include_str!("../../../src/lib/i18n/en.json")).unwrap(),
+            serde_json::from_str(include_str!("../../../src/lib/i18n/it.json")).unwrap(),
+        ];
+        for e in [
+            StoreError::InvalidId,
+            StoreError::ReadOnly,
+            StoreError::NotFound,
+            StoreError::Invalid(String::new()),
+            StoreError::Io(String::new()),
+        ] {
+            for catalog in &catalogs {
+                assert!(catalog.get(e.key()).is_some(), "{} missing", e.key());
+            }
+        }
     }
 }

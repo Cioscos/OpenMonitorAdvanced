@@ -1,7 +1,8 @@
 //! The overlay editor's Tauri commands: thin wrappers over [`ProfileStore`]
-//! that reload the overlay's catalog after every write. The file dialogs run
-//! on the blocking pool (`async`), never on the main thread, which has to
-//! keep pumping their messages.
+//! that reload the overlay's catalog after every write. Each command is an
+//! `async fn` that runs its file I/O and modal dialogs on the blocking pool
+//! (`spawn_blocking`), so they hold neither the main thread, which has to
+//! keep pumping the dialogs' messages, nor an async runtime worker.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, PoisonError};
@@ -74,35 +75,80 @@ fn reload(app: &AppHandle) {
     let _ = app;
 }
 
-#[tauri::command(async)]
-pub fn overlay_load_profile(app: AppHandle, id: String) -> Answer<EditableProfile> {
+/// Runs `call` on the blocking pool.
+async fn blocking<T: Send + 'static>(
+    call: impl FnOnce() -> Answer<T> + Send + 'static,
+) -> Answer<T> {
+    tauri::async_runtime::spawn_blocking(call)
+        .await
+        .map_err(|e| CommandError::from(StoreError::Io(e.to_string())))?
+}
+
+#[tauri::command]
+pub async fn overlay_load_profile(app: AppHandle, id: String) -> Answer<EditableProfile> {
+    blocking(move || load_profile(app, id)).await
+}
+
+#[tauri::command]
+pub async fn overlay_save_profile(
+    app: AppHandle,
+    id: Option<String>,
+    json: String,
+) -> Answer<String> {
+    blocking(move || save_profile(app, id, json)).await
+}
+
+#[tauri::command]
+pub async fn overlay_delete_profile(app: AppHandle, id: String) -> Answer<()> {
+    blocking(move || delete_profile(app, id)).await
+}
+
+#[tauri::command]
+pub async fn overlay_duplicate_profile(app: AppHandle, id: String) -> Answer<String> {
+    blocking(move || duplicate_profile(app, id)).await
+}
+
+#[tauri::command]
+pub async fn overlay_import_profile(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Answer<Option<String>> {
+    blocking(move || import_profile(app, window)).await
+}
+
+#[tauri::command]
+pub async fn overlay_export_profile(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: String,
+) -> Answer<bool> {
+    blocking(move || export_profile(app, window, id)).await
+}
+
+fn load_profile(app: AppHandle, id: String) -> Answer<EditableProfile> {
     Ok(store()?.load(&id, &schema(&app), lang(&app))?)
 }
 
-#[tauri::command(async)]
-pub fn overlay_save_profile(app: AppHandle, id: Option<String>, json: String) -> Answer<String> {
+fn save_profile(app: AppHandle, id: Option<String>, json: String) -> Answer<String> {
     let id = store()?.save(id.as_deref(), &json)?;
     reload(&app);
     Ok(id)
 }
 
-#[tauri::command(async)]
-pub fn overlay_delete_profile(app: AppHandle, id: String) -> Answer<()> {
+fn delete_profile(app: AppHandle, id: String) -> Answer<()> {
     store()?.delete(&id)?;
     reload(&app);
     Ok(())
 }
 
-#[tauri::command(async)]
-pub fn overlay_duplicate_profile(app: AppHandle, id: String) -> Answer<String> {
+fn duplicate_profile(app: AppHandle, id: String) -> Answer<String> {
     let id = store()?.duplicate(&id, &schema(&app), lang(&app))?;
     reload(&app);
     Ok(id)
 }
 
 /// «Open» dialog over the calling window; `None` when the user cancels.
-#[tauri::command(async)]
-pub fn overlay_import_profile(app: AppHandle, window: WebviewWindow) -> Answer<Option<String>> {
+fn import_profile(app: AppHandle, window: WebviewWindow) -> Answer<Option<String>> {
     let lang = lang(&app);
     let picked = app
         .dialog()
@@ -119,8 +165,7 @@ pub fn overlay_import_profile(app: AppHandle, window: WebviewWindow) -> Answer<O
 
 /// «Save» dialog over the calling window, named `<name>.omaoverlay.json`;
 /// `false` when the user cancels.
-#[tauri::command(async)]
-pub fn overlay_export_profile(app: AppHandle, window: WebviewWindow, id: String) -> Answer<bool> {
+fn export_profile(app: AppHandle, window: WebviewWindow, id: String) -> Answer<bool> {
     let (schema, lang) = (schema(&app), lang(&app));
     let store = store()?;
     let name = store.profile(&id, &schema, lang)?.name;

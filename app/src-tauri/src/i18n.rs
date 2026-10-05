@@ -22,6 +22,7 @@ pub const RUST_KEYS: &[&str] = &[
     "tray.viewSimple",
     "tray.viewAdvanced",
     "tray.antiCheat",
+    "tray.overlay.toggle",
     "tray.quit",
     "tray.log.start",
     "tray.log.pause",

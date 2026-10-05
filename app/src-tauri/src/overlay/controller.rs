@@ -186,6 +186,7 @@ pub struct Controller {
     schema: Arc<Schema>,
     host: HostState,
     hidden_by_user: bool,
+    hotkeys: OverlayHotkeys,
 
     // Target and frames.
     picker: TargetPicker,
@@ -255,6 +256,7 @@ impl Controller {
             schema: Arc::new(Schema::default()),
             host: HostState::Off,
             hidden_by_user: false,
+            hotkeys: OverlayHotkeys::default(),
             picker: new_picker(own_pid),
             target: None,
             tracked: None,
@@ -359,6 +361,11 @@ impl Controller {
     /// The «show/hide» hotkey or tray item; not saved (DP11).
     pub fn toggle_hidden(&mut self) {
         self.hidden_by_user = !self.hidden_by_user;
+    }
+
+    /// The statuses of the overlay's hotkeys, from the hotkey manager.
+    pub fn on_hotkeys(&mut self, hotkeys: OverlayHotkeys) {
+        self.hotkeys = hotkeys;
     }
 
     /// The profile after the active one, until the target changes.
@@ -470,7 +477,7 @@ impl Controller {
             profiles: self.catalog.entries.clone(),
             diagnostics: self.catalog.diagnostics.clone(),
             hidden_by_user: self.hidden_by_user,
-            hotkeys: OverlayHotkeys::default(),
+            hotkeys: self.hotkeys.clone(),
         }
     }
 
@@ -1379,6 +1386,34 @@ mod tests {
         assert_eq!(metrics(&out).len(), 1);
         assert_eq!(times(&out).len(), 1);
         assert!(!out.status.unwrap().hidden_by_user);
+    }
+
+    #[test]
+    fn hotkey_statuses_reach_the_overlay_status() {
+        use crate::log::HotkeyState;
+        let mut c = enabled_with(&settings(true));
+        c.step(0);
+        let hotkeys = OverlayHotkeys {
+            toggle: HotkeyStatus {
+                requested: Some("Ctrl+Alt+F1".to_owned()),
+                effective: Some("Ctrl+Alt+F1".to_owned()),
+                state: HotkeyState::Active,
+                reason: None,
+            },
+            next_profile: HotkeyStatus {
+                requested: Some("Ctrl+Alt+F2".to_owned()),
+                effective: None,
+                state: HotkeyState::Failed,
+                reason: Some("log.hotkey.inUse".to_owned()),
+            },
+        };
+        c.on_hotkeys(hotkeys.clone());
+        let out = c.step(100);
+        assert_eq!(out.status.unwrap().hotkeys, hotkeys);
+        assert_eq!(c.current_status().hotkeys, hotkeys);
+        // The same statuses again: no new status.
+        c.on_hotkeys(hotkeys);
+        assert!(c.step(200).status.is_none());
     }
 
     #[test]

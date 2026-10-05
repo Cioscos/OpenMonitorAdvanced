@@ -36,12 +36,14 @@ use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
 use super::controller::{
-    tick_values, Controller, Outputs, OverlayStatus, ToastRequest, ValuesPlan,
+    tick_values, Controller, Outputs, OverlayHotkeys, OverlayStatus, ToastRequest, ValuesPlan,
 };
 use super::frames::{options_from_env, ENV_VAR};
 use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlaySender};
 use super::profiles::{load_catalog, profiles_dir, ProfileCatalog};
+use crate::hotkeys::OverlayActions;
 use crate::i18n::{t, Lang};
+use crate::log::HotkeyStatus;
 use crate::notifier::{launch_for_main, ToastSink};
 use crate::settings::SettingsStore;
 use crate::tray::language_for;
@@ -73,6 +75,7 @@ pub(crate) enum Input {
     SetHidden(bool),
     ToggleHidden,
     NextProfile,
+    Hotkeys(OverlayHotkeys),
     Shutdown,
 }
 
@@ -120,7 +123,7 @@ struct Tap {
 }
 
 /// The side of the controller the rest of the app talks to: the sampler,
-/// the Tauri commands and (from C17) the hotkeys and the tray.
+/// the Tauri commands, the hotkeys and the tray.
 #[derive(Clone)]
 pub struct OverlayHandle {
     tx: Sender<Input>,
@@ -160,19 +163,24 @@ impl OverlayHandle {
     fn send(&self, input: Input) {
         let _ = self.tx.send(input);
     }
+}
 
+impl OverlayActions for OverlayHandle {
     /// The «show/hide» hotkey and tray item.
-    // Wired to the hotkeys and the tray by C17.
-    #[allow(dead_code)]
-    pub fn toggle_hidden(&self) {
+    fn toggle_hidden(&self) {
         self.send(Input::ToggleHidden);
     }
 
     /// The «next profile» hotkey.
-    // Wired to the hotkeys by C17.
-    #[allow(dead_code)]
-    pub fn next_profile(&self) {
+    fn next_profile(&self) {
         self.send(Input::NextProfile);
+    }
+
+    fn set_hotkeys(&self, toggle: HotkeyStatus, next_profile: HotkeyStatus) {
+        self.send(Input::Hotkeys(OverlayHotkeys {
+            toggle,
+            next_profile,
+        }));
     }
 }
 
@@ -424,6 +432,7 @@ impl Ctl {
             }
             Input::ToggleHidden => self.controller.toggle_hidden(),
             Input::NextProfile => self.controller.next_profile(),
+            Input::Hotkeys(hotkeys) => self.controller.on_hotkeys(hotkeys),
             Input::Shutdown => {}
         }
     }

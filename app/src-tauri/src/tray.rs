@@ -1,4 +1,4 @@
-//! Tray icon: the menu (open, views, log, anti-cheat mode, quit), a dynamic icon
+//! Tray icon: the menu (open, views, log, overlay, anti-cheat mode, quit), a dynamic icon
 //! in the color of the health level (with a red dot while the log records) and
 //! a tooltip led by its verdict, refreshed every tick, and the labels' language.
 
@@ -13,6 +13,7 @@ use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem}
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
+use crate::hotkeys::OverlayActions;
 use crate::i18n::{resolve, t, Lang};
 use crate::log::session::{LogState, LogStatus};
 use crate::log::LogService;
@@ -33,6 +34,22 @@ pub trait TrayBackend: Send + Sync {
     fn set_tooltip(&self, text: String);
     /// Rebuilds the menu in `lang`, with the log items of `log`.
     fn set_menu(&self, lang: Lang, log: LogState);
+    /// The overlay's «show/hide» item: clickable and ticked.
+    fn set_overlay_item(&self, enabled: bool, checked: bool);
+}
+
+/// The overlay's «show/hide» check item.
+pub const OVERLAY_ITEM_ID: &str = "overlay-visible";
+pub const OVERLAY_ITEM_LABEL: &str = "tray.overlay.toggle";
+
+/// A click on the menu item `id`: the overlay item hides or shows the
+/// overlay (not saved, DP11). Whether `id` was the overlay item.
+pub fn overlay_item_clicked(id: &str, overlay: &dyn OverlayActions) -> bool {
+    if id != OVERLAY_ITEM_ID {
+        return false;
+    }
+    overlay.toggle_hidden();
+    true
 }
 
 /// The log items of the tray menu.
@@ -166,6 +183,8 @@ struct State {
     /// What the icon last sent shows, its style and whether it has the dot.
     icon: Option<(IconContent, IconStyle, bool)>,
     tooltip: Option<String>,
+    /// What the overlay item last got: (enabled, checked).
+    overlay: Option<(bool, bool)>,
 }
 
 /// Keeps the tray icon, tooltip and labels in line with the readings and the
@@ -185,6 +204,7 @@ impl<B: TrayBackend> TrayController<B> {
                 resolved: None,
                 icon: None,
                 tooltip: None,
+                overlay: None,
             }),
         }
     }
@@ -279,6 +299,18 @@ impl<B: TrayBackend> TrayController<B> {
         self.backend.set_menu(lang, state.log);
     }
 
+    /// Follows the overlay: its item is clickable only while the overlay is
+    /// on (`overlay.enabled`) and ticked while the user has not hidden it.
+    /// A no-op when nothing changed.
+    pub fn set_overlay(&self, enabled: bool, visible: bool) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.overlay == Some((enabled, visible)) {
+            return;
+        }
+        state.overlay = Some((enabled, visible));
+        self.backend.set_overlay_item(enabled, visible);
+    }
+
     /// Follows the log: rebuilds the menu, and redraws the icon when the dot
     /// appears or goes. A no-op when the state is unchanged.
     pub fn set_log_state(&self, log: LogState) {
@@ -308,6 +340,7 @@ struct MenuItems {
     open: MenuItem<Wry>,
     simple: MenuItem<Wry>,
     advanced: MenuItem<Wry>,
+    overlay: CheckMenuItem<Wry>,
     anti_cheat: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
 }
@@ -315,7 +348,8 @@ struct MenuItems {
 impl MenuItems {
     /// A menu of the shared items and fresh log items for `log`. The shared
     /// items keep their handles (the anti-cheat checkbox follows the settings
-    /// store through one), and may sit in the old and the new menu at once.
+    /// store through one, the overlay item the overlay's status), and may sit
+    /// in the old and the new menu at once.
     fn menu(&self, app: &AppHandle, lang: Lang, log: LogState) -> tauri::Result<Menu<Wry>> {
         let log_items = log_menu(log)
             .iter()
@@ -339,6 +373,7 @@ impl MenuItems {
         entries.extend(log_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
         entries.extend([
             &separators[1] as &dyn IsMenuItem<Wry>,
+            &self.overlay,
             &self.anti_cheat,
             &separators[2],
             &self.quit,
@@ -376,11 +411,20 @@ impl TrayBackend for TauriBackend {
             let _ = items.open.set_text(t(lang, "tray.open", &[]));
             let _ = items.simple.set_text(t(lang, "tray.viewSimple", &[]));
             let _ = items.advanced.set_text(t(lang, "tray.viewAdvanced", &[]));
+            let _ = items.overlay.set_text(t(lang, OVERLAY_ITEM_LABEL, &[]));
             let _ = items.anti_cheat.set_text(t(lang, "tray.antiCheat", &[]));
             let _ = items.quit.set_text(t(lang, "tray.quit", &[]));
             if let Ok(menu) = items.menu(&app, lang, log) {
                 let _ = tray.set_menu(Some(menu));
             }
+        });
+    }
+
+    fn set_overlay_item(&self, enabled: bool, checked: bool) {
+        let item = self.items.overlay.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            let _ = item.set_enabled(enabled);
+            let _ = item.set_checked(checked);
         });
     }
 }
@@ -423,6 +467,19 @@ fn run_log_command(app: &AppHandle, item: LogMenuItem) {
     });
 }
 
+/// The overlay item's click goes to the overlay's controller; the item's
+/// tick then follows the status it publishes.
+#[cfg(windows)]
+fn overlay_menu_event(app: &AppHandle, id: &str) {
+    if let Some(overlay) = app.try_state::<crate::overlay::runner::OverlayHandle>() {
+        overlay_item_clicked(id, overlay.inner());
+    }
+}
+
+/// No overlay off Windows.
+#[cfg(not(windows))]
+fn overlay_menu_event(_app: &AppHandle, _id: &str) {}
+
 pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
     // The webview may be destroyed, so tray labels are localized in Rust.
     let lang = language_for(
@@ -446,6 +503,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         true,
         None::<&str>,
     )?;
+    // Shown until the overlay's status says otherwise (`set_overlay`).
+    let overlay = CheckMenuItem::with_id(
+        app,
+        OVERLAY_ITEM_ID,
+        t(lang, OVERLAY_ITEM_LABEL, &[]),
+        app.state::<Arc<SettingsStore>>().settings().overlay.enabled,
+        true,
+        None::<&str>,
+    )?;
     let initial_anti_cheat = app.state::<ServiceShell>().anti_cheat_enabled();
     let anti_cheat = CheckMenuItem::with_id(
         app,
@@ -460,6 +526,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         open,
         simple,
         advanced,
+        overlay,
         anti_cheat,
         quit,
     };
@@ -494,6 +561,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
             id => {
                 if let Some(item) = LogMenuItem::from_id(id) {
                     run_log_command(app, item);
+                } else {
+                    overlay_menu_event(app, id);
                 }
             }
         })
@@ -664,6 +733,8 @@ mod tests {
         icons: Vec<Vec<u8>>,
         tooltips: Vec<String>,
         menus: Vec<(Lang, LogState)>,
+        /// (enabled, checked) of the overlay item.
+        overlay: Vec<(bool, bool)>,
     }
 
     #[derive(Clone, Default)]
@@ -679,6 +750,62 @@ mod tests {
         fn set_menu(&self, lang: Lang, log: LogState) {
             self.0.lock().unwrap().menus.push((lang, log));
         }
+        fn set_overlay_item(&self, enabled: bool, checked: bool) {
+            self.0.lock().unwrap().overlay.push((enabled, checked));
+        }
+    }
+
+    #[test]
+    fn tray_overlay_item_disabled_when_overlay_off() {
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        // Off: greyed out, whatever the user's hide.
+        tray.set_overlay(false, true);
+        tray.set_overlay(false, true);
+        // On and shown, then hidden by the user.
+        tray.set_overlay(true, true);
+        tray.set_overlay(true, false);
+        tray.set_overlay(false, false);
+        assert_eq!(
+            backend.0.lock().unwrap().overlay,
+            [(false, true), (true, true), (true, false), (false, false)]
+        );
+        // A rebuilt menu keeps the item: its handle is shared.
+        tray.relabel(Lang::It);
+        assert_eq!(backend.0.lock().unwrap().overlay.len(), 4);
+        assert_eq!(OVERLAY_ITEM_ID, "overlay-visible");
+        assert_eq!(text("it-IT", OVERLAY_ITEM_LABEL), "Mostra/nascondi overlay");
+        assert_eq!(text("en-US", OVERLAY_ITEM_LABEL), "Show/hide overlay");
+    }
+
+    #[derive(Default)]
+    struct FakeOverlay(Mutex<Vec<&'static str>>);
+
+    impl crate::hotkeys::OverlayActions for FakeOverlay {
+        fn toggle_hidden(&self) {
+            self.0.lock().unwrap().push("toggle_hidden");
+        }
+        fn next_profile(&self) {
+            self.0.lock().unwrap().push("next_profile");
+        }
+        fn set_hotkeys(
+            &self,
+            _toggle: crate::log::HotkeyStatus,
+            _next_profile: crate::log::HotkeyStatus,
+        ) {
+        }
+    }
+
+    #[test]
+    fn tray_overlay_item_toggles_hidden() {
+        let overlay = FakeOverlay::default();
+        assert!(overlay_item_clicked("overlay-visible", &overlay));
+        assert_eq!(*overlay.0.lock().unwrap(), ["toggle_hidden"]);
+        // Other items do not reach the overlay.
+        for id in ["open", "anti_cheat", "log_start", "quit"] {
+            assert!(!overlay_item_clicked(id, &overlay));
+        }
+        assert_eq!(overlay.0.lock().unwrap().len(), 1);
     }
 
     #[test]

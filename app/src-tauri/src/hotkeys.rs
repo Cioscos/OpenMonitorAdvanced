@@ -1,13 +1,14 @@
-//! Global hotkeys of the CSV log (spec M5 §4.6, L10): registered with
-//! `tauri-plugin-global-shortcut` from Rust only (no capability reaches
-//! JavaScript), swapped safely, filtered against key repeat and reported in
-//! `LogStatus.hotkeys`.
+//! Global hotkeys of the CSV log (spec M5 §4.6, L10) and of the overlay
+//! (M7c, DP14): registered with `tauri-plugin-global-shortcut` from Rust only
+//! (no capability reaches JavaScript), swapped safely, filtered against key
+//! repeat and reported in `LogStatus.hotkeys` and `OverlayStatus.hotkeys`.
 //!
 //! Threads: the plugin runs `RegisterHotKey` on the main thread and waits
 //! for it, so registrations run on a thread of their own, never on a
 //! settings listener's or the main thread. Presses arrive on the main thread
 //! (and releases on the plugin's threads); they only read the bindings and
-//! queue the command for a worker, which waits for the writer.
+//! queue the command: the log's for a worker, which waits for the writer, the
+//! overlay's for its controller, without notifications.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,22 +32,85 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What a hotkey of the log does.
+/// What a global hotkey does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyAction {
-    Toggle,
-    Pause,
+    LogToggle,
+    LogPause,
+    OverlayToggle,
+    OverlayNextProfile,
 }
 
-impl HotkeyAction {
-    const ALL: [Self; 2] = [Self::Toggle, Self::Pause];
+/// How many actions have a hotkey.
+const ACTIONS: usize = 4;
 
-    fn index(self) -> usize {
+impl HotkeyAction {
+    /// In order of precedence: a combination asked for by two actions goes
+    /// to the first (DP14).
+    pub const ALL: [Self; ACTIONS] = [
+        Self::LogToggle,
+        Self::LogPause,
+        Self::OverlayToggle,
+        Self::OverlayNextProfile,
+    ];
+
+    pub fn index(self) -> usize {
         match self {
-            Self::Toggle => 0,
-            Self::Pause => 1,
+            Self::LogToggle => 0,
+            Self::LogPause => 1,
+            Self::OverlayToggle => 2,
+            Self::OverlayNextProfile => 3,
         }
     }
+}
+
+/// The overlay's side of the hotkeys (its controller's handle): never blocks.
+pub trait OverlayActions: Send + Sync {
+    fn toggle_hidden(&self);
+    fn next_profile(&self);
+    /// The statuses of «show/hide» and «next profile», for `OverlayStatus`.
+    fn set_hotkeys(&self, toggle: HotkeyStatus, next_profile: HotkeyStatus);
+}
+
+/// Hands an overlay press to the controller; a press of the log is returned
+/// for the log's worker.
+pub fn route_press(press: Press, overlay: Option<&dyn OverlayActions>) -> Option<Press> {
+    match press.action {
+        HotkeyAction::LogToggle | HotkeyAction::LogPause => Some(press),
+        HotkeyAction::OverlayToggle => {
+            if let Some(overlay) = overlay {
+                overlay.toggle_hidden();
+            }
+            None
+        }
+        HotkeyAction::OverlayNextProfile => {
+            if let Some(overlay) = overlay {
+                overlay.next_profile();
+            }
+            None
+        }
+    }
+}
+
+/// The statuses by action: the log's two and the overlay's two.
+fn split_statuses(statuses: [HotkeyStatus; ACTIONS]) -> (HotkeyStatuses, [HotkeyStatus; 2]) {
+    let [toggle, pause, overlay_toggle, next_profile] = statuses;
+    (
+        HotkeyStatuses { toggle, pause },
+        [overlay_toggle, next_profile],
+    )
+}
+
+/// Gives the overlay its statuses; the log's are returned.
+fn publish_statuses(
+    statuses: [HotkeyStatus; ACTIONS],
+    overlay: Option<&dyn OverlayActions>,
+) -> HotkeyStatuses {
+    let (log, [toggle, next_profile]) = split_statuses(statuses);
+    if let Some(overlay) = overlay {
+        overlay.set_hotkeys(toggle, next_profile);
+    }
+    log
 }
 
 /// Registers combinations with the operating system (faked in the tests).
@@ -115,7 +179,7 @@ struct Bindings {
     /// Grows with every change of `actions`.
     generation: u64,
     /// The effective combination of each action, by [`HotkeyAction::index`].
-    actions: [Option<Hotkey>; 2],
+    actions: [Option<Hotkey>; ACTIONS],
     /// One filter per bound combination, dropped when it is unbound.
     filters: HashMap<Hotkey, PressFilter>,
     /// Set while a hotkey capture box in the settings has focus.
@@ -164,7 +228,7 @@ impl Dispatch {
         lock(&self.inner).action_for(hotkey)
     }
 
-    fn publish(&self, actions: [Option<Hotkey>; 2]) {
+    fn publish(&self, actions: [Option<Hotkey>; ACTIONS]) {
         let mut bindings = lock(&self.inner);
         if bindings.actions == actions {
             return;
@@ -186,11 +250,11 @@ pub enum HotkeyRequest {
     Suspend(bool),
 }
 
-/// Owns the registered combinations of both actions.
+/// Owns the registered combinations of every action.
 pub struct HotkeyManager<R: HotkeyRegistrar> {
     registrar: R,
     /// Registered by us, by [`HotkeyAction::index`]; never the same twice.
-    effective: [Option<Hotkey>; 2],
+    effective: [Option<Hotkey>; ACTIONS],
     dispatch: Dispatch,
     /// The latest [`HotkeyRequest::Settings`].
     requested: Option<Requested>,
@@ -202,7 +266,7 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
     pub fn new(registrar: R, dispatch: Dispatch) -> Self {
         Self {
             registrar,
-            effective: [None; 2],
+            effective: [None; ACTIONS],
             dispatch,
             requested: None,
             suspended: false,
@@ -218,7 +282,7 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
     pub fn handle(
         &mut self,
         requests: impl IntoIterator<Item = HotkeyRequest>,
-    ) -> Option<HotkeyStatuses> {
+    ) -> Option<[HotkeyStatus; ACTIONS]> {
         for request in requests {
             match request {
                 HotkeyRequest::Settings(requested) => self.requested = Some(requested),
@@ -226,38 +290,40 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
             }
         }
         if self.suspended {
-            if self.effective != [None; 2] {
-                self.apply(None, None);
+            if self.effective != [None; ACTIONS] {
+                self.apply([None; ACTIONS]);
             }
             return None;
         }
-        let (toggle, pause) = self.requested.clone()?;
-        Some(self.apply(toggle.as_deref(), pause.as_deref()))
+        let requested = self.requested.clone()?;
+        Some(self.apply(requested.each_ref().map(Option::as_deref)))
     }
 
     /// Registers the new combination first, releases the old one only after
-    /// success (spec M5 §4.6). Both actions are reconciled together: a
+    /// success (spec M5 §4.6). Every action is reconciled together: a
     /// combination we own already is rebound without registering it again
-    /// (also when toggle and pause swap), and an old one still effective for
-    /// the other action is not released.
-    pub fn apply(&mut self, toggle: Option<&str>, pause: Option<&str>) -> HotkeyStatuses {
-        let texts = [toggle, pause];
+    /// (also when two actions swap), and an old one still effective for
+    /// another action is not released. `texts` and the statuses go by
+    /// [`HotkeyAction::index`].
+    pub fn apply(&mut self, texts: [Option<&str>; ACTIONS]) -> [HotkeyStatus; ACTIONS] {
         let old = self.effective;
         // Per action: the combination to bind (`None` = unset) or the
         // reason it cannot be.
-        let mut outcome: [Result<Option<Hotkey>, &'static str>; 2] = texts.map(|text| {
+        let mut outcome: [Result<Option<Hotkey>, &'static str>; ACTIONS] = texts.map(|text| {
             text.map_or(Ok(None), |text| {
                 parse_hotkey(text).map(Some).map_err(|err| {
-                    tracing::warn!(hotkey = text, ?err, "unreadable log hotkey");
+                    tracing::warn!(hotkey = text, ?err, "unreadable hotkey");
                     "log.hotkey.failed"
                 })
             })
         });
-        // The settings never give both the same combination; if they did,
-        // pause would lose it.
-        if let [Ok(Some(toggle)), Ok(Some(pause))] = outcome {
-            if toggle == pause {
-                outcome[1] = Err("log.hotkey.inUse");
+        // The settings never give two actions the same combination; if they
+        // did, the later action would lose it (DP14).
+        for i in 1..ACTIONS {
+            if let Ok(Some(hotkey)) = outcome[i] {
+                if outcome[..i].contains(&Ok(Some(hotkey))) {
+                    outcome[i] = Err("log.hotkey.inUse");
+                }
             }
         }
         for action in HotkeyAction::ALL {
@@ -267,16 +333,15 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
                 continue;
             }
             if let Err(err) = self.registrar.register(hotkey) {
-                tracing::warn!(?action, %hotkey, ?err, "cannot register the log hotkey");
+                tracing::warn!(?action, %hotkey, ?err, "cannot register the hotkey");
                 *slot = Err(err.reason());
             }
         }
         let mut effective = outcome.map(|result| result.ok().flatten());
-        // A failed action keeps its previous combination, unless the other
+        // A failed action keeps its previous combination, unless another
         // action has just taken it.
-        for action in HotkeyAction::ALL {
-            let i = action.index();
-            if outcome[i].is_err() && old[i].is_some() && old[i] != effective[1 - i] {
+        for i in 0..ACTIONS {
+            if outcome[i].is_err() && old[i].is_some() && !effective.contains(&old[i]) {
                 effective[i] = old[i];
             }
         }
@@ -287,7 +352,7 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
             }
         }
         self.effective = effective;
-        let status = |action: HotkeyAction| {
+        HotkeyAction::ALL.map(|action| {
             let i = action.index();
             HotkeyStatus {
                 requested: texts[i].map(str::to_owned),
@@ -299,11 +364,7 @@ impl<R: HotkeyRegistrar> HotkeyManager<R> {
                 },
                 reason: outcome[i].err().map(str::to_owned),
             }
-        };
-        HotkeyStatuses {
-            toggle: status(HotkeyAction::Toggle),
-            pause: status(HotkeyAction::Pause),
-        }
+        })
     }
 
     /// The action bound to `hotkey` now.
@@ -322,14 +383,16 @@ pub enum LogCommand {
     Stop,
 }
 
-/// What `action` does in `state`, if anything.
+/// What `action` does to the log in `state`, if anything (nothing for the
+/// overlay's actions).
 pub fn command_for(action: HotkeyAction, state: LogState) -> Option<LogCommand> {
     match (action, state) {
-        (HotkeyAction::Toggle, LogState::Idle | LogState::Error) => Some(LogCommand::Start),
-        (HotkeyAction::Toggle, LogState::Recording | LogState::Paused) => Some(LogCommand::Stop),
-        (HotkeyAction::Pause, LogState::Recording) => Some(LogCommand::Pause),
-        (HotkeyAction::Pause, LogState::Paused) => Some(LogCommand::Resume),
-        (HotkeyAction::Pause, LogState::Idle | LogState::Error) => None,
+        (HotkeyAction::LogToggle, LogState::Idle | LogState::Error) => Some(LogCommand::Start),
+        (HotkeyAction::LogToggle, LogState::Recording | LogState::Paused) => Some(LogCommand::Stop),
+        (HotkeyAction::LogPause, LogState::Recording) => Some(LogCommand::Pause),
+        (HotkeyAction::LogPause, LogState::Paused) => Some(LogCommand::Resume),
+        (HotkeyAction::LogPause, LogState::Idle | LogState::Error) => None,
+        (HotkeyAction::OverlayToggle | HotkeyAction::OverlayNextProfile, _) => None,
     }
 }
 
@@ -354,23 +417,24 @@ fn outcome_toast(lang: Lang, command: LogCommand, status: &LogStatus) -> Option<
     Some((t(lang, key, &[]), file))
 }
 
-type Requested = (Option<String>, Option<String>);
+/// The combinations the settings ask for, by [`HotkeyAction::index`];
+/// `overlay.hotkeyBenchmark` is registered by the M7d (DP11).
+type Requested = [Option<String>; ACTIONS];
 
 fn requested(settings: &Settings) -> Requested {
-    (
+    [
         settings.log.hotkey_toggle.clone(),
         settings.log.hotkey_pause.clone(),
-    )
+        settings.overlay.hotkey_toggle.clone(),
+        settings.overlay.hotkey_next_profile.clone(),
+    ]
 }
 
 /// Calls `apply` with the requested combinations once right after
 /// subscribing and then on every change of them. Unlike `rules.rs`, the
 /// catch-up reads the store after taking the dedup lock, so it can never
 /// apply a value older than one a listener applied before it.
-fn follow_hotkeys(
-    store: &Arc<SettingsStore>,
-    apply: impl Fn(Option<String>, Option<String>) + Send + Sync + 'static,
-) {
+fn follow_hotkeys(store: &Arc<SettingsStore>, apply: impl Fn(Requested) + Send + Sync + 'static) {
     let seen: Mutex<Option<Requested>> = Mutex::new(None);
     let offer = move |read: &dyn Fn() -> Requested| {
         let mut seen = lock(&seen);
@@ -378,7 +442,7 @@ fn follow_hotkeys(
         if seen.as_ref() == Some(&now) {
             return;
         }
-        apply(now.0.clone(), now.1.clone());
+        apply(now.clone());
         *seen = Some(now);
     };
     let offer = Arc::new(offer);
@@ -442,7 +506,7 @@ impl HotkeyRegistrar for PluginRegistrar {
             return;
         };
         if let Err(err) = plugin.unregister(shortcut) {
-            tracing::warn!(%hotkey, %err, "cannot release the log hotkey");
+            tracing::warn!(%hotkey, %err, "cannot release the hotkey");
         }
     }
 }
@@ -473,8 +537,9 @@ fn run_press(app: &AppHandle, store: &SettingsStore, log: &LogService, press: Pr
     }
 }
 
-/// Suspends the log hotkeys while a capture box in the settings has focus
-/// (managed state of [`set_log_hotkeys_suspended`]).
+/// Suspends every global hotkey, the log's and the overlay's (DP14), while a
+/// capture box in the settings has focus (managed state of
+/// [`set_log_hotkeys_suspended`]).
 pub struct HotkeyControl {
     dispatch: Dispatch,
     /// Under its lock the flag and the request change in the same order.
@@ -500,7 +565,8 @@ impl HotkeyControl {
 
 /// Called by the settings with `true` when a hotkey capture box gains focus
 /// and `false` when it loses it, so typing a combination we registered is
-/// captured instead of acted on.
+/// captured instead of acted on. Despite its name it suspends all four
+/// hotkeys (DP14).
 #[tauri::command]
 pub fn set_log_hotkeys_suspended(app: AppHandle, suspended: bool) {
     if let Some(control) = app.try_state::<HotkeyControl>() {
@@ -515,7 +581,7 @@ pub fn window_event_resumes(event: &WindowEvent) -> bool {
     matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed)
 }
 
-/// Resumes the log hotkeys after [`window_event_resumes`] events of the main
+/// Resumes the hotkeys after [`window_event_resumes`] events of the main
 /// window; the page suspends them again when a focused capture box regains
 /// focus.
 pub fn resume_on_window_event(app: &AppHandle, event: &WindowEvent) {
@@ -535,16 +601,29 @@ fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// From here on `log.hotkeyToggle` and `log.hotkeyPause` drive the global
-/// hotkeys; their state goes to `LogStatus.hotkeys`. The plugin must be
-/// registered on the builder (`main.rs`) and the shared toaster managed.
-pub fn install_hotkeys(app: &AppHandle, store: &Arc<SettingsStore>, log: Arc<LogService>) {
+/// From here on `log.hotkeyToggle`, `log.hotkeyPause`, `overlay.hotkeyToggle`
+/// and `overlay.hotkeyNextProfile` drive the global hotkeys; their state goes
+/// to `LogStatus.hotkeys` and, through `overlay`, to `OverlayStatus.hotkeys`.
+/// The plugin must be registered on the builder (`main.rs`) and the shared
+/// toaster managed. Without `overlay` (off Windows) its presses do nothing.
+pub fn install_hotkeys(
+    app: &AppHandle,
+    store: &Arc<SettingsStore>,
+    log: Arc<LogService>,
+    overlay: Option<Arc<dyn OverlayActions>>,
+) {
     let dispatch = Dispatch::default();
     let (presses, pressed) = channel::<Press>();
     let on_event: Arc<dyn Fn(Hotkey, bool) + Send + Sync> = {
         let dispatch = dispatch.clone();
+        let overlay = overlay.clone();
         Arc::new(move |hotkey, down| {
-            if let Some(press) = dispatch.press(hotkey, down) {
+            let Some(press) = dispatch.press(hotkey, down) else {
+                return;
+            };
+            // The overlay's go straight to its controller's channel, so they
+            // never wait behind a log command.
+            if let Some(press) = route_press(press, overlay.as_deref()) {
                 let _ = presses.send(press);
             }
         })
@@ -561,7 +640,7 @@ pub fn install_hotkeys(app: &AppHandle, store: &Arc<SettingsStore>, log: Arc<Log
         while let Ok(first) = request_rx.recv() {
             let batch = std::iter::once(first).chain(request_rx.try_iter());
             if let Some(statuses) = manager.handle(batch) {
-                status_log.set_hotkeys(statuses);
+                status_log.set_hotkeys(publish_statuses(statuses, overlay.as_deref()));
             }
         }
     });
@@ -572,8 +651,8 @@ pub fn install_hotkeys(app: &AppHandle, store: &Arc<SettingsStore>, log: Arc<Log
             run_press(&action_app, &action_store, &log, press);
         }
     });
-    follow_hotkeys(store, move |toggle, pause| {
-        let _ = requests.send(HotkeyRequest::Settings((toggle, pause)));
+    follow_hotkeys(store, move |requested| {
+        let _ = requests.send(HotkeyRequest::Settings(requested));
     });
 }
 
@@ -662,43 +741,48 @@ mod tests {
     fn default_toggle_is_registered_and_pause_is_unset() {
         let (mut manager, fake) = manager();
         let log = Settings::default().log;
-        let statuses = manager.apply(log.hotkey_toggle.as_deref(), log.hotkey_pause.as_deref());
+        let statuses = manager.apply([
+            log.hotkey_toggle.as_deref(),
+            log.hotkey_pause.as_deref(),
+            None,
+            None,
+        ]);
         assert_eq!(fake.take(), [reg("Ctrl+Alt+Shift+R")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+Shift+R"));
-        assert_eq!(statuses.pause, HotkeyStatus::default());
-        assert_eq!(statuses.pause.state, HotkeyState::Unset);
+        assert_eq!(statuses[0], active("Ctrl+Alt+Shift+R"));
+        assert_eq!(statuses[1], HotkeyStatus::default());
+        assert_eq!(statuses[1].state, HotkeyState::Unset);
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+Shift+R")),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
     }
 
     #[test]
     fn change_registers_new_before_releasing_old() {
         let (mut manager, fake) = manager();
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         fake.take();
-        let statuses = manager.apply(Some("Ctrl+Alt+T"), None);
+        let statuses = manager.apply([Some("Ctrl+Alt+T"), None, None, None]);
         assert_eq!(fake.take(), [reg("Ctrl+Alt+T"), unreg("Ctrl+Alt+R")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+T"));
+        assert_eq!(statuses[0], active("Ctrl+Alt+T"));
         assert_eq!(manager.action_for(key("Ctrl+Alt+R")), None);
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+T")),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
     }
 
     #[test]
     fn failed_change_keeps_the_old_combination() {
         let (mut manager, fake) = manager();
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         fake.refuse("Ctrl+Alt+T", RegisterError::InUse);
         fake.take();
-        let statuses = manager.apply(Some("Ctrl+Alt+T"), None);
+        let statuses = manager.apply([Some("Ctrl+Alt+T"), None, None, None]);
         // The old one is not released.
         assert_eq!(fake.take(), [reg("Ctrl+Alt+T")]);
         assert_eq!(
-            statuses.toggle,
+            statuses[0],
             HotkeyStatus {
                 requested: Some("Ctrl+Alt+T".to_owned()),
                 effective: Some("Ctrl+Alt+R".to_owned()),
@@ -708,7 +792,7 @@ mod tests {
         );
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+R")),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
         assert_eq!(manager.action_for(key("Ctrl+Alt+T")), None);
     }
@@ -716,12 +800,12 @@ mod tests {
     #[test]
     fn clearing_a_hotkey_releases_it() {
         let (mut manager, fake) = manager();
-        manager.apply(Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"));
+        manager.apply([Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"), None, None]);
         fake.take();
-        let statuses = manager.apply(Some("Ctrl+Alt+R"), None);
+        let statuses = manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         assert_eq!(fake.take(), [unreg("Ctrl+Alt+P")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+R"));
-        assert_eq!(statuses.pause, HotkeyStatus::default());
+        assert_eq!(statuses[0], active("Ctrl+Alt+R"));
+        assert_eq!(statuses[1], HotkeyStatus::default());
         assert_eq!(manager.action_for(key("Ctrl+Alt+P")), None);
     }
 
@@ -729,9 +813,9 @@ mod tests {
     fn initial_failure_leaves_it_inactive() {
         let (mut manager, fake) = manager();
         fake.refuse("Ctrl+Alt+Shift+R", RegisterError::Other("boom".to_owned()));
-        let statuses = manager.apply(Some("Ctrl+Alt+Shift+R"), None);
+        let statuses = manager.apply([Some("Ctrl+Alt+Shift+R"), None, None, None]);
         assert_eq!(
-            statuses.toggle,
+            statuses[0],
             HotkeyStatus {
                 requested: Some("Ctrl+Alt+Shift+R".to_owned()),
                 effective: None,
@@ -742,7 +826,7 @@ mod tests {
         assert_eq!(manager.action_for(key("Ctrl+Alt+Shift+R")), None);
         // Nothing registered, nothing to release later.
         fake.take();
-        manager.apply(None, None);
+        manager.apply([None, None, None, None]);
         assert_eq!(fake.take(), []);
     }
 
@@ -750,7 +834,7 @@ mod tests {
     fn held_hotkey_acts_once() {
         let dispatch = Dispatch::default();
         let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
-        manager.apply(Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"));
+        manager.apply([Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"), None, None]);
         let r = key("Ctrl+Alt+R");
         let p = key("Ctrl+Alt+P");
         let acted = [true, true, true, false, true]
@@ -761,7 +845,7 @@ mod tests {
         // `r` is still held: the other combination has its own filter.
         assert_eq!(
             dispatch.press(p, true).map(|press| press.action),
-            Some(HotkeyAction::Pause)
+            Some(HotkeyAction::LogPause)
         );
         assert_eq!(dispatch.press(r, true), None);
         // A combination that is not bound does nothing.
@@ -773,53 +857,53 @@ mod tests {
         let dispatch = Dispatch::default();
         let fake = FakeRegistrar::default();
         let mut manager = HotkeyManager::new(fake.clone(), dispatch.clone());
-        manager.apply(Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"));
+        manager.apply([Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"), None, None]);
         fake.take();
         let before = dispatch.press(key("Ctrl+Alt+R"), true).unwrap();
-        assert_eq!(before.action, HotkeyAction::Toggle);
+        assert_eq!(before.action, HotkeyAction::LogToggle);
 
-        let statuses = manager.apply(Some("Ctrl+Alt+P"), Some("Ctrl+Alt+R"));
+        let statuses = manager.apply([Some("Ctrl+Alt+P"), Some("Ctrl+Alt+R"), None, None]);
         // Both are owned already: rebound, not registered twice nor released.
         assert_eq!(fake.take(), []);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+P"));
-        assert_eq!(statuses.pause, active("Ctrl+Alt+R"));
+        assert_eq!(statuses[0], active("Ctrl+Alt+P"));
+        assert_eq!(statuses[1], active("Ctrl+Alt+R"));
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+P")),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+R")),
-            Some(HotkeyAction::Pause)
+            Some(HotkeyAction::LogPause)
         );
         // The press captured before the swap keeps its action.
-        assert_eq!(before.action, HotkeyAction::Toggle);
+        assert_eq!(before.action, HotkeyAction::LogToggle);
         dispatch.press(key("Ctrl+Alt+R"), false);
         let after = dispatch.press(key("Ctrl+Alt+R"), true).unwrap();
-        assert_eq!(after.action, HotkeyAction::Pause);
+        assert_eq!(after.action, HotkeyAction::LogPause);
         assert!(after.generation > before.generation);
 
         // A swap where one side is new: the other is kept, not released.
-        let statuses = manager.apply(Some("Ctrl+Alt+R"), Some("Ctrl+Alt+Q"));
+        let statuses = manager.apply([Some("Ctrl+Alt+R"), Some("Ctrl+Alt+Q"), None, None]);
         assert_eq!(fake.take(), [reg("Ctrl+Alt+Q"), unreg("Ctrl+Alt+P")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+R"));
-        assert_eq!(statuses.pause, active("Ctrl+Alt+Q"));
+        assert_eq!(statuses[0], active("Ctrl+Alt+R"));
+        assert_eq!(statuses[1], active("Ctrl+Alt+Q"));
     }
 
     #[test]
     fn failed_change_does_not_keep_a_combination_the_other_action_took() {
         let (mut manager, fake) = manager();
-        manager.apply(Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"));
+        manager.apply([Some("Ctrl+Alt+R"), Some("Ctrl+Alt+P"), None, None]);
         fake.refuse("Ctrl+Alt+Q", RegisterError::InUse);
         fake.take();
         // Toggle takes pause's combination; pause's new one fails.
-        let statuses = manager.apply(Some("Ctrl+Alt+P"), Some("Ctrl+Alt+Q"));
+        let statuses = manager.apply([Some("Ctrl+Alt+P"), Some("Ctrl+Alt+Q"), None, None]);
         assert_eq!(fake.take(), [reg("Ctrl+Alt+Q"), unreg("Ctrl+Alt+R")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+P"));
-        assert_eq!(statuses.pause.effective, None);
-        assert_eq!(statuses.pause.state, HotkeyState::Failed);
+        assert_eq!(statuses[0], active("Ctrl+Alt+P"));
+        assert_eq!(statuses[1].effective, None);
+        assert_eq!(statuses[1].state, HotkeyState::Failed);
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+P")),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
     }
 
@@ -827,26 +911,26 @@ mod tests {
     fn hotkey_change_resets_pressed_state() {
         let dispatch = Dispatch::default();
         let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         let r = key("Ctrl+Alt+R");
         assert!(dispatch.press(r, true).is_some());
         assert!(dispatch.press(r, true).is_none());
         // Removed while held, then bound again: it starts from released.
-        manager.apply(Some("Ctrl+Alt+T"), None);
+        manager.apply([Some("Ctrl+Alt+T"), None, None, None]);
         assert!(dispatch.press(r, true).is_none());
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         assert!(dispatch.press(r, true).is_some());
     }
 
     fn settings(toggle: &str, pause: &str) -> HotkeyRequest {
-        HotkeyRequest::Settings((Some(toggle.to_owned()), Some(pause.to_owned())))
+        HotkeyRequest::Settings([Some(toggle.to_owned()), Some(pause.to_owned()), None, None])
     }
 
     #[test]
     fn suspended_presses_do_nothing() {
         let dispatch = Dispatch::default();
         let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         let r = key("Ctrl+Alt+R");
         dispatch.set_suspended(true);
         assert_eq!(dispatch.press(r, true), None);
@@ -854,7 +938,7 @@ mod tests {
         dispatch.set_suspended(false);
         assert_eq!(
             dispatch.press(r, true).map(|press| press.action),
-            Some(HotkeyAction::Toggle)
+            Some(HotkeyAction::LogToggle)
         );
     }
 
@@ -863,7 +947,7 @@ mod tests {
         let (mut manager, fake) = manager();
         let statuses = manager.handle([settings("Ctrl+Alt+R", "Ctrl+Alt+P")]);
         assert_eq!(fake.take(), [reg("Ctrl+Alt+R"), reg("Ctrl+Alt+P")]);
-        assert_eq!(statuses.unwrap().toggle, active("Ctrl+Alt+R"));
+        assert_eq!(statuses.unwrap()[0], active("Ctrl+Alt+R"));
 
         // Suspended: ours are released so the capture box sees them, and
         // the published statuses stay as they were.
@@ -878,11 +962,11 @@ mod tests {
         // Resumed: the latest request is registered.
         let statuses = manager.handle([HotkeyRequest::Suspend(false)]).unwrap();
         assert_eq!(fake.take(), [reg("Ctrl+Alt+R"), reg("Ctrl+Alt+Q")]);
-        assert_eq!(statuses.toggle, active("Ctrl+Alt+R"));
-        assert_eq!(statuses.pause, active("Ctrl+Alt+Q"));
+        assert_eq!(statuses[0], active("Ctrl+Alt+R"));
+        assert_eq!(statuses[1], active("Ctrl+Alt+Q"));
         assert_eq!(
             manager.action_for(key("Ctrl+Alt+Q")),
-            Some(HotkeyAction::Pause)
+            Some(HotkeyAction::LogPause)
         );
 
         // Focus moving between two boxes ends suspended; a blur and focus
@@ -910,7 +994,7 @@ mod tests {
     fn control_suspends_the_dispatch_at_once() {
         let dispatch = Dispatch::default();
         let mut manager = HotkeyManager::new(FakeRegistrar::default(), dispatch.clone());
-        manager.apply(Some("Ctrl+Alt+R"), None);
+        manager.apply([Some("Ctrl+Alt+R"), None, None, None]);
         let (sender, requests) = channel();
         let control = HotkeyControl::new(dispatch.clone(), sender);
         control.set_suspended(true);
@@ -925,10 +1009,10 @@ mod tests {
     #[test]
     fn unreadable_hotkey_fails_without_registering() {
         let (mut manager, fake) = manager();
-        let statuses = manager.apply(Some("Ctrl+Nope"), None);
+        let statuses = manager.apply([Some("Ctrl+Nope"), None, None, None]);
         assert_eq!(fake.take(), []);
-        assert_eq!(statuses.toggle.state, HotkeyState::Failed);
-        assert_eq!(statuses.toggle.reason.as_deref(), Some("log.hotkey.failed"));
+        assert_eq!(statuses[0].state, HotkeyState::Failed);
+        assert_eq!(statuses[0].reason.as_deref(), Some("log.hotkey.failed"));
     }
 
     #[test]
@@ -977,7 +1061,7 @@ mod tests {
 
     #[test]
     fn toggle_and_pause_actions_follow_the_log_state() {
-        use HotkeyAction::{Pause, Toggle};
+        use HotkeyAction::{LogPause as Pause, LogToggle as Toggle};
         use LogState::{Error, Idle, Paused, Recording};
         assert_eq!(command_for(Toggle, Idle), Some(LogCommand::Start));
         assert_eq!(command_for(Toggle, Error), Some(LogCommand::Start));
@@ -1053,19 +1137,23 @@ mod tests {
         );
     }
 
-    type Seen = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+    type Seen = Arc<Mutex<Vec<Requested>>>;
+
+    fn texts(texts: [Option<&str>; 4]) -> Requested {
+        texts.map(|text| text.map(str::to_owned))
+    }
 
     #[test]
     fn hotkeys_follow_settings_changes() {
         let store = Arc::new(open_fast(&FakeFs::new()));
         let seen: Seen = Arc::default();
         let sink = Arc::clone(&seen);
-        follow_hotkeys(&store, move |toggle, pause| {
-            sink.lock().unwrap().push((toggle, pause))
+        follow_hotkeys(&store, move |requested| {
+            sink.lock().unwrap().push(requested)
         });
         assert_eq!(
             *seen.lock().unwrap(),
-            [(Some("Ctrl+Alt+Shift+R".to_owned()), None)],
+            [texts([Some("Ctrl+Alt+Shift+R"), None, None, None])],
             "the initial catch-up"
         );
         store
@@ -1074,15 +1162,227 @@ mod tests {
         wait_until("the new pause hotkey", || seen.lock().unwrap().len() == 2);
         assert_eq!(
             seen.lock().unwrap()[1],
-            (
-                Some("Ctrl+Alt+Shift+R".to_owned()),
-                Some("Ctrl+Alt+P".to_owned())
-            )
+            texts([Some("Ctrl+Alt+Shift+R"), Some("Ctrl+Alt+P"), None, None])
+        );
+        // The overlay's hotkeys follow too; the benchmark one is not
+        // registered before M7d (DP11).
+        store
+            .update(&json!({"overlay": {
+                "hotkeyToggle": "Ctrl+Alt+F1",
+                "hotkeyNextProfile": "Ctrl+Alt+F2",
+                "hotkeyBenchmark": "Ctrl+Alt+F3"
+            }}))
+            .unwrap();
+        wait_until("the overlay hotkeys", || seen.lock().unwrap().len() == 3);
+        assert_eq!(
+            seen.lock().unwrap()[2],
+            texts([
+                Some("Ctrl+Alt+Shift+R"),
+                Some("Ctrl+Alt+P"),
+                Some("Ctrl+Alt+F1"),
+                Some("Ctrl+Alt+F2")
+            ])
         );
         // Other settings do not touch the hotkeys.
         store
             .update(&json!({"general": {"temperatureUnit": "f"}}))
             .unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 2);
+        store
+            .update(&json!({"overlay": {"hotkeyBenchmark": "Ctrl+Alt+F4"}}))
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn log_hotkeys_unchanged() {
+        // The log's hotkeys behave as before with the overlay's unset: the
+        // default toggle alone, with the same registration and statuses.
+        let (mut manager, fake) = manager();
+        let log = Settings::default().log;
+        let statuses = manager.apply([
+            log.hotkey_toggle.as_deref(),
+            log.hotkey_pause.as_deref(),
+            None,
+            None,
+        ]);
+        assert_eq!(fake.take(), [reg("Ctrl+Alt+Shift+R")]);
+        assert_eq!(statuses[0], active("Ctrl+Alt+Shift+R"));
+        assert_eq!(statuses[1], HotkeyStatus::default());
+        assert_eq!(statuses[2], HotkeyStatus::default());
+        assert_eq!(statuses[3], HotkeyStatus::default());
+        let (log_statuses, overlay) = split_statuses(statuses);
+        assert_eq!(log_statuses.toggle, active("Ctrl+Alt+Shift+R"));
+        assert_eq!(log_statuses.pause, HotkeyStatus::default());
+        assert_eq!(overlay, [HotkeyStatus::default(), HotkeyStatus::default()]);
+        // Adding an overlay hotkey leaves the log's registration alone.
+        let statuses = manager.apply([Some("Ctrl+Alt+Shift+R"), None, Some("Ctrl+Alt+F1"), None]);
+        assert_eq!(fake.take(), [reg("Ctrl+Alt+F1")]);
+        assert_eq!(statuses[0], active("Ctrl+Alt+Shift+R"));
+        assert_eq!(
+            manager.action_for(key("Ctrl+Alt+Shift+R")),
+            Some(HotkeyAction::LogToggle)
+        );
+        // The overlay's actions are no log commands.
+        assert_eq!(
+            command_for(HotkeyAction::OverlayToggle, LogState::Idle),
+            None
+        );
+        assert_eq!(
+            command_for(HotkeyAction::OverlayNextProfile, LogState::Recording),
+            None
+        );
+    }
+
+    #[test]
+    fn four_actions_register_and_dispatch() {
+        let dispatch = Dispatch::default();
+        let fake = FakeRegistrar::default();
+        let mut manager = HotkeyManager::new(fake.clone(), dispatch.clone());
+        let combos = ["Ctrl+Alt+R", "Ctrl+Alt+P", "Ctrl+Alt+F1", "Ctrl+Alt+F2"];
+        let statuses = manager.apply(combos.map(Some));
+        assert_eq!(fake.take(), combos.map(reg));
+        assert_eq!(statuses, combos.map(active));
+        for (action, combo) in HotkeyAction::ALL.into_iter().zip(combos) {
+            assert_eq!(action, HotkeyAction::ALL[action.index()]);
+            assert_eq!(
+                dispatch.press(key(combo), true).map(|press| press.action),
+                Some(action),
+                "{combo}"
+            );
+        }
+        // One combination, one action: a later action loses it (DP14).
+        fake.refuse("Ctrl+Alt+F9", RegisterError::InUse);
+        let statuses = manager.apply([
+            Some("Ctrl+Alt+R"),
+            Some("Ctrl+Alt+P"),
+            Some("Ctrl+Alt+P"),
+            Some("Ctrl+Alt+F9"),
+        ]);
+        assert_eq!(fake.take(), [reg("Ctrl+Alt+F9")]);
+        assert_eq!(statuses[1], active("Ctrl+Alt+P"));
+        assert_eq!(statuses[2].state, HotkeyState::Failed);
+        assert_eq!(statuses[2].reason.as_deref(), Some("log.hotkey.inUse"));
+        // Its old combination stays its own: nobody else took it.
+        assert_eq!(statuses[2].effective.as_deref(), Some("Ctrl+Alt+F1"));
+        // A failed registration keeps the previous combination.
+        assert_eq!(statuses[3].state, HotkeyState::Failed);
+        assert_eq!(statuses[3].effective.as_deref(), Some("Ctrl+Alt+F2"));
+        assert_eq!(
+            manager.action_for(key("Ctrl+Alt+P")),
+            Some(HotkeyAction::LogPause)
+        );
+        assert_eq!(
+            manager.action_for(key("Ctrl+Alt+F2")),
+            Some(HotkeyAction::OverlayNextProfile)
+        );
+        // Suspension releases all four (DP14).
+        assert_eq!(manager.handle([HotkeyRequest::Suspend(true)]), None);
+        assert_eq!(
+            fake.take(),
+            ["Ctrl+Alt+R", "Ctrl+Alt+P", "Ctrl+Alt+F1", "Ctrl+Alt+F2"].map(unreg)
+        );
+        assert_eq!(dispatch.press(key("Ctrl+Alt+F1"), false), None);
+    }
+
+    #[test]
+    fn swap_between_log_and_overlay_does_not_reregister() {
+        let dispatch = Dispatch::default();
+        let fake = FakeRegistrar::default();
+        let mut manager = HotkeyManager::new(fake.clone(), dispatch.clone());
+        manager.apply([Some("Ctrl+Alt+R"), None, Some("Ctrl+Alt+F1"), None]);
+        fake.take();
+        let statuses = manager.apply([Some("Ctrl+Alt+F1"), None, Some("Ctrl+Alt+R"), None]);
+        assert_eq!(fake.take(), []);
+        assert_eq!(statuses[0], active("Ctrl+Alt+F1"));
+        assert_eq!(statuses[2], active("Ctrl+Alt+R"));
+        assert_eq!(
+            dispatch
+                .press(key("Ctrl+Alt+R"), true)
+                .map(|press| press.action),
+            Some(HotkeyAction::OverlayToggle)
+        );
+        assert_eq!(
+            dispatch
+                .press(key("Ctrl+Alt+F1"), true)
+                .map(|press| press.action),
+            Some(HotkeyAction::LogToggle)
+        );
+        // The log's combination moves to «next profile»: rebound only.
+        let statuses = manager.apply([None, None, Some("Ctrl+Alt+R"), Some("Ctrl+Alt+F1")]);
+        assert_eq!(fake.take(), []);
+        assert_eq!(statuses[0], HotkeyStatus::default());
+        assert_eq!(statuses[3], active("Ctrl+Alt+F1"));
+        assert_eq!(
+            manager.action_for(key("Ctrl+Alt+F1")),
+            Some(HotkeyAction::OverlayNextProfile)
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeOverlay {
+        calls: Mutex<Vec<&'static str>>,
+        hotkeys: Mutex<Vec<(HotkeyStatus, HotkeyStatus)>>,
+    }
+
+    impl OverlayActions for FakeOverlay {
+        fn toggle_hidden(&self) {
+            self.calls.lock().unwrap().push("toggle_hidden");
+        }
+
+        fn next_profile(&self) {
+            self.calls.lock().unwrap().push("next_profile");
+        }
+
+        fn set_hotkeys(&self, toggle: HotkeyStatus, next_profile: HotkeyStatus) {
+            self.hotkeys.lock().unwrap().push((toggle, next_profile));
+        }
+    }
+
+    #[test]
+    fn overlay_toggle_press_goes_to_the_controller() {
+        let overlay = FakeOverlay::default();
+        let press = |action| Press {
+            action,
+            generation: 1,
+        };
+        // Overlay presses go to the controller, never to the log worker.
+        assert_eq!(
+            route_press(press(HotkeyAction::OverlayToggle), Some(&overlay)),
+            None
+        );
+        assert_eq!(
+            route_press(press(HotkeyAction::OverlayNextProfile), Some(&overlay)),
+            None
+        );
+        assert_eq!(
+            *overlay.calls.lock().unwrap(),
+            ["toggle_hidden", "next_profile"]
+        );
+        // Log presses go on to the log worker untouched.
+        for action in [HotkeyAction::LogToggle, HotkeyAction::LogPause] {
+            assert_eq!(
+                route_press(press(action), Some(&overlay)),
+                Some(press(action))
+            );
+        }
+        assert_eq!(overlay.calls.lock().unwrap().len(), 2);
+        // Without an overlay (off Windows) its presses do nothing.
+        assert_eq!(route_press(press(HotkeyAction::OverlayToggle), None), None);
+    }
+
+    #[test]
+    fn statuses_go_to_the_log_and_the_overlay() {
+        let statuses = ["Ctrl+Alt+R", "Ctrl+Alt+P", "Ctrl+Alt+F1", "Ctrl+Alt+F2"].map(active);
+        let (log, overlay) = split_statuses(statuses.clone());
+        assert_eq!(log.toggle, active("Ctrl+Alt+R"));
+        assert_eq!(log.pause, active("Ctrl+Alt+P"));
+        assert_eq!(overlay, [active("Ctrl+Alt+F1"), active("Ctrl+Alt+F2")]);
+        let fake = FakeOverlay::default();
+        let log = publish_statuses(statuses, Some(&fake));
+        assert_eq!(log.toggle, active("Ctrl+Alt+R"));
+        assert_eq!(
+            *fake.hotkeys.lock().unwrap(),
+            [(active("Ctrl+Alt+F1"), active("Ctrl+Alt+F2"))]
+        );
     }
 }

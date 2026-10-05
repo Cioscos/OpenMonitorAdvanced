@@ -6,6 +6,7 @@
   "tray.log.pause": "Pause log",
   "tray.log.resume": "Resume log",
   "tray.log.stop": "Stop log",
+  "tray.overlay.toggle": "Show/hide overlay",
   "tray.antiCheat": "Anti-cheat compatible mode",
   "tray.viewSimple": "Simple view",
   "tray.viewAdvanced": "Advanced view",

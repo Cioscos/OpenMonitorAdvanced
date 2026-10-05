@@ -424,12 +424,14 @@ fn main() {
             let overlay = {
                 let shell = app.state::<ServiceShell>();
                 let status_handle = app.handle().clone();
+                let status_tray = tray.clone();
                 let runner = overlay::runner::OverlayRunner::start(overlay::runner::OverlayDeps {
                     store: store.clone(),
                     link: shell.link_commands(),
                     feed: shell.frames_feed(),
                     toaster: Box::new(toaster.clone()),
                     on_status: Box::new(move |status| {
+                        status_tray.set_overlay(status.enabled, !status.hidden_by_user);
                         let _ = status_handle.emit(overlay::runner::EVENT_OVERLAY_STATUS, status);
                     }),
                 })?;
@@ -438,8 +440,13 @@ fn main() {
                 app.manage(OverlayGuard(Mutex::new(Some(runner))));
                 handle
             };
-            // `log.hotkeyToggle` and `log.hotkeyPause` drive the global hotkeys.
-            hotkeys::install_hotkeys(app.handle(), &store, log_service.clone());
+            // The log's and the overlay's settings drive the global hotkeys.
+            #[cfg(windows)]
+            let overlay_actions: Option<Arc<dyn hotkeys::OverlayActions>> =
+                Some(Arc::new(overlay.clone()));
+            #[cfg(not(windows))]
+            let overlay_actions: Option<Arc<dyn hotkeys::OverlayActions>> = None;
+            hotkeys::install_hotkeys(app.handle(), &store, log_service.clone(), overlay_actions);
             // Listeners run on whichever thread changed the state; the tray
             // posts its own work to the main thread.
             let log_tray = tray.clone();

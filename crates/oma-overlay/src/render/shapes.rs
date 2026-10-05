@@ -17,6 +17,14 @@ use super::layout::{arc_point, RectF};
 /// bottom.
 pub const GAUGE_START_DEG: f32 = 135.0;
 
+/// The red of the benchmark badge's dot (`#FF3B5C`).
+pub const REC_RED: Rgba = Rgba {
+    r: 0xff,
+    g: 0x3b,
+    b: 0x5c,
+    a: 0xff,
+};
+
 pub fn d2d_rect(r: RectF) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.x,

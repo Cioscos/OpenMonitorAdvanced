@@ -4,12 +4,33 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use oma_core::model::Unit;
 use oma_core::overlay::{
-    parse_profile, FrameMetric, GraphMode, Kind, Profile, Source, StatOp, StatRing, VisibleIf,
+    parse_profile, FrameMetric, GraphMode, Kind, Profile, RangeBound, Source, StatOp, StatRing,
+    VisibleIf,
 };
 use oma_ipc::overlay::{
-    DrawSettings, FrameMetrics, OverlayMessage, PxArea, SensorInfo, WireFrameTime,
+    BenchmarkOverlay, DrawSettings, FrameMetrics, OverlayMessage, PxArea, SensorInfo, WireFrameTime,
 };
+
+use crate::render::layout::parse_unit;
+
+/// The window of the automatic top of a `meter` or `gauge` (DD16): the
+/// highest value of the last minute, so an old spike is forgotten.
+pub const AUTO_RANGE_S: u32 = 60;
+
+/// The size in cells of the benchmark box (DD5): the summary, or the
+/// `● REC mm:ss` badge while recording; `None` without a box.
+pub(crate) fn extra_cells(b: Option<&BenchmarkOverlay>) -> Option<(u32, u32)> {
+    let b = b?;
+    if b.summary.is_some() {
+        Some((18, 8))
+    } else if b.recording_s.is_some() {
+        Some((10, 2))
+    } else {
+        None
+    }
+}
 
 /// What an applied message changed, so the window knows what to redo.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -107,7 +128,24 @@ struct SourcePlan {
     texted: HashSet<SourceKey>,
 }
 
-fn source_plan(profile: &Profile) -> SourcePlan {
+/// Whether a `meter` or `gauge` takes its top from the recent values: an
+/// automatic maximum on a source that is not a percentage (0–100).
+fn auto_top(block: &oma_core::overlay::Block, sensors: &HashMap<String, SensorInfo>) -> bool {
+    let max = match block.kind {
+        Kind::Meter => block.style.meter.max,
+        Kind::Gauge => block.style.gauge.max,
+        _ => return false,
+    };
+    let percent = match &block.source {
+        Source::Sensor(id) => sensors
+            .get(id)
+            .is_some_and(|s| parse_unit(&s.unit) == Some(Unit::Percent)),
+        _ => false,
+    };
+    max == RangeBound::Auto && !percent
+}
+
+fn source_plan(profile: &Profile, sensors: &HashMap<String, SensorInfo>) -> SourcePlan {
     let mut windows: HashMap<SourceKey, u32> = HashMap::new();
     let mut charted = HashSet::new();
     let mut texted = HashSet::new();
@@ -124,6 +162,9 @@ fn source_plan(profile: &Profile) -> SourcePlan {
         );
         if b.stat.op != StatOp::Current && !is_low {
             need(&b.source, b.stat.window);
+        }
+        if auto_top(b, sensors) {
+            need(&b.source, AUTO_RANGE_S);
         }
         let charts = matches!(b.kind, Kind::Graph | Kind::Sparkline)
             && !is_frametime_graph(b.kind, b.style.graph.mode);
@@ -208,6 +249,8 @@ pub struct OverlayState {
     /// The target client area and its DPI; `None` hides the overlay.
     pub placement: Option<(PxArea, u32)>,
     pub draw: DrawSettings,
+    /// The benchmark box: the recording clock or the summary (M7d).
+    pub benchmark: Option<BenchmarkOverlay>,
 }
 
 impl Default for OverlayState {
@@ -227,6 +270,7 @@ impl Default for OverlayState {
             values: HashMap::new(),
             placement: None,
             draw: default_draw(),
+            benchmark: None,
         }
     }
 }
@@ -254,8 +298,21 @@ impl OverlayState {
     pub fn apply(&mut self, msg: OverlayMessage, now_s: f64) -> Changes {
         match msg {
             // The link answers the handshake; nothing to draw.
-            // Drawn from D7 on; ignored until then.
-            OverlayMessage::Hello(_) | OverlayMessage::Benchmark(_) => Changes::default(),
+            OverlayMessage::Hello(_) => Changes::default(),
+            OverlayMessage::Benchmark(b) => {
+                let new = (b.recording_s.is_some() || b.summary.is_some()).then_some(b);
+                if new == self.benchmark {
+                    return Changes::default();
+                }
+                // A box that appears, goes or changes size moves the window.
+                let layout = extra_cells(new.as_ref()) != extra_cells(self.benchmark.as_ref());
+                self.benchmark = new;
+                Changes {
+                    layout,
+                    text: true,
+                    ..Changes::default()
+                }
+            }
             OverlayMessage::SetProfile(p) => {
                 let profile = match parse_profile(&p.profile_json) {
                     Ok(profile) => profile,
@@ -268,9 +325,9 @@ impl OverlayState {
                         return Changes::default();
                     }
                 };
+                self.sensors = p.sensors.into_iter().map(|s| (s.id.clone(), s)).collect();
                 self.set_profile(profile);
                 self.profile_id = p.profile_id;
-                self.sensors = p.sensors.into_iter().map(|s| (s.id.clone(), s)).collect();
                 // Values of sensors the new profile does not use are of no use.
                 let sensors = &self.sensors;
                 self.values.retain(|id, _| sensors.contains_key(id));
@@ -348,11 +405,12 @@ impl OverlayState {
         }
     }
 
-    /// Makes `profile` the active one and fits the rings to it. A ring whose
+    /// Makes `profile` the active one and fits the rings to it (after its
+    /// sensors are known: a percentage needs no ring for its range). A ring whose
     /// window does not change keeps its samples, so re-sending the same
     /// profile (new settings) does not empty the charts.
     fn set_profile(&mut self, profile: Profile) {
-        let plan = source_plan(&profile);
+        let plan = source_plan(&profile, &self.sensors);
         let mut old = std::mem::take(&mut self.rings);
         self.rings = plan
             .windows
@@ -400,7 +458,8 @@ mod tests {
     use super::*;
     use oma_core::overlay::Stat;
     use oma_ipc::overlay::{
-        FrameTimes, SetPlacement, SetProfile, Values, WireValue, OVERLAY_PROTOCOL_VERSION,
+        BenchmarkOverlay, FrameTimes, SetPlacement, SetProfile, Values, WireBenchmarkSummary,
+        WireValue, OVERLAY_PROTOCOL_VERSION,
     };
     use serde_json::json;
 
@@ -789,6 +848,65 @@ mod tests {
             0.0,
         );
         assert!(!ch.any());
+    }
+
+    fn bench(recording_s: Option<u32>, summary: bool) -> OverlayMessage {
+        OverlayMessage::Benchmark(BenchmarkOverlay {
+            recording_s,
+            summary: summary.then_some(WireBenchmarkSummary {
+                fps_displayed: 119.5,
+                low_one_percent: 80.0,
+                low_point_one_percent: 60.0,
+                stutter_count: 4,
+                stutter_percent: 0.5,
+            }),
+        })
+    }
+
+    #[test]
+    fn benchmark_message_sets_the_box() {
+        let mut s = OverlayState::default();
+        let ch = s.apply(bench(Some(0), false), 0.0);
+        assert!(ch.layout && ch.text, "{ch:?}");
+        assert_eq!(s.benchmark.as_ref().and_then(|b| b.recording_s), Some(0));
+        // From recording to the summary: the box changes size.
+        let ch = s.apply(bench(None, true), 1.0);
+        assert!(ch.layout && ch.text, "{ch:?}");
+        // Removed.
+        let ch = s.apply(bench(None, false), 2.0);
+        assert!(ch.layout && ch.text, "{ch:?}");
+        assert_eq!(extra_cells(s.benchmark.as_ref()), None);
+        // Nothing to remove twice.
+        assert!(!s.apply(bench(None, false), 3.0).any());
+    }
+
+    #[test]
+    fn benchmark_seconds_only_mark_text() {
+        let mut s = OverlayState::default();
+        s.apply(bench(Some(1), false), 0.0);
+        let ch = s.apply(bench(Some(2), false), 1.0);
+        assert_eq!(
+            ch,
+            Changes {
+                text: true,
+                ..Changes::default()
+            }
+        );
+        assert!(!s.apply(bench(Some(2), false), 1.5).any());
+    }
+
+    #[test]
+    fn extra_cells_by_state() {
+        let b = |recording_s, summary| match bench(recording_s, summary) {
+            OverlayMessage::Benchmark(b) => b,
+            _ => unreachable!(),
+        };
+        assert_eq!(extra_cells(None), None);
+        assert_eq!(extra_cells(Some(&b(None, false))), None);
+        assert_eq!(extra_cells(Some(&b(Some(5), false))), Some((10, 2)));
+        assert_eq!(extra_cells(Some(&b(None, true))), Some((18, 8)));
+        // The summary wins over a running clock.
+        assert_eq!(extra_cells(Some(&b(Some(5), true))), Some((18, 8)));
     }
 
     #[test]

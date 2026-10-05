@@ -25,10 +25,11 @@ mod state;
 #[cfg(windows)]
 mod window;
 
-use oma_core::overlay::geometry::{place, PxRect};
+use oma_core::overlay::geometry::{place_with_extra, Placed, PxRect};
 use oma_ipc::overlay::PxArea;
 
 use crate::link::EXIT_USAGE;
+use crate::render::layout::RectF;
 use crate::state::OverlayState;
 
 fn main() {
@@ -57,8 +58,8 @@ fn run() -> i32 {
 /// `strings["previewTitle"]`.
 const PREVIEW_TITLE: &str = "OpenMonitor Advanced";
 
-/// The translation that draws the profile placed at `placed` on a surface
-/// covering `client`.
+/// The offset of `placed` on a surface covering `client`: where the profile
+/// (or the benchmark box) is drawn.
 fn preview_origin(client: PxRect, placed: PxRect) -> (f32, f32) {
     ((placed.x - client.x) as f32, (placed.y - client.y) as f32)
 }
@@ -80,9 +81,10 @@ fn set_preview_area(state: &mut OverlayState, client: PxRect, dpi: u32) -> bool 
     changed
 }
 
-/// Where the window goes: the profile placed in the target area (C3), or
-/// `None` (hidden) without a profile, without an area or without blocks.
-fn placement_rect(state: &OverlayState) -> Option<PxRect> {
+/// Where the window goes: the profile placed in the target area (C3), with
+/// the benchmark box of `extra_cells` attached (DD5), or `None` (hidden)
+/// without a profile, without an area or with nothing to show.
+fn placement_rect(state: &OverlayState, extra_cells: Option<(u32, u32)>) -> Option<Placed> {
     let profile = state.profile.as_ref()?;
     let (area, dpi) = state.placement.as_ref()?;
     let area = PxRect {
@@ -91,7 +93,19 @@ fn placement_rect(state: &OverlayState) -> Option<PxRect> {
         w: area.width,
         h: area.height,
     };
-    place(profile, area, *dpi)
+    place_with_extra(profile, area, *dpi, extra_cells)
+}
+
+/// The benchmark box inside the window of `placed`.
+fn bench_rect(placed: &Placed) -> Option<RectF> {
+    let e = placed.extra?;
+    let (x, y) = preview_origin(placed.window, e);
+    Some(RectF {
+        x,
+        y,
+        w: e.w as f32,
+        h: e.h as f32,
+    })
 }
 
 /// The message-wait timeout for a wake in `wait_s` seconds: rounded up, so
@@ -180,8 +194,9 @@ fn run_window(pipe: String, preview: bool) -> i32 {
     let mut retry_at: Option<f64> = None;
     // Since when the window has been hidden.
     let mut hidden_since: Option<f64> = None;
-    // Where the window should be, and where it is shown.
-    let mut rect: Option<PxRect> = None;
+    // Where the window, the profile and the benchmark box should be, and
+    // where the window is shown.
+    let mut placed: Option<Placed> = None;
     let mut shown: Option<PxRect> = None;
     // The window starts with `WDA_NONE`.
     let mut hidden_from_capture = false;
@@ -283,19 +298,39 @@ fn run_window(pipe: String, preview: bool) -> i32 {
             }
         }
         if changes.layout || changes.placement {
-            rect = placement_rect(&state);
+            // The preview never shows the benchmark box.
+            let extra = (!preview)
+                .then(|| state::extra_cells(state.benchmark.as_ref()))
+                .flatten();
+            placed = placement_rect(&state, extra);
         }
+        let profile_in = |surface: PxRect| {
+            placed
+                .and_then(|p| p.profile)
+                .map_or((0.0, 0.0), |p| preview_origin(surface, p))
+        };
         // The preview draws on its whole client area, the profile inside it.
         let (surface, view) = match client {
             Some(c) => (
                 Some(c),
                 render::View {
-                    origin: rect.map_or((0.0, 0.0), |p| preview_origin(c, p)),
+                    origin: profile_in(c),
                     background: Some(render::PREVIEW_BACKGROUND),
+                    bench: None,
                 },
             ),
             None if preview => (None, render::View::default()),
-            None => (rect, render::View::default()),
+            None => match placed {
+                Some(p) => (
+                    Some(p.window),
+                    render::View {
+                        origin: profile_in(p.window),
+                        background: None,
+                        bench: bench_rect(&p),
+                    },
+                ),
+                None => (None, render::View::default()),
+            },
         };
         if changes.layout || changes.placement || changes.settings {
             cache.invalidate();
@@ -405,7 +440,7 @@ mod tests {
     #[test]
     fn placement_rect_needs_profile_and_area() {
         let mut state = OverlayState::default();
-        assert_eq!(placement_rect(&state), None);
+        assert_eq!(placement_rect(&state, None), None);
         let area = PxArea {
             x: 100,
             y: 50,
@@ -420,12 +455,12 @@ mod tests {
             0.0,
         );
         // An area without a profile stays hidden.
-        assert_eq!(placement_rect(&state), None);
+        assert_eq!(placement_rect(&state, None), None);
         let json = r#"{ "format": 1, "name": "t", "blocks": [
             { "id": "a", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 },
               "source": { "frames": "fps-displayed" }, "kind": "text" } ] }"#;
         state.profile = Some(parse_profile(json).expect("profile"));
-        let r = placement_rect(&state).expect("placed");
+        let r = placement_rect(&state, None).expect("placed").window;
         assert!(r.w > 0 && r.h > 0, "{r:?}");
         assert!(r.x >= area.x && r.y >= area.y, "{r:?}");
         // The area goes away: hidden again.
@@ -436,7 +471,48 @@ mod tests {
             }),
             0.0,
         );
-        assert_eq!(placement_rect(&state), None);
+        assert_eq!(placement_rect(&state, None), None);
+    }
+
+    #[test]
+    fn placement_includes_the_benchmark_box() {
+        use oma_ipc::overlay::BenchmarkOverlay;
+        let mut state = OverlayState::default();
+        state.apply(
+            OverlayMessage::SetPlacement(SetPlacement {
+                area: Some(PxArea {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                }),
+                dpi: 96,
+            }),
+            0.0,
+        );
+        let json = r#"{ "format": 1, "name": "t", "anchor": "top-left", "blocks": [
+            { "id": "a", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 },
+              "source": { "frames": "fps-displayed" }, "kind": "text" } ] }"#;
+        state.profile = Some(parse_profile(json).expect("profile"));
+        let alone = placement_rect(&state, None).expect("placed").window;
+        state.apply(
+            OverlayMessage::Benchmark(BenchmarkOverlay {
+                recording_s: Some(3),
+                summary: None,
+            }),
+            0.0,
+        );
+        let cells = state::extra_cells(state.benchmark.as_ref());
+        let placed = placement_rect(&state, cells).expect("placed");
+        let (profile, extra) = (placed.profile.expect("profile"), placed.extra.expect("box"));
+        assert_eq!(profile, alone);
+        // 10 x 2 cells of 8 px, below the profile, inside the window.
+        assert_eq!((extra.w, extra.h), (80, 16));
+        assert_eq!(extra.y, profile.y + profile.h);
+        assert_eq!(placed.window.h, profile.h + extra.h);
+        // The box is drawn at its offset in the window.
+        let r = bench_rect(&placed).expect("box rect");
+        assert_eq!((r.x, r.y, r.w, r.h), (0.0, profile.h as f32, 80.0, 16.0));
     }
 
     #[test]
@@ -475,10 +551,13 @@ mod tests {
         let (client, dpi) = window::client_area(hwnd);
         assert!(client.w > 0 && client.h > 0, "{client:?}");
         set_preview_area(&mut state, client, dpi);
-        let placed = placement_rect(&state).expect("placed in the client area");
+        let placed = placement_rect(&state, None)
+            .and_then(|p| p.profile)
+            .expect("placed in the client area");
         let view = render::View {
             origin: preview_origin(client, placed),
             background: Some(render::PREVIEW_BACKGROUND),
+            bench: None,
         };
         let mut gfx = None;
         let mut cache = render::RenderCache::default();

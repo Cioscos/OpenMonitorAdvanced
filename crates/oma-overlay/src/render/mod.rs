@@ -22,9 +22,11 @@ pub use cache::RenderCache;
 
 #[cfg(windows)]
 use oma_core::overlay::{
-    fg_active, is_visible, threshold_color, Align, Block, GraphMode, Kind, Orientation, Rgba,
-    ThresholdTarget,
+    cell_px, fg_active, is_visible, threshold_color, Align, Block, GraphMode, Kind, Orientation,
+    Profile, Rgba, TextStyle, ThresholdTarget,
 };
+#[cfg(windows)]
+use oma_ipc::overlay::BenchmarkOverlay;
 #[cfg(windows)]
 use windows::core::Result;
 #[cfg(windows)]
@@ -45,10 +47,10 @@ use crate::state::{OverlayState, SourceKey};
 use cache::{BlockCache, BrushRes, TextRes};
 #[cfg(windows)]
 use layout::{
-    areas, block_px, block_value, chart_gen, font_px, frame_ms, frametime_bars, gauge_sweep,
-    graph_points, is_frametime_chart, is_percent, merge_bars, meter_fraction, panel_radius_px,
-    profile_frame, row_positions, source_value, stats_text, style_px, text_parts, value_range,
-    Frame, RectF, TextBox,
+    areas, auto_max, bench_rows, block_px, block_value, chart_gen, font_px, frame_ms,
+    frametime_bars, gauge_sweep, graph_points, is_frametime_chart, is_percent, merge_bars,
+    meter_fraction, panel_radius_px, profile_frame, rec_text, row_positions, source_value,
+    stats_text, style_px, text_parts, value_range, Frame, RectF, TextBox, TextParts,
 };
 
 /// The colour of a chart's grid lines.
@@ -79,6 +81,8 @@ pub struct View {
     pub origin: (f32, f32),
     /// Cleared to this colour before the profile is drawn.
     pub background: Option<D2D1_COLOR_F>,
+    /// The benchmark box, in pixels of the surface; never in the preview.
+    pub bench: Option<RectF>,
 }
 
 /// Draws the profile of `state` on `rt`, between its `BeginDraw` and
@@ -100,7 +104,25 @@ pub fn draw(
     let (Some(profile), Some((_, dpi))) = (&state.profile, &state.placement) else {
         return Ok(());
     };
-    let Some(frame) = profile_frame(profile, *dpi) else {
+    draw_profile(rt, cache, state, due, view.origin, profile, *dpi)?;
+    match (view.bench, &state.benchmark) {
+        (Some(r), Some(b)) => draw_bench(rt, cache, state, b, r, profile, *dpi),
+        _ => Ok(()),
+    }
+}
+
+/// Draws the profile's panel and blocks translated by `origin`.
+#[cfg(windows)]
+fn draw_profile(
+    rt: &ID2D1RenderTarget,
+    cache: &mut RenderCache,
+    state: &OverlayState,
+    due: Due,
+    origin: (f32, f32),
+    profile: &Profile,
+    dpi: u32,
+) -> Result<()> {
+    let Some(frame) = profile_frame(profile, dpi) else {
         return Ok(());
     };
     let n = profile.blocks.len();
@@ -135,7 +157,7 @@ pub fn draw(
     // SAFETY: drawing on the target between BeginDraw and EndDraw, from its
     // thread. Grayscale: ClearType needs an opaque background.
     unsafe {
-        rt.SetTransform(&Matrix3x2::translation(view.origin.0, view.origin.1));
+        rt.SetTransform(&Matrix3x2::translation(origin.0, origin.1));
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     }
     let brushes = &mut parts.brushes;
@@ -168,6 +190,90 @@ pub fn draw(
         // SAFETY: pops the clip pushed above.
         unsafe { rt.PopAxisAlignedClip() };
         drawn?;
+    }
+    Ok(())
+}
+
+/// The text style of the benchmark box: the default font, small enough for
+/// a row of two cells.
+#[cfg(windows)]
+fn bench_style() -> TextStyle {
+    TextStyle {
+        size: 8.0,
+        ..TextStyle::default()
+    }
+}
+
+/// Draws the benchmark box at `r` on the profile's panel: the `● REC mm:ss`
+/// badge while recording, the four summary rows once there is a summary.
+#[cfg(windows)]
+fn draw_bench(
+    rt: &ID2D1RenderTarget,
+    cache: &mut RenderCache,
+    state: &OverlayState,
+    bench: &BenchmarkOverlay,
+    r: RectF,
+    profile: &Profile,
+    dpi: u32,
+) -> Result<()> {
+    let rows: Vec<TextParts> = match (&bench.summary, bench.recording_s) {
+        (Some(sum), _) => bench_rows(sum, state).into(),
+        (None, Some(s)) => {
+            // The dot apart, in red.
+            let text = rec_text(s);
+            let (dot, clock) = text.split_once(' ').unwrap_or(("", &text));
+            vec![TextParts {
+                label: dot.to_owned(),
+                value: clock.to_owned(),
+                unit: String::new(),
+            }]
+        }
+        (None, None) => return Ok(()),
+    };
+    let recording = bench.summary.is_none();
+    let cell = cell_px(profile.scale, dpi);
+    let style = bench_style();
+    let px = font_px(style.size, cell);
+    let pad = (cell / 2.0) as f32;
+    let inner = RectF {
+        x: r.x + pad,
+        w: (r.w - 2.0 * pad).max(0.0),
+        ..r
+    };
+    let row_h = inner.h / rows.len() as f32;
+    let align = if recording { Align::Left } else { Align::Right };
+    let mut parts = cache.split()?;
+    let mut at = Vec::with_capacity(rows.len());
+    for (i, (row, items)) in rows.iter().zip(parts.bench.iter_mut()).enumerate() {
+        for (item, s) in items.iter_mut().zip([&row.label, &row.value, &row.unit]) {
+            parts.text.update(item, s, &style, px, cell)?;
+        }
+        let rect = RectF {
+            y: inner.y + row_h * i as f32,
+            h: row_h,
+            ..inner
+        };
+        let sizes = [items[0].size, items[1].size, items[2].size];
+        at.push(row_positions(rect, sizes, align, pad, px * 0.25));
+    }
+    // SAFETY: drawing on the target between BeginDraw and EndDraw, from its
+    // thread; the box is placed in surface pixels, not with the profile.
+    unsafe { rt.SetTransform(&Matrix3x2::identity()) };
+    let brushes = &mut parts.brushes;
+    let p = &profile.panel;
+    let radius = panel_radius_px(p.radius, cell, r.w, r.h);
+    let panel = brushes.get(shapes::with_opacity(p.color, p.opacity))?;
+    shapes::fill_panel(rt, r, radius, &panel);
+    let mut brush = |c| brushes.get(c);
+    for (items, at) in parts.bench.iter().zip(at) {
+        for (i, (item, at)) in items.iter().zip(at).enumerate() {
+            let color = if recording && i == 0 {
+                shapes::REC_RED
+            } else {
+                style.color
+            };
+            item.draw(rt, at, color, &mut brush)?;
+        }
     }
     Ok(())
 }
@@ -207,9 +313,6 @@ fn update_texts(
         return Ok(());
     }
     let value = block_value(block, state);
-    if let Some(v) = value {
-        bc.peak = bc.peak.max(v);
-    }
     let color = |target| threshold_color(&block.thresholds, target, value);
     bc.value_color = color(ThresholdTarget::Value);
     bc.graph_color = color(ThresholdTarget::Graph);
@@ -277,11 +380,13 @@ fn update_texts(
     let percent = is_percent(block, state);
     match block.kind {
         Kind::Meter => {
-            let (lo, hi) = value_range(st.meter.min, st.meter.max, percent, value, bc.peak);
+            let top = auto_max(block, state);
+            let (lo, hi) = value_range(st.meter.min, st.meter.max, percent, value, top);
             bc.fraction = meter_fraction(value.unwrap_or(f64::NAN), lo, hi);
         }
         Kind::Gauge => {
-            let (lo, hi) = value_range(st.gauge.min, st.gauge.max, percent, value, bc.peak);
+            let top = auto_max(block, state);
+            let (lo, hi) = value_range(st.gauge.min, st.gauge.max, percent, value, top);
             let sweep = gauge_sweep(value.unwrap_or(f64::NAN), lo, hi);
             let (center, radius, _) = shapes::gauge_circle(area.shape);
             let start = shapes::GAUGE_START_DEG;
@@ -867,5 +972,112 @@ pub(crate) mod tests {
             .map(|(x, y)| alpha(x, y))
             .collect();
         assert!(levels.len() > 2, "{levels:?}");
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn renders_the_summary_box_to_a_bitmap() {
+        use oma_ipc::overlay::{BenchmarkOverlay, WireBenchmarkSummary};
+        const W: u32 = 400;
+        const H: u32 = 300;
+        let mut state = gaming_state();
+        state.apply(
+            OverlayMessage::Benchmark(BenchmarkOverlay {
+                recording_s: None,
+                summary: Some(WireBenchmarkSummary {
+                    fps_displayed: 119.5,
+                    low_one_percent: 80.0,
+                    low_point_one_percent: 60.0,
+                    stutter_count: 4,
+                    stutter_percent: 0.5,
+                }),
+            }),
+            4.0,
+        );
+        // 18 x 8 cells of 8 px, below the profile.
+        let bench = RectF {
+            x: 0.0,
+            y: 220.0,
+            w: 144.0,
+            h: 64.0,
+        };
+        let _com = Com::init();
+        let (bitmap, rt) = wic_target(W, H);
+        let mut cache = RenderCache::default();
+        let due = Due {
+            text: true,
+            charts: true,
+        };
+        let view = View {
+            bench: Some(bench),
+            ..View::default()
+        };
+        for _ in 0..2 {
+            // SAFETY: a frame on our target, from this thread.
+            unsafe { rt.BeginDraw() };
+            draw(&rt, &mut cache, &state, due, view).expect("draw");
+            // SAFETY: closes the frame; no tags.
+            unsafe { rt.EndDraw(None, None) }.expect("end draw");
+        }
+        let mut pixels = vec![0u8; (W * H * 4) as usize];
+        // SAFETY: the whole bitmap into a buffer of exactly its size.
+        unsafe { bitmap.CopyPixels(std::ptr::null(), W * 4, &mut pixels) }.expect("pixels");
+        if let Some(path) = std::env::var_os("OMA_RENDER_DUMP") {
+            std::fs::write(path, bmp(W, H, &pixels)).expect("dump");
+        }
+        let alpha = |x: u32, y: u32| pixels[((y * W + x) * 4 + 3) as usize];
+        // The box's panel and its four rows of text: many alpha levels.
+        let levels: std::collections::HashSet<u8> = (228..276)
+            .flat_map(|y| (8..136).map(move |x| (x, y)))
+            .map(|(x, y)| alpha(x, y))
+            .collect();
+        assert!(levels.len() > 2, "{levels:?}");
+        assert!(!levels.contains(&0), "the panel covers the box");
+        // Nothing to the right of the box at its height.
+        assert_eq!(alpha(300, 250), 0);
+
+        // The badge: 10 x 2 cells, a red dot, the clock inside the box.
+        state.apply(
+            OverlayMessage::Benchmark(BenchmarkOverlay {
+                recording_s: Some(3599),
+                summary: None,
+            }),
+            5.0,
+        );
+        let badge = RectF {
+            w: 80.0,
+            h: 16.0,
+            ..bench
+        };
+        let view = View {
+            bench: Some(badge),
+            ..View::default()
+        };
+        // SAFETY: a frame on our target, from this thread.
+        unsafe { rt.BeginDraw() };
+        // The previous frame's pixels are cleared first.
+        // SAFETY: as above.
+        unsafe { rt.Clear(None) };
+        draw(&rt, &mut cache, &state, due, view).expect("draw");
+        // SAFETY: closes the frame; no tags.
+        unsafe { rt.EndDraw(None, None) }.expect("end draw");
+        // SAFETY: the whole bitmap into a buffer of exactly its size.
+        unsafe { bitmap.CopyPixels(std::ptr::null(), W * 4, &mut pixels) }.expect("pixels");
+        let px = |x: u32, y: u32| {
+            let i = ((y * W + x) * 4) as usize;
+            (pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])
+        };
+        let red = (220..236)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .any(|(x, y)| {
+                let (b, _, r, _) = px(x, y);
+                r > 120 && b < r / 2 + 40 && r > b + 60
+            });
+        assert!(red, "the dot is red");
+        let outside = (220..236)
+            .flat_map(|y| (80..160).map(move |x| (x, y)))
+            .filter(|&(x, y)| px(x, y).3 != 0)
+            .count();
+        assert_eq!(outside, 0, "the clock fits in the badge");
     }
 }

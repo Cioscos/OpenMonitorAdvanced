@@ -1,4 +1,4 @@
-//! App <-> overlay protocol (version 1): the messages the app and `oma-overlay.exe`
+//! App <-> overlay protocol (version 2): the messages the app and `oma-overlay.exe`
 //! exchange over the overlay pipe, framed with the generic framing of this crate.
 //!
 //! Same conventions as the service protocol: every field is always present on the wire
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::IpcError;
 
 /// Overlay protocol version, sent in [`OverlayHello::protocol_version`] by both sides.
-pub const OVERLAY_PROTOCOL_VERSION: u32 = 1;
+pub const OVERLAY_PROTOCOL_VERSION: u32 = 2;
 
 /// Prefix of the overlay pipe name; the app appends a random UUID v4.
 pub const OVERLAY_PIPE_PREFIX: &str = r"\\.\pipe\OpenMonitorAdvanced-Overlay-";
@@ -144,6 +144,24 @@ pub struct FrameTimes {
     pub frames: Vec<WireFrameTime>,
 }
 
+/// Final figures of a benchmark session, as shown in the overlay summary box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireBenchmarkSummary {
+    pub fps_displayed: f64,
+    pub low_one_percent: f64,
+    pub low_point_one_percent: f64,
+    pub stutter_count: u32,
+    pub stutter_percent: f64,
+}
+
+/// App to overlay: the benchmark box. `recording_s` is the capture time (nil when not
+/// recording); `summary` is the result to show (nil to remove it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BenchmarkOverlay {
+    pub recording_s: Option<u32>,
+    pub summary: Option<WireBenchmarkSummary>,
+}
+
 /// A message on the overlay pipe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "body", rename_all = "snake_case")]
@@ -154,6 +172,7 @@ pub enum OverlayMessage {
     Values(Values),
     FrameMetrics(FrameMetrics),
     FrameTimes(FrameTimes),
+    Benchmark(BenchmarkOverlay),
 }
 
 fn check_len(what: &str, n: usize, max: usize) -> Result<(), IpcError> {
@@ -221,6 +240,12 @@ impl OverlayMessage {
                     check_opt_finite("point_one_percent", l.point_one_percent)
                 })
             }
+            Self::Benchmark(b) => b.summary.as_ref().map_or(Ok(()), |s| {
+                check_finite("fps_displayed", s.fps_displayed)?;
+                check_finite("low_one_percent", s.low_one_percent)?;
+                check_finite("low_point_one_percent", s.low_point_one_percent)?;
+                check_finite("stutter_percent", s.stutter_percent)
+            }),
             Self::Hello(_) | Self::SetPlacement(_) => Ok(()),
         }
     }
@@ -465,5 +490,76 @@ mod tests {
         assert!(!overlay_compatible(&h));
         h.protocol_version = 0;
         assert!(!overlay_compatible(&h));
+    }
+
+    fn bench_summary() -> WireBenchmarkSummary {
+        WireBenchmarkSummary {
+            fps_displayed: 119.5,
+            low_one_percent: 80.0,
+            low_point_one_percent: 60.0,
+            stutter_count: 4,
+            stutter_percent: 0.5,
+        }
+    }
+
+    #[test]
+    fn benchmark_round_trips() {
+        round_trip(OverlayMessage::Benchmark(BenchmarkOverlay {
+            recording_s: Some(42),
+            summary: None,
+        }));
+        round_trip(OverlayMessage::Benchmark(BenchmarkOverlay {
+            recording_s: None,
+            summary: Some(bench_summary()),
+        }));
+    }
+
+    #[test]
+    fn benchmark_absent_fields_are_nil_on_the_wire() {
+        let bytes = rmp_serde::to_vec_named(&OverlayMessage::Benchmark(BenchmarkOverlay {
+            recording_s: None,
+            summary: None,
+        }))
+        .unwrap();
+        let v: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "benchmark");
+        let body = v["body"].as_object().unwrap();
+        for key in ["recording_s", "summary"] {
+            assert!(body.contains_key(key), "{key} missing");
+            assert!(body[key].is_null(), "{key} not nil");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_non_finite_summary() {
+        let msg = |s: WireBenchmarkSummary| {
+            OverlayMessage::Benchmark(BenchmarkOverlay {
+                recording_s: None,
+                summary: Some(s),
+            })
+        };
+        assert!(msg(bench_summary()).validate().is_ok());
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut s = bench_summary();
+            s.fps_displayed = bad;
+            assert!(msg(s).validate().is_err());
+            let mut s = bench_summary();
+            s.low_one_percent = bad;
+            assert!(msg(s).validate().is_err());
+            let mut s = bench_summary();
+            s.low_point_one_percent = bad;
+            assert!(msg(s).validate().is_err());
+            let mut s = bench_summary();
+            s.stutter_percent = bad;
+            assert!(msg(s).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn version_one_hello_is_incompatible() {
+        let mut h = hello();
+        h.protocol_version = 1;
+        assert!(!overlay_compatible(&h));
+        assert_eq!(OVERLAY_PROTOCOL_VERSION, 2);
     }
 }

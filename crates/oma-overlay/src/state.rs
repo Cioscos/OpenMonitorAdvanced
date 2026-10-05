@@ -254,7 +254,8 @@ impl OverlayState {
     pub fn apply(&mut self, msg: OverlayMessage, now_s: f64) -> Changes {
         match msg {
             // The link answers the handshake; nothing to draw.
-            OverlayMessage::Hello(_) => Changes::default(),
+            // Drawn from D7 on; ignored until then.
+            OverlayMessage::Hello(_) | OverlayMessage::Benchmark(_) => Changes::default(),
             OverlayMessage::SetProfile(p) => {
                 let profile = match parse_profile(&p.profile_json) {
                     Ok(profile) => profile,

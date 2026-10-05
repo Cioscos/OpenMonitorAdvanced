@@ -11,8 +11,8 @@
 //!   (while it is on) and the variable's (DP13); sent on change and again
 //!   once a second, as M7b did, with the target.
 //! - **Target:** a [`TargetPicker`] over the presenting processes and the
-//!   foreground PID; a target that keeps presenting is never replaced. A
-//!   new target activates `gameProfiles[exe]`, else
+//!   foreground PID; a target that keeps presenting is replaced only by a
+//!   game in the foreground on its own monitor. A new target activates `gameProfiles[exe]`, else
 //!   `defaultProfile`, and ends a `next_profile` choice.
 //!   Without frame data (service down or incompatible, engine starting or
 //!   not running) the target is kept while its window exists, and a
@@ -591,7 +591,7 @@ impl Controller {
         if self.frames_available() {
             self.pick_target(now_ms, out);
         } else {
-            self.hold_target(out);
+            self.hold_target(now_ms, out);
         }
         for batch in std::mem::take(&mut self.batches) {
             self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
@@ -618,7 +618,11 @@ impl Controller {
             .collect();
         self.picker.on_processes(&list, now_ms);
         if let Some(fg) = self.foreground {
-            self.picker.on_foreground(fg.pid, now_ms);
+            let beside = self
+                .foreground_monitor
+                .zip(self.geometry)
+                .is_some_and(|(m, g)| m != g.monitor);
+            self.picker.on_foreground(fg.pid, beside, now_ms);
         }
         self.picker.tick(now_ms);
         // Compared with our own target, which `hold_target` may have kept
@@ -638,10 +642,12 @@ impl Controller {
     /// last process list, has a profile in `gameProfiles`. Without any list
     /// (service down since the start) no game is recognised. Any other
     /// window (a browser) is never a target.
-    fn hold_target(&mut self, out: &mut Outputs) {
+    /// The picker adopts the held target, to keep it once frames return.
+    fn hold_target(&mut self, now_ms: u64, out: &mut Outputs) {
         if self.target.is_some() {
             if !self.target_window_alive() {
                 self.set_target(None);
+                self.picker.adopt(None, now_ms);
                 out.link.push(LinkCommand::SetFramesTarget(None));
             }
             return;
@@ -658,11 +664,13 @@ impl Controller {
         if excluded || !self.settings.overlay.game_profiles.contains_key(&exe) {
             return;
         }
-        self.set_target(Some(ProcessInfo {
+        let held = ProcessInfo {
             pid: fg.pid,
             name: name.clone(),
             displayed_fps: 0.0,
-        }));
+        };
+        self.picker.adopt(Some(held.clone()), now_ms);
+        self.set_target(Some(held));
         out.link.push(LinkCommand::SetFramesTarget(Some(fg.pid)));
     }
 
@@ -1327,6 +1335,18 @@ mod tests {
         assert!(targets(&out).is_empty());
         assert!(placements(&out).is_empty(), "still shown on the game");
         assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+    }
+
+    #[test]
+    fn game_on_the_same_monitor_takes_the_target() {
+        let mut c = showing();
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        c.on_foreground_monitor(Some(MONITOR));
+        let out = c.step(200);
+        assert_eq!(targets(&out), vec![Some(OTHER)]);
     }
 
     #[test]

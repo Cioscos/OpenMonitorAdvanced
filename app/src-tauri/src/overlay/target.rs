@@ -1,14 +1,19 @@
 //! Which game to follow: the foreground process, when the service sees it
 //! present at least [`MIN_GAME_FPS`] frames per second and it is neither one
 //! of ours nor a system process. The target stays while it keeps presenting
-//! at that rate, whatever has the foreground (a window on another monitor,
-//! another game): only a target that stops presenting (closed, minimized, a
-//! loading screen) gives way, to the foreground game at once or, without
-//! one, after [`TARGET_GRACE_MS`]. Pure: the caller supplies a monotonic
-//! clock in milliseconds.
+//! at [`KEEP_GAME_FPS`] or more, against any window on another monitor (a
+//! second screen); a game brought to the foreground on the target's own
+//! monitor (or on an unknown one) replaces it at once. A target that stops
+//! presenting (closed, minimized) gives way to the foreground game at once
+//! or, without one, after [`TARGET_GRACE_MS`]. Pure: the caller supplies a
+//! monotonic clock in milliseconds.
 
 /// Fewest displayed frames per second for a process to count as a game.
 pub const MIN_GAME_FPS: f64 = 10.0;
+
+/// Fewest displayed frames per second for a target to stay one: many games
+/// cap themselves at a few frames per second without the focus.
+pub const KEEP_GAME_FPS: f64 = 1.0;
 
 /// How long a target is kept after it last qualified.
 pub const TARGET_GRACE_MS: u64 = 3_000;
@@ -47,6 +52,8 @@ pub struct TargetPicker {
     /// Lowercase.
     excluded: Vec<String>,
     foreground: Option<u32>,
+    /// The foreground window is on another monitor than the target's.
+    beside: bool,
     processes: Vec<ProcessInfo>,
     current: Option<ProcessInfo>,
     /// When `current` last qualified (as the candidate or still presenting).
@@ -64,6 +71,7 @@ impl TargetPicker {
                 .map(|name| name.to_lowercase())
                 .collect(),
             foreground: None,
+            beside: false,
             processes: Vec::new(),
             current: None,
             last_candidate_ms: 0,
@@ -71,12 +79,22 @@ impl TargetPicker {
         }
     }
 
-    /// The foreground window now belongs to `pid`.
-    pub fn on_foreground(&mut self, pid: u32, now_ms: u64) {
+    /// The foreground window now belongs to `pid`; `beside_target`: it is
+    /// on another monitor than the target's window.
+    pub fn on_foreground(&mut self, pid: u32, beside_target: bool, now_ms: u64) {
         // The state up to now counts before the change.
         self.evaluate(now_ms);
         self.foreground = Some(pid);
+        self.beside = beside_target;
         self.evaluate(now_ms);
+    }
+
+    /// Makes `target` the current one, as already reported: the caller
+    /// chose it without the picker (no frame data).
+    pub fn adopt(&mut self, target: Option<ProcessInfo>, now_ms: u64) {
+        self.reported = target.as_ref().map(|t| t.pid);
+        self.current = target;
+        self.last_candidate_ms = now_ms;
     }
 
     /// The latest list of presenting processes.
@@ -115,12 +133,14 @@ impl TargetPicker {
     }
 
     /// The current target as it shows in the latest list, while it still
-    /// presents at a game's rate.
+    /// presents at [`KEEP_GAME_FPS`] or more.
     fn presenting(&self) -> Option<&ProcessInfo> {
         let pid = self.current.as_ref()?.pid;
-        self.processes
-            .iter()
-            .find(|p| p.pid == pid && self.qualifies(p))
+        self.processes.iter().find(|p| {
+            p.pid == pid
+                && p.displayed_fps >= KEEP_GAME_FPS
+                && !is_excluded(&self.excluded, &p.name)
+        })
     }
 
     fn qualifies(&self, p: &ProcessInfo) -> bool {
@@ -128,11 +148,13 @@ impl TargetPicker {
     }
 
     fn evaluate(&mut self, now_ms: u64) {
-        if let Some(still) = self.presenting().cloned() {
-            self.current = Some(still);
-            self.last_candidate_ms = now_ms;
-        } else if let Some(candidate) = self.candidate().cloned() {
-            self.current = Some(candidate);
+        let candidate = self.candidate().cloned();
+        let kept = self
+            .presenting()
+            .cloned()
+            .filter(|still| self.beside || candidate.as_ref().is_none_or(|c| c.pid == still.pid));
+        if let Some(next) = kept.or(candidate) {
+            self.current = Some(next);
             self.last_candidate_ms = now_ms;
         } else if self.current.is_some()
             && now_ms.saturating_sub(self.last_candidate_ms) >= TARGET_GRACE_MS
@@ -180,7 +202,7 @@ mod tests {
     fn following_game() -> TargetPicker {
         let mut p = picker();
         p.on_processes(&[game(), other_game()], 0);
-        p.on_foreground(100, 0);
+        p.on_foreground(100, false, 0);
         assert_eq!(p.tick(0), Some(Some(100)));
         p
     }
@@ -190,7 +212,7 @@ mod tests {
         let mut p = picker();
         p.on_processes(&[game()], 0);
         assert_eq!(p.current(), None);
-        p.on_foreground(100, 10);
+        p.on_foreground(100, false, 10);
         assert_eq!(p.current(), Some(&game()));
         assert_eq!(p.tick(10), Some(Some(100)));
     }
@@ -199,7 +221,7 @@ mod tests {
     fn slow_presenter_is_not_a_game() {
         let mut p = picker();
         p.on_processes(&[proc(100, "slow.exe", 9.0)], 0);
-        p.on_foreground(100, 0);
+        p.on_foreground(100, false, 0);
         assert_eq!(p.current(), None);
         assert_eq!(p.tick(0), None);
     }
@@ -208,7 +230,7 @@ mod tests {
     fn excluded_names_are_never_targets() {
         let mut p = picker();
         p.on_processes(&[proc(50, "DWM.EXE", 240.0)], 0);
-        p.on_foreground(50, 0);
+        p.on_foreground(50, false, 0);
         assert_eq!(p.current(), None);
         assert_eq!(p.tick(0), None);
     }
@@ -218,11 +240,11 @@ mod tests {
         // Built without any excluded name: our own executables stay excluded.
         let mut p = TargetPicker::new(vec![], vec![]);
         p.on_processes(&[proc(60, "OMA-Overlay.exe", 60.0)], 0);
-        p.on_foreground(60, 0);
+        p.on_foreground(60, false, 0);
         assert_eq!(p.current(), None);
         assert_eq!(p.tick(0), None);
         p.on_processes(&[proc(61, "oma-app.exe", 60.0)], 0);
-        p.on_foreground(61, 0);
+        p.on_foreground(61, false, 0);
         assert_eq!(p.current(), None);
         assert!(OWN_PROCESS_NAMES.contains(&"oma-overlay.exe"));
     }
@@ -231,7 +253,7 @@ mod tests {
     fn own_pids_are_never_targets() {
         let mut p = picker();
         p.on_processes(&[proc(OWN, "renamed.exe", 60.0)], 0);
-        p.on_foreground(OWN, 0);
+        p.on_foreground(OWN, false, 0);
         assert_eq!(p.current(), None);
         assert_eq!(p.tick(0), None);
     }
@@ -239,12 +261,12 @@ mod tests {
     #[test]
     fn target_survives_a_short_alt_tab() {
         let mut p = following_game();
-        p.on_foreground(300, 1_000);
+        p.on_foreground(300, false, 1_000);
         p.tick(1_000);
         p.tick(3_000);
         assert_eq!(p.current(), Some(&game()));
         // Back in the game before the grace ran out: no change at all.
-        p.on_foreground(100, 3_000);
+        p.on_foreground(100, false, 3_000);
         assert_eq!(p.tick(3_000), None);
         assert_eq!(p.current(), Some(&game()));
     }
@@ -254,23 +276,60 @@ mod tests {
         // A window on another monitor takes the foreground: the game keeps
         // presenting and stays the target.
         let mut p = following_game();
-        p.on_foreground(300, 1_000);
+        p.on_foreground(300, false, 1_000);
         assert_eq!(p.tick(10_000), None);
         assert_eq!(p.current(), Some(&game()));
     }
 
     #[test]
-    fn presenting_target_is_not_replaced_by_another_game() {
+    fn presenting_target_is_not_replaced_by_a_game_on_another_monitor() {
         let mut p = following_game();
-        p.on_foreground(200, 500);
+        p.on_foreground(200, true, 500);
         assert_eq!(p.current(), Some(&game()));
         assert_eq!(p.tick(500), None);
     }
 
     #[test]
+    fn game_on_the_same_monitor_replaces_a_presenting_target() {
+        // Alt-tab from one game to another on a single monitor, the first
+        // one still rendering behind.
+        let mut p = following_game();
+        p.on_foreground(200, false, 500);
+        assert_eq!(p.current(), Some(&other_game()));
+        assert_eq!(p.tick(500), Some(Some(200)));
+    }
+
+    #[test]
+    fn target_throttled_in_the_background_is_kept() {
+        // Many games cap themselves at a few FPS without the focus: still
+        // the target, even against a game on another monitor.
+        let mut p = following_game();
+        p.on_processes(&[proc(100, "game.exe", 5.0), other_game()], 500);
+        p.on_foreground(200, true, 500);
+        assert_eq!(p.tick(10_000), None);
+        assert_eq!(p.current().map(|t| t.pid), Some(100));
+    }
+
+    #[test]
+    fn adopted_target_is_kept_like_a_chosen_one() {
+        // A target held without frame data, handed back to the picker.
+        let mut p = picker();
+        p.adopt(Some(game()), 0);
+        assert_eq!(p.tick(0), None, "already the caller's target");
+        p.on_processes(&[game(), other_game()], 100);
+        p.on_foreground(200, true, 100);
+        assert_eq!(p.tick(100), None);
+        assert_eq!(p.current(), Some(&game()));
+        // Dropped by the caller: the foreground game is picked next.
+        p.adopt(None, 200);
+        assert_eq!(p.current(), None);
+        assert_eq!(p.tick(200), Some(Some(200)));
+    }
+
+    #[test]
     fn target_that_stops_presenting_drops_after_three_seconds() {
         let mut p = following_game();
-        p.on_foreground(300, 1_000);
+        p.on_foreground(300, false, 1_000);
         p.on_processes(&[other_game()], 1_000);
         assert_eq!(p.tick(3_999), None);
         assert_eq!(p.current(), Some(&game()));
@@ -282,16 +341,8 @@ mod tests {
     fn stopped_target_is_replaced_by_the_foreground_game_at_once() {
         let mut p = following_game();
         p.on_processes(&[other_game()], 500);
-        p.on_foreground(200, 500);
+        p.on_foreground(200, false, 500);
         assert_eq!(p.current(), Some(&other_game()));
-        assert_eq!(p.tick(500), Some(Some(200)));
-    }
-
-    #[test]
-    fn target_below_the_game_rate_counts_as_stopped() {
-        let mut p = following_game();
-        p.on_processes(&[proc(100, "game.exe", 5.0), other_game()], 500);
-        p.on_foreground(200, 500);
         assert_eq!(p.tick(500), Some(Some(200)));
     }
 
@@ -300,7 +351,7 @@ mod tests {
         let mut p = picker();
         assert_eq!(p.tick(0), None);
         p.on_processes(&[game()], 0);
-        p.on_foreground(100, 0);
+        p.on_foreground(100, false, 0);
         assert_eq!(p.tick(0), Some(Some(100)));
         assert_eq!(p.tick(250), None);
         p.on_processes(&[game()], 500);

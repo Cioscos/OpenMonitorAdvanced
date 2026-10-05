@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use oma_core::engine::TickOutput;
 use oma_core::model::Schema;
-use oma_core::overlay::Foreground;
+use oma_core::overlay::{Foreground, PxRect};
 use oma_core::settings::Settings;
 use oma_ipc::overlay::OverlayMessage;
 use oma_ipc::FramesConfigure;
@@ -271,6 +271,8 @@ impl OverlayRunner {
             last_foreground: None,
             foreground_ms: 0,
             foreground_now: current_foreground,
+            monitor_of: window_monitor,
+            logged_shown: false,
             engine_on: false,
             epoch: Instant::now(),
         };
@@ -354,6 +356,10 @@ struct Ctl {
     foreground_ms: u64,
     /// The foreground window now (`current_foreground`; a fake in tests).
     foreground_now: fn() -> Option<Foreground>,
+    /// The monitor of a window (`window_monitor`; a fake in tests).
+    monitor_of: fn(isize) -> Option<PxRect>,
+    /// The overlay was last logged as shown.
+    logged_shown: bool,
     /// The last `ConfigureFrames` sent turned the engine on.
     engine_on: bool,
     epoch: Instant,
@@ -432,7 +438,7 @@ impl Ctl {
                 self.last_foreground = Some(fg);
                 self.controller.on_foreground(fg);
                 self.controller
-                    .on_foreground_monitor(window_monitor(fg.hwnd));
+                    .on_foreground_monitor((self.monitor_of)(fg.hwnd));
                 // Back to the game: its state (minimized, visible) may differ.
                 if self.tracked.is_some_and(|t| t.hwnd == fg.hwnd) {
                     self.read_geometry();
@@ -506,6 +512,10 @@ impl Ctl {
         if let Some(fg) = (self.foreground_now)() {
             if Some(fg) != self.last_foreground {
                 self.handle(Input::Foreground(fg));
+            } else {
+                // Same window, maybe moved to another monitor since.
+                self.controller
+                    .on_foreground_monitor((self.monitor_of)(fg.hwnd));
             }
         }
     }
@@ -555,8 +565,11 @@ impl Ctl {
                 host.retry();
             }
             for msg in out.overlay {
+                // Shown/hidden changes only: a moving window would log
+                // every step.
                 if let OverlayMessage::SetPlacement(p) = &msg {
-                    match p.area {
+                    let shown = p.area.is_some();
+                    match p.area.filter(|_| !self.logged_shown) {
                         Some(a) => tracing::info!(
                             x = a.x,
                             y = a.y,
@@ -565,8 +578,10 @@ impl Ctl {
                             dpi = p.dpi,
                             "overlay shown"
                         ),
-                        None => tracing::info!("overlay hidden"),
+                        None if self.logged_shown && !shown => tracing::info!("overlay hidden"),
+                        None => {}
                     }
+                    self.logged_shown = shown;
                 }
                 host.send(msg);
             }
@@ -763,6 +778,8 @@ mod tests {
             last_foreground: None,
             foreground_ms: 0,
             foreground_now: current_foreground,
+            monitor_of: window_monitor,
+            logged_shown: false,
             engine_on: false,
             epoch: Instant::now(),
         }
@@ -784,12 +801,22 @@ mod tests {
         ctl.host_wanted = true;
         // The last event named the alt-tab switcher; the game holds the
         // foreground.
+        static MONITOR_READS: AtomicUsize = AtomicUsize::new(0);
+        ctl.monitor_of = |_| {
+            MONITOR_READS.fetch_add(1, Ordering::SeqCst);
+            None
+        };
         ctl.handle(Input::Foreground(switcher));
         *NOW.lock().unwrap() = Some(game);
         ctl.check_foreground(500);
         assert_eq!(ctl.last_foreground, Some(switcher), "not due yet");
         ctl.check_foreground(1_000);
         assert_eq!(ctl.last_foreground, Some(game));
+        // The same window a second later: its monitor is read again (it may
+        // have been moved onto the game's monitor).
+        let reads = MONITOR_READS.load(Ordering::SeqCst);
+        ctl.check_foreground(2_000);
+        assert_eq!(MONITOR_READS.load(Ordering::SeqCst), reads + 1);
         // Not wanted: no check.
         ctl.host_wanted = false;
         *NOW.lock().unwrap() = Some(switcher);

@@ -162,7 +162,7 @@ pub struct Outputs {
     /// The target's present mode, when it changed (for the log).
     pub present_mode: Option<String>,
     /// The foreground window as the service sees it, when the window or
-    /// its standing (listed, game rate, mode) changed (for the log).
+    /// its standing (listed, game rate) changed (for the log).
     pub foreground_note: Option<ForegroundNote>,
 }
 
@@ -254,8 +254,9 @@ pub struct Controller {
     sent_plan: Option<ValuesPlan>,
     /// The target's present mode last reported.
     sent_present_mode: Option<String>,
-    /// Window, listed, at a game's rate, mode: of the last foreground note.
-    sent_foreground: Option<(Foreground, bool, bool, String)>,
+    /// Window, listed, at a game's rate: of the last foreground note (the
+    /// target's mode has its own line).
+    sent_foreground: Option<(Foreground, bool, bool)>,
 }
 
 impl Controller {
@@ -919,7 +920,6 @@ impl Controller {
             fg,
             listed.is_some(),
             listed.is_some_and(|p| p.displayed_fps >= MIN_GAME_FPS),
-            listed.map(|p| p.present_mode.clone()).unwrap_or_default(),
         );
         if self.sent_foreground.as_ref() == Some(&key) {
             return None;

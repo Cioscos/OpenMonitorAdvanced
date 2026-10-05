@@ -1098,3 +1098,30 @@ Spike eseguito il 2026-10-04 (esito: `docs/superpowers/references/m7/spike-findi
 | SD10 | §3.2 e §14 G-Sync: su RTX 4080 la finestra trasparente ai clic non toglie il flip indipendente (MPO) né G-Sync, visibile, vuota o nascosta. La regola «finestra nascosta» resta per l'hardware senza MPO; il limite del §14 diventa «può succedere su hardware senza piani MPO liberi». |
 | SD11 | §4.3 esclusioni: confermate `dwm.exe` (presenta come `Hardware: Legacy Flip` quando esiste una finestra sopra il gioco) e i nostri processi (la finestra dell'overlay presenta come ogni altra). |
 | SD12 | §14 limiti, FG: «FSR 3/4 FG e Smooth Motion non distinguibili» → **non distinguibili solo senza Reflex o con PCL spento**; con PCL spento DLSS FG e Smooth Motion mostrano «FG?», FSR FG solo gli FPS mostrati. |
+
+## Esito dell'esecuzione
+
+Parte B eseguita subagent-driven il 2026-10-04/05: B1–B12 come da piano, più **B13** chiesto dall'utente durante l'esecuzione (nell'uninstaller, «Annulla» sul messaggio «app in esecuzione» chiude subito l'uninstaller con codice 1 invece di lasciare la pagina di avanzamento ferma). Ogni task ha avuto la sua revisione, con `protocol-parity-reviewer` dopo B4 e `ffi-safety-reviewer` per B6 e B10; poi la revisione dell'intero branch, che ha trovato un difetto importante, corretto: il tipo di frame `Unknown` di PresentMon (e `NA`, vuoto) era trattato come frame generato, mentre ora è `unknown` (SD3 aggiornata).
+
+Decisioni prese durante l'esecuzione:
+- l'aggregatore del servizio è thread-safe con un solo lock;
+- il riepilogo dei processi porta `at_qpc` = `TimeProvider.GetTimestamp()` (QPC su Windows);
+- la cattura si riconfigura a ogni `FramesConfigure`, ma su bersaglio, disconnessione e scadenza solo quando cambiano le opzioni combinate;
+- l'app rimanda configurazione e bersaglio una volta al secondo (il collegamento scarta i valori uguali), perché un comando trovato a coda piena andrebbe perso;
+- `ServiceHost.Build` riceve la cattura dall'esterno, così i test non toccano la sessione ETW vera;
+- quando la cattura esce da `running`, il servizio svuota l'aggregatore (niente elenco dei processi vecchio).
+
+Prove dal vivo (2026-10-05, setup locale 0.4.1 con PresentMon, RTX 4080; dettagli in `docs/follow-ups.md`), tutte superate:
+
+| Prova | Esito |
+|---|---|
+| V1 | Control senza FG: 68,6–68,8 FPS mostrati contro 67 di Steam (circa 2,5%) |
+| V2 | DLSS FG: con PCL 116–117 / 58, `Reflex`, ×2,00; senza PCL «FG?» |
+| V3 | FSR FG: senza PCL 120 mostrati, nessuna origine; con PCL 120 / 60, ×2,00 |
+| V4 | Smooth Motion (God of War): con PCL 157 / 78,5, ×2,00; senza PCL «FG?» |
+| V5 | alt-tab: il bersaglio cade dopo 3 s e torna al rientro; un'uscita di circa 2 s non lo fa cadere |
+| V6 | servizio 0,03% + PresentMon 0,003% della CPU totale, sotto lo 0,5% del §11; app nel tray 0,05% e 17,9 MB |
+| V7 | `Restart-Service oma-service`: le righe `frames:` riprendono da sole in circa 10 s |
+| V8 | «Annulla» con OMA aperto chiude subito l'uninstaller; OMA e il servizio restano |
+
+Osservazioni per la M7c/M7d: in primo piano diventa bersaglio anche un'app normale che presenta almeno 10 FPS (Windows Terminal mentre si scrive), come prevede la regola; in God of War (DX11) PresentMon non dà la latenza PC. Restano da fare: i percorsi di PresentMon nell'installer in una VM o Sandbox, `verify-signatures.ps1` sul nuovo setup, e l'estensione del test sul setup reale (`docs/follow-ups.md`).

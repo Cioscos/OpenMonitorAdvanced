@@ -230,16 +230,16 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 
 ## Manual checks after M7b
 
-Owed: the live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-motore-frame.md`, Task B12 step 8, spec M7 §13.2), never run by an agent. An agent builds the setup (`pwsh scripts/build-installer-payload.ps1`, then `cd app && pnpm tauri build --bundles nsis`) and prints its path; the user installs it, quits the app from the tray, starts it again from a PowerShell with `$env:OMA_FRAMES_DEBUG='pcl'` (or `1`, or `all`) and plays, while the agent reads the `frames:` lines in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs` (format in `app/src-tauri/src/overlay/frames.rs`). Results go to the plan («Esito dell'esecuzione») and here.
+The live checks of the M7b plan (`docs/superpowers/plans/2026-10-04-m7b-motore-frame.md`, Task B12 step 8, V1-V8) are done (2026-10-05, local 0.4.1 setup with PresentMon, SHA-256 `FC650CEF...C5F5`, all passed; games: Control Resonant DX12, God of War 2018 DX11, RTX 4080). The agent read the `frames:` lines in `%LOCALAPPDATA%\OpenMonitorAdvanced\logs`.
 
-- V1: a game without frame generation: displayed FPS within 5 % of the Steam overlay.
-- V2: DLSS FG with and without PCL (`pcl` against `1`): with PCL `source=Reflex` and `mult` about 2; without PCL `source=FG?`.
-- V3: FSR FG with PCL (`mult` about 2) and without PCL (displayed FPS only).
-- V4: NVIDIA Smooth Motion with and without PCL.
-- V5: alt-tab out of the game and back: the target holds for 3 s, then drops; back in the game, it is followed again.
-- V6: `scripts/measure-footprint.ps1 -Service` with the frame engine on and no game: PresentMon plus the service's extra work under 0.5 % of the total CPU (spec M7 §11, `docs/perf-budget.md`).
-- V7: restart the service from `services.msc` with the app open: after the reconnection the `frames:` lines resume by themselves.
-- V8: with OMA running, start the uninstall and press «Annulla» on the "app is running" prompt: the uninstaller closes at once and OMA stays installed and working; then uninstall again and press OK: it works as before.
+- V1: Control without FG: 68.6-68.8 displayed FPS against 67 on the Steam overlay (about 2.5 %); Reflex rendered 68.7, `mult=1.00`. `bottleneck=-` because `pcl` does not track the GPU (only `all` does).
+- V2: DLSS FG with PCL: 116-117 displayed (Steam 118), 58 rendered (Steam 59), `source=Reflex`, `mult=2.00`; without PCL (`1`): 117 displayed, `source=FG?`.
+- V3: FSR FG without PCL: 120 displayed (Steam 120), `source=-`; with PCL: 120 / 60, `source=Reflex`, `mult=2.00`.
+- V4: Smooth Motion in God of War with PCL: 157 displayed (NVIDIA overlay 157), 78.5 rendered, `mult=2.00`; without PCL `source=FG?`. `pc_lat_ms=-` in this DX11 game: PresentMon gives frame ids but no PC latency.
+- V5: alt-tab: the target dropped 3 s after leaving the game and came back on return; a short exit (about 2 s) kept it. Noted: Windows Terminal, while typing, presents 15-22 FPS and became the target (rule "foreground with at least 10 FPS", as Afterburner); per-profile exclusions are an M7c/M7d topic.
+- V6: tray with `OMA_FRAMES_DEBUG=1`, no game: app 0.05 % CPU and 17.9 MB; service 0.03 % CPU and 63.3 MB private; PresentMon 0.003 % CPU and 6.1 MB. Service plus PresentMon about 0.03 %, under the 0.5 % of spec M7 §11.
+- V7: `Restart-Service oma-service` with the app open: link back in 7 s, capture `starting` then `running`, target followed again after about 10 s in all.
+- V8: with OMA running, «Annulla» on the "app is running" prompt closes the uninstaller at once; OMA and the service keep running.
 
 Also owed with that setup: the installer's PresentMon paths in a VM or Windows Sandbox (`service\presentmon\PresentMon-2.6.0-x64.exe` installed and protected, removed on deselection and uninstall, `logman stop OpenMonitorAdvanced-Frames -ets` run by the uninstaller), and `scripts/verify-signatures.ps1 -Policy none` on the new setup (exactly one PresentMon, Intel signature).
 

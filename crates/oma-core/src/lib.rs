@@ -3,6 +3,7 @@
 
 pub mod csv;
 pub mod engine;
+pub mod format;
 pub mod frames;
 pub mod history;
 pub mod hotkey;

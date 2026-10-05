@@ -2427,6 +2427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oma-overlay"
+version = "0.4.1"
+dependencies = [
+ "oma-core",
+ "oma-ipc",
+ "oma-win",
+ "serde_json",
+ "tauri-winres",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "oma-win"
 version = "0.4.1"
 dependencies = [

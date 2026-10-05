@@ -52,7 +52,7 @@ test('section order includes overlay between log and sources', async () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((b) => b.textContent?.trim());
-  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
+  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'benchmark', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
   await fireEvent.click(within(nav).getByRole('button', { name: t('settings.section.overlay') }));
   expect(screen.getByRole('switch', { name: t('overlay.enabled') })).toBeTruthy();
 });
@@ -227,4 +227,27 @@ test('hotkey capture suspends hotkeys', async () => {
   await fireEvent.focus(next);
   await fireEvent.blur(next);
   expect(backend.hotkeySuspensions).toEqual([true, false, true, false]);
+});
+
+test('open editor calls the backend', async () => {
+  const { backend } = await setup();
+  await fireEvent.click(button('overlay.openEditor'));
+  expect(backend.editorCalls).toContain('openOverlayEditor');
+});
+
+test('benchmark hotkey capture suspends hotkeys', async () => {
+  const { backend } = await setup();
+  const input = screen.getByRole('textbox', { name: t('overlay.hotkeyBenchmark') });
+  await fireEvent.focus(input);
+  await waitFor(() => expect(backend.hotkeySuspensions).toEqual([true]));
+});
+
+test('retry and reload errors are shown', async () => {
+  const { backend } = await setup({ overlay: { enabled: true } }, { enabled: true, frames: 'failed', process: 'running' });
+  backend.overlayReloadProfiles = async () => Promise.reject('shell.error.missing');
+  await fireEvent.click(button('overlay.reload'));
+  await screen.findByText(t('overlay.error', { detail: t('shell.error.missing') }));
+  backend.overlayRetry = async () => Promise.reject(new Error('boom'));
+  await fireEvent.click(button('overlay.retry'));
+  await screen.findByText(t('overlay.error', { detail: 'boom' }));
 });

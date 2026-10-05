@@ -60,6 +60,11 @@ const PEER: &str = "overlay pipe peer";
 /// A fresh overlay pipe name: [`OVERLAY_PIPE_PREFIX`] followed by a UUID v4
 /// drawn from the system-preferred RNG.
 pub fn random_pipe_name() -> io::Result<String> {
+    Ok(format!("{OVERLAY_PIPE_PREFIX}{}", random_uuid_v4()?))
+}
+
+/// A random UUID v4 (lowercase, 8-4-4-4-12) drawn from the system-preferred RNG.
+pub fn random_uuid_v4() -> io::Result<String> {
     let mut bytes = [0u8; 16];
     // SAFETY: `bytes` is a live, writable 16-byte buffer for the whole call; no algorithm
     // handle is needed with BCRYPT_USE_SYSTEM_PREFERRED_RNG.
@@ -70,7 +75,7 @@ pub fn random_pipe_name() -> io::Result<String> {
             status.0 as u32
         )));
     }
-    Ok(format!("{OVERLAY_PIPE_PREFIX}{}", uuid_v4(bytes)))
+    Ok(uuid_v4(bytes))
 }
 
 /// The pipe's security descriptor: owner `sid` (so an elevated app does not
@@ -398,6 +403,20 @@ mod tests {
             0xCD, 0xEF,
         ];
         assert_eq!(uuid_v4(bytes), "01234567-89ab-4def-8123-456789abcdef");
+    }
+
+    #[test]
+    fn random_uuid_v4_is_lowercase_8_4_4_4_12() {
+        let a = random_uuid_v4().expect("uuid");
+        let b = random_uuid_v4().expect("uuid");
+        assert_ne!(a, b);
+        let lens: Vec<usize> = a.split('-').map(str::len).collect();
+        assert_eq!(lens, [8, 4, 4, 4, 12], "{a}");
+        assert!(
+            a.chars()
+                .all(|c| c == '-' || matches!(c, '0'..='9' | 'a'..='f')),
+            "{a}"
+        );
     }
 
     #[test]

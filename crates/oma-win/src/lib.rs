@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod cpu;
 pub mod crash;
 pub(crate) mod dynlib;
+pub mod fonts;
 pub mod foreground;
 pub mod fsutil;
 pub mod gpu;

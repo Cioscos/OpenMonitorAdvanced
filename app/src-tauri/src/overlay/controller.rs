@@ -159,6 +159,8 @@ pub struct Outputs {
     pub retry_host: bool,
     /// The new plan for the sampler, only when it changed.
     pub values_plan: Option<ValuesPlan>,
+    /// The target's present mode, when it changed (for the log).
+    pub present_mode: Option<String>,
 }
 
 pub struct Controller {
@@ -237,6 +239,8 @@ pub struct Controller {
     toasted: BTreeSet<String>,
     sent_status: Option<OverlayStatus>,
     sent_plan: Option<ValuesPlan>,
+    /// The target's present mode last reported.
+    sent_present_mode: Option<String>,
 }
 
 impl Controller {
@@ -291,6 +295,7 @@ impl Controller {
             toasted: BTreeSet::new(),
             sent_status: None,
             sent_plan: None,
+            sent_present_mode: None,
         }
     }
 
@@ -434,6 +439,16 @@ impl Controller {
         self.refresh_profile();
         self.step_overlay(&config, now_ms, &mut out);
         out.toast = self.toast();
+        let mode = self.target.as_ref().and_then(|t| {
+            self.processes
+                .iter()
+                .find(|p| p.pid == t.pid)
+                .map(|p| p.present_mode.clone())
+        });
+        if mode.is_some() && mode != self.sent_present_mode {
+            self.sent_present_mode.clone_from(&mode);
+            out.present_mode = mode;
+        }
 
         let status = self.current_status();
         if self.sent_status.as_ref() != Some(&status) {
@@ -703,6 +718,7 @@ impl Controller {
         self.times_after_s = f64::NEG_INFINITY;
         self.choice = None;
         self.choice_dirty = true;
+        self.sent_present_mode = None;
     }
 
     /// Follows the target's window (a game may replace it) and asks for its
@@ -1701,6 +1717,27 @@ mod tests {
             Some(ToastRequest::ExclusiveFullscreen {
                 exe: "other.exe".into()
             })
+        );
+    }
+
+    #[test]
+    fn target_present_mode_reported_on_change() {
+        let mut c = enabled_with(&settings(true));
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        assert_eq!(
+            c.step(0).present_mode.as_deref(),
+            Some("Hardware: Independent Flip")
+        );
+        assert_eq!(c.step(100).present_mode, None, "unchanged");
+        let legacy = PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![process(GAME, "my game.exe", "Hardware: Legacy Flip")],
+        };
+        c.on_frames(Some(&status("running")), Some(&legacy), &[]);
+        assert_eq!(
+            c.step(200).present_mode.as_deref(),
+            Some("Hardware: Legacy Flip")
         );
     }
 

@@ -30,6 +30,7 @@ use oma_core::engine::TickOutput;
 use oma_core::model::Schema;
 use oma_core::overlay::Foreground;
 use oma_core::settings::Settings;
+use oma_ipc::overlay::OverlayMessage;
 use oma_ipc::FramesConfigure;
 use oma_win::foreground::{window_geometry, window_monitor, ForegroundEvent, ForegroundWatcher};
 use oma_win::svc::{FramesFeed, LinkCommand};
@@ -262,6 +263,7 @@ impl OverlayRunner {
             host_start_failed: false,
             tracked: None,
             geometry_ms: 0,
+            logged_target: None,
             engine_on: false,
             epoch: Instant::now(),
         };
@@ -337,6 +339,8 @@ struct Ctl {
     /// The window whose geometry is read.
     tracked: Option<Foreground>,
     geometry_ms: u64,
+    /// The target last written to the log.
+    logged_target: Option<(String, u32)>,
     /// The last `ConfigureFrames` sent turned the engine on.
     engine_on: bool,
     epoch: Instant,
@@ -518,11 +522,27 @@ impl Ctl {
                 host.retry();
             }
             for msg in out.overlay {
+                if let OverlayMessage::SetPlacement(p) = &msg {
+                    match p.area {
+                        Some(a) => tracing::info!(
+                            x = a.x,
+                            y = a.y,
+                            width = a.width,
+                            height = a.height,
+                            dpi = p.dpi,
+                            "overlay shown"
+                        ),
+                        None => tracing::info!("overlay hidden"),
+                    }
+                }
                 host.send(msg);
             }
         }
         if let Some(plan) = out.values_plan {
             self.tap.lock().unwrap_or_else(PoisonError::into_inner).plan = plan;
+        }
+        if let Some(mode) = &out.present_mode {
+            tracing::info!(%mode, "target present mode");
         }
         if let Some(ToastRequest::ExclusiveFullscreen { exe }) = out.toast {
             tracing::info!(%exe, "the game runs in exclusive fullscreen: overlay not visible");
@@ -533,6 +553,14 @@ impl Ctl {
             );
         }
         if let Some(status) = out.status {
+            let target = status.target.as_ref().map(|t| (t.name.as_str(), t.pid));
+            if self.logged_target.as_ref().map(|(n, p)| (n.as_str(), *p)) != target {
+                match target {
+                    Some((exe, pid)) => tracing::info!(%exe, pid, "overlay target"),
+                    None => tracing::info!("overlay target: none"),
+                }
+                self.logged_target = target.map(|(n, p)| (n.to_owned(), p));
+            }
             // Stored first: a UI that reads it on the event gets this one.
             *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status.clone();
             (self.on_status)(&status);
@@ -689,6 +717,7 @@ mod tests {
             host_start_failed: false,
             tracked: None,
             geometry_ms: 0,
+            logged_target: None,
             engine_on: false,
             epoch: Instant::now(),
         }

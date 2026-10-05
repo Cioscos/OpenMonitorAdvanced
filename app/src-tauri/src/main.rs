@@ -54,10 +54,9 @@ fn generation_changed(last: &mut u64, generation: u64) -> bool {
 /// Owns the sampler so it can be stopped cleanly on exit.
 struct SamplerGuard(Mutex<Option<Sampler>>);
 
-/// Owns the frame diagnostics (`OMA_FRAMES_DEBUG`), if they run, so they are
-/// stopped on exit.
+/// Owns the overlay controller's thread so it is stopped, in order, on exit.
 #[cfg(windows)]
-struct FramesGuard(Mutex<Option<overlay::frames::FramesDiagnostics>>);
+struct OverlayGuard(Mutex<Option<overlay::runner::OverlayRunner>>);
 
 /// What a second launch asks of the running instance.
 #[derive(Debug, PartialEq, Eq)]
@@ -343,6 +342,10 @@ fn main() {
             updates::open_release_page,
             report::export_sensor_report,
             report::reveal_sensor_report,
+            overlay::runner::get_overlay_status,
+            overlay::runner::overlay_retry,
+            overlay::runner::overlay_reload_profiles,
+            overlay::runner::set_overlay_hidden,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -353,12 +356,6 @@ fn main() {
             {
                 let shell = app.state::<ServiceShell>();
                 shell.spawn_link(svc_feed, svc_drives);
-                // Only with `OMA_FRAMES_DEBUG` set; otherwise nothing starts.
-                if let Some(frames) =
-                    overlay::frames::start_if_requested(shell.link_commands(), shell.frames_feed())
-                {
-                    app.manage(FramesGuard(Mutex::new(Some(frames))));
-                }
             }
             // From here on, `rules` drives the rule engine; the stored rules
             // are installed now, before the first tick.
@@ -421,6 +418,26 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            // The overlay controller: with the overlay off and without
+            // `OMA_FRAMES_DEBUG` its thread only waits (§11).
+            #[cfg(windows)]
+            let overlay = {
+                let shell = app.state::<ServiceShell>();
+                let status_handle = app.handle().clone();
+                let runner = overlay::runner::OverlayRunner::start(overlay::runner::OverlayDeps {
+                    store: store.clone(),
+                    link: shell.link_commands(),
+                    feed: shell.frames_feed(),
+                    toaster: Box::new(toaster.clone()),
+                    on_status: Box::new(move |status| {
+                        let _ = status_handle.emit(overlay::runner::EVENT_OVERLAY_STATUS, status);
+                    }),
+                })?;
+                let handle = runner.handle();
+                app.manage(handle.clone());
+                app.manage(OverlayGuard(Mutex::new(Some(runner))));
+                handle
+            };
             // `log.hotkeyToggle` and `log.hotkeyPause` drive the global hotkeys.
             hotkeys::install_hotkeys(app.handle(), &store, log_service.clone());
             // Listeners run on whichever thread changed the state; the tray
@@ -446,6 +463,9 @@ fn main() {
                     // The log row, window or not; never waits on the writer.
                     log_service.on_tick(out, schema, &settings);
                 }
+                // Sensor values for the overlay; never waits on it.
+                #[cfg(windows)]
+                overlay.on_tick(out, alerts.schema());
                 // Nobody listens while the window is closed: skip serialization.
                 if handle.get_webview_window(window::MAIN).is_none() {
                     return;
@@ -519,16 +539,17 @@ fn main() {
                     sampler.stop();
                 }
             }
-            // Before the link goes away; joins a thread that only waits.
+            // After the sampler (no more `Values`), before the link goes
+            // away: the engine off, then the overlay closed (bounded, 2 s).
             #[cfg(windows)]
-            if let Some(guard) = app.try_state::<FramesGuard>() {
-                if let Some(frames) = guard
+            if let Some(guard) = app.try_state::<OverlayGuard>() {
+                if let Some(runner) = guard
                     .0
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .take()
                 {
-                    frames.stop();
+                    runner.stop();
                 }
             }
             // No tick is running any more: stop the CSV log (bounded, L6).

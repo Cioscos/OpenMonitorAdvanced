@@ -350,7 +350,7 @@ impl SendQueue {
 #[cfg(windows)]
 // Used by the overlay controller from C16 on.
 #[allow(unused_imports)]
-pub use imp::OverlayHost;
+pub use imp::{OverlayHost, OverlaySender};
 
 #[cfg(windows)]
 mod imp {
@@ -420,6 +420,19 @@ mod imp {
             self.ready.notify_all();
         }
 
+        /// Queues `msg` unless the outbox is closed (see [`OverlayHost::send`]).
+        fn push(&self, msg: OverlayMessage) {
+            let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !s.open {
+                return;
+            }
+            if !s.queue.push(msg) {
+                tracing::debug!("overlay send queue full: data message dropped");
+            }
+            drop(s);
+            self.ready.notify_one();
+        }
+
         /// The next message to write, or `None` once the outbox is closed.
         fn next(&self) -> Option<OverlayMessage> {
             let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -435,10 +448,26 @@ mod imp {
         }
     }
 
+    /// Sends to the overlay of an [`OverlayHost`] without blocking; a message
+    /// sent while the overlay is not `Running`, or after the host stopped,
+    /// is dropped.
+    #[derive(Clone)]
+    pub struct OverlaySender {
+        outbox: Arc<Outbox>,
+    }
+
+    impl OverlaySender {
+        pub fn send(&self, msg: OverlayMessage) {
+            self.outbox.push(msg);
+        }
+    }
+
     /// Starts, watches and stops `oma-overlay.exe` (see the module docs).
     pub struct OverlayHost {
         events: Sender<Event>,
         outbox: Arc<Outbox>,
+        // The runner gets each state through `on_state`; the tests read it.
+        #[cfg_attr(not(test), allow(dead_code))]
         state: Arc<Mutex<HostState>>,
         thread: Option<JoinHandle<()>>,
     }
@@ -500,21 +529,18 @@ mod imp {
         /// overlay is `Running`; when the queue is full, data messages go
         /// first.
         pub fn send(&self, msg: OverlayMessage) {
-            let mut s = self
-                .outbox
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if !s.open {
-                return;
-            }
-            if !s.queue.push(msg) {
-                tracing::debug!("overlay send queue full: data message dropped");
-            }
-            drop(s);
-            self.outbox.ready.notify_one();
+            self.outbox.push(msg);
         }
 
+        /// A handle that sends like [`Self::send`] from another thread (the
+        /// sampler's `Values`), without owning the host.
+        pub fn sender(&self) -> OverlaySender {
+            OverlaySender {
+                outbox: Arc::clone(&self.outbox),
+            }
+        }
+
+        #[cfg_attr(not(test), allow(dead_code))]
         pub fn state(&self) -> HostState {
             *self.state.lock().unwrap_or_else(PoisonError::into_inner)
         }

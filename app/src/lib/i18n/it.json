@@ -470,6 +470,8 @@
   "overlay.template.builtin-gaming": "Gaming",
   "overlay.template.builtin-full": "Completo",
   "overlay.template.builtin-bar": "Barra orizzontale",
+  "overlay.exclusive.title": "Overlay non visibile",
+  "overlay.exclusive.body": "L'overlay non è visibile in schermo intero esclusivo: usa la modalità senza bordi",
   "source.pdh": "Contatori di prestazioni di Windows (PDH)",
   "source.win32": "API di Windows",
   "source.ip_helper": "IP Helper di Windows",

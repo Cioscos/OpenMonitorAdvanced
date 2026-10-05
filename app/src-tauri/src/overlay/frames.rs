@@ -1,8 +1,9 @@
 //! Frame diagnostics, on request only: with `OMA_FRAMES_DEBUG` set to `1`
-//! (displayed FPS), `pcl` (plus PC latency) or `all` (plus GPU busy), the app
-//! turns the service's frame engine on, follows the foreground game (the
-//! overlay [`Controller`](super::controller::Controller)'s target) and writes
-//! one `frames:` line per second to its log. Any other value, or none,
+//! (displayed FPS), `pcl` (plus PC latency) or `all` (plus GPU busy), the
+//! overlay controller's thread ([`super::runner`]) turns the service's frame
+//! engine on, follows the foreground game (the
+//! [`Controller`](super::controller::Controller)'s target) and writes one
+//! `frames:` line per second to the app's log. Any other value, or none,
 //! starts nothing.
 //!
 //! The line is `key=value` pairs separated by spaces, always in this order,
@@ -181,150 +182,6 @@ pub(crate) fn line(readout: &FrameReadout, ctx: &LineContext<'_>) -> String {
     );
     let _ = write!(line, " bottleneck={bottleneck} dropped={}", ctx.dropped);
     line
-}
-
-#[cfg(windows)]
-pub use runner::{start_if_requested, FramesDiagnostics};
-
-#[cfg(windows)]
-mod runner {
-    use std::sync::{mpsc, Arc, Mutex, PoisonError};
-    use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
-
-    use oma_core::overlay::Foreground;
-    use oma_core::settings::Settings;
-    use oma_ipc::FramesConfigure;
-    use oma_win::foreground::{ForegroundEvent, ForegroundWatcher};
-    use oma_win::svc::{FramesFeed, LinkCommand};
-
-    use super::super::controller::Controller;
-    use super::{options_from_env, ENV_VAR};
-    use crate::i18n::Lang;
-
-    /// The `oma-frames` thread's period (4 Hz).
-    const TICK: Duration = Duration::from_millis(250);
-
-    /// Sends a command to the service link without blocking
-    /// ([`crate::service::ServiceShell::link_commands`]).
-    pub type LinkSink = Box<dyn Fn(LinkCommand) + Send + Sync>;
-
-    /// The running diagnostics: dropping it (or [`Self::stop`]) stops the
-    /// `oma-frames` thread, then closes the foreground watcher.
-    pub struct FramesDiagnostics {
-        stop: Option<mpsc::Sender<()>>,
-        thread: Option<JoinHandle<()>>,
-        /// Dropped after the thread has stopped (fields drop after `drop`).
-        _watcher: Option<ForegroundWatcher>,
-    }
-
-    impl FramesDiagnostics {
-        pub fn stop(self) {
-            drop(self);
-        }
-    }
-
-    impl Drop for FramesDiagnostics {
-        fn drop(&mut self) {
-            // A dropped sender wakes the thread's wait at once.
-            self.stop.take();
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-
-    /// Starts the diagnostics if `OMA_FRAMES_DEBUG` asks for them; call it
-    /// once the service link is spawned. Otherwise nothing starts.
-    pub fn start_if_requested(link: LinkSink, feed: FramesFeed) -> Option<FramesDiagnostics> {
-        let value = std::env::var(ENV_VAR).ok();
-        let config = options_from_env(value.as_deref())?;
-        let qpc_frequency = oma_win::qpc_frequency();
-        if qpc_frequency == 0 {
-            tracing::warn!("no QPC frequency: frame times cannot be converted, frames are ignored");
-        }
-
-        // The sink only stores: it runs on the `oma-foreground` thread and
-        // must never block for long.
-        let foreground = Arc::new(Mutex::new(None::<Foreground>));
-        let watcher = {
-            let foreground = Arc::clone(&foreground);
-            match ForegroundWatcher::spawn(Box::new(move |event| {
-                if let ForegroundEvent::Foreground(fg) = event {
-                    *foreground.lock().unwrap_or_else(PoisonError::into_inner) = Some(fg);
-                }
-            })) {
-                Ok(watcher) => Some(watcher),
-                Err(err) => {
-                    tracing::warn!(%err, "frame diagnostics: no foreground watcher, no target");
-                    None
-                }
-            }
-        };
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let spawned = std::thread::Builder::new()
-            .name("oma-frames".into())
-            .spawn(move || run(config, link, feed, foreground, stop_rx, qpc_frequency));
-        match spawned {
-            Ok(thread) => {
-                tracing::info!(
-                    value = value.as_deref().unwrap_or(""),
-                    "frame diagnostics on"
-                );
-                Some(FramesDiagnostics {
-                    stop: Some(stop_tx),
-                    thread: Some(thread),
-                    _watcher: watcher,
-                })
-            }
-            Err(err) => {
-                tracing::warn!(%err, "frame diagnostics: the thread could not start");
-                None
-            }
-        }
-    }
-
-    /// Drives a [`Controller`] with the overlay off and the variable's
-    /// configuration: the engine, the target and the `frames:` line of M7b.
-    /// C16 replaces this thread with the overlay controller's.
-    fn run(
-        config: FramesConfigure,
-        link: LinkSink,
-        feed: FramesFeed,
-        foreground: Arc<Mutex<Option<Foreground>>>,
-        stop: mpsc::Receiver<()>,
-        qpc_frequency: u64,
-    ) {
-        let start = Instant::now();
-        let mut controller = Controller::new(std::process::id(), qpc_frequency);
-        controller.on_settings(&Settings::default(), Lang::En, Some(config));
-        // The first step runs at once, so the engine starts without waiting
-        // a tick (as in M7b, DP13).
-        loop {
-            let now_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let update = feed.drain();
-            controller.on_service(update.connected);
-            controller.on_frames(
-                update.status.as_ref(),
-                update.processes.as_ref(),
-                &update.batches,
-            );
-            let fg = *foreground.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(fg) = fg {
-                controller.on_foreground(fg);
-            }
-            let out = controller.step(now_ms);
-            for command in out.link {
-                link(command);
-            }
-            if let Some(line) = out.diagnostics_line {
-                tracing::info!("{line}");
-            }
-            if let Err(mpsc::RecvTimeoutError::Disconnected) = stop.recv_timeout(TICK) {
-                break;
-            }
-        }
-    }
 }
 
 #[cfg(test)]

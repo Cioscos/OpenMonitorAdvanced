@@ -38,6 +38,10 @@ fn main() {
             "open_release_page",
             "export_sensor_report",
             "reveal_sensor_report",
+            "get_overlay_status",
+            "overlay_retry",
+            "overlay_reload_profiles",
+            "set_overlay_hidden",
         ]),
     ))
     .expect("Tauri build")

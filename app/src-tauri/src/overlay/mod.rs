@@ -1,21 +1,36 @@
 //! The game overlay's app side (M7): [`target`] picks the game to follow,
 //! [`controller`] decides what the frame engine and the overlay do,
-//! [`forward`] builds the messages for `oma-overlay.exe`, [`host`] runs it,
-//! [`profiles`] reads the profile catalog and [`frames`] formats the
-//! `OMA_FRAMES_DEBUG` line.
+//! [`runner`] runs it on the `oma-overlay-ctl` thread with the service link,
+//! the foreground watcher and the sampler, [`forward`] builds the messages
+//! for `oma-overlay.exe`, [`host`] runs it, [`profiles`] reads the profile
+//! catalog and [`frames`] formats the `OMA_FRAMES_DEBUG` line.
 
-// Wired to its thread from C16 on; until then only the diagnostics use it.
 #[cfg(windows)]
-#[allow(dead_code)]
 pub mod controller;
-// Used by the overlay controller from C16 on.
-#[allow(dead_code)]
 pub mod forward;
 pub mod frames;
-// Used by the overlay controller from C16 on.
-#[allow(dead_code)]
 pub mod host;
-// Used by the overlay controller from C16 on.
-#[allow(dead_code)]
 pub mod profiles;
+#[cfg(windows)]
+pub mod runner;
 pub mod target;
+
+/// The overlay's Tauri commands off Windows, where there is no overlay.
+#[cfg(not(windows))]
+pub mod runner {
+    #[tauri::command]
+    pub fn get_overlay_status() -> Option<()> {
+        None
+    }
+
+    #[tauri::command]
+    pub fn overlay_retry() {}
+
+    #[tauri::command]
+    pub fn overlay_reload_profiles() {}
+
+    #[tauri::command]
+    pub fn set_overlay_hidden(hidden: bool) {
+        let _ = hidden;
+    }
+}

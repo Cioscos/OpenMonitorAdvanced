@@ -430,7 +430,9 @@ impl Controller {
         }
     }
 
-    /// `Values` for one sampler tick, under the plan of the last step.
+    /// `Values` for one sampler tick, under the plan of the last step. The
+    /// sampler itself uses [`tick_values`] over the published plan (R2).
+    #[cfg(test)]
     pub fn on_tick_values(
         &self,
         schema: &Schema,

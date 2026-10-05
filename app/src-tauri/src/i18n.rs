@@ -50,6 +50,8 @@ pub const RUST_KEYS: &[&str] = &[
     "overlay.text.metric.bound",
     "overlay.text.low.integral",
     "overlay.text.low.percentile",
+    "overlay.exclusive.title",
+    "overlay.exclusive.body",
     "rule.cpu-temp.name",
     "rule.cpu-temp.message",
     "rule.cpu-throttle.name",

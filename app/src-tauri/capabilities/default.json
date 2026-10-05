@@ -42,6 +42,10 @@
     "allow-get-update-status",
     "allow-open-release-page",
     "allow-export-sensor-report",
-    "allow-reveal-sensor-report"
+    "allow-reveal-sensor-report",
+    "allow-get-overlay-status",
+    "allow-overlay-retry",
+    "allow-overlay-reload-profiles",
+    "allow-set-overlay-hidden"
   ]
 }

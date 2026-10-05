@@ -470,6 +470,8 @@
   "overlay.template.builtin-gaming": "Gaming",
   "overlay.template.builtin-full": "Full",
   "overlay.template.builtin-bar": "Horizontal bar",
+  "overlay.exclusive.title": "Overlay not visible",
+  "overlay.exclusive.body": "The overlay is not visible in exclusive fullscreen: use borderless mode",
   "source.pdh": "Windows performance counters (PDH)",
   "source.win32": "Windows API",
   "source.ip_helper": "Windows IP Helper",

@@ -59,17 +59,7 @@ pub struct ProfileCatalog {
 
 /// Reads the profile folder `dir`. A missing folder is not an error.
 pub fn load_catalog(dir: &Path) -> ProfileCatalog {
-    let mut catalog = ProfileCatalog {
-        entries: BuiltinId::ALL
-            .iter()
-            .map(|b| ProfileEntry {
-                id: b.as_str().to_owned(),
-                name: format!("overlay.template.{}", b.as_str()),
-                builtin: true,
-            })
-            .collect(),
-        ..ProfileCatalog::default()
-    };
+    let mut catalog = ProfileCatalog::builtins();
     let listing = match fs::read_dir(dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return catalog,
@@ -146,6 +136,21 @@ fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
 }
 
 impl ProfileCatalog {
+    /// The four built-in templates only.
+    pub fn builtins() -> Self {
+        Self {
+            entries: BuiltinId::ALL
+                .iter()
+                .map(|b| ProfileEntry {
+                    id: b.as_str().to_owned(),
+                    name: format!("overlay.template.{}", b.as_str()),
+                    builtin: true,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     /// The id and profile to use for `id`: a built-in bound to `schema`, a
     /// user profile, or «Gaming» for an unknown id.
     pub fn resolve(&self, id: &str, schema: &Schema) -> (String, Profile) {

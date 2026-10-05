@@ -256,9 +256,14 @@ fn run_window(pipe: String, preview: bool) -> i32 {
         let mut reassert = false;
         loop {
             match rx.try_recv() {
-                // The preview's area is its client area.
+                // The preview's area is its client area, and it shows no
+                // benchmark box.
                 Ok(LinkEvent::Message(msg))
-                    if preview && matches!(*msg, OverlayMessage::SetPlacement(_)) => {}
+                    if preview
+                        && matches!(
+                            *msg,
+                            OverlayMessage::SetPlacement(_) | OverlayMessage::Benchmark(_)
+                        ) => {}
                 Ok(LinkEvent::Message(msg)) => {
                     reassert |= matches!(*msg, OverlayMessage::SetPlacement(_));
                     changes.merge(state.apply(*msg, now_s));

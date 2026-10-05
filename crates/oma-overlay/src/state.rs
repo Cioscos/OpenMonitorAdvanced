@@ -145,12 +145,24 @@ fn auto_top(block: &oma_core::overlay::Block, sensors: &HashMap<String, SensorIn
     max == RangeBound::Auto && !percent
 }
 
+/// The ring an automatic top reads. The lows have no samples over time
+/// (the app computes them over their own window), so a meter on a low is
+/// scaled to the FPS displayed, which a low never exceeds.
+pub fn range_key(source: &Source) -> Option<SourceKey> {
+    match source {
+        Source::Frames(FrameMetric::Low1 | FrameMetric::Low01) => {
+            Some(SourceKey::Frames(FrameMetric::FpsDisplayed))
+        }
+        _ => SourceKey::of(source),
+    }
+}
+
 fn source_plan(profile: &Profile, sensors: &HashMap<String, SensorInfo>) -> SourcePlan {
     let mut windows: HashMap<SourceKey, u32> = HashMap::new();
     let mut charted = HashSet::new();
     let mut texted = HashSet::new();
-    let mut need = |source: &Source, window: u32| {
-        if let Some(key) = SourceKey::of(source) {
+    let mut need = |key: Option<SourceKey>, window: u32| {
+        if let Some(key) = key {
             let w = windows.entry(key).or_insert(0);
             *w = (*w).max(window);
         }
@@ -161,15 +173,15 @@ fn source_plan(profile: &Profile, sensors: &HashMap<String, SensorInfo>) -> Sour
             Source::Frames(FrameMetric::Low1 | FrameMetric::Low01)
         );
         if b.stat.op != StatOp::Current && !is_low {
-            need(&b.source, b.stat.window);
+            need(SourceKey::of(&b.source), b.stat.window);
         }
         if auto_top(b, sensors) {
-            need(&b.source, AUTO_RANGE_S);
+            need(range_key(&b.source), AUTO_RANGE_S);
         }
         let charts = matches!(b.kind, Kind::Graph | Kind::Sparkline)
             && !is_frametime_graph(b.kind, b.style.graph.mode);
         if charts {
-            need(&b.source, b.style.graph.range_s);
+            need(SourceKey::of(&b.source), b.style.graph.range_s);
         }
         if let Some(key) = SourceKey::of(&b.source) {
             if charts {
@@ -180,7 +192,7 @@ fn source_plan(profile: &Profile, sensors: &HashMap<String, SensorInfo>) -> Sour
         }
         if let Some(VisibleIf::Compare(c)) = &b.visible_if {
             if c.stat.op != StatOp::Current {
-                need(&c.source, c.stat.window);
+                need(SourceKey::of(&c.source), c.stat.window);
             }
             texted.extend(SourceKey::of(&c.source));
         }

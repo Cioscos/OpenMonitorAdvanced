@@ -12,7 +12,7 @@ use oma_core::settings::{TemperatureUnit, ThroughputUnit};
 
 use oma_ipc::overlay::{WireBenchmarkSummary, WireFrameTime};
 
-use crate::state::{metric_value, OverlayState, SourceKey, AUTO_RANGE_S};
+use crate::state::{metric_value, range_key, OverlayState, SourceKey, AUTO_RANGE_S};
 
 /// A rectangle in physical pixels, as Direct2D takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -493,7 +493,7 @@ pub fn gauge_sweep(value: f64, min: f64, max: f64) -> f32 {
 /// The highest value of the block's source in the last [`AUTO_RANGE_S`]
 /// seconds (DD16), from its ring; `None` without samples.
 pub fn auto_max(block: &Block, state: &OverlayState) -> Option<f64> {
-    let ring = state.rings.get(&SourceKey::of(&block.source)?)?;
+    let ring = state.rings.get(&range_key(&block.source)?)?;
     ring.value(&Stat {
         op: StatOp::Max,
         window: AUTO_RANGE_S,
@@ -1158,6 +1158,34 @@ mod tests {
             push(&mut s, t, 10.0);
         }
         assert_eq!(range(&s), (0.0, 10.0), "the spike is forgotten");
+    }
+
+    #[test]
+    fn auto_range_on_a_low_is_not_always_full() {
+        use oma_core::overlay::RangeBound::Auto;
+        use oma_ipc::overlay::{OverlayMessage, SetProfile};
+        let meter = json!({ "id": "m", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 },
+            "source": { "frames": "low-1" }, "kind": "meter",
+            "stat": { "window": 10, "definition": "percentile" } });
+        let mut s = OverlayState::default();
+        s.apply(
+            OverlayMessage::SetProfile(SetProfile {
+                profile_id: "p".into(),
+                profile_json: json!({ "format": 1, "name": "t", "blocks": [meter] }).to_string(),
+                sensors: vec![],
+                strings: BTreeMap::new(),
+                draw: crate::state::default_draw(),
+            }),
+            0.0,
+        );
+        // fps-displayed 100.4, 1% low 61.2 (see `metrics`).
+        s.apply(OverlayMessage::FrameMetrics(metrics("running")), 1.0);
+        let b = s.profile.as_ref().expect("profile").blocks[0].clone();
+        let v = block_value(&b, &s);
+        assert_eq!(v, Some(61.2));
+        let (lo, hi) = value_range(Auto, Auto, false, v, auto_max(&b, &s));
+        assert_eq!((lo, hi), (0.0, 100.4), "scaled to the recent FPS");
+        assert!(meter_fraction(61.2, lo, hi) < 1.0);
     }
 
     #[test]

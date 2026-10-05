@@ -6,8 +6,9 @@ use crate::roles::{role_sensor, Role};
 
 use super::profile::{
     Anchor, Block, CellRect, FrameMetric, GraphMode, GraphStyle, Kind, Outline, Profile, Rgba,
-    Source, Style, TextStyle, PROFILE_FORMAT,
+    Source, Stat, Style, TextStyle, PROFILE_FORMAT,
 };
+use crate::frames::LOWS_WINDOW_S;
 
 /// Width in cells of the Gaming and Full columns; the frametime graph spans it.
 const WIDTH: u32 = 36;
@@ -125,6 +126,18 @@ fn text_style(size: f32) -> TextStyle {
     }
 }
 
+/// The lows are read over the §4.4 window of ten seconds; every other
+/// source shows its current value.
+fn stat_of(source: &Source) -> Stat {
+    match source {
+        Source::Frames(FrameMetric::Low1 | FrameMetric::Low01) => Stat {
+            window: LOWS_WINDOW_S as u32,
+            ..Stat::default()
+        },
+        _ => Stat::default(),
+    }
+}
+
 fn block(item: &Item, x: i32, y: i32) -> Block {
     let mut style = Style {
         label_style: text_style(LABEL_PT),
@@ -150,7 +163,7 @@ fn block(item: &Item, x: i32, y: i32) -> Block {
         },
         z: 0,
         source: item.source.clone(),
-        stat: Default::default(),
+        stat: stat_of(&item.source),
         kind: item.kind,
         style,
         thresholds: vec![],
@@ -393,6 +406,24 @@ mod tests {
                 assert!(f.w <= 48 && f.h <= 32, "{id:?} footprint {f:?}");
             }
         }
+    }
+
+    #[test]
+    fn low_blocks_use_the_ten_second_lows_window() {
+        for id in BuiltinId::ALL {
+            let p = builtin_profile(id, &this_machine());
+            for b in &p.blocks {
+                let low = matches!(
+                    b.source,
+                    Source::Frames(FrameMetric::Low1 | FrameMetric::Low01)
+                );
+                let want = if low { 10 } else { 1 };
+                assert_eq!(b.stat.window, want, "{id:?} {}", b.id);
+            }
+        }
+        // Gaming has a low block, so the loop above checked one.
+        let gaming = builtin_profile(BuiltinId::Gaming, &this_machine());
+        assert!(gaming.blocks.iter().any(|b| b.id == "low-1"));
     }
 
     #[test]

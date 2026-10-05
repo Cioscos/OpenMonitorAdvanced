@@ -3,4 +3,7 @@
 //! when `OMA_FRAMES_DEBUG` asks for it.
 
 pub mod frames;
+// Used by the overlay controller from C16 on.
+#[allow(dead_code)]
+pub mod host;
 pub mod target;

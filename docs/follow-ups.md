@@ -339,8 +339,7 @@ Editor interface:
 
 Task D18 done on 2026-10-05/06 with the user (setup 0.5.0, SHA-256 `14d15424...f2f8`, God of War and Windows Terminal): X1-X8 all passed, two after fixes (`2101dbf` dismissible error banner, `4b9bea6` spacing in the benchmark sessions); results in the plan's «Esito dell'esecuzione», numbers in `docs/perf-budget.md`. Covered: editor bounds while maximized, edit and close with the preview open, the usual editor run, a benchmark with the shortcut, the footprint of editor and preview, and the two M7c items (window-drag cost, `starting` on an idle desktop). Still owed:
 
-- Preview at 1366x768 and 150% scaling: the window fits the work area and the profile is drawn whole.
-- Kill the preview process (`oma-overlay.exe --preview`) 3-5 times from Task Manager: the editor button returns to *Preview*, the in-game overlay is not touched, no restart loop.
+- Preview opened on a small primary screen (e.g. 1920x1080 at 150%): the window fits the work area and the profile is drawn whole. Skipped by the user on 2026-10-06 (no resolution change on the main monitor); the clamp is covered by the unit test `preview_bounds`. Moving the preview to a second monitor at 1920x1080 and 150% (DPI change) passed.
 - The installer paths of 0.5.0 (as for M7c, in a VM or Windows Sandbox).
 
 ## Manual checks after M7c

@@ -923,4 +923,6 @@ D1–D17 eseguiti subagent-driven il 2026-10-05, ognuno con la sua revisione, po
 
 **Voci aperte nuove.** Il log scrive un WARN «stopped unexpectedly code=5» prima dell'INFO «the preview was closed» quando si chiude l'anteprima (rumore). L'overlay si nasconde dopo circa 3 s in un trascinamento della finestra del gioco, perché il gioco smette di presentare nel ciclo modale di spostamento di Windows: l'utente lo ritiene accettabile. Entrambe in `docs/follow-ups.md`.
 
-**Non provate dal vivo (restano dovute).** Anteprima a 1366×768 con scala 150%; chiusura forzata del processo dell'anteprima 3–5 volte; i percorsi dell'installer (VM).
+**Prove aggiunte il 2026-10-06.** Chiusura forzata del processo dell'anteprima cinque volte: riavvii dopo 1, 2, 4 e 8 s, nessun riavvio dopo la quinta caduta, «Anteprima non disponibile: overlay interrotto» nell'editor, overlay in gioco intatto, riapertura manuale riuscita. Anteprima spostata su un secondo monitor a 1920×1080 con scala 150%: il cambio di DPI ridimensiona e ridisegna correttamente.
+
+**Non provate dal vivo (restano dovute).** Apertura dell'anteprima su un monitor principale piccolo (saltata dall'utente; coperta dal test `preview_bounds`); i percorsi dell'installer (VM).

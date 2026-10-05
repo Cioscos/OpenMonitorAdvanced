@@ -2,7 +2,9 @@
 //! the preview while no game is the target, and the payload of the
 //! `overlay-editor-data` event. Pure.
 
-use oma_core::frames::{synthetic, FrameWindow, SyntheticProfile, LOWS_WINDOW_S};
+use std::collections::VecDeque;
+
+use oma_core::frames::{synthetic, FrameSample, FrameWindow, SyntheticProfile, LOWS_WINDOW_S};
 use oma_ipc::overlay::{FrameMetrics, WireFrameTime};
 use serde::Serialize;
 
@@ -16,17 +18,23 @@ pub const EDITOR_SYNTHETIC: SyntheticProfile = SyntheticProfile {
     gpu_busy_ratio: Some(0.9),
 };
 
-/// The most a single [`SyntheticFeed::advance`] generates.
+/// The most a single [`SyntheticFeed::advance`] releases.
 const MAX_CATCH_UP_S: f64 = 2.0;
+/// Generated at once, so that the stutters (every 90 app frames) show.
+const CHUNK_S: f64 = 10.0;
 const SEED: u64 = 0x0E_D170;
 
-/// Synthetic frames one second at a time, up to the caller's clock, in a
-/// window of their own (10 s).
+/// Synthetic frames, generated 10 s at a time and released up to the
+/// caller's clock into a window of their own (10 s).
 pub struct SyntheticFeed {
     window: FrameWindow,
+    /// Generated, not yet released, oldest first.
+    pending: VecDeque<FrameSample>,
+    /// The end of the generated frames.
     generated_to_s: f64,
+    released_to_s: f64,
     seed: u64,
-    /// The last PCL frame id given, so that ids keep growing across seconds.
+    /// The last PCL frame id given, so that ids keep growing across chunks.
     pcl_id: u64,
 }
 
@@ -34,37 +42,50 @@ impl SyntheticFeed {
     pub fn new() -> Self {
         Self {
             window: FrameWindow::new(LOWS_WINDOW_S),
+            pending: VecDeque::new(),
             generated_to_s: f64::NEG_INFINITY,
+            released_to_s: f64::NEG_INFINITY,
             seed: SEED,
             pcl_id: 0,
         }
     }
 
-    /// Generates the whole seconds missing up to `now_s`; after a long pause
-    /// (or the first time) only the last 2 s.
+    /// Releases the frames up to `now_s`; after a long pause (or the first
+    /// time) only those of the last 2 s, from a fresh chunk.
     pub fn advance(&mut self, now_s: f64) {
-        if now_s - self.generated_to_s > MAX_CATCH_UP_S {
+        if now_s - self.released_to_s > MAX_CATCH_UP_S {
+            self.pending.clear();
             self.generated_to_s = now_s - MAX_CATCH_UP_S;
         }
-        while self.generated_to_s + 1.0 <= now_s {
-            let (start, mut end, mut last_id) = (self.generated_to_s, 1.0_f64, self.pcl_id);
-            for mut f in synthetic(self.seed, &EDITOR_SYNTHETIC, 1.0) {
-                // The second ends with its last app frame, which may run
-                // past 1 s: the next one starts there, without overlap.
-                if let Some(ms) = f.ms_app_frametime {
-                    end = end.max(f.t_s + ms / 1_000.0);
-                }
-                f.t_s += start;
-                f.pcl_frame_id = f.pcl_frame_id.map(|id| {
-                    last_id = self.pcl_id + id;
-                    last_id
-                });
+        while self.generated_to_s <= now_s {
+            self.generate();
+        }
+        while self.pending.front().is_some_and(|f| f.t_s <= now_s) {
+            if let Some(f) = self.pending.pop_front() {
                 self.window.push(f);
             }
-            self.pcl_id = last_id;
-            self.seed = self.seed.wrapping_add(1);
-            self.generated_to_s = start + end;
         }
+        self.released_to_s = now_s;
+    }
+
+    /// One chunk from `generated_to_s`; the next starts where its last app
+    /// frame ends, without overlap.
+    fn generate(&mut self) {
+        let (start, mut end, mut last_id) = (self.generated_to_s, CHUNK_S, self.pcl_id);
+        for mut f in synthetic(self.seed, &EDITOR_SYNTHETIC, CHUNK_S) {
+            if let Some(ms) = f.ms_app_frametime {
+                end = end.max(f.t_s + ms / 1_000.0);
+            }
+            f.t_s += start;
+            f.pcl_frame_id = f.pcl_frame_id.map(|id| {
+                last_id = self.pcl_id + id;
+                last_id
+            });
+            self.pending.push_back(f);
+        }
+        self.pcl_id = last_id;
+        self.seed = self.seed.wrapping_add(1);
+        self.generated_to_s = start + end;
     }
 
     pub fn window(&self) -> &FrameWindow {
@@ -134,8 +155,32 @@ mod tests {
         feed.advance(5_000.0);
         let t = times(&feed);
         assert!(t.first().unwrap() >= &4_998.0 && t.last().unwrap() < &5_000.05);
-        // About 72 app frames a second, each followed by a generated one;
-        // a second may run a few ms long, so one or two of them.
-        assert!((140..=300).contains(&t.len()), "{}", t.len());
+        // About 72 app frames a second, each followed by a generated one.
+        assert!((280..=300).contains(&t.len()), "{}", t.len());
+    }
+
+    #[test]
+    fn stutters_show_within_two_seconds() {
+        let mut feed = SyntheticFeed::new();
+        feed.advance(50.0);
+        let base_ms = 1_000.0 / EDITOR_SYNTHETIC.base_fps;
+        let frames = feed.window().last(f64::INFINITY);
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.ms_app_frametime.is_some_and(|ms| ms > base_ms * 3.0)),
+            "no stutter in {} frames",
+            frames.len()
+        );
+    }
+
+    #[test]
+    fn frames_are_released_up_to_now() {
+        let mut feed = SyntheticFeed::new();
+        feed.advance(10.0);
+        feed.advance(10.5);
+        let t = times(&feed);
+        assert!(*t.last().unwrap() <= 10.5);
+        assert!(*t.last().unwrap() > 10.4, "no 1 s bursts");
     }
 }

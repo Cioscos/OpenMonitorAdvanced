@@ -239,11 +239,7 @@ pub fn metrics_message(readout: Option<&FrameReadout>, state: &str) -> OverlayMe
         .take(MAX_LOWS)
         .map(|l| WireLow {
             window_s: l.window_s,
-            definition: match l.definition {
-                LowDefinition::Integral => "integral",
-                LowDefinition::Percentile => "percentile",
-            }
-            .to_owned(),
+            definition: wire_definition(l.definition).to_owned(),
             one_percent: finite(l.lows.map(|x| x.one_percent)),
             point_one_percent: finite(l.lows.map(|x| x.point_one_percent)),
         })
@@ -273,6 +269,25 @@ pub fn metrics_message(readout: Option<&FrameReadout>, state: &str) -> OverlayMe
         bound: bound.map(str::to_owned),
         lows,
     })
+}
+
+/// The protocol spelling of a lows definition.
+fn wire_definition(d: LowDefinition) -> &'static str {
+    match d {
+        LowDefinition::Integral => "integral",
+        LowDefinition::Percentile => "percentile",
+    }
+}
+
+/// Keeps in `m` only the lows of `lows` and the `(10, Integral)` entry
+/// [`oma_core::frames::read`] always computes.
+pub fn keep_lows(m: &mut FrameMetrics, lows: &[(u32, LowDefinition)]) {
+    let always = (LOWS_WINDOW_S as u32, LowDefinition::Integral);
+    m.lows.retain(|l| {
+        std::iter::once(&always)
+            .chain(lows)
+            .any(|&(w, d)| w == l.window_s && wire_definition(d) == l.definition)
+    });
 }
 
 /// `FrameTimes` with the frames of `swapchain` newer than `after_t_s`, and the

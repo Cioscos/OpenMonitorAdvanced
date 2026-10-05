@@ -31,8 +31,10 @@
 //!   to the canvas ([`Outputs::editor_data`]) and, while it runs, to the
 //!   preview process, with its own `SetProfile`. Their frames are the
 //!   target's, or without a target the editor's [`SyntheticFeed`]; the
-//!   in-game overlay never gets synthetic frames. The data is computed once
-//!   per step for every consumer.
+//!   in-game overlay never gets synthetic frames. The metrics are computed
+//!   once per step; the overlay keeps its own cadence and frame position and
+//!   gets only the active profile's lows, so the editor changes nothing in
+//!   it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -43,7 +45,7 @@ use oma_core::model::{Schema, Snapshot};
 use oma_core::overlay::{Foreground, Profile, PxRect, WindowGeometry};
 use oma_core::provider::Quality;
 use oma_core::settings::{Attach, Settings};
-use oma_ipc::overlay::{FrameMetrics, OverlayMessage, PxArea, SetPlacement};
+use oma_ipc::overlay::{FrameMetrics, OverlayMessage, PxArea, SetPlacement, WireFrameTime};
 use oma_ipc::{
     frames_state, FrameBatch, FramesConfigure, FramesStatus, PresentingProcess, PresentingProcesses,
 };
@@ -52,7 +54,8 @@ use serde::Serialize;
 
 use super::editor_feed::{EditorData, SyntheticFeed};
 use super::forward::{
-    frame_times_since, metrics_message, set_profile, union_needs, values_message,
+    frame_times_since, keep_lows, low_windows, metrics_message, set_profile, union_needs,
+    values_message,
 };
 use super::frames::{detail_label, line, sample_of, state_label, LineContext};
 use super::host::{HostFailure, HostState};
@@ -260,8 +263,14 @@ pub struct Controller {
     /// The preview's `SetProfile` may differ from the one sent.
     preview_dirty: bool,
     sent_preview: Option<OverlayMessage>,
+    /// `want_preview` of the last step.
+    sent_want_preview: bool,
+    /// The profile being edited: its lows reach the canvas.
+    editor_profile: Option<Profile>,
     /// The metrics last computed while the editor is open.
     editor_metrics: Option<FrameMetrics>,
+    /// The lows of the active profile, the only ones the overlay gets.
+    overlay_lows: Vec<(u32, LowDefinition)>,
 
     // What was sent.
     sent_config: Option<FramesConfigure>,
@@ -275,10 +284,10 @@ pub struct Controller {
     /// `Some(None)`: hidden; `None`: nothing sent since `Running`.
     sent_placement: Option<Option<(PxArea, u32)>>,
     shown: bool,
-    metrics_sent_ms: Option<u64>,
-    times_sent_ms: Option<u64>,
-    /// The newest frame time sent in `FrameTimes`.
-    times_after_s: f64,
+    /// The in-game overlay's data.
+    overlay_cursor: DataCursor,
+    /// The editor's and the preview's data.
+    side_cursor: DataCursor,
     line_ms: u64,
     /// Lowercase executables already toasted.
     toasted: BTreeSet<String>,
@@ -333,7 +342,10 @@ impl Controller {
             preview_was_running: false,
             preview_dirty: true,
             sent_preview: None,
+            sent_want_preview: false,
+            editor_profile: None,
             editor_metrics: None,
+            overlay_lows: Vec::new(),
             sent_config: None,
             config_sent_ms: 0,
             retry_frames: false,
@@ -343,9 +355,8 @@ impl Controller {
             sent_profile: None,
             sent_placement: None,
             shown: false,
-            metrics_sent_ms: None,
-            times_sent_ms: None,
-            times_after_s: f64::NEG_INFINITY,
+            overlay_cursor: DataCursor::NEW,
+            side_cursor: DataCursor::NEW,
             line_ms: 0,
             toasted: BTreeSet::new(),
             sent_status: None,
@@ -485,13 +496,12 @@ impl Controller {
         }
         if open {
             self.editor = Some(SyntheticFeed::new());
-            if self.target.is_none() {
-                // Synthetic times do not follow those of earlier frames.
-                self.reset_times();
-            }
+            // The canvas gets its data at once.
+            self.side_cursor = DataCursor::NEW;
         } else {
             self.editor = None;
             self.editor_metrics = None;
+            self.editor_profile = None;
             self.set_preview(None);
         }
     }
@@ -507,11 +517,21 @@ impl Controller {
 
     // Used by the runner from D10 on; drop the allow then.
     #[cfg_attr(not(test), allow(dead_code))]
-    /// The preview process's state. Going off by itself means the user
-    /// closed its window: the preview ends rather than restarting.
+    /// The profile open in the editor: the canvas gets its lows windows.
+    pub fn set_editor_profile(&mut self, profile: Option<Profile>) {
+        self.editor_profile = profile;
+        self.refresh_needs();
+    }
+
+    // Used by the runner from D10 on; drop the allow then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// The preview process's state. Going off by itself (it was wanted at
+    /// the last step and had started) means the user closed its window: the
+    /// preview ends rather than restarting. A stop we asked for keeps a
+    /// preview set since.
     pub fn on_preview_host(&mut self, state: HostState) {
-        if state == HostState::Off && self.preview_host != HostState::Off && self.preview.is_some()
-        {
+        let started = matches!(self.preview_host, HostState::Starting | HostState::Running);
+        if state == HostState::Off && started && self.sent_want_preview && self.preview.is_some() {
             self.set_preview(None);
         }
         self.preview_host = state;
@@ -576,6 +596,7 @@ impl Controller {
             let readout = self.readout(config.track_gpu);
             out.diagnostics_line = Some(self.line(&readout));
         }
+        self.sent_want_preview = out.want_preview;
         let plan = self.values_plan();
         if self.sent_plan.as_ref() != Some(&plan) {
             self.sent_plan = Some(plan.clone());
@@ -588,7 +609,7 @@ impl Controller {
     pub fn values_plan(&self) -> ValuesPlan {
         ValuesPlan {
             used: self.used.clone(),
-            wanted: self.shown || self.preview_running() || self.editor.is_some(),
+            wanted: self.shown || self.preview_running(),
         }
     }
 
@@ -608,7 +629,8 @@ impl Controller {
 
     fn reset_times(&mut self) {
         self.swapchain = None;
-        self.times_after_s = f64::NEG_INFINITY;
+        self.overlay_cursor.after_s = f64::NEG_INFINITY;
+        self.side_cursor.after_s = f64::NEG_INFINITY;
     }
 
     /// `Values` for one sampler tick, under the plan of the last step. The
@@ -904,11 +926,18 @@ impl Controller {
         self.refresh_needs();
     }
 
-    /// The sensors and lows windows of the active and the preview profiles,
-    /// and the frame window long enough for them.
+    /// The sensors of the active and the preview profiles, the lows windows
+    /// of those and of the edited one, and the frame window long enough for
+    /// them.
     fn refresh_needs(&mut self) {
-        let profiles = self.active.iter().map(|(_, p)| p).chain(&self.preview);
-        (self.used, self.lows) = union_needs(profiles);
+        let active = self.active.as_ref().map(|(_, p)| p);
+        (self.used, _) = union_needs(active.into_iter().chain(&self.preview));
+        let all = active
+            .into_iter()
+            .chain(&self.preview)
+            .chain(&self.editor_profile);
+        (_, self.lows) = union_needs(all);
+        self.overlay_lows = active.map(low_windows).unwrap_or_default();
         let window_s = self
             .lows
             .iter()
@@ -973,17 +1002,14 @@ impl Controller {
             self.sent_profile = None;
             self.sent_placement = None;
             self.profile_dirty = true;
-            self.times_after_s = f64::NEG_INFINITY;
-            self.metrics_sent_ms = None;
-            self.times_sent_ms = None;
+            self.overlay_cursor = DataCursor::NEW;
         }
         self.was_running = running;
         let was_shown = self.shown;
         self.shown = self.placement().is_some();
         if self.shown && !was_shown {
-            // Shown again: its data at once.
-            self.metrics_sent_ms = None;
-            self.times_sent_ms = None;
+            // Shown again: its data at once, the frames missed included.
+            self.overlay_cursor.pause();
         }
     }
 
@@ -1031,57 +1057,65 @@ impl Controller {
         }
     }
 
-    /// `FrameMetrics` at `textHz` and `FrameTimes` at 10 Hz, computed once
-    /// for the overlay (while shown), the preview (while it runs) and the
-    /// editor (while open).
+    /// `FrameMetrics` at `textHz` and `FrameTimes` at 10 Hz for the overlay
+    /// (while shown) and, on a cursor of their own, for the preview (while
+    /// it runs) and the editor (while open). The metrics are computed once;
+    /// the overlay's carry only the active profile's lows.
     fn step_data(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
-        let (shown, preview) = (self.shown, self.preview_running());
-        let editor = self.editor.is_some();
-        if !shown && !preview && !editor {
-            self.metrics_sent_ms = None;
-            self.times_sent_ms = None;
-            return;
+        let (shown, preview, editor) = (self.shown, self.preview_running(), self.editor.is_some());
+        let side = preview || editor;
+        if !shown {
+            self.overlay_cursor.pause();
         }
-        let send = |msg: &OverlayMessage, out: &mut Outputs| {
-            if shown {
-                out.overlay.push(msg.clone());
-            }
-            if preview {
-                out.preview.push(msg.clone());
-            }
-        };
+        if !side {
+            self.side_cursor.pause();
+        }
         let text_ms = 1_000 / u64::from(self.settings.overlay.text_hz.max(1));
+        let overlay_metrics = shown && due(&mut self.overlay_cursor.metrics_ms, now_ms, text_ms);
+        let side_metrics = side && due(&mut self.side_cursor.metrics_ms, now_ms, text_ms);
         let mut editor_due = false;
-        if self
-            .metrics_sent_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= text_ms)
-        {
-            self.metrics_sent_ms = Some(now_ms);
-            let msg = self.metrics_now(config.track_gpu);
-            send(&msg, out);
-            if let (true, OverlayMessage::FrameMetrics(m)) = (editor, msg) {
-                self.editor_metrics = Some(m);
-                editor_due = true;
+        if overlay_metrics || side_metrics {
+            if let OverlayMessage::FrameMetrics(m) = self.metrics_now(config.track_gpu) {
+                if overlay_metrics {
+                    let mut own = m.clone();
+                    keep_lows(&mut own, &self.overlay_lows);
+                    out.overlay.push(OverlayMessage::FrameMetrics(own));
+                }
+                if side_metrics && preview {
+                    out.preview.push(OverlayMessage::FrameMetrics(m.clone()));
+                }
+                if side_metrics && editor {
+                    self.editor_metrics = Some(m);
+                    editor_due = true;
+                }
             }
         }
+        let overlay_times = shown && due(&mut self.overlay_cursor.times_ms, now_ms, FRAME_TIMES_MS);
+        let side_times = side && due(&mut self.side_cursor.times_ms, now_ms, FRAME_TIMES_MS);
         let mut frame_times = Vec::new();
-        if self
-            .times_sent_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= FRAME_TIMES_MS)
-        {
-            self.times_sent_ms = Some(now_ms);
+        if overlay_times || side_times {
             let swapchain = self
                 .swapchain
                 .or_else(|| pick_swapchain(&self.frames_source().last(LOWS_WINDOW_S)));
             self.swapchain = swapchain;
-            let (msg, newest) =
-                frame_times_since(self.frames_source(), swapchain, self.times_after_s);
-            self.times_after_s = newest;
-            if let OverlayMessage::FrameTimes(t) = &msg {
-                if !t.frames.is_empty() {
-                    send(&msg, out);
+            if overlay_times {
+                let (msg, newest) =
+                    frame_times_since(self.frames_source(), swapchain, self.overlay_cursor.after_s);
+                self.overlay_cursor.after_s = newest;
+                if newest_frames(&msg).is_some() {
+                    out.overlay.push(msg);
+                }
+            }
+            if side_times {
+                let (msg, newest) =
+                    frame_times_since(self.frames_source(), swapchain, self.side_cursor.after_s);
+                self.side_cursor.after_s = newest;
+                if let Some(frames) = newest_frames(&msg) {
                     if editor {
-                        frame_times.clone_from(&t.frames);
+                        frame_times = frames.to_vec();
+                    }
+                    if preview {
+                        out.preview.push(msg);
                     }
                 }
             }
@@ -1179,6 +1213,46 @@ impl Controller {
                 dropped: self.dropped,
             },
         )
+    }
+}
+
+/// When a consumer of the frame data last got metrics and frame times, and
+/// the newest frame time it got.
+#[derive(Debug, Clone, Copy)]
+struct DataCursor {
+    metrics_ms: Option<u64>,
+    times_ms: Option<u64>,
+    after_s: f64,
+}
+
+impl DataCursor {
+    const NEW: Self = Self {
+        metrics_ms: None,
+        times_ms: None,
+        after_s: f64::NEG_INFINITY,
+    };
+
+    /// Due at the next step; the frames not yet sent stay due too.
+    fn pause(&mut self) {
+        self.metrics_ms = None;
+        self.times_ms = None;
+    }
+}
+
+/// Whether `period_ms` passed since `*last`; if so `*last` becomes now.
+fn due(last: &mut Option<u64>, now_ms: u64, period_ms: u64) -> bool {
+    let due = last.is_none_or(|t| now_ms.saturating_sub(t) >= period_ms);
+    if due {
+        *last = Some(now_ms);
+    }
+    due
+}
+
+/// The frames of a `FrameTimes` with at least one.
+fn newest_frames(msg: &OverlayMessage) -> Option<&[WireFrameTime]> {
+    match msg {
+        OverlayMessage::FrameTimes(t) if !t.frames.is_empty() => Some(&t.frames),
+        _ => None,
     }
 }
 
@@ -2494,21 +2568,130 @@ mod tests {
         }
     }
 
+    /// A profile with a `low-1` block over 30 s, percentile.
+    fn lows_profile() -> Profile {
+        oma_core::overlay::parse_profile(
+            &serde_json::json!({ "format": 1, "name": "l", "blocks": [{
+                "id": "a", "rect": { "x": 0, "y": 0, "w": 4, "h": 2 },
+                "source": { "frames": "low-1" }, "kind": "text",
+                "stat": { "window": 30, "definition": "percentile" }
+            }] })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn low_keys(m: &FrameMetrics) -> Vec<(u32, String)> {
+        m.lows
+            .iter()
+            .map(|l| (l.window_s, l.definition.clone()))
+            .collect()
+    }
+
     #[test]
     fn preview_does_not_change_the_in_game_overlay() {
         let (mut plain, mut with_preview) = (showing(), showing());
         with_preview.on_editor(true);
-        with_preview.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        with_preview.set_editor_profile(Some(lows_profile()));
+        with_preview.set_preview(Some(lows_profile()));
         with_preview.on_preview_host(HostState::Running);
-        for (i, now) in [200, 300, 600, 700, 1_100, 1_600].into_iter().enumerate() {
-            let batches = [batch(GAME, 5.0 + i as f64 * 0.5, 50, 0)];
+        let mut preview_lows = false;
+        let mut overlay_frames = BTreeSet::new();
+        for (i, now) in (2..60u64).map(|i| i * 100).enumerate() {
+            match now {
+                // Hidden for a while, then shown: the backlog reaches it.
+                1_000 | 2_500 => {
+                    plain.toggle_hidden();
+                    with_preview.toggle_hidden();
+                }
+                // A new overlay process.
+                3_500 => {
+                    plain.on_host(HostState::Starting);
+                    with_preview.on_host(HostState::Starting);
+                }
+                3_700 => {
+                    plain.on_host(HostState::Running);
+                    with_preview.on_host(HostState::Running);
+                }
+                _ => {}
+            }
+            let batches = [batch(GAME, 5.0 + i as f64 * 0.1, 10, 0)];
             for c in [&mut plain, &mut with_preview] {
                 c.on_frames(Some(&status("running")), Some(&processes()), &batches);
             }
             let (a, b) = (plain.step(now), with_preview.step(now));
             assert_eq!(a.overlay, b.overlay, "{now}");
-            assert!(!b.preview.is_empty() || now != 200);
+            for t in times(&a) {
+                overlay_frames.extend(t.frames.iter().map(|f| f.t_s.to_bits()));
+            }
+            for m in metrics(&a) {
+                assert!(
+                    low_keys(&m).iter().all(|k| k.0 == 10),
+                    "{now}: {:?}",
+                    m.lows
+                );
+            }
+            for m in b.preview.iter().filter_map(|m| match m {
+                OverlayMessage::FrameMetrics(f) => Some(f),
+                _ => None,
+            }) {
+                preview_lows |= low_keys(m).contains(&(30, "percentile".into()));
+            }
         }
+        assert!(preview_lows, "the preview gets its own lows");
+        // A new process gets the window again; no frame is ever missed.
+        assert_eq!(overlay_frames.len(), 58 * 10, "the overlay misses no frame");
+    }
+
+    #[test]
+    fn opening_the_editor_sends_metrics_at_once() {
+        let mut c = showing();
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 50, 0)],
+        );
+        assert_eq!(metrics(&c.step(150)).len(), 0, "sent at 100");
+        c.on_editor(true);
+        let out = c.step(200);
+        assert!(out.editor_data.is_some());
+        assert!(metrics(&out).is_empty(), "the overlay keeps its cadence");
+    }
+
+    #[test]
+    fn editor_profile_lows_reach_the_canvas() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_editor(true);
+        c.set_editor_profile(Some(lows_profile()));
+        let out = c.step(60_000);
+        let data = out.editor_data.unwrap();
+        assert!(low_keys(&data.metrics).contains(&(30, "percentile".into())));
+        assert_eq!(out.values_plan.map(|p| p.wanted), Some(false));
+        c.set_editor_profile(None);
+        let data = c.step(60_500).editor_data.unwrap();
+        assert!(low_keys(&data.metrics).iter().all(|k| k.0 == 10));
+    }
+
+    #[test]
+    fn a_stop_we_asked_for_keeps_a_new_preview() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        c.on_preview_host(HostState::Starting);
+        c.step(200);
+        c.on_preview_host(HostState::Running);
+        c.step(300);
+        c.set_preview(None);
+        assert!(!c.step(400).want_preview);
+        c.set_preview(Some(sensor_profile("gpu0/temperature/core")));
+        // The stop of the first preview arrives late.
+        c.on_preview_host(HostState::Off);
+        let out = c.step(500);
+        assert!(out.want_preview, "the new preview is kept");
+        assert!(out.status.is_none_or(|s| s.preview));
+        assert!(c.current_status().preview);
     }
 
     #[test]
@@ -2538,9 +2721,28 @@ mod tests {
                 .any(|m| matches!(m, OverlayMessage::SetPlacement(_))),
             "the preview ignores placements"
         );
-        let shared = data_of(&out.overlay);
-        assert!(!shared.is_empty());
-        assert_eq!(data_of(&out.preview), shared);
+        // The same frames, on the preview's own cadence.
+        assert_eq!(times(&out).len(), 1);
+        let preview_times: Vec<_> = out
+            .preview
+            .iter()
+            .filter(|m| matches!(m, OverlayMessage::FrameTimes(_)))
+            .cloned()
+            .collect();
+        assert_eq!(
+            preview_times,
+            vec![OverlayMessage::FrameTimes(times(&out)[0].clone())]
+        );
+        let out = c.step(700);
+        let preview_metrics: Vec<_> = out
+            .preview
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::FrameMetrics(f) => Some(f.fps_displayed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(preview_metrics, vec![Some(100.0)]);
         // Not sent again while nothing changes; again after a restart.
         assert!(preview_profiles(&c.step(700)).is_empty());
         c.on_preview_host(HostState::Starting);
@@ -2578,25 +2780,31 @@ mod tests {
         let plan = c.step(0).values_plan.unwrap();
         assert_eq!(plan.used, vec!["gpu0/temperature/core"]);
         assert!(!plan.wanted);
-        // The editor alone wants values.
+        // The editor alone does not need values (its canvas reads the
+        // LiveStore), nor do the sensors of the profile being edited.
         c.on_editor(true);
-        assert_eq!(
-            c.step(100).values_plan,
-            Some(ValuesPlan {
-                used: vec!["gpu0/temperature/core".into()],
-                wanted: true
-            })
-        );
+        c.set_editor_profile(Some(sensor_profile("cpu/1/load/total")));
+        assert_eq!(c.step(100).values_plan, None);
         c.set_preview(Some(sensor_profile("cpu/0/load/total")));
         let plan = c.step(200).values_plan.unwrap();
         assert_eq!(plan.used, vec!["cpu/0/load/total", "gpu0/temperature/core"]);
+        assert!(!plan.wanted, "the preview is not running yet");
+        c.on_preview_host(HostState::Running);
+        assert_eq!(
+            c.step(300).values_plan,
+            Some(ValuesPlan {
+                used: vec!["cpu/0/load/total".into(), "gpu0/temperature/core".into()],
+                wanted: true
+            })
+        );
         c.set_preview(None);
         assert_eq!(
-            c.step(300).values_plan.unwrap().used,
-            vec!["gpu0/temperature/core"]
+            c.step(400).values_plan,
+            Some(ValuesPlan {
+                used: vec!["gpu0/temperature/core".into()],
+                wanted: false
+            })
         );
-        c.on_editor(false);
-        assert!(!c.step(400).values_plan.unwrap().wanted);
     }
 
     #[test]

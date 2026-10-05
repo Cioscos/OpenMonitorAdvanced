@@ -1,6 +1,6 @@
 import cases from '../../../../testdata/overlay/geometry-cases.json';
 import { blockPx, cellPx, footprint, place, placeWithExtra, profileFrame } from './geometry';
-import { BLOCK_DEFAULTS, type Block, type Profile, withDefaults } from './profile';
+import { blockDefaults, type Block, type Profile, withDefaults } from './profile';
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -15,7 +15,7 @@ test('geometry matches the shared fixture', () => {
 });
 
 const block = (x: number, y: number, w: number, h: number): Block => ({
-  ...structuredClone(BLOCK_DEFAULTS),
+  ...blockDefaults(),
   id: `b${x}-${y}`,
   rect: { x, y, w, h },
   source: { text: 't' },

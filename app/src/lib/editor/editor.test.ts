@@ -81,3 +81,30 @@ test('a failed command keeps the error for the UI', async () => {
   expect(await store.load(USER_ID)).toBe(false);
   expect(store.error).toEqual({ key: 'editor.error.io', detail: 'disk full' });
 });
+
+test('save as on a built-in duplicates it, then renames and saves the copy', async () => {
+  const { backend, store } = setup();
+  backend.profiles['builtin-gaming'] = { id: 'builtin-gaming', builtin: true, json: JSON.stringify({ format: 1, name: 'Gaming' }) };
+  await store.load('builtin-gaming');
+  expect(await store.saveAs('Mine too')).toBe(true);
+  expect(backend.editorCalls).toContain('overlayDuplicateProfile:builtin-gaming');
+  expect(backend.editorCalls).not.toContain('overlaySaveProfile:null');
+  expect(store.builtin).toBe(false);
+  expect(JSON.parse(backend.profiles[store.profileId!].json).name).toBe('Mine too');
+  expect(store.dirty).toBe(false);
+});
+
+test('a dirty state that did not reach the shell is sent again', async () => {
+  const { backend, store } = setup();
+  await store.load(USER_ID);
+  const original = backend.overlayEditorDirty.bind(backend);
+  backend.overlayEditorDirty = async () => {
+    throw new Error('gone');
+  };
+  store.apply({ ...store.profile, name: 'a' });
+  await Promise.resolve();
+  await Promise.resolve();
+  backend.overlayEditorDirty = original;
+  store.apply({ ...store.profile, name: 'b' });
+  expect(backend.editorCalls).toContain('overlayEditorDirty:true');
+});

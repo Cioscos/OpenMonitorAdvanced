@@ -43,7 +43,7 @@ export class EditorStore {
     return this.profile.blocks.filter((b) => this.selection.has(b.id));
   }
 
-  /** Starts a new, unsaved, empty profile. */
+  /** Starts a new, unsaved, empty profile, named in the current language (call it again once the settings are known). */
   newProfile(): void {
     const profile = emptyProfile(t('editor.newProfileName'));
     this.#open(null, false, profile, JSON.stringify(profile));
@@ -113,6 +113,12 @@ export class EditorStore {
 
   /** Saves a copy under a new id (the shell makes the name unique) and opens it. */
   async saveAs(name: string): Promise<boolean> {
+    // A built-in goes through «Duplicate», which binds its sensors to this PC by role (DD10).
+    if (this.builtin) {
+      if (!(await this.duplicate())) return false;
+      this.rename(name);
+      return this.save();
+    }
     let id = '';
     const ok = await this.#run(async () => {
       id = await this.#backend.overlaySaveProfile(null, JSON.stringify({ ...this.profile, name }));
@@ -211,7 +217,11 @@ export class EditorStore {
   #syncDirty() {
     this.dirty = JSON.stringify(this.profile) !== this.saved;
     if (this.dirty === this.#sentDirty) return;
-    this.#sentDirty = this.dirty;
-    void this.#backend.overlayEditorDirty(this.dirty).catch(() => {});
+    const sent = this.dirty;
+    this.#sentDirty = sent;
+    void this.#backend.overlayEditorDirty(sent).catch(() => {
+      // Not delivered: the next change sends the state again.
+      if (this.#sentDirty === sent) this.#sentDirty = !sent;
+    });
   }
 }

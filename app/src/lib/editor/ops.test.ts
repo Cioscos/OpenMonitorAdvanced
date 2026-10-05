@@ -11,10 +11,10 @@ import {
   setPath,
   snap,
 } from './ops';
-import { BLOCK_DEFAULTS, newBlock, withDefaults, type Block, type Profile } from './profile';
+import { blockDefaults, newBlock, withDefaults, type Block, type Profile } from './profile';
 
 const block = (id: string, x: number, y: number, w = 4, h = 2): Block => ({
-  ...structuredClone(BLOCK_DEFAULTS),
+  ...blockDefaults(),
   id,
   rect: { x, y, w, h },
   source: { text: id },
@@ -116,4 +116,33 @@ test('new graph block for frametime sources', () => {
   expect(text.kind).toBe('text');
   expect(text.rect).toEqual({ x: 0, y: 0, w: 12, h: 2 });
   expect(newBlock({ frames: 'fps-displayed' }, { x: 0, y: 0 }, []).kind).toBe('text');
+});
+
+test('the default objects of a block are distinct', () => {
+  const b = newBlock({ text: 't' }, { x: 0, y: 0 }, []);
+  const { labelStyle, valueStyle, unitStyle, meter, gauge } = b.style;
+  expect(new Set([labelStyle, valueStyle, unitStyle]).size).toBe(3);
+  expect(meter).not.toBe(gauge);
+  valueStyle.size = 30;
+  expect(labelStyle.size).toBe(12);
+  expect(newBlock({ text: 't' }, { x: 0, y: 0 }, []).style.valueStyle.size).toBe(12);
+  const [loaded] = withDefaults({ format: 1, name: 'p', blocks: [{ id: 'a', rect: { x: 0, y: 0, w: 1, h: 1 }, source: { text: 't' }, kind: 'text' } as Block] }).blocks;
+  expect(loaded.style.labelStyle).not.toBe(loaded.style.unitStyle);
+});
+
+test('defaults are filled inside a panel, a comparison and the thresholds', () => {
+  const partial = {
+    id: 'a',
+    rect: { x: 0, y: 0, w: 1, h: 1 },
+    source: { text: 't' },
+    kind: 'text',
+    panel: { opacity: 0.8 },
+    visibleIf: { source: { frames: 'fps-displayed' }, op: '<', value: 60 },
+    thresholds: [{ op: '>', value: 90, color: '#FF0000' }],
+  } as unknown as Block;
+  const [b] = withDefaults({ format: 1, name: 'p', blocks: [partial] }).blocks;
+  expect(b.panel).toEqual({ color: '#000000', opacity: 0.8, radius: 4, padding: 1 });
+  expect(b.visibleIf).toEqual({ source: { frames: 'fps-displayed' }, stat: { op: 'current', window: 1, definition: 'integral' }, op: '<', value: 60 });
+  expect(b.thresholds).toEqual([{ op: '>', value: 90, color: '#FF0000', target: 'value' }]);
+  expect(withDefaults({ format: 1, name: 'p', blocks: [{ ...partial, visibleIf: { fg: 'active' } }] }).blocks[0].visibleIf).toEqual({ fg: 'active' });
 });

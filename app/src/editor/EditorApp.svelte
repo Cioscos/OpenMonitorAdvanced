@@ -22,10 +22,12 @@
         console.error('editor: settings unavailable', error);
       }
       if (cancelled) return;
-      // The profile the overlay shows now, else the default one.
+      // The profile the overlay shows now, else the default one; else a new profile, named only
+      // now that the settings have set the language.
       const status = await backend.getOverlayStatus().catch(() => null);
       const id = status?.activeProfile ?? settings.state?.settings.overlay.defaultProfile;
-      if (!cancelled && id !== undefined) await editor.load(id);
+      if (cancelled) return;
+      if (id === undefined || !(await editor.load(id))) editor.newProfile();
     })();
     return () => {
       cancelled = true;

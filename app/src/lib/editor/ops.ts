@@ -91,7 +91,11 @@ function write(target: unknown, keys: string[], value: unknown): unknown {
   return { ...obj, [key]: write(obj[key], rest, value) };
 }
 
-/** Sets the dotted `path` to `value` in the selected blocks; the others are returned as they are. */
+/**
+ * Sets the dotted `path` to `value` in the selected blocks; the others are returned as they are.
+ * A nullable object (`outline`, `shadow`, `panel`, `visibleIf`) is set whole: a leaf path under a
+ * null one (`style.valueStyle.outline.width`) would create a partial object the format rejects.
+ */
 export function setPath(blocks: readonly Block[], ids: Ids, path: string, value: unknown): Block[] {
   const set = new Set(ids);
   const keys = path.split('.');

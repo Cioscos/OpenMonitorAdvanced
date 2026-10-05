@@ -162,8 +162,11 @@ export const LIMITS = {
 
 const ACCENT = '#00E5FF';
 
-const TEXT_STYLE: TextStyle = { font: 'Segoe UI', size: 12, weight: 600, italic: false, color: '#FFFFFF', outline: null, shadow: null };
-const RANGE_STYLE: RangeStyle = { orientation: 'horizontal', min: 'auto', max: 'auto' };
+// Factories, not shared constants: every default object is a distinct value, so an in-place edit
+// of one (say `valueStyle`) never reaches another (`labelStyle`), even through `structuredClone`.
+const textStyle = (): TextStyle => ({ font: 'Segoe UI', size: 12, weight: 600, italic: false, color: '#FFFFFF', outline: null, shadow: null });
+const rangeStyle = (): RangeStyle => ({ orientation: 'horizontal', min: 'auto', max: 'auto' });
+const stat = (): Stat => ({ op: 'current', window: 1, definition: 'integral' });
 
 export const PANEL_DEFAULTS: Panel = { color: '#000000', opacity: 0.35, radius: 4, padding: 1 };
 
@@ -175,14 +178,14 @@ export const PROFILE_DEFAULTS: Omit<Profile, 'format' | 'name' | 'blocks'> = {
   panel: PANEL_DEFAULTS,
 };
 
-/** Every field of a block but `id`, `rect`, `source` and `kind`. */
-export const BLOCK_DEFAULTS: Omit<Block, 'id' | 'rect' | 'source' | 'kind'> = {
+/** Every field of a block but `id`, `rect`, `source` and `kind`, as new objects. */
+export const blockDefaults = (): Omit<Block, 'id' | 'rect' | 'source' | 'kind'> => ({
   z: 0,
-  stat: { op: 'current', window: 1, definition: 'integral' },
+  stat: stat(),
   style: {
-    labelStyle: TEXT_STYLE,
-    valueStyle: TEXT_STYLE,
-    unitStyle: TEXT_STYLE,
+    labelStyle: textStyle(),
+    valueStyle: textStyle(),
+    unitStyle: textStyle(),
     align: 'left',
     decimals: null,
     unit: 'auto',
@@ -197,13 +200,16 @@ export const BLOCK_DEFAULTS: Omit<Block, 'id' | 'rect' | 'source' | 'kind'> = {
       showMinAvgMax: false,
       showValue: true,
     },
-    meter: RANGE_STYLE,
-    gauge: RANGE_STYLE,
+    meter: rangeStyle(),
+    gauge: rangeStyle(),
   },
   thresholds: [],
   visibleIf: null,
   panel: null,
-};
+});
+
+/** `blockDefaults()` once; clone it before changing it. */
+export const BLOCK_DEFAULTS = blockDefaults();
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -216,10 +222,22 @@ function merge(defaults: unknown, value: unknown): unknown {
   return out;
 }
 
+/**
+ * A block with every default filled in, also inside its optional parts as serde does: the fields
+ * of a present `panel`, the `stat` of a `visibleIf` comparison and the `target` of each threshold.
+ */
+function blockWithDefaults(partial: unknown): Block {
+  const block = merge(blockDefaults(), partial) as Block;
+  if (block.panel !== null) block.panel = merge(PANEL_DEFAULTS, block.panel) as Panel;
+  if (block.visibleIf !== null && 'source' in block.visibleIf) block.visibleIf = merge({ stat: stat() }, block.visibleIf) as Comparison;
+  block.thresholds = block.thresholds.map((t) => merge({ target: 'value' }, t) as Threshold);
+  return block;
+}
+
 /** A partial profile (as a file may omit defaults) with every default filled in. */
 export function withDefaults(partial: Partial<Profile> & Pick<Profile, 'format' | 'name'>): Profile {
   const profile = merge(PROFILE_DEFAULTS, { ...partial, blocks: undefined }) as Profile;
-  profile.blocks = (partial.blocks ?? []).map((b) => merge(BLOCK_DEFAULTS, b) as Block);
+  profile.blocks = (partial.blocks ?? []).map(blockWithDefaults);
   return profile;
 }
 
@@ -243,12 +261,12 @@ const isFrametime = (source: Source) => 'frames' in source && source.frames.star
  */
 export function newBlock(source: Source, cell: { x: number; y: number }, existing: readonly Block[]): Block {
   const graph = isFrametime(source);
-  const block = merge(BLOCK_DEFAULTS, {
+  const block = blockWithDefaults({
     id: freeBlockId(new Set(existing.map((b) => b.id))),
     rect: { x: cell.x, y: cell.y, w: graph ? 20 : 12, h: graph ? 4 : 2 },
     source: structuredClone(source),
     kind: graph ? 'graph' : 'text',
-  }) as Block;
+  });
   if (graph) block.style.graph.mode = 'frametime';
   return block;
 }

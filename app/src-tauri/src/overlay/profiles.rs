@@ -17,6 +17,10 @@ use serde::Serialize;
 /// The id used when a requested profile does not exist.
 pub const FALLBACK_PROFILE: &str = "builtin-gaming";
 
+/// Most profile files read from the folder, the first by name; the rest are
+/// skipped with one diagnostic.
+pub const MAX_PROFILE_FILES: usize = 256;
+
 /// `<APPDATA>\OpenMonitorAdvanced\overlay\profiles`, from the roaming
 /// application data folder.
 pub fn profiles_dir(app_data: &Path) -> PathBuf {
@@ -86,6 +90,7 @@ pub fn load_catalog(dir: &Path) -> ProfileCatalog {
         })
         .collect();
     files.sort();
+    let skipped = files.split_off(files.len().min(MAX_PROFILE_FILES));
     for (file, path) in files {
         match read_profile(&path) {
             Ok(None) => {}
@@ -100,6 +105,15 @@ pub fn load_catalog(dir: &Path) -> ProfileCatalog {
             }
             Err(reason) => catalog.diagnostics.push(ProfileDiagnostic { file, reason }),
         }
+    }
+    if let Some((first, _)) = skipped.first() {
+        catalog.diagnostics.push(ProfileDiagnostic {
+            file: first.clone(),
+            reason: format!(
+                "{} profile files skipped: at most {MAX_PROFILE_FILES} are read",
+                skipped.len()
+            ),
+        });
     }
     catalog
 }
@@ -287,6 +301,33 @@ mod tests {
             }]
         );
         assert_eq!(fs::metadata(&path).unwrap().len(), text.len() as u64);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn at_most_max_profile_files_are_read() {
+        let dir = temp_dir("cap");
+        let total = MAX_PROFILE_FILES + 3;
+        for i in 0..total {
+            let id = format!("00000000-0000-4000-8000-{i:012x}");
+            fs::write(dir.join(format!("{id}.json")), profile_json("p")).unwrap();
+        }
+        let catalog = load_catalog(&dir);
+        let user: Vec<&ProfileEntry> = catalog.entries.iter().filter(|e| !e.builtin).collect();
+        assert_eq!(user.len(), MAX_PROFILE_FILES);
+        // The first files by name are read, the rest skipped.
+        assert_eq!(user[0].id, "00000000-0000-4000-8000-000000000000");
+        assert_eq!(
+            user[MAX_PROFILE_FILES - 1].id,
+            format!("00000000-0000-4000-8000-{:012x}", MAX_PROFILE_FILES - 1)
+        );
+        assert_eq!(
+            catalog.diagnostics,
+            vec![ProfileDiagnostic {
+                file: format!("00000000-0000-4000-8000-{MAX_PROFILE_FILES:012x}.json"),
+                reason: "3 profile files skipped: at most 256 are read".to_owned(),
+            }]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

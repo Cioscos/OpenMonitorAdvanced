@@ -94,6 +94,7 @@
       onpointermove={move}
       onpointerup={up}
       onpointercancel={() => (drag = null)}
+      onlostpointercapture={() => (drag = null)}
       onkeydown={(e) => key(e, source)}>{name}</button
     >
   </li>

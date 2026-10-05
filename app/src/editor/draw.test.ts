@@ -46,7 +46,7 @@ function readout(values: Record<string, number | null>, metrics: FrameMetrics | 
     metrics,
     sensor: (id) => (id === SENSOR ? { label: 'Core temperature', unit: 'celsius' } : undefined),
     t,
-    locale: 'en',
+    format: { decimalComma: false, temperature: 'c', rate: 'bits', flagOn: 'On', flagOff: 'Off' },
   };
 }
 
@@ -119,4 +119,16 @@ test('statOf covers the window before the newest sample', () => {
   expect(statOf(samples, { op: 'min', window: 5, definition: 'integral' })).toBe(10);
   expect(statOf(samples, { op: 'avg', window: 5, definition: 'integral' })).toBe(20);
   expect(statOf([], { op: 'avg', window: 5, definition: 'integral' })).toBeNull();
+});
+
+test('values use the block decimals and the drawing settings', () => {
+  const block = newBlock({ sensor: SENSOR }, { x: 0, y: 0 }, []);
+  block.style.decimals = 1;
+  const r = readout({ [SENSOR]: 85.25 });
+  r.format = { ...r.format, decimalComma: true, temperature: 'f' };
+  const { ctx, calls } = fakeContext();
+  drawProfile(ctx, profileWith(block), { origin: [0, 0], cell: 8 }, r);
+  const drawn = texts(calls).map((c) => c.args[0]);
+  expect(drawn).toContain('185,5');
+  expect(drawn).toContain('°F');
 });

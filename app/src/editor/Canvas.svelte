@@ -5,8 +5,10 @@
   import { deleteBlocks, duplicateBlocks, firstFreeCell, moveBlocks, pasteBlocks, resizeBlocks, snap } from '../lib/editor/ops';
   import { LIMITS, newBlock, type Block, type Profile, type Source } from '../lib/editor/profile';
   import { i18n, t } from '../lib/i18n/index.svelte';
+  import { sensorLabel } from '../lib/advanced/labels';
   import type { LiveStore } from '../lib/live.svelte';
-  import { blockRect, byZ, drawProfile, sourceName, type View } from './draw';
+  import { display } from '../lib/units.svelte';
+  import { blockRect, byZ, drawProfile, sourceName, type Readout, type View } from './draw';
   import { makeReadout, type FrameFeed } from './feed.svelte';
 
   // The profile on a simulated screen (§7.1, §7.3): the blocks drawn like the overlay, moved and
@@ -81,11 +83,20 @@
 
   $effect(() => {
     // Everything the picture depends on; no continuous loop (§11).
-    void [editor.profile, editor.selection, feed.version, live.timestampMs, live.schema, size.w, size.h, screenArea, i18n.locale];
+    void [editor.profile, editor.selection, feed.version, live.timestampMs, live.schema, size.w, size.h, screenArea, format];
     schedule();
   });
 
   const HANDLE = 6;
+
+  /** The drawing settings, as the app sends them to the overlay (`forward.rs`). */
+  const format = $derived<Readout['format']>({
+    decimalComma: i18n.locale === 'it',
+    temperature: display.temperature,
+    rate: display.throughput,
+    flagOn: t('flag.on'),
+    flagOff: t('flag.off'),
+  });
 
   function paint() {
     const ctx = canvas?.getContext('2d');
@@ -123,7 +134,7 @@
     ctx.beginPath();
     ctx.rect(s.x, s.y, s.w, s.h);
     ctx.clip();
-    drawProfile(ctx, editor.profile, L.view, makeReadout(live, feed, t, i18n.locale));
+    drawProfile(ctx, editor.profile, L.view, makeReadout(live, feed, t, format));
     ctx.restore();
     if (L.panel !== null) {
       // The profile's footprint as the overlay places it.
@@ -210,6 +221,8 @@
   }
 
   function move(e: PointerEvent) {
+    // The button was released where no `pointerup` reached us: the gesture is over.
+    if (gesture !== null && (e.buttons & 1) === 0) up();
     const p = point(e);
     if (gesture === null) {
       const { view } = layout(editor.profile);
@@ -261,6 +274,8 @@
 
   /** The editing shortcuts shared by the canvas and the block list; true when handled. */
   function shortcut(e: KeyboardEvent): boolean {
+    // A key during a drag (Ctrl+Z) acts on the finished gesture.
+    up();
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     const ids = editor.selection;
@@ -279,7 +294,10 @@
         editor.apply(r.profile);
         editor.select(r.ids);
       }
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && ids.size > 0) editor.apply(deleteBlocks(editor.profile, ids));
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && ids.size > 0) {
+      editor.apply(deleteBlocks(editor.profile, ids));
+      editor.select([]);
+    }
     else if (e.key === 'Escape') editor.select([]);
     else return false;
     return true;
@@ -290,6 +308,7 @@
   function canvasKey(e: KeyboardEvent) {
     const arrow = ARROWS[e.key];
     if (arrow !== undefined && editor.selection.size > 0) {
+      up();
       const edit = e.shiftKey ? resizeBlocks : moveBlocks;
       editor.apply(edit(editor.profile, editor.selection, arrow[0], arrow[1]));
     } else if (!shortcut(e)) return;
@@ -299,10 +318,16 @@
   // ---- block list ----
 
   const names = $derived.by(() => {
-    void live.schema;
     void i18n.locale;
-    const readout = makeReadout(live, feed, t, i18n.locale);
-    return new Map(editor.profile.blocks.map((b) => [b.id, sourceName(b.source, readout) || b.id]));
+    const sensors = new Map((live.schema?.sensors ?? []).map((s) => [s.id, s]));
+    const lookup: Pick<Readout, 'sensor' | 't'> = {
+      t,
+      sensor: (id) => {
+        const s = sensors.get(id);
+        return s === undefined ? undefined : { label: sensorLabel(s, t), unit: s.unit };
+      },
+    };
+    return new Map(editor.profile.blocks.map((b) => [b.id, sourceName(b.source, lookup) || b.id]));
   });
   let active = $state<string | null>(null);
 
@@ -365,6 +390,7 @@
       onpointermove={move}
       onpointerup={up}
       onpointercancel={up}
+      onlostpointercapture={up}
       onkeydown={canvasKey}
     >
       <canvas bind:this={canvas} class="canvas"></canvas>

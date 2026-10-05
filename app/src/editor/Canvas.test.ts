@@ -16,7 +16,8 @@ const blocks = () => within(screen.getByRole('listbox', { name: 'Blocks' }));
 // (jsdom has no screen size): half scale, so a cell is 4 px. A top-left profile with the default
 // offset (1 cell) and padding (1 cell) puts cell (0, 0) at (8, 8).
 const CELL = 4;
-const at = (cx: number, cy: number) => ({ clientX: 8 + cx * CELL, clientY: 8 + cy * CELL, pointerId: 1, button: 0 });
+// `buttons: 1`: the primary button is held, as during a real drag.
+const at = (cx: number, cy: number) => ({ clientX: 8 + cx * CELL, clientY: 8 + cy * CELL, pointerId: 1, button: 0, buttons: 1 });
 
 beforeEach(() => {
   i18n.locale = 'en';
@@ -47,6 +48,18 @@ test('drag moves by whole cells', async () => {
   await fireEvent.pointerUp(canvas, at(4, 3));
   expect(rect('b1')).toMatchObject({ x: 3, y: 2, w: 12, h: 2 });
   expect(rect(b)).toMatchObject({ x: 0, y: 4 });
+});
+
+test('a lost pointer capture ends the drag', async () => {
+  const { canvas, rect } = setup();
+  await fireEvent.pointerDown(canvas, at(1, 1));
+  await fireEvent.lostPointerCapture(canvas, { pointerId: 1 });
+  await fireEvent.pointerMove(canvas, at(4, 3));
+  expect(rect('b1')).toMatchObject({ x: 0, y: 0 });
+  // So does a move with the button no longer held.
+  await fireEvent.pointerDown(canvas, at(1, 1));
+  await fireEvent.pointerMove(canvas, { ...at(4, 3), buttons: 0 });
+  expect(rect('b1')).toMatchObject({ x: 0, y: 0 });
 });
 
 test('handles resize', async () => {
@@ -99,6 +112,17 @@ test('ctrl z undoes a drag in one step', async () => {
   expect(rect(a).x).toBe(5);
 });
 
+test('ctrl z during a drag ends it and undoes it', async () => {
+  const { canvas, rect, a } = setup();
+  await fireEvent.pointerDown(canvas, at(1, 1));
+  await fireEvent.pointerMove(canvas, at(4, 1));
+  await fireEvent.keyDown(canvas, { key: 'z', ctrlKey: true });
+  expect(rect(a).x).toBe(0);
+  // The rest of the drag no longer moves anything.
+  await fireEvent.pointerMove(canvas, at(6, 1));
+  expect(rect(a).x).toBe(0);
+});
+
 test('copy, paste, duplicate and delete go through the history', async () => {
   const { editor, canvas, a } = setup();
   editor.select([a]);
@@ -109,6 +133,7 @@ test('copy, paste, duplicate and delete go through the history', async () => {
   expect(editor.profile.blocks).toHaveLength(4);
   await fireEvent.keyDown(canvas, { key: 'Delete' });
   expect(editor.profile.blocks).toHaveLength(3);
+  expect(editor.selection.size).toBe(0);
   await fireEvent.keyDown(canvas, { key: 'z', ctrlKey: true });
   expect(editor.profile.blocks).toHaveLength(4);
 });

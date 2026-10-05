@@ -76,21 +76,36 @@ export class FrameFeed {
   }
 }
 
-/** A `Readout` over the live sensors and the frame feed. */
-export function makeReadout(live: LiveStore, feed: FrameFeed, t: Translate, locale: string): Readout {
+/**
+ * A `Readout` over the live sensors and the frame feed, for one repaint: the samples of each
+ * source are copied once and kept for the blocks that read them again.
+ */
+export function makeReadout(live: LiveStore, feed: FrameFeed, t: Translate, format: Readout['format']): Readout {
   const metrics = feed.metrics?.state === 'running' ? feed.metrics : null;
   const schema = new Map((live.schema?.sensors ?? []).map((s) => [s.id, s]));
-  const times = live.seriesTimestampsMs();
-  const sensorSamples = (id: string): [number, number][] => {
-    const values = live.series(id);
-    const out: [number, number][] = [];
-    values.forEach((v, i) => {
-      if (v !== null && Number.isFinite(v)) out.push([times[i] / 1000, v]);
-    });
-    return out;
+  let times: number[] | null = null;
+  const cache = new Map<string, [number, number][]>();
+  const read = (source: Source): [number, number][] => {
+    if ('sensor' in source) {
+      times ??= live.seriesTimestampsMs();
+      const out: [number, number][] = [];
+      live.series(source.sensor).forEach((v, i) => {
+        if (v !== null && Number.isFinite(v)) out.push([times![i] / 1000, v]);
+      });
+      return out;
+    }
+    return 'frames' in source && metrics !== null ? feed.samples(source.frames) : [];
   };
-  const samples = (source: Source): [number, number][] =>
-    'sensor' in source ? sensorSamples(source.sensor) : 'frames' in source && metrics !== null ? feed.samples(source.frames) : [];
+  const samples = (source: Source): [number, number][] => {
+    if ('text' in source) return [];
+    const key = 'sensor' in source ? `s:${source.sensor}` : `f:${source.frames}`;
+    let found = cache.get(key);
+    if (found === undefined) {
+      found = read(source);
+      cache.set(key, found);
+    }
+    return found;
+  };
   const value = (source: Source, stat: Stat): number | null => {
     if ('text' in source) return null;
     if ('sensor' in source) return stat.op === 'current' ? live.value(source.sensor) : statOf(samples(source), stat);
@@ -115,6 +130,6 @@ export function makeReadout(live: LiveStore, feed: FrameFeed, t: Translate, loca
       return s === undefined ? undefined : { label: sensorLabel(s, t), unit: s.unit };
     },
     t,
-    locale,
+    format,
   };
 }

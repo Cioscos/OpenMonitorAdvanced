@@ -3,11 +3,12 @@
 // crates/oma-core/src/overlay/eval.rs: thresholds, `visibleIf`, statistics, chart geometry,
 // meter and gauge ranges (DD16). Fonts are the browser's, so it is close, not identical.
 
-import { DASH, formatValue } from '../lib/format';
+import { DASH } from '../lib/format';
 import type { Translate } from '../lib/i18n/index.svelte';
-import { LIMITS, type Block, type CompareOp, type FrameMetric, type Profile, type RangeBound, type Rgba, type Source, type Stat, type TextStyle, type Threshold, type VisibleIf, type YAxis } from '../lib/editor/profile';
+import { LIMITS, type Block, type CompareOp, type Profile, type RangeBound, type Rgba, type Source, type Stat, type TextStyle, type Threshold, type VisibleIf, type YAxis } from '../lib/editor/profile';
 import { footprint } from '../lib/editor/geometry';
 import type { FrameMetrics, Unit, WireFrameTime } from '../lib/types';
+import { formatParts, joinParts, type OverlayFormat } from './overlayFormat';
 
 /** What the drawing reads: values, chart samples and the sensors of the schema. */
 export interface Readout {
@@ -20,7 +21,8 @@ export interface Readout {
   metrics: FrameMetrics | null;
   sensor(id: string): { label: string; unit: Unit } | undefined;
   t: Translate;
-  locale: string;
+  /** The drawing settings: language, units and flag texts (each block adds its decimals and unit). */
+  format: Omit<OverlayFormat, 'decimals' | 'unit'>;
 }
 
 /** Where the profile lies on the canvas: the pixel position of cell (0, 0) and the cell size. */
@@ -99,53 +101,23 @@ export interface TextParts {
   unit: string;
 }
 
-/** A frame metric as number and unit (`format_frame_metric`). */
-function formatFrameMetric(metric: FrameMetric, value: number | null, locale: string): [string, string] {
-  if (!finite(value)) return [DASH, ''];
-  const n = (digits: number) => new Intl.NumberFormat(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false }).format(value);
-  switch (metric) {
-    case 'fps-displayed':
-    case 'fps-rendered':
-    case 'fps-presented':
-    case 'low-1':
-    case 'low-01':
-      return [n(0), 'FPS'];
-    case 'frametime-displayed':
-    case 'frametime-app':
-    case 'latency-pc':
-    case 'latency-display':
-      return [n(1), 'ms'];
-    case 'fg-multiplier':
-      return [`×${n(1)}`, ''];
-    case 'stutter':
-      return [n(0), ''];
-    case 'bound':
-      return [DASH, ''];
-  }
-}
-
-/** `formatValue`'s text split into number and unit, as the overlay draws them apart. */
-function splitUnit(text: string): [string, string] {
-  const m = /^([-−]?[\d.,   ]*\d)\s*(.*)$/.exec(text);
-  return m === null ? [text, ''] : [m[1], m[2]];
-}
+/** The block's formatting: the drawing settings with its own decimals and unit (`format_options`). */
+const formatOf = (block: Block, readout: Readout): OverlayFormat => ({ ...readout.format, decimals: block.style.decimals, unit: block.style.unit });
 
 /** Number and unit of a block's value (`format_block_value`). */
-// ponytail: `style.decimals` and `style.unit` are not applied here (the app's formatter has no
-// such options); the preview shows them exactly.
 function formatBlockValue(block: Block, readout: Readout, value: number | null): [string, string] {
   const { source } = block;
   if ('text' in source) return [source.text, ''];
   if ('sensor' in source) {
     const info = readout.sensor(source.sensor);
     if (info === undefined) return [readout.t('overlay.text.sensorAbsent'), ''];
-    return splitUnit(formatValue(value, info.unit, readout.locale, readout.t));
+    return formatParts(value, { unit: info.unit }, formatOf(block, readout));
   }
   const m = readout.metrics;
   if (m === null) return [DASH, ''];
   if (source.frames === 'bound') return m.bound === 'gpu' || m.bound === 'cpu' ? [readout.t(`overlay.text.bound.${m.bound}`), ''] : [DASH, ''];
   if (source.frames === 'fps-rendered' && m.fg_suspected) return [readout.t('overlay.text.fgSuspected'), ''];
-  return formatFrameMetric(source.frames, value, readout.locale);
+  return formatParts(value, source, formatOf(block, readout));
 }
 
 function blockLabel(block: Block, readout: Readout): string {
@@ -213,8 +185,12 @@ function areas(block: Block, r: Rect, cell: number): { text: Rect; shape: Rect }
 function yRange(values: number[], y: YAxis): [number, number] | null {
   if (y.mode === 'fixed') return y.max > y.min ? [y.min, y.max] : null;
   if (values.length === 0) return null;
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of values) {
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+  }
   if (hi === lo) {
     const half = Math.max(Math.abs(lo) * 0.1, 0.5);
     return [lo - half, hi + half];
@@ -242,7 +218,9 @@ function frametimeBars(samples: readonly [number, number][], r: Rect, rangeS: nu
   const newest = samples.at(-1)?.[0];
   if (newest === undefined || rangeS <= 0) return [];
   const visible = samples.filter(([t, ft]) => t > newest - rangeS && Number.isFinite(ft) && ft > 0);
-  const top = Math.max(0, ...visible.map(([, ft]) => ft)) * 1.1;
+  let top = 0;
+  for (const [, ft] of visible) top = Math.max(top, ft);
+  top *= 1.1;
   if (top <= 0) return [];
   const xOf = (t: number) => r.x + r.w * (1 - (newest - t) / rangeS);
   return visible.map(([t, ft]) => {
@@ -336,16 +314,22 @@ function rowPositions(r: Rect, [label, value, unit]: Measured[], align: Block['s
   ];
 }
 
+/**
+ * The samples a chart of `block` draws: the frame times of its range for a frametime graph (read
+ * from the newest back, so a long history costs only the range), else its source's samples.
+ */
 function chartSamples(block: Block, readout: Readout): [number, number][] {
   const src = block.source;
   if ('frames' in src && block.kind === 'graph' && block.style.graph.mode === 'frametime' && src.frames.startsWith('frametime-')) {
     const app = src.frames === 'frametime-app';
+    const frames = readout.frameTimes;
     const out: [number, number][] = [];
-    for (const f of readout.frameTimes) {
-      const ms = app ? f.app_ms : f.displayed_ms;
-      if (ms !== null) out.push([f.t_s, ms]);
+    const from = (frames.at(-1)?.t_s ?? 0) - block.style.graph.rangeS;
+    for (let i = frames.length - 1; i >= 0 && frames[i].t_s >= from; i--) {
+      const ms = app ? frames[i].app_ms : frames[i].displayed_ms;
+      if (ms !== null) out.push([frames[i].t_s, ms]);
     }
-    return out;
+    return out.reverse();
   }
   return readout.samples(src);
 }
@@ -476,7 +460,7 @@ function drawBlock(ctx: CanvasRenderingContext2D, block: Block, r: Rect, profile
     const l = sizes[0];
     at = [[shape.x + (shape.w - l.w) / 2, shape.y + shape.h - l.ascent - l.descent], mid[1], mid[2]];
   } else if (block.kind === 'graph') {
-    const bandH = Math.max(...sizes.map((s) => s.ascent + s.descent));
+    const bandH = sizes.reduce((m, s) => Math.max(m, s.ascent + s.descent), 0);
     at = rowPositions({ x: r.x + gap / 2, y: r.y, w: Math.max(r.w - gap, 0), h: bandH }, sizes, 'right', gap, unitGap);
   } else {
     at = rowPositions(area.text, sizes, st.align, gap, unitGap);
@@ -489,11 +473,12 @@ function drawBlock(ctx: CanvasRenderingContext2D, block: Block, r: Rect, profile
     const w = (op: Stat['op']) => statOf(samples, { op, window: g.rangeS, definition: 'integral' });
     const avg = w('avg');
     if (avg !== null) {
-      const fmt = (v: number | null) => ('frames' in block.source ? formatFrameMetric(block.source.frames, v, readout.locale) : formatBlockValue(block, readout, v));
+      const src = block.source;
+      const fmt = (v: number | null) => ('frames' in src ? formatParts(v, src, formatOf(block, readout)) : formatBlockValue(block, readout, v));
       const [lo] = fmt(w('min'));
       const [mid] = fmt(avg);
       const [hi, unit] = fmt(w('max'));
-      const text = `${lo} / ${mid} / ${hi}${unit === '' ? '' : unit === '%' ? '%' : ` ${unit}`}`;
+      const text = joinParts([`${lo} / ${mid} / ${hi}`, unit]);
       const s = measure(ctx, text, st.labelStyle, cell);
       drawText(ctx, text, st.labelStyle, cell, [r.x + gap / 2, r.y + r.h - s.ascent - s.descent], st.labelStyle.color, s.ascent);
     }

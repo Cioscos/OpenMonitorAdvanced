@@ -28,14 +28,8 @@
 
 use std::fmt::Write as _;
 
-use oma_core::frames::metrics::{
-    bottleneck, displayed_fps, lows, mean_display_latency, mean_pc_latency, stutter, Bottleneck,
-    LowDefinition,
-};
-use oma_core::frames::{
-    fg_multiplier, fg_suspected, pick_swapchain, rendered_fps, source_label, FrameKind,
-    FrameSample, FrameWindow, Rendered, FPS_WINDOW_S, LOWS_WINDOW_S,
-};
+use oma_core::frames::metrics::Bottleneck;
+use oma_core::frames::{read, FrameKind, FrameSample, FrameWindow, Rendered, LOWS_WINDOW_S};
 use oma_ipc::{frames_state, FrameBatch, FramesConfigure, FramesStatus, PresentingProcesses};
 
 use super::target::{ProcessInfo, TargetPicker, SYSTEM_EXCLUDED};
@@ -45,9 +39,6 @@ pub const ENV_VAR: &str = "OMA_FRAMES_DEBUG";
 
 /// How often a `frames:` line is written (and the configuration re-sent).
 const REPORT_MS: u64 = 1_000;
-
-/// The window frame generation is suspected over (SD5).
-const FG_WINDOW_S: f64 = 2.0;
 
 /// The frame-engine configuration `OMA_FRAMES_DEBUG` asks for, if any.
 pub fn options_from_env(value: Option<&str>) -> Option<FramesConfigure> {
@@ -117,15 +108,6 @@ fn num(value: Option<f64>, decimals: usize) -> String {
         Some(v) if v.is_finite() => format!("{v:.decimals$}"),
         _ => "-".to_owned(),
     }
-}
-
-/// The frames of `frames` (ordered by `t_s`) in the trailing `seconds`.
-fn trailing(frames: &[FrameSample], seconds: f64) -> &[FrameSample] {
-    let Some(newest) = frames.last().map(|f| f.t_s) else {
-        return frames;
-    };
-    let start = frames.partition_point(|f| f.t_s < newest - seconds);
-    &frames[start..]
 }
 
 /// What one [`Diagnostics::step`] asks the caller to do.
@@ -227,47 +209,20 @@ impl Diagnostics {
     }
 
     fn line(&self) -> String {
-        let all = self.window.last(LOWS_WINDOW_S);
-        let main: Vec<FrameSample> = match pick_swapchain(&all) {
-            Some(swapchain) => all
-                .into_iter()
-                .filter(|f| f.swapchain == swapchain)
-                .collect(),
-            None => Vec::new(),
+        let readout = read(&self.window, &[], self.config.track_gpu);
+        let fps = readout.fps_displayed;
+        let source = readout.rendered_source.unwrap_or("-");
+        let rendered_value = match readout.rendered {
+            Rendered::Fps { fps, .. } => Some(fps),
+            _ => None,
         };
-        let second = trailing(&main, FPS_WINDOW_S);
-
-        let fps = displayed_fps(second);
-        let rendered = match rendered_fps(second) {
-            Rendered::Unavailable | Rendered::FgSuspected => {
-                if fg_suspected(trailing(&main, FG_WINDOW_S)) {
-                    Rendered::FgSuspected
-                } else {
-                    Rendered::Unavailable
-                }
-            }
-            figure => figure,
-        };
-        let (rendered_value, source) = match rendered {
-            Rendered::Fps { fps, source } => (Some(fps), source_label(source, second)),
-            Rendered::FgSuspected => (None, "FG?"),
-            Rendered::Unavailable => (None, "-"),
-        };
-        let frametimes: Vec<f64> = main
-            .iter()
-            .filter(|f| f.displayed)
-            .filter_map(|f| f.ms_between_display_change)
-            .collect();
-        let low = lows(&frametimes, LowDefinition::Integral);
-        let stutters = (!frametimes.is_empty()).then(|| stutter(&main));
-        let bottleneck = if self.config.track_gpu {
-            match bottleneck(&main, rendered == Rendered::FgSuspected) {
-                Bottleneck::Gpu => "gpu",
-                Bottleneck::Cpu => "cpu",
-                Bottleneck::Unknown => "unknown",
-            }
-        } else {
-            "-"
+        let low = readout.lows.first().and_then(|l| l.lows);
+        let stutters = readout.stutter;
+        let bottleneck = match readout.bottleneck {
+            Some(Bottleneck::Gpu) => "gpu",
+            Some(Bottleneck::Cpu) => "cpu",
+            Some(Bottleneck::Unknown) => "unknown",
+            None => "-",
         };
         let current = self.picker.current().filter(|p| Some(p.pid) == self.target);
 
@@ -285,22 +240,22 @@ impl Diagnostics {
             " fps={} rendered={} source={source} mult={}",
             num(fps, 1),
             num(rendered_value, 1),
-            num(fg_multiplier(fps, &rendered), 2),
+            num(readout.fg_multiplier, 2),
         );
         let _ = write!(
             line,
             " low1={} low01={} ft_ms={}",
             num(low.map(|l| l.one_percent), 1),
             num(low.map(|l| l.point_one_percent), 1),
-            num(fps.map(|f| 1000.0 / f), 2),
+            num(readout.frametime_displayed_ms, 2),
         );
         let _ = write!(
             line,
             " stutter={} stutter_pct={} pc_lat_ms={} disp_lat_ms={}",
             stutters.map_or_else(|| "-".to_owned(), |s| s.count.to_string()),
             num(stutters.map(|s| s.time_percent), 2),
-            num(mean_pc_latency(second), 1),
-            num(mean_display_latency(second), 1),
+            num(readout.latency_pc_ms, 1),
+            num(readout.latency_display_ms, 1),
         );
         let _ = write!(line, " bottleneck={bottleneck} dropped={}", self.dropped);
         line

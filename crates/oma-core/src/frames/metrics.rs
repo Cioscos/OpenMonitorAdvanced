@@ -104,18 +104,21 @@ pub fn stutter(frames: &[FrameSample]) -> Stutter {
     let mut count = 0u32;
     let mut stutter_ms = 0.0;
     let mut start = 0;
-    let mut scratch: Vec<f64> = Vec::new();
+    // The frametimes of `shown[start..i]`, kept sorted: each step inserts the
+    // previous frame and evicts the ones that aged out, both by binary search.
+    let mut sorted: Vec<f64> = Vec::new();
     for (i, &(t, ft)) in shown.iter().enumerate() {
+        if i > 0 {
+            sorted_insert(&mut sorted, shown[i - 1].1);
+        }
         while shown[start].0 < t - STUTTER_HISTORY_S {
+            sorted_remove(&mut sorted, shown[start].1);
             start += 1;
         }
         if i - start < STUTTER_MIN_HISTORY {
             continue;
         }
-        scratch.clear();
-        scratch.extend(shown[start..i].iter().map(|&(_, ms)| ms));
-        scratch.sort_by(|a, b| a.total_cmp(b));
-        let median = median_of_sorted(&scratch);
+        let median = median_of_sorted(&sorted);
         if ft > STUTTER_RATIO * median && ft - median > STUTTER_MIN_EXTRA_MS {
             count += 1;
             stutter_ms += ft;
@@ -129,6 +132,18 @@ pub fn stutter(frames: &[FrameSample]) -> Stutter {
             0.0
         },
     }
+}
+
+fn sorted_insert(sorted: &mut Vec<f64>, v: f64) {
+    let at = sorted.partition_point(|x| x.total_cmp(&v).is_lt());
+    sorted.insert(at, v);
+}
+
+/// Removes one occurrence of `v`, which must be in `sorted`.
+fn sorted_remove(sorted: &mut Vec<f64>, v: f64) {
+    let at = sorted.partition_point(|x| x.total_cmp(&v).is_lt());
+    debug_assert!(at < sorted.len() && sorted[at].total_cmp(&v).is_eq());
+    sorted.remove(at);
 }
 
 fn median_of_sorted(v: &[f64]) -> f64 {

@@ -4,14 +4,16 @@
 
 pub mod generation;
 pub mod metrics;
+pub mod readout;
 pub mod swapchain;
 pub mod synthetic;
 
 pub use generation::{
     fg_multiplier, fg_suspected, rendered_fps, source_label, Rendered, RenderedSource,
 };
+pub use readout::{read, FrameReadout, LowReadout};
 pub use swapchain::pick_swapchain;
-pub use synthetic::{synthetic, SyntheticProfile};
+pub use synthetic::{synthetic, SyntheticError, SyntheticProfile};
 
 use std::collections::VecDeque;
 
@@ -19,6 +21,8 @@ use std::collections::VecDeque;
 pub const FPS_WINDOW_S: f64 = 1.0;
 /// Window used for the 1% / 0.1% lows and the stutter count.
 pub const LOWS_WINDOW_S: f64 = 10.0;
+/// Window frame generation is suspected over.
+pub const FG_WINDOW_S: f64 = 2.0;
 
 /// Where a frame comes from: the application or a frame generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

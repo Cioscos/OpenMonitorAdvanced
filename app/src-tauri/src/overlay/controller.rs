@@ -476,7 +476,11 @@ impl Controller {
             process: process.to_owned(),
             process_reason: process_reason.map(str::to_owned),
             frames: self.frames_state().to_owned(),
-            frames_detail: self.status.as_ref().and_then(|s| s.detail.clone()),
+            frames_detail: self
+                .status
+                .as_ref()
+                .filter(|_| self.wanted_config().enabled)
+                .and_then(|s| s.detail.clone()),
             target: self.target.as_ref().map(|t| TargetStatus {
                 name: t.name.clone(),
                 pid: t.pid,
@@ -858,15 +862,19 @@ impl Controller {
             .then_some(ToastRequest::ExclusiveFullscreen { exe })
     }
 
-    /// The frame engine's state for the overlay and the UI.
+    /// The frame engine's state for the overlay and the UI: `off` while the
+    /// engine is not wanted, whatever the service link (with the overlay off
+    /// nothing steps on a reconnection, so its state would be stale).
     fn frames_state(&self) -> &str {
+        if !self.wanted_config().enabled {
+            return frames_state::OFF;
+        }
         if !self.connected {
             return FRAMES_UNAVAILABLE;
         }
         match &self.status {
             Some(status) => state_label(Some(status)),
-            None if self.wanted_config().enabled => frames_state::STARTING,
-            None => frames_state::OFF,
+            None => frames_state::STARTING,
         }
     }
 
@@ -1416,6 +1424,19 @@ mod tests {
         assert!(!out.status.unwrap().hidden_by_user);
         c.on_geometry(Some(geometry(96)));
         assert_eq!(placements(&c.step(300)), vec![shown(area(CLIENT), 96)]);
+    }
+
+    #[test]
+    fn engine_not_wanted_reports_frames_off() {
+        // The first step may come before the service link is up.
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        let status = c.step(0).status.unwrap();
+        assert_eq!(status.frames, frames_state::OFF);
+        assert_eq!(status.frames_detail, None);
+        // Wanted (here by OMA_FRAMES_DEBUG) without the service: unavailable.
+        c.on_settings(&settings(false), Lang::En, Some(config(true, false, false)));
+        assert_eq!(c.step(100).status.unwrap().frames, FRAMES_UNAVAILABLE);
     }
 
     #[test]

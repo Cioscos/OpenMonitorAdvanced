@@ -112,7 +112,8 @@
       error={errorOf('overlay.enabled')}
       onChange={(enabled) => send({ overlay: { enabled } })}
     />
-    {#if status}
+    <!-- With the overlay off the engine is not ours to report on (its state would be stale). -->
+    {#if status?.enabled}
       <div class="status" data-tone={tone(status)}>
         <span class="led" aria-hidden="true"></span>
         <div class="lines" role="status">

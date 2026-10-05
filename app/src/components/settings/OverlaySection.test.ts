@@ -71,6 +71,14 @@ test('shows the service text when frames are unavailable', async () => {
   expect(screen.queryByText(t('overlay.state.running'))).toBeNull();
 });
 
+test('no engine or process state while the overlay is off', async () => {
+  const { backend } = await setup(undefined, { enabled: false, frames: 'unavailable', process: 'off' });
+  expect(screen.queryByText(t('overlay.state.unavailable'))).toBeNull();
+  expect(screen.queryByRole('status')).toBeNull();
+  backend.emitOverlayStatus(makeOverlayStatus({ enabled: true, frames: 'unavailable', process: 'running' }));
+  await screen.findByText(t('overlay.state.unavailable'));
+});
+
 test('process failures have their own text', async () => {
   const { backend } = await setup(undefined, { enabled: true, frames: 'running', process: 'failed', processReason: 'crashing' });
   expect(screen.getByText(t('overlay.state.processFailed'))).toBeTruthy();

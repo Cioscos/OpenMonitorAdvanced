@@ -593,7 +593,7 @@ impl LogService {
         })
     }
 
-    fn configured_dir(&self, settings: &Settings) -> io::Result<PathBuf> {
+    pub(crate) fn configured_dir(&self, settings: &Settings) -> io::Result<PathBuf> {
         match &settings.log.folder {
             Some(folder) => Ok(PathBuf::from(folder)),
             None => Ok(self

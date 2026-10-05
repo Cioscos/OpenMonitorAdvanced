@@ -6,6 +6,8 @@
 //! catalog, [`store`] writes the editor's profile files and [`frames`]
 //! formats the `OMA_FRAMES_DEBUG` line.
 
+#[allow(dead_code)] // wired into the controller in D12
+pub mod benchmark;
 #[cfg(windows)]
 pub mod controller;
 pub mod editor;

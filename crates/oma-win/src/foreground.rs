@@ -19,7 +19,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{
-    GetDpiForWindow, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GetClassNameW, GetClientRect, GetForegroundWindow, GetMessageW,
@@ -102,6 +103,8 @@ impl ForegroundWatcher {
     ///
     /// The location hook is filtered on the PID that owns the window itself
     /// (for a UWP game, the frame host's), which may differ from `pid`.
+    /// A `Foreground` with `hwnd == 0` names no window and untracks, like
+    /// `None`.
     pub fn track(&self, window: Option<Foreground>) {
         let (hwnd, pid) = match window {
             Some(fg) if fg.hwnd != 0 => (fg.hwnd, fg.pid),
@@ -339,12 +342,23 @@ fn read_geometry(hwnd: HWND) -> Option<WindowGeometry> {
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return None;
     }
+    // The client rect of a DPI-virtualized window of another process is in
+    // its own logical units: map both corners to the screen under PMv2 and
+    // take the size from the mapped points, never from GetClientRect alone.
     let mut client = RECT::default();
     // SAFETY: `client` is a valid out pointer; a stale handle fails cleanly.
     unsafe { GetClientRect(hwnd, &mut client) }.ok()?;
-    let mut origin = POINT { x: 0, y: 0 };
-    // SAFETY: `origin` is a valid in/out pointer for the call.
-    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+    let mut top_left = POINT { x: 0, y: 0 };
+    let mut bottom_right = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    // SAFETY: both points are valid in/out pointers for the calls.
+    let mapped = unsafe {
+        ClientToScreen(hwnd, &mut top_left).as_bool()
+            && ClientToScreen(hwnd, &mut bottom_right).as_bool()
+    };
+    if !mapped {
         return None;
     }
     // SAFETY: plain call; MONITOR_DEFAULTTONEAREST always yields a monitor.
@@ -357,26 +371,42 @@ fn read_geometry(hwnd: HWND) -> Option<WindowGeometry> {
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
         return None;
     }
+    // The monitor's effective DPI, not GetDpiForWindow: that one answers 96
+    // for a DPI-unaware game (the system DPI for a system-aware one), which
+    // would shrink the overlay on a scaled monitor.
+    let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+    // SAFETY: `monitor` came from MonitorFromWindow; both out pointers are
+    // valid locals.
+    let monitor_dpi =
+        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
+            .ok()
+            .map(|()| dpi_x);
     // SAFETY: plain queries on a window handle.
-    let (dpi, minimized, visible) = unsafe {
-        (
-            GetDpiForWindow(hwnd),
-            IsIconic(hwnd).as_bool(),
-            IsWindowVisible(hwnd).as_bool(),
-        )
-    };
+    let (minimized, visible) =
+        unsafe { (IsIconic(hwnd).as_bool(), IsWindowVisible(hwnd).as_bool()) };
     Some(WindowGeometry {
-        client: PxRect {
-            x: origin.x,
-            y: origin.y,
-            w: client.right - client.left,
-            h: client.bottom - client.top,
-        },
+        client: client_px(top_left, bottom_right),
         monitor: rect_to_px(info.rcMonitor),
-        dpi: if dpi == 0 { 96 } else { dpi },
+        dpi: dpi_or_default(monitor_dpi),
         minimized,
         visible,
     })
+}
+
+/// The monitor DPI, or 96 when the query failed or answered 0.
+pub(crate) fn dpi_or_default(dpi: Option<u32>) -> u32 {
+    dpi.filter(|d| *d != 0).unwrap_or(96)
+}
+
+/// The client area from its two corners mapped to the screen; a degenerate
+/// mapping gives an empty size, never a negative one.
+pub(crate) fn client_px(top_left: POINT, bottom_right: POINT) -> PxRect {
+    PxRect {
+        x: top_left.x,
+        y: top_left.y,
+        w: (bottom_right.x - top_left.x).max(0),
+        h: (bottom_right.y - top_left.y).max(0),
+    }
 }
 
 fn rect_to_px(r: RECT) -> PxRect {
@@ -387,6 +417,7 @@ fn rect_to_px(r: RECT) -> PxRect {
         h: r.bottom - r.top,
     }
 }
+
 fn window_pid(hwnd: HWND) -> Option<u32> {
     let own = pid_of(hwnd);
     let mut class = [0u16; 64];
@@ -439,7 +470,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows::Win32::UI::HiDpi::{
-        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
@@ -484,10 +516,18 @@ mod tests {
     #[ignore = "requires real Windows hardware"]
     fn track_reports_moves_of_a_test_window() {
         // The test window lives on this thread; physical pixels on both sides.
-        // SAFETY: plain call with a predefined context constant.
-        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        // The guard restores the DPI context and destroys the window even if
+        // an assert fails.
+        let mut guard = TestWindow {
+            // SAFETY: plain call with a predefined context constant; the
+            // previous context is restored by the guard.
+            previous: unsafe {
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            },
+            window: None,
+        };
         // SAFETY: predefined "STATIC" class, static strings, no parent, menu
-        // or creation data; the window is destroyed at the end of the test.
+        // or creation data; the guard destroys the window.
         let window = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -505,6 +545,7 @@ mod tests {
             )
         }
         .expect("test window");
+        guard.window = Some(window);
         let hwnd = window.0 as isize;
         let (tx, rx) = mpsc::channel();
         let watcher = ForegroundWatcher::spawn(Box::new(move |event| {
@@ -562,9 +603,36 @@ mod tests {
         assert!(!moved(&rx, Duration::from_millis(300)), "untracked");
 
         drop(watcher);
-        // SAFETY: `window` was created by this thread and is destroyed once.
-        unsafe { DestroyWindow(window) }.expect("destroyed");
+        guard.destroy_window();
         assert_eq!(window_geometry(hwnd), None);
+    }
+
+    /// Restores the test thread's DPI context and destroys its test window,
+    /// on success and on a failed assert alike.
+    struct TestWindow {
+        previous: DPI_AWARENESS_CONTEXT,
+        window: Option<HWND>,
+    }
+
+    impl TestWindow {
+        fn destroy_window(&mut self) {
+            if let Some(window) = self.window.take() {
+                // SAFETY: `window` was created by this thread and `take`
+                // ensures it is destroyed once.
+                let _ = unsafe { DestroyWindow(window) };
+            }
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            self.destroy_window();
+            if !self.previous.0.is_null() {
+                // SAFETY: `previous` is the context this thread had before
+                // the test switched it.
+                let _ = unsafe { SetThreadDpiAwarenessContext(self.previous) };
+            }
+        }
     }
 
     #[test]
@@ -580,6 +648,31 @@ mod tests {
         // Another window of the same process, or nothing tracked.
         assert!(!location_event_matches(0x5678, OBJID_WINDOW.0, 0, 0x1234));
         assert!(!location_event_matches(0, OBJID_WINDOW.0, 0, 0));
+    }
+
+    #[test]
+    fn monitor_dpi_falls_back_to_96() {
+        assert_eq!(dpi_or_default(Some(144)), 144);
+        assert_eq!(dpi_or_default(Some(0)), 96);
+        assert_eq!(dpi_or_default(None), 96);
+    }
+
+    #[test]
+    fn client_rect_spans_both_mapped_corners() {
+        let tl = POINT { x: -100, y: 50 };
+        let br = POINT { x: 860, y: 590 };
+        assert_eq!(
+            client_px(tl, br),
+            PxRect {
+                x: -100,
+                y: 50,
+                w: 960,
+                h: 540
+            }
+        );
+        // A degenerate mapping never yields a negative size.
+        assert_eq!(client_px(br, tl).w, 0);
+        assert_eq!(client_px(br, tl).h, 0);
     }
 
     #[test]

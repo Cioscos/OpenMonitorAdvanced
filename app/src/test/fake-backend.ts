@@ -68,7 +68,8 @@ export function makeOverlayStatus(over: Partial<OverlayStatus> = {}): OverlaySta
     })),
     diagnostics: [],
     hiddenByUser: false,
-    hotkeys: { toggle: { ...NO_HOTKEY }, nextProfile: { ...NO_HOTKEY } },
+    hotkeys: { toggle: { ...NO_HOTKEY }, nextProfile: { ...NO_HOTKEY }, benchmark: { ...NO_HOTKEY } },
+    benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
     ...over,
   };
 }

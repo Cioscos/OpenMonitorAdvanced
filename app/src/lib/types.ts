@@ -595,5 +595,15 @@ export interface OverlayStatus {
   diagnostics: OverlayProfileDiagnostic[];
   /** Hidden with the hotkey or the tray; not saved. */
   hiddenByUser: boolean;
-  hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus };
+  hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus; benchmark: HotkeyStatus };
+  benchmark: BenchmarkStatus;
+}
+
+/** The benchmark capture (`OverlayStatus.benchmark`); `elapsedS` is the time when the status was sent. */
+export interface BenchmarkStatus {
+  state: 'idle' | 'recording' | 'error';
+  /** The recorded game's executable. */
+  game: string | null;
+  elapsedS: number | null;
+  error: LogError | null;
 }

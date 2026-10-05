@@ -813,12 +813,10 @@ mod tests {
         fn next_profile(&self) {
             self.0.lock().unwrap().push("next_profile");
         }
-        fn set_hotkeys(
-            &self,
-            _toggle: crate::log::HotkeyStatus,
-            _next_profile: crate::log::HotkeyStatus,
-        ) {
+        fn toggle_benchmark(&self) {
+            self.0.lock().unwrap().push("toggle_benchmark");
         }
+        fn set_hotkeys(&self, _statuses: [crate::log::HotkeyStatus; 3]) {}
     }
 
     #[test]

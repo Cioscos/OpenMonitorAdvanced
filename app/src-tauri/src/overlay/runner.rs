@@ -19,11 +19,16 @@
 //! - **Sampler:** [`OverlayHandle::on_tick`] builds `Values` from the plan the
 //!   controller last published (ruling R2) and queues them for the overlay
 //!   and the preview without ever blocking the tick.
-//! - **Shutdown** ([`OverlayRunner::stop`]): the engine is turned off if the
-//!   controller had turned it on, then the host closes the overlay, then the
-//!   watcher goes.
+//! - **Benchmark (M7d):** the controller's [`BenchmarkCommand`]s are carried
+//!   out here, on this thread, in the `benchmarks` folder of the CSV log; a
+//!   write error goes back to the controller. A capture keeps the thread
+//!   stepping, so its limits apply.
+//! - **Shutdown** ([`OverlayRunner::stop`]): a running capture is closed, the
+//!   engine is turned off if the controller had turned it on, then the host
+//!   closes the overlay, then the watcher goes.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -42,17 +47,21 @@ use oma_win::foreground::{
 use oma_win::svc::{FramesFeed, LinkCommand};
 use tauri::State;
 
+use super::benchmark::{BenchmarkFiles, BenchmarkWriter};
 use super::editor::CommandError;
 use super::editor_feed::EditorData;
 
 use super::controller::{
-    tick_values, Controller, Outputs, OverlayHotkeys, OverlayStatus, ToastRequest, ValuesPlan,
+    tick_values, BenchmarkCommand, Controller, Outputs, OverlayHotkeys, OverlayStatus,
+    ToastRequest, ValuesPlan,
 };
 use super::frames::{options_from_env, ENV_VAR};
 use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlayMode, OverlaySender};
 use super::profiles::{app_profiles_dir, load_catalog, ProfileCatalog};
 use crate::hotkeys::OverlayActions;
 use crate::i18n::{t, Lang};
+use crate::log::fs::RealFs;
+use crate::log::writer::WriteFailure;
 use crate::log::HotkeyStatus;
 use crate::notifier::{launch_for_main, ToastSink};
 use crate::settings::SettingsStore;
@@ -79,6 +88,8 @@ pub type LinkSink = Box<dyn Fn(LinkCommand) + Send + Sync>;
 pub type StatusSink = Box<dyn Fn(&OverlayStatus) + Send>;
 /// Receives the editor's canvas data, on the controller's thread; must not block.
 pub type EditorDataSink = Box<dyn Fn(&EditorData) + Send>;
+/// The benchmarks folder for these settings.
+pub type BenchmarksDir = Box<dyn Fn(&Settings) -> io::Result<PathBuf> + Send>;
 
 /// What the controller's thread reacts to.
 pub(crate) enum Input {
@@ -93,6 +104,8 @@ pub(crate) enum Input {
     SetHidden(bool),
     ToggleHidden,
     NextProfile,
+    /// The benchmark hotkey or button.
+    ToggleBenchmark,
     Hotkeys(OverlayHotkeys),
     /// The editor window opened or closed.
     Editor(bool),
@@ -222,10 +235,17 @@ impl OverlayActions for OverlayHandle {
         self.send(Input::NextProfile);
     }
 
-    fn set_hotkeys(&self, toggle: HotkeyStatus, next_profile: HotkeyStatus) {
+    /// The benchmark hotkey and button.
+    fn toggle_benchmark(&self) {
+        self.send(Input::ToggleBenchmark);
+    }
+
+    fn set_hotkeys(&self, statuses: [HotkeyStatus; 3]) {
+        let [toggle, next_profile, benchmark] = statuses;
         self.send(Input::Hotkeys(OverlayHotkeys {
             toggle,
             next_profile,
+            benchmark,
         }));
     }
 }
@@ -238,6 +258,7 @@ pub struct OverlayDeps {
     pub toaster: Box<dyn ToastSink>,
     pub on_status: StatusSink,
     pub on_editor_data: EditorDataSink,
+    pub benchmarks_dir: BenchmarksDir,
 }
 
 /// The running controller thread; [`Self::stop`] (or dropping it) ends it in
@@ -297,6 +318,8 @@ impl OverlayRunner {
             toaster: deps.toaster,
             on_status: deps.on_status,
             on_editor_data: deps.on_editor_data,
+            benchmarks_dir: deps.benchmarks_dir,
+            bench_writer: None,
             tap: Arc::clone(&handle.tap),
             status: Arc::clone(&handle.status),
             env,
@@ -377,6 +400,9 @@ struct Ctl {
     toaster: Box<dyn ToastSink>,
     on_status: StatusSink,
     on_editor_data: EditorDataSink,
+    benchmarks_dir: BenchmarksDir,
+    /// The capture's open CSV.
+    bench_writer: Option<BenchmarkWriter>,
     tap: Arc<Mutex<Tap>>,
     status: Arc<Mutex<OverlayStatus>>,
     env: Option<FramesConfigure>,
@@ -428,10 +454,10 @@ impl Ctl {
         self.settings.overlay.enabled || self.env.is_some()
     }
 
-    /// The thread steps every 100 ms: the engine is wanted or the editor is
-    /// open (its canvas and preview).
+    /// The thread steps every 100 ms: the engine is wanted, the editor is
+    /// open (its canvas and preview) or a capture runs (its time limits).
     fn stepping(&self) -> bool {
-        self.active() || self.editor_open
+        self.active() || self.editor_open || self.controller.recording()
     }
 
     fn run(mut self) {
@@ -522,6 +548,10 @@ impl Ctl {
             }
             Input::ToggleHidden => self.controller.toggle_hidden(),
             Input::NextProfile => self.controller.next_profile(),
+            Input::ToggleBenchmark => {
+                let now = self.now_ms();
+                self.controller.toggle_benchmark(now);
+            }
             Input::Hotkeys(hotkeys) => self.controller.on_hotkeys(hotkeys),
             Input::Editor(open) => {
                 self.editor_open = open;
@@ -618,7 +648,42 @@ impl Ctl {
         self.apply(out);
     }
 
+    /// The capture's file work. A failure goes back to the controller,
+    /// which stops the capture; later rows are dropped by the writer.
+    fn run_benchmark(&mut self, commands: Vec<BenchmarkCommand>) {
+        for command in commands {
+            let result = match command {
+                BenchmarkCommand::Begin { stem } => (self.benchmarks_dir)(&self.settings)
+                    .map_err(|e| WriteFailure::from_io(&e))
+                    .and_then(|dir| BenchmarkFiles::new(dir, Arc::new(RealFs)).begin(&stem))
+                    .map(|writer| {
+                        tracing::info!(%stem, "benchmark started");
+                        self.bench_writer = Some(writer);
+                    }),
+                BenchmarkCommand::Rows(rows) => match &mut self.bench_writer {
+                    Some(writer) => writer.append(&rows),
+                    None => Ok(()),
+                },
+                BenchmarkCommand::Finish { record } => match self.bench_writer.take() {
+                    Some(writer) => {
+                        let reason = record.as_ref().map(|r| r.end_reason);
+                        tracing::info!(?reason, "benchmark finished");
+                        writer.finish(record.as_ref())
+                    }
+                    None => Ok(()),
+                },
+            };
+            if let Err(failure) = result {
+                tracing::warn!(?failure, "benchmark: write failed");
+                self.controller.on_benchmark_error(failure);
+            }
+        }
+    }
+
     fn apply(&mut self, out: Outputs) {
+        // Before the status goes out, so a UI that reads the history on it
+        // finds the new files.
+        self.run_benchmark(out.benchmark);
         for command in out.link {
             if let LinkCommand::ConfigureFrames(config) = &command {
                 self.engine_on = config.enabled;
@@ -684,13 +749,33 @@ impl Ctl {
         if let Some(mode) = &out.present_mode {
             tracing::info!(%mode, "target present mode");
         }
-        if let Some(ToastRequest::ExclusiveFullscreen { exe }) = out.toast {
-            tracing::info!(%exe, "the game runs in exclusive fullscreen: overlay not visible");
-            self.toaster.show(
-                t(self.lang, "overlay.exclusive.title", &[]),
-                t(self.lang, "overlay.exclusive.body", &[]),
+        match out.toast {
+            Some(ToastRequest::ExclusiveFullscreen { exe }) => {
+                tracing::info!(%exe, "the game runs in exclusive fullscreen: overlay not visible");
+                self.toaster.show(
+                    t(self.lang, "overlay.exclusive.title", &[]),
+                    t(self.lang, "overlay.exclusive.body", &[]),
+                    launch_for_main(),
+                );
+            }
+            Some(ToastRequest::BenchmarkNoTarget) => self.toaster.show(
+                t(self.lang, "benchmark.toast.title", &[]),
+                t(self.lang, "benchmark.noTarget", &[]),
                 launch_for_main(),
-            );
+            ),
+            Some(ToastRequest::BenchmarkError { error }) => {
+                let detail = t(
+                    self.lang,
+                    &error.key,
+                    &[("detail", error.detail.as_deref().unwrap_or(""))],
+                );
+                self.toaster.show(
+                    t(self.lang, "benchmark.toast.title", &[]),
+                    t(self.lang, "benchmark.toast.error", &[("detail", &detail)]),
+                    launch_for_main(),
+                );
+            }
+            None => {}
         }
         if let Some(status) = out.status {
             let target = status.target.as_ref().map(|t| (t.name.as_str(), t.pid));
@@ -810,9 +895,12 @@ impl Ctl {
         }
     }
 
-    /// The exit order: the engine off (if we turned it on), then the overlay,
-    /// then the watcher.
+    /// The exit order: a running capture closed, the engine off (if we
+    /// turned it on), then the overlay, then the watcher.
     fn shutdown(mut self) {
+        let now = self.now_ms();
+        let commands = self.controller.shutdown_benchmark(now);
+        self.run_benchmark(commands);
         if self.engine_on {
             (self.link)(LinkCommand::ConfigureFrames(FramesConfigure {
                 enabled: false,
@@ -853,6 +941,12 @@ pub fn overlay_reload_profiles(state: State<'_, OverlayHandle>) {
 #[tauri::command]
 pub fn set_overlay_hidden(state: State<'_, OverlayHandle>, hidden: bool) {
     state.send(Input::SetHidden(hidden));
+}
+
+/// Starts or stops the benchmark capture (Settings › Benchmark).
+#[tauri::command]
+pub fn benchmark_toggle(state: State<'_, OverlayHandle>) {
+    state.toggle_benchmark();
 }
 
 /// A profile from the editor, checked like a profile file.
@@ -930,6 +1024,8 @@ mod tests {
             toaster: Box::new(NoToasts),
             on_status: Box::new(|_| {}),
             on_editor_data: Box::new(|_| {}),
+            benchmarks_dir: Box::new(|_| Err(io::ErrorKind::NotFound.into())),
+            bench_writer: None,
             tap: Arc::default(),
             status,
             env: None,
@@ -1099,10 +1195,96 @@ mod tests {
             "diagnostics",
             "hiddenByUser",
             "hotkeys",
+            "preview",
+            "benchmark",
         ] {
             assert!(json.get(key).is_some(), "{key} missing: {json}");
         }
         assert!(json["hotkeys"].get("nextProfile").is_some(), "{json}");
+        assert!(json["hotkeys"].get("benchmark").is_some(), "{json}");
+        assert_eq!(json["benchmark"]["state"], "idle");
+        assert!(json["benchmark"].get("elapsedS").is_some(), "{json}");
         assert_eq!(EVENT_OVERLAY_STATUS, "overlay-status");
+    }
+
+    #[test]
+    fn shutdown_finishes_a_running_capture() {
+        use oma_ipc::{
+            FrameBatch, FramesStatus, PresentingProcess, PresentingProcesses, WireFrame,
+        };
+        let dir = std::env::temp_dir().join(format!("oma-runner-bench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut settings = Settings::default();
+        settings.overlay.enabled = true;
+        let mut ctl = ctl(settings.clone());
+        let bench_dir = dir.clone();
+        ctl.benchmarks_dir = Box::new(move |_| Ok(bench_dir.clone()));
+        let c = &mut ctl.controller;
+        c.on_settings(&settings, Lang::En, None);
+        c.on_service(true);
+        let running = FramesStatus {
+            state: "running".into(),
+            detail: None,
+            presentmon_version: None,
+        };
+        let list = PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![PresentingProcess {
+                pid: 100,
+                name: "game.exe".into(),
+                displayed_fps: 100.0,
+                present_mode: "Hardware: Independent Flip".into(),
+                swapchains: 1,
+            }],
+        };
+        c.on_frames(Some(&running), Some(&list), &[]);
+        c.on_foreground(Foreground {
+            pid: 100,
+            hwnd: 0x1000,
+        });
+        c.step(0);
+        c.toggle_benchmark(0);
+        let frames = (0..20)
+            .map(|i| WireFrame {
+                qpc: 10_000_000 + i * 100_000,
+                swapchain: 1,
+                frame_type: "app".into(),
+                displayed: true,
+                ms_between_presents: 10.0,
+                ms_between_display_change: Some(10.0),
+                ms_until_displayed: None,
+                ms_app_frametime: None,
+                ms_pc_latency: None,
+                ms_gpu_busy: None,
+                pcl_frame_id: None,
+            })
+            .collect();
+        c.on_frames(
+            Some(&running),
+            Some(&list),
+            &[FrameBatch {
+                pid: 100,
+                frames,
+                dropped: 0,
+            }],
+        );
+        let out = c.step(100);
+        ctl.run_benchmark(out.benchmark);
+        assert!(ctl.stepping(), "a capture keeps the thread stepping");
+        ctl.shutdown();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names[0].starts_with("game-") && names[0].ends_with(".csv"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(&names[1])).unwrap()).unwrap();
+        assert_eq!(json["endReason"], "shutdown");
+        assert_eq!(json["summary"]["framesDisplayed"], 20);
+        let csv = std::fs::read_to_string(dir.join(&names[0])).unwrap();
+        assert_eq!(csv.lines().count(), 21, "header and 20 rows");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

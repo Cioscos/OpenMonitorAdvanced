@@ -3,10 +3,10 @@
 //! [`runner`] runs it on the `oma-overlay-ctl` thread with the service link,
 //! the foreground watcher and the sampler, [`forward`] builds the messages
 //! for `oma-overlay.exe`, [`host`] runs it, [`profiles`] reads the profile
-//! catalog, [`store`] writes the editor's profile files and [`frames`]
-//! formats the `OMA_FRAMES_DEBUG` line.
+//! catalog, [`store`] writes the editor's profile files, [`benchmark`]
+//! records the benchmark captures and [`frames`] formats the
+//! `OMA_FRAMES_DEBUG` line.
 
-#[allow(dead_code)] // wired into the controller in D12
 pub mod benchmark;
 #[cfg(windows)]
 pub mod controller;
@@ -52,6 +52,9 @@ pub mod runner {
         let _ = json;
         Ok(())
     }
+
+    #[tauri::command]
+    pub fn benchmark_toggle() {}
 
     #[tauri::command]
     pub fn overlay_use_now(id: String) -> Result<(), super::editor::CommandError> {

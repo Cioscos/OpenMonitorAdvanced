@@ -133,6 +133,10 @@ pub fn overlay_strings(lang: Lang) -> BTreeMap<String, String> {
         "bound.gpu",
         "bound.cpu",
         "previewTitle",
+        "bench.avg",
+        "bench.low1",
+        "bench.low01",
+        "bench.stutter",
     ] {
         out.insert(key.to_owned(), text(key));
     }
@@ -346,6 +350,11 @@ mod tests {
         "low.percentile",
         // The preview window's title (`--preview`).
         "previewTitle",
+        // The benchmark summary box.
+        "bench.avg",
+        "bench.low1",
+        "bench.low01",
+        "bench.stutter",
     ];
 
     fn profile(blocks: serde_json::Value) -> Profile {

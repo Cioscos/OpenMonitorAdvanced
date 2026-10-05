@@ -343,7 +343,8 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
       ],
       diagnostics: [{ file: 'old-layout.json', reason: 'unknown field `colour` at line 12 column 7' }],
       hiddenByUser: overlay.enabled && hidden,
-      hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile) },
+      hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile), benchmark: hotkey(overlay.hotkeyBenchmark) },
+      benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
     };
   };
   const emit = () => {

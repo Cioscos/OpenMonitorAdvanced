@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-benchmark-open-csv"
+description = "Enables the benchmark_open_csv command without any pre-configured scope."
+commands.allow = ["benchmark_open_csv"]
+
+[[permission]]
+identifier = "deny-benchmark-open-csv"
+description = "Denies the benchmark_open_csv command without any pre-configured scope."
+commands.deny = ["benchmark_open_csv"]

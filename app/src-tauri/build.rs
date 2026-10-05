@@ -55,6 +55,11 @@ fn main() {
             "overlay_editor_dirty",
             "overlay_editor_profile",
             "app_quit_confirmed",
+            "benchmark_toggle",
+            "benchmark_list",
+            "benchmark_open_csv",
+            "benchmark_open_folder",
+            "benchmark_delete",
         ]),
     ))
     .expect("Tauri build")

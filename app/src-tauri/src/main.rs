@@ -357,6 +357,11 @@ fn main() {
             overlay::runner::overlay_preview,
             overlay::runner::overlay_use_now,
             overlay::runner::overlay_editor_profile,
+            overlay::runner::benchmark_toggle,
+            overlay::benchmark::benchmark_list,
+            overlay::benchmark::benchmark_open_csv,
+            overlay::benchmark::benchmark_open_folder,
+            overlay::benchmark::benchmark_delete,
             window::open_overlay_editor,
             window::overlay_editor_dirty,
             window::app_quit_confirmed,
@@ -442,6 +447,7 @@ fn main() {
                 let status_tray = tray.clone();
                 // `overlay-preview` only when the preview opens or closes.
                 let preview_open = std::sync::atomic::AtomicBool::new(false);
+                let bench_log = log_service.clone();
                 let runner = overlay::runner::OverlayRunner::start(overlay::runner::OverlayDeps {
                     store: store.clone(),
                     link: shell.link_commands(),
@@ -465,6 +471,11 @@ fn main() {
                             overlay::runner::EVENT_EDITOR_DATA,
                             data,
                         );
+                    }),
+                    benchmarks_dir: Box::new(move |settings| {
+                        bench_log
+                            .configured_dir(settings)
+                            .map(|dir| dir.join(overlay::benchmark::BENCHMARKS_DIR))
                     }),
                 })?;
                 let handle = runner.handle();

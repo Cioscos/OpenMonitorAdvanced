@@ -5,6 +5,8 @@
 //!
 //! The recorder keeps only the displayed frametimes (`f32`) and counters, up
 //! to `MAX_SESSION_FRAMES`; rows go to disk through a 64 KiB buffer.
+//!
+//! The history commands take ids only, never a path ([`is_benchmark_id`]).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -14,8 +16,12 @@ use oma_core::csv::{self, LocalTime, BOM};
 use oma_core::frames::{FrameKind, FrameSample, SessionAccumulator, SessionSummary};
 use serde::{Deserialize, Serialize};
 
-use crate::log::fs::{LogFile, LogFs};
+use tauri::{AppHandle, Manager};
+
+use crate::log::fs::{LogFile, LogFs, RealFs};
 use crate::log::writer::WriteFailure;
+use crate::log::LogService;
+use crate::settings::SettingsStore;
 
 /// A capture stops after one hour (§8).
 pub const MAX_DURATION_MS: u64 = 3_600_000;
@@ -23,6 +29,8 @@ pub const MAX_DURATION_MS: u64 = 3_600_000;
 pub const NO_TARGET_STOP_MS: u64 = 10_000;
 /// How long the overlay shows the final summary.
 pub const SUMMARY_SHOW_MS: u64 = 10_000;
+/// The subfolder of the CSV log's folder (§8).
+pub const BENCHMARKS_DIR: &str = "benchmarks";
 /// History entries listed.
 pub const MAX_HISTORY: usize = 500;
 /// Largest summary file read back.
@@ -374,6 +382,10 @@ impl BenchmarkFiles {
         Err(WriteFailure::TooManyCollisions)
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Summaries, newest first (by their time stamp), at most [`MAX_HISTORY`].
     /// Unreadable, oversized and malformed files are skipped.
     pub fn list(&self) -> Vec<BenchmarkEntry> {
@@ -430,6 +442,60 @@ impl BenchmarkFiles {
             Err(BenchmarkError::NotFound)
         }
     }
+}
+
+/// The benchmarks of the configured log folder.
+fn files(app: &AppHandle) -> Result<BenchmarkFiles, String> {
+    let log = app.state::<Arc<LogService>>();
+    let store = app.state::<Arc<SettingsStore>>();
+    let dir = log
+        .configured_dir(&store.snapshot())
+        .map_err(|err| err.to_string())?;
+    Ok(BenchmarkFiles::new(
+        dir.join(BENCHMARKS_DIR),
+        Arc::new(RealFs),
+    ))
+}
+
+/// An error for the UI: an i18n key, or the system's text.
+fn error_text(err: BenchmarkError) -> String {
+    match err {
+        BenchmarkError::InvalidId => "invalid benchmark id".to_owned(),
+        BenchmarkError::NotFound => "shell.error.missing".to_owned(),
+        BenchmarkError::Io(text) => text,
+    }
+}
+
+/// The history, newest first; empty without a folder.
+#[tauri::command(async)]
+pub fn benchmark_list(app: AppHandle) -> Vec<BenchmarkEntry> {
+    files(&app).map(|f| f.list()).unwrap_or_default()
+}
+
+/// Opens the CSV of `id` with its default app.
+#[tauri::command(async)]
+pub fn benchmark_open_csv(app: AppHandle, id: String) -> Result<(), String> {
+    let path = files(&app)?.csv_path(&id).map_err(error_text)?;
+    crate::commands::open_path(&path)
+        .inspect_err(|err| tracing::warn!(%err, "cannot open the benchmark CSV"))
+}
+
+/// Opens the benchmarks folder; one that does not exist yet is not created
+/// (`log.error.folderMissing`, as for the log).
+#[tauri::command(async)]
+pub fn benchmark_open_folder(app: AppHandle) -> Result<(), String> {
+    let files = files(&app)?;
+    if !files.dir().is_dir() {
+        return Err("log.error.folderMissing".to_owned());
+    }
+    crate::commands::open_path(files.dir())
+        .inspect_err(|err| tracing::warn!(%err, "cannot open the benchmarks folder"))
+}
+
+/// Deletes the CSV and the summary of `id`.
+#[tauri::command(async)]
+pub fn benchmark_delete(app: AppHandle, id: String) -> Result<(), String> {
+    files(&app)?.delete(&id).map_err(error_text)
 }
 
 fn read_record(path: &Path) -> Option<BenchmarkRecord> {

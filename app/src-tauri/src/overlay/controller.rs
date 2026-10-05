@@ -35,23 +35,34 @@
 //!   once per step; the overlay keeps its own cadence and frame position and
 //!   gets only the active profile's lows, so the editor changes nothing in
 //!   it.
+//! - **Benchmark (M7d, §8):** [`Controller::toggle_benchmark`] starts a
+//!   capture of the target (the overlay must be on, DD6) or stops it. The
+//!   frames of the target's main swapchain go to a [`Recorder`] too (DD7);
+//!   the files are the caller's ([`Outputs::benchmark`]). The overlay gets
+//!   `● REC` once a second and the summary for [`SUMMARY_SHOW_MS`], never
+//!   for a game in `blockedGames`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use oma_core::csv::LocalTime;
 use oma_core::frames::metrics::LowDefinition;
 use oma_core::frames::{pick_swapchain, read, FrameReadout, FrameWindow, LOWS_WINDOW_S};
 use oma_core::model::{Schema, Snapshot};
 use oma_core::overlay::{Foreground, Profile, PxRect, WindowGeometry};
 use oma_core::provider::Quality;
 use oma_core::settings::{Attach, Settings};
-use oma_ipc::overlay::{FrameMetrics, OverlayMessage, PxArea, SetPlacement, WireFrameTime};
+use oma_ipc::overlay::{
+    BenchmarkOverlay, FrameMetrics, OverlayMessage, PxArea, SetPlacement, WireBenchmarkSummary,
+    WireFrameTime,
+};
 use oma_ipc::{
     frames_state, FrameBatch, FramesConfigure, FramesStatus, PresentingProcess, PresentingProcesses,
 };
 use oma_win::svc::LinkCommand;
 use serde::Serialize;
 
+use super::benchmark::{file_stem, BenchmarkRecord, EndReason, Recorder, SUMMARY_SHOW_MS};
 use super::editor_feed::{EditorData, SyntheticFeed};
 use super::forward::{
     frame_times_since, keep_lows, low_windows, metrics_message, set_profile, union_needs,
@@ -62,6 +73,8 @@ use super::host::{HostFailure, HostState};
 use super::profiles::{ProfileCatalog, ProfileDiagnostic, ProfileEntry};
 use super::target::{ProcessInfo, TargetPicker, MIN_GAME_FPS, OWN_PROCESS_NAMES, SYSTEM_EXCLUDED};
 use crate::i18n::Lang;
+use crate::log::session::LogError;
+use crate::log::writer::WriteFailure;
 use crate::log::HotkeyStatus;
 
 /// How often the engine configuration and the target are sent again.
@@ -91,6 +104,34 @@ pub enum ToastRequest {
     /// The target runs in exclusive fullscreen, where the overlay cannot
     /// show: once per executable and per app session (DP16).
     ExclusiveFullscreen { exe: String },
+    /// A capture was asked for without a game to measure.
+    BenchmarkNoTarget,
+    /// The capture stopped on a write error.
+    BenchmarkError { error: LogError },
+}
+
+/// What the caller does with the capture's files, in order.
+// One `Finish` per capture: its size does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkCommand {
+    /// Create the CSV.
+    Begin { stem: String },
+    /// Append these rows.
+    Rows(Vec<String>),
+    /// Close the CSV, with its summary (`None`: no frames, remove it).
+    Finish { record: Option<BenchmarkRecord> },
+}
+
+/// The capture, for the UI.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkStatus {
+    /// `idle`, `recording` or `error`.
+    pub state: String,
+    pub game: Option<String>,
+    pub elapsed_s: Option<u32>,
+    pub error: Option<LogError>,
 }
 
 /// What the sampler needs to send sensor values, published by the
@@ -129,6 +170,7 @@ pub struct TargetStatus {
 pub struct OverlayHotkeys {
     pub toggle: HotkeyStatus,
     pub next_profile: HotkeyStatus,
+    pub benchmark: HotkeyStatus,
 }
 
 /// The overlay's state, for the UI.
@@ -151,6 +193,7 @@ pub struct OverlayStatus {
     pub hotkeys: OverlayHotkeys,
     /// The preview is open.
     pub preview: bool,
+    pub benchmark: BenchmarkStatus,
 }
 
 /// What one [`Controller::step`] asks the caller to do.
@@ -172,6 +215,8 @@ pub struct Outputs {
     /// Watch this window's geometry (`Some(None)`: stop watching).
     pub track: Option<Option<Foreground>>,
     pub toast: Option<ToastRequest>,
+    /// The capture's file work, in order.
+    pub benchmark: Vec<BenchmarkCommand>,
     /// The new status, only when it changed.
     pub status: Option<OverlayStatus>,
     /// A `frames:` line to log (`OMA_FRAMES_DEBUG` only).
@@ -270,6 +315,22 @@ pub struct Controller {
     /// The lows of the active profile, the only ones the overlay gets.
     overlay_lows: Vec<(u32, LowDefinition)>,
 
+    // Benchmark.
+    recorder: Recorder,
+    /// The recorded game's PID and start time.
+    bench_game: Option<(u32, LocalTime)>,
+    bench_error: Option<LogError>,
+    /// Queued between steps.
+    bench_commands: Vec<BenchmarkCommand>,
+    bench_toast: Option<ToastRequest>,
+    /// The summary box and when it goes.
+    bench_summary: Option<(WireBenchmarkSummary, u64)>,
+    sent_bench: BenchmarkOverlay,
+    /// The local wall clock, for the file name and the summary.
+    clock: fn() -> LocalTime,
+    /// The time of the last step.
+    now_ms: u64,
+
     // What was sent.
     sent_config: Option<FramesConfigure>,
     config_sent_ms: u64,
@@ -344,6 +405,15 @@ impl Controller {
             editor_profile: None,
             editor_metrics: None,
             overlay_lows: Vec::new(),
+            recorder: Recorder::new(),
+            bench_game: None,
+            bench_error: None,
+            bench_commands: Vec::new(),
+            bench_toast: None,
+            bench_summary: None,
+            sent_bench: NO_BENCHMARK,
+            clock: wall_clock,
+            now_ms: 0,
             sent_config: None,
             config_sent_ms: 0,
             retry_frames: false,
@@ -527,6 +597,124 @@ impl Controller {
         self.preview_host = state;
     }
 
+    /// The benchmark hotkey or button: starts a capture of the target, which
+    /// needs the overlay on (DD6), or stops the one running.
+    pub fn toggle_benchmark(&mut self, now_ms: u64) {
+        if self.recorder.is_recording() {
+            self.end_benchmark(EndReason::User, now_ms);
+            return;
+        }
+        let target = self
+            .target
+            .clone()
+            .filter(|_| self.settings.overlay.enabled);
+        let Some(target) = target else {
+            self.bench_toast = Some(ToastRequest::BenchmarkNoTarget);
+            return;
+        };
+        self.recorder.on_target(true, now_ms);
+        if self.recorder.start(&target.name, now_ms).is_err() {
+            return;
+        }
+        let start = (self.clock)();
+        self.bench_game = Some((target.pid, start));
+        self.bench_error = None;
+        self.bench_summary = None;
+        self.bench_commands.push(BenchmarkCommand::Begin {
+            stem: file_stem(&target.name, start),
+        });
+    }
+
+    /// A capture is running.
+    pub fn recording(&self) -> bool {
+        self.recorder.is_recording()
+    }
+
+    /// The capture's files failed: it stops with `Error` and the reason
+    /// stays in the status. A failure after the end (the summary) is
+    /// reported only if the capture had none.
+    pub fn on_benchmark_error(&mut self, failure: WriteFailure) {
+        let recording = self.recorder.is_recording();
+        if !recording && self.bench_error.is_some() {
+            return;
+        }
+        if recording {
+            self.end_benchmark(EndReason::Error, self.now_ms);
+        }
+        let error = LogError::from(&failure);
+        self.bench_error = Some(error.clone());
+        self.bench_toast = Some(ToastRequest::BenchmarkError { error });
+    }
+
+    /// The app exits: a running capture ends with `Shutdown`; returns the
+    /// file work still due, to be done before the app goes.
+    pub fn shutdown_benchmark(&mut self, now_ms: u64) -> Vec<BenchmarkCommand> {
+        self.end_benchmark(EndReason::Shutdown, now_ms);
+        std::mem::take(&mut self.bench_commands)
+    }
+
+    fn end_benchmark(&mut self, reason: EndReason, now_ms: u64) {
+        let Some(game) = self.recorder.game().map(str::to_owned) else {
+            return;
+        };
+        let summary = self.recorder.stop(reason);
+        let start = self.bench_game.take().map_or_else(self.clock, |(_, t)| t);
+        let record = summary.map(|s| BenchmarkRecord::new(&game, start, reason, s));
+        if let Some(r) = record.as_ref().filter(|_| !self.blocked_exe(&game)) {
+            let s = &r.summary;
+            let summary = WireBenchmarkSummary {
+                fps_displayed: s.fps_displayed,
+                low_one_percent: s.lows_integral.one_percent,
+                low_point_one_percent: s.lows_integral.point_one_percent,
+                stutter_count: s.stutter_count,
+                stutter_percent: s.stutter_percent,
+            };
+            self.bench_summary = Some((summary, now_ms.saturating_add(SUMMARY_SHOW_MS)));
+        }
+        self.bench_commands
+            .push(BenchmarkCommand::Finish { record });
+    }
+
+    /// Whether the recorded game is the target; a capture that ran too long
+    /// or without its game ends.
+    fn step_benchmark(&mut self, now_ms: u64, out: &mut Outputs) {
+        if let Some((pid, _)) = self.bench_game {
+            let present = self.target.as_ref().is_some_and(|t| t.pid == pid);
+            self.recorder.on_target(present, now_ms);
+            if let Some(reason) = self.recorder.tick(now_ms) {
+                self.end_benchmark(reason, now_ms);
+            }
+        }
+        out.benchmark.append(&mut self.bench_commands);
+    }
+
+    /// The badge or the summary box, while the overlay runs.
+    fn step_bench_overlay(&mut self, now_ms: u64, out: &mut Outputs) {
+        if self
+            .bench_summary
+            .as_ref()
+            .is_some_and(|&(_, until)| now_ms >= until)
+        {
+            self.bench_summary = None;
+        }
+        if self.host != HostState::Running {
+            return;
+        }
+        let blocked = self.recorder.game().is_some_and(|g| self.blocked_exe(g));
+        let wanted = if blocked {
+            NO_BENCHMARK
+        } else {
+            BenchmarkOverlay {
+                recording_s: self.recorder.elapsed_s(now_ms),
+                summary: self.bench_summary.as_ref().map(|(s, _)| s.clone()),
+            }
+        };
+        if wanted != self.sent_bench {
+            self.sent_bench = wanted.clone();
+            out.overlay.push(OverlayMessage::Benchmark(wanted));
+        }
+    }
+
     /// «Retry»: restarts a frame engine that failed or was denied, and an
     /// overlay process that failed.
     pub fn retry(&mut self) {
@@ -548,9 +736,13 @@ impl Controller {
             retry_host: std::mem::take(&mut self.retry_host),
             ..Outputs::default()
         };
+        self.now_ms = now_ms;
+        // Queued since the last step (a `Begin`), before this step's rows.
+        out.benchmark.append(&mut self.bench_commands);
         let config = self.wanted_config();
         self.step_config(&config, now_ms, &mut out);
         self.step_target(config.enabled, now_ms, &mut out);
+        self.step_benchmark(now_ms, &mut out);
         self.step_resend(&config, now_ms, &mut out);
         self.step_track(&mut out);
         self.refresh_profile();
@@ -561,9 +753,10 @@ impl Controller {
         }
         self.step_overlay();
         self.step_overlay_messages(&mut out);
+        self.step_bench_overlay(now_ms, &mut out);
         self.step_preview(&mut out);
         self.step_data(&config, now_ms, &mut out);
-        out.toast = self.toast();
+        out.toast = self.bench_toast.take().or_else(|| self.toast());
         let mode = self.target.as_ref().and_then(|t| {
             self.processes
                 .iter()
@@ -669,6 +862,19 @@ impl Controller {
             hidden_by_user: self.hidden_by_user,
             hotkeys: self.hotkeys.clone(),
             preview: self.preview.is_some(),
+            benchmark: BenchmarkStatus {
+                state: if self.recorder.is_recording() {
+                    "recording"
+                } else if self.bench_error.is_some() {
+                    "error"
+                } else {
+                    "idle"
+                }
+                .to_owned(),
+                game: self.recorder.game().map(str::to_owned),
+                elapsed_s: self.recorder.elapsed_s(self.now_ms),
+                error: self.bench_error.clone(),
+            },
         }
     }
 
@@ -759,14 +965,33 @@ impl Controller {
         } else {
             self.hold_target(now_ms, out);
         }
+        let recorded = self.bench_game.map(|(pid, _)| pid);
+        let mut fresh = Vec::new();
         for batch in std::mem::take(&mut self.batches) {
             self.dropped = self.dropped.saturating_add(u64::from(batch.dropped));
             // A batch of the previous target may still arrive after a change.
             if self.qpc_frequency == 0 || Some(batch.pid) != self.target.as_ref().map(|t| t.pid) {
                 continue;
             }
+            let record = Some(batch.pid) == recorded;
             for frame in &batch.frames {
-                self.window.push(sample_of(frame, self.qpc_frequency));
+                let sample = sample_of(frame, self.qpc_frequency);
+                self.window.push(sample);
+                if record {
+                    fresh.push(sample);
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            // Only the main swapchain is measured (DD7).
+            let swapchain = self
+                .swapchain
+                .or_else(|| pick_swapchain(&self.window.last(LOWS_WINDOW_S)));
+            self.swapchain = swapchain;
+            fresh.retain(|f| Some(f.swapchain) == swapchain);
+            let rows = self.recorder.on_frames(&fresh, now_ms);
+            if !rows.is_empty() {
+                out.benchmark.push(BenchmarkCommand::Rows(rows));
             }
         }
     }
@@ -980,8 +1205,14 @@ impl Controller {
     }
 
     fn blocked(&self, target: &ProcessInfo) -> bool {
-        let exe = target.name.to_lowercase();
-        self.settings.overlay.blocked_games.contains(&exe)
+        self.blocked_exe(&target.name)
+    }
+
+    fn blocked_exe(&self, exe: &str) -> bool {
+        self.settings
+            .overlay
+            .blocked_games
+            .contains(&exe.to_lowercase())
     }
 
     /// Whether the overlay shows, and a fresh start for a new process.
@@ -993,6 +1224,7 @@ impl Controller {
             self.sent_placement = None;
             self.profile_dirty = true;
             self.overlay_cursor = DataCursor::NEW;
+            self.sent_bench = NO_BENCHMARK;
         }
         self.was_running = running;
         let was_shown = self.shown;
@@ -1244,6 +1476,20 @@ fn newest_frames(msg: &OverlayMessage) -> Option<&[WireFrameTime]> {
         OverlayMessage::FrameTimes(t) if !t.frames.is_empty() => Some(&t.frames),
         _ => None,
     }
+}
+
+/// The overlay's benchmark box when there is nothing to show.
+const NO_BENCHMARK: BenchmarkOverlay = BenchmarkOverlay {
+    recording_s: None,
+    summary: None,
+};
+
+/// The local time now.
+fn wall_clock() -> LocalTime {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    crate::report::local_now(now_ms)
 }
 
 fn new_picker(own_pid: u32) -> TargetPicker {
@@ -1928,6 +2174,7 @@ mod tests {
                 state: HotkeyState::Failed,
                 reason: Some("log.hotkey.inUse".to_owned()),
             },
+            benchmark: HotkeyStatus::default(),
         };
         c.on_hotkeys(hotkeys.clone());
         let out = c.step(100);
@@ -2882,5 +3129,288 @@ mod tests {
             tick_values(&ValuesPlan::default(), &schema, &snapshot, &[], 5),
             None
         );
+    }
+    // --- Benchmark (M7d, D12) ---------------------------------------------
+
+    fn fixed_clock() -> oma_core::csv::LocalTime {
+        // 2026-10-05 21:30:00 UTC
+        oma_core::csv::local_time(1_791_235_800_000, 0)
+    }
+
+    /// Like [`batch`], on another swapchain.
+    fn batch_on(pid: u32, swapchain: u64, first_s: f64, count: u32) -> FrameBatch {
+        let mut b = batch(pid, first_s, count, 0);
+        for f in &mut b.frames {
+            f.swapchain = swapchain;
+        }
+        b
+    }
+
+    fn bench_messages(out: &Outputs) -> Vec<BenchmarkOverlay> {
+        out.overlay
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::Benchmark(b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rows(out: &Outputs) -> usize {
+        out.benchmark
+            .iter()
+            .map(|c| match c {
+                BenchmarkCommand::Rows(r) => r.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn finished(out: &Outputs) -> Vec<Option<BenchmarkRecord>> {
+        out.benchmark
+            .iter()
+            .filter_map(|c| match c {
+                BenchmarkCommand::Finish { record } => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `c` with a capture started at `now_ms`, its `Begin` step done.
+    fn recording(mut c: Controller, now_ms: u64) -> Controller {
+        c.clock = fixed_clock;
+        c.toggle_benchmark(now_ms);
+        let out = c.step(now_ms);
+        assert_eq!(
+            out.benchmark,
+            vec![BenchmarkCommand::Begin {
+                stem: "my_game-20261005-213000".into()
+            }]
+        );
+        c
+    }
+
+    #[test]
+    fn benchmark_without_target_toasts() {
+        let mut c = enabled_with(&settings(true));
+        c.step(0);
+        c.toggle_benchmark(10);
+        let out = c.step(100);
+        assert_eq!(out.toast, Some(ToastRequest::BenchmarkNoTarget));
+        assert!(out.benchmark.is_empty());
+        assert_eq!(c.current_status().benchmark.state, "idle");
+        // A target with the overlay off (`OMA_FRAMES_DEBUG`): still no
+        // capture (DD6).
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, Some(config(true, false, false)));
+        c.on_catalog(builtins());
+        c.on_service(true);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        c.step(0);
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        c.toggle_benchmark(50);
+        let out = c.step(100);
+        assert_eq!(out.toast, Some(ToastRequest::BenchmarkNoTarget));
+        assert!(out.benchmark.is_empty());
+    }
+
+    #[test]
+    fn benchmark_records_only_the_target_main_swapchain() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[
+                batch(GAME, 1.0, 20, 0),
+                batch_on(GAME, 0xdef, 1.0, 2),
+                batch(OTHER, 1.0, 5, 0),
+            ],
+        );
+        let out = c.step(200);
+        assert_eq!(rows(&out), 20);
+        let bench = c.current_status().benchmark;
+        assert_eq!(bench.state, "recording");
+        assert_eq!(bench.game.as_deref(), Some("my game.exe"));
+        // Another target: its frames are not the recorded game's, and ten
+        // seconds without the game end the capture.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        let out = c.step(300);
+        assert_eq!(targets(&out), vec![Some(OTHER)]);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&other_only()),
+            &[batch(OTHER, 2.0, 5, 0)],
+        );
+        assert_eq!(rows(&c.step(400)), 0);
+        assert!(finished(&c.step(10_299)).is_empty());
+        let ended = finished(&c.step(10_300));
+        assert_eq!(ended.len(), 1);
+        let record = ended[0].clone().expect("frames were recorded");
+        assert_eq!(record.end_reason, EndReason::NoTarget);
+        assert_eq!(record.summary.frames_displayed, 20);
+    }
+
+    #[test]
+    fn benchmark_rec_seconds_go_to_the_overlay() {
+        let mut c = showing();
+        c.clock = fixed_clock;
+        c.toggle_benchmark(100);
+        assert_eq!(
+            bench_messages(&c.step(100)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(0),
+                summary: None
+            }]
+        );
+        assert!(bench_messages(&c.step(200)).is_empty());
+        assert!(bench_messages(&c.step(1_000)).is_empty());
+        assert_eq!(
+            bench_messages(&c.step(1_100)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(1),
+                summary: None
+            }]
+        );
+        assert_eq!(
+            c.current_status().benchmark,
+            BenchmarkStatus {
+                state: "recording".into(),
+                game: Some("my game.exe".into()),
+                elapsed_s: Some(1),
+                error: None,
+            }
+        );
+        // A new overlay process gets the badge again.
+        c.on_host(HostState::Starting);
+        c.step(1_200);
+        c.on_host(HostState::Running);
+        assert_eq!(
+            bench_messages(&c.step(1_300)),
+            vec![BenchmarkOverlay {
+                recording_s: Some(1),
+                summary: None
+            }]
+        );
+    }
+
+    #[test]
+    fn summary_shows_for_ten_seconds_then_clears() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        c.toggle_benchmark(1_000);
+        let out = c.step(1_000);
+        let ended = finished(&out);
+        let record = ended[0].clone().expect("a summary");
+        assert_eq!(record.end_reason, EndReason::User);
+        assert_eq!(record.game, "my game.exe");
+        assert_eq!(record.started_at, "2026-10-05T21:30:00");
+        let shown = bench_messages(&out);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].recording_s, None);
+        let summary = shown[0].summary.clone().expect("the summary box");
+        assert!((summary.fps_displayed - 100.0).abs() < 1e-6, "{summary:?}");
+        assert_eq!(c.current_status().benchmark.state, "idle");
+        assert!(bench_messages(&c.step(1_000 + SUMMARY_SHOW_MS - 1)).is_empty());
+        assert_eq!(
+            bench_messages(&c.step(1_000 + SUMMARY_SHOW_MS)),
+            vec![BenchmarkOverlay {
+                recording_s: None,
+                summary: None
+            }]
+        );
+    }
+
+    #[test]
+    fn blocked_game_is_recorded_without_badge() {
+        let mut s = settings(true);
+        s.overlay.blocked_games = vec!["my game.exe".into()];
+        let mut c = enabled_with(&s);
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        c.on_foreground(GAME_FG);
+        c.step(0);
+        c.on_geometry(Some(geometry(96)));
+        c.step(100);
+        let mut c = recording(c, 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        let out = c.step(200);
+        assert_eq!(rows(&out), 20);
+        assert!(bench_messages(&out).is_empty());
+        assert!(bench_messages(&c.step(1_500)).is_empty());
+        assert_eq!(c.current_status().benchmark.state, "recording");
+        c.toggle_benchmark(2_000);
+        let out = c.step(2_000);
+        assert!(finished(&out)[0].is_some());
+        assert!(bench_messages(&out).is_empty(), "no summary box either");
+    }
+
+    #[test]
+    fn write_error_stops_with_the_reason() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        c.on_benchmark_error(WriteFailure::DiskFull);
+        let out = c.step(300);
+        let ended = finished(&out);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].as_ref().unwrap().end_reason, EndReason::Error);
+        let error = LogError {
+            key: "log.error.diskFull".into(),
+            detail: None,
+        };
+        assert_eq!(
+            out.toast,
+            Some(ToastRequest::BenchmarkError {
+                error: error.clone()
+            })
+        );
+        let bench = c.current_status().benchmark;
+        assert_eq!(bench.state, "error");
+        assert_eq!(bench.error, Some(error));
+        assert_eq!(bench.game, None);
+        // The summary that then cannot be written: no second toast.
+        c.on_benchmark_error(WriteFailure::DiskFull);
+        assert_eq!(c.step(400).toast, None);
+        // A new capture clears the error.
+        c.toggle_benchmark(500);
+        c.step(500);
+        let bench = c.current_status().benchmark;
+        assert_eq!((bench.state.as_str(), bench.error), ("recording", None));
+    }
+
+    #[test]
+    fn shutdown_ends_the_capture_with_its_reason() {
+        let mut c = recording(showing(), 100);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 1.0, 20, 0)],
+        );
+        c.step(200);
+        let commands = c.shutdown_benchmark(300);
+        assert!(!c.recording());
+        let [BenchmarkCommand::Finish { record: Some(r) }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(r.end_reason, EndReason::Shutdown);
+        // Nothing running: nothing to do.
+        assert!(c.shutdown_benchmark(400).is_empty());
     }
 }

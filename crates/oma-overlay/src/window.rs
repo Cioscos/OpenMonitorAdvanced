@@ -1,6 +1,6 @@
 //! The overlay window (spec §5.1): a `WS_POPUP` that is topmost, click-through
 //! (`WS_EX_TRANSPARENT | WS_EX_LAYERED` and `HTTRANSPARENT`), never active
-//! (`WS_EX_NOACTIVATE`, `SW_SHOWNOACTIVATE`, `SWP_NOACTIVATE`) and never on the
+//! (`WS_EX_NOACTIVATE`, `SWP_NOACTIVATE`) and never on the
 //! taskbar (`WS_EX_TOOLWINDOW`). Its content is a DirectComposition swapchain
 //! (`compose`), so it has no redirection bitmap. It starts hidden and shows
 //! only at the rectangle the app's `SetPlacement` gives.
@@ -18,7 +18,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, PostQuitMessage, RegisterClassW,
     SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HTTRANSPARENT,
-    HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE,
+    HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE,
     WM_APP, WM_DESTROY, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -140,8 +140,9 @@ pub(crate) fn destroy(hwnd: HWND) {
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
-/// Moves the window to `rect` and shows it without activating it; `None`
-/// hides it (spec §3.2, §5.1).
+/// Moves the window to `rect`, on top of the topmost band again, and shows
+/// it without activating it, in one `SetWindowPos`; `None` hides it (spec
+/// §3.2, §5.1).
 pub fn apply_placement(hwnd: HWND, rect: Option<PxRect>) {
     match rect {
         Some(r) => {
@@ -154,14 +155,12 @@ pub fn apply_placement(hwnd: HWND, rect: Option<PxRect>) {
                     r.y,
                     r.w.max(1),
                     r.h.max(1),
-                    SWP_NOACTIVATE,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             };
             if let Err(e) = moved {
-                tracing::warn!(error = %e, "cannot move the overlay window");
+                tracing::warn!(error = %e, "cannot place the overlay window");
             }
-            // SAFETY: as above. The return value is the previous visibility.
-            let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         }
         None => {
             // SAFETY: as above.

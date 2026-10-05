@@ -19,7 +19,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -29,10 +30,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
-    DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED,
+    DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
 /// The largest side of the swapchain, in pixels (the D3D11 texture limit).
@@ -71,6 +71,9 @@ pub struct Compositor {
     _visual: IDCompositionVisual,
     _dcomp: IDCompositionDevice,
     _d2d_device: ID2D1Device,
+    /// The immediate context, flushed before `ResizeBuffers` so the
+    /// deferred releases of the old back buffers really happen.
+    d3d_context: ID3D11DeviceContext,
     _d3d: ID3D11Device,
 }
 
@@ -96,8 +99,13 @@ impl Compositor {
         };
         let d3d = device.ok_or_else(|| windows::core::Error::from(DXGI_ERROR_DEVICE_REMOVED))?;
         let dxgi_device: IDXGIDevice = d3d.cast()?;
-        // SAFETY: no flags; the factory is returned owned.
-        let factory: IDXGIFactory2 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
+        // The factory that created the device's adapter: on a hybrid PC a
+        // fresh factory could enumerate another GPU first.
+        // SAFETY: plain getters on live objects; both are returned owned.
+        let (factory, d3d_context): (IDXGIFactory2, ID3D11DeviceContext) = unsafe {
+            let adapter = dxgi_device.GetAdapter()?;
+            (adapter.GetParent()?, d3d.GetImmediateContext()?)
+        };
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: width,
             Height: height,
@@ -149,6 +157,7 @@ impl Compositor {
             _visual: visual,
             _dcomp: dcomp,
             _d2d_device: d2d_device,
+            d3d_context,
             _d3d: d3d,
         })
     }
@@ -170,6 +179,11 @@ impl Compositor {
         // SAFETY: the context is ours and not drawing (ended above).
         unsafe { self.dc.SetTarget(None) };
         self.target = None;
+        // D3D11 defers the destruction of released resources: flush so the
+        // back buffers are really gone, or `ResizeBuffers` can fail with
+        // `DXGI_ERROR_INVALID_CALL`.
+        // SAFETY: the immediate context of our device, from its only thread.
+        unsafe { self.d3d_context.Flush() };
         // SAFETY: no outstanding back-buffer references (see above); 0 and
         // `DXGI_FORMAT_UNKNOWN` keep the count and the format.
         unsafe {

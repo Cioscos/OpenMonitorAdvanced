@@ -72,6 +72,30 @@ fn wait_ms(wait_s: Option<f64>) -> u32 {
     }
 }
 
+/// Failed frames in a row before giving up (the app restarts us).
+const MAX_FAILURES: u32 = 3;
+
+/// Seconds before the next attempt after `failures` failed frames in a row:
+/// a quick retry for a transient error, then a long one, so that the last
+/// attempt comes after a driver reset (TDR, about 2 s) is over.
+fn retry_delay_s(failures: u32) -> f64 {
+    if failures <= 1 {
+        0.25
+    } else {
+        3.0
+    }
+}
+
+/// After this long hidden, the device and the swapchain are released (§11);
+/// the next visible frame builds them again.
+const HIDDEN_RELEASE_S: f64 = 30.0;
+
+/// Seconds left before the drawing surface of a window hidden since
+/// `hidden_since_s` is released; zero or less means now.
+fn release_in_s(hidden_since_s: f64, now_s: f64) -> f64 {
+    hidden_since_s + HIDDEN_RELEASE_S - now_s
+}
+
 /// The panel's corner radius in pixels: `radius` is in 96-DPI pixels at
 /// scale 1, and never more than half the shorter side.
 fn panel_radius_px(radius: f64, scale: f64, dpi: u32, w: u32, h: u32) -> f32 {
@@ -95,11 +119,7 @@ fn run_window(pipe: String) -> i32 {
     use crate::link::{LinkEvent, EXIT_CONNECT, EXIT_DEVICE_LOST, EXIT_OK};
     use crate::state::Changes;
     use crate::window::WM_APP_DATA;
-
-    /// After a failed frame the next attempt comes this soon.
-    const RETRY_S: f64 = 0.1;
-    /// Failed frames in a row before giving up (the app restarts us).
-    const MAX_FAILURES: u32 = 3;
+    use oma_ipc::overlay::OverlayMessage;
 
     window::set_dpi_awareness();
     let hwnd = match window::create() {
@@ -119,11 +139,14 @@ fn run_window(pipe: String) -> i32 {
     let start = Instant::now();
     let mut state = OverlayState::default();
     let mut cadence = Cadence::new(state.draw.chart_fps, state.draw.text_hz);
-    // Built at the first visible frame, dropped on a lost device.
+    // Built at the first visible frame, dropped on a lost device and after
+    // `HIDDEN_RELEASE_S` hidden.
     let mut gfx: Option<Compositor> = None;
     let mut failures = 0u32;
-    // A frame failed: draw everything again at `RETRY_S`.
-    let mut retry = false;
+    // A frame failed: draw everything again at this time.
+    let mut retry_at: Option<f64> = None;
+    // Since when the window has been hidden.
+    let mut hidden_since: Option<f64> = None;
     // Where the window should be, and where it is shown.
     let mut rect: Option<PxRect> = None;
     let mut shown: Option<PxRect> = None;
@@ -132,8 +155,15 @@ fn run_window(pipe: String) -> i32 {
     loop {
         let now_s = start.elapsed().as_secs_f64();
         let mut wake = cadence.next_wake(now_s);
-        if retry {
-            wake = Some(wake.map_or(RETRY_S, |w| w.min(RETRY_S)));
+        let mut wake_at = |s: f64| {
+            let w = (s - now_s).max(0.0);
+            wake = Some(wake.map_or(w, |v| v.min(w)));
+        };
+        if let Some(at) = retry_at {
+            wake_at(at);
+        }
+        if let (Some(since), Some(_)) = (hidden_since, &gfx) {
+            wake_at(now_s + release_in_s(since, now_s));
         }
         // SAFETY: no handles, only the queue of this thread; returns on a
         // message (also one already seen) or at the timeout.
@@ -168,9 +198,15 @@ fn run_window(pipe: String) -> i32 {
         posted.store(false, Ordering::SeqCst);
         let now_s = start.elapsed().as_secs_f64();
         let mut changes = Changes::default();
+        // A placement message, even an unchanged one, puts the window back on
+        // top of the topmost band (a topmost window shown later covers us).
+        let mut reassert = false;
         loop {
             match rx.try_recv() {
-                Ok(LinkEvent::Message(msg)) => changes.merge(state.apply(*msg, now_s)),
+                Ok(LinkEvent::Message(msg)) => {
+                    reassert |= matches!(*msg, OverlayMessage::SetPlacement(_));
+                    changes.merge(state.apply(*msg, now_s));
+                }
                 Ok(LinkEvent::Closed { exit_code }) => {
                     tracing::info!(exit_code, "overlay exiting");
                     return exit_code;
@@ -199,36 +235,47 @@ fn run_window(pipe: String) -> i32 {
             if shown.take().is_some() {
                 window::apply_placement(hwnd, None);
             }
-            retry = false;
+            retry_at = None;
+            let since = *hidden_since.get_or_insert(now_s);
+            if gfx.is_some() && release_in_s(since, now_s) <= 0.0 {
+                tracing::debug!("overlay hidden for a while; releasing the graphics device");
+                gfx = None;
+            }
             continue;
         };
-        if !(due.any() || retry) {
-            continue;
+        hidden_since = None;
+        let wants_draw = match retry_at {
+            Some(at) => now_s >= at,
+            None => due.any(),
+        };
+        let mut place_now = reassert && shown == Some(r);
+        if wants_draw {
+            match draw_frame(&mut gfx, hwnd, r, &state) {
+                Ok(()) => {
+                    failures = 0;
+                    retry_at = None;
+                    // Shown (or moved) only once its content is presented.
+                    place_now |= shown != Some(r);
+                }
+                Err(e) => {
+                    failures += 1;
+                    if needs_recreate(e.code()) {
+                        tracing::warn!(error = %e, failures, "graphics device lost; recreating");
+                        gfx = None;
+                    } else {
+                        tracing::warn!(error = %e, failures, "overlay frame failed");
+                    }
+                    if failures >= MAX_FAILURES {
+                        tracing::error!(failures, "overlay drawing keeps failing; exiting");
+                        return EXIT_DEVICE_LOST;
+                    }
+                    retry_at = Some(now_s + retry_delay_s(failures));
+                }
+            }
         }
-        match draw_frame(&mut gfx, hwnd, r, &state) {
-            Ok(()) => {
-                failures = 0;
-                retry = false;
-                // Shown (or moved) only once its content is presented.
-                if shown != Some(r) {
-                    window::apply_placement(hwnd, Some(r));
-                    shown = Some(r);
-                }
-            }
-            Err(e) => {
-                failures += 1;
-                if needs_recreate(e.code()) {
-                    tracing::warn!(error = %e, failures, "graphics device lost; recreating");
-                    gfx = None;
-                } else {
-                    tracing::warn!(error = %e, failures, "overlay frame failed");
-                }
-                if failures >= MAX_FAILURES {
-                    tracing::error!(failures, "overlay drawing keeps failing; exiting");
-                    return EXIT_DEVICE_LOST;
-                }
-                retry = true;
-            }
+        if place_now {
+            window::apply_placement(hwnd, Some(r));
+            shown = Some(r);
         }
     }
 }
@@ -341,6 +388,24 @@ mod tests {
         assert_eq!(wait_ms(Some(1.0 / 30.0)), 34);
         assert_eq!(wait_ms(Some(0.5)), 500);
         assert_eq!(wait_ms(Some(1e12)), u32::MAX - 1);
+    }
+
+    #[test]
+    fn retry_backs_off_past_a_driver_reset() {
+        assert_eq!(retry_delay_s(1), 0.25);
+        assert_eq!(retry_delay_s(2), 3.0);
+        assert_eq!(retry_delay_s(5), 3.0);
+        // The last attempt before the exit comes after a TDR (2 s) is over.
+        let before_last: f64 = (1..MAX_FAILURES).map(retry_delay_s).sum();
+        assert!(before_last > 3.0, "{before_last}");
+    }
+
+    #[test]
+    fn compositor_released_after_30_s_hidden() {
+        assert_eq!(release_in_s(10.0, 10.0), 30.0);
+        assert_eq!(release_in_s(10.0, 25.0), 15.0);
+        assert!(release_in_s(10.0, 40.0) <= 0.0);
+        assert!(release_in_s(10.0, 100.0) <= 0.0);
     }
 
     #[test]

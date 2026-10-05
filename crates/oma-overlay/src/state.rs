@@ -85,12 +85,23 @@ fn is_frametime_graph(kind: Kind, mode: GraphMode) -> bool {
     kind == Kind::Graph && mode == GraphMode::Frametime
 }
 
-/// The rings a profile needs: for each source, the longest window asked by a
-/// statistic other than `current` or by a chart. The second set holds the
-/// sources a chart reads.
-fn ring_plan(profile: &Profile) -> (HashMap<SourceKey, u32>, HashSet<SourceKey>) {
+/// What a profile reads from each source.
+#[derive(Debug, Default)]
+struct SourcePlan {
+    /// The rings: for each source, the longest window asked by a statistic
+    /// other than `current` or by a chart.
+    windows: HashMap<SourceKey, u32>,
+    /// The sources a chart (`graph`, `sparkline`) reads.
+    charted: HashSet<SourceKey>,
+    /// The sources a block redrawn at `textHz` reads (`text`, `meter`,
+    /// `gauge`), or a `visibleIf` compares.
+    texted: HashSet<SourceKey>,
+}
+
+fn source_plan(profile: &Profile) -> SourcePlan {
     let mut windows: HashMap<SourceKey, u32> = HashMap::new();
     let mut charted = HashSet::new();
+    let mut texted = HashSet::new();
     let mut need = |source: &Source, window: u32| {
         if let Some(key) = SourceKey::of(source) {
             let w = windows.entry(key).or_insert(0);
@@ -109,18 +120,31 @@ fn ring_plan(profile: &Profile) -> (HashMap<SourceKey, u32>, HashSet<SourceKey>)
             && !is_frametime_graph(b.kind, b.style.graph.mode);
         if charts {
             need(&b.source, b.style.graph.range_s);
-            if let Some(key) = SourceKey::of(&b.source) {
+        }
+        if let Some(key) = SourceKey::of(&b.source) {
+            if charts {
                 charted.insert(key);
+            } else if !is_frametime_graph(b.kind, b.style.graph.mode) {
+                texted.insert(key);
             }
         }
         if let Some(VisibleIf::Compare(c)) = &b.visible_if {
             if c.stat.op != StatOp::Current {
                 need(&c.source, c.stat.window);
             }
+            texted.extend(SourceKey::of(&c.source));
         }
     }
-    (windows, charted)
+    SourcePlan {
+        windows,
+        charted,
+        texted,
+    }
 }
+
+/// Most frames kept per second of frametime chart range: a frame rate no
+/// display reaches, so the cap only bites on timestamps that stop advancing.
+pub const MAX_FRAMES_PER_S: usize = 1000;
 
 /// The longest `range_s` of the frametime charts; 0 without one.
 fn frame_range_of(profile: &Profile) -> u32 {
@@ -157,10 +181,8 @@ pub struct OverlayState {
     pub strings: BTreeMap<String, String>,
     /// One ring per source with a statistic other than `current` or a chart.
     pub rings: HashMap<SourceKey, StatRing>,
-    /// The window of each ring, in seconds.
-    ring_windows: HashMap<SourceKey, u32>,
-    /// The sources a chart reads: new samples for them mark the charts dirty.
-    charted: HashSet<SourceKey>,
+    /// The window of each ring, the charted and the texted sources.
+    plan: SourcePlan,
     /// The frames of the frametime charts, oldest first.
     pub frame_times: VecDeque<WireFrameTime>,
     /// The longest `range_s` of the frametime charts; 0 keeps no frames.
@@ -182,8 +204,7 @@ impl Default for OverlayState {
             sensors: HashMap::new(),
             strings: BTreeMap::new(),
             rings: HashMap::new(),
-            ring_windows: HashMap::new(),
-            charted: HashSet::new(),
+            plan: SourcePlan::default(),
             frame_times: VecDeque::new(),
             frame_range_s: 0,
             metrics: None,
@@ -198,7 +219,7 @@ impl OverlayState {
     /// The window of the ring of `key`, if the profile asks for one.
     #[cfg(test)]
     pub fn ring_window(&self, key: &SourceKey) -> Option<u32> {
-        self.ring_windows.get(key).copied()
+        self.plan.windows.get(key).copied()
     }
 
     /// Applies one validated message received at `now_s` seconds (a monotonic
@@ -245,14 +266,19 @@ impl OverlayState {
                 }
             }
             OverlayMessage::Values(v) => {
-                let mut charts = false;
-                let text = !v.values.is_empty();
-                for w in v.values {
+                let (mut text, mut charts) = (false, false);
+                // Only the profile's sensors are kept, so the map stays bounded.
+                for w in v
+                    .values
+                    .into_iter()
+                    .filter(|w| self.sensors.contains_key(&w.id))
+                {
                     let key = SourceKey::Sensor(w.id.clone());
                     if let Some(ring) = self.rings.get_mut(&key) {
                         ring.push(now_s, w.value);
-                        charts |= self.charted.contains(&key);
                     }
+                    text |= self.plan.texted.contains(&key);
+                    charts |= self.plan.charted.contains(&key);
                     self.values.insert(w.id, (w.value, w.quality));
                 }
                 Changes {
@@ -267,7 +293,7 @@ impl OverlayState {
                     let key = SourceKey::Frames(metric);
                     if let Some(ring) = self.rings.get_mut(&key) {
                         ring.push(now_s, metric_value(&m, metric));
-                        charts |= self.charted.contains(&key);
+                        charts |= self.plan.charted.contains(&key);
                     }
                 }
                 self.metrics = Some(m);
@@ -295,39 +321,44 @@ impl OverlayState {
     /// window does not change keeps its samples, so re-sending the same
     /// profile (new settings) does not empty the charts.
     fn set_profile(&mut self, profile: Profile) {
-        let (windows, charted) = ring_plan(&profile);
+        let plan = source_plan(&profile);
         let mut old = std::mem::take(&mut self.rings);
-        self.rings = windows
+        self.rings = plan
+            .windows
             .iter()
             .map(|(key, &window)| {
                 let ring = match old.remove(key) {
-                    Some(ring) if self.ring_windows.get(key) == Some(&window) => ring,
+                    Some(ring) if self.plan.windows.get(key) == Some(&window) => ring,
                     _ => StatRing::new(window),
                 };
                 (key.clone(), ring)
             })
             .collect();
-        self.ring_windows = windows;
-        self.charted = charted;
+        self.plan = plan;
         self.frame_range_s = frame_range_of(&profile);
         self.trim_frame_times();
         self.profile = Some(profile);
     }
 
     /// Keeps the frames of the last `frame_range_s` seconds before the newest
-    /// one (inclusive); none without a frametime chart.
+    /// one (inclusive), and at most `frame_range_s × MAX_FRAMES_PER_S` of them
+    /// in case the timestamps stop advancing; none without a frametime chart.
+    /// Frames arrive in order, so the newest is the last.
     fn trim_frame_times(&mut self) {
         if self.frame_range_s == 0 {
             self.frame_times.clear();
             return;
         }
-        let Some(newest) = self.frame_times.iter().map(|f| f.t_s).reduce(f64::max) else {
+        let Some(newest) = self.frame_times.back().map(|f| f.t_s) else {
             return;
         };
         let oldest = newest - f64::from(self.frame_range_s);
         while self.frame_times.front().is_some_and(|f| f.t_s < oldest) {
             self.frame_times.pop_front();
         }
+        let cap = self.frame_range_s as usize * MAX_FRAMES_PER_S;
+        let excess = self.frame_times.len().saturating_sub(cap);
+        self.frame_times.drain(..excess);
     }
 }
 
@@ -347,11 +378,18 @@ mod tests {
         OverlayMessage::SetProfile(SetProfile {
             profile_id: "p".into(),
             profile_json: profile.to_string(),
-            sensors: vec![SensorInfo {
-                id: CPU.into(),
-                label: "CPU".into(),
-                unit: "celsius".into(),
-            }],
+            sensors: vec![
+                SensorInfo {
+                    id: CPU.into(),
+                    label: "CPU".into(),
+                    unit: "celsius".into(),
+                },
+                SensorInfo {
+                    id: GPU.into(),
+                    label: "GPU".into(),
+                    unit: "percent".into(),
+                },
+            ],
             strings: BTreeMap::from([("sensorAbsent".to_owned(), "n/a".to_owned())]),
             draw: DrawSettings {
                 chart_fps: 60,
@@ -529,8 +567,9 @@ mod tests {
         let ring = &s.rings[&SourceKey::Sensor(CPU.into())];
         assert_eq!(ring.value(&avg(5)), Some(45.0));
 
+        // GPU feeds only a chart: the charts are dirty, the texts are not.
         let ch = s.apply(values(3000, GPU, Some(10.0)), 3.0);
-        assert!(ch.text && ch.charts);
+        assert!(ch.charts && !ch.text);
 
         // An absent value is stored as absent and leaves the ring alone.
         s.apply(values(4000, CPU, None), 4.0);
@@ -631,6 +670,45 @@ mod tests {
         );
         let ts: Vec<f64> = s.frame_times.iter().map(|f| f.t_s).collect();
         assert_eq!(ts, vec![21.0, 25.0]);
+    }
+
+    #[test]
+    fn values_ignore_unknown_ids() {
+        let mut s = OverlayState::default();
+        s.apply(
+            set_profile(profile(json!([text_block(
+                "a",
+                json!({ "sensor": CPU }),
+                json!({})
+            )]))),
+            0.0,
+        );
+        let ch = s.apply(values(1000, "disk0/temperature/drive", Some(30.0)), 1.0);
+        assert!(!ch.any());
+        assert!(s.values.is_empty());
+        let ch = s.apply(values(2000, CPU, Some(40.0)), 2.0);
+        assert!(ch.text);
+        assert_eq!(s.values.len(), 1);
+    }
+
+    #[test]
+    fn frame_times_are_capped_without_advancing_time() {
+        let mut s = OverlayState::default();
+        s.apply(
+            set_profile(profile(json!([graph_block(
+                "a",
+                json!({ "frames": "frametime-displayed" }),
+                "frametime",
+                5
+            )]))),
+            0.0,
+        );
+        let cap = 5 * MAX_FRAMES_PER_S;
+        let batch = vec![1.0; 4096];
+        for _ in 0..(cap / 4096 + 2) {
+            s.apply(frames(&batch), 0.0);
+        }
+        assert_eq!(s.frame_times.len(), cap);
     }
 
     #[test]

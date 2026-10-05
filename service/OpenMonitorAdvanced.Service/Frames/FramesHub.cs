@@ -23,7 +23,8 @@ namespace OpenMonitorAdvanced.Service.Frames;
 /// </para>
 /// <para>
 /// <b>Timers</b> (through the injected <see cref="TimeProvider"/>) run only while a session is
-/// subscribed. The hub owns the capture: <see cref="Dispose"/> stops the timers, unhooks the
+/// subscribed and some live session has frames enabled; otherwise the hub sends nothing, not even
+/// empty summaries. The hub owns the capture: <see cref="Dispose"/> stops the timers, unhooks the
 /// capture's events and disposes it (which stops PresentMon and its ETW session).
 /// </para>
 /// </summary>
@@ -82,19 +83,7 @@ internal sealed class FramesHub : IDisposable
             var subscriber = new Subscriber(session, deliver);
             _subscribers[session] = subscriber;
             subscriber.StatusOwed = !deliver(_capture.Status);
-            if (_batchTimer is null)
-            {
-                // Frames gathered while nobody was subscribed (a session within its grace) are old:
-                // discard them, so the first batch holds only what arrives from now on.
-                foreach (uint pid in _requests.Targets)
-                {
-                    _ = _aggregator.TakeBatch(pid);
-                }
-
-                _batchTimer = _time.CreateTimer(_ => OnBatchTick(), null, BatchInterval, BatchInterval);
-                _summaryTimer = _time.CreateTimer(_ => OnSummaryTick(), null, SummaryInterval, SummaryInterval);
-            }
-
+            UpdateTickTimers(_requests.Effective is not null);
             return new Subscription(this, subscriber);
         }
     }
@@ -170,6 +159,7 @@ internal sealed class FramesHub : IDisposable
         }
 
         _aggregator.SetTargets(_requests.Targets);
+        UpdateTickTimers(options is not null);
 
         _expiryTimer?.Dispose();
         _expiryTimer = _requests.NextExpiry is { } due
@@ -229,16 +219,25 @@ internal sealed class FramesHub : IDisposable
             }
 
             // Every target is taken, also those no subscriber follows now (a session within its
-            // grace): their frames are discarded rather than piling up for a later reader.
+            // grace): their frames are discarded rather than piling up for a later reader. A burst
+            // beyond one batch is taken over the next ticks, oldest first.
             foreach (uint pid in _requests.Targets)
             {
                 FrameBatchMessage? batch = _aggregator.TakeBatch(pid);
+                bool followed = false;
                 foreach (Subscriber subscriber in _subscribers.Values)
                 {
                     if (_requests.TargetOf(subscriber.Session) == pid)
                     {
+                        followed = true;
                         Send(subscriber, pid, batch);
                     }
+                }
+
+                // Nobody reads this target: drop its whole backlog, not just one batch of it.
+                while (!followed && batch is not null)
+                {
+                    batch = _aggregator.TakeBatch(pid);
                 }
             }
         }
@@ -312,10 +311,28 @@ internal sealed class FramesHub : IDisposable
                 _subscribers.Remove(subscriber.Session);
             }
 
-            if (_subscribers.Count == 0)
-            {
-                StopTickTimers();
-            }
+            UpdateTickTimers(_requests.Effective is not null);
+        }
+    }
+
+    /// <summary>
+    /// The tick timers run while a session is subscribed and some live session has frames enabled;
+    /// otherwise the hub is idle. Under the lock.
+    /// </summary>
+    private void UpdateTickTimers(bool anyEnabled)
+    {
+        bool wanted = !_disposed && anyEnabled && _subscribers.Count > 0;
+        if (wanted && _batchTimer is null)
+        {
+            // Frames gathered while the timers were off (a session within its grace) are old:
+            // discard them, so the first batch holds only what arrives from now on.
+            _aggregator.DiscardPending();
+            _batchTimer = _time.CreateTimer(_ => OnBatchTick(), null, BatchInterval, BatchInterval);
+            _summaryTimer = _time.CreateTimer(_ => OnSummaryTick(), null, SummaryInterval, SummaryInterval);
+        }
+        else if (!wanted)
+        {
+            StopTickTimers();
         }
     }
 

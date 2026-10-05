@@ -112,6 +112,8 @@ test('overlay commands and event match the Rust shell', async () => {
   expect(invoke).toHaveBeenLastCalledWith('overlay_retry');
   await backend.overlayReloadProfiles();
   expect(invoke).toHaveBeenLastCalledWith('overlay_reload_profiles');
+  await backend.setOverlayHidden(false);
+  expect(invoke).toHaveBeenLastCalledWith('set_overlay_hidden', { hidden: false });
   await backend.onOverlayStatus(vi.fn());
   expect(listen).toHaveBeenLastCalledWith('overlay-status', expect.any(Function));
 });

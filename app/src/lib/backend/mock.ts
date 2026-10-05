@@ -324,6 +324,7 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
   const listeners = new Set<(s: OverlayStatus) => void>();
   const unset = { requested: null, effective: null, state: 'unset', reason: null } as const;
   let engine = frames;
+  let hidden = false;
   const status = (): OverlayStatus => {
     const overlay = settings.state().settings.overlay;
     const target = overlay.enabled ? { name: 'cyberpunk2077.exe', pid: 14_320 } : null;
@@ -341,7 +342,7 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
         { id: '6f1c2a9e-3b47-4d8a-9e15-0c2b7d4f8a31', name: 'Stream (1440p)', builtin: false },
       ],
       diagnostics: [{ file: 'old-layout.json', reason: 'unknown field `colour` at line 12 column 7' }],
-      hiddenByUser: false,
+      hiddenByUser: overlay.enabled && hidden,
       hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile) },
     };
   };
@@ -363,6 +364,10 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
       emit();
     },
     reload: emit,
+    setHidden(next: boolean) {
+      hidden = next;
+      emit();
+    },
   };
 }
 
@@ -614,6 +619,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
     overlayRetry: async () => overlay.retry(),
     // No profile folder in the browser: the catalog stays the same.
     overlayReloadProfiles: async () => overlay.reload(),
+    setOverlayHidden: async (hidden) => overlay.setHidden(hidden),
     // The browser has no network access to GitHub: the check always finds nothing to report.
     checkUpdates: async () => MOCK_UPDATE_STATUS,
     getUpdateStatus: async () => MOCK_UPDATE_STATUS,

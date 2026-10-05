@@ -258,7 +258,16 @@ pub fn builtin_profile(id: BuiltinId, schema: &Schema) -> Profile {
     let (anchor, blocks) = match id {
         BuiltinId::MinimalFps => (
             Anchor::TopLeft,
-            flow(&[metric("fps-displayed", FrameMetric::FpsDisplayed)], WIDTH),
+            // The unit says what the value is (no «FPS 93 FPS»).
+            flow(
+                &[Item {
+                    label: Some(""),
+                    // As wide as the bar's label-less FPS.
+                    w: 7,
+                    ..metric("fps-displayed", FrameMetric::FpsDisplayed)
+                }],
+                WIDTH,
+            ),
         ),
         BuiltinId::Gaming => (Anchor::TopLeft, flow(&gaming_items(schema), WIDTH)),
         BuiltinId::Full => (Anchor::TopLeft, flow(&full_items(schema), WIDTH)),
@@ -424,6 +433,14 @@ mod tests {
         // Gaming has a low block, so the loop above checked one.
         let gaming = builtin_profile(BuiltinId::Gaming, &this_machine());
         assert!(gaming.blocks.iter().any(|b| b.id == "low-1"));
+    }
+
+    #[test]
+    fn minimal_fps_shows_the_value_and_unit_only() {
+        // «FPS 93 FPS» said it twice: the unit is enough.
+        let p = builtin_profile(BuiltinId::MinimalFps, &this_machine());
+        assert_eq!(p.blocks.len(), 1);
+        assert_eq!(p.blocks[0].style.label.as_deref(), Some(""));
     }
 
     #[test]

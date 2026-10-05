@@ -57,6 +57,11 @@ class OverlayStore {
     await this.#backend?.overlayRetry();
   }
 
+  /** Hides or shows the overlay, as the hotkey and the tray do (not saved). */
+  async setHidden(hidden: boolean): Promise<void> {
+    await this.#backend?.setOverlayHidden(hidden);
+  }
+
   /** Reads the profile folder again; the new catalog arrives as a status. */
   async reloadProfiles(): Promise<void> {
     await this.#backend?.overlayReloadProfiles();

@@ -125,6 +125,16 @@
           <button type="button" class="action" onclick={() => overlay.retry().catch(() => {})}>{t('overlay.retry')}</button>
         {/if}
       </div>
+      <!-- Hidden with the hotkey or the tray: not saved, so a restart shows it again. -->
+      {#if status.hiddenByUser}
+        <div class="status" data-tone="idle">
+          <span class="led" aria-hidden="true"></span>
+          <div class="lines" role="status">
+            <p>{t('overlay.hidden')}</p>
+          </div>
+          <button type="button" class="action" onclick={() => overlay.setHidden(false).catch(() => {})}>{t('overlay.show')}</button>
+        </div>
+      {/if}
     {/if}
   </Group>
 

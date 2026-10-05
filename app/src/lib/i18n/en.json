@@ -492,6 +492,8 @@
   "overlay.state.failed": "FPS measurement interrupted",
   "overlay.state.processFailed": "Overlay interrupted",
   "overlay.state.incompatible": "Overlay component of another version: reinstall",
+  "overlay.hidden": "Overlay hidden with the hotkey or from the tray",
+  "overlay.show": "Show",
   "overlay.retry": "Try again",
   "overlay.current": "Current game: {name}",
   "overlay.current.none": "No game detected",

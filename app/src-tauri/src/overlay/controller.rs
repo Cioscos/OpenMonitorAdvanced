@@ -302,6 +302,13 @@ impl Controller {
             if settings.overlay.enabled && !self.settings.overlay.enabled {
                 self.hidden_by_user = false;
             }
+            // A new default or game association shows at once: it ends the
+            // `next_profile` choice.
+            let (old, new) = (&self.settings.overlay, &settings.overlay);
+            if old.default_profile != new.default_profile || old.game_profiles != new.game_profiles
+            {
+                self.choice = None;
+            }
             self.settings = settings.clone();
             self.lang = lang;
             self.choice_dirty = true;
@@ -1467,6 +1474,45 @@ mod tests {
         let out = c.step(600);
         assert_eq!(targets(&out), vec![Some(OTHER)]);
         assert_eq!(profiles_sent(&out), vec!["builtin-gaming"]);
+    }
+
+    #[test]
+    fn changing_the_profile_settings_ends_the_choice() {
+        let mut c = showing();
+        c.next_profile();
+        assert_eq!(profiles_sent(&c.step(200)), vec!["builtin-full"]);
+        // The default profile changes in the settings: it shows at once.
+        let mut s = settings(true);
+        s.overlay.default_profile = "builtin-bar".into();
+        c.on_settings(&s, Lang::En, None);
+        assert_eq!(profiles_sent(&c.step(300)), vec!["builtin-bar"]);
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-bar")
+        );
+        // A choice, then a game association for another profile.
+        c.next_profile();
+        c.step(400);
+        s.overlay
+            .game_profiles
+            .insert("my game.exe".into(), "builtin-gaming".into());
+        c.on_settings(&s, Lang::En, None);
+        assert_eq!(profiles_sent(&c.step(500)), vec!["builtin-gaming"]);
+    }
+
+    #[test]
+    fn other_settings_keep_the_choice() {
+        let mut c = showing();
+        c.next_profile();
+        assert_eq!(profiles_sent(&c.step(200)), vec!["builtin-full"]);
+        let mut s = settings(true);
+        s.overlay.hide_from_capture = !s.overlay.hide_from_capture;
+        c.on_settings(&s, Lang::En, None);
+        c.step(300);
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-full")
+        );
     }
 
     #[test]

@@ -77,6 +77,7 @@ export function createTauriBackend(): Backend {
     onOverlayStatus: (cb) => listen<OverlayStatus>('overlay-status', (e) => cb(e.payload)),
     overlayRetry: () => invoke<void>('overlay_retry'),
     overlayReloadProfiles: () => invoke<void>('overlay_reload_profiles'),
+    setOverlayHidden: (hidden) => invoke<void>('set_overlay_hidden', { hidden }),
     checkUpdates: () => invoke<UpdateStatus>('check_updates'),
     getUpdateStatus: () => invoke<UpdateStatus>('get_update_status'),
     openReleasePage: () => invoke<void>('open_release_page'),

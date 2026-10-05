@@ -492,6 +492,8 @@
   "overlay.state.failed": "Misura degli FPS interrotta",
   "overlay.state.processFailed": "Overlay interrotto",
   "overlay.state.incompatible": "Componente overlay di un'altra versione: reinstalla",
+  "overlay.hidden": "Overlay nascosto con la scorciatoia o dal tray",
+  "overlay.show": "Mostra",
   "overlay.retry": "Riprova",
   "overlay.current": "Gioco attuale: {name}",
   "overlay.current.none": "Nessun gioco rilevato",

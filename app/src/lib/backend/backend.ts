@@ -124,6 +124,8 @@ export interface Backend {
   overlayRetry(): Promise<void>;
   /** Reads the profile folder again; the new catalog arrives as an event. */
   overlayReloadProfiles(): Promise<void>;
+  /** Hides or shows the overlay like the hotkey and the tray (not saved); the outcome arrives as an event. */
+  setOverlayHidden(hidden: boolean): Promise<void>;
   /** Asks GitHub for the latest release now; replies with the resulting status (rejects only if the background task panics). */
   checkUpdates(): Promise<UpdateStatus>;
   getUpdateStatus(): Promise<UpdateStatus>;

@@ -107,6 +107,21 @@ test('retry visible only on failed or denied', async () => {
   expect(retry()).not.toBeNull();
 });
 
+test('an overlay hidden by the user says so and offers to show it', async () => {
+  const { backend } = await setup(undefined, { enabled: true, frames: 'running', process: 'running', hiddenByUser: false });
+  const show = () => screen.queryByRole('button', { name: t('overlay.show') });
+  expect(screen.queryByText(t('overlay.hidden'))).toBeNull();
+  expect(show()).toBeNull();
+  backend.emitOverlayStatus(makeOverlayStatus({ enabled: true, frames: 'running', process: 'running', hiddenByUser: true }));
+  await screen.findByText(t('overlay.hidden'));
+  expect(screen.getByText(t('overlay.state.running'))).toBeTruthy();
+  await fireEvent.click(show()!);
+  expect(backend.overlayCalls).toContain('setOverlayHidden:false');
+  // With the overlay off there is nothing to show.
+  backend.emitOverlayStatus(makeOverlayStatus({ enabled: false, frames: 'off', process: 'off', hiddenByUser: true }));
+  await waitFor(() => expect(screen.queryByText(t('overlay.hidden'))).toBeNull());
+});
+
 test('associate patches gameProfiles with the whole map', async () => {
   const { patches } = await setup(
     { overlay: { gameProfiles: { 'cs2.exe': 'builtin-bar' } } },

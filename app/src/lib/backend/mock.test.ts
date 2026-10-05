@@ -533,6 +533,10 @@ test('mock overlay follows the settings and offers a retry', async () => {
   expect(seen.at(-1)!.activeProfile).toBe('builtin-bar');
   await backend.overlayRetry();
   expect(seen.at(-1)!.frames).toBe('running');
+  await backend.setOverlayHidden(true);
+  expect(seen.at(-1)!.hiddenByUser).toBe(true);
+  await backend.setOverlayHidden(false);
+  expect(seen.at(-1)!.hiddenByUser).toBe(false);
   off();
 });
 

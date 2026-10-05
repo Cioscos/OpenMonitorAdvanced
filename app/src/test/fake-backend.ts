@@ -431,6 +431,10 @@ export class FakeBackend implements Backend {
     this.overlayCalls.push('overlayReloadProfiles');
   }
 
+  async setOverlayHidden(hidden: boolean): Promise<void> {
+    this.overlayCalls.push(`setOverlayHidden:${hidden}`);
+  }
+
   async checkUpdates(): Promise<UpdateStatus> {
     this.checkUpdatesCalls++;
     if (this.checkError !== null) throw this.checkError;

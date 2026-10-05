@@ -22,11 +22,14 @@ pub const SYSTEM_EXCLUDED: &[&str] = &[
     "lockapp.exe",
     "csrss.exe",
     "msedgewebview2.exe",
-    "oma-app.exe",
-    "oma-overlay.exe",
     "oma-service.exe",
     "presentmon-2.6.0-x64.exe",
 ];
+
+/// Our own executables, never a target whatever the excluded names: the
+/// overlay window presents frames like any other (SD11, DP15) and its PID
+/// changes at every restart.
+pub const OWN_PROCESS_NAMES: &[&str] = &["oma-app.exe", "oma-overlay.exe"];
 
 /// A process that presents frames, as the service reports it.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,9 +107,7 @@ impl TargetPicker {
             return None;
         }
         self.processes.iter().find(|p| {
-            p.pid == pid
-                && p.displayed_fps >= MIN_GAME_FPS
-                && !self.excluded.contains(&p.name.to_lowercase())
+            p.pid == pid && p.displayed_fps >= MIN_GAME_FPS && !is_excluded(&self.excluded, &p.name)
         })
     }
 
@@ -120,6 +121,11 @@ impl TargetPicker {
             self.current = None;
         }
     }
+}
+
+fn is_excluded(excluded: &[String], name: &str) -> bool {
+    let name = name.to_lowercase();
+    OWN_PROCESS_NAMES.contains(&name.as_str()) || excluded.contains(&name)
 }
 
 #[cfg(test)]
@@ -186,6 +192,20 @@ mod tests {
         p.on_foreground(50, 0);
         assert_eq!(p.current(), None);
         assert_eq!(p.tick(0), None);
+    }
+
+    #[test]
+    fn own_processes_are_never_targets() {
+        // Built without any excluded name: our own executables stay excluded.
+        let mut p = TargetPicker::new(vec![], vec![]);
+        p.on_processes(&[proc(60, "OMA-Overlay.exe", 60.0)], 0);
+        p.on_foreground(60, 0);
+        assert_eq!(p.current(), None);
+        assert_eq!(p.tick(0), None);
+        p.on_processes(&[proc(61, "oma-app.exe", 60.0)], 0);
+        p.on_foreground(61, 0);
+        assert_eq!(p.current(), None);
+        assert!(OWN_PROCESS_NAMES.contains(&"oma-overlay.exe"));
     }
 
     #[test]

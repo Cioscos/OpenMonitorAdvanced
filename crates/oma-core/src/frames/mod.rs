@@ -109,6 +109,12 @@ impl FrameWindow {
         self.frames.iter().skip(start).copied().collect()
     }
 
+    /// Frames with `t_s > after_t_s`, oldest first.
+    pub fn since(&self, after_t_s: f64) -> Vec<FrameSample> {
+        let start = self.frames.partition_point(|x| x.t_s <= after_t_s);
+        self.frames.iter().skip(start).copied().collect()
+    }
+
     pub fn clear(&mut self) {
         self.frames.clear();
     }
@@ -177,6 +183,18 @@ mod tests {
         assert_eq!(got.len(), 11);
         assert!((got[0].t_s - 2.0).abs() < 1e-9);
         assert!(FrameWindow::new(1.0).last(1.0).is_empty());
+    }
+
+    #[test]
+    fn window_since_returns_only_later_frames() {
+        let mut w = FrameWindow::new(10.0);
+        for i in 0..=10 {
+            w.push(sample(f64::from(i)));
+        }
+        let ts: Vec<f64> = w.since(7.0).iter().map(|f| f.t_s).collect();
+        assert_eq!(ts, vec![8.0, 9.0, 10.0]);
+        assert!(w.since(10.0).is_empty());
+        assert_eq!(w.since(f64::NEG_INFINITY).len(), 11);
     }
 
     #[test]

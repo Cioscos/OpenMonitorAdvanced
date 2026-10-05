@@ -22,17 +22,23 @@ pub fn source_label(source: RenderedSource, frames: &[FrameSample]) -> &'static 
         RenderedSource::Reflex => "Reflex",
         RenderedSource::FrameType => {
             let count = |k: FrameKind| frames.iter().filter(|f| f.kind == k).count();
-            let xefg = count(FrameKind::GeneratedIntelXefg);
-            let afmf = count(FrameKind::GeneratedAmdAfmf);
-            let other = count(FrameKind::GeneratedOther);
-            if xefg > afmf + other {
-                "XeSS-FG"
-            } else if afmf > xefg + other {
-                "AFMF"
-            } else {
-                "FG"
-            }
+            generated_label(
+                count(FrameKind::GeneratedIntelXefg),
+                count(FrameKind::GeneratedAmdAfmf),
+                count(FrameKind::GeneratedOther),
+            )
         }
+    }
+}
+
+/// Label of the frame generator that produced most of the generated frames.
+pub(crate) fn generated_label(xefg: usize, afmf: usize, other: usize) -> &'static str {
+    if xefg > afmf + other {
+        "XeSS-FG"
+    } else if afmf > xefg + other {
+        "AFMF"
+    } else {
+        "FG"
     }
 }
 

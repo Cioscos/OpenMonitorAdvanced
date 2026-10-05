@@ -15,7 +15,7 @@ CPU, RAM, disks, network and GPUs (NVIDIA, AMD, Intel) are read **without admini
 An optional Windows service adds the sensors that need them: temperatures, voltages, fans and
 SMART data.
 
-> **Status:** early development (version 0.4.1). Expect rough edges and breaking changes between
+> **Status:** early development (version 0.5.0). Expect rough edges and breaking changes between
 > versions.
 
 ## Features
@@ -206,9 +206,30 @@ from its own small process, `oma-overlay.exe`, installed next to the app.
   executable; *Exclude the current game* never shows the overlay over that game (the
   measurement goes on).
 - **Your own profiles.** Profiles are JSON files named `<uuid>.json` in
-  `%APPDATA%\OpenMonitorAdvanced\overlay\profiles\`. In this version you write them by hand (the
-  editor comes in a later version); *Reload profiles* reads the folder again, and an invalid file
-  is listed with the reason while the default profile is used. The app never changes those files.
+  `%APPDATA%\OpenMonitorAdvanced\overlay\profiles\`. You make them in the editor (see below);
+  *Reload profiles* reads the folder again after you change a file by hand, and an invalid file
+  is listed with the reason while the default profile is used. The built-in profiles are never
+  changed.
+- **Editor.** *Settings › Overlay › Open the editor* opens a separate window. The canvas shows
+  the profile on a game-sized area, with live values from your sensors and, when no game is
+  being followed, synthetic frames so the charts, the FG multiplier, thresholds and *visible
+  if* rules move. Drag a block to move it, resize it from its corner, pick the anchor, scale,
+  sensors, fonts, colours, thresholds and *visible if* in the properties panel; undo and redo
+  work. *Preview* opens a second small window (`oma-overlay.exe --preview`) that draws the profile
+  exactly as the in-game overlay does; it exists only while it is open. Built-in profiles open
+  read-only: *Duplicate* makes your own copy. *Use now* saves the profile and makes it the active
+  one until the next game change; *Associate* and the default profile make the choice stable.
+  *Import* and *Export* use `.omaoverlay.json` files: an imported file gets a new id and a unique
+  name, and a broken or oversized file is refused without writing anything. Closing the editor
+  or quitting from the tray with unsaved changes asks whether to save, discard or cancel.
+- **Benchmark.** *Settings › Overlay › Benchmark* sets a global shortcut (not set by default)
+  that starts and stops a capture of the game being followed, up to 60 minutes. While it runs the
+  overlay shows `● REC mm:ss` next to the profile; when it ends, a summary box (average, 1% and
+  0.1% lows, stutter, rendered FPS where known) stays for 10 seconds. Each capture writes two
+  files in the `benchmarks` subfolder of the CSV log folder: `<game>-<yyyymmdd-hhmmss>.csv` with one row per
+  displayed frame, and a `.json` with the summary. The settings page lists past captures, opens
+  the folder and deletes them. It needs the overlay turned on, because the frame measurement
+  runs only then.
 - **The game is not touched.** No injection, no hook inside the game, no handle on its process,
   no reads of its memory, no input sent to it. The service checks PresentMon's SHA-256 before
   every start and refuses a modified copy. PresentMon traces through its own ETW session,
@@ -231,6 +252,10 @@ from its own small process, `oma-overlay.exe`, installed next to the app.
 
 - **Exclusive fullscreen:** the overlay is not visible over a game in true exclusive
   fullscreen (the app says so once per game); use borderless mode. The measurement works.
+- **Editor canvas:** the canvas is not pixel-exact for fonts: the browser and DirectWrite draw
+  the same font with slightly different metrics. *Preview* is the exact view.
+- **Benchmark:** it needs the overlay turned on and a game being followed; with the overlay off
+  the shortcut only says that no game is in the foreground.
 - **Frame generation:** with PC latency on, the rendered FPS are known for DLSS FG, FSR FG and
   NVIDIA Smooth Motion in games with Reflex, and for Intel XeSS-FG and AMD AFMF from the
   driver. Without Reflex, or with PC latency off, the rendered FPS are unknown: DLSS FG and

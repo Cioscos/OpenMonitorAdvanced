@@ -311,7 +311,8 @@ l'overlay è spento; da nascosto il processo resta in esecuzione). `oma-overlay`
 | Overlay spento | nessun processo in più, costo invariato | PresentMon non gira |
 | Overlay acceso, nessun gioco | PresentMon + `oma-overlay` < 0,5% della CPU totale; `oma-overlay` < 40 MB privati | PresentMon 0,006–0,023% sul desktop, 5–6,5 MB privati |
 | Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 70 MB (era 40 MB, vedi sotto) | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
-| Editor aperto | come la finestra principale (< 200 MB con WebView2) | — |
+| Editor aperto | come la finestra principale (< 200 MB con WebView2) | da misurare in D18 |
+| Anteprima aperta | nessun limite nuovo: secondo processo `oma-overlay --preview`, vive solo mentre è aperta | da misurare in D18 |
 
 **Memoria dell'overlay e GPU (verifica W8, 2026-10-05).** La memoria privata
 di `oma-overlay` visibile è quasi tutta del driver grafico: un dispositivo
@@ -332,6 +333,16 @@ Misure della M7c (task C20, 2026-10-05; setup release 0.4.1 installato, RTX 4080
 | Overlay spento | non gira | — | non gira | riferimento: app 0,04%, servizio 0,04% | rispettato |
 | Overlay acceso, nessun gioco | < 0,005 | 5,6 | < 0,005 (5,2 MB) | app +0,01, servizio −0,01 | rispettato |
 | Overlay visibile in gioco, «Gaming», grafici a 30 FPS | 0,39 | 65,1 | 0,06 (5,6 MB) | app +0,09, servizio +0,11 | CPU 0,65% < 1%: rispettato; memoria entro il limite rivisto di 70 MB |
+
+**Costo di `FrameReadout::read` su finestre lunghe (M7d, 2026-10-05).** Test
+`readout_cost_on_a_300_s_window` (`cargo test -p oma-core
+readout_cost_on_a_300_s_window --release -- --ignored --nocapture`): 300 s a
+240 FPS (72.000 frame) e una finestra low di 300 s, media di 20 chiamate. Build
+release: 3,2 ms per chiamata (debug: circa 40 ms). Supera il segno di 2 ms, ma
+solo un profilo con low su 300 s lo paga, a `textHz`; i profili integrati usano
+finestre brevi. Voce aperta in `docs/follow-ups.md`. Editor e anteprima: da
+misurare in D18 con `measure-footprint.ps1` (memoria e CPU del processo
+dell'editor e di `oma-overlay --preview`).
 
 Le cifre dello spike vengono da `flush-probe` (60 s, 16 processori logici;
 dettagli in `docs/superpowers/references/m7/spike-findings.md`, S2), non dal

@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M7c).
+Updated at the end of every milestone (last update: M7d).
 
 ## Open: code
 
@@ -208,6 +208,45 @@ The hand-written part of the 0.4.1 draft release (above the block that `render-r
 >
 > This release is not code-signed yet: Windows SmartScreen may warn you (see the README, "Verify your download").
 
+## Draft: release notes for 0.5.0
+
+The hand-written part of the 0.5.0 draft release (above the block that `render-release-notes.ps1` generates), to be pasted into the draft **only when the user prepares the release**.
+
+> ## What's new
+>
+> ### In-game overlay (M7b, M7c)
+>
+> - **FPS, frame times, lows and sensors over your game**, drawn by a separate click-through window (`oma-overlay.exe`) that never touches the game: no injection, no hook, no input sent. Frame data comes from Intel's PresentMon 2.6.0, installed next to the service with its SHA-256 checked at every start.
+> - Displayed, rendered and presented FPS, frame time chart, 1% and 0.1% lows, stutter, frame generation multiplier, PC and display latency, CPU or GPU bound, and any sensor of the app. Four built-in profiles: *Minimal FPS*, *Gaming*, *Full* and *Horizontal bar*.
+> - Global shortcuts (not set by default) to show or hide the overlay and to change profile; a profile per game; games you can exclude.
+>
+> ### Editor and your own profiles (M7d)
+>
+> - **A profile editor** (*Settings > Overlay > Open the editor*): drag and resize blocks on a canvas with live values, set anchors, fonts, colours, thresholds and *visible if* rules, undo and redo, and a **preview** window that draws the profile exactly as in game.
+> - Duplicate the built-in profiles, import and export profiles as `.omaoverlay.json` files (checked, with a new id and a unique name), and *Use now* to try a profile in game. Unsaved changes are never lost without a question.
+>
+> ### Benchmark (M7d)
+>
+> - **A global shortcut starts and stops a capture** of the game in the foreground, up to 60 minutes, with `REC` on the overlay and a summary box at the end. Each capture writes a CSV with one row per displayed frame and a JSON summary in the `benchmarks` folder of the log folder; the settings page lists, opens and deletes them.
+>
+> ### Fixes
+>
+> - `meter` and `gauge` blocks with an automatic scale follow the last minute instead of the peak of all time.
+> - Errors of *Try again* and *Reload profiles* in the Overlay settings are shown.
+>
+> ### Limits
+>
+> - **Exclusive fullscreen:** the overlay is not visible there (use borderless); the measurement works.
+> - **Frame generation without Reflex:** the rendered FPS are unknown for DLSS FG and Smooth Motion (the overlay shows *FG?*) and for FSR FG.
+> - **Memory in game:** the overlay uses about 65 MB, almost all of the graphics driver.
+> - The editor canvas is not pixel-exact for fonts; the preview is. The benchmark needs the overlay turned on.
+>
+> ### Upgrading
+>
+> **App, service and overlay must be the same version (service protocol v4, overlay protocol v2); the installer updates all of them.**
+>
+> This release is not code-signed yet: Windows SmartScreen may warn you (see the README, "Verify your download").
+
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
 - NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick. The M5c CSV log does not need them (it logs what the tick already has), so they wait for a request.
@@ -255,7 +294,6 @@ Items left open by the M7c reviews (plan `docs/superpowers/plans/` M7c, tasks C1
 
 - The overlay client could also check the pipe server's PID against its parent process (`GetNamedPipeServerProcessId`), mirroring the app's check on the child. `crates/oma-overlay/src/link.rs`; when touched.
 - Pipe handoff when a process of the same user reuses the child's PID (C8 security review, M1): the user is outside the threat model and the data are only sensors and profiles; harden it with a nonce passed on the child's stdin. `app/src-tauri/src/overlay/host.rs`; before 1.0.
-- `meter` and `gauge` blocks with an automatic full scale: the peak never decays, so after a single spike the scale stays wide. `crates/oma-overlay/src/render/`; with the editor (M7d).
 - Cost of the `EVENT_OBJECT_LOCATIONCHANGE` events followed for the game window: not measured in C20 (W8 ran with a still window; W6 moved it without a measure). `crates/oma-win` (foreground); with M7d.
 - Frame state `starting` on an idle desktop: not checked explicitly in C20. App (`overlay/controller.rs`) and service (`FrameCapture`); with M7d.
 - Overlay memory: shown in game it uses 56-65 MB private, almost all the discrete GPU driver (D3D11 device about 51 MB); the in-game limit was raised from 40 to 70 MB by the user "this once" (W8). WARP would stay at about 3 MB with nearly the same CPU on a small window; the integrated GPU does not help when the screen is on the discrete one (both drivers load, 78-87 MB). Measure WARP at high scale before switching. `crates/oma-overlay/src/compose.rs`; when memory matters again.
@@ -264,8 +302,46 @@ Items left open by the M7c reviews (plan `docs/superpowers/plans/` M7c, tasks C1
 - Any change to `gameProfiles` (even for another game) ends the *Next profile* choice. `app/src-tauri/src/overlay/controller.rs`; if users notice.
 - Exclusive-fullscreen notice (DP16) not verified live: Control in DX12 never reports a `Legacy` present mode. Needs a DX9/DX11 game in true exclusive fullscreen.
 - Not tried live: God of War 2018 (DX11), a Vulkan and an OpenGL game with the overlay (W1).
-- `FrameReadout::read()` with low windows of up to 300 s requested by a profile: the per-tick cost on long windows is unmeasured (no built-in profile uses them). `crates/oma-core/src/frames/readout.rs`; with the editor (M7d), which lets users pick them.
-- Overlay settings UI: errors from *Try again* and *Reload profiles* are swallowed without a message. `app/src/components/settings/OverlaySection.svelte`; when touched.
+
+## Open: editor and benchmark (M7d)
+
+Items left open by the M7d reviews (plan `docs/superpowers/plans/2026-10-05-m7d-editor-benchmark.md`, tasks D1-D16).
+
+- `FrameReadout::read()` on a full 300 s window at 240 FPS (72 000 frames) with a 300 s low window costs 3.2 ms per call in release (40 ms in debug; test `readout_cost_on_a_300_s_window`, 2026-10-05), above the 2 ms mark. The controller calls it at `textHz`. Most of the cost is the copy of the window and the sort of the lows; only profiles with long windows pay it. `crates/oma-core/src/frames/readout.rs`; if the editor makes long windows common.
+- The window shared by the preview and the edited profile's lows can stretch to 300 s; `readout()` shares one swapchain between cursors. `app/src-tauri/src/overlay/controller.rs`; when touched.
+
+Core and benchmark:
+
+- No test for string escaping in a profile (quotes, backslash, non-ASCII in name or label) nor for non-default outline, shadow and gauge in the writer. `crates/oma-core/src/overlay/`.
+- Single-frame lows fall back to the displayed FPS and PCL ids with `id1 <= id0` give nil: untested. `crates/oma-core/src/frames/session.rs`.
+- The benchmark file list has no last name tiebreak for equal stamp and suffix; the `formula_guard` test mostly retests `escape_field`. `app/src-tauri/src/overlay/benchmark.rs`.
+- `overlay-status` is emitted once a second during a capture (the elapsed time); summary JSON `reason` and status `error` can differ when the rows fail in the same step as the limit; `log.folder` accepts UNC paths (older). `app/src-tauri/src/overlay/`.
+- `benchmark.end.<reason>` shows the raw key for an unknown reason, and a stale `failure` text outlives a change of state. `app/src/components/settings/`.
+
+Editor commands and files:
+
+- A failed `read_names` of the font list is skipped silently and the font warning repeats while DirectWrite fails. `crates/oma-win`, `app/src-tauri/src/overlay/`.
+- `export_file_name` edge cases (trailing dots, reserved names such as `CON`, empty), importing a folder says "not found", crash-left `.tmp` files of a process id are not cleaned, and saving with an unknown uuid creates a file (unbounded files from a compromised WebView). `app/src-tauri/src/overlay/store.rs`; before 1.0.
+- A tray *Quit* with a dirty editor never exits if the editor script hangs. `app/src-tauri/src/`; when touched.
+- `preview_failure` is not cleared when the editor opens again. `app/src-tauri/src/overlay/`.
+
+Editor interface:
+
+- *Export* with unsaved changes and the answer "Discard" exports the saved file, not the edited one; the TypeScript `uniqueName` does not truncate to the name limit (the Rust one does). `app/src/lib/editor/`.
+- Any key, even a lone Ctrl or Shift, ends a drag in progress (`Canvas.svelte`); the canvas has a single bottom-right resize handle; the resolution presets assume 100% scaling; a non-current stat copies the full series once per source per repaint.
+- Multi-selection shows thresholds and *visible if* read-only as "-"; the alpha of the colour pickers is not editable; the editor-only limits are z +-10000, offset +-400 and 1024 characters of text; a failed save drops the requests queued behind it; `commonValue` compares through `JSON.stringify` (key order); a load error stays visible next to the new-profile fallback. `app/src/components/overlay-editor/`.
+- Preview window: no redraw during the modal drag of the border; an unplaceable profile is drawn at (0,0); `set_preview_area` is untested; a stale doc comment on `destroy()`. `crates/oma-overlay/src/window.rs`.
+- Drawing the benchmark box builds its row strings at every frame, and the summary shows the stutter count without the percentage. `crates/oma-overlay/src/render/`.
+
+## Manual checks owed after M7d
+
+Task D18, with the user (never by an agent on this PC), on a build of the 0.5.0 branch:
+
+- Editor bounds while maximized: the window reopens at the normal size and position, not at the maximized rectangle.
+- Preview at 1366x768 and 150% scaling: the window fits the work area and the profile is drawn whole.
+- Edit and close the editor within 100 ms with the preview open: no preview process is left and no late preview starts.
+- Kill the preview process (`oma-overlay.exe --preview`) 3-5 times from Task Manager: the editor button returns to *Preview*, the in-game overlay is not touched, no restart loop.
+- The usual run of the editor (open, drag, save, duplicate, import, export, unsaved-changes prompt on window close and tray *Quit*) and of a benchmark with the shortcut over a game, with the footprint numbers of the editor and the preview for `docs/perf-budget.md`.
 
 ## Manual checks after M7c
 
@@ -349,6 +425,13 @@ To settle on the first signed run (deferred from the M6a reviews):
 - PawnIO scenarios in a VM: driver stopped, uninstalled, and the 3010 reboot state (`rebootPending`, then `ok` after the reboot); the Win32 codes 2/3/5 of the probe live. `ok` was checked on the dev machine.
 - Autostart across a real logout/login (the Run value and the Task Manager enable/disable states were verified; the login itself was deferred).
 - Per-module switches with two clients (two user sessions): the module stays on while one of them wants it.
+
+## Closed in M7d
+
+- Automatic full scale of `meter` and `gauge` blocks: the maximum of the last 60 s instead of the peak of all time, in the overlay and on the canvas (DD16): task D7.
+- Errors from *Try again* and *Reload profiles* in the Overlay settings page are shown: task D16.
+- Final review wave: late preview and canvas profile after the editor closes (guard on the editor being open), *Duplicate*, *Import* and *Export* with unsaved changes ask first, `editor.json` limited to the commands of the editor window, a failed preview is reported, editor bounds not saved while maximized, preview window ends on `WM_DESTROY`, checks the DPI rectangle and fits the work area, unique names fit the name limit, the session lows use one sorted copy, deleting the capture in progress is refused and the benchmark errors have i18n keys; *Save as* on a built-in profile gets a unique name (D15).
+- Cost of `FrameReadout::read()` on long low windows: measured (3.2 ms in release on 300 s at 240 FPS), see the open item above.
 
 ## Closed in M7c
 

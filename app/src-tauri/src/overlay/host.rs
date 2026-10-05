@@ -168,6 +168,14 @@ impl Supervisor {
         self.failed = Some(HostFailure::Incompatible);
     }
 
+    /// The start in progress was called off (stopped, or the app is
+    /// closing) and its process is already gone: not a crash. A start is
+    /// due again at once if the overlay is still, or again, wanted.
+    pub fn on_aborted(&mut self) {
+        self.alive = false;
+        self.running = false;
+    }
+
     /// The process finished its handshake.
     pub fn on_running(&mut self) {
         if self.alive {
@@ -712,7 +720,7 @@ mod imp {
                     self.sup.on_running();
                 }
                 Launch::Failed(kind) => self.count(kind),
-                Launch::Aborted => {}
+                Launch::Aborted => self.sup.on_aborted(),
             }
         }
 
@@ -944,15 +952,34 @@ mod imp {
         }
     }
 
-    /// Kills and reaps the child; what is left is a crash.
+    /// Kills the child and waits at most [`EXIT_WAIT`] for it to go (a
+    /// process stuck in the driver, as in a hung GPU reset, may never exit:
+    /// then it is left behind and logged). What is left is a crash.
     fn kill(child: &mut Child) -> ExitKind {
-        // `kill` succeeds on a child that already exited; when it fails,
-        // waiting could block for good.
-        match child.kill() {
-            Ok(()) => {
-                let _ = child.wait();
+        // `kill` succeeds on a child that already exited.
+        if let Err(e) = child.kill() {
+            tracing::warn!(error = %e, "cannot kill the overlay");
+            return ExitKind::Crash;
+        }
+        let deadline = Instant::now() + EXIT_WAIT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Ok(None) => {
+                    tracing::error!(
+                        pid = child.id(),
+                        "the killed overlay did not exit within 2 s"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot wait for the killed overlay");
+                    break;
+                }
             }
-            Err(e) => tracing::warn!(error = %e, "cannot kill the overlay"),
         }
         ExitKind::Crash
     }
@@ -1113,6 +1140,34 @@ mod tests {
         assert_eq!(s.state(), HostState::Off);
         s.set_wanted(true, 6);
         assert_eq!(s.poll(6), Some(SupervisorAction::Start));
+    }
+
+    #[test]
+    fn aborted_launch_restarts_without_counting_a_crash() {
+        // Off then on, both drained while the start was in progress.
+        let mut s = started(0);
+        s.set_wanted(false, 100);
+        s.set_wanted(true, 100);
+        s.on_aborted();
+        assert_eq!(s.state(), HostState::Starting);
+        assert_eq!(s.poll(100), Some(SupervisorAction::Start), "starts again");
+
+        // Only off: nothing left to stop, nothing counted.
+        let mut s = started(0);
+        s.set_wanted(false, 100);
+        s.on_aborted();
+        assert_eq!(s.poll(100), None);
+        assert_eq!(s.state(), HostState::Off);
+
+        // Aborts never fill the crash budget.
+        let mut s = started(0);
+        for i in 1..10 {
+            s.set_wanted(false, i);
+            s.set_wanted(true, i);
+            s.on_aborted();
+            assert_eq!(s.poll(i), Some(SupervisorAction::Start), "abort {i}");
+        }
+        assert_eq!(s.state(), HostState::Starting);
     }
 
     #[test]

@@ -1275,13 +1275,15 @@ mod tests {
             manager.action_for(key("Ctrl+Alt+F2")),
             Some(HotkeyAction::OverlayNextProfile)
         );
-        // Suspension releases all four (DP14).
+        // Released, so a new press would act...
+        dispatch.press(key("Ctrl+Alt+F1"), false);
+        // ...but suspension releases all four (DP14) and nothing acts.
         assert_eq!(manager.handle([HotkeyRequest::Suspend(true)]), None);
         assert_eq!(
             fake.take(),
             ["Ctrl+Alt+R", "Ctrl+Alt+P", "Ctrl+Alt+F1", "Ctrl+Alt+F2"].map(unreg)
         );
-        assert_eq!(dispatch.press(key("Ctrl+Alt+F1"), false), None);
+        assert_eq!(dispatch.press(key("Ctrl+Alt+F1"), true), None);
     }
 
     #[test]

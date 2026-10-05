@@ -1,7 +1,13 @@
-//! The game overlay's app side (M7). In M7b there is no overlay window yet:
-//! [`target`] picks the game to follow and [`frames`] logs its frame metrics
-//! when `OMA_FRAMES_DEBUG` asks for it.
+//! The game overlay's app side (M7): [`target`] picks the game to follow,
+//! [`controller`] decides what the frame engine and the overlay do,
+//! [`forward`] builds the messages for `oma-overlay.exe`, [`host`] runs it,
+//! [`profiles`] reads the profile catalog and [`frames`] formats the
+//! `OMA_FRAMES_DEBUG` line.
 
+// Wired to its thread from C16 on; until then only the diagnostics use it.
+#[cfg(windows)]
+#[allow(dead_code)]
+pub mod controller;
 // Used by the overlay controller from C16 on.
 #[allow(dead_code)]
 pub mod forward;

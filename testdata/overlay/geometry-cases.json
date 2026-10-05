@@ -1,0 +1,825 @@
+[
+ {
+  "name": "anchor top-left",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top-left",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 8,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 8,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor top",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 912,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 912,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor top-right",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top-right",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 1816,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 1816,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor left",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "left",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 8,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 8,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor center",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "center",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 912,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 912,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor right",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "right",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 1816,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 1816,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor bottom-left",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom-left",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 8,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 8,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor bottom",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 912,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 912,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "anchor bottom-right",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom-right",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 1816,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 1816,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "scale 1.5 at 144 dpi",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top-left",
+   "offset": {
+    "x": 0,
+    "y": 0
+   },
+   "scale": 1.5,
+   "panel": {
+    "padding": 0
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 1,
+      "h": 1
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 100,
+   "y": 50,
+   "w": 800,
+   "h": 600
+  },
+  "dpi": 144,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 100,
+    "y": 50,
+    "w": 18,
+    "h": 18
+   },
+   "profile": {
+    "x": 100,
+    "y": 50,
+    "w": 18,
+    "h": 18
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "overflowing offset is kept inside",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top-left",
+   "offset": {
+    "x": 1000,
+    "y": 1000
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": null,
+  "expected": {
+   "window": {
+    "x": 1824,
+    "y": 1032,
+    "w": 96,
+    "h": 48
+   },
+   "profile": {
+    "x": 1824,
+    "y": 1032,
+    "w": 96,
+    "h": 48
+   },
+   "extra": null
+  }
+ },
+ {
+  "name": "box below a top-left profile",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top-left",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": [
+   10,
+   2
+  ],
+  "expected": {
+   "window": {
+    "x": 8,
+    "y": 8,
+    "w": 96,
+    "h": 64
+   },
+   "profile": {
+    "x": 8,
+    "y": 8,
+    "w": 96,
+    "h": 48
+   },
+   "extra": {
+    "x": 8,
+    "y": 56,
+    "w": 80,
+    "h": 16
+   }
+  }
+ },
+ {
+  "name": "box above a bottom-right profile",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom-right",
+   "offset": {
+    "x": 1,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": [
+   10,
+   2
+  ],
+  "expected": {
+   "window": {
+    "x": 1816,
+    "y": 1008,
+    "w": 96,
+    "h": 64
+   },
+   "profile": {
+    "x": 1816,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "extra": {
+    "x": 1832,
+    "y": 1008,
+    "w": 80,
+    "h": 16
+   }
+  }
+ },
+ {
+  "name": "union shifted inside the area",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "center",
+   "offset": {
+    "x": 0,
+    "y": 0
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 200,
+   "h": 100
+  },
+  "dpi": 96,
+  "extraCells": [
+   10,
+   4
+  ],
+  "expected": {
+   "window": {
+    "x": 52,
+    "y": 20,
+    "w": 96,
+    "h": 80
+   },
+   "profile": {
+    "x": 52,
+    "y": 20,
+    "w": 96,
+    "h": 48
+   },
+   "extra": {
+    "x": 60,
+    "y": 68,
+    "w": 80,
+    "h": 32
+   }
+  }
+ },
+ {
+  "name": "empty profile with box",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom-right",
+   "offset": {
+    "x": 2,
+    "y": 3
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": []
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": [
+   10,
+   2
+  ],
+  "expected": {
+   "window": {
+    "x": 1824,
+    "y": 1040,
+    "w": 80,
+    "h": 16
+   },
+   "profile": null,
+   "extra": {
+    "x": 1824,
+    "y": 1040,
+    "w": 80,
+    "h": 16
+   }
+  }
+ }
+]

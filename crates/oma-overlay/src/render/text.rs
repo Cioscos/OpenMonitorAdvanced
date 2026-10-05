@@ -9,7 +9,7 @@ use std::cell::RefCell;
 
 use oma_core::overlay::{Rgba, TextStyle};
 use windows::core::{w, Result, BOOL, PCWSTR};
-use windows::Win32::Foundation::E_UNEXPECTED;
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, E_UNEXPECTED};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_FILL_MODE_WINDING;
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Factory, ID2D1Geometry, ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -55,6 +55,25 @@ pub fn create_format(
             w!(""),
         )
     }
+}
+
+/// The metrics of the first line of `layout`. A text with line breaks has
+/// more than one: the call is repeated with room for all of them.
+fn first_line(layout: &IDWriteTextLayout) -> Result<DWRITE_LINE_METRICS> {
+    let mut lines = vec![DWRITE_LINE_METRICS::default()];
+    let mut count = 0u32;
+    // SAFETY: `lines` is a live buffer of the length passed; `count` is a
+    // local out-parameter.
+    let first = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
+    if let Err(e) = first {
+        if e.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() || count == 0 {
+            return Err(e);
+        }
+        lines.resize(count as usize, DWRITE_LINE_METRICS::default());
+        // SAFETY: as above, with room for `count` lines.
+        unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count)? };
+    }
+    Ok(lines[0])
 }
 
 /// Collects the outline of every glyph run of a layout as geometries placed
@@ -132,7 +151,7 @@ impl IDWriteTextRenderer_Impl for OutlineCollector_Impl {
             let path = self.factory.CreatePathGeometry()?;
             let sink = path.Open()?;
             let offsets = (!run.glyphOffsets.is_null()).then_some(run.glyphOffsets);
-            face.GetGlyphRunOutline(
+            let outlined = face.GetGlyphRunOutline(
                 run.fontEmSize,
                 run.glyphIndices,
                 Some(run.glyphAdvances),
@@ -141,8 +160,10 @@ impl IDWriteTextRenderer_Impl for OutlineCollector_Impl {
                 run.isSideways.as_bool(),
                 run.bidiLevel % 2 == 1,
                 &sink,
-            )?;
-            sink.Close()?;
+            );
+            // The sink is closed in any case; the first error wins.
+            let closed = sink.Close();
+            outlined.and(closed)?;
             let placed = self
                 .factory
                 .CreateTransformedGeometry(&path, &Matrix3x2::translation(x, y))?;
@@ -259,12 +280,8 @@ impl TextItem {
                 layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 let mut metrics = DWRITE_TEXT_METRICS::default();
                 layout.GetMetrics(&mut metrics)?;
-                let mut lines = [DWRITE_LINE_METRICS::default()];
-                let mut count = 0u32;
-                // One line (no wrapping); a longer list would only fail with
-                // `E_NOT_SUFFICIENT_BUFFER` and leave the first line filled.
-                let _ = layout.GetLineMetrics(Some(&mut lines), &mut count);
-                (layout, metrics, lines[0])
+                let first = first_line(&layout)?;
+                (layout, metrics, first)
             };
             if style.outline.is_some() || style.shadow.is_some() {
                 self.geometry = outline_geometry(factory, &layout)?;
@@ -314,23 +331,33 @@ impl TextItem {
         let outline = style
             .outline
             .map(|o| (style_px(f64::from(o.width), self.cell) * 2.0, o.color));
+        // Every brush first: nothing below can fail with a transform set.
+        let shadow = match style.shadow {
+            Some(sh) => Some((
+                style_px(f64::from(sh.dx), self.cell),
+                style_px(f64::from(sh.dy), self.cell),
+                brush(sh.color)?,
+            )),
+            None => None,
+        };
+        let outline = match outline {
+            Some((width, color)) => Some((width, brush(color)?)),
+            None => None,
+        };
         // SAFETY: as above; the geometry comes from the target's factory
         // (the cache drops it with the device), and the transform is reset
-        // to identity before returning.
+        // to identity before the block ends.
         unsafe {
-            if let Some(shadow) = style.shadow {
-                let dx = style_px(f64::from(shadow.dx), self.cell);
-                let dy = style_px(f64::from(shadow.dy), self.cell);
-                let b = brush(shadow.color)?;
+            if let Some((dx, dy, b)) = &shadow {
                 rt.SetTransform(&Matrix3x2::translation(at.0 + dx, at.1 + dy));
-                if let Some((width, _)) = outline {
-                    rt.DrawGeometry(geometry, &b, width, None);
+                if let Some((width, _)) = &outline {
+                    rt.DrawGeometry(geometry, b, *width, None);
                 }
-                rt.FillGeometry(geometry, &b, None);
+                rt.FillGeometry(geometry, b, None);
             }
             rt.SetTransform(&Matrix3x2::translation(at.0, at.1));
-            if let Some((width, color)) = outline {
-                rt.DrawGeometry(geometry, &brush(color)?, width, None);
+            if let Some((width, b)) = &outline {
+                rt.DrawGeometry(geometry, b, *width, None);
             }
             rt.FillGeometry(geometry, &fill_brush, None);
             rt.SetTransform(&Matrix3x2::identity());
@@ -389,6 +416,15 @@ mod tests {
         assert!(item.geometry.is_some() && item.size.w > 0.0 && item.size.ascent > 0.0);
         assert!(item.is("60", &outlined, 8.0));
         assert!(!item.is("61", &outlined, 8.0));
+        // Two lines: the metrics of the first line still give the baseline.
+        let fmt = || create_format(&dwrite, &outlined, 16.0);
+        item.update(
+            "1
+2", &outlined, 8.0, &dwrite, fmt, &factory,
+        )
+        .expect("update");
+        assert!(item.size.ascent > 0.0, "{:?}", item.size);
+        assert!(item.size.descent > item.size.ascent, "{:?}", item.size);
         // An empty text has neither layout nor geometry.
         let fmt = || create_format(&dwrite, &outlined, 16.0);
         item.update("", &outlined, 8.0, &dwrite, fmt, &factory)

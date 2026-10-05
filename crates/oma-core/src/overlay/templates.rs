@@ -10,9 +10,13 @@ use super::profile::{
 };
 
 /// Width in cells of the Gaming and Full columns; the frametime graph spans it.
-const WIDTH: u32 = 20;
-const ROW_H: u32 = 2;
-const GRAPH_H: u32 = 4;
+const WIDTH: u32 = 36;
+/// A text row: three cells (24 px at scale 1) hold an 11 pt value.
+const ROW_H: u32 = 3;
+const GRAPH_H: u32 = 5;
+/// Text sizes in points (§6.3): label and unit, and the value.
+const LABEL_PT: f32 = 9.0;
+const VALUE_PT: f32 = 11.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinId {
@@ -55,6 +59,8 @@ struct Item {
     kind: Kind,
     w: u32,
     h: u32,
+    /// A fixed label; `None` uses the translated sensor or metric name.
+    label: Option<&'static str>,
 }
 
 fn metric(id: &'static str, m: FrameMetric) -> Item {
@@ -64,6 +70,19 @@ fn metric(id: &'static str, m: FrameMetric) -> Item {
         kind: Kind::Text,
         w: WIDTH / 2,
         h: ROW_H,
+        label: None,
+    }
+}
+
+/// The short label of a sensor role: the device, since the unit tells
+/// load, temperature, clock and power apart. The app's sensor names
+/// («Memoria dedicata usata») do not fit a compact overlay row.
+fn short_label(role: Role) -> &'static str {
+    match role {
+        Role::GpuMemoryUsed => "VRAM",
+        Role::RamUsed => "RAM",
+        Role::CpuLoad | Role::CpuTemperature | Role::CpuClock => "CPU",
+        _ => "GPU",
     }
 }
 
@@ -75,6 +94,7 @@ fn sensor(schema: &Schema, id: &'static str, role: Role) -> Option<Item> {
         kind: Kind::Text,
         w: WIDTH / 2,
         h: ROW_H,
+        label: Some(short_label(role)),
     })
 }
 
@@ -85,11 +105,13 @@ fn frametime_graph() -> Item {
         kind: Kind::Graph,
         w: WIDTH,
         h: GRAPH_H,
+        label: None,
     }
 }
 
-fn text_style() -> TextStyle {
+fn text_style(size: f32) -> TextStyle {
     TextStyle {
+        size,
         outline: Some(Outline {
             width: 1.0,
             color: Rgba {
@@ -105,9 +127,10 @@ fn text_style() -> TextStyle {
 
 fn block(item: &Item, x: i32, y: i32) -> Block {
     let mut style = Style {
-        label_style: text_style(),
-        value_style: text_style(),
-        unit_style: text_style(),
+        label_style: text_style(LABEL_PT),
+        value_style: text_style(VALUE_PT),
+        unit_style: text_style(LABEL_PT),
+        label: item.label.map(str::to_owned),
         ..Style::default()
     };
     if item.kind == Kind::Graph {
@@ -201,15 +224,23 @@ fn bar_items(schema: &Schema) -> Vec<Item> {
     .into_iter()
     .flatten()
     .collect();
+    // Widths in cells measured for the widest values at 9/11 pt; FPS and
+    // frametime show no label (their units say what they are).
     for item in &mut items {
-        item.w = 8;
+        let (w, label) = match item.id {
+            "fps-displayed" | "frametime" => (7, Some("")),
+            "gpu-load" | "cpu-load" => (8, item.label),
+            _ => (9, item.label),
+        };
+        item.w = w;
+        item.label = label;
     }
     items
 }
 
 /// Builds a built-in profile for this machine. Blocks whose role has no
-/// sensor in `schema` are left out; labels stay `None` so the overlay uses
-/// the sensor or metric labels.
+/// sensor in `schema` are left out; metric blocks keep the translated
+/// metric names, sensor blocks a short device label.
 pub fn builtin_profile(id: BuiltinId, schema: &Schema) -> Profile {
     let (anchor, blocks) = match id {
         BuiltinId::MinimalFps => (
@@ -291,12 +322,28 @@ mod tests {
         let graph = p.blocks.iter().find(|b| b.id == "frametime-graph").unwrap();
         assert_eq!(graph.kind, Kind::Graph);
         assert_eq!(graph.style.graph.mode, GraphMode::Frametime);
-        assert_eq!((graph.rect.w, graph.rect.h), (20, 4));
+        assert_eq!((graph.rect.w, graph.rect.h), (WIDTH, GRAPH_H));
         assert_eq!(
             graph.source,
             Source::Frames(FrameMetric::FrametimeDisplayed)
         );
         let fps = p.blocks.iter().find(|b| b.id == "fps-displayed").unwrap();
+        // Sizes in points (§6.3): the value larger than label and unit.
+        assert_eq!(fps.style.label_style.size, LABEL_PT);
+        assert_eq!(fps.style.value_style.size, VALUE_PT);
+        assert_eq!(fps.style.unit_style.size, LABEL_PT);
+        assert_eq!(fps.rect.h, ROW_H);
+        // Metrics use the translated metric names, sensors a short label.
+        assert_eq!(fps.style.label, None);
+        let label = |id: &str| {
+            p.blocks
+                .iter()
+                .find(|b| b.id == id)
+                .and_then(|b| b.style.label.clone())
+        };
+        assert_eq!(label("gpu-load").as_deref(), Some("GPU"));
+        assert_eq!(label("cpu-temperature").as_deref(), Some("CPU"));
+        assert_eq!(label("gpu-memory-used").as_deref(), Some("VRAM"));
         let o = fps.style.value_style.outline.unwrap();
         assert_eq!(o.width, 1.0);
         assert_eq!(o.color.to_string(), "#000000C0");
@@ -352,7 +399,10 @@ mod tests {
     fn bar_is_one_row_at_the_top() {
         let p = builtin_profile(BuiltinId::Bar, &this_machine());
         assert_eq!(p.anchor, crate::overlay::Anchor::Top);
-        assert!(p.blocks.iter().all(|b| b.rect.y == 0 && b.rect.h == 2));
+        assert!(p.blocks.iter().all(|b| b.rect.y == 0 && b.rect.h == ROW_H));
+        // The units say what each block is: FPS and frametime need no label.
+        let fps = p.blocks.iter().find(|b| b.id == "fps-displayed").unwrap();
+        assert_eq!(fps.style.label.as_deref(), Some(""));
         assert_eq!(
             builtin_profile(BuiltinId::MinimalFps, &this_machine())
                 .blocks

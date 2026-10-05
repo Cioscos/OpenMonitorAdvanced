@@ -196,6 +196,11 @@ pub struct OverlayState {
     pub frame_times: VecDeque<WireFrameTime>,
     /// The longest `range_s` of the frametime charts; 0 keeps no frames.
     frame_range_s: u32,
+    /// How many times each ring got a sample, so a chart is rebuilt only
+    /// when its own source changed.
+    gens: HashMap<SourceKey, u64>,
+    /// How many batches of frames were appended to `frame_times`.
+    frames_gen: u64,
     /// The last frame metrics.
     pub metrics: Option<FrameMetrics>,
     /// The last value and quality of each sensor.
@@ -216,6 +221,8 @@ impl Default for OverlayState {
             plan: SourcePlan::default(),
             frame_times: VecDeque::new(),
             frame_range_s: 0,
+            gens: HashMap::new(),
+            frames_gen: 0,
             metrics: None,
             values: HashMap::new(),
             placement: None,
@@ -229,6 +236,17 @@ impl OverlayState {
     #[cfg(test)]
     pub fn ring_window(&self, key: &SourceKey) -> Option<u32> {
         self.plan.windows.get(key).copied()
+    }
+
+    /// The data generation of the ring of `key`: it grows with every
+    /// sample the ring receives.
+    pub fn data_gen(&self, key: &SourceKey) -> u64 {
+        self.gens.get(key).copied().unwrap_or(0)
+    }
+
+    /// The data generation of `frame_times`: it grows with every batch.
+    pub fn frames_gen(&self) -> u64 {
+        self.frames_gen
     }
 
     /// Applies one validated message received at `now_s` seconds (a monotonic
@@ -285,6 +303,7 @@ impl OverlayState {
                     let key = SourceKey::Sensor(w.id.clone());
                     if let Some(ring) = self.rings.get_mut(&key) {
                         ring.push(now_s, w.value);
+                        *self.gens.entry(key.clone()).or_insert(0) += 1;
                     }
                     text |= self.plan.texted.contains(&key);
                     charts |= self.plan.charted.contains(&key);
@@ -303,6 +322,7 @@ impl OverlayState {
                     if let Some(ring) = self.rings.get_mut(&key) {
                         ring.push(now_s, metric_value(&m, metric));
                         charts |= self.plan.charted.contains(&key);
+                        *self.gens.entry(key).or_insert(0) += 1;
                     }
                 }
                 self.metrics = Some(m);
@@ -318,6 +338,7 @@ impl OverlayState {
                 }
                 self.frame_times.extend(f.frames);
                 self.trim_frame_times();
+                self.frames_gen += 1;
                 Changes {
                     charts: true,
                     ..Changes::default()
@@ -343,6 +364,8 @@ impl OverlayState {
                 (key.clone(), ring)
             })
             .collect();
+        let rings = &self.rings;
+        self.gens.retain(|key, _| rings.contains_key(key));
         self.plan = plan;
         self.frame_range_s = frame_range_of(&profile);
         self.trim_frame_times();
@@ -765,5 +788,42 @@ mod tests {
             0.0,
         );
         assert!(!ch.any());
+    }
+
+    #[test]
+    fn data_generations_follow_their_source() {
+        let mut s = OverlayState::default();
+        s.apply(
+            set_profile(profile(json!([
+                graph_block("g", json!({ "sensor": GPU }), "line", 60),
+                graph_block("f", json!({ "frames": "fps-displayed" }), "line", 60),
+                graph_block(
+                    "t",
+                    json!({ "frames": "frametime-displayed" }),
+                    "frametime",
+                    10
+                ),
+            ]))),
+            0.0,
+        );
+        let gpu = SourceKey::Sensor(GPU.into());
+        let fps = SourceKey::Frames(FrameMetric::FpsDisplayed);
+        let (g0, f0, t0) = (s.data_gen(&gpu), s.data_gen(&fps), s.frames_gen());
+        // A GPU value moves only the GPU's generation.
+        s.apply(values(1000, GPU, Some(10.0)), 1.0);
+        assert!(s.data_gen(&gpu) > g0);
+        assert_eq!((s.data_gen(&fps), s.frames_gen()), (f0, t0));
+        // Frame times move only the frames' generation.
+        let g1 = s.data_gen(&gpu);
+        s.apply(frames(&[1.0, 2.0]), 2.0);
+        assert!(s.frames_gen() > t0);
+        assert_eq!((s.data_gen(&gpu), s.data_gen(&fps)), (g1, f0));
+        // Frame metrics move the metrics' rings.
+        s.apply(OverlayMessage::FrameMetrics(sample_metrics()), 3.0);
+        assert!(s.data_gen(&fps) > f0);
+        assert_eq!(s.data_gen(&gpu), g1);
+        // A value of an unknown sensor moves nothing.
+        s.apply(values(4000, "x/y/z", Some(1.0)), 4.0);
+        assert_eq!(s.data_gen(&gpu), g1);
     }
 }

@@ -22,8 +22,8 @@ pub use cache::RenderCache;
 
 #[cfg(windows)]
 use oma_core::overlay::{
-    fg_active, is_visible, threshold_color, Align, Block, FrameMetric, GraphMode, Kind,
-    Orientation, Rgba, Source, Stat, StatOp, ThresholdTarget,
+    fg_active, is_visible, threshold_color, Align, Block, GraphMode, Kind, Orientation, Rgba,
+    ThresholdTarget,
 };
 #[cfg(windows)]
 use windows::core::Result;
@@ -43,9 +43,10 @@ use crate::state::{OverlayState, SourceKey};
 use cache::{BlockCache, BrushRes, TextRes};
 #[cfg(windows)]
 use layout::{
-    areas, block_px, block_value, format_block_value, frametime_bars, gauge_sweep, graph_points,
-    merge_bars, meter_fraction, panel_radius_px, profile_frame, row_positions, source_value,
-    style_px, text_parts, value_range, Frame, RectF, TextBox,
+    areas, block_px, block_value, chart_gen, font_px, frame_ms, frametime_bars, gauge_sweep,
+    graph_points, is_frametime_chart, is_percent, merge_bars, meter_fraction, panel_radius_px,
+    profile_frame, row_positions, source_value, stats_text, style_px, text_parts, value_range,
+    Frame, RectF, TextBox,
 };
 
 /// The colour of a chart's grid lines.
@@ -94,11 +95,12 @@ pub fn draw(
             update_texts(bc, block, state, &frame, fg, &mut parts.text)?;
         }
     }
-    if due.charts || rebuild {
-        let factory = parts.text.factory;
-        for (block, bc) in profile.blocks.iter().zip(parts.blocks.iter_mut()) {
-            update_chart(bc, block, state, &frame, factory, parts.samples)?;
-        }
+    // Every frame looks, but a chart is rebuilt only when it has none yet
+    // (new, or just shown) or, at the chart rate, when its own data moved.
+    let charts_due = due.charts || rebuild;
+    let factory = parts.text.factory;
+    for (block, bc) in profile.blocks.iter().zip(parts.blocks.iter_mut()) {
+        update_chart(bc, block, state, &frame, factory, parts.samples, charts_due)?;
     }
 
     // SAFETY: drawing on the target between BeginDraw and EndDraw, from its
@@ -149,78 +151,6 @@ fn orientation(block: &Block) -> Orientation {
     }
 }
 
-#[cfg(windows)]
-fn is_percent(block: &Block, state: &OverlayState) -> bool {
-    match &block.source {
-        Source::Sensor(id) => state.sensors.get(id).is_some_and(|s| s.unit == "percent"),
-        _ => false,
-    }
-}
-
-/// A `frametime` graph of a `frametime-*` source: one bar per frame.
-#[cfg(windows)]
-fn is_frametime_chart(block: &Block) -> bool {
-    block.kind == Kind::Graph
-        && block.style.graph.mode == GraphMode::Frametime
-        && matches!(
-            block.source,
-            Source::Frames(FrameMetric::FrametimeDisplayed | FrameMetric::FrametimeApp)
-        )
-}
-
-/// The frametime of a frame for `block`'s source.
-#[cfg(windows)]
-fn frame_ms(block: &Block, f: &oma_ipc::overlay::WireFrameTime) -> Option<f64> {
-    match block.source {
-        Source::Frames(FrameMetric::FrametimeApp) => f.app_ms,
-        _ => f.displayed_ms,
-    }
-}
-
-/// A graph's minimum, average and maximum over its range, as
-/// `min / avg / max unit`; empty without data.
-#[cfg(windows)]
-fn stats_text(block: &Block, state: &OverlayState) -> String {
-    let range = block.style.graph.range_s;
-    let (min, avg, max) = if is_frametime_chart(block) {
-        let newest = state.frame_times.back().map_or(0.0, |f| f.t_s);
-        let from = newest - f64::from(range);
-        let (mut lo, mut hi, mut sum, mut n) = (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0u32);
-        for ms in state
-            .frame_times
-            .iter()
-            .filter(|f| f.t_s >= from)
-            .filter_map(|f| frame_ms(block, f))
-        {
-            lo = lo.min(ms);
-            hi = hi.max(ms);
-            sum += ms;
-            n += 1;
-        }
-        if n == 0 {
-            return String::new();
-        }
-        (Some(lo), Some(sum / f64::from(n)), Some(hi))
-    } else {
-        let stat = |op| {
-            let s = Stat {
-                op,
-                window: range,
-                ..block.stat
-            };
-            source_value(&block.source, &s, state)
-        };
-        (stat(StatOp::Min), stat(StatOp::Avg), stat(StatOp::Max))
-    };
-    if avg.is_none() {
-        return String::new();
-    }
-    let (lo, _) = format_block_value(block, state, min);
-    let (mid, _) = format_block_value(block, state, avg);
-    let (hi, unit) = format_block_value(block, state, max);
-    oma_core::format::join(&format!("{lo} / {mid} / {hi}"), &unit)
-}
-
 /// Refreshes visibility, value, threshold colours and texts of a block.
 #[cfg(windows)]
 fn update_texts(
@@ -234,15 +164,23 @@ fn update_texts(
     let cell = frame.cell;
     let rect = block_px(block, frame.origin, cell);
     bc.rect = rect;
-    bc.visible = is_visible(
+    let visible = is_visible(
         block.visible_if.as_ref(),
         &|source, stat| source_value(source, stat, state),
         fg,
     );
-    if !bc.visible {
+    if visible != bc.visible {
+        // Shown again: its chart is built on this frame.
+        bc.chart_stamp = None;
+        bc.visible = visible;
+    }
+    if !visible {
         return Ok(());
     }
     let value = block_value(block, state);
+    if let Some(v) = value {
+        bc.peak = bc.peak.max(v);
+    }
     let color = |target| threshold_color(&block.thresholds, target, value);
     bc.value_color = color(ThresholdTarget::Value);
     bc.graph_color = color(ThresholdTarget::Graph);
@@ -254,7 +192,7 @@ fn update_texts(
         parts.value.clear();
         parts.unit.clear();
     }
-    let px = |size: f32| style_px(f64::from(size), cell);
+    let px = |size: f32| font_px(size, cell);
     let styles = [&st.label_style, &st.value_style, &st.unit_style];
     let strings = [&parts.label, &parts.value, &parts.unit];
     for ((item, s), style) in bc.texts.iter_mut().zip(strings).zip(styles) {
@@ -310,11 +248,11 @@ fn update_texts(
     let percent = is_percent(block, state);
     match block.kind {
         Kind::Meter => {
-            let (lo, hi) = value_range(st.meter.min, st.meter.max, percent, value);
+            let (lo, hi) = value_range(st.meter.min, st.meter.max, percent, value, bc.peak);
             bc.fraction = meter_fraction(value.unwrap_or(f64::NAN), lo, hi);
         }
         Kind::Gauge => {
-            let (lo, hi) = value_range(st.gauge.min, st.gauge.max, percent, value);
+            let (lo, hi) = value_range(st.gauge.min, st.gauge.max, percent, value, bc.peak);
             let sweep = gauge_sweep(value.unwrap_or(f64::NAN), lo, hi);
             let (center, radius, _) = shapes::gauge_circle(area.shape);
             let start = shapes::GAUGE_START_DEG;
@@ -331,7 +269,8 @@ fn update_texts(
     Ok(())
 }
 
-/// Rebuilds the chart geometry of a visible `graph` or `sparkline`.
+/// Rebuilds the chart geometry of a visible `graph` or `sparkline` that has
+/// none, or, when `due`, whose source's data generation moved.
 #[cfg(windows)]
 fn update_chart(
     bc: &mut BlockCache,
@@ -340,10 +279,18 @@ fn update_chart(
     frame: &Frame,
     factory: &ID2D1Factory,
     samples: &mut Vec<(f64, f64)>,
+    due: bool,
 ) -> Result<()> {
     if !bc.visible || !matches!(block.kind, Kind::Graph | Kind::Sparkline) {
         return Ok(());
     }
+    let stamp = chart_gen(block, state);
+    match bc.chart_stamp {
+        None => {}
+        Some(old) if due && old != stamp => {}
+        Some(_) => return Ok(()),
+    }
+    bc.chart_stamp = Some(stamp);
     let shape = areas(block.kind, orientation(block), bc.rect, frame.cell as f32).shape;
     let g = &block.style.graph;
     let range = f64::from(g.range_s);
@@ -467,12 +414,14 @@ mod tests {
         D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    use windows::Win32::Graphics::Imaging::IWICBitmap;
     use windows::Win32::Graphics::Imaging::{
         CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
         WICBitmapCacheOnLoad,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_MULTITHREADED,
     };
 
     use crate::state::default_draw;
@@ -601,23 +550,38 @@ mod tests {
         out
     }
 
-    #[test]
-    #[ignore = "requires real Windows hardware"]
-    fn renders_gaming_profile_to_a_bitmap() {
-        const W: u32 = 400;
-        const H: u32 = 300;
-        let state = gaming_state();
-        // SAFETY: COM for this test thread (WIC needs it); the factories,
-        // the bitmap and the target are owned locals used from this thread.
-        let (bitmap, rt) = unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED)
+    /// COM for this test thread (WIC needs it), released on drop.
+    struct Com;
+
+    impl Com {
+        fn init() -> Self {
+            // SAFETY: initialises COM on this thread; balanced by `drop`.
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
                 .ok()
                 .expect("COM");
+            Com
+        }
+    }
+
+    impl Drop for Com {
+        fn drop(&mut self) {
+            // SAFETY: balances the successful `CoInitializeEx` of `init`,
+            // on the same thread, after the COM objects declared later.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    /// A `w × h` WIC bitmap and a Direct2D target drawing into it, at 96 DPI
+    /// (one unit, one pixel). COM must be initialised.
+    fn wic_target(w: u32, h: u32) -> (IWICBitmap, ID2D1RenderTarget) {
+        // SAFETY: plain object creation on this thread; `props` outlives the
+        // call; everything is returned owned.
+        unsafe {
             let wic: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
                     .expect("WIC");
             let bitmap = wic
-                .CreateBitmap(W, H, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad)
+                .CreateBitmap(w, h, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad)
                 .expect("bitmap");
             let d2d: ID2D1Factory1 =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).expect("d2d");
@@ -635,19 +599,224 @@ mod tests {
                 .CreateWicBitmapRenderTarget(&bitmap, &props)
                 .expect("WIC target");
             (bitmap, rt)
-        };
-        let mut cache = RenderCache::default();
+        }
+    }
+
+    /// One frame of `state`, refreshing everything.
+    fn frame(rt: &ID2D1RenderTarget, cache: &mut RenderCache, state: &OverlayState) {
         let due = Due {
             text: true,
             charts: true,
         };
+        // SAFETY: a frame on our target, from this thread.
+        unsafe { rt.BeginDraw() };
+        draw(rt, cache, state, due).expect("draw");
+        // SAFETY: closes the frame; no tags.
+        unsafe { rt.EndDraw(None, None) }.expect("end draw");
+    }
+
+    /// The overlay texts of the plan's catalog table (C14), by language.
+    fn overlay_strings(it: bool) -> BTreeMap<String, String> {
+        let pick = |en: &str, it_: &str| if it { it_.to_owned() } else { en.to_owned() };
+        BTreeMap::from([
+            (
+                "sensorAbsent".to_owned(),
+                pick("sensor missing", "sensore assente"),
+            ),
+            ("fgSuspected".to_owned(), "FG?".to_owned()),
+            ("bound.gpu".to_owned(), "GPU".to_owned()),
+            ("bound.cpu".to_owned(), "CPU".to_owned()),
+            ("metric.fps-displayed".to_owned(), "FPS".to_owned()),
+            (
+                "metric.fps-rendered".to_owned(),
+                pick("Rendered", "Renderizzati"),
+            ),
+            (
+                "metric.fps-presented".to_owned(),
+                pick("Presented", "Presentati"),
+            ),
+            (
+                "metric.frametime-displayed".to_owned(),
+                "Frametime".to_owned(),
+            ),
+            (
+                "metric.frametime-app".to_owned(),
+                pick("App frametime", "Frametime app"),
+            ),
+            ("metric.low-1".to_owned(), "1% low".to_owned()),
+            ("metric.low-01".to_owned(), pick("0.1% low", "0,1% low")),
+            ("metric.fg-multiplier".to_owned(), "FG".to_owned()),
+            ("metric.stutter".to_owned(), "Stutter".to_owned()),
+            (
+                "metric.latency-pc".to_owned(),
+                pick("PC latency", "Latenza PC"),
+            ),
+            (
+                "metric.latency-display".to_owned(),
+                pick("Display latency", "Latenza schermo"),
+            ),
+            ("metric.bound".to_owned(), pick("Bound", "Limite")),
+            ("low.integral".to_owned(), " (int.)".to_owned()),
+            ("low.percentile".to_owned(), pick(" (pct.)", " (perc.)")),
+        ])
+    }
+
+    /// A built-in profile on this machine's schema, with the app's sensor
+    /// labels in `it` or English and the widest plausible values.
+    fn template_state(id: BuiltinId, it: bool) -> OverlayState {
+        let schema: Schema = serde_json::from_str(include_str!(
+            "../../../oma-core/tests/fixtures/this-machine-schema.json"
+        ))
+        .expect("schema fixture");
+        let catalog: serde_json::Value = serde_json::from_str(if it {
+            include_str!("../../../../app/src/lib/i18n/it.json")
+        } else {
+            include_str!("../../../../app/src/lib/i18n/en.json")
+        })
+        .expect("catalog");
+        let profile = builtin_profile(id, &schema);
+        let mut sensors = Vec::new();
+        let mut values = Vec::new();
+        for b in &profile.blocks {
+            let Source::Sensor(id) = &b.source else {
+                continue;
+            };
+            let info = schema.sensors.iter().find(|s| &s.id == id).expect("sensor");
+            let unit = serde_json::to_value(info.unit).expect("unit");
+            let unit = unit.as_str().expect("unit name").to_owned();
+            let label = catalog[format!("sensor.{}", info.label.key)]
+                .as_str()
+                .unwrap_or_else(|| panic!("no label for {}", info.label.key))
+                .to_owned();
+            let value = match unit.as_str() {
+                "celsius" | "percent" => 100.0,
+                "bytes" => 23.9 * 1024f64.powi(3),
+                "megahertz" => 5000.0,
+                "watt" => 450.0,
+                _ => 999.0,
+            };
+            sensors.push(SensorInfo {
+                id: id.clone(),
+                label,
+                unit,
+            });
+            values.push(WireValue {
+                id: id.clone(),
+                value: Some(value),
+                quality: "fresh".into(),
+            });
+        }
+        let mut state = OverlayState::default();
+        state.apply(
+            OverlayMessage::SetProfile(SetProfile {
+                profile_id: id.as_str().into(),
+                profile_json: serde_json::to_string(&profile).expect("json"),
+                sensors,
+                strings: overlay_strings(it),
+                draw: oma_ipc::overlay::DrawSettings {
+                    decimal_comma: it,
+                    ..default_draw()
+                },
+            }),
+            0.0,
+        );
+        state.apply(
+            OverlayMessage::SetPlacement(SetPlacement {
+                area: Some(PxArea {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                }),
+                dpi: 96,
+            }),
+            0.0,
+        );
+        state.apply(OverlayMessage::Values(Values { at_ms: 0, values }), 1.0);
+        state.apply(
+            OverlayMessage::FrameMetrics(FrameMetrics {
+                state: "running".into(),
+                fps_displayed: Some(999.0),
+                fps_rendered: Some(999.0),
+                fps_presented: Some(999.0),
+                rendered_source: None,
+                fg_suspected: false,
+                frametime_displayed_ms: Some(99.9),
+                frametime_app_ms: Some(99.9),
+                fg_multiplier: Some(4.0),
+                stutter_count: Some(999),
+                stutter_percent: Some(99.9),
+                latency_pc_ms: Some(99.9),
+                latency_display_ms: Some(99.9),
+                bound: Some("gpu".into()),
+                lows: vec![oma_ipc::overlay::WireLow {
+                    window_s: 1,
+                    definition: "integral".into(),
+                    one_percent: Some(999.0),
+                    point_one_percent: Some(999.0),
+                }],
+            }),
+            1.0,
+        );
+        state
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn builtin_templates_fit_at_scale_one() {
+        let _com = Com::init();
+        let (_bitmap, rt) = wic_target(1024, 1024);
+        let mut misfits = Vec::new();
+        for id in BuiltinId::ALL {
+            for it in [false, true] {
+                let state = template_state(id, it);
+                let mut cache = RenderCache::default();
+                frame(&rt, &mut cache, &state);
+                let profile = state.profile.as_ref().expect("profile");
+                for (block, bc) in profile.blocks.iter().zip(&cache.blocks) {
+                    let r = bc.rect;
+                    let parts: Vec<_> = bc
+                        .texts
+                        .iter()
+                        .zip(&bc.at)
+                        .filter(|(t, _)| t.size.w > 0.0)
+                        .collect();
+                    let right = parts
+                        .iter()
+                        .map(|(t, at)| at.0 + t.size.w)
+                        .fold(r.x, f32::max);
+                    let top = parts.iter().map(|(_, at)| at.1).fold(r.y, f32::min);
+                    let bottom = parts
+                        .iter()
+                        .map(|(t, at)| at.1 + t.size.ascent + t.size.descent)
+                        .fold(r.y, f32::max);
+                    if right > r.right() + 0.5 || top < r.y - 0.5 || bottom > r.bottom() + 0.5 {
+                        misfits.push(format!(
+                            "{} {} {}: text {right:.0}x{top:.0}..{bottom:.0} in {r:?}",
+                            id.as_str(),
+                            if it { "it" } else { "en" },
+                            block.id
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(misfits.is_empty(), "{}", misfits.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn renders_gaming_profile_to_a_bitmap() {
+        const W: u32 = 400;
+        const H: u32 = 300;
+        let state = gaming_state();
+        // Declared before every COM object, so it is dropped after them.
+        let _com = Com::init();
+        let (bitmap, rt) = wic_target(W, H);
+        let mut cache = RenderCache::default();
         // Twice: the second frame replays the cache.
         for _ in 0..2 {
-            // SAFETY: a frame on our target, from this thread.
-            unsafe { rt.BeginDraw() };
-            draw(&rt, &mut cache, &state, due).expect("draw");
-            // SAFETY: closes the frame; no tags.
-            unsafe { rt.EndDraw(None, None) }.expect("end draw");
+            frame(&rt, &mut cache, &state);
         }
         let mut pixels = vec![0u8; (W * H * 4) as usize];
         // SAFETY: the whole bitmap into a buffer of exactly its size.

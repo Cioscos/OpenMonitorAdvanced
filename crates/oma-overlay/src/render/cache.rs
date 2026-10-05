@@ -100,6 +100,10 @@ pub struct BlockCache {
     /// The chart's line (stroked) and area or bars (filled).
     pub line: Option<ID2D1Geometry>,
     pub fill: Option<ID2D1Geometry>,
+    /// The data generation the chart was built from; `None` to build it.
+    pub chart_stamp: Option<u64>,
+    /// The highest value seen: the automatic top of a meter or gauge.
+    pub peak: f64,
     /// A meter's fullness, 0–1.
     pub fraction: f32,
     /// A gauge's arcs: the whole track and the value's sweep.

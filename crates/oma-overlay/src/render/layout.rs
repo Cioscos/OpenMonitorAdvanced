@@ -5,10 +5,12 @@
 use oma_core::format::{format_frame_metric, format_value, FormatOptions, DASH};
 use oma_core::model::Unit;
 use oma_core::overlay::{
-    cell_px, footprint, Align, AxisMode, Block, FrameMetric, Kind, LowDefinitionKey, Orientation,
-    Profile, RangeBound, Source, Stat, StatOp, YAxis, CELL_PX,
+    cell_px, footprint, Align, AxisMode, Block, FrameMetric, GraphMode, Kind, LowDefinitionKey,
+    Orientation, Profile, RangeBound, Source, Stat, StatOp, YAxis, CELL_PX,
 };
 use oma_core::settings::{TemperatureUnit, ThroughputUnit};
+
+use oma_ipc::overlay::WireFrameTime;
 
 use crate::state::{metric_value, OverlayState, SourceKey};
 
@@ -77,6 +79,12 @@ pub fn block_px(block: &Block, origin: (f64, f64), cell: f64) -> RectF {
 /// widths, shadow offsets, radii) in physical pixels, for a cell of `cell`.
 pub fn style_px(v: f64, cell: f64) -> f32 {
     (v * cell / CELL_PX) as f32
+}
+
+/// A font size in points (§6.3) in physical pixels, for a cell of `cell`:
+/// `pt × 96/72 × scale × dpi/96`, the cell carrying scale and DPI.
+pub fn font_px(size_pt: f32, cell: f64) -> f32 {
+    (f64::from(size_pt) * 4.0 / 3.0 * cell / CELL_PX) as f32
 }
 
 /// A corner radius in pixels: `radius` is in 96-DPI pixels at scale 1, and
@@ -250,6 +258,93 @@ pub fn format_block_value(
     }
 }
 
+/// Whether `block` reads a percentage sensor (its automatic range is 0–100).
+pub fn is_percent(block: &Block, state: &OverlayState) -> bool {
+    match &block.source {
+        Source::Sensor(id) => state
+            .sensors
+            .get(id)
+            .is_some_and(|s| parse_unit(&s.unit) == Some(Unit::Percent)),
+        _ => false,
+    }
+}
+
+/// A `frametime` graph of a `frametime-*` source: one bar per frame.
+pub fn is_frametime_chart(block: &Block) -> bool {
+    block.kind == Kind::Graph
+        && block.style.graph.mode == GraphMode::Frametime
+        && matches!(
+            block.source,
+            Source::Frames(FrameMetric::FrametimeDisplayed | FrameMetric::FrametimeApp)
+        )
+}
+
+/// The frametime of a frame for `block`'s source.
+pub fn frame_ms(block: &Block, f: &WireFrameTime) -> Option<f64> {
+    match block.source {
+        Source::Frames(FrameMetric::FrametimeApp) => f.app_ms,
+        _ => f.displayed_ms,
+    }
+}
+
+/// The data generation a chart of `block` is drawn from: the frames for a
+/// frametime chart, otherwise its source's ring.
+pub fn chart_gen(block: &Block, state: &OverlayState) -> u64 {
+    if is_frametime_chart(block) {
+        return state.frames_gen();
+    }
+    SourceKey::of(&block.source).map_or(0, |k| state.data_gen(&k))
+}
+
+/// A graph's minimum, average and maximum over its range, as
+/// `min / avg / max unit`; empty without data.
+pub fn stats_text(block: &Block, state: &OverlayState) -> String {
+    let range = block.style.graph.range_s;
+    let (min, avg, max) = if is_frametime_chart(block) {
+        let newest = state.frame_times.back().map_or(0.0, |f| f.t_s);
+        let from = newest - f64::from(range);
+        let (mut lo, mut hi, mut sum, mut n) = (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0u32);
+        for ms in state
+            .frame_times
+            .iter()
+            .filter(|f| f.t_s >= from)
+            .filter_map(|f| frame_ms(block, f))
+        {
+            lo = lo.min(ms);
+            hi = hi.max(ms);
+            sum += ms;
+            n += 1;
+        }
+        if n == 0 {
+            return String::new();
+        }
+        (Some(lo), Some(sum / f64::from(n)), Some(hi))
+    } else {
+        let stat = |op| {
+            let s = Stat {
+                op,
+                window: range,
+                ..block.stat
+            };
+            source_value(&block.source, &s, state)
+        };
+        (stat(StatOp::Min), stat(StatOp::Avg), stat(StatOp::Max))
+    };
+    if avg.is_none() {
+        return String::new();
+    }
+    // Frames read through the frame formatter even with the engine stopped:
+    // these are the kept frames, not the live metrics.
+    let fmt = |v| match &block.source {
+        Source::Frames(m) => format_frame_metric(*m, v, &format_options(block, state)),
+        _ => format_block_value(block, state, v),
+    };
+    let (lo, _) = fmt(min);
+    let (mid, _) = fmt(avg);
+    let (hi, unit) = fmt(max);
+    oma_core::format::join(&format!("{lo} / {mid} / {hi}"), &unit)
+}
+
 /// The label of `block`: its own, the sensor's, or the metric's name; a low
 /// without its own label also names its definition (§4.4).
 pub fn block_label(block: &Block, state: &OverlayState) -> String {
@@ -289,7 +384,7 @@ pub fn text_parts(block: &Block, state: &OverlayState) -> TextParts {
 }
 
 /// The y range of a chart: fixed, or the visible minimum to maximum with a
-/// 10% margin; all-equal values give 0..1, widened to include them.
+/// 10% margin; all-equal values are centred, `v ± max(10% of |v|, 0.5)`.
 fn y_range(values: impl Iterator<Item = f64>, y: &YAxis) -> Option<(f64, f64)> {
     if y.mode == AxisMode::Fixed {
         return (y.max > y.min).then_some((y.min, y.max));
@@ -301,7 +396,8 @@ fn y_range(values: impl Iterator<Item = f64>, y: &YAxis) -> Option<(f64, f64)> {
         return None;
     }
     if hi == lo {
-        return Some((lo.min(0.0), hi.max(1.0)));
+        let half = (lo.abs() * 0.1).max(0.5);
+        return Some((lo - half, hi + half));
     }
     let margin = (hi - lo) * 0.1;
     Some((lo - margin, hi + margin))
@@ -394,14 +490,16 @@ pub fn gauge_sweep(value: f64, min: f64, max: f64) -> f32 {
     meter_fraction(value, min, max) * 270.0
 }
 
-/// The range of a meter or gauge: each bound fixed, or automatic (0 to 100
-/// for percentages; otherwise from 0 to the value, so a reading fills the
-/// bar, and down to the value when it is negative).
+/// The range of a meter or gauge: each bound fixed, or automatic. The
+/// automatic range of a percentage is 0 to 100; otherwise it runs from 0
+/// (or the value, when negative) up to the highest value seen, `peak`, so a
+/// reading is never shown as always full.
 pub fn value_range(
     min: RangeBound,
     max: RangeBound,
     percent: bool,
     value: Option<f64>,
+    peak: f64,
 ) -> (f64, f64) {
     let v = value.unwrap_or(0.0);
     let lo = match min {
@@ -412,7 +510,7 @@ pub fn value_range(
     let hi = match max {
         RangeBound::Fixed(m) => m,
         RangeBound::Auto if percent => 100.0,
-        RangeBound::Auto => v.max(0.0).max(lo),
+        RangeBound::Auto => v.max(peak).max(0.0).max(lo),
     };
     (lo, hi)
 }
@@ -685,10 +783,12 @@ mod tests {
         for ((x, y), (wx, wy)) in p.iter().zip(want) {
             assert!(close(*x, wx) && close(*y, wy), "{p:?}");
         }
-        // All equal: 0..1, so a flat zero lies on the bottom edge.
+        // All equal: centred, v ± max(10% of |v|, 0.5).
         let p = graph_points(&[(0.0, 0.0), (1.0, 0.0)], r, 2.0, &YAxis::default(), 1.0);
-        assert!(p.iter().all(|&(_, y)| close(y, 70.0)), "{p:?}");
+        assert!(p.iter().all(|&(_, y)| close(y, 45.0)), "{p:?}");
         assert!(close(p[1].0, 110.0) && close(p[0].0, 60.0), "{p:?}");
+        let p = graph_points(&[(0.0, 50.0), (1.0, 50.0)], r, 2.0, &YAxis::default(), 1.0);
+        assert!(p.iter().all(|&(_, y)| close(y, 45.0)), "{p:?}");
         assert!(graph_points(&[], r, 2.0, &YAxis::default(), 1.0).is_empty());
     }
 
@@ -926,11 +1026,23 @@ mod tests {
     #[test]
     fn value_range_auto_and_fixed() {
         use oma_core::overlay::RangeBound::{Auto, Fixed};
-        assert_eq!(value_range(Auto, Auto, true, Some(40.0)), (0.0, 100.0));
-        assert_eq!(value_range(Auto, Auto, false, Some(40.0)), (0.0, 40.0));
-        assert_eq!(value_range(Auto, Auto, false, Some(-5.0)), (-5.0, 0.0));
         assert_eq!(
-            value_range(Fixed(10.0), Fixed(90.0), true, None),
+            value_range(Auto, Auto, true, Some(40.0), 90.0),
+            (0.0, 100.0)
+        );
+        // Not a percentage: up to the highest value seen, so it is not
+        // always full.
+        assert_eq!(
+            value_range(Auto, Auto, false, Some(40.0), 90.0),
+            (0.0, 90.0)
+        );
+        assert_eq!(value_range(Auto, Auto, false, Some(40.0), 0.0), (0.0, 40.0));
+        assert_eq!(
+            value_range(Auto, Auto, false, Some(-5.0), -5.0),
+            (-5.0, 0.0)
+        );
+        assert_eq!(
+            value_range(Fixed(10.0), Fixed(90.0), true, None, 0.0),
             (10.0, 90.0)
         );
     }
@@ -1027,5 +1139,131 @@ mod tests {
         // 90° is down on screen.
         let p = arc_point((10.0, 10.0), 5.0, 90.0);
         assert!(close(p.0, 10.0) && close(p.1, 15.0));
+    }
+
+    #[test]
+    fn font_size_is_in_points() {
+        // 12 pt at 96 DPI and scale 1 (an 8 px cell) is 16 px.
+        assert_eq!(font_px(12.0, 8.0), 16.0);
+        // Scale 1.5 at 144 DPI: an 18 px cell.
+        assert_eq!(font_px(9.0, 18.0), 27.0);
+    }
+
+    #[test]
+    fn percent_is_read_from_the_unit() {
+        let mut s2 = state();
+        s2.sensors.insert(
+            "gpu/load/core".into(),
+            SensorInfo {
+                id: "gpu/load/core".into(),
+                label: "GPU".into(),
+                unit: "percent".into(),
+            },
+        );
+        let gpu = block(json!({ "source": { "sensor": "gpu/load/core" } }));
+        let cpu = block(json!({ "source": { "sensor": CPU } }));
+        let fps = block(json!({ "source": { "frames": "fps-displayed" } }));
+        assert!(is_percent(&gpu, &s2));
+        assert!(!is_percent(&cpu, &s2));
+        assert!(!is_percent(&fps, &s2));
+    }
+
+    #[test]
+    fn frametime_chart_needs_a_frametime_source() {
+        let g = |source: serde_json::Value, mode: &str| {
+            block(
+                json!({ "source": source, "kind": "graph", "style": { "graph": { "mode": mode } } }),
+            )
+        };
+        assert!(is_frametime_chart(&g(
+            json!({ "frames": "frametime-displayed" }),
+            "frametime"
+        )));
+        assert!(is_frametime_chart(&g(
+            json!({ "frames": "frametime-app" }),
+            "frametime"
+        )));
+        assert!(!is_frametime_chart(&g(
+            json!({ "frames": "frametime-app" }),
+            "line"
+        )));
+        assert!(!is_frametime_chart(&g(
+            json!({ "frames": "fps-displayed" }),
+            "frametime"
+        )));
+    }
+
+    #[test]
+    fn chart_gen_follows_the_chart_source() {
+        let mut s = state();
+        let json = r#"{ "format": 1, "name": "t", "blocks": [
+            { "id": "g", "rect": { "x": 0, "y": 0, "w": 10, "h": 2 }, "kind": "sparkline",
+              "source": { "sensor": "cpu/temperature/package" } },
+            { "id": "t", "rect": { "x": 0, "y": 2, "w": 10, "h": 2 }, "kind": "graph",
+              "source": { "frames": "frametime-displayed" },
+              "style": { "graph": { "mode": "frametime" } } } ] }"#;
+        s.apply(
+            oma_ipc::overlay::OverlayMessage::SetProfile(oma_ipc::overlay::SetProfile {
+                profile_id: "p".into(),
+                profile_json: json.into(),
+                sensors: s.sensors.values().cloned().collect(),
+                strings: s.strings.clone(),
+                draw: crate::state::default_draw(),
+            }),
+            0.0,
+        );
+        let p = s.profile.clone().unwrap();
+        let (spark, ft) = (&p.blocks[0], &p.blocks[1]);
+        let (a, b) = (chart_gen(spark, &s), chart_gen(ft, &s));
+        s.apply(
+            oma_ipc::overlay::OverlayMessage::FrameTimes(oma_ipc::overlay::FrameTimes {
+                frames: vec![oma_ipc::overlay::WireFrameTime {
+                    t_s: 1.0,
+                    displayed_ms: Some(7.0),
+                    app_ms: None,
+                }],
+            }),
+            1.0,
+        );
+        assert_eq!(chart_gen(spark, &s), a);
+        assert!(chart_gen(ft, &s) > b);
+        s.apply(
+            oma_ipc::overlay::OverlayMessage::Values(oma_ipc::overlay::Values {
+                at_ms: 0,
+                values: vec![oma_ipc::overlay::WireValue {
+                    id: CPU.into(),
+                    value: Some(50.0),
+                    quality: "fresh".into(),
+                }],
+            }),
+            2.0,
+        );
+        assert!(chart_gen(spark, &s) > a);
+    }
+
+    #[test]
+    fn stats_text_over_the_graph_range() {
+        use oma_ipc::overlay::WireFrameTime;
+        let mut s = state();
+        let ft = block(json!({
+            "source": { "frames": "frametime-displayed" }, "kind": "graph",
+            "style": { "graph": { "mode": "frametime", "rangeS": 5 } }
+        }));
+        assert_eq!(stats_text(&ft, &s), "");
+        // The frame at t = 0 is older than the 5 s range.
+        for (t, ms) in [(0.0, 100.0), (6.0, 10.0), (7.0, 20.0), (8.0, 30.0)] {
+            s.frame_times.push_back(WireFrameTime {
+                t_s: t,
+                displayed_ms: Some(ms),
+                app_ms: None,
+            });
+        }
+        assert_eq!(stats_text(&ft, &s), "10.0 / 20.0 / 30.0 ms");
+        // The app frametime reads its own column, absent here.
+        let app = block(json!({
+            "source": { "frames": "frametime-app" }, "kind": "graph",
+            "style": { "graph": { "mode": "frametime", "rangeS": 5 } }
+        }));
+        assert_eq!(stats_text(&app, &s), "");
     }
 }

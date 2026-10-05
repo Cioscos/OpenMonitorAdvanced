@@ -17,8 +17,8 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
-use super::pipe::OwnedHandle;
 use super::win32_code;
+use crate::pipe_io::OwnedHandle;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 

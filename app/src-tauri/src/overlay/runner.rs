@@ -230,9 +230,10 @@ impl OverlayRunner {
         let settings = deps.store.snapshot();
         let lang = language_for(settings.general.language);
         let mut controller = Controller::new(std::process::id(), qpc_frequency);
-        // The profile folder is read at start, when the overlay is turned on
-        // and on «Reload» (DP17).
-        controller.on_catalog(read_catalog());
+        // The profile folder is read at start (on the controller's thread, so
+        // a large or slow folder never delays the app), when the overlay is
+        // turned on and on «Reload» (DP17). The built-ins until then.
+        controller.on_catalog(ProfileCatalog::builtins());
         controller.on_settings(&settings, lang, env.clone());
 
         let handle = OverlayHandle {
@@ -352,6 +353,7 @@ impl Ctl {
     }
 
     fn run(mut self) {
+        self.load_catalog(read_catalog());
         // The first step runs at once, so the engine starts without waiting
         // (as in M7b, DP13).
         let mut next_step_ms: u64 = 0;
@@ -438,6 +440,14 @@ impl Ctl {
             Input::Hotkeys(hotkeys) => self.controller.on_hotkeys(hotkeys),
             Input::Shutdown => {}
         }
+    }
+
+    /// The catalog read at start: a step publishes it even while nothing
+    /// else would step (the overlay off).
+    fn load_catalog(&mut self, catalog: ProfileCatalog) {
+        self.controller.on_catalog(catalog);
+        let now = self.now_ms();
+        self.step(now);
     }
 
     /// The watcher runs only while the frame engine is wanted (§11).
@@ -643,6 +653,7 @@ mod tests {
 
     use super::*;
     use crate::overlay::controller::Controller;
+    use crate::overlay::profiles::ProfileDiagnostic;
 
     struct NoToasts;
 
@@ -694,6 +705,26 @@ mod tests {
         other.overlay.text_hz = 4;
         ctl.handle(Input::Settings(Arc::new(other)));
         assert!(!ctl.host_start_failed);
+    }
+
+    #[test]
+    fn catalog_read_on_the_thread_is_published() {
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let mut ctl = ctl(Settings::default());
+        ctl.on_status = {
+            let published = Arc::clone(&published);
+            Box::new(move |s: &OverlayStatus| published.lock().unwrap().push(s.clone()))
+        };
+        let mut catalog = ProfileCatalog::builtins();
+        catalog.diagnostics.push(ProfileDiagnostic {
+            file: "x.json".into(),
+            reason: "bad".into(),
+        });
+        ctl.load_catalog(catalog.clone());
+        let status = ctl.status.lock().unwrap().clone();
+        assert_eq!(status.diagnostics, catalog.diagnostics);
+        assert_eq!(status.profiles, catalog.entries);
+        assert_eq!(published.lock().unwrap().last(), Some(&status));
     }
 
     #[test]

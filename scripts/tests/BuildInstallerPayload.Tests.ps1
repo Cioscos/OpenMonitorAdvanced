@@ -266,3 +266,93 @@ Describe 'PresentMon staging' {
             Should -BeLike 'Authenticode status HashMismatch*'
     }
 }
+
+Describe 'overlay staging (plan DP7)' {
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..\lib\OmaOverlayPayload.psm1') -Force -ErrorAction Stop
+
+        # A fake cargo (a .ps1) that records its arguments and "builds" $Source (a file to copy, or
+        # text) as <--target-dir>\release\oma-overlay.exe, then exits with $ExitCode.
+        function New-FakeCargo([string]$Source = 'fake overlay bytes', [int]$ExitCode = 0) {
+            $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $fake = Join-Path $dir 'fake-cargo.ps1'
+            $argsFile = Join-Path $dir 'args.txt'
+            Set-Content -LiteralPath $fake -Value @"
+Set-Content -LiteralPath '$argsFile' -Value (`$args -join "``n")
+`$t = `$args[[array]::IndexOf(`$args, '--target-dir') + 1]
+New-Item -ItemType Directory -Force (Join-Path `$t 'release') | Out-Null
+`$exe = Join-Path `$t 'release\oma-overlay.exe'
+if (Test-Path -LiteralPath '$Source' -PathType Leaf) { Copy-Item -LiteralPath '$Source' -Destination `$exe -Force }
+else { Set-Content -LiteralPath `$exe -Value '$Source' -NoNewline }
+'Finished release profile'
+exit $ExitCode
+"@
+            [pscustomobject]@{
+                Cargo       = $fake
+                ArgsFile    = $argsFile
+                TargetDir   = Join-Path $dir 'target'
+                Destination = Join-Path $dir 'payload\overlay\oma-overlay.exe'
+            }
+        }
+        $script:goodInfo = { param($Path) [pscustomobject]@{ ProductName = 'OpenMonitor Advanced'; ProductVersion = '1.2.3'; FileVersion = '1.2.3' } }
+    }
+
+    It 'payload stages oma-overlay.exe' {
+        $c = New-FakeCargo
+        $r = Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+            -Version '1.2.3' -VersionInfoProvider $goodInfo
+        Get-Content -Raw -LiteralPath $c.Destination | Should -BeExactly 'fake overlay bytes'
+        Test-Path -LiteralPath "$($c.Destination).partial" | Should -BeFalse
+        $r.Path | Should -Be $c.Destination
+        $r.Sha256 | Should -BeExactly (Get-OmaSha256 $c.Destination)
+        # Exactly the build of DP7, locked, against this repository and the given target dir.
+        $a = @(Get-Content -LiteralPath $c.ArgsFile)
+        $a[0..4] | Should -Be @('build', '--release', '--locked', '-p', 'oma-overlay')
+        $a[$a.IndexOf('--manifest-path') + 1] | Should -Be (Join-Path $repoRoot 'Cargo.toml')
+        $a[$a.IndexOf('--target-dir') + 1] | Should -Be $c.TargetDir
+    }
+
+    It 'replaces a previous overlay and stages nothing when the build fails' {
+        $c = New-FakeCargo -ExitCode 101
+        New-Item -ItemType Directory -Force (Split-Path $c.Destination) | Out-Null
+        Set-Content -LiteralPath $c.Destination -Value 'stale overlay'
+        { Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+                -Version '1.2.3' -VersionInfoProvider $goodInfo } | Should -Throw '*cargo build of oma-overlay failed with exit code 101*'
+        Test-Path -LiteralPath $c.Destination | Should -BeFalse
+    }
+
+    It 'refuses an overlay without the product metadata and stages nothing' {
+        $c = New-FakeCargo
+        $bad = { param($Path) [pscustomobject]@{ ProductName = 'oma-overlay'; ProductVersion = '1.2.3'; FileVersion = '1.2.3.0' } }
+        { Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+                -Version '1.2.3' -VersionInfoProvider $bad } |
+            Should -Throw "*oma-overlay.exe has ProductName 'oma-overlay', expected 'OpenMonitor Advanced'*FileVersion '1.2.3.0', expected '1.2.3'*"
+        Test-Path -LiteralPath $c.Destination | Should -BeFalse
+        Test-Path -LiteralPath "$($c.Destination).partial" | Should -BeFalse
+    }
+
+    It 'the payload script builds the overlay with cargo and checks its version information' {
+        # The fake "builds" pwsh.exe, whose ProductName is PowerShell: the real metadata gate runs.
+        $c = New-FakeCargo -Source $pwshExe
+        $out = Join-Path (Split-Path $c.Cargo) 'payload'
+        $r = Invoke-OmaNative -FilePath $pwshExe -AllowFailure -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-File', $payloadScript, '-OverlayOnly',
+            '-CargoExe', $c.Cargo, '-CargoTargetDir', $c.TargetDir, '-OutputRoot', $out)
+        $r.ExitCode | Should -Be 1
+        $r.Stdout | Should -BeLike "*oma-overlay.exe has ProductName 'PowerShell', expected 'OpenMonitor Advanced'*"
+        @(Get-Content -LiteralPath $c.ArgsFile)[0..4] | Should -Be @('build', '--release', '--locked', '-p', 'oma-overlay')
+        Test-Path -LiteralPath (Join-Path $out 'overlay\oma-overlay.exe') | Should -BeFalse
+        # Overlay only: neither the service, PawnIO nor PresentMon is touched.
+        Test-Path -LiteralPath (Join-Path $out 'service') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $out 'PawnIO_setup.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $out 'presentmon') | Should -BeFalse
+    }
+
+    It 'the only switches exclude each other' {
+        $r = Invoke-OmaNative -FilePath $pwshExe -AllowFailure -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-File', $payloadScript, '-OverlayOnly', '-PawnIoOnly', '-OutputRoot', (Join-Path $TestDrive 'excl'))
+        $r.ExitCode | Should -Be 1
+        $r.Stdout | Should -BeLike '*exclude each other*'
+    }
+}

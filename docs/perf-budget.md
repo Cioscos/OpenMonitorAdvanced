@@ -299,7 +299,12 @@ processo PresentMon figlio del servizio (`PresentMonCpuPercent`,
 `PresentMonPrivateBytesMB`, oppure `PresentMonValid = False` con il motivo
 `not running` quando il servizio non lo ha avviato). Il lavoro in più del
 servizio è la differenza fra `ServiceCorePercentCpu` con il motore acceso e
-quella con il motore spento.
+quella con il motore spento. Dalla M7c lo script riporta anche, in ogni modo
+e senza `-Service`, il processo `oma-overlay.exe` figlio dell'app
+(`OverlayCpuPercent` e `OverlayPrivateBytesMB`, dai contatori grezzi come
+PresentMon, oppure `OverlayValid = False` con il motivo, `not running` quando
+l'overlay è spento o nascosto senza processo). `oma-overlay` non entra in
+`TotalAppPercentCpu` (solo l'app e WebView2).
 
 | Stato | Limite | Punto di partenza (spike M7b, SD9) |
 |---|---|---|
@@ -308,12 +313,21 @@ quella con il motore spento.
 | Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) | — |
 
+Misure della M7c, da compilare nel task C20 (release, stessa macchina):
+
+| Stato | `oma-overlay` CPU % | `oma-overlay` MB privati | PresentMon CPU % | Lavoro in più di app e servizio | Esito |
+|---|---:|---:|---:|---:|---|
+| Overlay spento | da misurare in C20 (atteso: nessun processo) | — | — | da misurare in C20 | da misurare in C20 |
+| Overlay acceso, nessun gioco | da misurare in C20 | da misurare in C20 | da misurare in C20 | — | da misurare in C20 |
+| Overlay visibile in gioco, «Gaming», grafici a 30 FPS | da misurare in C20 | da misurare in C20 | da misurare in C20 | da misurare in C20 | da misurare in C20 |
+
 Le cifre dello spike vengono da `flush-probe` (60 s, 16 processori logici;
 dettagli in `docs/superpowers/references/m7/spike-findings.md`, S2), non dal
 servizio. La misura sul servizio installato, con il motore acceso e senza
 gioco (PresentMon più il lavoro del servizio sotto lo 0,5%), è la verifica dal
-vivo V6 della M7b, ancora da eseguire (`docs/follow-ups.md`). `oma-overlay`
-arriva con la M7c.
+vivo V6 della M7b, eseguita il 2026-10-05 (`docs/follow-ups.md`): servizio più
+PresentMon circa 0,03%. `oma-overlay` arriva con la M7c; le sue misure sono
+nella tabella sopra.
 
 ## M6c measurement details
 

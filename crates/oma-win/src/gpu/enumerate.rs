@@ -93,11 +93,6 @@ pub(crate) fn enumerate() -> Result<Vec<Adapter>, ProviderError> {
         .collect())
 }
 
-/// LUID of the first integrated GPU, in DXGI order.
-pub(crate) fn first_integrated(adapters: &[Adapter]) -> Option<u64> {
-    adapters.iter().find(|a| a.integrated).map(|a| a.luid)
-}
-
 fn dxgi_adapters() -> Result<Vec<DXGI_ADAPTER_DESC1>, ProviderError> {
     let failed =
         |call: &str, e: windows::core::Error| ProviderError::Failed(format!("{call}: {e}"));
@@ -215,27 +210,6 @@ fn kernel_info(luid: u64) -> (Option<PciAddress>, Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn adapter(luid: u64, integrated: bool) -> Adapter {
-        Adapter {
-            luid,
-            name: String::new(),
-            vendor_id: 0,
-            device_id: 0,
-            subsys_id: 0,
-            pci: None,
-            integrated,
-            dedicated_bytes: 0,
-        }
-    }
-
-    #[test]
-    fn first_integrated_skips_discrete_adapters() {
-        let list = [adapter(1, false), adapter(2, true), adapter(3, true)];
-        assert_eq!(first_integrated(&list), Some(2));
-        assert_eq!(first_integrated(&[adapter(1, false)]), None);
-        assert_eq!(first_integrated(&[]), None);
-    }
 
     #[test]
     fn luid_packs_high_and_low_parts() {

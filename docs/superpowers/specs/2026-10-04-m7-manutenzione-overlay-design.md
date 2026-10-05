@@ -529,7 +529,7 @@ Si aggiungono a `docs/perf-budget.md` e si misurano con `measure-footprint.ps1`,
 |---|---|
 | Overlay spento | nessun processo in più, costo invariato |
 | Overlay acceso, nessun gioco | PresentMon + `oma-overlay` < 0,5% della CPU totale; `oma-overlay` < 40 MB privati |
-| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB |
+| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 70 MB (alzato da 40 MB il 2026-10-05, verifica W8: il driver di una GPU discreta costa da solo circa 51 MB al dispositivo D3D11, vedi `docs/perf-budget.md`) |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) |
 
 Lo spike fissa i numeri di partenza (SD9): PresentMon costa dallo 0,006% allo 0,05% della CPU totale, con 5–6,5 MB privati; il lavoro di lettura nel servizio è stimato dallo 0,04% allo 0,1% (sonda dello spike). I limiti della tabella restano invariati. Il ritardo dei dati (SD7) è di solito 200–400 ms dalla presentazione all'arrivo, con buchi occasionali fino a circa 2,3 s: l'overlay disegna per tempo del dato. Se un limite non si rispetta, il piano se ne occupa prima del merge.

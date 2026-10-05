@@ -46,7 +46,8 @@
   the overlay is off or no game is in the foreground with the overlay shown).
   It runs as the user, so no elevation is needed. It is not part of
   TotalAppPercentCpu (host and WebView2 only); spec M7 §11 budgets it on its
-  own (< 40 MB) and together with PresentMon (< 0.5 % without a game).
+  own (< 40 MB without a game, < 70 MB shown in game) and together with
+  PresentMon (< 0.5 % without a game).
 .EXAMPLE
   ./scripts/measure-footprint.ps1                            # window open
   ./scripts/measure-footprint.ps1 -Minimized                 # tray only
@@ -386,7 +387,7 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
         TotalPrivateMB    = [math]::Round($totalPrivate / 1MB, 1)
         VendorModules     = if ($vendorModules.Count) { $vendorModules -join ', ' } else { '(none)' }
     }
-    # Spec M7 §11: the overlay process on its own (< 40 MB private), and with PresentMon for the CPU lines.
+    # Spec M7 §11: the overlay process on its own (< 40 MB private without a game, < 70 MB shown in game), and with PresentMon for the CPU lines.
     foreach ($field in (ConvertTo-OverlayFields $overlay.Result).GetEnumerator()) { $result[$field.Key] = $field.Value }
     if ($MeasureService) {
         if ($svcResult.Valid) {

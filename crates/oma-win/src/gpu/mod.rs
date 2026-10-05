@@ -21,15 +21,6 @@ pub(crate) mod trim;
 
 pub use processes::{GpuProcess, GpuProcessTable};
 
-/// LUID (packed as `(HighPart << 32) | LowPart`) of the first integrated
-/// GPU, if the machine has one: the overlay draws there, where a D3D11
-/// device costs far less private memory than on a discrete GPU (M7c, W8).
-pub fn integrated_adapter_luid() -> Option<u64> {
-    enumerate::enumerate()
-        .ok()
-        .and_then(|list| enumerate::first_integrated(&list))
-}
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;

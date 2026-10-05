@@ -310,27 +310,28 @@ l'overlay è spento; da nascosto il processo resta in esecuzione). `oma-overlay`
 |---|---|---|
 | Overlay spento | nessun processo in più, costo invariato | PresentMon non gira |
 | Overlay acceso, nessun gioco | PresentMon + `oma-overlay` < 0,5% della CPU totale; `oma-overlay` < 40 MB privati | PresentMon 0,006–0,023% sul desktop, 5–6,5 MB privati |
-| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
+| Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 70 MB (era 40 MB, vedi sotto) | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) | — |
 
 **Memoria dell'overlay e GPU (verifica W8, 2026-10-05).** La memoria privata
-di `oma-overlay` è quasi tutta del driver grafico: un dispositivo D3D11 sulla
-RTX 4080 costa da solo circa 51 MB (con qualunque opzione di creazione), sulla
-GPU integrata AMD 21–26 MB, con WARP 1,3 MB; Direct2D, DirectComposition e il
-disegno aggiungono circa 2 MB. Per scelta dell'utente l'overlay disegna sulla
-GPU integrata quando c'è (DWM compone la superficie fra le due GPU) e
-altrimenti sulla GPU predefinita: **su un PC senza GPU integrata l'overlay
-visibile resta intorno ai 57–65 MB, sopra il limite di 40 MB.** WARP starebbe
-nel limite ovunque (circa 7 MB, CPU quasi uguale a 30 FPS su una finestra di
-320×200: 0,25% contro 0,23%), ma non è stato scelto.
+di `oma-overlay` visibile è quasi tutta del driver grafico: un dispositivo
+D3D11 sulla RTX 4080 costa da solo circa 51 MB, con qualunque opzione di
+creazione; Direct2D, DirectComposition e il disegno aggiungono circa 2 MB.
+Misure con la finestra visibile per 10 s (64×32): GPU predefinita (NVIDIA)
+56,2 MB; GPU integrata AMD 77,8 MB, perché con lo schermo sulla NVIDIA il
+processo carica anche il driver NVIDIA per la copia fra le GPU (provata in
+gioco: 86,9 MB); WARP 3,3 MB, con CPU quasi uguale (0,25% contro 0,23% a
+30 FPS su 320×200). Per scelta dell'utente l'overlay resta sulla GPU
+predefinita e il limite in gioco passa da 40 a 70 MB; WARP resta l'opzione
+per risparmiare memoria se servirà.
 
-Misure della M7c, da compilare nel task C20 (release, stessa macchina):
+Misure della M7c (task C20, 2026-10-05; setup release 0.4.1 installato, RTX 4080 + iGPU AMD, 16 processori logici; `measure-footprint.ps1 -Minimized -Service`, app nel tray, 15 s di riscaldamento e 30 s di misura; in gioco Control Resonant in DX12 senza bordi, in partita):
 
 | Stato | `oma-overlay` CPU % | `oma-overlay` MB privati | PresentMon CPU % | Lavoro in più di app e servizio | Esito |
 |---|---:|---:|---:|---:|---|
-| Overlay spento | da misurare in C20 (atteso: nessun processo) | — | — | da misurare in C20 | da misurare in C20 |
-| Overlay acceso, nessun gioco | da misurare in C20 | da misurare in C20 | da misurare in C20 | — | da misurare in C20 |
-| Overlay visibile in gioco, «Gaming», grafici a 30 FPS | da misurare in C20 | da misurare in C20 | da misurare in C20 | da misurare in C20 | da misurare in C20 |
+| Overlay spento | non gira | — | non gira | riferimento: app 0,04%, servizio 0,04% | rispettato |
+| Overlay acceso, nessun gioco | < 0,005 | 5,6 | < 0,005 (5,2 MB) | app +0,01, servizio −0,01 | rispettato |
+| Overlay visibile in gioco, «Gaming», grafici a 30 FPS | 0,39 | 65,1 | 0,06 (5,6 MB) | app +0,09, servizio +0,11 | CPU 0,65% < 1%: rispettato; memoria entro il limite rivisto di 70 MB |
 
 Le cifre dello spike vengono da `flush-probe` (60 s, 16 processori logici;
 dettagli in `docs/superpowers/references/m7/spike-findings.md`, S2), non dal

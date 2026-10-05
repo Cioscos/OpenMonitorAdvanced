@@ -3,12 +3,6 @@
 //! by DirectComposition, and a Direct2D device context on its back buffer.
 //! Nothing goes through `UpdateLayeredWindow`.
 //!
-//! The device lives on the integrated GPU when the machine has one: there it
-//! costs about 20 MB of private memory, against about 50 MB for the
-//! driver of a discrete GPU (live check W8); DWM composes the small surface
-//! across adapters. Without an integrated GPU, or if that device cannot be
-//! created, the default hardware adapter is used.
-//!
 //! On a lost device every call fails with one of the codes of
 //! [`needs_recreate`]: the window loop drops the `Compositor` and builds a
 //! new one at the next frame.
@@ -23,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
 };
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_SDK_VERSION,
@@ -36,59 +30,13 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIFactory2,
-    IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
-    DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED,
+    DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
 /// The largest side of the swapchain, in pixels (the D3D11 texture limit).
 const MAX_SIDE: u32 = 16384;
-
-/// A D3D11 device on `adapter`, or on the default hardware adapter.
-fn create_device(adapter: Option<&IDXGIAdapter>) -> Result<ID3D11Device> {
-    // With an explicit adapter the driver type must be UNKNOWN.
-    let driver = if adapter.is_some() {
-        D3D_DRIVER_TYPE_UNKNOWN
-    } else {
-        D3D_DRIVER_TYPE_HARDWARE
-    };
-    let mut device: Option<ID3D11Device> = None;
-    // SAFETY: valid out-pointer to a local; `adapter` is a live COM object
-    // or none; no software module, default feature levels; the device is
-    // returned owned.
-    unsafe {
-        D3D11CreateDevice(
-            adapter,
-            driver,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            None,
-        )?
-    };
-    device.ok_or_else(|| windows::core::Error::from(DXGI_ERROR_DEVICE_REMOVED))
-}
-
-/// The DXGI adapter with this LUID (packed as `(HighPart << 32) | LowPart`).
-fn adapter_by_luid(luid: u64) -> Option<IDXGIAdapter1> {
-    // SAFETY: no preconditions; the factory is released when dropped.
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
-    (0u32..)
-        // SAFETY: `factory` is live; out-of-range indices return an error,
-        // which ends the iteration.
-        .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
-        .find(|adapter| {
-            // SAFETY: `adapter` is a live COM object.
-            unsafe { adapter.GetDesc1() }.is_ok_and(|d| {
-                ((d.AdapterLuid.HighPart as u32 as u64) << 32) | u64::from(d.AdapterLuid.LowPart)
-                    == luid
-            })
-        })
-}
 
 /// Whether `hr` means the device is gone and everything must be rebuilt.
 pub(crate) fn needs_recreate(hr: HRESULT) -> bool {
@@ -133,26 +81,29 @@ impl Compositor {
     /// Builds the chain for `hwnd` with a `width × height` swapchain.
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
         let (width, height) = (clamp_side(width), clamp_side(height));
-        let integrated = oma_win::gpu::integrated_adapter_luid().and_then(adapter_by_luid);
-        let d3d = match integrated.and_then(|a| create_device(Some(&a.cast().ok()?)).ok()) {
-            Some(device) => device,
-            None => create_device(None)?,
+        let mut device: Option<ID3D11Device> = None;
+        // SAFETY: valid out-pointer to a local; no adapter, no software
+        // module, default feature levels; the device is returned owned.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )?
         };
+        let d3d = device.ok_or_else(|| windows::core::Error::from(DXGI_ERROR_DEVICE_REMOVED))?;
         let dxgi_device: IDXGIDevice = d3d.cast()?;
         // The factory that created the device's adapter: on a hybrid PC a
         // fresh factory could enumerate another GPU first.
         // SAFETY: plain getters on live objects; both are returned owned.
         let (factory, d3d_context): (IDXGIFactory2, ID3D11DeviceContext) = unsafe {
             let adapter = dxgi_device.GetAdapter()?;
-            if let Ok(d) = adapter.GetDesc() {
-                let len = d
-                    .Description
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(d.Description.len());
-                let name = String::from_utf16_lossy(&d.Description[..len]);
-                tracing::info!(adapter = %name.trim(), "drawing device created");
-            }
             (adapter.GetParent()?, d3d.GetImmediateContext()?)
         };
         let desc = DXGI_SWAP_CHAIN_DESC1 {

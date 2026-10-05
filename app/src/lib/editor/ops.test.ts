@@ -3,6 +3,7 @@ import {
   commonValue,
   deleteBlocks,
   duplicateBlocks,
+  firstFreeCell,
   MIXED,
   moveBlocks,
   pasteBlocks,
@@ -145,4 +146,12 @@ test('defaults are filled inside a panel, a comparison and the thresholds', () =
   expect(b.visibleIf).toEqual({ source: { frames: 'fps-displayed' }, stat: { op: 'current', window: 1, definition: 'integral' }, op: '<', value: 60 });
   expect(b.thresholds).toEqual([{ op: '>', value: 90, color: '#FF0000', target: 'value' }]);
   expect(withDefaults({ format: 1, name: 'p', blocks: [{ ...partial, visibleIf: { fg: 'active' } }] }).blocks[0].visibleIf).toEqual({ fg: 'active' });
+});
+
+test('firstFreeCell finds the top-left-most free cell', () => {
+  const a = newBlock({ text: 'a' }, { x: 0, y: 0 }, []);
+  const b = newBlock({ text: 'b' }, { x: 12, y: 0 }, [a]);
+  expect(firstFreeCell([], 12, 2)).toEqual({ x: 0, y: 0 });
+  expect(firstFreeCell([a], 12, 2)).toEqual({ x: 12, y: 0 });
+  expect(firstFreeCell([a, b], 12, 2)).toEqual({ x: 24, y: 0 });
 });

@@ -1,20 +1,37 @@
 <script lang="ts">
-  // Root of the `overlay-editor` window. D14 adds the canvas and the palette, D15 the toolbar,
-  // the properties and the unsaved-changes dialog; this shell opens the profile and keeps the
-  // language and the shell's view of the editor in step.
+  // Root of the `overlay-editor` window: the source palette and the canvas (D14); D15 adds the
+  // toolbar, the properties and the unsaved-changes dialog. It opens the profile and keeps the
+  // language, the sensors, the canvas's frame data and the shell's view of the editor in step.
   import { onDestroy, onMount } from 'svelte';
   import { createBackend, type Backend } from '../lib/backend';
   import { EditorStore } from '../lib/editor/editor.svelte';
   import { t } from '../lib/i18n/index.svelte';
+  import { LiveStore, connect } from '../lib/live.svelte';
   import { settings } from '../lib/settings.svelte';
+  import Canvas from './Canvas.svelte';
+  import { FrameFeed } from './feed.svelte';
+  import Palette from './Palette.svelte';
 
   let { backend = createBackend() }: { backend?: Backend } = $props();
   // svelte-ignore state_referenced_locally
   const editor = new EditorStore(backend);
+  const live = new LiveStore();
+  const feed = new FrameFeed();
+  let canvas: Canvas | undefined = $state();
+  /** The first profile is open: edits made before would be replaced by it. */
+  let ready = $state(false);
 
   onMount(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
+    const stops: (() => void)[] = [];
+    // The sensors (with their history) and the frame data the canvas draws.
+    for (const start of [() => connect(live, backend), () => feed.connect(backend)]) {
+      start().then(
+        (stop) => (cancelled ? stop() : stops.push(stop)),
+        (error) => console.error('editor: canvas data unavailable', error),
+      );
+    }
     void (async () => {
       try {
         off = await settings.connect(backend);
@@ -28,10 +45,12 @@
       const id = status?.activeProfile ?? settings.state?.settings.overlay.defaultProfile;
       if (cancelled) return;
       if (id === undefined || !(await editor.load(id))) editor.newProfile();
+      ready = true;
     })();
     return () => {
       cancelled = true;
       off?.();
+      stops.forEach((stop) => stop());
     };
   });
 
@@ -54,11 +73,21 @@
   {#if editor.error !== null}
     <p class="error" role="alert">{t(editor.error.key, { detail: editor.error.detail ?? '' })}</p>
   {/if}
+  {#if ready}
+  <div class="body">
+    <Palette schema={live.schema} onAdd={(source) => canvas?.addSource(source)} onDrop={(source, x, y) => canvas?.dropAt(source, x, y)} />
+    <Canvas bind:this={canvas} {editor} {live} {feed} />
+  </div>
+  {/if}
 </main>
 
 <style>
   .editor {
-    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-sizing: border-box;
+    height: 100vh;
     padding: 12px 16px;
     background: var(--bg);
     color: var(--text);
@@ -83,7 +112,15 @@
     color: var(--accent);
   }
   .note {
+    margin: 0;
     color: var(--text-muted);
+  }
+  .body {
+    display: grid;
+    flex: 1;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 16px;
+    min-height: 0;
   }
   .error {
     color: var(--crit);

@@ -1,7 +1,7 @@
 // Pure edits of a profile: every function returns new objects and leaves its arguments alone.
 // Rectangles stay inside the limits of profile.rs (x, y 0–400; w, h 1–200).
 
-import { freeBlockId, LIMITS, type Block, type Profile } from './profile';
+import { freeBlockId, LIMITS, type Block, type CellRect, type Profile } from './profile';
 
 /** `commonValue` of blocks that disagree. */
 export const MIXED: unique symbol = Symbol('mixed');
@@ -100,4 +100,18 @@ export function setPath(blocks: readonly Block[], ids: Ids, path: string, value:
   const set = new Set(ids);
   const keys = path.split('.');
   return blocks.map((b) => (set.has(b.id) ? (write(b, keys, value) as Block) : b));
+}
+
+const overlaps = (a: CellRect, b: CellRect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/**
+ * The top-left-most cell where a `w` x `h` block overlaps no block: (0, 0), or right of or under
+ * an existing block, first by row then by column.
+ */
+export function firstFreeCell(blocks: readonly Block[], w: number, h: number): { x: number; y: number } {
+  const xs = [0, ...blocks.map((b) => b.rect.x + b.rect.w)];
+  const ys = [0, ...blocks.map((b) => b.rect.y + b.rect.h)];
+  const cells = ys.flatMap((y) => xs.map((x) => ({ x, y }))).sort((a, b) => a.y - b.y || a.x - b.x);
+  const free = cells.find((c) => c.x <= LIMITS.rect.x[1] && c.y <= LIMITS.rect.y[1] && !blocks.some((b) => overlaps({ ...c, w, h }, b.rect)));
+  return free ?? { x: 0, y: 0 };
 }

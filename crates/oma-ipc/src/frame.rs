@@ -10,6 +10,9 @@
 
 use std::collections::HashSet;
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
 use crate::message::Message;
 use crate::{IpcError, MAX_FRAME_BYTES};
 
@@ -281,7 +284,12 @@ pub fn encode_payload(msg: &Message) -> Result<Vec<u8>, IpcError> {
 /// length, followed by the MessagePack payload. Refuses payloads over
 /// [`MAX_FRAME_BYTES`].
 pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, IpcError> {
-    let payload = encode_payload(msg)?;
+    encode_frame_of(msg)
+}
+
+/// Like [`encode_frame`], for any serde type (the app-overlay protocol uses it).
+pub fn encode_frame_of<T: Serialize>(msg: &T) -> Result<Vec<u8>, IpcError> {
+    let payload = rmp_serde::to_vec_named(msg).map_err(|e| IpcError::Encode(e.to_string()))?;
     if payload.len() > MAX_FRAME_BYTES {
         return Err(IpcError::FrameTooLarge(payload.len() as u32));
     }
@@ -289,6 +297,14 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, IpcError> {
     frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     frame.extend_from_slice(&payload);
     Ok(frame)
+}
+
+/// Decodes a MessagePack payload (no length prefix) into any serde type, after the same
+/// structural validation (depth, element counts, duplicate keys, trailing bytes) as
+/// [`decode_payload`]. Type-specific checks are the caller's job.
+pub fn decode_payload_of<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, IpcError> {
+    validate_message(bytes)?;
+    rmp_serde::from_slice(bytes).map_err(|e| IpcError::Decode(e.to_string()))
 }
 
 /// Decodes a MessagePack payload (no length prefix) into a [`Message`].
@@ -301,9 +317,7 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, IpcError> {
 /// one through. A snapshot whose `held` list differs in length from `values`,
 /// or flags an absent value as held, is a protocol error.
 pub fn decode_payload(bytes: &[u8]) -> Result<Message, IpcError> {
-    validate_message(bytes)?;
-    let mut msg: Message =
-        rmp_serde::from_slice(bytes).map_err(|e| IpcError::Decode(e.to_string()))?;
+    let mut msg: Message = decode_payload_of(bytes)?;
     if let Message::Snapshot(snapshot) = &mut msg {
         if snapshot.held.len() != snapshot.values.len() {
             return Err(IpcError::Decode(format!(
@@ -435,6 +449,19 @@ impl FrameDecoder {
     /// [`MAX_FRAME_BYTES`] is rejected immediately, before waiting for (or
     /// allocating for) the rest of the oversized frame.
     pub fn next_message(&mut self) -> Result<Option<Message>, IpcError> {
+        self.next_with(decode_payload)
+    }
+
+    /// Like [`next_message`](Self::next_message), for any serde type; the caller runs
+    /// any type-specific validation on the result.
+    pub fn next_of<T: DeserializeOwned>(&mut self) -> Result<Option<T>, IpcError> {
+        self.next_with(decode_payload_of)
+    }
+
+    fn next_with<T>(
+        &mut self,
+        decode: impl FnOnce(&[u8]) -> Result<T, IpcError>,
+    ) -> Result<Option<T>, IpcError> {
         if self.buf.len() < 4 {
             return Ok(None);
         }
@@ -448,7 +475,7 @@ impl FrameDecoder {
         if self.buf.len() < total {
             return Ok(None);
         }
-        let message = decode_payload(&self.buf[4..total])?;
+        let message = decode(&self.buf[4..total])?;
         self.buf.drain(0..total);
         Ok(Some(message))
     }
@@ -482,6 +509,24 @@ mod tests {
             smart_disabled_drives: vec![],
             smart_enabled_drives: vec![],
         })
+    }
+
+    #[test]
+    fn generic_framing_matches_message_framing() {
+        let msg = subscribe(500);
+        assert_eq!(encode_frame_of(&msg).unwrap(), encode_frame(&msg).unwrap());
+        let frame = encode_frame_of(&msg).unwrap();
+        assert_eq!(decode_payload_of::<Message>(&frame[4..]).unwrap(), msg);
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&frame).unwrap();
+        assert_eq!(decoder.next_of::<Message>().unwrap(), Some(msg));
+        assert_eq!(decoder.next_of::<Message>().unwrap(), None);
+        // The same limit applies.
+        let big = "x".repeat(MAX_FRAME_BYTES + 1);
+        assert!(matches!(
+            encode_frame_of(&big),
+            Err(IpcError::FrameTooLarge(_))
+        ));
     }
 
     #[test]

@@ -331,7 +331,7 @@ struct Ctl {
     host: Option<OverlayHost>,
     host_wanted: bool,
     /// The host could not start: not tried again (nor logged) until the
-    /// settings change or «Retry»; the status shows the failure meanwhile.
+    /// overlay's settings change or «Retry»; the status shows the failure meanwhile.
     host_start_failed: bool,
     /// The window whose geometry is read.
     tracked: Option<Foreground>,
@@ -397,6 +397,7 @@ impl Ctl {
         match input {
             Input::Settings(settings) => {
                 let turned_on = settings.overlay.enabled && !self.settings.overlay.enabled;
+                let overlay_changed = settings.overlay != self.settings.overlay;
                 self.lang = language_for(settings.general.language);
                 self.controller
                     .on_settings(&settings, self.lang, self.env.clone());
@@ -404,7 +405,9 @@ impl Ctl {
                 if turned_on {
                     self.controller.on_catalog(read_catalog());
                 }
-                self.clear_host_start_failure();
+                if overlay_changed {
+                    self.clear_host_start_failure();
+                }
             }
             Input::Foreground(fg) => {
                 self.controller.on_foreground(fg);
@@ -640,6 +643,58 @@ mod tests {
 
     use super::*;
     use crate::overlay::controller::Controller;
+
+    struct NoToasts;
+
+    impl ToastSink for NoToasts {
+        fn show(&self, _title: String, _body: String, _launch: String) {}
+    }
+
+    /// A controller thread's state, never run: no watcher, no host.
+    fn ctl(settings: Settings) -> Ctl {
+        let (tx, rx) = mpsc::channel();
+        let controller = Controller::new(1, 10_000_000);
+        let status = Arc::new(Mutex::new(controller.current_status()));
+        Ctl {
+            controller,
+            rx,
+            tx,
+            link: Box::new(|_| {}),
+            feed: FramesFeed::default(),
+            toaster: Box::new(NoToasts),
+            on_status: Box::new(|_| {}),
+            tap: Arc::default(),
+            status,
+            env: None,
+            settings: Arc::new(settings),
+            lang: Lang::En,
+            moves: Arc::default(),
+            watcher: None,
+            watcher_failed: false,
+            host: None,
+            host_wanted: false,
+            host_start_failed: false,
+            tracked: None,
+            geometry_ms: 0,
+            engine_on: false,
+            epoch: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn host_start_failure_is_cleared_only_by_overlay_settings() {
+        let mut ctl = ctl(Settings::default());
+        ctl.host_start_failed = true;
+        // Another section changed: the failure stays latched.
+        let mut other = Settings::default();
+        other.general.interval_ms = 2_000;
+        ctl.handle(Input::Settings(Arc::new(other.clone())));
+        assert!(ctl.host_start_failed);
+        // The overlay's settings changed: a new chance.
+        other.overlay.text_hz = 4;
+        ctl.handle(Input::Settings(Arc::new(other)));
+        assert!(!ctl.host_start_failed);
+    }
 
     #[test]
     fn moves_are_coalesced() {

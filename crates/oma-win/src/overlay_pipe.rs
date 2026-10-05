@@ -19,14 +19,14 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oma_ipc::encode_frame_of;
 use oma_ipc::overlay::{OverlayMessage, OVERLAY_PIPE_PREFIX};
 use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
-    INVALID_HANDLE_VALUE,
+    GetLastError, LocalFree, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -42,8 +42,8 @@ use windows::Win32::Storage::FileSystem::{
     SECURITY_SQOS_PRESENT,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -73,9 +73,12 @@ pub fn random_pipe_name() -> io::Result<String> {
     Ok(format!("{OVERLAY_PIPE_PREFIX}{}", uuid_v4(bytes)))
 }
 
-/// A protected DACL with one ACE: generic all for `sid`.
+/// The pipe's security descriptor: owner `sid` (so an elevated app does not
+/// hand ownership to Administrators), a protected DACL with one ACE (generic
+/// all for `sid`), and a medium mandatory label with no-write-up and
+/// no-read-up, so low-integrity processes of the same user cannot open it.
 pub(crate) fn user_only_sddl(sid: &str) -> String {
-    format!("D:P(A;;GA;;;{sid})")
+    format!("O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;ME)")
 }
 
 /// Formats 16 random bytes as a UUID v4 (RFC 4122 variant), lowercase.
@@ -184,8 +187,11 @@ pub struct OverlayPipeServer {
 
 impl OverlayPipeServer {
     /// Creates the only instance of the pipe `name` (which must start with
-    /// [`OVERLAY_PIPE_PREFIX`]), with a DACL that admits the current user
-    /// only. Fails with `ERROR_ACCESS_DENIED` (5) when the name exists.
+    /// [`OVERLAY_PIPE_PREFIX`]), with the descriptor of [`user_only_sddl`]
+    /// for the current user. When the name exists it fails: with
+    /// `ERROR_PIPE_BUSY` (231) if it is our own instance (the one-instance
+    /// limit is checked first), with `ERROR_ACCESS_DENIED` (5) if another
+    /// process created it (`FILE_FLAG_FIRST_PIPE_INSTANCE`).
     pub fn create(name: &str) -> io::Result<Self> {
         check_name(name)?;
         let sddl = HSTRING::from(user_only_sddl(&current_user_sid()?));
@@ -236,31 +242,42 @@ impl OverlayPipeServer {
     /// Waits at most `timeout` for a client to connect and returns its PID,
     /// which the caller checks against the overlay it spawned. Fails with
     /// `ErrorKind::TimedOut` when nobody connects in time; the pipe keeps
-    /// listening and `accept` can be called again.
+    /// listening and `accept` can be called again. A client that connected
+    /// and left before it was accepted is dropped and the wait goes on.
     pub fn accept(&self, timeout: Duration) -> io::Result<u32> {
         let event = new_event().map_err(code_error)?;
         let h = self.conn.handle();
-        // Below INFINITE (u32::MAX), so a huge timeout still ends.
-        let timeout_ms =
-            u32::try_from(timeout.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
-        // SAFETY: one overlapped ConnectNamedPipe on `h` with the given OVERLAPPED and no
-        // buffer; `event` is a live manual-reset event for the whole call, and `overlapped_io`
-        // cancels and waits for the operation before returning if it gives up.
-        let r = unsafe {
-            overlapped_io(h, event.0, None, timeout_ms, |ov| {
-                ConnectNamedPipe(h, Some(ov))
-            })
-        };
-        match r {
-            Ok(_) => {}
-            // The client connected before the call: nothing was pending.
-            Err(IoFailure::Win32(code)) if code == ERROR_PIPE_CONNECTED.0 => {}
-            Err(IoFailure::Win32(code)) => return Err(code_error(code)),
-            Err(IoFailure::TimedOut | IoFailure::Stopped) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "no overlay client connected in time",
-                ))
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // Below INFINITE (u32::MAX), so a huge timeout still ends.
+            let timeout_ms =
+                u32::try_from(left.as_millis()).map_or(u32::MAX - 1, |ms| ms.min(u32::MAX - 1));
+            // SAFETY: one overlapped ConnectNamedPipe on `h` with the given OVERLAPPED and no
+            // buffer; `event` is a live manual-reset event for the whole call, and
+            // `overlapped_io` cancels and waits for the operation before returning if it gives
+            // up. ConnectNamedPipe resets the event when it starts, so it can be reused.
+            let r = unsafe {
+                overlapped_io(h, event.0, None, timeout_ms, |ov| {
+                    ConnectNamedPipe(h, Some(ov))
+                })
+            };
+            match r {
+                Ok(_) => break,
+                // The client connected before the call: nothing was pending.
+                Err(IoFailure::Win32(code)) if code == ERROR_PIPE_CONNECTED.0 => break,
+                // A client connected and closed before it was accepted: recycle the instance.
+                Err(IoFailure::Win32(code)) if code == ERROR_NO_DATA.0 => {
+                    // SAFETY: live server pipe handle with no operation pending on it.
+                    unsafe { DisconnectNamedPipe(h) }.map_err(|e| os_error(&e))?;
+                }
+                Err(IoFailure::Win32(code)) => return Err(code_error(code)),
+                Err(IoFailure::TimedOut | IoFailure::Stopped) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no overlay client connected in time",
+                    ))
+                }
             }
         }
         let mut pid = 0u32;
@@ -269,7 +286,9 @@ impl OverlayPipeServer {
         Ok(pid)
     }
 
-    /// The connected pipe, ready to send and read overlay messages.
+    /// The connected pipe, ready to send and read overlay messages. Call it
+    /// only after a successful [`accept`](Self::accept) and the caller's
+    /// check of the client PID; never send before that.
     pub fn into_connection(self) -> OverlayConnection {
         OverlayConnection { conn: self.conn }
     }
@@ -342,7 +361,9 @@ mod tests {
     use windows::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
     };
-    use windows::Win32::Security::{ACL, DACL_SECURITY_INFORMATION};
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
     use windows::Win32::System::Pipes::PIPE_UNLIMITED_INSTANCES;
 
     use super::*;
@@ -364,7 +385,7 @@ mod tests {
     fn user_only_sddl_grants_generic_all_to_the_sid() {
         assert_eq!(
             user_only_sddl("S-1-5-21-1-2-3-1001"),
-            "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)"
+            "O:S-1-5-21-1-2-3-1001D:P(A;;GA;;;S-1-5-21-1-2-3-1001)S:(ML;;NWNR;;;ME)"
         );
     }
 
@@ -485,6 +506,8 @@ mod tests {
         let sid = current_user_sid().expect("current user SID");
         assert!(sid.starts_with("S-1-5-"), "{sid}");
 
+        let info =
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
         let mut sd = PSECURITY_DESCRIPTOR::default();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         // SAFETY: live server handle (it has READ_CONTROL); `sd` receives a LocalAlloc'd
@@ -493,7 +516,7 @@ mod tests {
             GetSecurityInfo(
                 server.conn.handle(),
                 SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                info,
                 None,
                 None,
                 Some(&mut dacl),
@@ -510,7 +533,7 @@ mod tests {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 PSECURITY_DESCRIPTOR(sd.0),
                 SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
+                info,
                 &mut text,
                 None,
             )
@@ -519,10 +542,21 @@ mod tests {
         let text = LocalMem(text.0.cast());
         // SAFETY: NUL-terminated wide string alive until the guard drops.
         let sddl = unsafe { PWSTR(text.0.cast()).to_string() }.unwrap();
+        // Owned by this user, not by Administrators even when elevated.
+        let rest = sddl
+            .strip_prefix(&format!("O:{sid}"))
+            .unwrap_or_else(|| panic!("owner: {sddl}"));
+        let (dacl, label) = rest
+            .split_once("S:")
+            .unwrap_or_else(|| panic!("no label: {sddl}"));
         // Protected, one allow ACE, for this user only (generic all may read back mapped).
-        assert!(sddl.starts_with("D:P(A;;"), "{sddl}");
-        assert!(sddl.ends_with(&format!(";;;{sid})")), "{sddl}");
-        assert_eq!(sddl.matches('(').count(), 1, "{sddl}");
+        assert!(dacl.starts_with("D:P(A;;"), "{sddl}");
+        assert!(dacl.ends_with(&format!(";;;{sid})")), "{sddl}");
+        assert_eq!(dacl.matches('(').count(), 1, "{sddl}");
+        // Medium integrity, no write-up and no read-up: low-integrity processes stay out.
+        // The kernel may add SACL control flags (`AI`) before the one label ACE.
+        assert!(label.ends_with("(ML;;NWNR;;;ME)"), "{sddl}");
+        assert_eq!(label.matches('(').count(), 1, "{sddl}");
     }
 
     #[test]
@@ -530,6 +564,21 @@ mod tests {
         let name = random_pipe_name().unwrap();
         let server = OverlayPipeServer::create(&name).unwrap();
         let _client = connect_overlay_client(&name).expect("connect the client");
+        assert_eq!(server.accept(WAIT).expect("accept"), std::process::id());
+    }
+
+    #[test]
+    fn accept_skips_a_client_that_already_left() {
+        let name = random_pipe_name().unwrap();
+        let server = OverlayPipeServer::create(&name).unwrap();
+        // Connects and closes before the server accepts: ConnectNamedPipe sees ERROR_NO_DATA.
+        drop(connect_overlay_client(&name).expect("connect the first client"));
+        let err = server
+            .accept(Duration::from_millis(200))
+            .expect_err("the departed client is not accepted");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err:?}");
+        // The instance was recycled: the next client gets in.
+        let _client = connect_overlay_client(&name).expect("connect the second client");
         assert_eq!(server.accept(WAIT).expect("accept"), std::process::id());
     }
 

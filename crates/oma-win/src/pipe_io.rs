@@ -107,7 +107,8 @@ pub(crate) enum IoFailure {
 /// Starts one overlapped operation with `op` and waits for it, for `stop`
 /// or for `timeout_ms`. When it gives up (stop, timeout, failed wait) the
 /// operation is cancelled and waited for before returning, so on return
-/// the kernel no longer uses the `OVERLAPPED`, `event` or the buffer.
+/// the kernel no longer uses the `OVERLAPPED`, `event` or the buffer. An
+/// operation that completed anyway before the cancellation returns `Ok`.
 ///
 /// # Safety
 ///
@@ -151,11 +152,13 @@ pub(crate) unsafe fn overlapped_io(
             let mut n = 0u32;
             // SAFETY: cancels only this OVERLAPPED on `h`, then blocks until the kernel has
             // finished with it (completed or aborted), so `ov` and the buffer can be released.
-            unsafe {
+            let completed = unsafe {
                 let _ = CancelIoEx(h, Some(&ov));
-                let _ = GetOverlappedResult(h, &ov, &mut n, true);
-            }
-            return Err(failure);
+                GetOverlappedResult(h, &ov, &mut n, true).is_ok()
+            };
+            // The operation finished before the cancellation reached it: its result stands
+            // (a write that took the bytes must not be reported as lost).
+            return if completed { Ok(n) } else { Err(failure) };
         }
     }
     let mut n = 0u32;

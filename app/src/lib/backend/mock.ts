@@ -345,6 +345,7 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
       hiddenByUser: overlay.enabled && hidden,
       hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile), benchmark: hotkey(overlay.hotkeyBenchmark) },
       preview,
+      previewFailure: null,
       benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
     };
   };

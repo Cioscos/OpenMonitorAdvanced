@@ -15,6 +15,7 @@
     previewOpen,
     previewBusy,
     onSelect,
+    onGuarded,
     onPreview,
     onUseNow,
   }: {
@@ -26,6 +27,8 @@
     previewBusy: boolean;
     /** Another profile picked in the selector; the parent asks first when there are changes. */
     onSelect: (id: string) => unknown;
+    /** Runs an action that reads the saved file or replaces the open profile, after asking about the changes. */
+    onGuarded: (action: () => unknown) => unknown;
     onPreview: () => unknown;
     onUseNow: () => unknown;
   } = $props();
@@ -90,12 +93,12 @@
       <button type="button" class="primary" disabled={ro} onclick={() => editor.save()}>{t('editor.save')}</button>
       <button type="button" onclick={() => (ask = { kind: 'saveAs', name: editor.profile.name })}>{t('editor.saveAs')}</button>
       <button type="button" disabled={ro} onclick={() => (ask = { kind: 'rename', name: editor.profile.name })}>{t('editor.rename')}</button>
-      <button type="button" onclick={() => editor.duplicate()}>{t('editor.duplicate')}</button>
+      <button type="button" onclick={() => onGuarded(() => editor.duplicate())}>{t('editor.duplicate')}</button>
       <button type="button" disabled={ro} onclick={() => (ask = { kind: 'delete' })}>{t('editor.delete')}</button>
     </div>
     <div class="cluster">
-      <button type="button" onclick={() => editor.importFile()}>{t('editor.import')}</button>
-      <button type="button" disabled={editor.profileId === null} onclick={() => editor.exportFile()}>{t('editor.export')}</button>
+      <button type="button" onclick={() => onGuarded(() => editor.importFile())}>{t('editor.import')}</button>
+      <button type="button" disabled={editor.profileId === null} onclick={() => onGuarded(() => editor.exportFile())}>{t('editor.export')}</button>
     </div>
     <div class="cluster">
       <button type="button" disabled={ro || !editor.history.canUndo} onclick={() => editor.undo()}>{t('editor.undo')}</button>

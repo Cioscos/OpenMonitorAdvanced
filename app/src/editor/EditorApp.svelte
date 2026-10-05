@@ -24,7 +24,7 @@
   import { t } from '../lib/i18n/index.svelte';
   import { LiveStore, connect } from '../lib/live.svelte';
   import { settings } from '../lib/settings.svelte';
-  import type { OverlayProfileEntry } from '../lib/types';
+  import type { OverlayProfileEntry, OverlayStatus } from '../lib/types';
   import Canvas from './Canvas.svelte';
   import { FrameFeed } from './feed.svelte';
   import Palette from './Palette.svelte';
@@ -65,7 +65,7 @@
       // The sensors (with their history) and the frame data the canvas draws.
       () => connect(live, backend),
       () => feed.connect(backend),
-      () => backend.onOverlayStatus((s) => (profiles = s.profiles)),
+      () => backend.onOverlayStatus(onStatus),
       () =>
         backend.onOverlayPreview((e) => {
           previewOpen = e.open;
@@ -105,7 +105,7 @@
       // now that the settings have set the language.
       const status = await backend.getOverlayStatus().catch(() => null);
       if (status !== null) {
-        profiles = status.profiles;
+        onStatus(status);
         previewOpen = status.preview;
       }
       const id = status?.activeProfile ?? settings.state?.settings.overlay.defaultProfile;
@@ -142,6 +142,17 @@
   }
 
   // ---- preview (§7.4): every edit, 100 ms after the last one, while the window is open ----
+
+  /** The preview failure the page shows, so a status that repeats it does not hide a later error. */
+  let shownFailure: OverlayStatus['previewFailure'] = null;
+
+  function onStatus(s: OverlayStatus) {
+    profiles = s.profiles;
+    if (s.previewFailure === shownFailure) return;
+    shownFailure = s.previewFailure;
+    previewError =
+      shownFailure === null ? null : t(shownFailure === 'incompatible' ? 'overlay.state.incompatible' : 'overlay.state.processFailed');
+  }
 
   /** The profile the preview shows, so reopening or an unchanged profile sends nothing. */
   let previewed: string | null = null;
@@ -212,7 +223,7 @@
     <p class="error" role="alert">{t('editor.error.preview', { detail: previewError })}</p>
   {/if}
   {#if ready}
-    <Toolbar {editor} {profiles} {previewOpen} {previewBusy} onSelect={(id) => ask(() => editor.load(id))} onPreview={togglePreview} onUseNow={useNow} />
+    <Toolbar {editor} {profiles} {previewOpen} {previewBusy} onSelect={(id) => ask(() => editor.load(id))} onGuarded={ask} onPreview={togglePreview} onUseNow={useNow} />
     <div class="body">
       <Palette schema={live.schema} onAdd={(source) => canvas?.addSource(source)} onDrop={(source, x, y) => canvas?.dropAt(source, x, y)} />
       <Canvas bind:this={canvas} {editor} {live} {feed} />

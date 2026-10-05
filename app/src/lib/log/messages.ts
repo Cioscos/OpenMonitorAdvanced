@@ -9,11 +9,11 @@ export function logErrorText(error: LogError | null | undefined, t: Translate): 
 }
 
 /**
- * What "Open folder" failed with: `openLogFolder` rejects with a `log.error.*` key or with the
- * system's own text. A known key is translated; anything else is shown as it came.
+ * What "Open folder" (or a benchmark command) failed with: a `log.error.*` or `benchmark.error.*`
+ * key, or the system's own text. A known key is translated; anything else is shown as it came.
  */
 export function folderErrorText(reason: unknown, t: Translate): string {
-  if (typeof reason === 'string' && reason.startsWith('log.error.') && reason in catalogs.en) return t(reason);
+  if (typeof reason === 'string' && /^(log|benchmark)\.error\./.test(reason) && reason in catalogs.en) return t(reason);
   if (typeof reason === 'string' && OPEN_ERROR_KEYS.includes(reason)) return t(reason);
   if (reason instanceof Error) return reason.message;
   return String(reason);

@@ -3,7 +3,7 @@ import { i18n, t } from '../i18n/index.svelte';
 import { folderErrorText } from './messages';
 
 describe('folderErrorText', () => {
-  it.each(['log.error.folderMissing', 'shell.error.missing', 'shell.error.timeout'])('translates %s', (key) => {
+  it.each(['log.error.folderMissing', 'shell.error.missing', 'shell.error.timeout', 'benchmark.error.recording'])('translates %s', (key) => {
     i18n.locale = 'en';
     expect(folderErrorText(key, t)).toBe(t(key));
     expect(folderErrorText(key, t)).not.toBe(key);

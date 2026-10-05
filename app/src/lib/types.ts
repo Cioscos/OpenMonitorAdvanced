@@ -598,6 +598,8 @@ export interface OverlayStatus {
   hotkeys: { toggle: HotkeyStatus; nextProfile: HotkeyStatus; benchmark: HotkeyStatus };
   /** The editor's preview window is open. */
   preview: boolean;
+  /** The preview's process gave up, which closed the preview; until the next preview. */
+  previewFailure: 'crashing' | 'incompatible' | null;
   benchmark: BenchmarkStatus;
 }
 

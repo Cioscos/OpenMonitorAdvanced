@@ -266,3 +266,34 @@ test('a quit during the close question still quits', async () => {
   // The app is told to quit before the window goes.
   expect(backend.editorCalls.filter((c) => c === 'appQuitConfirmed' || c === 'destroy')).toEqual(['appQuitConfirmed', 'destroy']);
 });
+
+test('duplicate, import and export with changes ask first', async () => {
+  const { backend } = await setup();
+  await edit();
+  // Duplicate: cancel keeps the edits and does nothing.
+  await fireEvent.click(toolbar().getByRole('button', { name: 'Duplicate' }));
+  await fireEvent.click(within(await screen.findByRole('dialog', { name: 'Unsaved changes' })).getByRole('button', { name: 'Cancel' }));
+  expect(backend.editorCalls.some((c) => c.startsWith('overlayDuplicateProfile'))).toBe(false);
+  expect(screen.getByText('●')).toBeTruthy();
+  // Import: asks too.
+  await fireEvent.click(toolbar().getByRole('button', { name: 'Import…' }));
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+  expect(backend.editorCalls).not.toContain('overlayImportProfile');
+  // Export: saved first, then exported.
+  await fireEvent.click(toolbar().getByRole('button', { name: 'Export…' }));
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(backend.editorCalls).toContain(`overlayExportProfile:${USER_ID}`));
+  const calls = backend.editorCalls.filter((c) => c.startsWith('overlaySaveProfile') || c.startsWith('overlayExportProfile'));
+  expect(calls).toEqual([`overlaySaveProfile:${USER_ID}`, `overlayExportProfile:${USER_ID}`]);
+});
+
+test('a preview whose window failed closes and says why', async () => {
+  const { backend } = await setup();
+  await fireEvent.click(toolbar().getByRole('button', { name: 'Preview' }));
+  backend.emitPreview(true);
+  await toolbar().findByRole('button', { name: 'Close preview' });
+  backend.emitOverlayStatus(makeOverlayStatus({ previewFailure: 'incompatible' }));
+  backend.emitPreview(false);
+  expect(await screen.findByText('Preview not available: Overlay component of another version: reinstall')).toBeTruthy();
+  await toolbar().findByRole('button', { name: 'Preview' });
+});

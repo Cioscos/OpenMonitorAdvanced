@@ -27,6 +27,12 @@
 //!   schema, and after every new `Running`; `FrameMetrics` at `textHz`,
 //!   `FrameTimes` at 10 Hz with the new frames only, sensor values through
 //!   [`ValuesPlan`]; no data while the overlay is hidden.
+//! - **Editor and preview (M7d):** with the editor open the same data goes
+//!   to the canvas ([`Outputs::editor_data`]) and, while it runs, to the
+//!   preview process, with its own `SetProfile`. Their frames are the
+//!   target's, or without a target the editor's [`SyntheticFeed`]; the
+//!   in-game overlay never gets synthetic frames. The data is computed once
+//!   per step for every consumer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -37,15 +43,16 @@ use oma_core::model::{Schema, Snapshot};
 use oma_core::overlay::{Foreground, Profile, PxRect, WindowGeometry};
 use oma_core::provider::Quality;
 use oma_core::settings::{Attach, Settings};
-use oma_ipc::overlay::{OverlayMessage, PxArea, SetPlacement};
+use oma_ipc::overlay::{FrameMetrics, OverlayMessage, PxArea, SetPlacement};
 use oma_ipc::{
     frames_state, FrameBatch, FramesConfigure, FramesStatus, PresentingProcess, PresentingProcesses,
 };
 use oma_win::svc::LinkCommand;
 use serde::Serialize;
 
+use super::editor_feed::{EditorData, SyntheticFeed};
 use super::forward::{
-    frame_times_since, low_windows, metrics_message, set_profile, used_sensors, values_message,
+    frame_times_since, metrics_message, set_profile, union_needs, values_message,
 };
 use super::frames::{detail_label, line, sample_of, state_label, LineContext};
 use super::host::{HostFailure, HostState};
@@ -70,6 +77,8 @@ const EXCLUSIVE_PRESENT_MODES: [&str; 2] = [
 ];
 /// The DPI of a hidden placement, which the overlay ignores.
 const DEFAULT_DPI: u32 = 96;
+/// The profile id of the preview's `SetProfile`.
+const PREVIEW_ID: &str = "preview";
 /// `FrameMetrics.state` and `OverlayStatus.frames` without the service.
 pub const FRAMES_UNAVAILABLE: &str = "unavailable";
 
@@ -137,6 +146,8 @@ pub struct OverlayStatus {
     pub diagnostics: Vec<ProfileDiagnostic>,
     pub hidden_by_user: bool,
     pub hotkeys: OverlayHotkeys,
+    /// The preview is open.
+    pub preview: bool,
 }
 
 /// What one [`Controller::step`] asks the caller to do.
@@ -148,6 +159,15 @@ pub struct Outputs {
     pub overlay: Vec<OverlayMessage>,
     /// Whether the overlay process should run.
     pub want_process: bool,
+    // Used by the runner from D10 on; drop the allow then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether the preview process should run: there is a preview profile.
+    pub want_preview: bool,
+    /// Messages for the preview process, in order (only while it is
+    /// `Running`): its `SetProfile` and the overlay's data.
+    pub preview: Vec<OverlayMessage>,
+    /// For the editor's canvas, only while it is open.
+    pub editor_data: Option<EditorData>,
     /// Watch this window's geometry (`Some(None)`: stop watching).
     pub track: Option<Option<Foreground>>,
     pub toast: Option<ToastRequest>,
@@ -231,6 +251,18 @@ pub struct Controller {
     /// `SetProfile` may differ from the one sent.
     profile_dirty: bool,
 
+    // Editor and preview.
+    /// The editor's synthetic frames: `Some` exactly while it is open.
+    editor: Option<SyntheticFeed>,
+    preview: Option<Profile>,
+    preview_host: HostState,
+    preview_was_running: bool,
+    /// The preview's `SetProfile` may differ from the one sent.
+    preview_dirty: bool,
+    sent_preview: Option<OverlayMessage>,
+    /// The metrics last computed while the editor is open.
+    editor_metrics: Option<FrameMetrics>,
+
     // What was sent.
     sent_config: Option<FramesConfigure>,
     config_sent_ms: u64,
@@ -295,6 +327,13 @@ impl Controller {
             lows: Vec::new(),
             used: Vec::new(),
             profile_dirty: true,
+            editor: None,
+            preview: None,
+            preview_host: HostState::Off,
+            preview_was_running: false,
+            preview_dirty: true,
+            sent_preview: None,
+            editor_metrics: None,
             sent_config: None,
             config_sent_ms: 0,
             retry_frames: false,
@@ -335,6 +374,7 @@ impl Controller {
             self.lang = lang;
             self.choice_dirty = true;
             self.profile_dirty = true;
+            self.preview_dirty = true;
         }
         self.env = env;
     }
@@ -398,6 +438,7 @@ impl Controller {
         self.schema = schema;
         self.choice_dirty = true;
         self.profile_dirty = true;
+        self.preview_dirty = true;
     }
 
     pub fn on_host(&mut self, state: HostState) {
@@ -424,8 +465,56 @@ impl Controller {
             .active
             .as_ref()
             .map_or_else(|| self.chosen_profile(), |(id, _)| id.clone());
-        self.choice = Some(self.catalog.next_after(&current));
+        let next = self.catalog.next_after(&current);
+        self.use_now(next);
+    }
+
+    /// «Use now» in the editor: the profile `id` until the target changes
+    /// (DD9).
+    pub fn use_now(&mut self, id: String) {
+        self.choice = Some(id);
         self.choice_dirty = true;
+    }
+
+    // Used by the runner from D10 on; drop the allow then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// The editor window opened or closed. Closing it ends the preview.
+    pub fn on_editor(&mut self, open: bool) {
+        if open == self.editor.is_some() {
+            return;
+        }
+        if open {
+            self.editor = Some(SyntheticFeed::new());
+            if self.target.is_none() {
+                // Synthetic times do not follow those of earlier frames.
+                self.reset_times();
+            }
+        } else {
+            self.editor = None;
+            self.editor_metrics = None;
+            self.set_preview(None);
+        }
+    }
+
+    // Used by the runner from D10 on; drop the allow then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// The profile the preview draws; `None` closes the preview.
+    pub fn set_preview(&mut self, profile: Option<Profile>) {
+        self.preview = profile;
+        self.preview_dirty = true;
+        self.refresh_needs();
+    }
+
+    // Used by the runner from D10 on; drop the allow then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// The preview process's state. Going off by itself means the user
+    /// closed its window: the preview ends rather than restarting.
+    pub fn on_preview_host(&mut self, state: HostState) {
+        if state == HostState::Off && self.preview_host != HostState::Off && self.preview.is_some()
+        {
+            self.set_preview(None);
+        }
+        self.preview_host = state;
     }
 
     /// «Retry»: restarts a frame engine that failed or was denied, and an
@@ -445,6 +534,7 @@ impl Controller {
     pub fn step(&mut self, now_ms: u64) -> Outputs {
         let mut out = Outputs {
             want_process: self.settings.overlay.enabled,
+            want_preview: self.preview.is_some(),
             retry_host: std::mem::take(&mut self.retry_host),
             ..Outputs::default()
         };
@@ -454,7 +544,15 @@ impl Controller {
         self.step_resend(&config, now_ms, &mut out);
         self.step_track(&mut out);
         self.refresh_profile();
-        self.step_overlay(&config, now_ms, &mut out);
+        if self.target.is_none() {
+            if let Some(feed) = &mut self.editor {
+                feed.advance(now_ms as f64 / 1_000.0);
+            }
+        }
+        self.step_overlay();
+        self.step_overlay_messages(&mut out);
+        self.step_preview(&mut out);
+        self.step_data(&config, now_ms, &mut out);
         out.toast = self.toast();
         let mode = self.target.as_ref().and_then(|t| {
             self.processes
@@ -478,12 +576,8 @@ impl Controller {
             let readout = self.readout(config.track_gpu);
             out.diagnostics_line = Some(self.line(&readout));
         }
-        let plan_changed = self
-            .sent_plan
-            .as_ref()
-            .is_none_or(|p| p.wanted != self.shown || p.used != self.used);
-        if plan_changed {
-            let plan = self.values_plan();
+        let plan = self.values_plan();
+        if self.sent_plan.as_ref() != Some(&plan) {
             self.sent_plan = Some(plan.clone());
             out.values_plan = Some(plan);
         }
@@ -494,8 +588,27 @@ impl Controller {
     pub fn values_plan(&self) -> ValuesPlan {
         ValuesPlan {
             used: self.used.clone(),
-            wanted: self.shown,
+            wanted: self.shown || self.preview_running() || self.editor.is_some(),
         }
+    }
+
+    fn preview_running(&self) -> bool {
+        self.preview.is_some() && self.preview_host == HostState::Running
+    }
+
+    /// The editor's synthetic frames, used while there is no target.
+    fn synthetic(&self) -> Option<&SyntheticFeed> {
+        self.editor.as_ref().filter(|_| self.target.is_none())
+    }
+
+    /// The frames the overlay, the preview and the canvas show.
+    fn frames_source(&self) -> &FrameWindow {
+        self.synthetic().map_or(&self.window, SyntheticFeed::window)
+    }
+
+    fn reset_times(&mut self) {
+        self.swapchain = None;
+        self.times_after_s = f64::NEG_INFINITY;
     }
 
     /// `Values` for one sampler tick, under the plan of the last step. The
@@ -543,6 +656,7 @@ impl Controller {
             diagnostics: self.catalog.diagnostics.clone(),
             hidden_by_user: self.hidden_by_user,
             hotkeys: self.hotkeys.clone(),
+            preview: self.preview.is_some(),
         }
     }
 
@@ -730,10 +844,13 @@ impl Controller {
         self.tracked = target
             .as_ref()
             .and_then(|t| self.foreground.filter(|fg| fg.pid == t.pid));
+        // A synthetic run starts afresh, without a gap in its window.
+        if target.is_none() && self.editor.is_some() {
+            self.editor = Some(SyntheticFeed::new());
+        }
         self.target = target;
         self.window.clear();
-        self.swapchain = None;
-        self.times_after_s = f64::NEG_INFINITY;
+        self.reset_times();
         self.choice = None;
         self.choice_dirty = true;
         self.sent_present_mode = None;
@@ -782,8 +899,16 @@ impl Controller {
         {
             return;
         }
-        self.lows = low_windows(&profile);
-        self.used = used_sensors(&profile);
+        self.active = Some((id, profile));
+        self.profile_dirty = true;
+        self.refresh_needs();
+    }
+
+    /// The sensors and lows windows of the active and the preview profiles,
+    /// and the frame window long enough for them.
+    fn refresh_needs(&mut self) {
+        let profiles = self.active.iter().map(|(_, p)| p).chain(&self.preview);
+        (self.used, self.lows) = union_needs(profiles);
         let window_s = self
             .lows
             .iter()
@@ -799,8 +924,6 @@ impl Controller {
             self.window = window;
             self.window_s = window_s;
         }
-        self.active = Some((id, profile));
-        self.profile_dirty = true;
     }
 
     /// Where the overlay shows, if it does (DP9–DP11).
@@ -842,8 +965,8 @@ impl Controller {
         self.settings.overlay.blocked_games.contains(&exe)
     }
 
-    /// `SetProfile`, `SetPlacement` and the data, while the overlay runs.
-    fn step_overlay(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
+    /// Whether the overlay shows, and a fresh start for a new process.
+    fn step_overlay(&mut self) {
         let running = self.host == HostState::Running;
         if running && !self.was_running {
             // A new overlay process knows nothing yet.
@@ -855,9 +978,18 @@ impl Controller {
             self.times_sent_ms = None;
         }
         self.was_running = running;
-        let placement = self.placement();
-        self.shown = placement.is_some();
-        if !running {
+        let was_shown = self.shown;
+        self.shown = self.placement().is_some();
+        if self.shown && !was_shown {
+            // Shown again: its data at once.
+            self.metrics_sent_ms = None;
+            self.times_sent_ms = None;
+        }
+    }
+
+    /// `SetProfile` and `SetPlacement`, while the overlay runs.
+    fn step_overlay_messages(&mut self, out: &mut Outputs) {
+        if self.host != HostState::Running {
             return;
         }
         if std::mem::take(&mut self.profile_dirty) {
@@ -869,6 +1001,7 @@ impl Controller {
                 }
             }
         }
+        let placement = self.placement();
         if self.sent_placement != Some(placement) {
             self.sent_placement = Some(placement);
             out.overlay.push(OverlayMessage::SetPlacement(SetPlacement {
@@ -876,41 +1009,106 @@ impl Controller {
                 dpi: placement.map_or(DEFAULT_DPI, |(_, dpi)| dpi),
             }));
         }
-        if !self.shown {
+    }
+
+    /// The preview's `SetProfile`, while it runs; it ignores placements.
+    fn step_preview(&mut self, out: &mut Outputs) {
+        let running = self.preview_running();
+        if running && !self.preview_was_running {
+            self.sent_preview = None;
+            self.preview_dirty = true;
+        }
+        self.preview_was_running = running;
+        if !running || !std::mem::take(&mut self.preview_dirty) {
+            return;
+        }
+        if let Some(profile) = &self.preview {
+            let msg = set_profile(PREVIEW_ID, profile, &self.schema, &self.settings, self.lang);
+            if self.sent_preview.as_ref() != Some(&msg) {
+                self.sent_preview = Some(msg.clone());
+                out.preview.push(msg);
+            }
+        }
+    }
+
+    /// `FrameMetrics` at `textHz` and `FrameTimes` at 10 Hz, computed once
+    /// for the overlay (while shown), the preview (while it runs) and the
+    /// editor (while open).
+    fn step_data(&mut self, config: &FramesConfigure, now_ms: u64, out: &mut Outputs) {
+        let (shown, preview) = (self.shown, self.preview_running());
+        let editor = self.editor.is_some();
+        if !shown && !preview && !editor {
             self.metrics_sent_ms = None;
             self.times_sent_ms = None;
             return;
         }
+        let send = |msg: &OverlayMessage, out: &mut Outputs| {
+            if shown {
+                out.overlay.push(msg.clone());
+            }
+            if preview {
+                out.preview.push(msg.clone());
+            }
+        };
         let text_ms = 1_000 / u64::from(self.settings.overlay.text_hz.max(1));
+        let mut editor_due = false;
         if self
             .metrics_sent_ms
             .is_none_or(|t| now_ms.saturating_sub(t) >= text_ms)
         {
             self.metrics_sent_ms = Some(now_ms);
-            let msg = if self.connected {
-                let readout = self.readout(config.track_gpu);
-                metrics_message(Some(&readout), self.frames_state())
-            } else {
-                metrics_message(None, FRAMES_UNAVAILABLE)
-            };
-            out.overlay.push(msg);
+            let msg = self.metrics_now(config.track_gpu);
+            send(&msg, out);
+            if let (true, OverlayMessage::FrameMetrics(m)) = (editor, msg) {
+                self.editor_metrics = Some(m);
+                editor_due = true;
+            }
         }
+        let mut frame_times = Vec::new();
         if self
             .times_sent_ms
             .is_none_or(|t| now_ms.saturating_sub(t) >= FRAME_TIMES_MS)
         {
             self.times_sent_ms = Some(now_ms);
-            if self.swapchain.is_none() {
-                self.swapchain = pick_swapchain(&self.window.last(LOWS_WINDOW_S));
-            }
-            let (msg, newest) = frame_times_since(&self.window, self.swapchain, self.times_after_s);
+            let swapchain = self
+                .swapchain
+                .or_else(|| pick_swapchain(&self.frames_source().last(LOWS_WINDOW_S)));
+            self.swapchain = swapchain;
+            let (msg, newest) =
+                frame_times_since(self.frames_source(), swapchain, self.times_after_s);
             self.times_after_s = newest;
-            if matches!(&msg, OverlayMessage::FrameTimes(t) if !t.frames.is_empty()) {
-                out.overlay.push(msg);
+            if let OverlayMessage::FrameTimes(t) = &msg {
+                if !t.frames.is_empty() {
+                    send(&msg, out);
+                    if editor {
+                        frame_times.clone_from(&t.frames);
+                    }
+                }
             }
+        }
+        if editor_due || !frame_times.is_empty() {
+            out.editor_data = self.editor_metrics.clone().map(|metrics| EditorData {
+                metrics,
+                frame_times,
+            });
         }
     }
 
+    /// `FrameMetrics` now: of the synthetic frames, the target's, or empty
+    /// without the service.
+    fn metrics_now(&mut self, track_gpu: bool) -> OverlayMessage {
+        if let Some(feed) = self.synthetic() {
+            // Every metric of the made-up game shows, the bottleneck too.
+            let readout = read(feed.window(), &self.lows, true);
+            return metrics_message(Some(&readout), frames_state::RUNNING);
+        }
+        if self.connected {
+            let readout = self.readout(track_gpu);
+            metrics_message(Some(&readout), self.frames_state())
+        } else {
+            metrics_message(None, FRAMES_UNAVAILABLE)
+        }
+    }
     /// A note when the foreground window or its standing in the service's
     /// list changed; the FPS value alone does not count.
     fn foreground_note(&mut self) -> Option<ForegroundNote> {
@@ -994,7 +1192,7 @@ fn new_picker(own_pid: u32) -> TargetPicker {
 mod tests {
     use super::*;
     use oma_core::model::{Label, Sensor, SensorKind, Source as SensorSource, Unit};
-    use oma_ipc::overlay::{FrameMetrics, FrameTimes, SetProfile, Values};
+    use oma_ipc::overlay::{FrameTimes, SetProfile, Values};
     use oma_ipc::{PresentingProcess, WireFrame};
 
     use super::super::profiles::load_catalog;
@@ -2176,6 +2374,275 @@ mod tests {
         let line = d.step(1_000).diagnostics_line.unwrap();
         assert_eq!(field(&line, "fps"), "-");
         assert_eq!(field(&line, "dropped"), "1");
+    }
+
+    /// A profile with a text block on `sensor`.
+    fn sensor_profile(sensor: &str) -> Profile {
+        oma_core::overlay::parse_profile(
+            &serde_json::json!({ "format": 1, "name": "p", "blocks": [{
+                "id": "a", "rect": { "x": 0, "y": 0, "w": 4, "h": 2 },
+                "source": { "sensor": sensor }, "kind": "text"
+            }] })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn preview_profiles(out: &Outputs) -> Vec<SetProfile> {
+        out.preview
+            .iter()
+            .filter_map(|m| match m {
+                OverlayMessage::SetProfile(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn data_of(messages: &[OverlayMessage]) -> Vec<OverlayMessage> {
+        messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    OverlayMessage::FrameMetrics(_) | OverlayMessage::FrameTimes(_)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn editor_without_target_gets_synthetic_running_metrics() {
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        c.on_catalog(builtins());
+        c.on_service(true);
+        c.on_editor(true);
+        let out = c.step(60_000);
+        assert!(out.link.is_empty(), "the frame engine stays off");
+        assert!(out.overlay.is_empty());
+        assert_eq!(out.status.unwrap().frames, frames_state::OFF);
+        let data = out.editor_data.expect("editor data at once");
+        assert_eq!(data.metrics.state, frames_state::RUNNING);
+        let fps = data.metrics.fps_displayed.expect("displayed FPS");
+        assert!((fps - 144.0).abs() < 5.0, "{fps}");
+        assert_eq!(data.metrics.fg_multiplier.map(f64::round), Some(2.0));
+        assert!(!data.frame_times.is_empty());
+        // Frame times at 10 Hz (new ones only), metrics at textHz (2 Hz).
+        let (mut with_metrics, mut with_times) = (0, 0);
+        for i in 1..=20 {
+            if let Some(d) = c.step(60_000 + i * 100).editor_data {
+                with_metrics += 1;
+                with_times += usize::from(!d.frame_times.is_empty());
+            }
+        }
+        assert!(
+            with_metrics >= 4 && with_times >= 2,
+            "{with_metrics} {with_times}"
+        );
+        // The in-game overlay never gets synthetic frames.
+        c.on_settings(&settings(true), Lang::En, None);
+        c.on_host(HostState::Running);
+        for now in [63_000, 63_500, 64_000] {
+            let out = c.step(now);
+            assert!(data_of(&out.overlay).is_empty(), "{now}");
+            assert!(out.editor_data.is_some(), "{now}");
+        }
+    }
+
+    #[test]
+    fn editor_with_target_gets_the_target_metrics() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 101, 0)],
+        );
+        let out = c.step(600);
+        let data = out.editor_data.clone().expect("editor data");
+        assert_eq!(data.metrics.state, "running");
+        assert_eq!(data.metrics.fps_displayed, Some(100.0));
+        assert_eq!(data.frame_times.len(), 101);
+        assert!((data.frame_times[0].t_s - 5.0).abs() < 1e-6);
+        // The overlay gets the same data.
+        assert_eq!(metrics(&out), vec![data.metrics]);
+    }
+
+    #[test]
+    fn editor_closed_sends_no_editor_data() {
+        let mut c = showing();
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 50, 0)],
+        );
+        for now in [200, 600, 1_100] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+        c.on_editor(true);
+        assert!(c.step(1_600).editor_data.is_some());
+        c.on_editor(false);
+        for now in [1_700, 2_200, 3_000] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+        // Without a target either.
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&settings(false), Lang::En, None);
+        for now in [0, 5_000, 10_000] {
+            assert!(c.step(now).editor_data.is_none());
+        }
+    }
+
+    #[test]
+    fn preview_does_not_change_the_in_game_overlay() {
+        let (mut plain, mut with_preview) = (showing(), showing());
+        with_preview.on_editor(true);
+        with_preview.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        with_preview.on_preview_host(HostState::Running);
+        for (i, now) in [200, 300, 600, 700, 1_100, 1_600].into_iter().enumerate() {
+            let batches = [batch(GAME, 5.0 + i as f64 * 0.5, 50, 0)];
+            for c in [&mut plain, &mut with_preview] {
+                c.on_frames(Some(&status("running")), Some(&processes()), &batches);
+            }
+            let (a, b) = (plain.step(now), with_preview.step(now));
+            assert_eq!(a.overlay, b.overlay, "{now}");
+            assert!(!b.preview.is_empty() || now != 200);
+        }
+    }
+
+    #[test]
+    fn preview_gets_its_own_profile_and_shared_data() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let out = c.step(200);
+        assert!(out.want_preview);
+        assert!(out.preview.is_empty(), "nothing before the preview runs");
+        assert!(out.status.unwrap().preview);
+        c.on_preview_host(HostState::Running);
+        c.on_frames(
+            Some(&status("running")),
+            Some(&processes()),
+            &[batch(GAME, 5.0, 101, 0)],
+        );
+        let out = c.step(600);
+        let profiles = preview_profiles(&out);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].profile_id, "preview");
+        assert_eq!(profiles[0].strings["previewTitle"], "Overlay preview");
+        assert!(matches!(out.preview[0], OverlayMessage::SetProfile(_)));
+        assert!(
+            !out.preview
+                .iter()
+                .any(|m| matches!(m, OverlayMessage::SetPlacement(_))),
+            "the preview ignores placements"
+        );
+        let shared = data_of(&out.overlay);
+        assert!(!shared.is_empty());
+        assert_eq!(data_of(&out.preview), shared);
+        // Not sent again while nothing changes; again after a restart.
+        assert!(preview_profiles(&c.step(700)).is_empty());
+        c.on_preview_host(HostState::Starting);
+        assert!(c.step(800).preview.is_empty());
+        c.on_preview_host(HostState::Running);
+        assert_eq!(preview_profiles(&c.step(900)).len(), 1);
+        // Closed by the editor.
+        c.set_preview(None);
+        let out = c.step(1_000);
+        assert!(!out.want_preview && out.preview.is_empty());
+    }
+
+    /// A catalog with one user profile reading `sensor`, and its id.
+    fn catalog_with(sensor: &str) -> (ProfileCatalog, String) {
+        let dir =
+            std::env::temp_dir().join(format!("oma-controller-tests-union-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "00000000-0000-4000-8000-0000000000c1";
+        let json = serde_json::to_string(&sensor_profile(sensor)).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+        let catalog = load_catalog(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        (catalog, id.to_owned())
+    }
+
+    #[test]
+    fn values_plan_is_the_union_of_active_and_preview() {
+        let (catalog, id) = catalog_with("gpu0/temperature/core");
+        let mut s = settings(false);
+        s.overlay.default_profile = id;
+        let mut c = Controller::new(OWN, FREQ);
+        c.on_settings(&s, Lang::En, None);
+        c.on_catalog(catalog);
+        let plan = c.step(0).values_plan.unwrap();
+        assert_eq!(plan.used, vec!["gpu0/temperature/core"]);
+        assert!(!plan.wanted);
+        // The editor alone wants values.
+        c.on_editor(true);
+        assert_eq!(
+            c.step(100).values_plan,
+            Some(ValuesPlan {
+                used: vec!["gpu0/temperature/core".into()],
+                wanted: true
+            })
+        );
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        let plan = c.step(200).values_plan.unwrap();
+        assert_eq!(plan.used, vec!["cpu/0/load/total", "gpu0/temperature/core"]);
+        c.set_preview(None);
+        assert_eq!(
+            c.step(300).values_plan.unwrap().used,
+            vec!["gpu0/temperature/core"]
+        );
+        c.on_editor(false);
+        assert!(!c.step(400).values_plan.unwrap().wanted);
+    }
+
+    #[test]
+    fn preview_closed_by_the_user_is_dropped() {
+        let mut c = showing();
+        c.on_editor(true);
+        c.set_preview(Some(sensor_profile("cpu/0/load/total")));
+        // Not started yet: an `Off` is not a close.
+        c.on_preview_host(HostState::Off);
+        assert!(c.step(200).want_preview);
+        c.on_preview_host(HostState::Starting);
+        c.step(300);
+        c.on_preview_host(HostState::Running);
+        assert!(c.step(400).want_preview);
+        // The user closed the window: the host is off.
+        c.on_preview_host(HostState::Off);
+        let out = c.step(500);
+        assert!(!out.want_preview);
+        assert!(out.preview.is_empty());
+        assert!(!out.status.unwrap().preview);
+        assert!(!c.step(600).want_preview, "not restarted");
+    }
+
+    #[test]
+    fn use_now_lasts_until_target_change() {
+        let mut c = showing();
+        c.use_now("builtin-bar".into());
+        assert_eq!(profiles_sent(&c.step(200)), vec!["builtin-bar"]);
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-bar")
+        );
+        // A short alt-tab keeps it.
+        c.on_foreground(BROWSER_FG);
+        assert!(profiles_sent(&c.step(300)).is_empty());
+        c.on_foreground(GAME_FG);
+        assert!(profiles_sent(&c.step(400)).is_empty());
+        // Another game: the settings' profile again.
+        c.on_frames(Some(&status("running")), Some(&other_only()), &[]);
+        c.on_foreground(Foreground {
+            pid: OTHER,
+            hwnd: 0x2000,
+        });
+        let out = c.step(500);
+        assert_eq!(targets(&out), vec![Some(OTHER)]);
+        assert_eq!(profiles_sent(&out), vec!["builtin-gaming"]);
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub const RUST_KEYS: &[&str] = &[
     "flag.off",
     "overlay.text.sensorAbsent",
     "overlay.text.fgSuspected",
+    "overlay.text.previewTitle",
     "overlay.text.bound.gpu",
     "overlay.text.bound.cpu",
     "overlay.text.metric.fps-displayed",

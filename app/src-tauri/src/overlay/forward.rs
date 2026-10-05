@@ -79,6 +79,25 @@ pub fn low_windows(profile: &Profile) -> Vec<(u32, LowDefinition)> {
     out
 }
 
+/// The sensors and lows windows of several profiles together (the active
+/// one and the preview): sensors unique and sorted, lows unique and within
+/// the limit [`low_windows`] keeps.
+pub fn union_needs<'a>(
+    profiles: impl IntoIterator<Item = &'a Profile>,
+) -> (Vec<String>, Vec<(u32, LowDefinition)>) {
+    let mut used = BTreeSet::new();
+    let mut lows: Vec<(u32, LowDefinition)> = Vec::new();
+    for p in profiles {
+        used.extend(used_sensors(p));
+        for pair in low_windows(p) {
+            if !lows.contains(&pair) && lows.len() < MAX_LOWS - 1 {
+                lows.push(pair);
+            }
+        }
+    }
+    (used.into_iter().collect(), lows)
+}
+
 /// Translated label and unit of each `used` sensor present in `schema`.
 pub fn sensor_infos(schema: &Schema, used: &[String], lang: Lang) -> Vec<SensorInfo> {
     used.iter()
@@ -108,7 +127,13 @@ fn serde_name<T: serde::Serialize>(v: T) -> String {
 pub fn overlay_strings(lang: Lang) -> BTreeMap<String, String> {
     let text = |key: &str| t(lang, &format!("overlay.text.{key}"), &[]);
     let mut out = BTreeMap::new();
-    for key in ["sensorAbsent", "fgSuspected", "bound.gpu", "bound.cpu"] {
+    for key in [
+        "sensorAbsent",
+        "fgSuspected",
+        "bound.gpu",
+        "bound.cpu",
+        "previewTitle",
+    ] {
         out.insert(key.to_owned(), text(key));
     }
     for key in ["low.integral", "low.percentile"] {
@@ -304,6 +329,8 @@ mod tests {
         "flag.off",
         "low.integral",
         "low.percentile",
+        // The preview window's title (`--preview`).
+        "previewTitle",
     ];
 
     fn profile(blocks: serde_json::Value) -> Profile {

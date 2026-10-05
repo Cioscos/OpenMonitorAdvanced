@@ -458,6 +458,7 @@
   "flag.off": "No",
   "overlay.text.sensorAbsent": "sensor missing",
   "overlay.text.fgSuspected": "FG?",
+  "overlay.text.previewTitle": "Overlay preview",
   "overlay.text.bound.gpu": "GPU",
   "overlay.text.bound.cpu": "CPU",
   "overlay.text.metric.fps-displayed": "FPS",

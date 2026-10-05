@@ -9,6 +9,8 @@
 #[cfg(windows)]
 pub mod controller;
 pub mod editor;
+#[cfg(windows)]
+pub mod editor_feed;
 pub mod forward;
 pub mod frames;
 pub mod host;

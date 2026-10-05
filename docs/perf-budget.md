@@ -313,6 +313,17 @@ l'overlay è spento; da nascosto il processo resta in esecuzione). `oma-overlay`
 | Overlay visibile in gioco, profilo «Gaming», grafici a 30 FPS | `oma-overlay` + PresentMon + il lavoro in più di app e servizio < 1% della CPU totale; `oma-overlay` < 40 MB | PresentMon fino allo 0,05% (GoW a 148 righe/s, come SYSTEM), 5,5 MB; lettura del CSV e svuotamento stimati dallo 0,04% allo 0,1% (sonda dello spike) |
 | Editor aperto | come la finestra principale (< 200 MB con WebView2) | — |
 
+**Memoria dell'overlay e GPU (verifica W8, 2026-10-05).** La memoria privata
+di `oma-overlay` è quasi tutta del driver grafico: un dispositivo D3D11 sulla
+RTX 4080 costa da solo circa 51 MB (con qualunque opzione di creazione), sulla
+GPU integrata AMD 21–26 MB, con WARP 1,3 MB; Direct2D, DirectComposition e il
+disegno aggiungono circa 2 MB. Per scelta dell'utente l'overlay disegna sulla
+GPU integrata quando c'è (DWM compone la superficie fra le due GPU) e
+altrimenti sulla GPU predefinita: **su un PC senza GPU integrata l'overlay
+visibile resta intorno ai 57–65 MB, sopra il limite di 40 MB.** WARP starebbe
+nel limite ovunque (circa 7 MB, CPU quasi uguale a 30 FPS su una finestra di
+320×200: 0,25% contro 0,23%), ma non è stato scelto.
+
 Misure della M7c, da compilare nel task C20 (release, stessa macchina):
 
 | Stato | `oma-overlay` CPU % | `oma-overlay` MB privati | PresentMon CPU % | Lavoro in più di app e servizio | Esito |

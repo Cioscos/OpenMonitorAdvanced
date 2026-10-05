@@ -13,9 +13,9 @@
 //! - **Target:** a [`TargetPicker`] over the presenting processes and the
 //!   foreground PID. A new target activates `gameProfiles[exe]`, else
 //!   `defaultProfile`, and ends a `next_profile` choice.
-//!   Without frame data (service down or incompatible, engine not running)
-//!   the target is kept while its window exists, and a foreground process
-//!   whose last known name has a `gameProfiles` entry can become one, so
+//!   Without frame data (service down or incompatible, engine starting or
+//!   not running) the target is kept while its window exists, and a
+//!   foreground process whose last known name has a `gameProfiles` entry can become one, so
 //!   sensor blocks keep working (spec §9).
 //! - **Visibility (DP9–DP11):** the overlay shows only while it is on, its
 //!   process runs, the target's window is the foreground one, visible and
@@ -618,8 +618,8 @@ impl Controller {
         }
     }
 
-    /// Without frame data (service down or incompatible, engine not
-    /// running) sensor blocks must keep working (spec §9): the target is
+    /// Without frame data (service down or incompatible, engine starting
+    /// or not running) sensor blocks must keep working (spec §9): the target is
     /// kept, without the grace limit, while its window exists; without one,
     /// the foreground process becomes the target if its name, known from the
     /// last process list, has a profile in `gameProfiles`. Without any list
@@ -658,12 +658,11 @@ impl Controller {
         self.sent_track.is_some() && !(self.geometry_seen && self.geometry.is_none())
     }
 
-    /// The frame engine gives data (or is about to).
+    /// The frame engine gives data. While it starts (after a reconnection
+    /// it may take long) its lists are empty, so the target is held rather
+    /// than dropped after the picker's grace.
     fn frames_available(&self) -> bool {
-        matches!(
-            self.frames_state(),
-            frames_state::RUNNING | frames_state::STARTING
-        )
+        self.frames_state() == frames_state::RUNNING
     }
 
     fn set_target(&mut self, target: Option<ProcessInfo>) {
@@ -1709,6 +1708,39 @@ mod tests {
         let out = c.step(30_200);
         assert!(targets(&out).iter().all(|t| *t == Some(GAME)));
         assert!(profiles_sent(&out).is_empty(), "the choice survives");
+        assert_eq!(
+            c.current_status().active_profile.as_deref(),
+            Some("builtin-full")
+        );
+    }
+
+    #[test]
+    fn reconnection_keeps_the_target_while_the_engine_starts() {
+        let mut c = showing();
+        c.next_profile();
+        c.step(200);
+        c.on_service(false);
+        c.on_frames(None, None, &[]);
+        c.step(1_000);
+        // Back, the engine `starting` (it may take long) with empty lists:
+        // nothing changes, past the picker's grace too.
+        c.on_service(true);
+        let empty = PresentingProcesses {
+            at_qpc: 0,
+            processes: vec![],
+        };
+        for now in [5_000, 6_000, 9_000, 15_000] {
+            c.on_frames(Some(&status("starting")), Some(&empty), &[]);
+            let out = c.step(now);
+            assert!(targets(&out).iter().all(|t| *t == Some(GAME)), "{now}");
+            assert!(placements(&out).is_empty(), "{now}: still shown");
+        }
+        assert_eq!(c.current_status().target.map(|t| t.pid), Some(GAME));
+        // Running: the same game, the choice kept.
+        c.on_frames(Some(&status("running")), Some(&processes()), &[]);
+        let out = c.step(15_100);
+        assert!(targets(&out).iter().all(|t| *t == Some(GAME)), "{out:?}");
+        assert!(placements(&out).is_empty());
         assert_eq!(
             c.current_status().active_profile.as_deref(),
             Some("builtin-full")

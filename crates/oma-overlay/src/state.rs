@@ -30,6 +30,15 @@ impl Changes {
     pub fn any(&self) -> bool {
         self.layout || self.text || self.charts || self.placement || self.settings
     }
+
+    /// Adds the changes of a later message (a drained burst of messages).
+    pub fn merge(&mut self, other: Changes) {
+        self.layout |= other.layout;
+        self.text |= other.text;
+        self.charts |= other.charts;
+        self.placement |= other.placement;
+        self.settings |= other.settings;
+    }
 }
 
 /// A source that can have a ring: a sensor or a numeric frame metric.

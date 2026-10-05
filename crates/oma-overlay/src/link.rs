@@ -15,6 +15,9 @@ pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_CONNECT: i32 = 2;
 /// The app speaks another overlay protocol version.
 pub const EXIT_INCOMPATIBLE: i32 = 3;
+/// The window or its drawing surface failed three frames in a row (device
+/// lost, C11); the app restarts the overlay.
+pub const EXIT_DEVICE_LOST: i32 = 4;
 
 /// What the link hands to the window.
 #[derive(Debug)]

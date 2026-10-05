@@ -247,19 +247,28 @@ Open: after the setup rebuild, extend the real-lister test in `scripts/tests/Ver
 
 Known, by design: a service that crashes (or is killed) leaves the `OpenMonitorAdvanced-Frames` ETW session running, with PresentMon's buffers (up to 1024 × 64 KB), until the next service start (which stops it by name) or the uninstall (`logman stop OpenMonitorAdvanced-Frames -ets`).
 
-The five items «Before M7c» from the review of the M7b branch are closed: see "Closed in M7c".
+The five "Before M7c" items from the review of the M7b branch are closed: see "Closed in M7c".
 
 ## Open: overlay (M7c)
 
-Voci aperte dalle revisioni della M7c (piano `docs/superpowers/plans/` M7c, task C1–C19).
+Items left open by the M7c reviews (plan `docs/superpowers/plans/` M7c, tasks C1-C19).
 
-- Il client dell'overlay potrebbe controllare anche lui il PID del server della pipe contro quello del processo padre (`GetNamedPipeServerProcessId`), simmetrico al controllo dell'app sul figlio. `crates/oma-overlay/src/link.rs`; quando si tocca.
-- Passaggio della pipe in caso di riuso del PID da parte di un processo dello stesso utente (revisione di sicurezza C8, M1): l'utente stesso è fuori dal modello di minaccia e i dati sono solo sensori e profili; da irrobustire con un nonce passato sullo stdin del figlio. `app/src-tauri/src/overlay/host.rs`; prima della 1.0.
-- Blocchi `meter` e `gauge` con il fondo scala automatico: il picco non decade mai, quindi dopo un picco isolato la scala resta larga. `crates/oma-overlay/src/render/`; con l'editor (M7d).
-- Costo degli eventi `EVENT_OBJECT_LOCATIONCHANGE` seguiti per la finestra del gioco: da misurare nella verifica dal vivo W8 (budget del §11), con un gioco che sposta o ridimensiona la finestra. `crates/oma-win` (foreground), task C20.
-- Stato dei frame `starting` sul desktop senza gioco: da verificare dal vivo che non resti `starting` quando PresentMon gira ma nessun processo presenta. App (`overlay/controller.rs`) e servizio (`FrameCapture`); task C20.
-- `FrameReadout::read()` con finestre dei low fino a 300 s chieste dal profilo: il costo per tick su finestre lunghe è da misurare (nessun profilo integrato le usa). `crates/oma-core/src/frames/readout.rs`; con l'editor (M7d), che permette di sceglierle.
-- UI dell'overlay: gli errori di «Riprova» e di «Ricarica i profili» vengono ignorati senza messaggio. `app/src/components/settings/OverlaySection.svelte`; quando si tocca.
+- The overlay client could also check the pipe server's PID against its parent process (`GetNamedPipeServerProcessId`), mirroring the app's check on the child. `crates/oma-overlay/src/link.rs`; when touched.
+- Pipe handoff when a process of the same user reuses the child's PID (C8 security review, M1): the user is outside the threat model and the data are only sensors and profiles; harden it with a nonce passed on the child's stdin. `app/src-tauri/src/overlay/host.rs`; before 1.0.
+- `meter` and `gauge` blocks with an automatic full scale: the peak never decays, so after a single spike the scale stays wide. `crates/oma-overlay/src/render/`; with the editor (M7d).
+- Cost of the `EVENT_OBJECT_LOCATIONCHANGE` events followed for the game window: to measure in live check W8 (spec M7 §11 budget) with a game that moves or resizes its window. `crates/oma-win` (foreground); task C20.
+- Frame state `starting` on an idle desktop: check live that it does not stay `starting` while PresentMon runs and nothing presents. App (`overlay/controller.rs`) and service (`FrameCapture`); task C20.
+- `FrameReadout::read()` with low windows of up to 300 s requested by a profile: the per-tick cost on long windows is unmeasured (no built-in profile uses them). `crates/oma-core/src/frames/readout.rs`; with the editor (M7d), which lets users pick them.
+- Overlay settings UI: errors from *Try again* and *Reload profiles* are swallowed without a message. `app/src/components/settings/OverlaySection.svelte`; when touched.
+
+## Manual checks owed after M7c
+
+The overlay's installer paths, on a setup built with C19 (in a VM or Windows Sandbox, or by the user; never by an agent on this PC):
+
+- Fresh install: `C:\Program Files\OpenMonitor Advanced\oma-overlay.exe` present, with the product name and version in its properties.
+- Upgrade over a running app with the overlay visible over a game: the setup stops the overlay (`OMA_STOP_OVERLAY` in `OmaCloseApp`), copies the new one without a Retry/Ignore prompt, and the reopened app starts it again.
+- Uninstall: `oma-overlay.exe` is removed (or scheduled for removal at the next restart if it was locked); with the service stop failing, no file is deleted, the overlay included.
+- `scripts/verify-signatures.ps1 -Policy none` on the new setup: exactly one `oma-overlay.exe`, with the collect-pass hash and the product metadata.
 
 ## Manual checks after M7a
 
@@ -328,10 +337,9 @@ To settle on the first signed run (deferred from the M6a reviews):
 
 ## Closed in M7c
 
-- Hub dei frame inattivo senza sessioni abilitate (niente timer né riepiloghi vuoti con `Enabled=false`) e backlog limitato delle righe oltre le 512 per tick invece di contarle in `Dropped`: task C1 (`e6c2859`).
-- Mediana dello stutter incrementale invece che ricalcolata per ogni finestra, e controlli d'ingresso di `oma_core::frames::synthetic()` (FPS, fattori e semi fuori intervallo): task C2 (`4572f04`).
-- «Riprova» dopo `failed` (`crashing`): il controller dell'overlay manda `enabled: false` e poi `enabled: true` (test `retry_after_failed_sends_disabled_then_enabled`): task C15 (`200f5e9`).
-- `oma-overlay.exe` nel payload, nell'installer, nella firma (quattro file firmati, `sign-shim.ps1 -Mode register-payload`) e in `measure-footprint.ps1`: task C19.
+- Frame hub idle when no session is enabled (no timers and no empty summaries with `Enabled=false`), and a bounded backlog for the rows beyond 512 per tick instead of counting them in `Dropped`: task C1 (`e6c2859`).
+- Stutter median computed incrementally instead of from scratch for each window, and input guards in `oma_core::frames::synthetic()` (FPS, factors and seeds out of range): task C2 (`4572f04`).
+- *Try again* after `failed` (`crashing`): the overlay controller sends `enabled: false` and then `enabled: true` (test `retry_after_failed_sends_disabled_then_enabled`): task C15 (`200f5e9`).
 
 ## Closed in M7a
 

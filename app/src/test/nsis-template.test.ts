@@ -731,16 +731,35 @@ describe('oma.nsh failure paths', () => {
     expect(post.slice(1, 1 + OVERLAY_COPY.length)).toEqual(OVERLAY_COPY);
     expect(all.filter((s) => /^File .*OMA_OVERLAY_EXE/.test(s))).toHaveLength(1);
 
+    // Uninstall: with the other files, after the service stop and removal and their checks,
+    // so a failure there still deletes nothing («No files were deleted»).
     const hook = block(all, /^!macro NSIS_HOOK_PREUNINSTALL$/, /^!macroend$/);
-    const del = hook.indexOf('Delete "$INSTDIR\\${OMA_OVERLAY_EXE}"');
-    expect(del).toBeGreaterThan(indexOf(hook, /^!insertmacro OMA_UN_CHECK_APP /));
-    expect(hook.slice(del - 1, del + 5)).toEqual([
-      'ClearErrors',
-      'Delete "$INSTDIR\\${OMA_OVERLAY_EXE}"',
-      '${If} ${Errors}',
-      'Sleep 1000',
-      'Delete "$INSTDIR\\${OMA_OVERLAY_EXE}"',
+    const del = hook.indexOf('Delete /REBOOTOK "$INSTDIR\\${OMA_OVERLAY_EXE}"');
+    expect(hook.filter((s) => /OMA_OVERLAY_EXE/.test(s))).toEqual([hook[del]]);
+    expect(hook[del - 1]).toBe('!insertmacro OMA_STOP_OVERLAY');
+    expect(hook[del + 1]).toBe('Delete "$INSTDIR\\service\\${OMA_SERVICE_EXE}"');
+    const lastFail = hook.reduce((at, s, i) => (FAIL.test(s) ? i : at), -1);
+    expect(lastFail).toBeGreaterThan(indexOf(hook, STOP));
+    expect(del).toBeGreaterThan(lastFail);
+    expect(del).toBeGreaterThan(indexOf(hook, HELPER));
+
+    // Upgrade: OmaCloseApp stops a running overlay on every path (after the label all paths
+    // reach), before the Install section copies the new one.
+    const close = block(all, /^Function OmaCloseApp$/, /^FunctionEnd$/);
+    expect(close[close.indexOf('oma_close_done:') + 1]).toBe('!insertmacro OMA_STOP_OVERLAY');
+    const stop = block(all, /^!macro OMA_STOP_OVERLAY$/, /^!macroend$/);
+    expect(stop).toEqual([
+      '!macro OMA_STOP_OVERLAY',
+      'Push $0',
+      'nsis_tauri_utils::FindProcess "${OMA_OVERLAY_EXE}"',
+      'Pop $0',
+      '${If} $0 = 0',
+      'nsis_tauri_utils::KillProcess "${OMA_OVERLAY_EXE}"',
+      'Pop $0',
+      'Sleep 500',
       '${EndIf}',
+      'Pop $0',
+      '!macroend',
     ]);
 
     const strings = block(all, /^!macro OMA_LANGSTRINGS$/, /^!macroend$/);
@@ -879,7 +898,16 @@ describe('closing and reopening the app around an upgrade', () => {
     // Every plugin result is popped into $0; the three saved registers come back in reverse order.
     expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
     // ClearErrors after the label: a missing DisplayVersion or Run value leaves no error flag behind.
-    expect(fn.slice(-6)).toEqual(['oma_close_done:', 'ClearErrors', 'Pop $2', 'Pop $1', 'Pop $0', 'FunctionEnd']);
+    // OMA_STOP_OVERLAY saves and restores $0 itself.
+    expect(fn.slice(-7)).toEqual([
+      'oma_close_done:',
+      '!insertmacro OMA_STOP_OVERLAY',
+      'ClearErrors',
+      'Pop $2',
+      'Pop $1',
+      'Pop $0',
+      'FunctionEnd',
+    ]);
     expect(fn.join('\n')).not.toMatch(/\$R\d/);
   });
 

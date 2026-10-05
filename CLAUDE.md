@@ -45,7 +45,7 @@ pwsh scripts/check-version.ps1 [-Tag vX.Y.Z] # le cinque versioni e Cargo.lock c
 pwsh scripts/bump-version.ps1 X.Y.Z          # aggiorna le cinque versioni e Cargo.lock; non fa commit né tag, stampa i comandi
 pwsh scripts/generate-licenses.ps1 [-Check]  # rigenera THIRD_PARTY_LICENSES.txt (con -Check: fallisce se non è aggiornato, come in CI); serve cargo-about 0.9.2
 Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester -Path scripts/tests -ExcludeTagFilter Integration -CI   # test degli script (Pester 5.7.1)
-cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, servizio, PawnIO e PresentMon
+cd app && pnpm tauri build --bundles nsis    # installer NSIS con app, overlay, servizio, PawnIO e PresentMon
 $env:OMA_FRAMES_DEBUG='1'                     # (o 'pcl', o 'all') prima di avviare l'app: diagnostica dei frame, una riga `frames:` al secondo nel log dell'app
 ```
 

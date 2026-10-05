@@ -442,8 +442,8 @@ FunctionEnd
 
 ; Tauri hook: end of the template's Install section, after the reinstall page
 ; ran the old uninstaller (if it did) and after NSIS_HOOK_PREINSTALL.
-; First the overlay process (M7c, plan DP7), next to the app: the app was closed
-; before (OmaCloseApp), and the overlay exits as soon as the app's pipe closes.
+; First the overlay process (M7c, plan DP7), next to the app: OmaCloseApp closed
+; the app and stopped any running overlay before.
 ; A failed copy (a locked file the user chose to ignore) ends the install, since
 ; the app would start an old or missing overlay.
 ; Then the start-with-Windows value: the old uninstaller runs without /UPDATE,
@@ -474,6 +474,22 @@ FunctionEnd
 ; /S, /P and the reinstalls that skip the uninstaller; only the first call acts.
 !macro OMA_CLOSE_APP
   Call OmaCloseApp
+!macroend
+
+; Stops every running oma-overlay.exe (M7c), for any user, like the app itself
+; in OmaCloseApp. The overlay exits by itself once the app's pipe closes; this
+; makes the copy over it (and its deletion) deterministic even if one is stuck.
+; Registers preserved.
+!macro OMA_STOP_OVERLAY
+  Push $0
+  nsis_tauri_utils::FindProcess "${OMA_OVERLAY_EXE}"
+  Pop $0
+  ${If} $0 = 0
+    nsis_tauri_utils::KillProcess "${OMA_OVERLAY_EXE}"
+    Pop $0
+    Sleep 500
+  ${EndIf}
+  Pop $0
 !macroend
 
 ; Starts an exe de-elevated in the interactive user's session, without waiting.
@@ -895,6 +911,8 @@ Function OmaCloseApp
     DetailPrint "Could not close ${PRODUCTNAME}"
   ${EndIf}
   oma_close_done:
+  ; The app's overlay process, whether or not the app was running.
+  !insertmacro OMA_STOP_OVERLAY
   ClearErrors
   Pop $2
   Pop $1
@@ -965,14 +983,6 @@ FunctionEnd
 ; with the service, and the frames ETW session is stopped once the service is.
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro OMA_UN_CHECK_APP "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  ; The overlay (M7c) exits once the app is gone; a second try covers the moment
-  ; it takes to notice. On an update the new setup copies it again.
-  ClearErrors
-  Delete "$INSTDIR\${OMA_OVERLAY_EXE}"
-  ${If} ${Errors}
-    Sleep 1000
-    Delete "$INSTDIR\${OMA_OVERLAY_EXE}"
-  ${EndIf}
   Call un.OmaStopService
   ${If} $OmaResult != "0"
     !insertmacro OMA_FAIL "$(omaServiceRemoveFailed)" "stop: $OmaResult"
@@ -993,6 +1003,11 @@ FunctionEnd
       ${EndIf}
     ${EndIf}
   ${EndIf}
+  ; The overlay (M7c) with the other files, once nothing can fail any more: it
+  ; exits when the app is gone; a leftover one is stopped, and a file still
+  ; locked goes at the next restart. On an update the new setup copies it again.
+  !insertmacro OMA_STOP_OVERLAY
+  Delete /REBOOTOK "$INSTDIR\${OMA_OVERLAY_EXE}"
   Delete "$INSTDIR\service\${OMA_SERVICE_EXE}"
   Delete "$INSTDIR\service\presentmon\PresentMon-2.6.0-x64.exe"
   RMDir "$INSTDIR\service\presentmon"

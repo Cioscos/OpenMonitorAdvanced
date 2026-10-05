@@ -66,9 +66,9 @@ jobs:
         working-directory: app
         run: pnpm install --frozen-lockfile
 
-      # Publishes oma-service (with the trim-warning gate) and fetches the
-      # pinned, signature-checked PawnIO setup and PresentMon console into
-      # target/installer-payload.
+      # Publishes oma-service (with the trim-warning gate), builds oma-overlay
+      # (cargo --release --locked) and fetches the pinned, signature-checked
+      # PawnIO setup and PresentMon console into target/installer-payload.
       - name: Build installer payload
         shell: pwsh
         run: ./scripts/build-installer-payload.ps1

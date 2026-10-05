@@ -13,7 +13,7 @@ import {
   setPath,
   snap,
 } from './ops';
-import { blockDefaults, newBlock, withDefaults, type Block, type Profile } from './profile';
+import { blockDefaults, LIMITS, newBlock, withDefaults, type Block, type Profile } from './profile';
 
 const block = (id: string, x: number, y: number, w = 4, h = 2): Block => ({
   ...blockDefaults(),
@@ -87,6 +87,11 @@ test('delete and layer order', () => {
   expect(deleteBlocks(p, ['a']).blocks.map((b) => b.id)).toEqual(['b']);
   expect(bringForward(p, ['a']).blocks[0].z).toBe(1);
   expect(sendBackward(p, ['b']).blocks[1].z).toBe(-1);
+  // The layer stays within the editor's range.
+  const top = { ...p, blocks: p.blocks.map((b) => ({ ...b, z: LIMITS.z[1] })) };
+  expect(bringForward(top, ['a']).blocks[0].z).toBe(LIMITS.z[1]);
+  const bottom = { ...p, blocks: p.blocks.map((b) => ({ ...b, z: LIMITS.z[0] })) };
+  expect(sendBackward(bottom, ['a']).blocks[0].z).toBe(LIMITS.z[0]);
 });
 
 test('commonValue reports MIXED', () => {

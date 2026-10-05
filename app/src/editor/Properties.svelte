@@ -104,7 +104,7 @@
         {@render number('p-y', t('editor.props.y'), 'rect.y', LIMITS.rect.y, true)}
         {@render number('p-w', t('editor.props.w'), 'rect.w', LIMITS.rect.w, true)}
         {@render number('p-h', t('editor.props.h'), 'rect.h', LIMITS.rect.h, true)}
-        {@render number('p-z', t('editor.props.z'), 'z', null, true)}
+        {@render number('p-z', t('editor.props.z'), 'z', LIMITS.z, true)}
       </div>
       <div class="actions">
         <button type="button" onclick={() => editor.apply(bringForward(editor.profile, editor.selection))}>{t('editor.props.forward')}</button>
@@ -117,7 +117,7 @@
       <div class="grid">
         {#if allText}
           <label for="p-text">{t('editor.props.text')}</label>
-          <input id="p-text" type="text" value={choice('source.text')} placeholder={mixedText} onchange={(e) => set('source.text', e.currentTarget.value)} />
+          <input id="p-text" type="text" maxlength={LIMITS.textChars} value={choice('source.text')} placeholder={mixedText} onchange={(e) => set('source.text', e.currentTarget.value)} />
         {/if}
         <label for="p-stat">{t('editor.props.stat')}</label>
         <select id="p-stat" value={choice('stat.op')} onchange={(e) => set('stat.op', e.currentTarget.value)}>
@@ -139,6 +139,7 @@
         <input
           id="p-label"
           type="text"
+          maxlength={LIMITS.textChars}
           value={typeof get('style.label') === 'string' ? (get('style.label') as string) : ''}
           placeholder={get('style.label') === MIXED ? mixedText : t('editor.props.auto')}
           onchange={(e) => set('style.label', e.currentTarget.value === '' ? null : e.currentTarget.value)}

@@ -70,8 +70,8 @@ export function deleteBlocks(profile: Profile, ids: Ids): Profile {
   return { ...profile, blocks: profile.blocks.filter((b) => !set.has(b.id)) };
 }
 
-export const bringForward = (profile: Profile, ids: Ids): Profile => mapSelected(profile, ids, (b) => ({ ...b, z: b.z + 1 }));
-export const sendBackward = (profile: Profile, ids: Ids): Profile => mapSelected(profile, ids, (b) => ({ ...b, z: b.z - 1 }));
+export const bringForward = (profile: Profile, ids: Ids): Profile => mapSelected(profile, ids, (b) => ({ ...b, z: clamp(b.z + 1, LIMITS.z) }));
+export const sendBackward = (profile: Profile, ids: Ids): Profile => mapSelected(profile, ids, (b) => ({ ...b, z: clamp(b.z - 1, LIMITS.z) }));
 
 const read = (value: unknown, path: string): unknown =>
   path.split('.').reduce<unknown>((v, key) => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>)[key] : undefined), value);

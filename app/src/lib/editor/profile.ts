@@ -174,6 +174,11 @@ export const LIMITS = {
   statWindow: [1, 300],
   graph: { rangeS: [5, 300], lineWidth: [0.5, 4], fillAlpha: [0, 1], gridLines: [0, 8] },
   thresholds: 8,
+  // The format takes any i32 for these; the editor keeps them to a sane range.
+  z: [-10_000, 10_000],
+  offset: [-400, 400],
+  /** Characters of a label, a text block or a profile name typed in the editor (the format allows 64 KiB). */
+  textChars: 1024,
 } as const;
 
 const ACCENT = '#00E5FF';

@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 /** The editor's window: `close()` runs the close handlers as Tauri does, destroying unless prevented. */
-function fakeWindow() {
+function fakeWindow(log: string[]) {
   const handlers: ((e: { preventDefault(): void }) => unknown)[] = [];
   const win = {
     destroyed: 0,
@@ -27,6 +27,7 @@ function fakeWindow() {
       return () => {};
     },
     async destroy() {
+      log.push('destroy');
       win.destroyed++;
     },
     async close() {
@@ -50,7 +51,7 @@ async function setup(open: 'user' | 'builtin' = 'user') {
     activeProfile: open === 'user' ? USER_ID : 'builtin-gaming',
     profiles: [...base.profiles, { id: USER_ID, name: 'Mine', builtin: false }],
   });
-  const win = fakeWindow();
+  const win = fakeWindow(backend.editorCalls);
   render(EditorApp, { backend, appWindow: win });
   await screen.findByText(open === 'user' ? 'Mine' : 'Gaming', { selector: '.profile' });
   return { backend, win };
@@ -99,6 +100,26 @@ test('save as asks a name and selects the new profile', async () => {
   await waitFor(() => expect((toolbar().getByLabelText('Profile') as HTMLSelectElement).value).toBe(id));
 });
 
+test('save as from a built-in ends with a unique name', async () => {
+  const { backend } = await setup('builtin');
+  const saveAs = async (name: string) => {
+    await fireEvent.click(toolbar().getByRole('button', { name: 'Save as…' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Save as…' }));
+    await fireEvent.input(dialog.getByLabelText('Name'), { target: { value: name } });
+    await fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(backend.editorCalls.at(-1)).toMatch(/^overlay(SaveProfile|EditorDirty)/));
+  };
+  const names = () => Object.values(backend.profiles).filter((p) => !p.builtin).map((p) => JSON.parse(p.json).name);
+  await saveAs('mine');
+  await waitFor(() => expect(names()).toContain('mine (2)'));
+  // A built-in's name in the other language is taken too, as the shell's catalog has it.
+  await fireEvent.change(toolbar().getByLabelText('Profile'), { target: { value: 'builtin-gaming' } });
+  await screen.findByText('Gaming', { selector: '.profile' });
+  await saveAs('completo');
+  await waitFor(() => expect(names()).toContain('completo (2)'));
+});
+
 test('delete asks for confirmation', async () => {
   const { backend } = await setup();
   await fireEvent.click(toolbar().getByRole('button', { name: 'Delete' }));
@@ -123,6 +144,8 @@ test('preview is sent 100 ms after the last edit', async () => {
   const { backend } = await setup();
   await fireEvent.click(toolbar().getByRole('button', { name: 'Preview' }));
   expect(backend.previews).toHaveLength(1);
+  // Busy until the preview window answers.
+  expect((toolbar().getByRole('button', { name: 'Preview' }) as HTMLButtonElement).disabled).toBe(true);
   backend.emitPreview(true);
   await toolbar().findByRole('button', { name: 'Close preview' });
   vi.useFakeTimers();
@@ -136,6 +159,15 @@ test('preview is sent 100 ms after the last edit', async () => {
   expect(JSON.parse(backend.previews[1]!).offset.x).toBe(6);
   await fireEvent.click(toolbar().getByRole('button', { name: 'Close preview' }));
   expect(backend.previews.at(-1)).toBeNull();
+});
+
+test('the preview button comes back after 2 s without an answer', async () => {
+  await setup();
+  vi.useFakeTimers();
+  await fireEvent.click(toolbar().getByRole('button', { name: 'Preview' }));
+  expect((toolbar().getByRole('button', { name: 'Preview' }) as HTMLButtonElement).disabled).toBe(true);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect((toolbar().getByRole('button', { name: 'Preview' }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 test('use now saves then activates', async () => {
@@ -206,4 +238,31 @@ test('switching profile with changes asks first', async () => {
   await fireEvent.change(toolbar().getByLabelText('Profile'), { target: { value: 'builtin-gaming' } });
   await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Discard' }));
   await screen.findByText('Gaming', { selector: '.profile' });
+});
+
+test('a failed save keeps the editor open and does not quit', async () => {
+  const { backend, win } = await setup();
+  await edit();
+  await win.close();
+  backend.editorError = { key: 'editor.error.io', detail: 'disk full' };
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText('File error: disk full')).toBeTruthy();
+  expect(win.destroyed).toBe(0);
+  backend.emitEditorQuit();
+  await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save' }));
+  await screen.findByText('File error: disk full');
+  expect(backend.editorCalls).not.toContain('appQuitConfirmed');
+  expect(win.destroyed).toBe(0);
+});
+
+test('a quit during the close question still quits', async () => {
+  const { backend, win } = await setup();
+  await edit();
+  await win.close();
+  await screen.findByRole('dialog', { name: 'Unsaved changes' });
+  backend.emitEditorQuit();
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(win.destroyed).toBe(1));
+  // The app is told to quit before the window goes.
+  expect(backend.editorCalls.filter((c) => c === 'appQuitConfirmed' || c === 'destroy')).toEqual(['appQuitConfirmed', 'destroy']);
 });

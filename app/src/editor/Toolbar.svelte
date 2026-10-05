@@ -3,7 +3,7 @@
   import type { EditorStore } from '../lib/editor/editor.svelte';
   import { uniqueName } from '../lib/editor/ops';
   import { LIMITS, type Anchor, type Panel } from '../lib/editor/profile';
-  import { t } from '../lib/i18n/index.svelte';
+  import { t, translate } from '../lib/i18n/index.svelte';
   import type { OverlayProfileEntry } from '../lib/types';
 
   // The editor's bar (§7.1): the profile and its file actions, the profile's placement and
@@ -13,6 +13,7 @@
     editor,
     profiles,
     previewOpen,
+    previewBusy,
     onSelect,
     onPreview,
     onUseNow,
@@ -21,6 +22,8 @@
     /** The catalog, built-ins with an i18n key as name. */
     profiles: readonly OverlayProfileEntry[];
     previewOpen: boolean;
+    /** An open request waits for the preview window's answer. */
+    previewBusy: boolean;
     /** Another profile picked in the selector; the parent asks first when there are changes. */
     onSelect: (id: string) => unknown;
     onPreview: () => unknown;
@@ -61,7 +64,10 @@
     if (wanted === '') return;
     // Unique among the saved profiles' names as the selector shows them (DD11), the open
     // profile's own aside for a rename.
-    const others = profiles.filter((p) => a.kind === 'saveAs' || p.id !== editor.profileId).map(label);
+    // The built-ins count in both languages, as in the shell's `create()`.
+    const others = profiles.flatMap((p) =>
+      p.builtin ? [translate('en', p.name), translate('it', p.name)] : a.kind === 'saveAs' || p.id !== editor.profileId ? [p.name] : [],
+    );
     const name = uniqueName(others, wanted);
     if (a.kind === 'saveAs') await editor.saveAs(name);
     else editor.rename(name);
@@ -96,7 +102,7 @@
       <button type="button" disabled={ro || !editor.history.canRedo} onclick={() => editor.redo()}>{t('editor.redo')}</button>
     </div>
     <div class="cluster end">
-      <button type="button" class:live={previewOpen} aria-pressed={previewOpen} onclick={() => onPreview()}>
+      <button type="button" class:live={previewOpen} aria-pressed={previewOpen} disabled={previewBusy} onclick={() => onPreview()}>
         {previewOpen ? t('editor.preview.close') : t('editor.preview')}
       </button>
       <button type="button" class="primary" title={t('editor.useNow.hint')} onclick={() => onUseNow()}>{t('editor.useNow')}</button>
@@ -122,9 +128,9 @@
     <fieldset class="group">
       <legend>{t('editor.offset')}</legend>
       <label for="tb-ox">{t('editor.props.x')}</label>
-      <NumberInput disabled={ro} id="tb-ox" integer value={editor.profile.offset.x} onCommit={(x) => editor.apply({ ...editor.profile, offset: { ...editor.profile.offset, x } })} />
+      <NumberInput disabled={ro} id="tb-ox" integer value={editor.profile.offset.x} onCommit={(x) => editor.apply({ ...editor.profile, offset: { ...editor.profile.offset, x: clamp(x, LIMITS.offset) } })} />
       <label for="tb-oy">{t('editor.props.y')}</label>
-      <NumberInput disabled={ro} id="tb-oy" integer value={editor.profile.offset.y} onCommit={(y) => editor.apply({ ...editor.profile, offset: { ...editor.profile.offset, y } })} />
+      <NumberInput disabled={ro} id="tb-oy" integer value={editor.profile.offset.y} onCommit={(y) => editor.apply({ ...editor.profile, offset: { ...editor.profile.offset, y: clamp(y, LIMITS.offset) } })} />
     </fieldset>
     <label class="group scale">
       <span>{t('editor.scale')}</span>
@@ -179,7 +185,7 @@
           <p>{t('editor.delete.confirm', { name: editor.profile.name })}</p>
         {:else}
           <label for="tb-name">{t('editor.name')}</label>
-          <input id="tb-name" type="text" bind:value={ask.name} use:focus autocomplete="off" spellcheck="false" />
+          <input id="tb-name" type="text" maxlength={LIMITS.textChars} bind:value={ask.name} use:focus autocomplete="off" spellcheck="false" />
         {/if}
         <div class="actions">
           <button type="button" onclick={() => (ask = null)}>{t('editor.unsaved.cancel')}</button>

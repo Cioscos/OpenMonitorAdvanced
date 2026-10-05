@@ -7,6 +7,8 @@
 
   /** Delay before an edit reaches the preview window (§7.4). */
   export const PREVIEW_DEBOUNCE_MS = 100;
+  /** How long the «Preview» button waits for `overlay-preview` before it can be pressed again. */
+  export const PREVIEW_OPEN_TIMEOUT_MS = 2000;
 </script>
 
 <script lang="ts">
@@ -45,8 +47,15 @@
   let fonts = $state.raw<string[]>([]);
   let previewOpen = $state(false);
   let previewError = $state<string | null>(null);
-  /** What runs once the unsaved changes are saved or discarded; null while nothing asks. */
-  let pending = $state.raw<(() => unknown) | null>(null);
+  /** An open request waits for `overlay-preview`; `previewTimer` gives up after a while. */
+  let previewBusy = $state(false);
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * What runs once the unsaved changes are saved or discarded, in order, the window's own
+   * destruction last (a tray quit asked meanwhile must still reach the shell); empty while
+   * nothing asks.
+   */
+  let pending = $state.raw<{ action: () => unknown; last: boolean }[]>([]);
 
   onMount(() => {
     let off: (() => void) | undefined;
@@ -57,7 +66,11 @@
       () => connect(live, backend),
       () => feed.connect(backend),
       () => backend.onOverlayStatus((s) => (profiles = s.profiles)),
-      () => backend.onOverlayPreview((e) => (previewOpen = e.open)),
+      () =>
+        backend.onOverlayPreview((e) => {
+          previewOpen = e.open;
+          previewDone();
+        }),
       // «Quit» from the tray with unsaved changes (DD13).
       () => backend.onOverlayEditorQuit(() => ask(() => backend.appQuitConfirmed())),
     ];
@@ -67,7 +80,7 @@
         win.onCloseRequested((event) => {
           if (!editor.dirty) return;
           event.preventDefault();
-          ask(() => win.destroy());
+          ask(() => win.destroy(), true);
         }),
       );
     }
@@ -107,19 +120,25 @@
     };
   });
 
-  onDestroy(() => editor.close());
+  onDestroy(() => {
+    clearTimeout(previewTimer);
+    editor.close();
+  });
 
-  /** Runs `action` now, or after the user saved or discarded the changes. */
-  function ask(action: () => unknown) {
-    if (editor.dirty) pending = action;
+  /**
+   * Runs `action` now, or after the user saved or discarded the changes; a request while the
+   * question is open joins the ones already waiting. `last` runs after the others (closing).
+   */
+  function ask(action: () => unknown, last = false) {
+    if (editor.dirty) pending = [...pending, { action, last }];
     else void action();
   }
 
   async function answer(save: boolean) {
-    const action = pending;
-    pending = null;
-    if (action === null || (save && !(await editor.save()))) return;
-    await action();
+    const actions = [...pending.filter((p) => !p.last), ...pending.filter((p) => p.last)];
+    pending = [];
+    if (save && !(await editor.save())) return;
+    for (const { action } of actions) await action();
   }
 
   // ---- preview (§7.4): every edit, 100 ms after the last one, while the window is open ----
@@ -134,7 +153,14 @@
       previewError = null;
     } catch (e) {
       previewError = asCommandError(e).detail ?? '';
+      previewDone();
     }
+  }
+
+  function previewDone() {
+    previewBusy = false;
+    clearTimeout(previewTimer);
+    previewTimer = undefined;
   }
 
   $effect(() => {
@@ -145,7 +171,13 @@
     return () => clearTimeout(timer);
   });
 
-  const togglePreview = () => sendPreview(previewOpen ? null : JSON.stringify(editor.profile));
+  function togglePreview() {
+    if (previewOpen) return sendPreview(null);
+    previewBusy = true;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(previewDone, PREVIEW_OPEN_TIMEOUT_MS);
+    return sendPreview(JSON.stringify(editor.profile));
+  }
 
   /** «Use now» (DD9): saves the profile (a new one gets its id), then shows it in game. */
   async function useNow() {
@@ -180,15 +212,15 @@
     <p class="error" role="alert">{t('editor.error.preview', { detail: previewError })}</p>
   {/if}
   {#if ready}
-    <Toolbar {editor} {profiles} {previewOpen} onSelect={(id) => ask(() => editor.load(id))} onPreview={togglePreview} onUseNow={useNow} />
+    <Toolbar {editor} {profiles} {previewOpen} {previewBusy} onSelect={(id) => ask(() => editor.load(id))} onPreview={togglePreview} onUseNow={useNow} />
     <div class="body">
       <Palette schema={live.schema} onAdd={(source) => canvas?.addSource(source)} onDrop={(source, x, y) => canvas?.dropAt(source, x, y)} />
       <Canvas bind:this={canvas} {editor} {live} {feed} />
       <Properties {editor} {fonts} schema={live.schema} />
     </div>
   {/if}
-  {#if pending !== null}
-    <UnsavedDialog name={editor.profile.name} onSave={() => answer(true)} onDiscard={() => answer(false)} onCancel={() => (pending = null)} />
+  {#if pending.length > 0}
+    <UnsavedDialog name={editor.profile.name} onSave={() => answer(true)} onDiscard={() => answer(false)} onCancel={() => (pending = [])} />
   {/if}
 </main>
 

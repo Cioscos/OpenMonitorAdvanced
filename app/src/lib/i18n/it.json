@@ -485,6 +485,7 @@
   "overlay.template.builtin-full": "Completo",
   "overlay.template.builtin-bar": "Barra orizzontale",
   "editor.title": "Editor overlay",
+  "editor.newProfileName": "Nuovo profilo",
   "editor.error.invalidId": "Profilo sconosciuto.",
   "editor.error.readOnly": "I profili integrati sono in sola lettura: duplicalo per modificarlo.",
   "editor.error.notFound": "Il file del profilo non esiste più.",

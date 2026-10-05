@@ -485,6 +485,7 @@
   "overlay.template.builtin-full": "Full",
   "overlay.template.builtin-bar": "Horizontal bar",
   "editor.title": "Overlay editor",
+  "editor.newProfileName": "New profile",
   "editor.error.invalidId": "Unknown profile.",
   "editor.error.readOnly": "Built-in profiles are read-only: duplicate it to edit.",
   "editor.error.notFound": "The profile file no longer exists.",

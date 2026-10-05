@@ -545,3 +545,19 @@ test('?overlay= simulates a frame engine state', () => {
   expect(parseOverlayFrames('?overlay=bogus')).toBe('running');
   expect(parseOverlayFrames('')).toBe('running');
 });
+
+describe('mock overlay editor', () => {
+  test('profiles round-trip and the catalog follows', async () => {
+    const backend = createMockBackend();
+    const builtin = await backend.overlayLoadProfile('builtin-gaming');
+    expect(builtin.builtin).toBe(true);
+    await expect(backend.overlaySaveProfile('builtin-gaming', builtin.json)).rejects.toMatchObject({ key: 'editor.error.readOnly' });
+    const id = await backend.overlayDuplicateProfile('builtin-gaming');
+    const copy = await backend.overlayLoadProfile(id);
+    expect(copy.builtin).toBe(false);
+    expect(JSON.parse(copy.json).blocks.length).toBeGreaterThan(0);
+    expect((await backend.getOverlayStatus())!.profiles.map((p) => p.id)).toContain(id);
+    await backend.overlayDeleteProfile(id);
+    await expect(backend.overlayLoadProfile(id)).rejects.toMatchObject({ key: 'editor.error.notFound' });
+  });
+});

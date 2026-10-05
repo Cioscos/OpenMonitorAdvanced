@@ -821,5 +821,191 @@
     "h": 16
    }
   }
+ },
+ {
+  "name": "box wider than a 1x1 profile at top (odd negative half truncates)",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "top",
+   "offset": {
+    "x": 0,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 0
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 1,
+      "h": 1
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 108,
+  "extraCells": [
+   10,
+   2
+  ],
+  "expected": {
+   "window": {
+    "x": 915,
+    "y": 9,
+    "w": 90,
+    "h": 27
+   },
+   "profile": {
+    "x": 955,
+    "y": 9,
+    "w": 9,
+    "h": 9
+   },
+   "extra": {
+    "x": 915,
+    "y": 18,
+    "w": 90,
+    "h": 18
+   }
+  }
+ },
+ {
+  "name": "box above a bottom profile",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "bottom",
+   "offset": {
+    "x": 0,
+    "y": 1
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": [
+   10,
+   2
+  ],
+  "expected": {
+   "window": {
+    "x": 912,
+    "y": 1008,
+    "w": 96,
+    "h": 64
+   },
+   "profile": {
+    "x": 912,
+    "y": 1024,
+    "w": 96,
+    "h": 48
+   },
+   "extra": {
+    "x": 920,
+    "y": 1008,
+    "w": 80,
+    "h": 16
+   }
+  }
+ },
+ {
+  "name": "summary box below a right profile",
+  "profile": {
+   "format": 1,
+   "name": "fixture",
+   "anchor": "right",
+   "offset": {
+    "x": 1,
+    "y": 0
+   },
+   "scale": 1.0,
+   "panel": {
+    "padding": 1
+   },
+   "blocks": [
+    {
+     "id": "b0",
+     "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 10,
+      "h": 4
+     },
+     "source": {
+      "text": "t"
+     },
+     "kind": "text"
+    }
+   ]
+  },
+  "area": {
+   "x": 0,
+   "y": 0,
+   "w": 1920,
+   "h": 1080
+  },
+  "dpi": 96,
+  "extraCells": [
+   18,
+   8
+  ],
+  "expected": {
+   "window": {
+    "x": 1768,
+    "y": 516,
+    "w": 144,
+    "h": 112
+   },
+   "profile": {
+    "x": 1816,
+    "y": 516,
+    "w": 96,
+    "h": 48
+   },
+   "extra": {
+    "x": 1768,
+    "y": 564,
+    "w": 144,
+    "h": 64
+   }
+  }
  }
 ]

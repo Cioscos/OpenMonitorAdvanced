@@ -31,6 +31,7 @@ import defaultRulesFixture from '../../test/fixtures/default-rules.json';
 import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
+import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
@@ -322,6 +323,8 @@ export function parseOverlayFrames(search: string): OverlayFramesState {
  */
 function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
   const listeners = new Set<(s: OverlayStatus) => void>();
+  const previewListeners = new Set<(e: { open: boolean }) => void>();
+  let preview = false;
   const unset = { requested: null, effective: null, state: 'unset', reason: null } as const;
   let engine = frames;
   let hidden = false;
@@ -337,13 +340,11 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
       framesDetail: null,
       target,
       activeProfile: target === null ? null : (overlay.gameProfiles[target.name] ?? overlay.defaultProfile),
-      profiles: [
-        ...['builtin-minimal-fps', 'builtin-gaming', 'builtin-full', 'builtin-bar'].map((id) => ({ id, name: `overlay.template.${id}`, builtin: true })),
-        { id: '6f1c2a9e-3b47-4d8a-9e15-0c2b7d4f8a31', name: 'Stream (1440p)', builtin: false },
-      ],
+      profiles: profiles.entries(),
       diagnostics: [{ file: 'old-layout.json', reason: 'unknown field `colour` at line 12 column 7' }],
       hiddenByUser: overlay.enabled && hidden,
       hotkeys: { toggle: hotkey(overlay.hotkeyToggle), nextProfile: hotkey(overlay.hotkeyNextProfile), benchmark: hotkey(overlay.hotkeyBenchmark) },
+      preview,
       benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
     };
   };
@@ -351,9 +352,24 @@ function mockOverlay(settings: MockSettings, frames: OverlayFramesState) {
     const next = status();
     listeners.forEach((cb) => cb(next));
   };
+  const profiles = mockProfileStore(emit);
   settings.subscribe(emit);
   return {
     get: status,
+    profiles,
+    /** No preview window in the browser: only the state is followed. */
+    setPreview(json: string | null) {
+      if (preview === (json !== null)) return;
+      preview = json !== null;
+      emit();
+      previewListeners.forEach((cb) => cb({ open: preview }));
+    },
+    onPreview(cb: (e: { open: boolean }) => void) {
+      previewListeners.add(cb);
+      return () => {
+        previewListeners.delete(cb);
+      };
+    },
     subscribe(cb: (s: OverlayStatus) => void) {
       listeners.add(cb);
       return () => {
@@ -491,6 +507,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
   const recorder = mockLogRecorder(parseLogState(typeof location === 'undefined' ? '' : location.search));
   const overlay = mockOverlay(settings, parseOverlayFrames(typeof location === 'undefined' ? '' : location.search));
+  const editorData = mockEditorData();
+  let benchmarks = structuredClone(MOCK_BENCHMARKS);
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -621,6 +639,32 @@ export function createMockBackend(intervalMs = 1000): Backend {
     // No profile folder in the browser: the catalog stays the same.
     overlayReloadProfiles: async () => overlay.reload(),
     setOverlayHidden: async (hidden) => overlay.setHidden(hidden),
+    overlayLoadProfile: async (id) => overlay.profiles.load(id),
+    overlaySaveProfile: async (id, json) => overlay.profiles.save(id, json),
+    overlayDeleteProfile: async (id) => overlay.profiles.remove(id),
+    overlayDuplicateProfile: async (id) => overlay.profiles.duplicate(id),
+    // No file dialogs in the browser: import is always cancelled, export always succeeds.
+    overlayImportProfile: async () => null,
+    overlayExportProfile: async () => true,
+    overlayFontFamilies: async () => ['Segoe UI', 'Segoe UI Variable', 'Bahnschrift', 'Consolas', 'Arial'],
+    overlayPreview: async (json) => overlay.setPreview(json),
+    overlayEditorProfile: async () => {},
+    overlayUseNow: async (id) => console.info('mock: use profile now', id),
+    overlayEditorDirty: async () => {},
+    openOverlayEditor: async () => {
+      window.open(`${location.pathname}?window=overlay-editor`, '_blank');
+    },
+    appQuitConfirmed: async () => console.info('mock: quit'),
+    onOverlayEditorData: async (cb) => editorData.subscribe(cb),
+    onOverlayPreview: async (cb) => overlay.onPreview(cb),
+    onOverlayEditorQuit: async () => () => {},
+    benchmarkToggle: async () => console.info('mock: benchmark toggle'),
+    benchmarkList: async () => structuredClone(benchmarks),
+    benchmarkOpenCsv: async (id) => console.info('mock: open benchmark CSV', id),
+    benchmarkOpenFolder: async () => console.info('mock: open benchmarks folder'),
+    benchmarkDelete: async (id) => {
+      benchmarks = benchmarks.filter((b) => b.id !== id);
+    },
     // The browser has no network access to GitHub: the check always finds nothing to report.
     checkUpdates: async () => MOCK_UPDATE_STATUS,
     getUpdateStatus: async () => MOCK_UPDATE_STATUS,

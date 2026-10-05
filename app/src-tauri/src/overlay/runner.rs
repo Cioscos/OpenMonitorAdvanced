@@ -39,7 +39,7 @@ use super::controller::{
     tick_values, Controller, Outputs, OverlayStatus, ToastRequest, ValuesPlan,
 };
 use super::frames::{options_from_env, ENV_VAR};
-use super::host::{overlay_exe, HostState, OverlayHost, OverlaySender};
+use super::host::{overlay_exe, HostFailure, HostState, OverlayHost, OverlaySender};
 use super::profiles::{load_catalog, profiles_dir, ProfileCatalog};
 use crate::i18n::{t, Lang};
 use crate::notifier::{launch_for_main, ToastSink};
@@ -210,6 +210,15 @@ impl OverlayRunner {
             tracing::warn!("no QPC frequency: frame times cannot be converted, frames are ignored");
         }
 
+        let (tx, rx) = mpsc::channel();
+        // Subscribed before the snapshot, so no change falls in between (one
+        // may arrive twice: the controller ignores equal settings).
+        {
+            let tx = tx.clone();
+            deps.store.subscribe(Box::new(move |settings, _| {
+                let _ = tx.send(Input::Settings(Arc::new(settings.clone())));
+            }));
+        }
         let settings = deps.store.snapshot();
         let lang = language_for(settings.general.language);
         let mut controller = Controller::new(std::process::id(), qpc_frequency);
@@ -218,18 +227,11 @@ impl OverlayRunner {
         controller.on_catalog(read_catalog());
         controller.on_settings(&settings, lang, env.clone());
 
-        let (tx, rx) = mpsc::channel();
         let handle = OverlayHandle {
             tx: tx.clone(),
             tap: Arc::default(),
             status: Arc::new(Mutex::new(controller.current_status())),
         };
-        {
-            let tx = tx.clone();
-            deps.store.subscribe(Box::new(move |settings, _| {
-                let _ = tx.send(Input::Settings(Arc::new(settings.clone())));
-            }));
-        }
         let ctl = Ctl {
             controller,
             rx,
@@ -248,6 +250,7 @@ impl OverlayRunner {
             watcher_failed: false,
             host: None,
             host_wanted: false,
+            host_start_failed: false,
             tracked: None,
             geometry_ms: 0,
             engine_on: false,
@@ -319,6 +322,9 @@ struct Ctl {
     watcher_failed: bool,
     host: Option<OverlayHost>,
     host_wanted: bool,
+    /// The host could not start: not tried again (nor logged) until the
+    /// settings change or «Retry»; the status shows the failure meanwhile.
+    host_start_failed: bool,
     /// The window whose geometry is read.
     tracked: Option<Foreground>,
     geometry_ms: u64,
@@ -390,6 +396,7 @@ impl Ctl {
                 if turned_on {
                     self.controller.on_catalog(read_catalog());
                 }
+                self.clear_host_start_failure();
             }
             Input::Foreground(fg) => {
                 self.controller.on_foreground(fg);
@@ -405,7 +412,10 @@ impl Ctl {
             }
             Input::Host(state) => self.controller.on_host(state),
             Input::Schema(schema) => self.controller.on_schema(schema),
-            Input::Retry => self.controller.retry(),
+            Input::Retry => {
+                self.controller.retry();
+                self.clear_host_start_failure();
+            }
             Input::ReloadProfiles => self.controller.on_catalog(read_catalog()),
             Input::SetHidden(hidden) => {
                 if self.controller.current_status().hidden_by_user != hidden {
@@ -499,8 +509,9 @@ impl Ctl {
             );
         }
         if let Some(status) = out.status {
+            // Stored first: a UI that reads it on the event gets this one.
+            *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status.clone();
             (self.on_status)(&status);
-            *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status;
         }
         if let Some(line) = out.diagnostics_line {
             tracing::info!("{line}");
@@ -514,10 +525,14 @@ impl Ctl {
             return;
         }
         if wanted && self.host.is_none() {
+            if self.host_start_failed {
+                return;
+            }
             let exe = match std::env::current_exe() {
                 Ok(current) => overlay_exe(&current),
                 Err(err) => {
                     tracing::warn!(%err, "overlay: the app's own path is unknown");
+                    self.fail_host_start();
                     return;
                 }
             };
@@ -534,6 +549,7 @@ impl Ctl {
                 }
                 Err(err) => {
                     tracing::warn!(%err, "overlay: the host thread could not start");
+                    self.fail_host_start();
                     return;
                 }
             }
@@ -542,6 +558,26 @@ impl Ctl {
             host.set_wanted(wanted);
         }
         self.host_wanted = wanted;
+    }
+
+    /// Latches a failed host start: the status shows a failed overlay
+    /// process (through the channel, so it gets a step of its own).
+    fn fail_host_start(&mut self) {
+        self.host_start_failed = true;
+        let _ = self.tx.send(Input::Host(HostState::Failed {
+            reason: HostFailure::Crashing,
+        }));
+    }
+
+    /// A new chance for a host that could not start; with the overlay off
+    /// the failure no longer shows.
+    fn clear_host_start_failure(&mut self) {
+        if !std::mem::take(&mut self.host_start_failed) || self.host.is_some() {
+            return;
+        }
+        if !self.settings.overlay.enabled {
+            self.controller.on_host(HostState::Off);
+        }
     }
 
     /// The exit order: the engine off (if we turned it on), then the overlay,

@@ -348,8 +348,6 @@ impl SendQueue {
 }
 
 #[cfg(windows)]
-// Used by the overlay controller from C16 on.
-#[allow(unused_imports)]
 pub use imp::{OverlayHost, OverlaySender};
 
 #[cfg(windows)]

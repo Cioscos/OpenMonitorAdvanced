@@ -32,7 +32,7 @@ const FLAG_ORDER: [&str; 6] = [
 pub enum BenchAction {
     SendStop,
     Kill,
-    Save(ScoreFile),
+    Save(Box<ScoreFile>),
     Finished(BenchEnd),
 }
 
@@ -390,7 +390,7 @@ impl BenchController {
         self.score_id = Some(file.id.clone());
         let id = file.id.clone();
         vec![
-            BenchAction::Save(file),
+            BenchAction::Save(Box::new(file)),
             BenchAction::Finished(BenchEnd::Saved(id)),
         ]
     }
@@ -542,7 +542,7 @@ mod tests {
     fn saved(a: &[BenchAction]) -> &ScoreFile {
         a.iter()
             .find_map(|x| match x {
-                BenchAction::Save(f) => Some(f),
+                BenchAction::Save(f) => Some(&**f),
                 _ => None,
             })
             .expect("a Save action")

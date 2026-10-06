@@ -373,7 +373,11 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
     $vendorDlls = @('nvml.dll', 'nvapi64.dll', 'atiadlxx.dll', 'ControlLib.dll')
     $vendorModules = @($Proc.Modules | Where-Object { $vendorDlls -contains $_.ModuleName } |
         ForEach-Object { $_.ModuleName } | Sort-Object -Unique)
-    $totalPrivate = ($perf | Measure-Object -Property WorkingSetPrivate -Sum).Sum
+    # oma-load.exe (M8a1) is the stress test's own load, outside the window budget: reported on its own.
+    $loadIds = @($webviews | Where-Object { $_.Name -eq 'oma-load.exe' } | ForEach-Object { [int]$_.ProcessId })
+    $loadPerf = @($perf | Where-Object { $loadIds -contains [int]$_.IDProcess })
+    $loadPrivate = ($loadPerf | Measure-Object -Property WorkingSetPrivate -Sum).Sum
+    $totalPrivate = ($perf | Measure-Object -Property WorkingSetPrivate -Sum).Sum - $loadPrivate
 
     $result = [ordered]@{
         Mode              = $Mode
@@ -384,8 +388,9 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
         TotalAppCpuProcesses = $appCpu.ProcessCount
         TotalAppCpuInvalidReason = $appCpu.Reason
         AppPrivateMB      = [math]::Round($appPrivate / 1MB, 1)
-        WebView2Processes = $webviews.Count
+        WebView2Processes = $webviews.Count - $loadIds.Count
         TotalPrivateMB    = [math]::Round($totalPrivate / 1MB, 1)
+        LoadPrivateMB     = if ($loadIds.Count) { [math]::Round($loadPrivate / 1MB, 1) } else { $null }
         VendorModules     = if ($vendorModules.Count) { $vendorModules -join ', ' } else { '(none)' }
     }
     # Spec M7 §11: the overlay process on its own (< 40 MB private without a game, < 70 MB shown in game), and with PresentMon for the CPU lines.

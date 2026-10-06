@@ -1,6 +1,12 @@
 {
   "app.title": "OpenMonitor Advanced",
   "tray.open": "Apri",
+  "performance.start.missing": "oma-load.exe non trovato",
+  "performance.start.spawn": "avvio non riuscito",
+  "performance.start.timeout": "il processo di test non ha risposto",
+  "performance.start.foreign_client": "un altro processo ha tentato di collegarsi",
+  "performance.start.incompatible": "versione del processo di test non compatibile",
+  "performance.start.no_topology": "topologia della CPU non ricevuta",
   "tray.quit": "Esci",
   "tray.log.start": "Avvia log",
   "tray.log.pause": "Pausa log",

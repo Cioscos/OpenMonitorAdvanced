@@ -9,6 +9,8 @@ mod log;
 mod notifier;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod overlay;
+#[allow(dead_code)]
+mod performance;
 mod report;
 mod rules;
 mod service;

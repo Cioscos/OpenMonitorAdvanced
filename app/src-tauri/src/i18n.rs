@@ -19,6 +19,12 @@ pub enum Lang {
 #[cfg(test)]
 pub const RUST_KEYS: &[&str] = &[
     "tray.open",
+    "performance.start.missing",
+    "performance.start.spawn",
+    "performance.start.timeout",
+    "performance.start.foreign_client",
+    "performance.start.incompatible",
+    "performance.start.no_topology",
     "tray.viewSimple",
     "tray.viewAdvanced",
     "tray.antiCheat",

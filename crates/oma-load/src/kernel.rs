@@ -182,7 +182,9 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
         KernelId::K3 => Some(&crate::kernels::k2::K2Factory { ram: true }),
         #[cfg(target_arch = "x86_64")]
         KernelId::K4 => Some(&crate::kernels::k4::K4Factory),
-        // The other kernels arrive with A11–A15.
+        #[cfg(target_arch = "x86_64")]
+        KernelId::K5 => Some(&crate::kernels::k5::K5Factory),
+        // The other kernels arrive with A12–A15.
         _ => None,
     }
 }

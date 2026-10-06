@@ -45,14 +45,19 @@ pub fn cpu_baseline() -> &'static Baseline {
     BASELINE.get_or_init(|| parse_baseline(BASELINE_JSON).expect("cpu-1-baseline.json is valid"))
 }
 
+/// Iterations per second (all threads) to the workload's true unit.
+pub fn per_second_to_units(w: &Workload, iterations_per_s: f64) -> f64 {
+    let divisor = if w.unit.starts_with('G') { 1e9 } else { 1e6 };
+    iterations_per_s * w.work_per_iteration / divisor
+}
+
 /// Rate of one repetition in true units: `checks` iterations of all threads in `work_ms`.
 /// `None` when either is 0.
 pub fn rate(w: &Workload, checks: u64, work_ms: u64) -> Option<f64> {
     if checks == 0 || work_ms == 0 {
         return None;
     }
-    let divisor = if w.unit.starts_with('G') { 1e9 } else { 1e6 };
-    let r = checks as f64 * w.work_per_iteration / divisor / (work_ms as f64 / 1000.0);
+    let r = per_second_to_units(w, checks as f64 / (work_ms as f64 / 1000.0));
     (r.is_finite() && r > 0.0).then_some(r)
 }
 

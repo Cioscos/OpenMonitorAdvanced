@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::file::{Device, KernelRate, ScoreFile, ScoreSample, Scores, FORMAT};
 use super::plan::{BenchMode, BenchStep};
-use super::score::{median3, points, rate, scaling, Baseline, SCALE_POINTS};
+use super::score::{median3, per_second_to_units, points, rate, scaling, Baseline, SCALE_POINTS};
 use super::workloads::{BenchKernel, WORKLOADS};
 use crate::load::{Clock, SensorSample};
 
@@ -216,7 +216,8 @@ impl BenchController {
             BenchMode::Single => &self.ctx.baseline.single,
             BenchMode::Multi => &self.ctx.baseline.multi,
         };
-        let v = SCALE_POINTS * rate / table.get(&s.kernel)?;
+        let w = WORKLOADS.iter().find(|w| w.id == s.kernel)?;
+        let v = SCALE_POINTS * per_second_to_units(w, rate) / table.get(&s.kernel)?;
         v.is_finite().then_some(v)
     }
 
@@ -608,15 +609,23 @@ mod tests {
     fn live_points_follow_progress_rate() {
         let mut c = ctl();
         let b = cpu_baseline();
+        let ntt = &WORKLOADS[0];
+        // Progress.rate is iterations per second of all threads; Ntt counts in Mop/s.
+        let raw = |units: f64| units * 1e6 / ntt.work_per_iteration;
         // Step 0 is the Ntt warm-up in single mode: the reference is single/ntt.
-        c.on_load(&progress(0, Some(b.single[&BenchKernel::Ntt])), clock(1000));
-        assert_eq!(c.status().live_points, Some(1500.0));
+        c.on_load(
+            &progress(0, Some(raw(b.single[&BenchKernel::Ntt]))),
+            clock(1000),
+        );
+        let v = c.status().live_points.unwrap();
+        assert!((v - 1500.0).abs() < 1e-9, "{v}");
         // Step 24 is the Ntt warm-up in multi mode.
         c.on_load(
-            &progress(24, Some(b.multi[&BenchKernel::Ntt] / 2.0)),
+            &progress(24, Some(raw(b.multi[&BenchKernel::Ntt] / 2.0))),
             clock(2000),
         );
-        assert_eq!(c.status().live_points, Some(750.0));
+        let v = c.status().live_points.unwrap();
+        assert!((v - 750.0).abs() < 1e-9, "{v}");
         c.on_load(&progress(24, None), clock(3000));
         assert_eq!(c.status().live_points, None);
         assert_eq!(c.status().step, Some(24));

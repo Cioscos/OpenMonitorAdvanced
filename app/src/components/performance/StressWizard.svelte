@@ -3,7 +3,7 @@
   import type { Backend } from '../../lib/backend';
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { errorText, formatDuration, marked, sizeLabel } from '../../lib/performance/format';
+  import { around, errorText, formatDuration, marked, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { Custom, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
@@ -132,11 +132,6 @@
     }
   }
 
-  /** `text` cut around the first `word` (any case), so the word can carry its term. */
-  function around(text: string, word: string): [string, string, string] {
-    const at = text.toLowerCase().indexOf(word.toLowerCase());
-    return at < 0 ? [text, '', ''] : [text.slice(0, at), text.slice(at, at + word.length), text.slice(at + word.length)];
-  }
   const noService = $derived(around(t('performance.warn.noService'), t('glossary.thermalStop.name')));
   const overclockHint = $derived(around(t('performance.objective.overclock.hint'), t('glossary.curveOptimizer.name')));
 

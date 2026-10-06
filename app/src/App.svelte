@@ -272,7 +272,7 @@
     {:else if view === 'advanced'}
       <AdvancedView {store} {backend} {service} {focus} onFocused={() => (focus = null)} />
     {:else if view === 'performance'}
-      <PerformanceView {backend} bind:page={performancePage} />
+      <PerformanceView {backend} {store} bind:page={performancePage} />
     {:else}
       <SettingsView {store} {backend} {service} target={settingsTarget} onBack={closeSettings} />
     {/if}

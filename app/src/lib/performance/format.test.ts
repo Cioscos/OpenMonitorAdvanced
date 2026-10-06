@@ -1,6 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
 import type { Phase } from '../types';
-import { errorText, formatDuration, marked, phaseLabel } from './format';
+import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
+import { cpuChartSensors, errorText, eventText, formatDuration, marked, phaseLabel } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -50,4 +51,23 @@ test('shell_errors_are_translated_by_code', () => {
   // An unknown code and any other text stay as the shell wrote them.
   expect(errorText('build:something_new', t)).toBe('build:something_new');
   expect(errorText('oma-load.exe not found', t)).toBe('oma-load.exe not found');
+});
+
+test('event_text_counts_phases_from_one_and_reads_recovered_whea', () => {
+  i18n.locale = 'it';
+  const ev = (code: string, params: Record<string, string> = {}) => eventText({ atMs: 0, code, params }, t, 'it');
+  expect(ev('ram_insufficient', { phase: '0' })).toEqual({ text: t('performance.event.ram_insufficient', { phase: 1 }), term: null });
+  expect(ev('ram_reduced', { phase: '2', value: String(4 * 1024 ** 3) }).text).toBe(t('performance.event.ram_reduced', { phase: 3, value: '4,0 GB' }));
+  expect(ev('whea', { id: '19', apic: '4', core: '2' })).toEqual({ text: 'Errore WHEA 19 sul core 2', term: 'whea' });
+  expect(ev('whea18', { record: '7', apic: '6' }).text).toBe("Errore WHEA 18 dall'APIC ID 6");
+  expect(ev('mystery')).toEqual({ text: 'mystery', term: null });
+  i18n.locale = 'en';
+});
+
+test('chart_sensors_follow_da5', () => {
+  expect(cpuChartSensors(MOCK_SCHEMA)).toEqual([]);
+  expect(cpuChartSensors(SERVICE_MOCK_SCHEMA).map((s) => s.id)).toEqual(['cpu/0/temperature/package', 'cpu/0/power/package']);
+  const tdie = { ...SERVICE_MOCK_SCHEMA.sensors[0], id: 'cpu/0/temperature/tdie' };
+  expect(cpuChartSensors({ ...SERVICE_MOCK_SCHEMA, sensors: [...SERVICE_MOCK_SCHEMA.sensors, tdie] })[0].id).toBe('cpu/0/temperature/tdie');
+  expect(cpuChartSensors(null)).toEqual([]);
 });

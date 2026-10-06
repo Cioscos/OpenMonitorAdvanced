@@ -1,5 +1,6 @@
-import type { Translate } from '../i18n/index.svelte';
-import type { DataSize, KernelId, Phase } from '../types';
+import { formatBytes } from '../format';
+import type { Params, Translate } from '../i18n/index.svelte';
+import type { DataSize, KernelId, Phase, Schema, Sensor, SessionEvent } from '../types';
 
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
@@ -28,6 +29,50 @@ export function phaseLabel(phase: Phase, t: Translate): string {
 export function marked(text: string): [string, string, string] {
   const match = /\[([^\]]+)\]/.exec(text);
   return match ? [text.slice(0, match.index), match[1], text.slice(match.index + match[0].length)] : [text, '', ''];
+}
+
+/** `text` cut around the first `word` (any case), so the word can carry its term; for fixed texts without brackets. */
+export function around(text: string, word: string): [string, string, string] {
+  const at = text.toLowerCase().indexOf(word.toLowerCase());
+  return at < 0 ? [text, '', ''] : [text.slice(0, at), text.slice(at, at + word.length), text.slice(at + word.length)];
+}
+
+/** The glossary term each event's text mentions (by its `glossary.<term>.name`). */
+const EVENT_TERMS: Record<string, string> = {
+  thermal_stop: 'thermalStop',
+  reference_invalid: 'reference',
+  ram_reduced: 'ramShare',
+  k9_needs_two_cores: 'mode.k9',
+  whea: 'whea',
+  whea_unreadable: 'whea',
+};
+
+/**
+ * A line of the event log in words (`performance.event.<code>`) and the term it mentions. Phases
+ * count from 1 as a person does; `whea17`…`whea19` (found after a crash) read like the live `whea`.
+ * An unknown code shows itself.
+ */
+export function eventText(event: SessionEvent, t: Translate, locale: string): { text: string; term: string | null } {
+  const recovered = /^whea(\d+)$/.exec(event.code);
+  const code = recovered ? 'whea' : event.code;
+  const p: Params = { ...event.params };
+  if (recovered) p.id = recovered[1];
+  if (p.phase !== undefined && Number.isFinite(Number(p.phase))) p.phase = Number(p.phase) + 1;
+  if (code === 'ram_reduced' && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if (code === 'whea') {
+    p.where = p.core !== undefined ? t('performance.event.where.core', p) : p.apic !== undefined ? t('performance.event.where.apic', p) : '';
+  }
+  const key = `performance.event.${code}`;
+  const text = t(key, p);
+  return text === key ? { text: event.code, term: null } : { text, term: EVENT_TERMS[code] ?? null };
+}
+
+/** DA5: the CPU temperature (first present) and package power, as the chart's series. */
+const CPU_TEMPERATURES = ['tdie', 'tctl', 'package', 'core-max'].map((name) => `cpu/0/temperature/${name}`);
+export function cpuChartSensors(schema: Schema | null): Sensor[] {
+  const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
+  const temperature = CPU_TEMPERATURES.map((id) => byId.get(id)).find(Boolean);
+  return [temperature, byId.get('cpu/0/power/package')].filter((s): s is Sensor => s !== undefined);
 }
 
 /**

@@ -116,6 +116,55 @@ export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
   };
 }
 
+/** A saved stress session for tests: a CPU test that passed, with one phase; override what matters. */
+export function makeStressSession(over: Partial<StressSession> = {}): StressSession {
+  return {
+    format: 1,
+    id: 'session-1',
+    startedAt: '2026-10-06T19:04:00Z',
+    endedAt: '2026-10-06T19:09:00Z',
+    component: 'cpu',
+    device: 'Fake Ryzen 7 7800X3D',
+    objective: 'normal',
+    preset: 'quick',
+    request: { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null },
+    plan: {
+      seed: 1,
+      ram_bytes: 0,
+      phases: [
+        {
+          kernel: 'k1',
+          alt_kernel: null,
+          isa: 'avx2',
+          size: 'auto',
+          mode: 'steady',
+          placement: 'all_logical',
+          duration_s: 300,
+          per_core_s: null,
+          both_smt: false,
+          cores: null,
+          patterns: [],
+          stop_on_error: false,
+        },
+      ],
+    },
+    outcome: 'passed',
+    outcomeDetail: { verdict: 'passed', params: {}, phase: 0, kernel: 'k1', core: null, tempC: 70, clockMhz: 4800, atMs: 300_000 },
+    phases: [{ index: 0, kernel: 'k1', outcome: 'passed', durationMs: 300_000, checks: 1000, errors: 0, skipped: null }],
+    cores: [],
+    errors: [],
+    errorsDropped: 0,
+    eventsDropped: 0,
+    whea: { byId: {}, byApic: {}, unreadable: false, lastRecord: null },
+    stats: { tempMaxC: 80, tempAvgC: 70, powerMaxW: 120, powerAvgW: 100, clockMaxMhz: 5000, clockAvgMhz: 4800 },
+    samples: [],
+    events: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+    ...over,
+  };
+}
+
 /** An 8-core, 16-thread CPU with AVX2, 32 GB of RAM and the service connected; override what matters. */
 export function makeSystemInfo(over: Partial<SystemInfo> = {}): SystemInfo {
   return {

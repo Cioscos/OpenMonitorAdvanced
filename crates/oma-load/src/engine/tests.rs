@@ -78,13 +78,14 @@ fn plan(phases: Vec<Phase>) -> Plan {
 
 /// A deterministic kernel: the reference digest after about 1 ms, or a wrong one.
 struct CountKernel {
+    delay: Duration,
     bad: bool,
     count: Arc<AtomicU64>,
 }
 
 impl Kernel for CountKernel {
     fn iterate(&mut self, beat: &AtomicU64) -> Check {
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(self.delay);
         beat.fetch_add(1, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
         Check::Digest(if self.bad { REF ^ 0x10 } else { REF })
@@ -97,6 +98,8 @@ struct CountFactory {
     bad: Range<u32>,
     count: Arc<AtomicU64>,
     ref_delay: Duration,
+    /// The worker created with this index takes 120 ms per step.
+    slow: u32,
 }
 
 impl CountFactory {
@@ -106,6 +109,7 @@ impl CountFactory {
             bad,
             count: Arc::new(AtomicU64::new(0)),
             ref_delay: Duration::ZERO,
+            slow: u32::MAX,
         }
     }
 }
@@ -118,7 +122,9 @@ impl KernelFactory for CountFactory {
 
     fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
         let n = self.created.fetch_add(1, Ordering::Relaxed);
+        let delay = if n == self.slow { 120 } else { 1 };
         Ok(Box::new(CountKernel {
+            delay: Duration::from_millis(delay),
             bad: self.bad.contains(&n),
             count: Arc::clone(&self.count),
         }))
@@ -1077,4 +1083,19 @@ fn fixed_work_error_stops_the_phase() {
     assert_eq!(fin.reason, FinishReason::FirstError);
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(done(&msgs)[0].checks < 1_000);
+}
+
+#[test]
+fn a_worker_that_finishes_early_is_not_hung() {
+    // The fast worker is done after ~15 ms; the slow one needs ~1.8 s, more than the 1 s
+    // the test sentinel waits for a beat.
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    let (fin, msgs) = run_one(&f, fixed(15, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert!(errors(&msgs).is_empty());
+    let d = done(&msgs)[0];
+    assert_eq!(d.checks, 30);
+    let w = d.work_ms.expect("work_ms");
+    assert!(w >= 1_700, "work_ms follows the slow worker: {w}");
 }

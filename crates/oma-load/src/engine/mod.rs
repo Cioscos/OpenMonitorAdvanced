@@ -177,6 +177,8 @@ struct Slot {
     beat: AtomicU64,
     iterations: AtomicU64,
     errors_sent: AtomicU32,
+    /// The worker ran all its iterations: it has no beat to give any more.
+    done: AtomicBool,
 }
 
 /// The running set, as the sentinel sees it; `generation` changes with every set.
@@ -669,6 +671,7 @@ impl Engine<'_, '_> {
                     beat: AtomicU64::new(0),
                     iterations: AtomicU64::new(0),
                     errors_sent: AtomicU32::new(0),
+                    done: AtomicBool::new(false),
                 })
             })
             .collect();
@@ -1029,6 +1032,7 @@ impl Engine<'_, '_> {
             tracing::error!(kernel = ?pr.spec.kernel, "a kernel panicked");
             self.crashed.store(true, Ordering::Relaxed);
         } else if pr.spec.iterations.is_some() && !ctx.shared.quit.load(Ordering::Relaxed) {
+            slot.done.store(true, Ordering::Release);
             let at = live.opened.get().map_or(0, |o| ms(o.elapsed()));
             live.last_finished_ms.fetch_max(at, Ordering::AcqRel);
             live.finished.fetch_add(1, Ordering::AcqRel);
@@ -1151,7 +1155,15 @@ impl Engine<'_, '_> {
         let beats = w.live.as_ref().map_or_else(Vec::new, |p| {
             p.slots
                 .iter()
-                .map(|s| s.beat.load(Ordering::Relaxed))
+                .map(|s| {
+                    // Only the sentinel reads this: a finished worker waits for the
+                    // others, so its beat moves on every look and is never taken as hung.
+                    if s.done.load(Ordering::Acquire) {
+                        s.beat.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        s.beat.load(Ordering::Relaxed)
+                    }
+                })
                 .collect()
         });
         (w.generation, beats)

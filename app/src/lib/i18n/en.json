@@ -834,5 +834,19 @@
   "performance.start.timeout": "the test process did not answer",
   "performance.start.foreign_client": "another process tried to connect",
   "performance.start.incompatible": "incompatible test process version",
-  "performance.start.no_topology": "CPU topology not received"
+  "performance.start.no_topology": "CPU topology not received",
+  "performance.outcome.passed": "Passed",
+  "performance.outcome.marginal": "Passed with warnings: errors corrected by the hardware",
+  "performance.outcome.errors": "Errors found",
+  "performance.outcome.errors_core": "Unstable · core {core}",
+  "performance.outcome.crashed": "Unstable: the test closed",
+  "performance.outcome.crashed_app": "Interrupted: the app closed during the test",
+  "performance.outcome.hung": "Unstable: the test froze",
+  "performance.outcome.system_crash": "Interrupted by a system crash during {phase}",
+  "performance.outcome.stopped_user": "Stopped by you",
+  "performance.outcome.stopped_thermal": "Stopped: temperature at {temp} °C",
+  "performance.outcome.suspended": "Interrupted by sleep",
+  "performance.outcome.failed_to_start": "Not started: {reason}",
+  "performance.toast.title": "Stress test finished",
+  "performance.toast.recovered": "The previous test was interrupted: open the result."
 }

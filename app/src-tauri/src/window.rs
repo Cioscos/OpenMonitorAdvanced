@@ -41,6 +41,45 @@ pub struct NavigationTarget {
     /// The settings section to open (`about`), for the update toast.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_section: Option<String>,
+    /// The Performance view's page (M8a1), for the tray and the stress toasts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance: Option<PerformanceNav>,
+}
+
+/// A page of the Performance view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PerformancePage {
+    /// The test in progress.
+    #[allow(dead_code)] // removed in A21
+    Run,
+    /// A saved session's result.
+    Result,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceNav {
+    pub page: PerformancePage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl PerformanceNav {
+    #[allow(dead_code)] // removed in A21
+    pub fn run() -> Self {
+        Self {
+            page: PerformancePage::Run,
+            session_id: None,
+        }
+    }
+
+    pub fn result(session_id: &str) -> Self {
+        Self {
+            page: PerformancePage::Result,
+            session_id: Some(session_id.to_owned()),
+        }
+    }
 }
 
 fn view_name<S: Serializer>(view: &ViewKind, serializer: S) -> Result<S::Ok, S::Error> {
@@ -53,6 +92,7 @@ impl NavigationTarget {
             view,
             device_id: None,
             settings_section: None,
+            performance: None,
         }
     }
 
@@ -62,6 +102,7 @@ impl NavigationTarget {
             view: ViewKind::Advanced,
             device_id: Some(device_id.to_owned()),
             settings_section: None,
+            performance: None,
         }
     }
 
@@ -71,6 +112,17 @@ impl NavigationTarget {
             view,
             device_id: None,
             settings_section: Some("about".to_owned()),
+            performance: None,
+        }
+    }
+
+    /// A page of the Performance view, with `view` as the view it returns to.
+    pub fn performance(view: ViewKind, nav: PerformanceNav) -> Self {
+        Self {
+            view,
+            device_id: None,
+            settings_section: None,
+            performance: Some(nav),
         }
     }
 }
@@ -354,13 +406,21 @@ pub fn show_device(app: &AppHandle, device_id: &str) {
 /// Shows Settings › About (a clicked update toast); Back returns to the last
 /// view, Simple when none is remembered.
 pub fn show_about(app: &AppHandle) {
-    let view = app
-        .state::<std::sync::Arc<crate::settings::SettingsStore>>()
+    navigate(app, NavigationTarget::about(last_view(app)));
+}
+
+/// Shows a page of the Performance view (a clicked stress toast, the tray).
+pub fn show_performance(app: &AppHandle, nav: PerformanceNav) {
+    navigate(app, NavigationTarget::performance(last_view(app), nav));
+}
+
+/// The last view, Simple when none is remembered.
+fn last_view(app: &AppHandle) -> ViewKind {
+    app.state::<Arc<SettingsStore>>()
         .snapshot()
         .view
         .last
-        .unwrap_or(ViewKind::Simple);
-    navigate(app, NavigationTarget::about(view));
+        .unwrap_or(ViewKind::Simple)
 }
 
 /// Leaves `target` pending, tells an open window at once, and shows it.
@@ -470,6 +530,23 @@ mod tests {
                 "{open} {dirty}"
             );
         }
+    }
+
+    #[test]
+    fn navigation_target_serializes_performance() {
+        let json = |nav| {
+            serde_json::to_string(&NavigationTarget::performance(ViewKind::Simple, nav)).unwrap()
+        };
+        assert_eq!(
+            json(PerformanceNav::run()),
+            r#"{"view":"simple","performance":{"page":"run"}}"#
+        );
+        assert_eq!(
+            json(PerformanceNav::result(
+                "0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"
+            )),
+            r#"{"view":"simple","performance":{"page":"result","sessionId":"0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"}}"#
+        );
     }
 
     #[test]

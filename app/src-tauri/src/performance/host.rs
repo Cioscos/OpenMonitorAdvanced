@@ -87,7 +87,6 @@ impl fmt::Display for StartFailure {
 impl std::error::Error for StartFailure {}
 
 #[cfg(windows)]
-#[allow(unused_imports)] // removed in A20
 pub use imp::{HostEvent, LoadHost};
 
 #[cfg(windows)]

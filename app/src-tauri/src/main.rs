@@ -9,7 +9,6 @@ mod log;
 mod notifier;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod overlay;
-#[allow(dead_code)] // removed in A20
 mod performance;
 mod report;
 mod rules;
@@ -367,6 +366,16 @@ fn main() {
             window::open_overlay_editor,
             window::overlay_editor_dirty,
             window::app_quit_confirmed,
+            performance::commands::performance_system,
+            performance::commands::performance_preview,
+            performance::commands::performance_start,
+            performance::commands::performance_stop,
+            performance::commands::performance_status,
+            performance::commands::performance_history,
+            performance::commands::performance_session,
+            performance::commands::performance_delete,
+            performance::commands::performance_export,
+            performance::commands::performance_quit_confirmed,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -439,6 +448,47 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            // The stress test runner: without a test it does no periodic work (§11).
+            #[cfg(windows)]
+            let perf = {
+                let engine = engine.clone();
+                let svc = svc_status.clone();
+                let (open_handle, emit_handle) = (app.handle().clone(), app.handle().clone());
+                let runner = Arc::new(performance::runner::PerformanceRunner::new(
+                    performance::runner::RunnerDeps {
+                        store: Arc::new(performance::store::PerformanceStore::new(
+                            performance::performance_dir(),
+                        )),
+                        settings: store.clone(),
+                        machine: Box::new(performance::runner::WinMachine),
+                        launcher: performance::runner::load_host_launcher(),
+                        toaster: Box::new(toaster.clone()),
+                        schema: Box::new(move || {
+                            engine
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .schema()
+                                .clone()
+                        }),
+                        service_available: Box::new(move || {
+                            svc.get().1.state == oma_ipc::ServiceState::Connected
+                        }),
+                        window_open: Box::new(move || window::any_open(&open_handle)),
+                        emit: Box::new(move |status| {
+                            let _ = emit_handle.emit(performance::runner::EVENT_STATUS, status);
+                        }),
+                        on_state: Box::new(|_| {}),
+                        app_version: app.package_info().version.to_string(),
+                    },
+                ));
+                app.manage(runner.clone());
+                // A test the last run left open becomes a session (DA14), off the main thread.
+                let recover = runner.clone();
+                std::thread::Builder::new()
+                    .name("oma-perf-recover".into())
+                    .spawn(move || recover.recover())?;
+                runner
+            };
             // The overlay controller: with the overlay off and without
             // `OMA_FRAMES_DEBUG` its thread only waits (§11).
             #[cfg(windows)]
@@ -514,6 +564,9 @@ fn main() {
                     tray.update(schema, &out.snapshot, alerts.health(), &settings);
                     // The log row, window or not; never waits on the writer.
                     log_service.on_tick(out, schema, &settings);
+                    // CPU readings for a stress test; never waits on it.
+                    #[cfg(windows)]
+                    perf.on_tick(out, schema);
                 }
                 // Sensor values for the overlay; never waits on it.
                 #[cfg(windows)]
@@ -603,6 +656,11 @@ fn main() {
                 {
                     runner.stop();
                 }
+            }
+            // A stress test in progress ends as `stopped_user` (bounded, DA16).
+            #[cfg(windows)]
+            if let Some(runner) = app.try_state::<Arc<performance::runner::PerformanceRunner>>() {
+                runner.shutdown(Duration::from_secs(2));
             }
             // No tick is running any more: stop the CSV log (bounded, L6).
             if let Some(log) = app.try_state::<Arc<log::LogService>>() {

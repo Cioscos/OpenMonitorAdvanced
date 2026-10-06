@@ -834,5 +834,19 @@
   "performance.start.timeout": "il processo di test non ha risposto",
   "performance.start.foreign_client": "un altro processo ha tentato di collegarsi",
   "performance.start.incompatible": "versione del processo di test non compatibile",
-  "performance.start.no_topology": "topologia della CPU non ricevuta"
+  "performance.start.no_topology": "topologia della CPU non ricevuta",
+  "performance.outcome.passed": "Superato",
+  "performance.outcome.marginal": "Superato con avvisi: errori corretti dall'hardware",
+  "performance.outcome.errors": "Errori trovati",
+  "performance.outcome.errors_core": "Instabile · core {core}",
+  "performance.outcome.crashed": "Instabile: il test si è chiuso",
+  "performance.outcome.crashed_app": "Interrotto: l'app si è chiusa durante il test",
+  "performance.outcome.hung": "Instabile: il test si è bloccato",
+  "performance.outcome.system_crash": "Interrotto da un crash del sistema durante {phase}",
+  "performance.outcome.stopped_user": "Fermato da te",
+  "performance.outcome.stopped_thermal": "Fermato: temperatura a {temp} °C",
+  "performance.outcome.suspended": "Interrotto dalla sospensione",
+  "performance.outcome.failed_to_start": "Non avviato: {reason}",
+  "performance.toast.title": "Stress test finito",
+  "performance.toast.recovered": "Il test precedente si è interrotto: apri il risultato."
 }

@@ -160,7 +160,9 @@ impl PerformanceStore {
         }
     }
 
+    /// A new journal starts a new count of failed recoveries.
     pub fn write_journal(&self, j: &Journal) -> io::Result<()> {
+        let _ = fs::remove_file(self.attempts_path());
         write_file(
             &self.journal_path(),
             &serde_json::to_vec(j).map_err(io::Error::other)?,
@@ -404,7 +406,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fff]Z` to Unix ms.
-fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let fraction_ok = b.len() == 20
         || (b.len() > 21 && b[19] == b'.' && b[20..b.len() - 1].iter().all(u8::is_ascii_digit));
@@ -442,7 +444,7 @@ fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     Some((((days * 24 + h) * 60 + mi) * 60 + sec) * 1000)
 }
 
-fn to_rfc3339(unix_ms: i64) -> String {
+pub(crate) fn to_rfc3339(unix_ms: i64) -> String {
     let t = oma_core::csv::local_time(unix_ms.max(0) as u64, 0);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
@@ -704,11 +706,19 @@ mod tests {
         // A real I/O error (`stress` is a file): kept twice, dropped at the third start.
         j.updated_at = UPDATED.into();
         fs::write(dir.join("stress"), b"x").unwrap();
+        store.write_journal(&j).unwrap();
         for n in 1..=3 {
-            store.write_journal(&j).unwrap_or(());
             assert!(store.recover(0, none, "1.0").is_none());
             assert_eq!(store.read_journal().is_some(), n < 3, "start {n}");
         }
+    }
+
+    #[test]
+    fn write_journal_resets_the_retry_counter() {
+        let store = PerformanceStore::new(temp_dir("attempts"));
+        fs::write(store.attempts_path(), b"2").unwrap();
+        store.write_journal(&journal(ID, UPDATED)).unwrap();
+        assert!(!store.attempts_path().exists());
     }
 
     #[test]

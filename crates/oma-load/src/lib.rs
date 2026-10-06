@@ -3,6 +3,10 @@
 //! and `link`.
 
 pub mod args;
+pub mod engine;
+pub mod kernel;
 pub mod link;
 pub mod log;
+pub mod rng;
 pub mod sys;
+pub mod verify;

@@ -31,7 +31,7 @@ fn run() -> i32 {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "oma-load starting");
     #[cfg(windows)]
     {
-        link::run(&args.pipe)
+        link::run(&args.pipe, args.inject)
     }
     #[cfg(not(windows))]
     {

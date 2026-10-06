@@ -22,6 +22,13 @@ pub fn group_affinity(cpu: &LogicalCpu) -> GROUP_AFFINITY {
 
 /// Pins the calling thread to `cpu`.
 pub fn pin_current_thread(cpu: &LogicalCpu) -> io::Result<()> {
+    // A group holds at most 64 processors: a larger number would overflow the mask.
+    if cpu.number >= 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "processor number outside the group mask",
+        ));
+    }
     let affinity = group_affinity(cpu);
     // SAFETY: the pseudo-handle of the current thread needs no close; `affinity` is a live
     // GROUP_AFFINITY for the call; the previous affinity is not requested.
@@ -108,6 +115,16 @@ mod tests {
             ..cpu(0)
         });
         assert_eq!((a.Group, a.Mask), (1, 1 << 5));
+    }
+
+    #[test]
+    fn pinning_refuses_a_number_outside_the_mask() {
+        let e = pin_current_thread(&LogicalCpu {
+            number: 64,
+            ..cpu(0)
+        })
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The pipe link to the app: connect, send our `Hello` and the full topology,
-//! then wait for `Run`. The phase engine arrives with A8: until then `Run` is
-//! answered with `Finished { reason: Failed }`.
+//! then serve the app: `Run` starts the phase engine on its own thread, `Stop`
+//! raises its stop flag, and a closed pipe ends the process at once.
 //!
 //! The link ends the process: [`run`] returns the exit code.
 
@@ -75,7 +75,7 @@ pub fn route(msg: LoadMessage) -> Route {
     }
 }
 
-/// The answer to `Run` until the engine exists (A8).
+/// The answer to a `Run` the engine could not start.
 pub fn failed_finish() -> LoadMessage {
     LoadMessage::Finished(Finished {
         reason: FinishReason::Failed,
@@ -94,9 +94,12 @@ pub fn hello() -> LoadMessage {
 }
 
 /// Connects to `pipe`, serves the app until the pipe closes and returns the exit code.
+/// `inject` is the fault injection of the command line (DA18).
 #[cfg(windows)]
-pub fn run(pipe: &str) -> i32 {
-    use std::sync::mpsc;
+pub fn run(pipe: &str, inject: Option<crate::args::Inject>) -> i32 {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
 
     use oma_win::load_pipe::connect_load_client;
     use oma_win::private_pipe::{CloseReason, PipeEvent};
@@ -112,34 +115,55 @@ pub fn run(pipe: &str) -> i32 {
         tracing::error!(error = %e, "cannot send the load hello");
         return EXIT_CONNECT;
     }
-    match crate::sys::full_topology() {
+    let topology = match crate::sys::full_topology() {
         Ok(t) => {
-            if let Err(e) = conn.send(&LoadMessage::Topology(t)) {
+            if let Err(e) = conn.send(&LoadMessage::Topology(t.clone())) {
                 tracing::error!(error = %e, "cannot send the topology");
                 return EXIT_CONNECT;
             }
+            Arc::new(t)
         }
         Err(e) => {
             tracing::error!(error = %e, "cannot read the topology");
             return EXIT_CONNECT;
         }
-    }
+    };
     tracing::info!("connected to the app");
+    let conn = Arc::new(conn);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut engine: Option<thread::JoinHandle<()>> = None;
 
     let (tx, events) = mpsc::channel();
     let reader = conn.start_reader(move |event| tx.send(event).is_ok());
     let code = loop {
         match events.recv() {
             Ok(PipeEvent::Message(msg)) => match route(msg) {
-                Route::Run(_) => {
-                    // The engine is A8; until then every plan fails at once.
-                    tracing::warn!("no phase engine yet: the plan is refused");
-                    if let Err(e) = conn.send(&failed_finish()) {
-                        tracing::warn!(error = %e, "cannot send Finished");
-                        break EXIT_OK;
+                Route::Run(req) => {
+                    if engine.as_ref().is_some_and(|h| !h.is_finished()) {
+                        tracing::warn!("a plan is already running: Run ignored");
+                        continue;
+                    }
+                    stop.store(false, Ordering::Relaxed);
+                    let started = start_engine(
+                        Arc::clone(&conn),
+                        Arc::clone(&stop),
+                        Arc::clone(&topology),
+                        req.plan,
+                        inject.clone(),
+                    );
+                    match started {
+                        Ok(handle) => engine = Some(handle),
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot start the engine thread");
+                            if let Err(e) = conn.send(&failed_finish()) {
+                                tracing::warn!(error = %e, "cannot send Finished");
+                                break EXIT_OK;
+                            }
+                        }
                     }
                 }
-                Route::Stop | Route::Ignore => {}
+                Route::Stop => stop.store(true, Ordering::Relaxed),
+                Route::Ignore => {}
                 Route::Exit(code) => break code,
             },
             Ok(PipeEvent::Closed(reason)) => {
@@ -149,6 +173,8 @@ pub fn run(pipe: &str) -> i32 {
                     }
                     other => tracing::warn!(reason = ?other, "the load pipe broke"),
                 }
+                // Returning ends the process, and the workers with it.
+                stop.store(true, Ordering::Relaxed);
                 break EXIT_OK;
             }
             Err(_) => break EXIT_OK,
@@ -156,6 +182,29 @@ pub fn run(pipe: &str) -> i32 {
     };
     reader.stop();
     code
+}
+
+/// Runs `plan` on the engine thread, which sends everything and the final `Finished`.
+#[cfg(windows)]
+fn start_engine(
+    conn: std::sync::Arc<oma_win::load_pipe::LoadConnection>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    topology: std::sync::Arc<oma_ipc::load::Topology>,
+    plan: oma_ipc::load::Plan,
+    inject: Option<crate::args::Inject>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("oma-load-engine".into())
+        .spawn(move || {
+            let out = |msg: LoadMessage| {
+                if let Err(e) = conn.send(&msg) {
+                    tracing::warn!(error = %e, "cannot send to the app");
+                }
+            };
+            let finished = crate::engine::run(&plan, &topology, &out, &stop, inject);
+            tracing::info!(reason = ?finished.reason, "plan finished");
+            out(LoadMessage::Finished(finished));
+        })
 }
 
 #[cfg(test)]

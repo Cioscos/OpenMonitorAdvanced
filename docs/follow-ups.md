@@ -122,7 +122,7 @@ Run with the user after the merge into `main` (installed 0.5.0 setup from `main`
 
 Fixed during the checks: the result showed the core grid ("not tested") for plans without a core-cycle phase (`98c3fc8`); the space before `·` was lost inside `{#if}` blocks (`b87b616`); a phase cut short by a stop counted as passed (`39e73bc`); the footprint script counted `oma-load` in the window total (`ec55ce9`); the wizard did not follow the service state live (`58a808c`).
 
-Open: in the wizard summary, unticking a mode under "Personalizza" removes its phases from the list, so the panel below jumps up and down. Proposed fix: keep the phases in the list, dimmed and marked as excluded; the bar and the total count only the active ones. `app/src/components/performance/StressWizard.svelte`; waiting for the user's go.
+Fixed after the checks: unticked modes keep their phases in the wizard summary, dimmed and marked excluded (`bbfd70e`). Installer rebuilt from `bbfd70e`; the VM checks of the installer were skipped by the user.
 
 ## Open: minor items from the M5b reviews
 

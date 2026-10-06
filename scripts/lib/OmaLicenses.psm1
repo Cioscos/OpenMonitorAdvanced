@@ -241,8 +241,10 @@ function Merge-OmaLicenseSections {
                 if (-not $texts.ContainsKey($body)) {
                     $texts[$body] = [pscustomobject]@{
                         Title = $t.Title; Body = $body; FirstName = $m.Name; FirstVersion = $m.Version; Label = $null
+                        Neutral = $false
                     }
                 }
+                if ($t.PSObject.Properties['Neutral'] -and $t.Neutral) { $texts[$body].Neutral = $true }
                 if (-not $keys.Contains($body)) { $keys.Add($body) }
             }
             [pscustomobject]@{
@@ -259,9 +261,11 @@ function Merge-OmaLicenseSections {
 
     # Labels, stable when a dependency is added: "<title> (<first user>)", where the first user
     # is the first entry of the file that references the text. Should two texts collide, the
-    # user's version is added, then the start of the text's SHA-256.
+    # user's version is added, then the start of the text's SHA-256. A text marked Neutral (a
+    # standard text of our own scripts/licenses folder) is labelled by its title alone, so a
+    # component never points at a text named after an unrelated package.
     $all = [object[]]@($texts.Values)
-    foreach ($t in $all) { $t.Label = "$($t.Title) ($($t.FirstName))" }
+    foreach ($t in $all) { $t.Label = if ($t.Neutral) { $t.Title } else { "$($t.Title) ($($t.FirstName))" } }
     foreach ($t in (Get-OmaCollidingTexts $all)) { $t.Label = "$($t.Title) ($($t.FirstName) $($t.FirstVersion))" }
     foreach ($t in (Get-OmaCollidingTexts $all)) {
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($t.Body)))

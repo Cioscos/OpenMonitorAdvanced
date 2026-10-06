@@ -229,7 +229,9 @@ function Get-AdaptedEntries([string[]]$Accepted) {
     [pscustomobject]@{
         Ecosystem = 'Adapted'; Name = 'OpenDCDiag'; Version = '9957c45b'; License = 'Apache-2.0'
         Copyright = '2022 Intel Corporation'
-        Texts = @([pscustomobject]@{ Title = 'Apache-2.0'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir 'Apache-2.0.txt')) })
+        Texts = @([pscustomobject]@{
+                Title = 'Apache-2.0'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir 'Apache-2.0.txt')); Neutral = $true
+            })
     }
 }
 

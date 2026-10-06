@@ -1600,4 +1600,16 @@ mod tests {
         let d = decode(json!({"version": 1, "performance": {"ramSharePercent": 3}}));
         assert_eq!(d.settings.performance.ram_share_percent, 10);
     }
+
+    #[test]
+    fn performance_wrong_types_give_defaults() {
+        let d = decode(json!({"version": 1, "performance":
+            {"cpuStopC": "x", "stopOnFirstError": 3}}));
+        assert_eq!(d.settings.performance, PerformanceSettings::default());
+        assert_eq!(d.diagnostics.len(), 2);
+        assert!(d
+            .diagnostics
+            .iter()
+            .all(|x| x.kind == DiagnosticKind::WrongType));
+    }
 }

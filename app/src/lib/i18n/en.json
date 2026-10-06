@@ -34,6 +34,7 @@
   "settings.performance.thermalStop": "Thermal stop",
   "settings.performance.thermalStop.hint": "Stops the test when the CPU gets too hot.",
   "settings.performance.thermalStop.confirm": "Without the thermal stop the test does not stop if the CPU gets too hot. Turn it off?",
+  "settings.performance.cancel": "Cancel",
   "settings.performance.thermalStop.off": "Turn off",
   "settings.performance.cpuStop": "CPU threshold",
   "settings.performance.cpuStop.hint": "The temperature at which the thermal stop acts, from 60 to 110 °C.",

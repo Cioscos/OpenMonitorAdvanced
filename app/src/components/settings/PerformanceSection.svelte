@@ -34,6 +34,8 @@
   const FIRST_ERROR: Record<FirstError, boolean | null> = { profile: null, yes: true, no: false };
 </script>
 
+<svelte:window onkeydown={(e) => e.key === 'Escape' && askingOff && (askingOff = false)} />
+
 {#if current}
   <Group id="performance-safety" title={t('settings.performance.group.safety')}>
     <Toggle
@@ -50,12 +52,12 @@
           <div class="ask" id="performance-thermal-ask" role="alert">
             <span>{t('settings.performance.thermalStop.confirm')}</span>
             <button type="button" class="action danger" onclick={confirmOff}>{t('settings.performance.thermalStop.off')}</button>
-            <button type="button" class="action" onclick={() => (askingOff = false)}>{t('rules.cancel')}</button>
+            <button type="button" class="action" onclick={() => (askingOff = false)}>{t('settings.performance.cancel')}</button>
           </div>
         {/if}
       {/snippet}
     </Toggle>
-    <Field id="performance-cpu-stop" label={t('settings.performance.cpuStop')} description={t('settings.performance.cpuStop.hint')} error={errorOf('performance.cpuStopC')}>
+    <Field id="performance-cpu-stop" labelFor={current.cpuStopC === null ? null : 'performance-cpu-stop-input'} label={t('settings.performance.cpuStop')} description={t('settings.performance.cpuStop.hint')} error={errorOf('performance.cpuStopC')}>
       {#snippet control()}
         <div class="buttons">
           {#if current.cpuStopC === null}

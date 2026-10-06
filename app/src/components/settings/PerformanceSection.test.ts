@@ -37,7 +37,7 @@ test('disabling_thermal_stop_asks_first', async () => {
   expect(patches).toEqual([]);
   expect(screen.getByText(t('settings.performance.thermalStop.confirm'))).toBeTruthy();
   // Cancelling changes nothing; confirming sends the change.
-  await fireEvent.click(screen.getByRole('button', { name: t('rules.cancel') }));
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.cancel') }));
   expect(patches).toEqual([]);
   await fireEvent.click(toggle);
   await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.thermalStop.off') }));
@@ -62,10 +62,33 @@ test('reset_risk_notice', async () => {
   await waitFor(() => expect(patches).toEqual([{ performance: { riskNoticeSeen: false } }]));
 });
 
-test('first_error_and_ram_share_send_patches', async () => {
+test('first_error_sends_patches', async () => {
   const { patches } = await setup();
   await fireEvent.click(screen.getByRole('radio', { name: t('settings.performance.firstError.yes') }));
   await waitFor(() => expect(patches).toEqual([{ performance: { stopOnFirstError: true } }]));
   await fireEvent.click(screen.getByRole('radio', { name: t('settings.performance.firstError.profile') }));
   await waitFor(() => expect(patches.at(-1)).toEqual({ performance: { stopOnFirstError: null } }));
+});
+
+test('ram_share_commit_sends_patch', async () => {
+  const { patches } = await setup();
+  const input = screen.getByLabelText(t('settings.performance.ramShare'));
+  await fireEvent.input(input, { target: { value: '50' } });
+  await fireEvent.blur(input);
+  await waitFor(() => expect(patches).toEqual([{ performance: { ramSharePercent: 50 } }]));
+});
+
+test('manual_threshold_starts_at_95_and_has_a_label', async () => {
+  const { patches } = await setup();
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.cpuStop.set') }));
+  await waitFor(() => expect(patches).toEqual([{ performance: { cpuStopC: 95 } }]));
+  expect(await screen.findByLabelText(t('settings.performance.cpuStop'))).toBeTruthy();
+});
+
+test('escape_cancels_the_thermal_confirmation', async () => {
+  const { patches } = await setup();
+  await fireEvent.click(screen.getByRole('switch', { name: t('settings.performance.thermalStop') }));
+  await fireEvent.keyDown(screen.getByText(t('settings.performance.thermalStop.confirm')), { key: 'Escape' });
+  expect(screen.queryByText(t('settings.performance.thermalStop.confirm'))).toBeNull();
+  expect(patches).toEqual([]);
 });

@@ -26,7 +26,7 @@ const error = (over: Partial<ErrorRecord> = {}): ErrorRecord => ({
 /** An overclock test that found errors on core 2 only, in its second phase (one core at a time). */
 const UNSTABLE = (): StressSession => {
   const first = error();
-  return makeStressSession({
+  const s = makeStressSession({
     id: 'bad',
     objective: 'overclock',
     request: { component: 'cpu', objective: 'overclock', preset: 'standard', custom: null, retryCore: null },
@@ -43,6 +43,8 @@ const UNSTABLE = (): StressSession => {
     whea: { byId: { '19': 2 }, byApic: { '4': 2 }, unreadable: false, lastRecord: 9 },
     events: [{ atMs: 150_000, code: 'whea', params: { id: '19', apic: '4', core: '2' } }],
   });
+  const cycle = { ...s.plan.phases[0], kernel: 'k2' as const, placement: 'core_cycle' as const, per_core_s: 60 };
+  return { ...s, plan: { ...s.plan, phases: [s.plan.phases[0], cycle] } };
 };
 
 beforeEach(() => {
@@ -117,6 +119,12 @@ test('result_without_single_core_has_no_retry', async () => {
   // «Repeat» sends the session's own request.
   await fireEvent.click(screen.getByRole('button', { name: t('performance.result.repeat') }));
   await waitFor(() => expect(backend.performanceStartRequests).toEqual([session.request]));
+});
+
+test('result_without_core_cycle_has_no_core_grid', async () => {
+  // A normal test loads every core at once: no core is tested on its own, so no «not tested» cells.
+  await setup(makeStressSession({ cores: [0, 1, 2, 3].map((core) => ({ core, state: 'untested' as const, firstError: null })) }));
+  expect(screen.queryByRole('list', { name: t('performance.run.cores') })).toBeNull();
 });
 
 test('export_calls_the_backend', async () => {

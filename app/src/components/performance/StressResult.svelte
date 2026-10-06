@@ -86,6 +86,10 @@
   /** «Retry only core N»: only when every error is on that one core. */
   const retry = $derived(verdict === 'errors_core' && firstError?.core != null ? { core: firstError.core, kernel: firstError.kernel } : null);
 
+  // The core grid only for a plan that tested cores one at a time, like the live page: in an all-core
+  // phase every core works at once and none would read «tested».
+  const showCores = $derived(!!session?.cores.length && session.plan.phases.some((p) => p.placement === 'core_cycle'));
+
   const totalMs = $derived(session?.plan.phases.reduce((sum, p) => sum + p.duration_s * 1000, 0) ?? 0);
   const durationMs = $derived(session?.endedAt ? Math.max(0, Date.parse(session.endedAt) - Date.parse(session.startedAt)) : null);
   const phaseCounts = $derived.by(() => {
@@ -201,7 +205,7 @@
     {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
     {#if exported}<p class="muted" role="status">{exported}</p>{/if}
 
-    <div class="panels" class:two={session.cores.length > 0}>
+    <div class="panels" class:two={showCores}>
       <section class="panel">
         <p class="label">{t('performance.result.session')}</p>
         <dl class="summary">
@@ -245,7 +249,7 @@
           {/if}
         </dl>
       </section>
-      {#if session.cores.length > 0}
+      {#if showCores}
         <section class="panel">
           <p class="label"><Term term="coreNumber">{t('performance.result.cores')}</Term></p>
           <CoreGrid cores={session.cores} final {notes} />

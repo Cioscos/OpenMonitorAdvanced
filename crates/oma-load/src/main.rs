@@ -11,11 +11,9 @@
 use oma_load::{args, link, log};
 
 fn main() {
-    let code = {
-        // Dropped before `exit`, so the buffered log lines are flushed.
-        let _log_guard = log::init();
-        run()
-    };
+    log::init();
+    let code = run();
+    log::flush();
     std::process::exit(code);
 }
 

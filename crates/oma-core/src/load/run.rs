@@ -483,6 +483,8 @@ impl RunController {
                 self.phase = p.phase;
                 self.current_core = p.current_core;
                 self.checks = p.checks;
+                // oma-load caps its `Error` messages but counts every error.
+                self.errors = self.errors.max(p.errors);
                 for c in &p.cores {
                     self.set_core(c.core, c.state);
                 }
@@ -551,6 +553,7 @@ impl RunController {
                 }
             }
             LoadMessage::Finished(f) => {
+                self.errors = self.errors.max(f.errors);
                 match f.reason {
                     FinishReason::Completed => self.completed = true,
                     FinishReason::Stopped => {
@@ -558,7 +561,7 @@ impl RunController {
                             self.user_stop = true;
                         }
                     }
-                    FinishReason::FirstError => self.errors = self.errors.max(f.errors),
+                    FinishReason::FirstError => {}
                     FinishReason::Failed => {
                         if !self.hung {
                             self.crashed = true;
@@ -1064,6 +1067,32 @@ mod tests {
         assert_eq!(s.errors[0].temp_c, Some(71.0));
         assert_eq!(s.cores[2].state, CoreState::Failed);
         assert_eq!(c.status().errors, 1);
+    }
+
+    #[test]
+    fn error_count_is_the_largest_of_errors_progress_and_finished() {
+        // oma-load sends at most 16 `Error` messages per worker and phase, but counts them all.
+        let mut c = ctl(false, true);
+        c.on_load(&error(Some(1), ErrorKind::Mismatch), clock(1000));
+        let mut p = progress(0, None);
+        if let LoadMessage::Progress(p) = &mut p {
+            p.errors = 40;
+        }
+        c.on_load(&p, clock(1500));
+        assert_eq!(c.status().errors, 40);
+        let mut f = finished(FinishReason::Completed);
+        if let LoadMessage::Finished(f) = &mut f {
+            f.errors = 50;
+        }
+        let a = c.on_load(&f, clock(2000));
+        settle(&mut c, a);
+        assert_eq!(c.status().errors, 50);
+        assert_eq!(
+            verdict(&c),
+            "errors_core",
+            "the core still comes from the Error"
+        );
+        assert_eq!(c.session().cores[1].state, CoreState::Failed);
     }
 
     #[test]

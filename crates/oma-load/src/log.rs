@@ -3,6 +3,7 @@
 //! `%LOCALAPPDATA%\OpenMonitorAdvanced\logs` with the `oma-load` prefix.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 /// The folder of the logs, shared with the app and the service.
 pub fn logs_dir() -> Option<PathBuf> {
@@ -14,18 +15,22 @@ pub fn logs_dir() -> Option<PathBuf> {
     )
 }
 
+/// The guard of the file log: dropping it flushes the buffered lines.
+static GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
+
 /// Sets up the file log. The process has no console (windows subsystem), so
 /// a missing `LOCALAPPDATA` or an appender that cannot be built leaves it
-/// without a log instead of failing. Keep the guard alive until exit: its
-/// drop flushes the buffered lines.
-pub fn init() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let logs = logs_dir()?;
-    let file = tracing_appender::rolling::Builder::new()
+/// without a log instead of failing. Call [`flush`] before the process exits.
+pub fn init() {
+    let Some(logs) = logs_dir() else { return };
+    let Ok(file) = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("oma-load")
         .max_log_files(7)
         .build(logs)
-        .ok()?;
+    else {
+        return;
+    };
     let (writer, guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::fmt()
         .with_ansi(false)
@@ -35,5 +40,11 @@ pub fn init() -> Option<tracing_appender::non_blocking::WorkerGuard> {
                 .unwrap_or_else(|_| "oma_core=debug,oma_win=info,oma_load=info".into()),
         )
         .init();
-    Some(guard)
+    *GUARD.lock().unwrap_or_else(PoisonError::into_inner) = Some(guard);
+}
+
+/// Writes out the buffered log lines; later lines are lost. Called right before
+/// `std::process::exit`, which runs no destructors.
+pub fn flush() {
+    drop(GUARD.lock().unwrap_or_else(PoisonError::into_inner).take());
 }

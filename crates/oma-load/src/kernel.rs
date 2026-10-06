@@ -10,23 +10,38 @@
 
 //! The contract between the phase engine and the kernels (K1–K10, A9–A15).
 //!
-//! For each phase the engine asks the [`KernelFactory`] of the phase kernel for:
-//! - the reference, [`KernelFactory::reference`], run on up to three processors of
-//!   different cores that must agree (DA7); `None` for the kernels that check themselves
-//!   (K9, K10);
-//! - one [`Kernel`] per worker thread, [`KernelFactory::worker`], built on the worker's own
-//!   pinned thread (so its memory is first touched there), before the reference.
+//! For each set of workers of a phase the engine asks the [`KernelFactory`] of each kernel
+//! for:
+//! 1. the reference, [`KernelFactory::reference`], run first, on up to three processors of
+//!    different cores, one after the other; the three vectors must be equal (DA7). `None`
+//!    for the kernels that check themselves (K9, K10);
+//! 2. then one [`Kernel`] per worker thread, [`KernelFactory::worker`], built on the
+//!    worker's own pinned thread, so its memory is first touched there.
 //!
-//! Every [`Kernel::iterate`] returns a [`Check`]: a digest the engine compares with the
-//! reference, or the kernel's own verdict.
+//! Every [`Kernel::iterate`] returns a [`Check`]: a digest the engine compares with entry
+//! `variant` of the reference vector, or the kernel's own verdict.
 //!
-//! **Memory (DA10).** `worker` sizes its data from `ctx.budget.ram_per_thread`. When the
-//! allocation fails it returns [`KernelError::Memory`] with the size per thread to try next
-//! (half, not below 256 MiB), or [`KernelError::Insufficient`] when it is already at the
-//! floor. The engine then rebuilds every worker of the phase with the new size (and
-//! `Notice { code: "ram_reduced" }`), so the workers and the reference always share one
-//! `ctx`; for K3 and K4 it retries `Insufficient` with one thread per physical core, then
-//! skips the phase with `Notice { code: "ram_insufficient" }`.
+//! **The digest** depends only on `isa`, `size`, `budget`, `seed` and `patterns`: not on
+//! `ctx.worker`, `ctx.workers` or how many iterations ran before. Every iteration starts
+//! again from the same state (DA6).
+//!
+//! **Memory (DA10).** `reference` and `worker` size their data from
+//! `ctx.budget.ram_per_thread`. When an allocation fails, they return
+//! [`KernelError::Memory`] with the size per thread to try next (half, not below 256 MiB),
+//! or [`KernelError::Insufficient`] when they are already at the floor; `reference` wraps
+//! it in [`RefFailure::Kernel`]. The engine then starts the set again with the new size
+//! (and `Notice { code: "ram_reduced" }`), so the workers and the reference always share
+//! one `ctx`. For K3 and K4 it retries `Insufficient` with one thread per physical core,
+//! then skips the phase with `Notice { code: "ram_insufficient" }`. Allocate with
+//! `try_reserve_exact`, never with an allocation that aborts.
+//!
+//! **Timing.**
+//! - An iteration takes at most 2 s on a slow CPU and bumps `beat` at least every 250 ms.
+//! - The kernels used in `variable` and `light` (K1, K2, K5) keep an iteration to a few
+//!   ms (at most 50 ms), so the bursts keep their length and a stop ends within 1 s.
+//! - A long build may poll `ctx.shared.quit` and give up with any error once it is raised.
+//! - A worker that waits for another one (K9) checks `ctx.shared.quit` and keeps bumping
+//!   `beat` while it waits.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -37,8 +52,11 @@ use oma_ipc::load::{DataSize, Isa, KernelId, LogicalCpu, RamPattern, Topology};
 /// The result of one iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
-    /// A digest of the output, compared with the reference digest.
+    /// A digest of the output, compared with entry 0 of the reference vector.
     Digest(u64),
+    /// A digest compared with entry `variant` of the reference vector: one entry per data
+    /// size of K4.
+    DigestOf { variant: u32, digest: u64 },
     /// A self-checking kernel found its output right.
     Ok,
     /// A self-checking kernel found a wrong value.
@@ -47,19 +65,34 @@ pub enum Check {
 
 /// One worker's instance of a kernel, with its data.
 pub trait Kernel: Send {
-    /// Runs one iteration, at most 2 s on a slow CPU, bumping `beat` (any change counts)
-    /// at least every 250 ms of work.
+    /// Runs one iteration; see the module documentation for the timing.
     fn iterate(&mut self, beat: &AtomicU64) -> Check;
 }
 
 pub trait KernelFactory: Sync {
-    /// The reference digest for `ctx`, computed with the same code as the workers; `None`
-    /// for a self-checking kernel. `Err` is a defect of the implementation found by the
-    /// reference's own checks (`reference_invalid`), never an error of a core.
-    fn reference(&self, ctx: &WorkerCtx) -> Option<Result<u64, String>>;
+    /// The reference digests for `ctx`, indexed by `Check::DigestOf::variant` (one entry for
+    /// a kernel that returns `Check::Digest`), computed with the same code as the workers;
+    /// `None` for a self-checking kernel.
+    fn reference(&self, ctx: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>>;
 
     /// A kernel for worker `ctx.worker`; see the module documentation for the errors.
     fn worker(&self, ctx: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError>;
+}
+
+/// Why a reference could not be computed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefFailure {
+    /// The reference's own checks (a SUMINP/SUMOUT-style sum, an FFT round trip) found a
+    /// defect of the implementation (`reference_invalid`), never an error of a core.
+    Invalid(String),
+    /// The same errors as [`KernelFactory::worker`].
+    Kernel(KernelError),
+}
+
+impl From<KernelError> for RefFailure {
+    fn from(e: KernelError) -> Self {
+        Self::Kernel(e)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

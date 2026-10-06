@@ -12,7 +12,7 @@ use oma_ipc::load::{
 };
 
 use super::*;
-use crate::kernel::{Check, Kernel, KernelError, WorkerCtx};
+use crate::kernel::{Check, Kernel, KernelError, RefFailure, WorkerCtx};
 use crate::rng::{phase_seed, Xoshiro256ss};
 
 const REF: u64 = 0x5EED_5EED;
@@ -107,8 +107,8 @@ impl CountFactory {
 }
 
 impl KernelFactory for CountFactory {
-    fn reference(&self, _: &WorkerCtx) -> Option<Result<u64, String>> {
-        Some(Ok(REF))
+    fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        Some(Ok(vec![REF]))
     }
 
     fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
@@ -135,8 +135,8 @@ impl Kernel for StallKernel {
 struct StallFactory(Arc<AtomicBool>);
 
 impl KernelFactory for StallFactory {
-    fn reference(&self, _: &WorkerCtx) -> Option<Result<u64, String>> {
-        Some(Ok(REF))
+    fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        Some(Ok(vec![REF]))
     }
 
     fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
@@ -144,12 +144,16 @@ impl KernelFactory for StallFactory {
     }
 }
 
-/// Fails the allocation down to 1 MiB per thread, then has not enough memory.
+/// Fails the allocation down to 1 MiB per thread, then has not enough memory. The
+/// reference fails the same way above 2 MiB.
 struct MemoryFactory;
 
 impl KernelFactory for MemoryFactory {
-    fn reference(&self, _: &WorkerCtx) -> Option<Result<u64, String>> {
-        Some(Ok(REF))
+    fn reference(&self, ctx: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        match ctx.budget.ram_per_thread {
+            b if b > 2 * MIB => Some(Err(KernelError::Memory(b / 2).into())),
+            _ => Some(Ok(vec![REF])),
+        }
     }
 
     fn worker(&self, ctx: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
@@ -438,8 +442,11 @@ fn ram_reduction_halves_then_one_per_core_then_skips() {
 fn reference_disagreement_skips_the_phase() {
     struct Disagree(AtomicU32);
     impl KernelFactory for Disagree {
-        fn reference(&self, _: &WorkerCtx) -> Option<Result<u64, String>> {
-            Some(Ok(u64::from(self.0.fetch_add(1, Ordering::Relaxed))))
+        fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+            Some(Ok(vec![
+                REF,
+                u64::from(self.0.fetch_add(1, Ordering::Relaxed)),
+            ]))
         }
         fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
             Ok(Box::new(StallKernel(Arc::new(AtomicBool::new(true)))))
@@ -464,4 +471,300 @@ fn reference_disagreement_skips_the_phase() {
         done(&msgs)[0].skipped.as_deref(),
         Some("reference_disagreement")
     );
+    // A disagreement is no core's error.
+    assert!(last_progress(&msgs)
+        .cores
+        .iter()
+        .all(|c| c.state == CoreState::Untested));
+}
+
+/// The reference takes 700 ms on each processor.
+struct SlowReference(AtomicU32);
+
+impl KernelFactory for SlowReference {
+    fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        thread::sleep(Duration::from_millis(700));
+        Some(Ok(vec![REF]))
+    }
+
+    fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Err(KernelError::Unsupported)
+    }
+}
+
+/// Runs `plan` and raises `stop` after `after`; returns the end and how long it took
+/// from the stop.
+fn run_and_stop(
+    plan: &Plan,
+    topology: &Topology,
+    factory: &FactoryFn<'_>,
+    after: Duration,
+) -> (Finished, Vec<LoadMessage>, Duration) {
+    let stop = AtomicBool::new(false);
+    thread::scope(|s| {
+        let stopper = s.spawn(|| {
+            thread::sleep(after);
+            stop.store(true, Ordering::Relaxed);
+            Instant::now()
+        });
+        let (fin, msgs) = run_test(plan, topology, factory, None, &stop, &no_hang);
+        let ended = Instant::now();
+        (fin, msgs, ended - stopper.join().unwrap())
+    })
+}
+
+#[test]
+fn stop_during_a_slow_reference_finishes_within_one_second() {
+    let f = SlowReference(AtomicU32::new(0));
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let (fin, msgs, latency) = run_and_stop(
+        &plan(vec![phase(KernelId::K2, Placement::OnePerCore, 60)]),
+        &topology(3, 1),
+        &factory,
+        Duration::from_millis(1200),
+    );
+    assert_eq!(fin.reason, FinishReason::Stopped);
+    assert!(latency < Duration::from_secs(1), "{latency:?}");
+    let progress = msgs
+        .iter()
+        .filter(|m| matches!(m, LoadMessage::Progress(_)))
+        .count();
+    assert!(progress >= 2, "Progress keeps coming during the reference");
+    assert_eq!(f.0.load(Ordering::Relaxed), 0, "no worker built");
+}
+
+#[test]
+fn stop_during_core_cycle_finishes_within_one_second() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let mut p = phase(KernelId::K2, Placement::CoreCycle, 60);
+    p.per_core_s = Some(30);
+    let (fin, msgs, latency) = run_and_stop(
+        &plan(vec![p]),
+        &topology(2, 1),
+        &factory,
+        Duration::from_millis(300),
+    );
+    assert_eq!(fin.reason, FinishReason::Stopped);
+    assert!(latency < Duration::from_secs(1), "{latency:?}");
+    let states: Vec<_> = last_progress(&msgs).cores.iter().map(|c| c.state).collect();
+    assert_eq!(states, [CoreState::Untested, CoreState::Untested]);
+}
+
+#[test]
+fn errors_are_capped_per_worker_but_all_counted() {
+    let f = CountFactory::new(0..u32::MAX);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let (fin, msgs) = run_test(
+        &plan(vec![phase(KernelId::K2, Placement::AllLogical, 1)]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(errors(&msgs).len(), 16);
+    assert!(fin.errors > 16, "{}", fin.errors);
+    assert_eq!(done(&msgs)[0].errors, fin.errors);
+    let progress = msgs
+        .iter()
+        .filter(|m| matches!(m, LoadMessage::Progress(_)))
+        .count();
+    assert!(progress <= 7, "at most 4 Hz after errors: {progress}");
+    // An all-core error marks the core too (DA11).
+    assert_eq!(last_progress(&msgs).cores[0].state, CoreState::Failed);
+}
+
+#[test]
+fn a_core_failed_in_an_all_core_phase_is_skipped_by_core_cycle() {
+    let f = CountFactory::new(0..1);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let mut cycle = phase(KernelId::K2, Placement::CoreCycle, 1);
+    cycle.per_core_s = Some(1);
+    // One worker on the only core fails; the cycle then has no core left.
+    let first = phase(KernelId::K2, Placement::OnePerCore, 1);
+    let (fin, msgs) = run_test(
+        &plan(vec![first, cycle]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs);
+    assert_eq!(d.len(), 2);
+    assert_eq!(
+        f.created.load(Ordering::Relaxed),
+        1,
+        "core 0 is not tried again"
+    );
+}
+
+#[test]
+fn reference_invalid_skips_the_phase_and_is_not_counted() {
+    struct Invalid;
+    impl KernelFactory for Invalid {
+        fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+            Some(Err(RefFailure::Invalid("sum off".into())))
+        }
+        fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+            Err(KernelError::Unsupported)
+        }
+    }
+    let factory = |_: KernelId| Some(&Invalid as &dyn KernelFactory);
+    let (fin, msgs) = run_test(
+        &plan(vec![phase(KernelId::K2, Placement::AllLogical, 60)]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!((fin.reason, fin.errors), (FinishReason::Completed, 0));
+    assert_eq!(errors(&msgs)[0].kind, ErrorKind::ReferenceInvalid);
+    assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("reference_invalid"));
+}
+
+#[test]
+fn light_mode_runs_one_thread_and_both_smt_runs_two() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let mut light = phase(KernelId::K2, Placement::AllLogical, 1);
+    light.mode = LoadMode::Light;
+    let (fin, _) = run_test(
+        &plan(vec![light]),
+        &topology(2, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(f.created.load(Ordering::Relaxed), 1);
+
+    let g = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&g as &dyn KernelFactory);
+    let mut both = phase(KernelId::K2, Placement::CoreCycle, 1);
+    both.per_core_s = Some(1);
+    both.both_smt = true;
+    let (fin, msgs) = run_test(
+        &plan(vec![both]),
+        &topology(2, 2),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(
+        g.created.load(Ordering::Relaxed),
+        2,
+        "both threads of core 0"
+    );
+    assert_eq!(last_progress(&msgs).cores[0].state, CoreState::Passed);
+}
+
+#[test]
+fn digest_of_is_compared_with_its_variant() {
+    /// Alternates the two variants; the second is wrong when `bad`.
+    struct Sizes {
+        n: u32,
+        bad: bool,
+    }
+    impl Kernel for Sizes {
+        fn iterate(&mut self, beat: &AtomicU64) -> Check {
+            thread::sleep(Duration::from_millis(1));
+            beat.fetch_add(1, Ordering::Relaxed);
+            self.n += 1;
+            let variant = self.n % 2;
+            let digest = REF + u64::from(variant) + u64::from(self.bad && variant == 1);
+            Check::DigestOf { variant, digest }
+        }
+    }
+    struct SizesFactory(bool);
+    impl KernelFactory for SizesFactory {
+        fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+            Some(Ok(vec![REF, REF + 1]))
+        }
+        fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+            Ok(Box::new(Sizes { n: 0, bad: self.0 }))
+        }
+    }
+    for bad in [false, true] {
+        let f = SizesFactory(bad);
+        let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+        let mut p = phase(KernelId::K4, Placement::AllLogical, 1);
+        p.stop_on_error = true;
+        let (fin, msgs) = run_test(
+            &plan(vec![p]),
+            &topology(1, 1),
+            &factory,
+            None,
+            &AtomicBool::new(false),
+            &no_hang,
+        );
+        if bad {
+            assert_eq!(fin.reason, FinishReason::FirstError);
+            let e = errors(&msgs)[0];
+            assert_eq!((e.expected, e.actual), (REF + 1, REF + 2));
+        } else {
+            assert_eq!((fin.reason, fin.errors), (FinishReason::Completed, 0));
+        }
+    }
+}
+
+#[test]
+fn unsupported_alt_kernel_leaves_the_main_one_and_a_panic_skips() {
+    struct NoAlt;
+    impl KernelFactory for NoAlt {
+        fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+            Some(Ok(vec![REF]))
+        }
+        fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+            Err(KernelError::Unsupported)
+        }
+    }
+    let main = CountFactory::new(0..0);
+    let factory = |id: KernelId| match id {
+        KernelId::K1 => Some(&main as &dyn KernelFactory),
+        _ => Some(&NoAlt as &dyn KernelFactory),
+    };
+    let mut p = phase(KernelId::K1, Placement::OnePerCore, 1);
+    p.mode = LoadMode::Variable;
+    p.alt_kernel = Some(KernelId::K5);
+    let (fin, msgs) = run_test(
+        &plan(vec![p]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(done(&msgs)[0].skipped, None);
+    assert!(main.count.load(Ordering::Relaxed) > 0);
+
+    struct Panics;
+    impl KernelFactory for Panics {
+        fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+            Some(Ok(vec![REF]))
+        }
+        fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+            panic!("kernel bug while building")
+        }
+    }
+    let factory = |_: KernelId| Some(&Panics as &dyn KernelFactory);
+    let (fin, msgs) = run_test(
+        &plan(vec![phase(KernelId::K2, Placement::OnePerCore, 60)]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("kernel_panic"));
 }

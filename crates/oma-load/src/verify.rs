@@ -9,7 +9,7 @@
 // The modifications are part of OpenMonitor Advanced, GPL-3.0-or-later.
 
 //! Verification (§4.2, DA7): 64-bit digests of a kernel's output and the reference, the
-//! digest every iteration must match bit for bit.
+//! digests every iteration must match bit for bit.
 
 use oma_ipc::load::LogicalCpu;
 
@@ -33,23 +33,25 @@ pub fn digest_f64(values: &[f64]) -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefError {
-    /// The processors computed different values, in the order of the processors.
-    Disagree(Vec<u64>),
-    /// The computation itself reported a defect of the implementation.
-    Invalid(String),
+pub enum RefError<E> {
+    /// The processors computed different vectors, in the order of the processors.
+    Disagree(Vec<Vec<u64>>),
+    /// The computation failed.
+    Failed(E),
+    /// The computation panicked.
+    Panicked,
 }
 
 /// Runs `f` on each of the first [`REFERENCE_CPUS`] processors of `cpus`, one after the
-/// other on a thread pinned to it, and returns the value they agree on. With no processor
-/// it runs once on the calling thread.
-pub fn reference_on(
+/// other on a thread pinned to it, and returns the vector they agree on. With no processor
+/// it runs once on the calling thread. The first failure ends it.
+pub fn reference_on<E: Send>(
     cpus: &[LogicalCpu],
-    f: &(dyn Fn() -> Result<u64, String> + Sync),
-) -> Result<u64, RefError> {
+    f: &(dyn Fn() -> Result<Vec<u64>, E> + Sync),
+) -> Result<Vec<u64>, RefError<E>> {
     let mut values = Vec::with_capacity(REFERENCE_CPUS);
     if cpus.is_empty() {
-        values.push(f().map_err(RefError::Invalid)?);
+        values.push(f().map_err(RefError::Failed)?);
     }
     for cpu in cpus.iter().take(REFERENCE_CPUS) {
         let value = std::thread::scope(|s| {
@@ -61,11 +63,11 @@ pub fn reference_on(
             })
             .join()
         })
-        .map_err(|_| RefError::Invalid("the reference panicked".into()))?;
-        values.push(value.map_err(RefError::Invalid)?);
+        .map_err(|_| RefError::Panicked)?;
+        values.push(value.map_err(RefError::Failed)?);
     }
-    if values.iter().all(|&v| v == values[0]) {
-        Ok(values[0])
+    if values.iter().all(|v| *v == values[0]) {
+        Ok(values.swap_remove(0))
     } else {
         Err(RefError::Disagree(values))
     }
@@ -75,6 +77,8 @@ pub fn reference_on(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    type Digests = Result<Vec<u64>, String>;
 
     fn cpu(index: u32) -> LogicalCpu {
         LogicalCpu {
@@ -116,41 +120,45 @@ mod tests {
     fn reference_agrees_or_reports_disagreement() {
         let cpus = [cpu(0), cpu(1), cpu(1), cpu(0)];
         let calls = AtomicU32::new(0);
-        let same = || {
+        let same = || -> Digests {
             calls.fetch_add(1, Ordering::Relaxed);
-            Ok(9)
+            Ok(vec![9, 4])
         };
-        assert_eq!(reference_on(&cpus, &same), Ok(9));
+        assert_eq!(reference_on(&cpus, &same), Ok(vec![9, 4]));
         assert_eq!(calls.load(Ordering::Relaxed), 3, "at most three processors");
 
+        // The whole vector must agree: only the second entry of the third differs.
         let n = AtomicU32::new(0);
-        let third_differs = || {
-            Ok(if n.fetch_add(1, Ordering::Relaxed) == 2 {
+        let third_differs = || -> Digests {
+            let last = if n.fetch_add(1, Ordering::Relaxed) == 2 {
                 8
             } else {
                 9
-            })
+            };
+            Ok(vec![1, last])
         };
         assert_eq!(
             reference_on(&cpus, &third_differs),
-            Err(RefError::Disagree(vec![9, 9, 8]))
+            Err(RefError::Disagree(vec![vec![1, 9], vec![1, 9], vec![1, 8]]))
         );
-        let invalid = || Err("round trip off by 1e-3".to_owned());
+        let invalid = || -> Digests { Err("round trip off by 1e-3".into()) };
         assert_eq!(
             reference_on(&cpus, &invalid),
-            Err(RefError::Invalid("round trip off by 1e-3".into()))
+            Err(RefError::Failed("round trip off by 1e-3".into()))
         );
+        let panics = || -> Digests { panic!("kernel bug") };
+        assert_eq!(reference_on(&cpus, &panics), Err(RefError::Panicked));
     }
 
     #[test]
     fn reference_with_one_core_uses_it_alone() {
         let calls = AtomicU32::new(0);
-        let f = || Ok(u64::from(calls.fetch_add(1, Ordering::Relaxed)) + 5);
-        assert_eq!(reference_on(&[cpu(0)], &f), Ok(5));
+        let f = || -> Digests { Ok(vec![u64::from(calls.fetch_add(1, Ordering::Relaxed)) + 5]) };
+        assert_eq!(reference_on(&[cpu(0)], &f), Ok(vec![5]));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             reference_on(&[], &f),
-            Ok(6),
+            Ok(vec![6]),
             "no processor: the calling thread"
         );
     }

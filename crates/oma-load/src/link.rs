@@ -196,12 +196,26 @@ fn start_engine(
     std::thread::Builder::new()
         .name("oma-load-engine".into())
         .spawn(move || {
+            let warned = std::sync::atomic::AtomicBool::new(false);
             let out = |msg: LoadMessage| {
                 if let Err(e) = conn.send(&msg) {
-                    tracing::warn!(error = %e, "cannot send to the app");
+                    // A broken pipe fails every send: once in the log is enough.
+                    if !warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::warn!(error = %e, "cannot send to the app");
+                    }
                 }
             };
-            let finished = crate::engine::run(&plan, &topology, &out, &stop, inject);
+            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::engine::run(&plan, &topology, &out, &stop, inject)
+            }))
+            .unwrap_or_else(|_| {
+                tracing::error!("the engine panicked");
+                Finished {
+                    reason: FinishReason::Failed,
+                    checks: 0,
+                    errors: 0,
+                }
+            });
             tracing::info!(reason = ?finished.reason, "plan finished");
             out(LoadMessage::Finished(finished));
         })

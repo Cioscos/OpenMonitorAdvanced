@@ -8,11 +8,13 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 # Sections of the generated file, in this order; any other ecosystem follows, by name.
-$script:EcosystemOrder = @('Rust', 'JavaScript', '.NET', 'Programs')
+$script:EcosystemOrder = @('Rust', 'JavaScript', '.NET', 'Programs', 'Adapted')
 $script:SectionTitles = @{
     'Rust' = 'Rust crates'; 'JavaScript' = 'JavaScript packages'; '.NET' = '.NET packages'
     # Executables shipped unmodified next to the service (M7b: Intel PresentMon), with what they embed.
     'Programs' = 'Programs shipped with the service'
+    # Third-party source code adapted into our own crates (M8a1: OpenDCDiag in oma-load).
+    'Adapted' = 'Source code adapted into OpenMonitor Advanced'
 }
 $script:Rule = '-' * 79
 
@@ -179,7 +181,7 @@ function Test-OmaLicenseAccepted {
 .DESCRIPTION
   -Sections are @{ Ecosystem; Entries }, each entry @{ Ecosystem; Name; Version; License;
   Copyright; Texts = @(@{ Title; Body }) }. Sections of the same ecosystem are joined and
-  ordered Rust, JavaScript, .NET, Programs, then by name; entries are sorted by name (ordinal,
+  ordered Rust, JavaScript, .NET, Programs, Adapted, then by name; entries are sorted by name (ordinal,
   ignoring case) and version (numeric segments compared as numbers), and the same name and
   version is one entry. Texts are compared after normalisation (LF line ends, no BOM, no trailing
   whitespace, no leading or trailing blank lines), so the same text from two packages is kept
@@ -312,8 +314,9 @@ function ConvertTo-OmaLicenseText {
     $out.Add('OpenMonitor Advanced is licensed under GPL-3.0-or-later (see LICENSE). It includes the')
     $out.Add('third-party components listed below: the Rust crates compiled into the application, the')
     $out.Add('JavaScript packages bundled into its user interface, the .NET packages and runtime built')
-    $out.Add('into the oma-service hardware service and the programs shipped unmodified with that')
-    $out.Add('service. Each component names, in square brackets, the licence texts that apply to it;')
+    $out.Add('into the oma-service hardware service, the programs shipped unmodified with that')
+    $out.Add('service and the source code adapted into the oma-load program. Each component names, in')
+    $out.Add('square brackets, the licence texts that apply to it;')
     $out.Add('every text is printed once, at the end of this file. Further notices are in')
     $out.Add('THIRD_PARTY_NOTICES.')
     $out.Add('')

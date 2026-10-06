@@ -4,8 +4,9 @@ OpenMonitor Advanced - third-party licences
 OpenMonitor Advanced is licensed under GPL-3.0-or-later (see LICENSE). It includes the
 third-party components listed below: the Rust crates compiled into the application, the
 JavaScript packages bundled into its user interface, the .NET packages and runtime built
-into the oma-service hardware service and the programs shipped unmodified with that
-service. Each component names, in square brackets, the licence texts that apply to it;
+into the oma-service hardware service, the programs shipped unmodified with that
+service and the source code adapted into the oma-load program. Each component names, in
+square brackets, the licence texts that apply to it;
 every text is printed once, at the end of this file. Further notices are in
 THIRD_PARTY_NOTICES.
 
@@ -1272,6 +1273,15 @@ PresentMon 2.6.0
     Licence: MIT
     Copyright: 2017-2024 Intel Corporation
     Text: [MIT (PresentMon)]
+
+
+Source code adapted into OpenMonitor Advanced (1)
+-------------------------------------------------
+
+OpenDCDiag 9957c45b
+    Licence: Apache-2.0
+    Copyright: 2022 Intel Corporation
+    Text: [Apache-2.0 (dunce)]
 
 
 Licence texts

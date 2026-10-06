@@ -8,14 +8,15 @@
                       tauri.sign.collect.json and tauri.sign.apply.json (needs the run context);
     collect | apply   one signCommand call (-Path %1), from the generated Tauri configs;
     register-payload  records one payload exe in collect: target\installer-payload\service\oma-service.exe
-                      or target\installer-payload\overlay\oma-overlay.exe (one call each);
-    import-signed     copies exactly the four signed files from -From into signed/;
+                      target\installer-payload\overlay\oma-overlay.exe or target\installer-payload\load\oma-load.exe (one call each);
+    import-signed     copies exactly the five signed files from -From into signed/;
     check             gate after a bundle (-Pass collect|apply, needs the run context).
 
     pwsh scripts/sign-shim.ps1 -Mode init -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     cd app; pnpm tauri build --bundles nsis --config ../target/signing/tauri.sign.collect.json -v '--' --locked
     pwsh scripts/sign-shim.ps1 -Mode register-payload -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\service\oma-service.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     pwsh scripts/sign-shim.ps1 -Mode register-payload -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\overlay\oma-overlay.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
+    pwsh scripts/sign-shim.ps1 -Mode register-payload -StateRoot <abs>\target\signing -Path <abs>\target\installer-payload\load\oma-load.exe -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
     pwsh scripts/sign-shim.ps1 -Mode check -Pass collect -StateRoot <abs>\target\signing -Commit <sha> -Version X.Y.Z -RunId <id> -RunAttempt <n>
 
   The run context (-Commit, -Version, -RunId, -RunAttempt) comes from the caller, never from the

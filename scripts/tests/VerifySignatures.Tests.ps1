@@ -133,9 +133,11 @@ BeforeAll {
             'service-signed'       = 'service signed by signpath'
             'overlay-unsigned'     = 'overlay unsigned'
             'overlay-signed'       = 'overlay signed by signpath'
+            'load-unsigned'        = 'load unsigned'
+            'load-signed'          = 'load signed by signpath'
         }
-        foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe') {
-            $key = @{ 'oma-app.exe' = 'app'; 'uninstall.exe' = 'uninstaller'; 'oma-service.exe' = 'service'; 'oma-overlay.exe' = 'overlay' }[$n]
+        foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe') {
+            $key = @{ 'oma-app.exe' = 'app'; 'uninstall.exe' = 'uninstaller'; 'oma-service.exe' = 'service'; 'oma-overlay.exe' = 'overlay'; 'oma-load.exe' = 'load' }[$n]
             Write-Fake (Join-Path $state "unsigned\$n") $content["$key-unsigned"]
             if ($Kind -eq 'signed') { Write-Fake (Join-Path $state "signed\$n") $content["$key-signed"] }
         }
@@ -148,6 +150,7 @@ BeforeAll {
             [ordered]@{ role = 'setup'; path = "C:\r\target\release\bundle\nsis\$setupName"; name = $setupName; sha256 = 'f' * 64; after = 'f' * 64 }
             [ordered]@{ role = 'service'; path = 'C:\r\target\installer-payload\service\oma-service.exe'; name = 'oma-service.exe'; sha256 = $sha['service-unsigned']; after = $sha['service-unsigned'] }
             [ordered]@{ role = 'overlay'; path = 'C:\r\target\installer-payload\overlay\oma-overlay.exe'; name = 'oma-overlay.exe'; sha256 = $sha['overlay-unsigned']; after = $sha['overlay-unsigned'] }
+            [ordered]@{ role = 'load'; path = 'C:\r\target\installer-payload\load\oma-load.exe'; name = 'oma-load.exe'; sha256 = $sha['load-unsigned']; after = $sha['load-unsigned'] }
         )
         $apply = @()
         $signed = [ordered]@{}
@@ -157,11 +160,11 @@ BeforeAll {
                 [ordered]@{ role = 'uninstaller'; path = 'C:\t\nst3C4D.tmp'; name = 'uninstall.exe'; sha256 = $sha['uninstaller-unsigned']; after = $sha['uninstaller-signed'] }
                 [ordered]@{ role = 'setup'; path = "C:\r\target\release\bundle\nsis\$setupName"; name = $setupName; sha256 = 'e' * 64; after = 'e' * 64 }
             )
-            $signed = [ordered]@{ 'oma-app.exe' = $sha['app-signed']; 'uninstall.exe' = $sha['uninstaller-signed']; 'oma-service.exe' = $sha['service-signed']; 'oma-overlay.exe' = $sha['overlay-signed'] }
+            $signed = [ordered]@{ 'oma-app.exe' = $sha['app-signed']; 'uninstall.exe' = $sha['uninstaller-signed']; 'oma-service.exe' = $sha['service-signed']; 'oma-overlay.exe' = $sha['overlay-signed']; 'oma-load.exe' = $sha['load-signed'] }
         }
         $manifest = [ordered]@{
             schema = 1; commit = 'a' * 40; version = $version; runId = '42'; runAttempt = '1'; repoRoot = 'C:\r'
-            expected = [ordered]@{ app = 'C:\r\target\release\oma-app.exe'; setupDir = 'C:\r\target\release\bundle\nsis'; setupName = $setupName; service = 'C:\r\target\installer-payload\service\oma-service.exe'; overlay = 'C:\r\target\installer-payload\overlay\oma-overlay.exe' }
+            expected = [ordered]@{ app = 'C:\r\target\release\oma-app.exe'; setupDir = 'C:\r\target\release\bundle\nsis'; setupName = $setupName; service = 'C:\r\target\installer-payload\service\oma-service.exe'; overlay = 'C:\r\target\installer-payload\overlay\oma-overlay.exe'; load = 'C:\r\target\installer-payload\load\oma-load.exe' }
             collect = $collect; apply = $apply; signed = $signed
         }
         Write-Fake (Join-Path $state 'manifest.json') (ConvertTo-Json -InputObject $manifest -Depth 10)
@@ -171,6 +174,7 @@ BeforeAll {
         $script:extract = [ordered]@{
             'oma-app.exe'                      = $content["app-$which"]
             'oma-overlay.exe'                  = $content["overlay-$which"]
+            'oma-load.exe'                     = $content["load-$which"]
             'service\oma-service.exe'          = $content["service-$which"]
             'service\PawnIO_setup.exe'         = 'pawnio setup bytes'
             'service\presentmon\PresentMon-2.6.0-x64.exe' = 'presentmon bytes'
@@ -483,6 +487,20 @@ Describe 'signature and payload verification with fake providers' {
             $signatureCalls | Should -Contain (Split-Path -Leaf $run.Setup)
         }
 
+        It 'verify lists exactly one oma-load.exe with the version metadata' {
+            $run = New-FakeRun
+            @(Invoke-Payload $run) | Should -BeNullOrEmpty
+            $signatureCalls | Should -Contain 'oma-load.exe'
+
+            $run = New-FakeRun
+            $extract['oma-load.exe'] = $null
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*exactly one oma-load.exe in the archive listing, found 0*'
+
+            $run = New-FakeRun
+            $extract['oma-load.exe'] = 'load unsigned'
+            ((Invoke-Payload $run) -join "`n") | Should -BeLike '*oma-load.exe in the setup has SHA-256 *from the signed copy*'
+        }
+
         It 'verify lists exactly one oma-overlay.exe with the version metadata' {
             # Installed next to the app (plan DP7) and checked like the other product files.
             $run = New-FakeRun
@@ -743,23 +761,24 @@ Describe 'signature and payload verification with fake providers' {
     Describe 'Test-OmaSignedFiles' {
         BeforeEach {
             $script:dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
-            foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe') { Write-Fake (Join-Path $dir $n) "signed $n" }
+            foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe') { Write-Fake (Join-Path $dir $n) "signed $n" }
         }
 
-        It 'accepts the four signed files' {
+        It 'accepts the five signed files' {
             Test-OmaSignedFiles -Directory $dir -Policy release -Version $version -Certificates (New-Certificates) `
                 -SignatureProvider $sigProvider -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
                 -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore | Should -BeNullOrEmpty
         }
 
-        It 'requires exactly the four names' {
+        It 'requires exactly the five names' {
             Write-Fake (Join-Path $dir 'extra.dll') 'x'
             Remove-Item -LiteralPath (Join-Path $dir 'uninstall.exe')
             Remove-Item -LiteralPath (Join-Path $dir 'oma-overlay.exe')
+            Remove-Item -LiteralPath (Join-Path $dir 'oma-load.exe')
             $p = @(Test-OmaSignedFiles -Directory $dir -Policy release -Version $version -Certificates (New-Certificates) `
                     -SignatureProvider $sigProvider -ChainProvider $chainProvider -VersionInfoProvider $versionProvider `
                     -EmbeddedSignatureProvider $embeddedProvider -TrustStore $trustStore)
-            ($p -join "`n") | Should -BeLike '*missing: uninstall.exe, oma-overlay.exe*unexpected: extra.dll*'
+            ($p -join "`n") | Should -BeLike '*missing: uninstall.exe, oma-overlay.exe, oma-load.exe*unexpected: extra.dll*'
         }
 
         It 'checks signatures and metadata of each file' {
@@ -801,7 +820,7 @@ Describe 'signature and payload verification with fake providers' {
             $cfg = Get-Content -Raw (Join-Path $PSScriptRoot '..\..\.signpath\certificates.json') | ConvertFrom-Json
             if ($cfg.release.subject) { Set-ItResult -Skipped -Because 'the release certificate is configured' }
             $dir = Join-Path $TestDrive 'files'
-            foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe') { Write-Fake (Join-Path $dir $n) $n }
+            foreach ($n in 'oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe') { Write-Fake (Join-Path $dir $n) $n }
             $r = Invoke-OmaNative -FilePath $pwshExe -AllowFailure -ArgumentList @(
                 '-NoProfile', '-NonInteractive', '-File', $verifyScript, '-Policy', 'release', '-Version', '0.3.0', '-Files', $dir)
             $r.ExitCode | Should -Be 1

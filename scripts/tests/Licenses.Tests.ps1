@@ -76,6 +76,17 @@ Describe 'Merge-OmaLicenseSections' {
         $m.Sections[1].Title | Should -BeExactly 'Programs shipped with the service'
     }
 
+    It 'puts the adapted source code after the programs, under its own title' {
+        $sections = @(
+            [pscustomobject]@{ Ecosystem = 'Adapted'; Entries = @((New-Entry 'Adapted' 'OpenDCDiag' '9957c45b' 'Apache-2.0' @((Text 'Apache-2.0' 'Apache text')))) },
+            [pscustomobject]@{ Ecosystem = 'Programs'; Entries = @((New-Entry 'Programs' 'PresentMon' '2.6.0' 'MIT' @((Text 'MIT' $mit)))) },
+            [pscustomobject]@{ Ecosystem = 'Rust'; Entries = @((New-Entry 'Rust' 'a' '1.0.0' 'MIT' @((Text 'MIT' $mit)))) }
+        )
+        $m = Merge-OmaLicenseSections -Sections $sections
+        ($m.Sections | ForEach-Object Ecosystem) -join ',' | Should -BeExactly 'Rust,Programs,Adapted'
+        $m.Sections[2].Title | Should -BeExactly 'Source code adapted into OpenMonitor Advanced'
+    }
+
     It 'keeps existing labels when a dependency is added' {
         $base = @(
             (New-Entry 'Rust' 'm' '1.0.0' 'MIT' @((Text 'MIT' "Copyright M`n$mit"))),

@@ -19,6 +19,9 @@
      runtime pack has different ones).
   4. Programs: Intel PresentMon 2.6.0, shipped unmodified with the service, and cereal 1.3.2,
      compiled into it; texts from pinned copies in scripts/licenses/.
+  5. Adapted: source code of OpenDCDiag (Apache-2.0) adapted into crates/oma-load (M8a1). The
+     FIRESTARTER code adapted there is GPL-3.0-or-later, our own licence: it is attributed in
+     THIRD_PARTY_NOTICES.md only.
   Every licence expression must be satisfiable with the `accepted` list of about.toml. The
   output is UTF-8 without BOM, LF, with no date and no local path, so it is deterministic.
   -Check writes to a temporary folder and compares; exit code 1 lists the differing lines.
@@ -217,6 +220,19 @@ function Get-ProgramEntries([string[]]$Accepted) {
     }
 }
 
+# Third-party source adapted into our own crates (M8a1), written by hand like the programs above. Only
+# what is not under our own licence appears here: OpenDCDiag at commit 9957c45b (Copyright 2022 Intel
+# Corporation, Apache-2.0), adapted in crates/oma-load/src/verify.rs and kernel.rs. FIRESTARTER
+# (GPL-3.0-or-later) is covered by LICENSE and THIRD_PARTY_NOTICES.md.
+function Get-AdaptedEntries([string[]]$Accepted) {
+    Assert-Accepted 'OpenDCDiag 9957c45b' 'Apache-2.0' $Accepted
+    [pscustomobject]@{
+        Ecosystem = 'Adapted'; Name = 'OpenDCDiag'; Version = '9957c45b'; License = 'Apache-2.0'
+        Copyright = '2022 Intel Corporation'
+        Texts = @([pscustomobject]@{ Title = 'Apache-2.0'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir 'Apache-2.0.txt')) })
+    }
+}
+
 # Warns (never fails, so the output stays the same on every machine) when the THIRD-PARTY-NOTICES
 # of the restored runtime pack differ from the pinned copy, which then needs a review and update.
 function Test-RuntimeNotices($Assets, [string]$PackagesRoot) {
@@ -252,6 +268,7 @@ try {
         Get-JsEntries $temp $accepted
         Get-NuGetEntries $accepted
         Get-ProgramEntries $accepted
+        Get-AdaptedEntries $accepted
     )
     $text = ConvertTo-OmaLicenseText -Entries $entries
     $target = Join-Path $RepoRoot 'THIRD_PARTY_LICENSES.txt'

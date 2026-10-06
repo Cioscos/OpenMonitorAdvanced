@@ -220,7 +220,8 @@ function Measure-ChildSample {
     $result
 }
 
-# Measure the host and all WebView2 descendants over one common sample action.
+# Measure the host, all WebView2 descendants and the load generator oma-load.exe (M8a1, when
+# running) over one common sample action.
 # Changed endpoint membership, missing counters or reused PIDs invalidate the result.
 # A child born and exited between the endpoint snapshots cannot be observed here.
 function Measure-AppCpuSample {
@@ -245,7 +246,7 @@ function Measure-AppCpuSample {
         } while ($changed)
         @($Processes | Where-Object {
             ([int]$_.ProcessId -eq $RootProcessId) -or
-            ($_.Name -eq 'msedgewebview2.exe' -and $descendants.Contains([int]$_.ProcessId))
+            ($_.Name -in 'msedgewebview2.exe', 'oma-load.exe' -and $descendants.Contains([int]$_.ProcessId))
         } | Sort-Object ProcessId)
     }
 
@@ -269,7 +270,7 @@ function Measure-AppCpuSample {
     $startIdentity = @($startMembers | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate)" }) -join ','
     $endIdentity = @($endMembers | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate)" }) -join ','
     if ($startIdentity -ne $endIdentity) { return & $invalid 'App/WebView2 process tree changed during sampling.' }
-    if ($RequireWebView -and $startMembers.Count -le 1) {
+    if ($RequireWebView -and -not @($startMembers | Where-Object { $_.Name -eq 'msedgewebview2.exe' }).Count) {
         return & $invalid 'No WebView2 descendant was found in a visible-window sample.'
     }
 
@@ -362,7 +363,7 @@ function Measure-Process([Diagnostics.Process]$Proc, [string]$Mode, [switch]$Mea
         }
     } while ($changed)
     $webviews = @($processes | Where-Object {
-        $_.Name -eq 'msedgewebview2.exe' -and $descendants.Contains([int]$_.ProcessId)
+        $_.Name -in 'msedgewebview2.exe', 'oma-load.exe' -and $descendants.Contains([int]$_.ProcessId)
     })
     $ids = @($Proc.Id) + @($webviews | ForEach-Object { [int]$_.ProcessId })
     $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |

@@ -61,3 +61,18 @@ Describe 'overlay measurement (spec M7 §11)' {
         $r.Reason | Should -Be 'not running'
     }
 }
+
+Describe 'app process tree (M8a1)' {
+    It 'counts oma-load.exe among the app processes when it runs' {
+        $script:procs = @((New-Proc 100 1 'oma-app.exe'), (New-Proc 101 100 'msedgewebview2.exe'), (New-Proc 102 100 'oma-load.exe'), (New-Proc 103 1 'oma-load.exe'))
+        # The clock advances on every read, so the delta between the two reads is positive.
+        $script:clock = @{ Tick = [uint64]0 }
+        $counters = {
+            $script:clock.Tick += 10000000
+            @(100, 101, 102, 103 | ForEach-Object { [pscustomobject]@{ IDProcess = $_; PercentProcessorTime = $script:clock.Tick; Timestamp_Sys100NS = $script:clock.Tick } })
+        }
+        $r = Measure-AppCpuSample -RootProcessId 100 -ProcessProvider { $script:procs } -CounterProvider $counters -SampleAction { } -RequireWebView
+        # Root, WebView2 and its own oma-load.exe child; another app's oma-load.exe is left out.
+        $r.ProcessCount | Should -Be 3 -Because $r.Reason
+    }
+}

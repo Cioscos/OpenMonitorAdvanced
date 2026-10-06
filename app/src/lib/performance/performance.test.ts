@@ -1,6 +1,6 @@
 import { MOCK_SCHEMA } from '../backend/mock';
 import { FakeBackend, makeRunStatus } from '../../test/fake-backend';
-import type { RunStatus, StartRequest } from '../types';
+import type { RunStatus, StartRequest, StressSessionSummary } from '../types';
 import { performanceStore } from './performance.svelte';
 
 const REQUEST: StartRequest = { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null };
@@ -50,16 +50,38 @@ test('running_follows_status', async () => {
 
 test('start_while_running_is_ignored', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
+  // Not connected: refused without asking the shell.
+  expect(await performanceStore.start(REQUEST)).toEqual({ ok: false, reason: 'notConnected' });
   off = await performanceStore.connect(backend);
-  expect(await performanceStore.start(REQUEST)).toBe('fake-session');
+  expect(await performanceStore.start(REQUEST)).toEqual({ ok: true, id: 'fake-session' });
   expect(backend.performanceStartRequests).toEqual([REQUEST]);
   backend.emitPerformanceStatus(makeRunStatus({ state: 'running', sessionId: 'fake-session' }));
-  expect(await performanceStore.start(REQUEST)).toBeNull();
+  expect(await performanceStore.start(REQUEST)).toEqual({ ok: false, reason: 'busy' });
   expect(backend.performanceStartRequests).toHaveLength(1);
   // A finished test refreshes the history, and a new start goes through.
   backend.performanceCalls = [];
   backend.emitPerformanceStatus(makeRunStatus({ state: 'finished', sessionId: 'fake-session', outcome: 'passed' }));
   await vi.waitFor(() => expect(backend.performanceCalls).toContain('performanceHistory'));
-  expect(await performanceStore.start(REQUEST)).toBe('fake-session');
+  expect(await performanceStore.start(REQUEST)).toEqual({ ok: true, id: 'fake-session' });
   expect(backend.performanceStartRequests).toHaveLength(2);
+  // The shell's refusal is the rejection.
+  backend.performanceStartError = 'a stress test is already running';
+  backend.emitPerformanceStatus(makeRunStatus({ state: 'finished', sessionId: 'x', outcome: 'passed' }));
+  await expect(performanceStore.start(REQUEST)).rejects.toBe('a stress test is already running');
+});
+
+test('reconnecting_keeps_the_history_until_the_new_list_arrives', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const entry = { id: 'old', startedAt: '2026-10-05T10:00:00Z', component: 'cpu', objective: 'normal', preset: 'quick', durationMs: 300_000, outcome: 'passed', verdict: 'passed', params: {} } as const;
+  backend.performanceSessions = [entry];
+  off = await performanceStore.connect(backend);
+  off();
+  let resolve!: (list: StressSessionSummary[]) => void;
+  vi.spyOn(backend, 'performanceHistory').mockReturnValue(new Promise((r) => (resolve = r)));
+  const connecting = performanceStore.connect(backend);
+  await vi.waitFor(() => expect(backend.performanceStatusListeners.size).toBe(1));
+  expect(performanceStore.history.map((s) => s.id)).toEqual(['old']);
+  resolve([{ ...entry, id: 'new' }, entry]);
+  off = await connecting;
+  expect(performanceStore.history.map((s) => s.id)).toEqual(['new', 'old']);
 });

@@ -84,6 +84,9 @@
 
   // The tooltip lives under <body>: outside labels (whose text names a control), and away from
   // ancestors with a filter or transform, under which `position: fixed` stops following the window.
+  // In the template it sits inside the term, never as a sibling: Svelte removes a block by walking
+  // from its first to its last node, and a last node moved under <body> would make that walk
+  // swallow everything after the block.
   function portal(node: HTMLElement) {
     document.body.appendChild(node);
     return { destroy: () => node.remove() };
@@ -104,18 +107,18 @@
   onfocus={show}
   onblur={hide}
 >
-  {#if children}{@render children()}{:else}{name}{/if}
-</span><span
-  class="tip"
-  role="tooltip"
-  {id}
-  hidden={!open}
-  bind:this={tip}
-  use:portal
-  style:left="{position.left}px"
-  style:top="{position.top}px"
-  onmouseenter={show}
-  onmouseleave={hideSoon}>{t(`glossary.${term}`)}</span>
+  {#if children}{@render children()}{:else}{name}{/if}<span
+    class="tip"
+    role="tooltip"
+    {id}
+    hidden={!open}
+    bind:this={tip}
+    use:portal
+    style:left="{position.left}px"
+    style:top="{position.top}px"
+    onmouseenter={show}
+    onmouseleave={hideSoon}>{t(`glossary.${term}`)}</span>
+</span>
 
 <style>
   .term {

@@ -24,4 +24,8 @@ test('every_term_used_in_performance_pages_has_a_key', () => {
   // The settings section alone marks Tjmax, the thermal stop and the RAM share.
   expect([...used]).toEqual(expect.arrayContaining(['tjmax', 'thermalStop', 'ramShare']));
   expect(missing([...used].map((term) => `glossary.${term}`))).toEqual([]);
+  // A `<Term term="…" />` without children shows the term's name.
+  const named = sources.flatMap((source) => [...source.matchAll(/<Term\s+term="([^"]+)"\s*\/>/g)].map((m) => m[1]));
+  expect(named).toContain('tjmax');
+  expect(missing(named.map((term) => `glossary.${term}.name`))).toEqual([]);
 });

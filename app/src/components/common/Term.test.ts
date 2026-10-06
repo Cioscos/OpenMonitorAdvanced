@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { i18n, t } from '../../lib/i18n/index.svelte';
+import TermHost from '../../test/fixtures/TermHost.svelte';
 import Term, { placeTip } from './Term.svelte';
 
 beforeEach(() => {
@@ -74,4 +75,29 @@ test('the tooltip flips above and stays inside the window', () => {
   expect(placeTip({ left: 360, top: 50, width: 40, height: 20 }, size, viewport).left).toBe(192);
   // At the left edge: pushed back inside.
   expect(placeTip({ left: 0, top: 50, width: 10, height: 20 }, size, viewport).left).toBe(8);
+});
+
+test('a term as the whole content of a block leaves its siblings alone', async () => {
+  const { rerender } = render(TermHost, { show: true, items: ['fft', 'ntt', 'fma'] });
+  const terms = () => [...document.querySelectorAll('#each-host .term')].map((el) => el.textContent);
+  expect(terms()).toEqual(['FFT', 'NTT', 'FMA']);
+  expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(4);
+
+  await rerender({ show: false, items: ['fft', 'ntt', 'fma'] });
+  expect(document.getElementById('if-host')?.textContent).toBe('after tail');
+  expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(3);
+
+  // A keyed reorder, then a removal.
+  await rerender({ show: false, items: ['fma', 'fft', 'ntt'] });
+  expect(terms()).toEqual(['FMA', 'FFT', 'NTT']);
+  expect(document.getElementById('after-each')).toBeTruthy();
+  await rerender({ show: false, items: ['fma', 'ntt'] });
+  expect(terms()).toEqual(['FMA', 'NTT']);
+  expect(document.getElementById('each-host')?.lastElementChild?.id).toBe('after-each');
+  expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(2);
+
+  await rerender({ show: true, items: [] });
+  expect(document.getElementById('if-host')?.textContent).toBe('FFTafter tail');
+  expect(document.getElementById('each-host')?.textContent).toBe('after');
+  expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(1);
 });

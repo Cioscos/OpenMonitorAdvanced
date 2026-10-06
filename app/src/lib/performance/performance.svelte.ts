@@ -6,6 +6,9 @@ export function isRunning(status: RunStatus | null): boolean {
   return status?.state === 'starting' || status?.state === 'running' || status?.state === 'stopping';
 }
 
+/** `start`'s answer: the new session's id, or why it was not sent to the shell. */
+export type StartResult = { ok: true; id: string } | { ok: false; reason: 'notConnected' | 'busy' };
+
 /**
  * The stress test as the shell last reported it, for the Performance view. It is connected only
  * while the view is on screen: without a test nothing here does periodic work.
@@ -13,7 +16,7 @@ export function isRunning(status: RunStatus | null): boolean {
 class PerformanceStore {
   status = $state.raw<RunStatus | null>(null);
   system = $state.raw<SystemInfo | null>(null);
-  /** Saved sessions, newest first. */
+  /** Saved sessions, newest first; kept across reconnections until a newer list arrives. */
   history = $state.raw<StressSessionSummary[]>([]);
   readonly running = $derived(isRunning(this.status));
   #backend: Backend | null = null;
@@ -62,13 +65,17 @@ class PerformanceStore {
     return stop;
   }
 
-  /** Starts a test: its session id, or null when one is already running or starting. Rejects with the shell's reason. */
-  async start(request: StartRequest): Promise<string | null> {
+  /**
+   * Starts a test. Refused without asking the shell while not connected, or while a test runs or a
+   * start is in flight (`busy`); rejects with the shell's own reason (text) when it refuses.
+   */
+  async start(request: StartRequest): Promise<StartResult> {
     const backend = this.#backend;
-    if (backend === null || this.running || this.#starting) return null;
+    if (backend === null) return { ok: false, reason: 'notConnected' };
+    if (this.running || this.#starting) return { ok: false, reason: 'busy' };
     this.#starting = true;
     try {
-      return await backend.performanceStart(request);
+      return { ok: true, id: await backend.performanceStart(request) };
     } finally {
       this.#starting = false;
     }
@@ -96,7 +103,6 @@ class PerformanceStore {
   #reset() {
     this.status = null;
     this.system = null;
-    this.history = [];
     this.#backend = null;
     this.#starting = false;
   }

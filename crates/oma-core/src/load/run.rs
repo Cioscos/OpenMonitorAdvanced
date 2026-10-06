@@ -1170,6 +1170,17 @@ mod tests {
     }
 
     #[test]
+    fn intermediate_save_carries_the_stats_for_a_crash() {
+        let mut c = ctl(true, true);
+        c.on_load(&progress(0, None), clock(1000));
+        c.on_sample(&sample(Some(70.0)), true, clock(1000));
+        c.on_load(&progress(0, None), clock(61_000));
+        let a = c.on_clock(clock(61_500));
+        assert!(a.contains(&Action::SaveSession));
+        assert_eq!(c.session().stats.temp_max_c, Some(70.0));
+    }
+
+    #[test]
     fn phase_cut_by_a_stop_reads_stopped_not_passed() {
         let mut c = ctl(true, true);
         c.on_load(&progress(0, None), clock(1000));

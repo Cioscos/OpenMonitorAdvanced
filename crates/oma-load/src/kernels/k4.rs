@@ -5,7 +5,7 @@
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
-use super::k2::{n_l1, n_ram, FftCore, RAM_CAP};
+use super::k2::{n_l1, n_ram, ram_share, FftCore};
 use crate::kernel::{Check, Kernel, KernelError, KernelFactory, RefFailure, WorkerCtx};
 
 /// Time on one size, by the worker's own clock.
@@ -13,7 +13,10 @@ const DWELL: Duration = Duration::from_secs(20);
 
 /// The sizes of the cycle: K2 `l1` doubling up to K3's (or just `l1` with little memory).
 fn sizes(ctx: &WorkerCtx) -> Vec<usize> {
-    let (first, last) = (n_l1(ctx), n_l1(ctx).max(n_ram(ctx.budget.ram_per_thread)));
+    let (first, last) = (
+        n_l1(ctx),
+        n_l1(ctx).max(n_ram(ram_share(ctx.budget.ram_per_thread).unwrap_or(0))),
+    );
     std::iter::successors(Some(first), |&n| (n < last).then_some(n * 2)).collect()
 }
 
@@ -27,8 +30,8 @@ pub(crate) struct K4 {
 
 impl K4 {
     pub(crate) fn new(ctx: &WorkerCtx) -> Result<Self, KernelError> {
+        let tried = ram_share(ctx.budget.ram_per_thread)?;
         let sizes = sizes(ctx);
-        let tried = ctx.budget.ram_per_thread.min(RAM_CAP);
         let mut core = FftCore::new(ctx, *sizes.last().unwrap(), Some(tried))?;
         core.set_size(sizes[0]);
         Ok(Self {
@@ -53,8 +56,9 @@ impl Kernel for K4 {
                 variant: self.index as u32,
                 digest,
             },
-            // The only error is the reference's; `Ok` is how a stop leaves an iteration.
-            _ => Check::Ok,
+            // A stop left the iteration: nothing to compare.
+            Ok(None) => Check::Ok,
+            Err(_) => unreachable!("only the reference verifies"),
         }
     }
 }
@@ -72,11 +76,9 @@ impl KernelFactory for K4Factory {
                 k.core.set_size(n);
                 match k.core.run(&beat, true) {
                     Ok(Some(d)) => digests.push(d),
-                    Ok(None) => return Err(KernelError::Unsupported.into()),
-                    Err(why) => {
-                        tracing::error!(why, size = i, "FFT reference is invalid");
-                        return Err(RefFailure::Invalid("reference_invalid".into()));
-                    }
+                    // See K2: a stop is not `Unsupported`.
+                    Ok(None) => return Err(RefFailure::Invalid("stopped".into())),
+                    Err(why) => return Err(RefFailure::Invalid(format!("size {i}: {why}"))),
                 }
             }
             Ok(digests)
@@ -93,7 +95,8 @@ mod tests {
     use super::*;
     use crate::kernels::fft::tests::available;
     use crate::kernels::k2::tests::ctx;
-    use oma_ipc::load::DataSize;
+    use crate::kernels::k2::{LIMITS, RAM_CAP, RAM_FLOOR};
+    use oma_ipc::load::{DataSize, Isa};
 
     #[test]
     fn k4_cycles_sizes_from_l1_up() {
@@ -146,11 +149,25 @@ mod tests {
     }
 
     #[test]
+    fn k4_below_the_floor_is_insufficient() {
+        LIMITS.with(|l| l.set((RAM_CAP, RAM_FLOOR)));
+        let mut c = ctx(Isa::Sse2, 7, DataSize::Auto);
+        c.budget.ram_per_thread = 100 * 1024 * 1024;
+        assert!(matches!(K4::new(&c), Err(KernelError::Insufficient)));
+        assert_eq!(
+            K4Factory.reference(&c),
+            Some(Err(KernelError::Insufficient.into()))
+        );
+        assert!(matches!(
+            K4Factory.worker(&c),
+            Err(KernelError::Insufficient)
+        ));
+    }
+
+    #[test]
     fn k4_with_little_memory_stays_on_l1() {
         let mut c = ctx(Isa::Sse2, 7, DataSize::Auto);
         c.budget.ram_per_thread = 1024;
         assert_eq!(sizes(&c), [1024]);
     }
-
-    use oma_ipc::load::Isa;
 }

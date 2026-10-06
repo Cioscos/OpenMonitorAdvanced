@@ -26,6 +26,32 @@ const BYTES_PER_POINT: u64 = 48;
 const SUM_TOLERANCE: f64 = 1e-9;
 const ROUND_TRIP_TOLERANCE: f64 = 1e-9;
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the (cap, floor) in force on this thread. Tests default to no floor, so
+    /// they can run with small sizes; the floor tests set the real one.
+    pub(crate) static LIMITS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((RAM_CAP, 0)) };
+}
+
+/// The (cap, floor) of the memory per thread of K3 and K4.
+fn limits() -> (u64, u64) {
+    #[cfg(test)]
+    return LIMITS.with(|l| l.get());
+    #[cfg(not(test))]
+    (RAM_CAP, RAM_FLOOR)
+}
+
+/// DA9 and DA10: the memory per thread K3 and K4 use, at most 1 GiB. Below 256 MiB there
+/// is no size to run at: `Insufficient`, so the engine asks for one thread per physical
+/// core and then skips the phase, before anything is allocated.
+pub(crate) fn ram_share(ram_per_thread: u64) -> Result<u64, KernelError> {
+    let (cap, floor) = limits();
+    match ram_per_thread.min(cap) {
+        share if share < floor => Err(KernelError::Insufficient),
+        share => Ok(share),
+    }
+}
+
 /// The largest power of 2 not above `v`, and at least `min`.
 fn pow2_floor(v: u64, min: u64) -> usize {
     (1u64 << v.max(min).ilog2()) as usize
@@ -44,14 +70,14 @@ fn n_l2(ctx: &WorkerCtx) -> usize {
 /// DA9, K3: the memory per thread (at most 1 GiB) holds the whole footprint, which is three
 /// times the 16·N of the work buffer: the stored input and the twiddles come with it, so
 /// the plan's RAM share stays true.
-pub(crate) fn n_ram(ram_per_thread: u64) -> usize {
-    pow2_floor(ram_per_thread.min(RAM_CAP) / BYTES_PER_POINT, 64)
+pub(crate) fn n_ram(share: u64) -> usize {
+    pow2_floor(share / BYTES_PER_POINT, 64)
 }
 
 /// DA10: half of what was tried, or `Insufficient` when that would go below the floor.
 pub(crate) fn memory_error(tried: u64) -> KernelError {
     match tried / 2 {
-        next if next >= RAM_FLOOR => KernelError::Memory(next),
+        next if next >= limits().1 => KernelError::Memory(next),
         _ => KernelError::Insufficient,
     }
 }
@@ -184,8 +210,8 @@ pub(crate) struct K2 {
 impl K2 {
     pub(crate) fn new(ctx: &WorkerCtx, ram: bool) -> Result<Self, KernelError> {
         let (n, tried) = if ram {
-            let tried = ctx.budget.ram_per_thread.min(RAM_CAP);
-            (n_ram(ctx.budget.ram_per_thread), Some(tried))
+            let share = ram_share(ctx.budget.ram_per_thread)?;
+            (n_ram(share), Some(share))
         } else if matches!(ctx.size, DataSize::L1 | DataSize::Auto) {
             (n_l1(ctx), None)
         } else {
@@ -205,8 +231,9 @@ impl Kernel for K2 {
     fn iterate(&mut self, beat: &AtomicU64) -> Check {
         match self.core.run(beat, false) {
             Ok(Some(d)) => Check::Digest(d),
-            // The only error is the reference's; `Ok` is how a stop leaves an iteration.
-            _ => Check::Ok,
+            // A stop left the iteration: nothing to compare.
+            Ok(None) => Check::Ok,
+            Err(_) => unreachable!("only the reference verifies"),
         }
     }
 }
@@ -222,11 +249,10 @@ impl KernelFactory for K2Factory {
             let mut k = K2::new(ctx, self.ram)?;
             match k.core.run(&AtomicU64::new(0), true) {
                 Ok(Some(d)) => Ok(vec![d]),
-                Ok(None) => Err(KernelError::Unsupported.into()),
-                Err(why) => {
-                    tracing::error!(why, "FFT reference is invalid");
-                    Err(RefFailure::Invalid("reference_invalid".into()))
-                }
+                // A stop during the reference: the engine is ending the phase anyway, and
+                // `Invalid` is not `Unsupported`, which would skip the phase with a notice.
+                Ok(None) => Err(RefFailure::Invalid("stopped".into())),
+                Err(why) => Err(RefFailure::Invalid(why)),
             }
         })())
     }
@@ -280,7 +306,10 @@ pub(crate) mod tests {
                 let mut a = K2::new(&ctx(isa, 7, size), ram).unwrap();
                 let first = digest_of(&mut a);
                 assert_eq!(first, digest_of(&mut a), "{isa:?} {size:?}: again");
-                let mut b = K2::new(&ctx(isa, 7, size), ram).unwrap();
+                let mut other = ctx(isa, 7, size);
+                other.worker = 3;
+                other.workers = 4;
+                let mut b = K2::new(&other, ram).unwrap();
                 assert_eq!(first, digest_of(&mut b), "{isa:?} {size:?}: another worker");
                 let mut c = K2::new(&ctx(isa, 8, size), ram).unwrap();
                 assert_ne!(first, digest_of(&mut c), "{isa:?} {size:?}: another seed");
@@ -296,7 +325,7 @@ pub(crate) mod tests {
         assert_eq!(n_l1(&c), 1024); // 16 KiB / 16
         assert_eq!(n_l2(&c), 8192); // 0.6 * 256 KiB = 157286 B / 16 = 9830
         assert_eq!(n_ram(8192 * BYTES_PER_POINT), 8192);
-        assert_eq!(n_ram(u64::MAX), 1 << 24); // capped at 1 GiB
+        assert_eq!(n_ram(ram_share(u64::MAX).unwrap()), 1 << 24); // capped at 1 GiB
     }
 
     #[test]
@@ -313,32 +342,70 @@ pub(crate) mod tests {
 
     #[test]
     fn reference_fails_when_the_transform_is_wrong() {
-        let mut k = K2::new(&ctx(Isa::Sse2, 7, DataSize::L1), false).unwrap();
-        // A corrupted twiddle breaks both checks.
+        // The checks run inside `reference()`: a corrupted twiddle must be caught there.
+        let c = ctx(Isa::Sse2, 7, DataSize::L1);
+        let mut k = K2::new(&c, false).unwrap();
         k.core.fft.corrupt_for_test();
-        assert!(k.core.run(&AtomicU64::new(0), true).is_err());
+        let Err(why) = k.core.run(&AtomicU64::new(0), true) else {
+            panic!("a wrong transform passed the reference checks");
+        };
+        assert!(why.contains("differs"), "{why}");
+        // The factory reports the reason as `Invalid`; a sound one gives a digest.
+        assert!(matches!(
+            K2Factory { ram: false }.reference(&c),
+            Some(Ok(v)) if v.len() == 1
+        ));
+        // A reference interrupted by a stop is `Invalid("stopped")`, not `Unsupported`.
+        c.shared.quit.store(true, Ordering::Relaxed);
+        assert_eq!(
+            K2Factory { ram: false }.reference(&c),
+            Some(Err(RefFailure::Invalid("stopped".into())))
+        );
     }
 
     #[test]
     fn a_raised_quit_ends_the_iteration_early() {
         let c = ctx(Isa::Sse2, 7, DataSize::L1);
-        c.shared.quit.store(true, Ordering::Relaxed);
         let mut k = K2::new(&c, false).unwrap();
-        assert_eq!(k.iterate(&AtomicU64::new(0)), Check::Ok);
+        let beat = AtomicU64::new(0);
+        assert!(matches!(k.iterate(&beat), Check::Digest(_)));
+        let full = beat.load(Ordering::Relaxed);
+        c.shared.quit.store(true, Ordering::Relaxed);
+        beat.store(0, Ordering::Relaxed);
+        assert_eq!(k.iterate(&beat), Check::Ok);
+        // It stopped after the first tick (the bit reversal's), far short of a full run.
+        assert!(beat.load(Ordering::Relaxed) <= 2 && full > 10);
     }
 
     #[test]
     fn k3_allocation_failure_is_memory_error() {
+        // The real sizing, with the 1 GiB cap lifted so that a budget of u64::MAX / 2
+        // asks for 2^57 points: the reservation fails up front, nothing is allocated.
+        LIMITS.with(|l| l.set((u64::MAX, 0)));
         let mut c = ctx(Isa::Sse2, 7, DataSize::Ram);
         c.budget.ram_per_thread = u64::MAX / 2;
-        // 2^59 points: the reservation fails up front, nothing is allocated.
-        let Err(e) = K2::with_points(&c, 1 << 59, Some(u64::MAX / 2)) else {
-            panic!("allocated 2^59 points");
-        };
-        assert_eq!(e, KernelError::Memory(u64::MAX / 4));
+        assert!(matches!(
+            K2::new(&c, true),
+            Err(KernelError::Memory(m)) if m == u64::MAX / 4
+        ));
         // At the floor there is nothing left to give up.
+        LIMITS.with(|l| l.set((RAM_CAP, RAM_FLOOR)));
         assert_eq!(memory_error(RAM_FLOOR), KernelError::Insufficient);
         assert_eq!(memory_error(2 * RAM_FLOOR), KernelError::Memory(RAM_FLOOR));
+    }
+
+    #[test]
+    fn k3_below_the_floor_is_insufficient() {
+        LIMITS.with(|l| l.set((RAM_CAP, RAM_FLOOR)));
+        let mut c = ctx(Isa::Sse2, 7, DataSize::Ram);
+        c.budget.ram_per_thread = 100 * MIB;
+        assert!(matches!(K2::new(&c, true), Err(KernelError::Insufficient)));
+        assert_eq!(
+            K2Factory { ram: true }.reference(&c),
+            Some(Err(KernelError::Insufficient.into()))
+        );
+        // The caches have no floor.
+        assert!(K2::new(&c, false).is_ok());
     }
 
     /// Iteration times of K2 `l1` and `l2` with the sizes of a typical CPU (48 KiB L1d,

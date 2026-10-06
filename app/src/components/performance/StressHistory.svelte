@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Backend } from '../../lib/backend';
-  import { errorText, formatDuration, verdictTitle } from '../../lib/performance/format';
+  import { around, errorText, formatDuration, verdictTitle } from '../../lib/performance/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { StressComponent, StressSessionSummary } from '../../lib/types';
@@ -28,12 +28,15 @@
     const v = verdictOf(s);
     return v === 'passed' ? 'ok' : v && CRIT.includes(v) ? 'crit' : 'warn';
   };
-  /** «Unstable · core 2» cut around «core 2», which carries its term. */
+  /** The question of the delete confirmation: the date in full, so it reads naturally. */
+  const whenLong = (s: StressSessionSummary) => new Date(s.startedAt).toLocaleString(locale, { dateStyle: 'long', timeStyle: 'short' });
+  /** «Unstable · core 2» cut around «core 2», which carries its term; any other verdict is left whole. */
   const verdictPieces = (s: StressSessionSummary): [string, string, string] => {
     const title = verdictTitle({ verdict: verdictOf(s), params: s.params }, t);
-    const m = /core \d+/i.exec(title);
-    return m ? [title.slice(0, m.index), m[0], title.slice(m.index + m[0].length)] : [title, '', ''];
+    return verdictOf(s) === 'errors_core' && s.params.core !== undefined ? around(title, t('performance.core.label', { core: s.params.core })) : [title, '', ''];
   };
+  /** Moves the focus to the element that appears, so the keyboard follows the confirmation. */
+  const focusOnMount = (node: HTMLElement) => node.focus();
 
   async function remove(id: string) {
     confirming = null;
@@ -43,7 +46,11 @@
     } catch (error) {
       message = errorText(error, t);
     }
-    await performanceStore.refreshHistory();
+    try {
+      await performanceStore.refreshHistory();
+    } catch (error) {
+      message = errorText(error, t);
+    }
   }
 
   async function repeat(id: string) {
@@ -81,18 +88,20 @@
 
   {#if message}<p class="message" role="alert">{message}</p>{/if}
 
-  {#if rows.length === 0}
+  {#if performanceStore.history.length === 0}
     <div class="empty">
       <p>{t('performance.history.empty')}</p>
       <button type="button" class="action" onclick={() => onOpen('new')}>{t('performance.history.emptyAction')}</button>
     </div>
+  {:else if rows.length === 0}
+    <p class="none">{t('performance.history.noMatch')}</p>
   {:else}
     <ul aria-label={t('performance.history.list')}>
       {#each rows as s (s.id)}
         {@const tone = toneOf(s)}
         {@const [before, word, after] = verdictPieces(s)}
         <li class="row {tone}">
-          <button type="button" class="open" aria-label={t('performance.history.open', { when: when(s) })} onclick={() => onOpen(`result:${s.id}`)}>
+          <button type="button" class="open" onclick={() => onOpen(`result:${s.id}`)}>
             <span class="when">{when(s)}</span>
             <span class="what">
               {t(`performance.wizard.${s.component}`)} · {t(`performance.objective.${s.objective}`)} · {t(`performance.preset.${s.preset}`)} · {formatDuration(s.durationMs / 1000)}
@@ -104,12 +113,12 @@
           </p>
           <div class="buttons">
             {#if confirming === s.id}
-              <span class="ask">{t('performance.history.deleteConfirm', { when: when(s) })}</span>
-              <button type="button" class="action danger" onclick={() => remove(s.id)}>{t('performance.history.delete')}</button>
+              <span class="ask">{t('performance.history.deleteConfirm', { when: whenLong(s) })}</span>
+              <button type="button" class="action danger" use:focusOnMount onclick={() => remove(s.id)}>{t('performance.history.delete')}</button>
               <button type="button" class="action" onclick={() => (confirming = null)}>{t('performance.history.cancel')}</button>
             {:else}
               <button type="button" class="action" disabled={busy !== null} onclick={() => repeat(s.id)}>{t('performance.history.repeat')}</button>
-              <button type="button" class="action" onclick={() => (confirming = s.id)}>{t('performance.history.delete')}</button>
+              <button type="button" class="action" disabled={busy !== null} onclick={() => (confirming = s.id)}>{t('performance.history.delete')}</button>
             {/if}
           </div>
         </li>
@@ -227,6 +236,10 @@
     flex-direction: column;
     gap: 12px;
     align-items: flex-start;
+    color: var(--text-muted);
+  }
+  .none {
+    margin: 0;
     color: var(--text-muted);
   }
   .empty p,

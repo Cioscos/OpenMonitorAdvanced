@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import type { StressSessionSummary } from '../../lib/types';
-import { FakeBackend, makeStressSession, makeSystemInfo } from '../../test/fake-backend';
+import { FakeBackend, makeRunStatus, makeStressSession, makeSystemInfo } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
 
@@ -45,7 +45,7 @@ async function setup() {
 }
 const items = () => within(screen.getByRole('list', { name: t('performance.history.list') })).getAllByRole('listitem');
 
-test('lists_sessions_newest_first', async () => {
+test('lists_sessions_in_the_order_the_backend_gives', async () => {
   await setup();
   const rows = items();
   expect(rows).toHaveLength(2);
@@ -84,4 +84,50 @@ test('empty_history_invites_a_new_test', async () => {
   await screen.findByText(t('performance.history.empty'));
   await fireEvent.click(within(document.querySelector('.empty') as HTMLElement).getByRole('button'));
   await screen.findByRole('heading', { name: t('performance.nav.new') });
+});
+
+test('a filter without matches says so, not that nothing is saved', async () => {
+  await setup();
+  await fireEvent.click(screen.getByRole('radio', { name: 'RAM' }));
+  await fireEvent.click(within(items()[0]).getByRole('button', { name: t('performance.history.delete') }));
+  await fireEvent.click(within(items()[0]).getByRole('button', { name: t('performance.history.delete') }));
+  await screen.findByText(t('performance.history.noMatch'));
+  expect(screen.queryByText(t('performance.history.empty'))).toBeNull();
+});
+
+test('only an errors_core verdict gets a core term', async () => {
+  const backend: FakeBackend = await connectSettings();
+  backend.performanceSessions = [summary({ id: 'f', outcome: 'failed_to_start', verdict: 'failed_to_start', params: { reason: 'core 3 is parked' } })];
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
+  // The store keeps the previous list until the new one arrives.
+  await screen.findByText(/core 3 is parked/);
+  const row = screen.getAllByRole('listitem')[0];
+  expect(row.querySelector('.term')).toBeNull();
+});
+
+test('a failing delete shows the message and the confirmation gives way', async () => {
+  const backend = await setup();
+  backend.performanceDelete = async () => {
+    throw 'disk locked';
+  };
+  await fireEvent.click(within(items()[1]).getByRole('button', { name: t('performance.history.delete') }));
+  const confirm = within(items()[1]).getAllByRole('button', { name: t('performance.history.delete') })[0];
+  expect(document.activeElement).toBe(confirm);
+  await fireEvent.click(confirm);
+  expect((await screen.findByRole('alert')).textContent).toContain('disk locked');
+});
+
+test('repeat of a session that is gone says so', async () => {
+  const backend = await setup();
+  await fireEvent.click(within(items()[0]).getByRole('button', { name: t('performance.history.repeat') }));
+  expect((await screen.findByRole('alert')).textContent).toBe(t('performance.history.missing'));
+  expect(backend.performanceStartRequests).toHaveLength(0);
+});
+
+test('repeat while a test runs says busy', async () => {
+  const backend = await setup();
+  backend.emitPerformanceStatus(makeRunStatus({ state: 'running' }));
+  await fireEvent.click(await screen.findByRole('button', { name: t('performance.nav.history') }));
+  await fireEvent.click(within(items()[1]).getByRole('button', { name: t('performance.history.repeat') }));
+  expect((await screen.findByRole('alert')).textContent).toBe(t('performance.wizard.busy'));
 });

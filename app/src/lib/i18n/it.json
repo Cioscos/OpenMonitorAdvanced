@@ -1132,7 +1132,7 @@
   "performance.history.filter": "Componente",
   "performance.history.all": "Tutti",
   "performance.history.list": "Test salvati",
-  "performance.history.open": "Apri il risultato del {when}",
+  "performance.history.noMatch": "Nessun test per questo componente.",
   "performance.history.empty": "Nessun test salvato.",
   "performance.history.emptyAction": "Nuovo test",
   "performance.history.repeat": "Ripeti il test",

@@ -55,7 +55,7 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 - Handshake failure paths of the host (timeout, incompatible, no topology, early exit) are not tested end to end; a spawn failure saves no `failed_to_start` session. `app/src-tauri/src/performance/`; when touched.
 - Hypervisor flag: the Hyper-V root partition (VBS on bare metal) is not flagged as a VM; a nested root with the same privilege would not be. `crates/oma-win/src/topology.rs`; accepted.
 
-## Manual checks owed after M8a1 (plan task A28)
+## M8a1 live checks (plan task A28): done 2026-10-06, P16 owed on another PC
 
 To run with the user, one block at a time, before merging into `main`. Heavy loads only with the user's go. Build first (normal shell, repository root):
 

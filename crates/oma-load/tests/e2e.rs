@@ -5,6 +5,7 @@
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use oma_ipc::load::*;
@@ -14,8 +15,11 @@ use oma_win::private_pipe::PipeEvent;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WAIT: Duration = Duration::from_secs(10);
+/// The tests run one at a time, so the 2-thread cap holds and timings are not load-sensitive.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct Session {
+    _serial: MutexGuard<'static, ()>,
     conn: LoadConnection,
     rx: Receiver<PipeEvent<LoadMessage>>,
     child: Child,
@@ -23,10 +27,12 @@ struct Session {
     _reader: oma_win::private_pipe::PipeReader,
     isa: Isa,
     cores: Vec<u32>,
+    smt: bool,
 }
 
 impl Session {
     fn start(extra: &[&str]) -> Self {
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let name = random_load_pipe_name().unwrap();
         let server = create_load_server(&name).unwrap();
         let job = KillOnCloseJob::new().unwrap();
@@ -42,6 +48,7 @@ impl Session {
         let (tx, rx) = sync_channel(4096);
         let reader = conn.start_reader(move |e| tx.try_send(e).is_ok());
         let mut s = Session {
+            _serial: serial,
             conn,
             rx,
             child,
@@ -49,6 +56,7 @@ impl Session {
             _reader: reader,
             isa: Isa::Sse2,
             cores: vec![],
+            smt: false,
         };
         let LoadMessage::Hello(h) = s.recv() else {
             panic!("Hello first")
@@ -59,6 +67,12 @@ impl Session {
             panic!("Topology second")
         };
         assert!(t.logical.iter().all(|l| l.apic_id.is_some()));
+        s.smt = t
+            .logical
+            .iter()
+            .filter(|l| l.core == t.logical[0].core)
+            .count()
+            > 1;
         for l in &t.logical {
             if !s.cores.contains(&l.core) && s.cores.len() < 2 {
                 s.cores.push(l.core);
@@ -106,11 +120,13 @@ impl Session {
             isa: self.isa,
             size: if ram { DataSize::Ram } else { DataSize::L2 },
             mode: LoadMode::Steady,
-            placement: Placement::OnePerCore,
+            // `cores` only limits core_cycle phases, and these run one core (one thread, or
+            // the two siblings of K9) at a time: at most 2 busy threads.
+            placement: Placement::CoreCycle,
             duration_s: secs,
-            per_core_s: None,
-            both_smt: false,
-            cores: Some(self.cores[..workers.min(self.cores.len())].to_vec()),
+            per_core_s: Some(1),
+            both_smt: workers > 1,
+            cores: Some(self.cores.clone()),
             patterns: if kernel == KernelId::K10 {
                 vec![RamPattern::Random]
             } else {
@@ -142,15 +158,13 @@ impl Session {
 }
 
 fn wait_exit(mut child: Child, _job: KillOnCloseJob) -> i32 {
-    {
-        let end = Instant::now() + WAIT;
-        loop {
-            if let Some(s) = child.try_wait().unwrap() {
-                return s.code().unwrap();
-            }
-            assert!(Instant::now() < end, "the process did not exit");
-            std::thread::sleep(Duration::from_millis(20));
+    let end = Instant::now() + WAIT;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.code().unwrap();
         }
+        assert!(Instant::now() < end, "the process did not exit");
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -168,11 +182,17 @@ fn handshake_topology_and_short_plan_complete() {
     p.size = DataSize::L2;
     s.run(vec![p]);
     let all = s.until_finished();
-    assert!(all.iter().any(|m| matches!(m, LoadMessage::Progress(_))));
-    assert!(all
-        .iter()
-        .any(|m| matches!(m, LoadMessage::PhaseDone(d) if d.skipped.is_none())));
+    let pos = |f: fn(&LoadMessage) -> bool| all.iter().position(f).expect("message missing");
+    let progress = pos(|m| matches!(m, LoadMessage::Progress(_)));
+    let done = pos(|m| matches!(m, LoadMessage::PhaseDone(d) if d.skipped.is_none()));
+    assert!(progress < done && done < all.len() - 1, "bad order");
     assert!(!all.iter().any(|m| matches!(m, LoadMessage::Error(_))));
+    assert_eq!(
+        all.iter()
+            .filter(|m| matches!(m, LoadMessage::Finished(_)))
+            .count(),
+        1
+    );
     assert_eq!(finished(&all).reason, FinishReason::Completed);
     assert_eq!(s.close_and_wait(), 0);
 }
@@ -181,7 +201,8 @@ fn handshake_topology_and_short_plan_complete() {
 fn every_kernel_runs_one_second() {
     let mut s = Session::start(&[]);
     use KernelId::*;
-    let phases: Vec<Phase> = [K1, K2, K3, K4, K5, K7, K8, K9, K10]
+    let kernels = [K1, K2, K3, K4, K5, K7, K8, K9, K10];
+    let phases: Vec<Phase> = kernels
         .into_iter()
         .map(|k| s.phase(k, 1, if k == K9 { 2 } else { 1 }))
         .collect();
@@ -197,13 +218,32 @@ fn every_kernel_runs_one_second() {
         })
         .collect();
     assert_eq!(done.len(), n);
+    for d in &done {
+        let no_smt_k9 = !s.smt
+            && kernels[d.phase as usize] == K9
+            && d.skipped.as_deref() == Some("k9_needs_two_cores");
+        assert!(
+            d.skipped.is_none() || no_smt_k9,
+            "phase {} ({:?}) skipped: {:?}; notices: {:?}",
+            d.phase,
+            kernels[d.phase as usize],
+            d.skipped,
+            all.iter()
+                .filter(|m| matches!(m, LoadMessage::Notice(_)))
+                .collect::<Vec<_>>()
+        );
+    }
     assert_eq!(finished(&all).reason, FinishReason::Completed);
+    assert_eq!(s.close_and_wait(), 0);
 }
 
 #[cfg(debug_assertions)]
 #[test]
 fn injected_fault_reaches_the_app_as_error_on_core_1() {
     let mut s = Session::start(&["--inject-fault", "k5:1"]);
+    assert!(s.cores.contains(&1), "core number 1 is not in the topology");
+    // Run on core numbers 0 and 1 explicitly.
+    s.cores = vec![0, 1];
     let mut p = s.phase(KernelId::K5, 2, 2);
     p.size = DataSize::L2;
     s.run(vec![p]);

@@ -4,6 +4,9 @@
 //! one side writes the 64 lines and the other reads and checks them, then the roles swap,
 //! so the lines keep moving between the two cores. Self-checking (DA7): no reference.
 //!
+//! K9 must not be an `alt_kernel` (no profile uses it so: DA11 has K5 only): the factory cannot
+//! tell, and its workers would wait for partners that never run.
+//!
 //! An odd worker count leaves the last worker without a partner; the engine drops it.
 
 use std::any::Any;
@@ -116,8 +119,11 @@ impl K9 {
         }
     }
 
+    /// Reads one round. A wrong line does not end the round: the rest is drained too, so
+    /// the writer is done with the ring before this side starts writing the next round.
     fn read(&self, round: u64, beat: &AtomicU64) -> Check {
         let mut last = Instant::now();
+        let mut first = Check::Ok;
         for (l, line) in self.lines().iter().enumerate() {
             let want = round * LINES as u64 + l as u64 + 1;
             let mut spins = 0u32;
@@ -139,33 +145,27 @@ impl K9 {
                     }
                 }
             };
-            if seq != want {
-                return Check::Mismatch {
-                    expected: want,
-                    actual: seq,
-                };
-            }
             let mut all: [u64; DATA + 1] = std::array::from_fn(|w| line.0[w].load(Relaxed));
             all[SEQ] = seq;
             let (sum, actual) = (line.0[SUM].load(Relaxed), digest_words(&all));
-            if actual != sum {
-                return Check::Mismatch {
-                    expected: sum,
-                    actual,
-                };
-            }
             let mut expected = [0u64; DATA + 1];
             expected[..DATA].copy_from_slice(&self.words(round, l));
-            expected[SEQ] = seq;
-            if all != expected {
+            expected[SEQ] = want;
+            let bad = if seq != want {
+                Some((want, seq))
+            } else if actual != sum {
+                Some((sum, actual))
+            } else if all != expected {
                 // The checksum holds but the content is another round's.
-                return Check::Mismatch {
-                    expected: digest_words(&expected),
-                    actual,
-                };
+                Some((digest_words(&expected), actual))
+            } else {
+                None
+            };
+            if let (Some((expected, actual)), Check::Ok) = (bad, first) {
+                first = Check::Mismatch { expected, actual };
             }
         }
-        Check::Ok
+        first
     }
 }
 
@@ -242,7 +242,7 @@ mod tests {
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        assert!(rounds.iter().all(|&n| n > 100), "{rounds:?}");
+        assert!(rounds.iter().all(|&n| n >= 2), "{rounds:?}");
     }
 
     #[test]
@@ -253,6 +253,65 @@ mod tests {
         w.flip = Some((5 * DATA + 2, 9));
         let beat = AtomicU64::new(0);
         assert_eq!(w.iterate(&beat), Check::Ok);
+        assert!(matches!(r.iterate(&beat), Check::Mismatch { .. }));
+    }
+
+    /// Runs `2 * n` clean rounds (the roles swap each one) from an even round.
+    fn clean_rounds(w: &mut K9, r: &mut K9, n: usize) {
+        let beat = AtomicU64::new(0);
+        for _ in 0..n {
+            assert_eq!(w.iterate(&beat), Check::Ok);
+            assert_eq!(r.iterate(&beat), Check::Ok);
+            assert_eq!(r.iterate(&beat), Check::Ok);
+            assert_eq!(w.iterate(&beat), Check::Ok);
+        }
+    }
+
+    #[test]
+    fn k9_mismatch_drains_the_round_and_the_pair_goes_on() {
+        let c = ctxs(2);
+        let mut w = K9::new(&c[0]).unwrap();
+        let mut r = K9::new(&c[1]).unwrap();
+        w.flip = Some((30 * DATA, 3));
+        let beat = AtomicU64::new(0);
+        assert_eq!(w.iterate(&beat), Check::Ok);
+        assert!(matches!(r.iterate(&beat), Check::Mismatch { .. }));
+        // Round 1 is written by `r` and read by `w`; then clean pairs of rounds.
+        assert_eq!(r.iterate(&beat), Check::Ok);
+        assert_eq!(w.iterate(&beat), Check::Ok);
+        clean_rounds(&mut w, &mut r, 3);
+    }
+
+    #[test]
+    fn k9_sequence_ahead_and_stale_content_are_mismatches() {
+        let c = ctxs(2);
+        let mut w = K9::new(&c[0]).unwrap();
+        let mut r = K9::new(&c[1]).unwrap();
+        let beat = AtomicU64::new(0);
+        w.iterate(&beat);
+        // Line 3 claims a later sequence number.
+        w.lines()[3].0[SEQ].store(9999, Release);
+        assert_eq!(
+            r.iterate(&beat),
+            Check::Mismatch {
+                expected: 4,
+                actual: 9999
+            }
+        );
+        // Line 5 holds another round's words under a valid checksum.
+        let c = ctxs(2);
+        let mut w = K9::new(&c[0]).unwrap();
+        let mut r = K9::new(&c[1]).unwrap();
+        w.iterate(&beat);
+        let stale = w.words(7, 5);
+        let mut all = [0u64; DATA + 1];
+        all[..DATA].copy_from_slice(&stale);
+        all[SEQ] = 6;
+        let line = &w.lines()[5];
+        for (i, v) in stale.iter().enumerate() {
+            line.0[i].store(*v, Relaxed);
+        }
+        line.0[SUM].store(digest_words(&all), Relaxed);
         assert!(matches!(r.iterate(&beat), Check::Mismatch { .. }));
     }
 

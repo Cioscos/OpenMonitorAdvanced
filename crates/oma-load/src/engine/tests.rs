@@ -789,3 +789,20 @@ fn k9_needs_two_workers() {
         Some("k9_needs_two_cores")
     );
 }
+
+#[test]
+fn k9_with_three_workers_runs_two() {
+    let factory = CountFactory::new(0..0);
+    let f = |_: KernelId| Some(&factory as &dyn KernelFactory);
+    let (fin, msgs) = run_test(
+        &plan(vec![phase(KernelId::K9, Placement::AllLogical, 1)]),
+        &topology(3, 1),
+        &f,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert_eq!(factory.created.load(Ordering::Relaxed), 2);
+    assert_eq!(done(&msgs)[0].skipped, None);
+}

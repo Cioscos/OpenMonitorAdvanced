@@ -925,6 +925,8 @@ mod tests {
             cores: None,
             patterns: vec![],
             stop_on_error: false,
+            iterations: None,
+            pause_before_ms: 0,
         }
     }
 
@@ -1082,6 +1084,7 @@ mod tests {
                 errors: 0,
                 duration_ms: 1000,
                 skipped: None,
+                work_ms: None,
             }),
             clock(2000),
         );
@@ -1660,6 +1663,7 @@ mod tests {
             errors: 0,
             duration_ms: 1000,
             skipped: skipped.map(str::to_owned),
+            work_ms: None,
         })
     }
 

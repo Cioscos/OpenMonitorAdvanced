@@ -729,10 +729,10 @@ export type StressComponent = 'cpu' | 'ram';
 export type Objective = 'normal' | 'overclock';
 export type Preset = 'quick' | 'standard' | 'long' | 'night';
 export type Isa = 'avx512' | 'avx2' | 'sse2';
-export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10';
+export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort';
 export type LoadMode = 'steady' | 'variable' | 'light';
 export type Placement = 'all_logical' | 'one_per_core' | 'core_cycle';
-export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto';
+export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto' | 'fixed';
 export type RamPattern = 'moving_inversions' | 'modulo20' | 'random' | 'address' | 'crc_copy';
 export type CoreState = 'untested' | 'testing' | 'passed' | 'failed';
 export type Outcome =
@@ -789,6 +789,8 @@ export interface Phase {
   cores: number[] | null;
   patterns: RamPattern[];
   stop_on_error: boolean;
+  iterations?: number | null;
+  pause_before_ms?: number;
 }
 
 /** `performance_preview`'s reply and a session's plan (`oma-ipc::load::Plan`, snake_case). */

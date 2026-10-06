@@ -388,6 +388,7 @@ impl Engine<'_, '_> {
                     End::Skipped(reason) => Some(reason.to_owned()),
                     _ => None,
                 },
+                work_ms: None,
             }));
             match end {
                 End::Stopped => return self.finish(FinishReason::Stopped),

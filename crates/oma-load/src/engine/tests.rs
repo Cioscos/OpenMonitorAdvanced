@@ -63,6 +63,8 @@ fn phase(kernel: KernelId, placement: Placement, duration_s: u32) -> Phase {
         cores: None,
         patterns: vec![],
         stop_on_error: false,
+        iterations: None,
+        pause_before_ms: 0,
     }
 }
 

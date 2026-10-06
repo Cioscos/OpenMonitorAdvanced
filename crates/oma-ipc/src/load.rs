@@ -1,4 +1,4 @@
-//! App <-> `oma-load.exe` protocol (version 1): the messages the app and the stress-test
+//! App <-> `oma-load.exe` protocol (version 2): the messages the app and the stress-test
 //! helper exchange over the load pipe, framed with the generic framing of this crate.
 //!
 //! Same conventions as the service and overlay protocols: every field is always present on
@@ -12,7 +12,7 @@ use crate::overlay::check_len;
 use crate::IpcError;
 
 /// Load protocol version, sent in [`LoadHello::protocol_version`] by both sides.
-pub const LOAD_PROTOCOL_VERSION: u32 = 1;
+pub const LOAD_PROTOCOL_VERSION: u32 = 2;
 
 /// Prefix of the load pipe name; the app appends a random UUID v4.
 pub const LOAD_PIPE_PREFIX: &str = r"\\.\pipe\OpenMonitorAdvanced-Load-";
@@ -25,6 +25,10 @@ pub const MAX_PLAN_SECONDS: u32 = 86_400;
 pub const MAX_LOGICAL: usize = 1024;
 /// Maximum length of any text field, in bytes.
 pub const MAX_TEXT_BYTES: usize = 256;
+/// Maximum [`Phase::iterations`].
+pub const MAX_ITERATIONS: u64 = 1_000_000_000;
+/// Maximum [`Phase::pause_before_ms`].
+pub const MAX_PAUSE_MS: u32 = 10_000;
 /// Maximum [`Plan::ram_bytes`].
 pub const MAX_RAM_BYTES: u64 = 1 << 40;
 
@@ -79,6 +83,17 @@ pub enum KernelId {
     K8,
     K9,
     K10,
+    /// Benchmark-only loads (fixed work, `iterations` required).
+    Hash,
+    Compress,
+    Sort,
+}
+
+impl KernelId {
+    /// True for the loads that only run as fixed-work benchmark phases.
+    pub fn is_bench_only(self) -> bool {
+        matches!(self, Self::Hash | Self::Compress | Self::Sort)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +104,8 @@ pub enum DataSize {
     L3,
     Ram,
     Auto,
+    /// Fixed size, the same on every machine (benchmark).
+    Fixed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +209,12 @@ pub struct Phase {
     pub cores: Option<Vec<u32>>,
     pub patterns: Vec<RamPattern>,
     pub stop_on_error: bool,
+    /// Fixed work: iterations per thread (benchmark). `serde(default)` only reads v1 sessions.
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    /// Pause before the phase starts, in milliseconds.
+    #[serde(default)]
+    pub pause_before_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +287,9 @@ pub struct PhaseDone {
     pub errors: u64,
     pub duration_ms: u64,
     pub skipped: Option<String>,
+    /// Fixed-work phases: milliseconds from the gate opening to the last thread done.
+    #[serde(default)]
+    pub work_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +344,36 @@ fn check_phase(p: &Phase) -> Result<(), IpcError> {
     if (p.kernel == KernelId::K10) == p.patterns.is_empty() {
         return Err(IpcError::Decode(
             "patterns are required for k10 and refused for the other kernels".into(),
+        ));
+    }
+    if let Some(n) = p.iterations {
+        if !(1..=MAX_ITERATIONS).contains(&n) {
+            return Err(IpcError::Decode(format!(
+                "iterations {n} is out of 1-{MAX_ITERATIONS}"
+            )));
+        }
+        if p.mode != LoadMode::Steady || p.placement == Placement::CoreCycle {
+            return Err(IpcError::Decode(
+                "iterations need the steady mode and no core_cycle".into(),
+            ));
+        }
+    } else if p.kernel.is_bench_only() {
+        return Err(IpcError::Decode(
+            "hash, compress and sort need iterations".into(),
+        ));
+    }
+    if p.pause_before_ms > MAX_PAUSE_MS {
+        return Err(IpcError::Decode(format!(
+            "pause_before_ms {} is over {MAX_PAUSE_MS}",
+            p.pause_before_ms
+        )));
+    }
+    if p.size == DataSize::Fixed
+        && !(p.kernel.is_bench_only()
+            || matches!(p.kernel, KernelId::K2 | KernelId::K5 | KernelId::K7))
+    {
+        return Err(IpcError::Decode(
+            "the fixed size is only for k2, k5, k7, hash, compress and sort".into(),
         ));
     }
     Ok(())
@@ -406,6 +462,8 @@ mod tests {
             cores: None,
             patterns: vec![],
             stop_on_error: true,
+            iterations: None,
+            pause_before_ms: 0,
         }
     }
 
@@ -505,6 +563,7 @@ mod tests {
             errors: 0,
             duration_ms: 1000,
             skipped: Some("isa".into()),
+            work_ms: Some(900),
         }));
         round_trip(LoadMessage::Finished(Finished {
             reason: FinishReason::FirstError,
@@ -592,6 +651,119 @@ mod tests {
         assert!(plan(vec![p]).validate().is_err());
     }
 
+    fn bench_phase() -> Phase {
+        let mut p = phase();
+        p.kernel = KernelId::Hash;
+        p.size = DataSize::Fixed;
+        p.iterations = Some(1000);
+        p.pause_before_ms = 2000;
+        p
+    }
+
+    #[test]
+    fn bench_phase_round_trips() {
+        let mut sort = bench_phase();
+        sort.kernel = KernelId::Sort;
+        round_trip(plan(vec![bench_phase(), sort]));
+        assert!(plan(vec![bench_phase()]).validate().is_ok());
+        assert_eq!(serde_json::to_value(KernelId::Hash).unwrap(), "hash");
+        assert_eq!(
+            serde_json::to_value(KernelId::Compress).unwrap(),
+            "compress"
+        );
+        assert_eq!(serde_json::to_value(KernelId::Sort).unwrap(), "sort");
+        assert_eq!(serde_json::to_value(DataSize::Fixed).unwrap(), "fixed");
+        let v = serde_json::to_value(bench_phase()).unwrap();
+        assert_eq!(v["iterations"], 1000);
+        assert_eq!(v["pause_before_ms"], 2000);
+    }
+
+    #[test]
+    fn iterations_out_of_range_is_rejected() {
+        for (n, ok) in [
+            (0, false),
+            (1, true),
+            (1_000_000_000, true),
+            (1_000_000_001, false),
+        ] {
+            let mut p = bench_phase();
+            p.iterations = Some(n);
+            assert_eq!(plan(vec![p]).validate().is_ok(), ok, "{n}");
+        }
+        for (ms, ok) in [(0, true), (10_000, true), (10_001, false)] {
+            let mut p = bench_phase();
+            p.pause_before_ms = ms;
+            assert_eq!(plan(vec![p]).validate().is_ok(), ok, "{ms}");
+        }
+    }
+
+    #[test]
+    fn iterations_need_steady_and_no_core_cycle() {
+        for mode in [LoadMode::Variable, LoadMode::Light] {
+            let mut p = bench_phase();
+            p.mode = mode;
+            assert!(plan(vec![p]).validate().is_err());
+        }
+        let mut p = bench_phase();
+        p.placement = Placement::CoreCycle;
+        p.per_core_s = Some(5);
+        assert!(plan(vec![p]).validate().is_err());
+    }
+
+    #[test]
+    fn bench_kernels_need_iterations() {
+        for k in [KernelId::Hash, KernelId::Compress, KernelId::Sort] {
+            let mut p = bench_phase();
+            p.kernel = k;
+            assert!(plan(vec![p.clone()]).validate().is_ok());
+            p.iterations = None;
+            assert!(plan(vec![p]).validate().is_err(), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn fixed_size_only_for_bench_kernels() {
+        for (k, ok) in [
+            (KernelId::K2, true),
+            (KernelId::K5, true),
+            (KernelId::K7, true),
+            (KernelId::Hash, true),
+            (KernelId::K1, false),
+            (KernelId::K3, false),
+            (KernelId::K4, false),
+            (KernelId::K8, false),
+            (KernelId::K9, false),
+        ] {
+            let mut p = phase();
+            p.kernel = k;
+            p.size = DataSize::Fixed;
+            p.iterations = k.is_bench_only().then_some(10);
+            assert_eq!(plan(vec![p]).validate().is_ok(), ok, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn v1_phase_without_bench_fields_still_parses() {
+        let json = serde_json::json!({
+            "kernel": "k1", "alt_kernel": null, "isa": "avx2", "size": "l1",
+            "mode": "steady", "placement": "all_logical", "duration_s": 60,
+            "per_core_s": null, "both_smt": false, "cores": null,
+            "patterns": [], "stop_on_error": true
+        });
+        let p: Phase = serde_json::from_value(json).unwrap();
+        assert_eq!(p.iterations, None);
+        assert_eq!(p.pause_before_ms, 0);
+    }
+
+    #[test]
+    fn phase_done_without_work_ms_parses() {
+        let json = serde_json::json!({
+            "phase": 0, "checks": 1, "errors": 0, "duration_ms": 5, "skipped": null
+        });
+        let d: PhaseDone = serde_json::from_value(json).unwrap();
+        assert_eq!(d.work_ms, None);
+    }
+
     #[test]
     fn long_text_is_rejected() {
         let long = "x".repeat(MAX_TEXT_BYTES + 1);
@@ -617,6 +789,7 @@ mod tests {
             errors: 0,
             duration_ms: 0,
             skipped: Some(long),
+            work_ms: None,
         });
         assert!(done.validate().is_err());
     }
@@ -655,7 +828,7 @@ mod tests {
     fn hello_compatibility() {
         assert!(load_compatible(&hello()));
         let mut h = hello();
-        h.protocol_version = 2;
+        h.protocol_version = 3;
         assert!(!load_compatible(&h));
     }
 }

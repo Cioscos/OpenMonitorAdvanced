@@ -305,6 +305,8 @@ mod tests {
                     cores: None,
                     patterns: vec![],
                     stop_on_error: false,
+                    iterations: None,
+                    pause_before_ms: 0,
                 }],
             },
             outcome: Some(Outcome::Errors),

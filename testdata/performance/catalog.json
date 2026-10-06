@@ -1,0 +1,62 @@
+{
+  "components": [
+    "cpu",
+    "ram"
+  ],
+  "isa": [
+    "avx512",
+    "avx2",
+    "sse2"
+  ],
+  "kernels": [
+    "k1",
+    "k2",
+    "k3",
+    "k4",
+    "k5",
+    "k7",
+    "k8",
+    "k9",
+    "k10"
+  ],
+  "modes": [
+    "steady",
+    "variable",
+    "light",
+    "coreCycle",
+    "allCore"
+  ],
+  "objectives": [
+    "normal",
+    "overclock"
+  ],
+  "patterns": [
+    "moving_inversions",
+    "modulo20",
+    "random",
+    "address",
+    "crc_copy"
+  ],
+  "presets": {
+    "cpu.normal": {
+      "long": 3600,
+      "quick": 300,
+      "standard": 1800
+    },
+    "cpu.overclock": {
+      "long": 7200,
+      "night": 28800,
+      "standard": 3600
+    },
+    "ram.normal": {
+      "long": 3600,
+      "quick": 900,
+      "standard": 1800
+    },
+    "ram.overclock": {
+      "long": 7200,
+      "night": 28800,
+      "standard": 3600
+    }
+  }
+}

@@ -2409,6 +2409,7 @@ dependencies = [
 name = "oma-core"
 version = "0.5.0"
 dependencies = [
+ "oma-ipc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+oma-ipc.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

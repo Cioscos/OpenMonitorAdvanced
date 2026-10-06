@@ -17,6 +17,7 @@ pub use plan::{
 };
 pub use run::{Action, Clock, PhaseInfo, RunConfig, RunController, RunState, RunStatus, WheaEvent};
 pub use sensors::{read_sample, resolve_cpu_sensors, CpuSensorIds, SensorSample};
+pub(crate) use session::check_format;
 pub use session::{
     is_session_file_name, is_session_id, parse_journal, parse_session, prune, session_file_name,
     summary, CoreResult, ErrorRecord, FormatError, Journal, OutcomeDetail, PhaseResult, Sample,

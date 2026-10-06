@@ -70,6 +70,9 @@ SMART data.
   the reason in the deck.
 - **In-game overlay.** FPS, frame times, lows and sensors over a game, from a separate
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
+- **Performance view.** A stress test for the CPU and the RAM, with a guided wizard (normal check
+  or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
+  of past sessions (see [Performance view](#performance-view)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -173,6 +176,25 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   The *Start with Windows* entry of a standard user survives an uninstall of the per-machine
   installer and then points at a program that is gone: remove it in *Settings › Apps › Startup*
   (or turn the option off before uninstalling).
+
+## Performance view
+
+The Performance view runs a stress test on the CPU or the RAM. The load comes from a separate
+small process, `oma-load.exe`, installed next to the app; it is stopped when you stop the test or
+close the app. A wizard asks what to test, how long and with which thresholds; during the run the
+page shows clocks, temperature, power and errors, and a thermal stop ends the test if the CPU gets
+too hot. Each session ends with a verdict (passed, unstable with the core, stopped, interrupted by
+a system crash) and is kept in the history. Closing the window does not stop a test: it goes on
+from the tray. Technical terms have a plain-words tooltip.
+
+- **Admin rights** are not needed. Without the service the CPU test runs, with a warning, and
+  without thermal stop.
+- **RAM limit.** The RAM test covers only the memory Windows gives the program (4 KB pages): it is
+  not a replacement for MemTest86, TestMem5 or Karhu.
+- **Crashes.** Fatal hardware errors and system crashes show up only after the restart; the core
+  named in the result is the one under test, not proof that it is at fault.
+- The load kernels are partly adapted from FIRESTARTER and OpenDCDiag; see
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## In-game overlay
 
@@ -369,6 +391,7 @@ ends up in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Data model, sampling scheduler, per-source merge, history. No Windows code. |
 | `crates/oma-win` | Windows providers: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, disks, network |
 | `crates/oma-ipc` | Protocol types, MessagePack encoding and framing for talking to `oma-service` and to the overlay |
+| `crates/oma-load` | `oma-load.exe`, the stress-test load process (CPU and RAM kernels) |
 | `crates/oma-overlay` | `oma-overlay.exe`, the in-game overlay window (Direct2D, DirectWrite, DirectComposition) |
 | `app/src-tauri` | Tauri 2 shell (`oma-app`): commands, tray, window, safe mode, NSIS template and hooks |
 | `app/src` | Svelte 5 + TypeScript UI, English and Italian translations |

@@ -291,6 +291,18 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
+## M8a1 — stress test CPU e RAM (spec M8 §11)
+
+Non misurato in questa sessione: `scripts/measure-footprint.ps1` avvia l'app (release) e ne apre la finestra; un agente non pilota l'app né il desktop dell'utente (regola delle verifiche dal vivo). La misura a riposo e quella sotto carico spettano quindi alle verifiche dal vivo (A28, P13). Il codice della M8a1 non aggiunge lavoro a riposo: `oma-load.exe` esiste solo mentre un test è in corso e il modulo `performance/` dell'app resta inattivo senza test.
+
+Comando per l'utente (shell normale, dalla radice del repository):
+
+```powershell
+pwsh scripts/measure-footprint.ps1
+```
+
+A riposo, senza test: attesi nucleo < 1% CPU, tray < 30 MB, finestra < 200 MB (WebView2 compresa), come per la M7. Poi, durante P1 (CPU, Verifica normale, Rapido), lo stesso script con la finestra aperta: finestra < 200 MB; la memoria privata di `oma-load.exe` si annota a parte (non rientra nel budget dell'app, è il carico stesso). I valori vanno in questa sezione dopo A28.
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

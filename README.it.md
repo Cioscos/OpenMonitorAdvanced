@@ -73,6 +73,9 @@ temperature, tensioni, ventole e dati SMART.
   quando cambiano le colonne: lingua, unità o sensori selezionati. *Impostazioni › Log CSV*
   imposta cartella, sensori, intervallo, limite di dimensione e scorciatoie. Un errore, come una
   unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
+- **Vista Prestazioni.** Uno stress test per CPU e RAM, con una procedura guidata (verifica
+  normale o stabilità dell'overclock, da Rapido a Lungo), una pagina dal vivo, un risultato con
+  verdetto e la cronologia delle sessioni (vedi [Vista Prestazioni](#vista-prestazioni)).
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -182,6 +185,26 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
   dell'installer per tutto il computer e poi punta a un programma che non c'è più: rimuovila da
   *Impostazioni › App › Avvio* (o disattiva l'opzione prima di disinstallare).
 
+## Vista Prestazioni
+
+La vista Prestazioni esegue uno stress test della CPU o della RAM. Il carico viene da un piccolo
+processo a parte, `oma-load.exe`, installato accanto all'app; si ferma quando fermi il test o
+chiudi l'app. Una procedura guidata chiede cosa provare, per quanto tempo e con quali soglie;
+durante la prova la pagina mostra frequenze, temperatura, potenza ed errori, e uno stop termico
+chiude il test se la CPU diventa troppo calda. Ogni sessione finisce con un verdetto (superato,
+instabile con il core, fermato, interrotto da un crash del sistema) e resta nella cronologia.
+Chiudere la finestra non ferma un test: continua dal tray. I termini tecnici hanno un tooltip in
+parole semplici.
+
+- **Privilegi di amministratore** non servono. Senza il servizio il test della CPU parte, con un
+  avviso, e senza stop termico.
+- **Limite della RAM.** Il test della RAM copre solo la memoria che Windows concede al programma
+  (pagine da 4 KB): non sostituisce MemTest86, TestMem5 o Karhu.
+- **Crash.** Gli errori hardware fatali e i crash del sistema si vedono solo dopo il riavvio; il
+  core indicato nel risultato è quello in prova, non la prova che sia il colpevole.
+- I kernel di carico sono in parte adattati da FIRESTARTER e OpenDCDiag; vedi
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Controllo degli aggiornamenti
 
 L'app può dirti quando esce una nuova versione. In *Impostazioni › Informazioni*, **Controlla ora**
@@ -278,6 +301,7 @@ finisce in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Modello dati, scheduler di campionamento, merge per fonte, storico. Niente codice Windows. |
 | `crates/oma-win` | Provider Windows: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete |
 | `crates/oma-ipc` | Tipi del protocollo, codifica MessagePack e framing per parlare con `oma-service` |
+| `crates/oma-load` | `oma-load.exe`, il processo di carico dello stress test (kernel di CPU e RAM) |
 | `app/src-tauri` | Shell Tauri 2 (`oma-app`): comandi, tray, finestra, modalità sicura, template e hook NSIS |
 | `app/src` | Interfaccia Svelte 5 + TypeScript, traduzioni italiana e inglese |
 | `service/` | `oma-service`, servizio Windows .NET 10 basato su LibreHardwareMonitorLib, con i suoi test |

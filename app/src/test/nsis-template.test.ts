@@ -209,6 +209,13 @@ const OVERLAY_COPY = [
   '!insertmacro OMA_FAIL "$(omaOverlayFailed)" "copy of ${OMA_OVERLAY_EXE} failed"',
   '${EndIf}',
 ];
+const LOAD_COPY = [
+  'ClearErrors',
+  'File "${OMA_PAYLOAD}\\load\\${OMA_LOAD_EXE}"',
+  '${If} ${Errors}',
+  '!insertmacro OMA_FAIL "$(omaLoadFailed)" "copy of ${OMA_LOAD_EXE} failed"',
+  '${EndIf}',
+];
 const TOUCHES_SERVICE_FILES = /^(File|Delete|RMDir)\b.*(oma-service|OMA_SERVICE_EXE|\\service)/;
 
 /** Every `call` is immediately followed by `check` and then by OMA_FAIL. */
@@ -728,7 +735,7 @@ describe('oma.nsh failure paths', () => {
       /!if \/FileExists "\$\{OMA_PAYLOAD\}\\overlay\\\$\{OMA_OVERLAY_EXE\}"\n!else\n\s*!error "Missing /,
     );
     const post = block(all, /^!macro NSIS_HOOK_POSTINSTALL$/, /^!macroend$/);
-    expect(post.slice(1, 1 + OVERLAY_COPY.length)).toEqual(OVERLAY_COPY);
+    expect(post.slice(1, 1 + OVERLAY_COPY.length + LOAD_COPY.length)).toEqual([...OVERLAY_COPY, ...LOAD_COPY]);
     expect(all.filter((s) => /^File .*OMA_OVERLAY_EXE/.test(s))).toHaveLength(1);
 
     // Uninstall: with the other files, after the service stop and removal and their checks,
@@ -737,7 +744,12 @@ describe('oma.nsh failure paths', () => {
     const del = hook.indexOf('Delete /REBOOTOK "$INSTDIR\\${OMA_OVERLAY_EXE}"');
     expect(hook.filter((s) => /OMA_OVERLAY_EXE/.test(s))).toEqual([hook[del]]);
     expect(hook[del - 1]).toBe('!insertmacro OMA_STOP_OVERLAY');
-    expect(hook[del + 1]).toBe('Delete "$INSTDIR\\service\\${OMA_SERVICE_EXE}"');
+    // M8a1: the load generator is stopped and deleted right after the overlay.
+    expect(hook.slice(del + 1, del + 4)).toEqual([
+      '!insertmacro OMA_STOP_LOAD',
+      'Delete /REBOOTOK "$INSTDIR\\${OMA_LOAD_EXE}"',
+      'Delete "$INSTDIR\\service\\${OMA_SERVICE_EXE}"',
+    ]);
     const lastFail = hook.reduce((at, s, i) => (FAIL.test(s) ? i : at), -1);
     expect(lastFail).toBeGreaterThan(indexOf(hook, STOP));
     expect(del).toBeGreaterThan(lastFail);
@@ -899,9 +911,10 @@ describe('closing and reopening the app around an upgrade', () => {
     expect(pops.filter((p) => p !== '$0').concat('$0')).toEqual(['$2', '$1', '$0']);
     // ClearErrors after the label: a missing DisplayVersion or Run value leaves no error flag behind.
     // OMA_STOP_OVERLAY saves and restores $0 itself.
-    expect(fn.slice(-7)).toEqual([
+    expect(fn.slice(-8)).toEqual([
       'oma_close_done:',
       '!insertmacro OMA_STOP_OVERLAY',
+      '!insertmacro OMA_STOP_LOAD',
       'ClearErrors',
       'Pop $2',
       'Pop $1',
@@ -929,6 +942,7 @@ describe('closing and reopening the app around an upgrade', () => {
     expect(post).toEqual([
       '!macro NSIS_HOOK_POSTINSTALL',
       ...OVERLAY_COPY,
+      ...LOAD_COPY,
       '${If} $OmaRunValue != ""',
       'Push $0',
       'ClearErrors',

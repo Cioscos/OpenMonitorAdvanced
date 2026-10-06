@@ -109,6 +109,21 @@ P15 and P16 end a running test on purpose: ask the user first. P17: switch to th
 
 P9 is a forced restart: ask the user first. Results go in this file and in the project memory (`m8a1-followups.md`); then `superpowers:finishing-a-development-branch` (whole-branch review, local merge, no push unless asked).
 
+### Results (2026-10-06)
+
+Run with the user after the merge into `main` (installed 0.5.0 setup from `main`, P3 with `pnpm tauri dev`).
+
+| # | Result |
+|---|---|
+| P1, P2, P3, P4, P5, P6, P7, P8, P10, P12, P13, P14, P15, P17 | Passed. P13: window 165.9 MB under load (`TotalPrivateMB`, app 0.03% CPU), `oma-load` 17 MB, in `docs/perf-budget.md`. P17 with a custom plan (K5 only, 10 min). |
+| P9 | Passed by accident: the P16 sleep did not resume on this PC (a hardware fault of the machine at wake), the forced power-off gave "Interrupted by a system crash during phase 1" with Kernel-Power 41. |
+| P11 | Skipped by the user (no Ryzen Master check). |
+| P16 | Owed: this PC does not resume from sleep (hardware); run it on another machine. |
+
+Fixed during the checks: the result showed the core grid ("not tested") for plans without a core-cycle phase (`98c3fc8`); the space before `·` was lost inside `{#if}` blocks (`b87b616`); a phase cut short by a stop counted as passed (`39e73bc`); the footprint script counted `oma-load` in the window total (`ec55ce9`); the wizard did not follow the service state live (`58a808c`).
+
+Open: in the wizard summary, unticking a mode under "Personalizza" removes its phases from the list, so the panel below jumps up and down. Proposed fix: keep the phases in the list, dimmed and marked as excluded; the bar and the total count only the active ones. `app/src/components/performance/StressWizard.svelte`; waiting for the user's go.
+
 ## Open: minor items from the M5b reviews
 
 Small findings the task reviews accepted and deferred; none of them changes what the user sees today.

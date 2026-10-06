@@ -303,7 +303,7 @@ pwsh scripts/measure-footprint.ps1
 
 At rest, with no test: expected core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included), as for M7. Then, in the app the script launched, start a CPU Quick test by hand (normal check) and measure again with the window open: window < 200 MB. Note the private memory and CPU of `oma-load.exe` from Task Manager separately: it is the load itself, not part of the app budget. The values go in this section after A28.
 
-Measured 2026-10-06 (P13) on the development machine (16 logical processors, Windows 11 Pro 10.0.26300) with the release build of `main` after the merge (`targetelease\oma-app.exe`, built by `pnpm tauri build --bundles nsis`), `scripts/measure-footprint.ps1 -WarmupSeconds 60`, a CPU Quick test (normal check) started by hand during the warm-up, window open. Since `ec55ce9` the script reports `oma-load.exe` apart (`LoadPrivateMB`) and leaves it out of `TotalPrivateMB`; `TotalAppPercentCpu` still includes it.
+Measured 2026-10-06 (P13) on the development machine (16 logical processors, Windows 11 Pro 10.0.26300) with the release build of `main` after the merge (`target\release\oma-app.exe`, built by `pnpm tauri build --bundles nsis`), `scripts/measure-footprint.ps1 -WarmupSeconds 60`, a CPU Quick test (normal check) started by hand during the warm-up, window open. Since `ec55ce9` the script reports `oma-load.exe` apart (`LoadPrivateMB`) and leaves it out of `TotalPrivateMB`; `TotalAppPercentCpu` still includes it.
 
 ```
 Mode                 : window

@@ -233,7 +233,7 @@ export interface NavigationTarget {
   /** The settings section to open, for the update toast. */
   settingsSection?: 'about';
   /** The Performance page the tray or a toast asked for; `quit` also asks «stop the test and quit?». */
-  performance?: { page: 'run' | 'result' | 'quit'; sessionId?: string };
+  performance?: { page: 'run' | 'result' | 'quit' | 'score-cpu'; sessionId?: string };
 }
 
 export interface ServiceModules {
@@ -962,4 +962,67 @@ export interface StressSessionSummary {
   outcome: Outcome | null;
   verdict: string | null;
   params: Record<string, string>;
+}
+
+// --- CPU benchmark (mirrors crates/oma-core/src/scores and app/src-tauri/src/performance/bench.rs; plan M8a2 B7) ---
+
+export type BenchKernel = 'ntt' | 'hash' | 'compress' | 'sort' | 'fft' | 'gemm';
+export type BenchMode = 'single' | 'multi';
+export type BenchState = 'starting' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed';
+export type BenchSegment = 'pending' | 'running' | 'done' | 'failed';
+
+/** A phase of the benchmark: `rep` 0 is the warm-up, 1–3 the repetitions. */
+export interface BenchStep {
+  kernel: BenchKernel;
+  mode: BenchMode;
+  rep: number;
+}
+
+/**
+ * The `performance-bench` payload and `performance_bench_status`'s reply. `livePoints` is the live
+ * needle of the step under way; `error` is `exited`, `failed`, `crashed`, `hung` or a
+ * `performance.start.*` key.
+ */
+export interface BenchStatus {
+  state: BenchState;
+  step: number | null;
+  steps: BenchStep[];
+  segments: BenchSegment[];
+  livePoints: number | null;
+  single: number | null;
+  multi: number | null;
+  flags: string[];
+  scoreId: string | null;
+  error: string | null;
+}
+
+/** One entry of `performance_scores`, newest first. */
+export interface CpuScoreSummary {
+  id: string;
+  at: string;
+  single: number | null;
+  multi: number | null;
+  valid: boolean;
+  flags: string[];
+  provisional: boolean;
+}
+
+/** A saved score (`performance_score`): the speeds of each workload in its own unit. */
+export interface CpuScoreFile {
+  format: number;
+  id: string;
+  at: string;
+  category: string;
+  scoreVersion: string;
+  provisional: boolean;
+  isa: Isa;
+  scores: { single: number | null; multi: number | null };
+  kernels: { id: BenchKernel; unit: string; single: number | null; multi: number | null }[];
+  device: { model: string; cores: number; logical: number };
+  flags: string[];
+  valid: boolean;
+  scaling: number | null;
+  samples: { tMs: number; tempC: number | null; powerW: number | null; clockMhz: number | null }[];
+  appVersion: string;
+  loadVersion: string | null;
 }

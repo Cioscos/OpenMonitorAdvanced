@@ -528,6 +528,8 @@ test('the tray and a toast open the running test and a result', async () => {
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Result' })).toBeTruthy());
   backend.emitNavigate({ view: 'simple', performance: { page: 'run' } });
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Test in progress' })).toBeTruthy());
+  backend.emitNavigate({ view: 'simple', performance: { page: 'score-cpu' } });
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'CPU Benchmark' })).toBeTruthy());
 });
 
 test('a test that starts opens its page and marks the sidebar entry', async () => {

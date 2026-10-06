@@ -1,6 +1,7 @@
 import { catalogs, type Locale } from '../i18n/index.svelte';
 import performanceSection from '../../components/settings/PerformanceSection.svelte?raw';
-import { ISA_TERMS, MODE_TERMS, PATTERN_TERMS, TERMS } from './glossary';
+import baseline from '../../../../crates/oma-core/src/scores/cpu-1-baseline.json';
+import { BENCH_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
 
 const LOCALES: Locale[] = ['en', 'it'];
 
@@ -28,4 +29,11 @@ test('every_term_used_in_performance_pages_has_a_key', () => {
   const named = sources.flatMap((source) => [...source.matchAll(/<Term\s+term="([^"]+)"\s*\/>/g)].map((m) => m[1]));
   expect(named).toContain('tjmax');
   expect(missing(named.map((term) => `glossary.${term}.name`))).toEqual([]);
+});
+
+test('every_bench_kernel_has_an_entry', () => {
+  // The six workloads of the score scale `oma-core` ships (DB3).
+  expect([...BENCH_TERMS].sort()).toEqual(Object.keys(baseline.single).map((id) => `bench.${id}`).sort());
+  expect(TERMS).toEqual(expect.arrayContaining(SCORE_TERMS));
+  expect(missing([...BENCH_TERMS, ...SCORE_TERMS].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

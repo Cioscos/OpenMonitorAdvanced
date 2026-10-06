@@ -32,7 +32,7 @@ import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
 import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
-import { mockPerformance, parsePerfScenario } from './mockPerformance';
+import { mockBench, mockPerformance, parseBenchScenario, parsePerfScenario } from './mockPerformance';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
@@ -512,6 +512,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const editorData = mockEditorData();
   let benchmarks = structuredClone(MOCK_BENCHMARKS);
   const perf = mockPerformance(parsePerfScenario(typeof location === 'undefined' ? '' : location.search), () => serviceStatus.state === 'connected');
+  const bench = mockBench(parseBenchScenario(typeof location === 'undefined' ? '' : location.search), () => perf.running());
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -675,6 +676,14 @@ export function createMockBackend(intervalMs = 1000): Backend {
     onPerformanceStatus: async (cb) => perf.subscribe(cb),
     onPerformanceQuit: async () => () => {},
     performanceQuitConfirmed: async () => console.info('mock: stop and quit'),
+    performanceBenchStart: async () => bench.start(),
+    performanceBenchStop: async () => bench.stop(),
+    performanceBenchStatus: async () => bench.status(),
+    performanceScores: async () => bench.scores(),
+    performanceScore: async (id) => bench.score(id),
+    performanceScoreDelete: async (id) => bench.remove(id),
+    performanceBaseline: async () => ({ provisional: true }),
+    onPerformanceBench: async (cb) => bench.subscribe(cb),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),
     benchmarkList: async () => structuredClone(benchmarks),
     benchmarkOpenCsv: async (id) => console.info('mock: open benchmark CSV', id),

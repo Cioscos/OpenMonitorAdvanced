@@ -1,4 +1,5 @@
 import { catalogs } from '../i18n/index.svelte';
+import { mockBench } from './mockPerformance';
 import {
   MOCK_HISTORY_SECONDS,
   MOCK_SCHEMA,
@@ -560,4 +561,26 @@ describe('mock overlay editor', () => {
     await backend.overlayDeleteProfile(id);
     await expect(backend.overlayLoadProfile(id)).rejects.toMatchObject({ key: 'editor.error.notFound' });
   });
+});
+
+test('mock_bench_runs_twenty_seconds_and_the_error_scenario_is_not_valid', () => {
+  vi.useFakeTimers();
+  try {
+    for (const scenario of [null, 'error'] as const) {
+      const bench = mockBench(scenario, () => false);
+      const seen: string[] = [];
+      bench.subscribe((s) => seen.push(s.state));
+      const id = bench.start();
+      expect(() => bench.start()).toThrow();
+      vi.advanceTimersByTime(19_000);
+      expect(bench.status()?.state).toBe(scenario === 'error' ? 'done' : 'running');
+      vi.advanceTimersByTime(1_500);
+      expect(bench.status()).toMatchObject({ state: 'done', scoreId: id });
+      expect(bench.score(id)?.valid).toBe(scenario === null);
+      expect(bench.scores()[0].id).toBe(id);
+    }
+    expect(() => mockBench(null, () => true).start()).toThrow();
+  } finally {
+    vi.useRealTimers();
+  }
 });

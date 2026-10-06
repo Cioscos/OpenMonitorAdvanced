@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
+  BenchStatus,
+  CpuScoreFile,
+  CpuScoreSummary,
   AppInfo,
   ExportedReport,
   AutostartStatus,
@@ -115,6 +118,14 @@ export function createTauriBackend(): Backend {
     onPerformanceStatus: (cb) => listen<RunStatus>('performance-status', (e) => cb(e.payload)),
     onPerformanceQuit: (cb) => listen<null>('performance-quit', () => cb()),
     performanceQuitConfirmed: () => invoke<void>('performance_quit_confirmed'),
+    performanceBenchStart: () => invoke<string>('performance_bench_start'),
+    performanceBenchStop: () => invoke<void>('performance_bench_stop'),
+    performanceBenchStatus: () => invoke<BenchStatus | null>('performance_bench_status'),
+    performanceScores: () => invoke<CpuScoreSummary[]>('performance_scores'),
+    performanceScore: (id) => invoke<CpuScoreFile | null>('performance_score', { id }),
+    performanceScoreDelete: (id) => invoke<void>('performance_score_delete', { id }),
+    performanceBaseline: () => invoke<{ provisional: boolean }>('performance_baseline'),
+    onPerformanceBench: (cb) => listen<BenchStatus>('performance-bench', (e) => cb(e.payload)),
     benchmarkToggle: () => invoke<void>('benchmark_toggle'),
     benchmarkList: () => invoke<BenchmarkEntry[]>('benchmark_list'),
     benchmarkOpenCsv: (id) => invoke<void>('benchmark_open_csv', { id }),

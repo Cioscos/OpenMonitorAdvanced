@@ -149,6 +149,13 @@ test('editor and benchmark commands match the Rust shell', async () => {
     [() => backend.performanceSession('x'), 'performance_session', { id: 'x' }],
     [() => backend.performanceDelete('x'), 'performance_delete', { id: 'x' }],
     [() => backend.performanceExport('x'), 'performance_export', { id: 'x' }],
+    [() => backend.performanceBenchStart(), 'performance_bench_start'],
+    [() => backend.performanceBenchStop(), 'performance_bench_stop'],
+    [() => backend.performanceBenchStatus(), 'performance_bench_status'],
+    [() => backend.performanceScores(), 'performance_scores'],
+    [() => backend.performanceScore('x'), 'performance_score', { id: 'x' }],
+    [() => backend.performanceScoreDelete('x'), 'performance_score_delete', { id: 'x' }],
+    [() => backend.performanceBaseline(), 'performance_baseline'],
     [() => backend.benchmarkToggle(), 'benchmark_toggle'],
     [() => backend.benchmarkList(), 'benchmark_list'],
     [() => backend.benchmarkOpenCsv('x'), 'benchmark_open_csv', { id: 'x' }],
@@ -162,6 +169,8 @@ test('editor and benchmark commands match the Rust shell', async () => {
   }
   await backend.onPerformanceStatus(() => {});
   expect(listen).toHaveBeenLastCalledWith('performance-status', expect.any(Function));
+  await backend.onPerformanceBench(() => {});
+  expect(listen).toHaveBeenLastCalledWith('performance-bench', expect.any(Function));
   await backend.onOverlayEditorData(() => {});
   expect(listen).toHaveBeenLastCalledWith('overlay-editor-data', expect.any(Function));
   await backend.onOverlayPreview(() => {});

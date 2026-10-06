@@ -10,8 +10,15 @@ export const MODE_TERMS: string[] = [...catalog.kernels, ...catalog.modes].map((
 export const ISA_TERMS: string[] = catalog.isa.map((id) => `isa.${id}`);
 export const PATTERN_TERMS: string[] = catalog.patterns.map((id) => `mode.pattern.${id}`);
 
+/** The six workloads of the CPU benchmark (M8a2 DB3): `bench.ntt`, `bench.gemm`… */
+export const BENCH_TERMS: string[] = ['ntt', 'hash', 'compress', 'sort', 'fft', 'gemm'].map((id) => `bench.${id}`);
+
+/** The terms of the CPU score page (table T2 of the M8a2 plan). */
+export const SCORE_TERMS: string[] = ['benchPoints', 'singleCore', 'multiCore', 'scaling', 'referenceMark', 'warmup', 'median'];
+
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [
+  ...SCORE_TERMS,
   'fft',
   'ntt',
   'linpack',

@@ -125,6 +125,8 @@ pub const RUST_KEYS: &[&str] = &[
     "performance.start.foreign_client",
     "performance.start.incompatible",
     "performance.start.no_topology",
+    "performance.start.nothing_ran",
+    "performance.start.invalid_plan",
     "performance.outcome.passed",
     "performance.outcome.marginal",
     "performance.outcome.errors",

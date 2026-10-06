@@ -21,7 +21,7 @@ use oma_core::load::{
     build_plan, core_order, cpu_stop_threshold, decide, ram_budget, read_sample,
     resolve_cpu_sensors, Action, BuildError, BuildInput, Clock, Component, CpuSensorIds, Objective,
     OutcomeDetail, OutcomeFacts, Preset, RunConfig, RunController, RunState, RunStatus,
-    SensorSample, Session, StartRequest, WheaEvent, FORMAT,
+    SensorSample, Session, StartRequest, VerdictKey, WheaEvent, FORMAT,
 };
 use oma_core::model::Schema;
 use oma_ipc::load::{Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology};
@@ -293,13 +293,77 @@ fn core_count(topology: &Topology) -> usize {
         .unwrap_or(0)
 }
 
+/// The `Run` message of `plan`, refused when it would not pass the helper's validation.
+fn plan_message(plan: Plan) -> Result<LoadMessage, StartFailure> {
+    let msg = LoadMessage::Run(RunRequest { plan });
+    msg.validate().map_err(|err| {
+        tracing::error!(%err, "the stress plan is not valid");
+        StartFailure::InvalidPlan
+    })?;
+    Ok(msg)
+}
+
+/// A verdict without the place it happened.
+fn bare_detail(key: VerdictKey) -> OutcomeDetail {
+    OutcomeDetail {
+        verdict: key.key.to_string(),
+        params: key.params,
+        phase: None,
+        kernel: None,
+        core: None,
+        temp_c: None,
+        clock_mhz: None,
+        at_ms: None,
+    }
+}
+
+/// The runner thread panicked: the session (as last saved) ends as `crashed`, and the
+/// status as finished, so the tray mark goes and a new test can start.
+fn after_panic(deps: &RunnerDeps, status: &Mutex<RunStatus>, started: Session) {
+    tracing::error!("the stress test runner panicked");
+    let store = &deps.store;
+    let mut session = store.load(&started.id).ok().flatten().unwrap_or(started);
+    if session.outcome.is_none() {
+        let (outcome, key) = decide(&OutcomeFacts {
+            crashed: true,
+            ..Default::default()
+        });
+        session.outcome = Some(outcome);
+        session.outcome_detail = Some(bare_detail(key));
+        session.ended_at = Some(to_rfc3339(unix_now_ms()));
+        if let Err(err) = store.save(&session) {
+            tracing::warn!(%err, "cannot save the stress session");
+        }
+    }
+    if let Err(err) = store.delete_journal() {
+        tracing::warn!(%err, "cannot delete the stress journal");
+    }
+    let mut st = lock(status).clone();
+    st.state = RunState::Finished;
+    st.outcome = session.outcome;
+    (deps.on_state)(&st);
+    if (deps.window_open)() {
+        (deps.emit)(&st);
+    }
+    *lock(status) = st;
+}
+
 /// The T3 text of a session's verdict.
 fn verdict_text(lang: Lang, detail: &OutcomeDetail) -> String {
-    let params: Vec<(&str, &str)> = detail
+    // A `failed_to_start` reason is a text, or the key of one (`performance.start.*`).
+    let texts: Vec<(&str, String)> = detail
         .params
         .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(k, v)| {
+            let text = if v.starts_with("performance.start.") {
+                t(lang, v, &[])
+            } else {
+                v.clone()
+            };
+            (k.as_str(), text)
+        })
         .collect();
+    let params: Vec<(&str, &str)> = texts.iter().map(|(k, v)| (*k, v.as_str())).collect();
     t(
         lang,
         &format!("performance.outcome.{}", detail.verdict),
@@ -447,6 +511,7 @@ impl PerformanceRunner {
             cores: core_order(&topology),
             apic_to_core: BTreeMap::new(),
             whea_after: None,
+            whea_baseline_missing: false,
         };
         let device = match request.component {
             Component::Cpu => topology.brand.clone(),
@@ -502,7 +567,16 @@ impl PerformanceRunner {
         };
         let thread = std::thread::Builder::new()
             .name("oma-perf-runner".into())
-            .spawn(move || worker.run(session, config, starting))
+            .spawn(move || {
+                let (deps, status) = (Arc::clone(&worker.deps), Arc::clone(&worker.status));
+                let started = session.clone();
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker.run(session, config, starting)
+                }));
+                if run.is_err() {
+                    after_panic(&deps, &status, started);
+                }
+            })
             .map_err(|e| {
                 // Nothing started: the status goes back to what it was.
                 *lock(&self.status) = previous;
@@ -652,6 +726,10 @@ impl Worker {
         #[cfg(windows)]
         let _awake = oma_win::power::KeepAwake::new();
         self.publish(starting);
+        let run = match plan_message(session.plan.clone()) {
+            Ok(run) => run,
+            Err(failure) => return self.failed(session, config, &failure),
+        };
         let whea_start = self.deps.machine.latest_whea();
         let (tx, rx) = mpsc::channel();
         let host = match (self.deps.launcher)(tx) {
@@ -659,6 +737,7 @@ impl Worker {
             Err(failure) => return self.failed(session, config, &failure),
         };
         config.whea_after = whea_start.as_ref().ok().copied().flatten();
+        config.whea_baseline_missing = whea_start.is_err();
         config.apic_to_core = host
             .topology()
             .logical
@@ -666,7 +745,6 @@ impl Worker {
             .filter_map(|l| Some((l.apic_id?, l.core)))
             .collect();
         session.load_version = Some(host.hello().version.clone());
-        let plan = session.plan.clone();
         let ctl = RunController::new(session, config, self.clock());
         let mut d = Driver {
             worker: &self,
@@ -684,7 +762,7 @@ impl Worker {
             // Stopped during the handshake: the plan never runs.
             let a = d.ctl.on_user_stop(d.worker.clock());
             d.exec(a);
-        } else if let Err(err) = d.host.send(&LoadMessage::Run(RunRequest { plan })) {
+        } else if let Err(err) = d.host.send(&run) {
             // The pipe is gone: `Closed` and `Exited` follow.
             tracing::warn!(%err, "cannot send the plan to oma-load");
         }
@@ -702,16 +780,7 @@ impl Worker {
             ..Default::default()
         });
         session.outcome = Some(outcome);
-        session.outcome_detail = Some(OutcomeDetail {
-            verdict: key.key.to_string(),
-            params: key.params,
-            phase: None,
-            kernel: None,
-            core: None,
-            temp_c: None,
-            clock_mhz: None,
-            at_ms: None,
-        });
+        session.outcome_detail = Some(bare_detail(key));
         session.ended_at = Some(to_rfc3339(unix_now_ms()));
         if let Err(err) = self.deps.store.save(&session) {
             tracing::warn!(%err, "cannot save the stress session");
@@ -787,6 +856,9 @@ impl Driver<'_> {
                 Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
             }
             events.extend(rx.try_iter());
+            // A wake first: the messages queued during a sleep must not end the session.
+            let a = self.ctl.on_sleep_check(self.worker.clock());
+            self.exec(a);
             for event in events {
                 // The events of a helper we killed are of no interest.
                 if self.killed || self.done {
@@ -845,7 +917,7 @@ impl Driver<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     use oma_core::load::{Component, Objective, Outcome, Preset, RunState};
@@ -899,7 +971,11 @@ mod tests {
         }
     }
 
-    struct FakeMachine;
+    #[derive(Default)]
+    struct FakeMachine {
+        /// The time asleep it reports; a script moves it on.
+        asleep: Arc<AtomicU64>,
+    }
 
     impl Machine for FakeMachine {
         fn topology(&self) -> io::Result<Topology> {
@@ -918,7 +994,7 @@ mod tests {
             Ok(vec![])
         }
         fn asleep_ms(&self) -> u64 {
-            0
+            self.asleep.load(Ordering::SeqCst)
         }
     }
 
@@ -934,6 +1010,8 @@ mod tests {
         spread: Option<Duration>,
         /// What the helper received, by name.
         received: Arc<Mutex<Vec<&'static str>>>,
+        /// Set to this much time asleep when `Run` arrives, before the answer.
+        sleep_on_run: Option<(Arc<AtomicU64>, u64)>,
     }
 
     struct FakeLink {
@@ -962,6 +1040,9 @@ mod tests {
             match msg {
                 LoadMessage::Run(_) => {
                     s.received.lock().unwrap().push("run");
+                    if let Some((asleep, ms)) = &s.sleep_on_run {
+                        asleep.store(*ms, Ordering::SeqCst);
+                    }
                     let (tx, msgs, exit, every) = (
                         self.tx.clone(),
                         s.on_run.clone(),
@@ -1032,6 +1113,10 @@ mod tests {
     }
 
     fn rig_with(name: &str, launcher: Launcher) -> Rig {
+        rig_on(name, launcher, FakeMachine::default())
+    }
+
+    fn rig_on(name: &str, launcher: Launcher, machine: FakeMachine) -> Rig {
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         settings.update_with(|s| s.general.language = Language::En);
         let toasts = Toasts::default();
@@ -1042,7 +1127,7 @@ mod tests {
         let runner = PerformanceRunner::new(RunnerDeps {
             store: Arc::new(PerformanceStore::new(dir.0.clone())),
             settings,
-            machine: Box::new(FakeMachine),
+            machine: Box::new(machine),
             launcher,
             toaster: Box::new(toasts.clone()),
             schema: Box::new(|| Schema {
@@ -1382,6 +1467,158 @@ mod tests {
         let n = rig.emitted.load(Ordering::SeqCst);
         // Starting, running, finished, and one or two once-a-second updates.
         assert!((3..=6).contains(&n), "{n} events");
+    }
+
+    #[test]
+    fn a_finished_queued_during_a_sleep_still_ends_suspended() {
+        let machine = FakeMachine::default();
+        let rig = rig_on(
+            "sleep",
+            scripted(Script {
+                on_run: vec![progress(0), finished(FinishReason::Completed, 0)],
+                exit_after_run: true,
+                sleep_on_run: Some((Arc::clone(&machine.asleep), 50_000)),
+                ..Default::default()
+            }),
+            machine,
+        );
+        rig.runner.start(request()).unwrap();
+        wait_idle(&rig.runner);
+        assert_eq!(only_session(&rig.runner).outcome, Some(Outcome::Suspended));
+    }
+
+    #[test]
+    fn unreadable_whea_baseline_counts_nothing_from_the_history() {
+        struct HistoryMachine(FakeMachine);
+        impl Machine for HistoryMachine {
+            fn topology(&self) -> io::Result<Topology> {
+                self.0.topology()
+            }
+            fn isa(&self) -> Vec<Isa> {
+                self.0.isa()
+            }
+            fn memory(&self) -> io::Result<(u64, u64)> {
+                self.0.memory()
+            }
+            fn latest_whea(&self) -> io::Result<Option<u64>> {
+                Err(io::Error::other("no log"))
+            }
+            /// The whole history, every time.
+            fn whea_after(&self, _after: Option<u64>) -> io::Result<Vec<WheaEvent>> {
+                Ok(vec![WheaEvent {
+                    record_id: 3,
+                    event_id: 19,
+                    apic_id: None,
+                    time_utc: String::new(),
+                }])
+            }
+            fn asleep_ms(&self) -> u64 {
+                0
+            }
+        }
+        let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
+        let dir = TempDir::new("baseline");
+        let runner = PerformanceRunner::new(RunnerDeps {
+            store: Arc::new(PerformanceStore::new(dir.0.clone())),
+            settings,
+            machine: Box::new(HistoryMachine(FakeMachine::default())),
+            launcher: scripted(Script {
+                on_run: vec![progress(0), finished(FinishReason::Completed, 0)],
+                exit_after_run: true,
+                ..Default::default()
+            }),
+            toaster: Box::new(Toasts::default()),
+            schema: Box::new(|| Schema {
+                revision: 1,
+                devices: vec![],
+                sensors: vec![],
+            }),
+            service_available: Box::new(|| false),
+            window_open: Box::new(|| false),
+            emit: Box::new(|_| {}),
+            on_state: Box::new(|_| {}),
+            app_version: "0.0.0-test".into(),
+        });
+        runner.start(request()).unwrap();
+        wait_idle(&runner);
+        let s = only_session(&runner);
+        assert_eq!(
+            s.outcome,
+            Some(Outcome::Passed),
+            "the old WHEA 19 is not counted"
+        );
+        assert_eq!(s.whea.last_record, Some(3));
+    }
+
+    #[test]
+    fn an_invalid_plan_never_reaches_the_helper() {
+        let plan = Plan {
+            seed: 1,
+            ram_bytes: 0,
+            phases: vec![],
+        };
+        let failure = plan_message(plan).unwrap_err();
+        assert_eq!(failure.i18n_key(), "performance.start.invalid_plan");
+    }
+
+    #[test]
+    fn a_runner_panic_saves_a_crashed_session_and_ends_the_status() {
+        struct PanicLink(LoadHello, Topology);
+        impl LoadLink for PanicLink {
+            fn send(&self, _msg: &LoadMessage) -> io::Result<()> {
+                panic!("a bug in the link");
+            }
+            fn hello(&self) -> &LoadHello {
+                &self.0
+            }
+            fn topology(&self) -> &Topology {
+                &self.1
+            }
+            fn kill(&mut self) {}
+        }
+        let launcher: Launcher = Box::new(|_| {
+            Ok(Box::new(PanicLink(
+                LoadHello {
+                    protocol_version: oma_ipc::load::LOAD_PROTOCOL_VERSION,
+                    version: "9.9.9".into(),
+                    isa: vec![],
+                },
+                topology(),
+            )) as Box<dyn LoadLink>)
+        });
+        let rig = rig_with("panic", launcher);
+        rig.runner.start(request()).unwrap();
+        wait_idle(&rig.runner);
+        let s = only_session(&rig.runner);
+        assert_eq!(s.outcome, Some(Outcome::Crashed));
+        assert_eq!(s.outcome_detail.unwrap().verdict, "crashed");
+        assert!(rig.runner.store().read_journal().is_none());
+        let st = rig.runner.status();
+        assert_eq!(
+            (st.state, st.outcome),
+            (RunState::Finished, Some(Outcome::Crashed))
+        );
+        // The next test can start.
+        assert!(!rig.runner.is_running());
+    }
+
+    #[test]
+    fn verdict_text_translates_a_reason_key() {
+        let detail = OutcomeDetail {
+            verdict: "failed_to_start".into(),
+            params: [(
+                "reason".to_string(),
+                "performance.start.nothing_ran".to_string(),
+            )]
+            .into(),
+            phase: None,
+            kernel: None,
+            core: None,
+            temp_c: None,
+            clock_mhz: None,
+            at_ms: None,
+        };
+        assert_eq!(verdict_text(Lang::En, &detail), "Not started: no phase ran");
     }
 
     #[test]

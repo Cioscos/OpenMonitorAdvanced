@@ -55,6 +55,8 @@ pub enum StartFailure {
     Incompatible,
     /// The `Hello` came, the `Topology` did not.
     NoTopology,
+    /// The plan would not pass the validation of the helper, which would refuse it.
+    InvalidPlan,
 }
 
 impl StartFailure {
@@ -67,6 +69,7 @@ impl StartFailure {
             Self::ForeignClient => "performance.start.foreign_client",
             Self::Incompatible => "performance.start.incompatible",
             Self::NoTopology => "performance.start.no_topology",
+            Self::InvalidPlan => "performance.start.invalid_plan",
         }
     }
 }
@@ -80,6 +83,7 @@ impl fmt::Display for StartFailure {
             Self::ForeignClient => write!(f, "the load pipe client is not {LOAD_EXE}"),
             Self::Incompatible => write!(f, "{LOAD_EXE} speaks another protocol version"),
             Self::NoTopology => write!(f, "{LOAD_EXE} sent no topology"),
+            Self::InvalidPlan => write!(f, "the plan is not valid"),
         }
     }
 }

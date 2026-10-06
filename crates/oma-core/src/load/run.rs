@@ -30,6 +30,11 @@ const STATUS_EVENTS: usize = 200;
 const MAX_EVENTS: usize = 1_000;
 const FINAL_POLL_MS: u64 = 2_000;
 const TEMP_MISSING_MS: u64 = 10_000;
+/// How long a run may outlast its plan before it counts as hung.
+const OVERRUN_MS: u64 = 120_000;
+/// `oma-load` exits with this code on an invalid command line or message (`EXIT_USAGE`).
+const LOAD_EXIT_USAGE: i32 = 1;
+const INVALID_PLAN: &str = "performance.start.invalid_plan";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -58,6 +63,9 @@ pub struct RunConfig {
     pub apic_to_core: BTreeMap<u32, u32>,
     /// Newest WHEA record already in the log at the start (older history is ignored).
     pub whea_after: Option<u64>,
+    /// The newest record could not be read at the start: the first poll that works only
+    /// sets the baseline, so the history of the log is never counted.
+    pub whea_baseline_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,7 +124,7 @@ pub struct RunStatus {
     pub cores: Vec<CoreProgress>,
     pub current_core: Option<u32>,
     pub events: Vec<SessionEvent>,
-    /// `noService`, `tempMissing`, `wheaUnreadable`, `ramReduced`.
+    /// `noService`, `tempMissing`, `wheaUnreadable`, `ramReduced`, `ramInsufficient`.
     pub warnings: Vec<String>,
     pub outcome: Option<Outcome>,
 }
@@ -193,6 +201,8 @@ pub struct RunController {
     thermal_stop: Option<f64>,
     errors: u64,
     error_cores: BTreeSet<u32>,
+    coreless_errors: bool,
+    failed_to_start: Option<String>,
     whea_core: Option<u32>,
     end: End,
 }
@@ -246,6 +256,8 @@ impl RunController {
             thermal_stop: None,
             errors: 0,
             error_cores: BTreeSet::new(),
+            coreless_errors: false,
+            failed_to_start: None,
             whea_core: None,
             end: End::default(),
             config,
@@ -363,19 +375,23 @@ impl RunController {
     }
 
     fn compute_outcome(&mut self) -> Outcome {
+        let s = &self.session;
+        let all_skipped = !s.phases.is_empty() && s.phases.iter().all(|p| p.skipped.is_some());
         let facts = OutcomeFacts {
-            failed_to_start: None,
+            failed_to_start: self.failed_to_start.clone(),
             system_crash: false,
             app_closed: false,
             crashed: self.crashed,
             hung: self.hung,
             errors: self.errors,
             error_cores: self.error_cores.clone(),
+            coreless_errors: self.coreless_errors,
             thermal_stop: self.thermal_stop,
             suspended: self.suspended,
             user_stop: self.user_stop,
             whea_corrected: self.whea_count(&[17, 19]),
             completed: self.completed,
+            nothing_ran: self.completed && (self.checks == 0 || all_skipped),
         };
         let (outcome, verdict) = decide(&facts);
         let e = self.end;
@@ -513,6 +529,7 @@ impl RunController {
                     clock_mhz: clock,
                 };
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
+                self.coreless_errors |= core.is_none();
                 if let Some(core) = core {
                     self.error_cores.insert(core);
                     let c = self.set_core(core, CoreState::Failed);
@@ -525,8 +542,10 @@ impl RunController {
                 }
             }
             LoadMessage::Notice(n) => {
-                if n.code == "ram_reduced" {
-                    self.warn("ramReduced");
+                match n.code.as_str() {
+                    "ram_reduced" => self.warn("ramReduced"),
+                    "ram_insufficient" => self.warn("ramInsufficient"),
+                    _ => {}
                 }
                 let mut params = vec![("phase", n.phase.to_string())];
                 if let Some(v) = n.value {
@@ -554,6 +573,7 @@ impl RunController {
             }
             LoadMessage::Finished(f) => {
                 self.errors = self.errors.max(f.errors);
+                self.checks = self.checks.max(f.checks);
                 match f.reason {
                     FinishReason::Completed => self.completed = true,
                     FinishReason::Stopped => {
@@ -660,6 +680,14 @@ impl RunController {
         }
         self.tick(now);
         let events = match result {
+            Ok(e) if self.config.whea_baseline_missing => {
+                // The first answer is the history of the log: only the baseline.
+                self.config.whea_baseline_missing = false;
+                if let Some(last) = e.iter().map(|e| e.record_id).max() {
+                    self.session.whea.last_record = Some(last);
+                }
+                return if self.ended { self.complete() } else { vec![] };
+            }
             Ok(e) => e,
             Err(()) => {
                 if !self.session.whea.unreadable {
@@ -720,18 +748,14 @@ impl RunController {
         }
         self.tick(now);
         // Before any pipe check: after a sleep the pipe is silent too (DA15).
-        let slept = now.asleep_ms.saturating_sub(self.last_asleep);
-        self.last_asleep = now.asleep_ms;
-        if slept > SLEEP_JUMP_MS {
-            self.suspended = true;
-            self.event("suspended", &[]);
-            let mut out = vec![Action::SendStop, Action::Kill];
-            out.extend(self.finish(now));
+        if let Some(out) = self.sleep_check(now) {
             return out;
         }
         let mut out = vec![];
+        let overrun =
+            self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS;
         if self.state == RunState::Running
-            && now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS
+            && (overrun || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
         {
             self.hung = true;
             self.event("hung", &[]);
@@ -763,6 +787,32 @@ impl RunController {
         out
     }
 
+    /// Ends the session as `suspended` when the PC slept since the last check (DA15). The
+    /// runner calls it after a wait, before the messages of the pipe, so a `Finished`
+    /// queued during the sleep cannot end the session first.
+    pub fn on_sleep_check(&mut self, now: Clock) -> Vec<Action> {
+        self.guarded(now, |s| {
+            if s.ended {
+                return vec![];
+            }
+            s.tick(now);
+            s.sleep_check(now).unwrap_or_default()
+        })
+    }
+
+    fn sleep_check(&mut self, now: Clock) -> Option<Vec<Action>> {
+        let slept = now.asleep_ms.saturating_sub(self.last_asleep);
+        self.last_asleep = now.asleep_ms;
+        if slept <= SLEEP_JUMP_MS {
+            return None;
+        }
+        self.suspended = true;
+        self.event("suspended", &[]);
+        let mut out = vec![Action::SendStop, Action::Kill];
+        out.extend(self.finish(now));
+        Some(out)
+    }
+
     pub fn on_user_stop(&mut self, now: Clock) -> Vec<Action> {
         self.guarded(now, |s| s.user_stop(now))
     }
@@ -784,8 +834,11 @@ impl RunController {
             return vec![];
         }
         self.tick(now);
-        // A clean exit after our own stop request is not a crash.
-        if !(self.state == RunState::Stopping && code == Some(0)) {
+        // A clean exit after our own stop request is not a crash; a usage exit means the
+        // plan was refused, so it never ran.
+        if code == Some(LOAD_EXIT_USAGE) {
+            self.failed_to_start = Some(INVALID_PLAN.into());
+        } else if !(self.state == RunState::Stopping && code == Some(0)) {
             self.crashed = true;
             let code = code.map_or("-".into(), |c| c.to_string());
             self.event("crashed", &[("code", code)]);
@@ -929,6 +982,7 @@ mod tests {
                 cores: vec![0, 1, 2, 3],
                 apic_to_core: [(8, 1)].into(),
                 whea_after: None,
+                whea_baseline_missing: false,
             },
             clock(0),
         )
@@ -1320,6 +1374,7 @@ mod tests {
                 cores: vec![],
                 apic_to_core: BTreeMap::new(),
                 whea_after: Some(100),
+                whea_baseline_missing: false,
             },
             clock(0),
         );
@@ -1565,6 +1620,154 @@ mod tests {
         let a = c.on_load(&LoadMessage::Stop(StopRequest {}), clock(1100));
         assert!(a.is_empty());
         assert_eq!(c.status().events.len(), 1);
+    }
+
+    fn notice(code: &str) -> LoadMessage {
+        LoadMessage::Notice(Notice {
+            phase: 0,
+            code: code.into(),
+            value: None,
+        })
+    }
+
+    fn phase_done(phase: u32, skipped: Option<&str>) -> LoadMessage {
+        LoadMessage::PhaseDone(PhaseDone {
+            phase,
+            checks: 0,
+            errors: 0,
+            duration_ms: 1000,
+            skipped: skipped.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn ram_insufficient_raises_a_warning() {
+        let mut c = ctl(false, true);
+        c.on_load(&notice("ram_insufficient"), clock(1000));
+        assert_eq!(c.status().warnings, ["ramInsufficient"]);
+    }
+
+    #[test]
+    fn completed_without_checks_is_failed_to_start() {
+        let mut c = ctl(false, true);
+        let a = c.on_load(
+            &LoadMessage::Finished(Finished {
+                reason: FinishReason::Completed,
+                checks: 0,
+                errors: 0,
+            }),
+            clock(1000),
+        );
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.nothing_ran");
+    }
+
+    #[test]
+    fn every_phase_skipped_is_failed_to_start() {
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(500));
+        c.on_load(&phase_done(0, Some("unsupported")), clock(1000));
+        c.on_load(&phase_done(1, Some("ram_insufficient")), clock(1500));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(2000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::FailedToStart));
+        // One phase that ran is enough.
+        let mut c = ctl(false, true);
+        c.on_load(&phase_done(0, None), clock(1000));
+        c.on_load(&phase_done(1, Some("unsupported")), clock(1500));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(2000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::Passed));
+    }
+
+    #[test]
+    fn a_core_less_error_makes_errors_not_core_n() {
+        let mut c = ctl(false, true);
+        c.on_load(&error(Some(2), ErrorKind::Mismatch), clock(1000));
+        c.on_load(&error(None, ErrorKind::ReferenceDisagreement), clock(1100));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(1200));
+        settle(&mut c, a);
+        assert_eq!(verdict(&c), "errors");
+    }
+
+    #[test]
+    fn past_the_overall_deadline_is_hung() {
+        // Two phases of 60 s: the run may last 120 s + 120 s of grace.
+        let mut c = ctl(false, true);
+        let mut t = 0;
+        while t < 240_000 {
+            t += 1000;
+            c.on_load(&progress(0, None), clock(t));
+            assert!(
+                c.on_clock(clock(t)).iter().all(|a| *a != Action::Kill),
+                "{t}"
+            );
+        }
+        c.on_load(&progress(0, None), clock(240_001));
+        let a = c.on_clock(clock(240_001));
+        let a = settle(&mut c, a);
+        assert_eq!(a[0], Action::Kill);
+        assert!(has_finished(&a, Outcome::Hung));
+    }
+
+    #[test]
+    fn usage_exit_without_finished_is_failed_to_start() {
+        let mut c = ctl(false, true);
+        let a = c.on_exit(Some(1), clock(1000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.invalid_plan");
+    }
+
+    #[test]
+    fn unknown_whea_baseline_is_set_by_the_first_good_poll() {
+        let mut c = RunController::new(
+            session(),
+            RunConfig {
+                whea_baseline_missing: true,
+                ..ctl(false, true).config.clone()
+            },
+            clock(0),
+        );
+        let ev = |rec| WheaEvent {
+            record_id: rec,
+            event_id: 19,
+            apic_id: None,
+            time_utc: String::new(),
+        };
+        c.on_whea(Err(()), clock(500));
+        // The history in the log: only the baseline.
+        c.on_whea(Ok(vec![ev(40), ev(41)]), clock(1000));
+        assert_eq!(c.status().whea_corrected, 0);
+        assert_eq!(c.session().whea.last_record, Some(41));
+        c.on_whea(Ok(vec![ev(41), ev(42)]), clock(2000));
+        assert_eq!(c.status().whea_corrected, 1);
+    }
+
+    #[test]
+    fn sleep_check_alone_ends_as_suspended() {
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(1000));
+        let awake = Clock {
+            mono_ms: 1250,
+            wall_ms: 0,
+            asleep_ms: 0,
+        };
+        assert!(c.on_sleep_check(awake).is_empty());
+        let a = c.on_sleep_check(Clock {
+            mono_ms: 60_000,
+            wall_ms: 0,
+            asleep_ms: 50_000,
+        });
+        assert_eq!(a[..2], [Action::SendStop, Action::Kill]);
+        // The Finished that follows changes nothing.
+        let a2 = c.on_load(&finished(FinishReason::Completed), clock(60_001));
+        assert!(a2.is_empty());
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::Suspended));
     }
 
     #[test]

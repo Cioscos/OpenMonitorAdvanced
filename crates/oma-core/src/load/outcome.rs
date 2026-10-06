@@ -19,6 +19,9 @@ pub enum Outcome {
     FailedToStart,
 }
 
+/// The `failed_to_start` reason of a session that completed without running anything.
+pub const NOTHING_RAN: &str = "performance.start.nothing_ran";
+
 /// What happened during a session; `decide` picks the outcome.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OutcomeFacts {
@@ -29,11 +32,15 @@ pub struct OutcomeFacts {
     pub hung: bool,
     pub errors: u64,
     pub error_cores: BTreeSet<u32>,
+    /// Some counted error has no core (a reference disagreement): no «core N» verdict.
+    pub coreless_errors: bool,
     pub thermal_stop: Option<f64>,
     pub suspended: bool,
     pub user_stop: bool,
     pub whea_corrected: u64,
     pub completed: bool,
+    /// Completed with no check, or with every phase skipped.
+    pub nothing_ran: bool,
 }
 
 /// The text key (table T3 of the plan) with its parameters.
@@ -58,6 +65,12 @@ pub fn decide(f: &OutcomeFacts) -> (Outcome, VerdictKey) {
         k.params.insert("reason".into(), reason.clone());
         return (Outcome::FailedToStart, k);
     }
+    // A session that ran nothing has no verdict to give, unless its references disagreed.
+    if f.nothing_ran && f.errors == 0 {
+        let mut k = key("failed_to_start");
+        k.params.insert("reason".into(), NOTHING_RAN.into());
+        return (Outcome::FailedToStart, k);
+    }
     if f.system_crash {
         return (Outcome::SystemCrash, key("system_crash"));
     }
@@ -75,7 +88,7 @@ pub fn decide(f: &OutcomeFacts) -> (Outcome, VerdictKey) {
     if f.errors > 0 {
         let mut it = f.error_cores.iter();
         return match (it.next(), it.next()) {
-            (Some(core), None) => {
+            (Some(core), None) if !f.coreless_errors => {
                 let mut k = key("errors_core");
                 k.params.insert("core".into(), core.to_string());
                 (Outcome::Errors, k)
@@ -162,6 +175,27 @@ mod tests {
         assert_eq!(decide(&f).1.key, "errors");
         f.error_cores.clear();
         assert_eq!(decide(&f).1.key, "errors");
+    }
+
+    #[test]
+    fn a_core_less_error_is_plain_errors() {
+        let mut f = base();
+        f.errors = 2;
+        f.error_cores = [4].into();
+        f.coreless_errors = true;
+        assert_eq!(decide(&f).1.key, "errors");
+    }
+
+    #[test]
+    fn nothing_ran_is_failed_to_start() {
+        let mut f = base();
+        f.nothing_ran = true;
+        let (o, k) = decide(&f);
+        assert_eq!(o, Outcome::FailedToStart);
+        assert_eq!(k.params["reason"], NOTHING_RAN);
+        // A disagreement of the reference is still an error.
+        f.errors = 1;
+        assert_eq!(decide(&f).0, Outcome::Errors);
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod session;
 mod thermal;
 
 pub use catalog::catalog_json;
-pub use outcome::{decide, Outcome, OutcomeFacts, VerdictKey};
+pub use outcome::{decide, Outcome, OutcomeFacts, VerdictKey, NOTHING_RAN};
 pub use plan::{
     build_plan, core_order, presets, ram_budget, BuildError, BuildInput, Component, Custom,
     ModeEdit, Objective, Preset, RetryCore, StartRequest, ThreadChoice, KEEP_FREE_BYTES,

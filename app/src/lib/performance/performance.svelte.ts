@@ -33,10 +33,17 @@ class PerformanceStore {
     this.#reset();
     this.#backend = backend;
     let eventSeen = false;
+    // The service can stop or start while the view is open: its state comes live, not only on connect.
+    let serviceSeen: boolean | null = null;
     let off: Unsubscribe | null = null;
+    let offService: Unsubscribe | null = null;
+    const withService = (system: SystemInfo | null) =>
+      system && serviceSeen !== null ? { ...system, serviceConnected: serviceSeen } : system;
     const stop = () => {
       off?.();
       off = null;
+      offService?.();
+      offService = null;
       if (this.#generation === generation) {
         this.#generation++;
         this.#reset();
@@ -48,6 +55,11 @@ class PerformanceStore {
         eventSeen = true;
         this.#accept(next);
       });
+      offService = await backend.onServiceStatus((service) => {
+        if (this.#generation !== generation) return;
+        serviceSeen = service.state === 'connected';
+        this.system = withService(this.system);
+      });
       const [status, system, history] = await Promise.all([
         backend.performanceStatus(),
         backend.performanceSystem(),
@@ -55,7 +67,7 @@ class PerformanceStore {
       ]);
       if (this.#generation === generation) {
         if (!eventSeen) this.status = status;
-        this.system = system;
+        this.system = withService(system);
         this.history = history;
       }
     } catch (error) {

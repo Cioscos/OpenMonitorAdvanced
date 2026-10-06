@@ -85,3 +85,18 @@ test('reconnecting_keeps_the_history_until_the_new_list_arrives', async () => {
   off = await connecting;
   expect(performanceStore.history.map((s) => s.id)).toEqual(['new', 'old']);
 });
+
+test('service_state_updates_the_system_info_live', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  off = await performanceStore.connect(backend);
+  expect(performanceStore.system?.serviceConnected).toBe(true);
+  backend.emitServiceStatus({ state: 'unreachable', detail: null, pawnIo: null, sources: null });
+  expect(performanceStore.system?.serviceConnected).toBe(false);
+  backend.emitServiceStatus({ state: 'connected', detail: null, pawnIo: null, sources: null });
+  expect(performanceStore.system?.serviceConnected).toBe(true);
+  // Disconnected, the store no longer listens.
+  off();
+  off = undefined;
+  backend.emitServiceStatus({ state: 'unreachable', detail: null, pawnIo: null, sources: null });
+  expect(performanceStore.system).toBeNull();
+});

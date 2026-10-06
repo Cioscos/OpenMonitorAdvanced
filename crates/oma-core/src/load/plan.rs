@@ -289,10 +289,12 @@ fn oc_round(avx2: Isa, avx512: bool, cores: &[u32], t: u32, a: u32) -> Vec<Phase
 /// CPU overclock profile (DA11): shrink the round to fit, repeat it while time remains.
 fn cpu_overclock(avx2: Isa, avx512: bool, cores: &[u32], duration: u32) -> Vec<Phase> {
     let n = cores.len() as u32;
-    let base_t = match duration {
-        ..3601 => 180,
-        ..7201 => 300,
-        _ => 600,
+    let base_t = if duration <= 3600 {
+        180
+    } else if duration <= 7200 {
+        300
+    } else {
+        600
     };
     let fixed_phases: u32 = if avx512 { 9 } else { 7 };
     let round_len = |t: u32, a: u32| fixed_phases * a + n * t;

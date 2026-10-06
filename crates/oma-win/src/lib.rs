@@ -23,6 +23,7 @@ mod pdh;
 pub mod pipe_io;
 pub mod power;
 pub mod private_pipe;
+pub mod proc_cpu;
 pub mod qpc;
 pub mod shell_open;
 pub mod storage;

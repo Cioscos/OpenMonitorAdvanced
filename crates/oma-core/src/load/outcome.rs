@@ -61,7 +61,7 @@ pub fn decide(f: &OutcomeFacts) -> (Outcome, VerdictKey) {
     if f.system_crash {
         return (Outcome::SystemCrash, key("system_crash"));
     }
-    if f.crashed {
+    if f.crashed || f.app_closed {
         let k = if f.app_closed {
             "crashed_app"
         } else {
@@ -187,6 +187,9 @@ mod tests {
         assert_eq!(decide(&f).1.key, "crashed_app");
         f.app_closed = false;
         assert_eq!(decide(&f).1.key, "crashed");
+        let mut f = base();
+        f.app_closed = true;
+        assert_eq!(decide(&f).0, Outcome::Crashed);
         let mut f = base();
         f.thermal_stop = Some(96.4);
         assert_eq!(decide(&f).1.params["temp"], "96");

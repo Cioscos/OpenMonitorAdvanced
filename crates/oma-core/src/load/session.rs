@@ -90,6 +90,7 @@ pub struct CoreResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorRecord {
+    // ComputeError's fields are single words, so camelCase and snake_case coincide.
     #[serde(flatten)]
     pub error: oma_ipc::load::ComputeError,
     pub at_ms: u64,

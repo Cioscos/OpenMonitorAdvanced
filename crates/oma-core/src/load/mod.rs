@@ -4,6 +4,7 @@
 mod catalog;
 mod outcome;
 mod plan;
+mod run;
 mod sensors;
 mod session;
 mod thermal;
@@ -14,6 +15,7 @@ pub use plan::{
     build_plan, core_order, presets, ram_budget, BuildError, BuildInput, Component, Custom,
     ModeEdit, Objective, Preset, RetryCore, StartRequest, ThreadChoice,
 };
+pub use run::{Action, Clock, PhaseInfo, RunConfig, RunController, RunState, RunStatus, WheaEvent};
 pub use sensors::{read_sample, resolve_cpu_sensors, CpuSensorIds, SensorSample};
 pub use session::{
     is_session_file_name, is_session_id, parse_journal, parse_session, prune, session_file_name,

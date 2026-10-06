@@ -52,7 +52,7 @@ pub fn resolve_cpu_sensors(schema: &Schema, cores: usize) -> CpuSensorIds {
             .find(|d| d.id == "cpu/0")
             .and_then(|d| d.properties.get("tjMaxC"))
             .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite()),
+            .filter(|v| v.is_finite() && *v > 0.0),
     }
 }
 
@@ -133,6 +133,14 @@ mod tests {
         assert_eq!(ids.clock, Some(3));
         assert_eq!(ids.core_clock, vec![Some(2), None]);
         assert_eq!(ids.tjmax_c, Some(100.0));
+    }
+
+    #[test]
+    fn non_positive_or_non_finite_tjmax_is_ignored() {
+        for t in ["0", "-5", "NaN", "inf"] {
+            let s = schema(&[("package", SensorKind::Temperature)], Some(t));
+            assert_eq!(resolve_cpu_sensors(&s, 0).tjmax_c, None, "{t}");
+        }
     }
 
     #[test]

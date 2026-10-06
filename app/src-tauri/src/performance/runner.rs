@@ -33,7 +33,7 @@ use crate::notifier::{launch_for_performance, ToastSink};
 use crate::settings::SettingsStore;
 use crate::tray::language_for;
 
-/// Emitted to the windows on every state change and once a second during a
+/// Emitted to the main window on every state change and once a second during a
 /// test, only while a window is open; the payload is a [`RunStatus`].
 pub const EVENT_STATUS: &str = "performance-status";
 
@@ -107,20 +107,9 @@ impl Machine for WinMachine {
         oma_win::topology::read()
     }
 
-    /// As `oma-load` detects them: AVX-512F, AVX2 with FMA, SSE2.
+    /// As `oma-load` detects them.
     fn isa(&self) -> Vec<Isa> {
-        let mut isa = Vec::new();
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx512f") {
-                isa.push(Isa::Avx512);
-            }
-            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-                isa.push(Isa::Avx2);
-            }
-            isa.push(Isa::Sse2);
-        }
-        isa
+        oma_ipc::load::detected_isa()
     }
 
     fn memory(&self) -> io::Result<(u64, u64)> {
@@ -154,7 +143,7 @@ pub struct RunnerDeps {
     pub schema: Box<dyn Fn() -> Schema + Send + Sync>,
     /// Whether the service is connected (the thermal stop needs it).
     pub service_available: Box<dyn Fn() -> bool + Send + Sync>,
-    /// Whether a window listens (`window::any_open`).
+    /// Whether the main window, the only one with the Performance view, is open.
     pub window_open: Box<dyn Fn() -> bool + Send + Sync>,
     /// Sends [`EVENT_STATUS`]; called only while a window is open.
     pub emit: Box<dyn Fn(&RunStatus) + Send + Sync>,
@@ -322,23 +311,31 @@ impl PerformanceRunner {
     /// Prunes the history and recovers a test the last run left open (DA14),
     /// once: a toast opens its result. Starts wait for it.
     pub fn recover(&self) {
+        // A panic in here must not poison the `Once` for every later start.
         self.recovery.call_once(|| {
-            let store = &self.deps.store;
-            store.prune_now();
-            let recovered = store.recover(
-                oma_win::power::boot_time_unix_ms(),
-                oma_win::eventlog::crash_evidence,
-                &self.deps.app_version,
-            );
-            if let Some(summary) = recovered {
-                let lang = self.lang();
-                self.deps.toaster.show(
-                    t(lang, "performance.toast.title", &[]),
-                    t(lang, "performance.toast.recovered", &[]),
-                    launch_for_performance(&summary.id),
-                );
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.recover_now()));
+            if run.is_err() {
+                tracing::error!("the stress test recovery panicked");
             }
         });
+    }
+
+    fn recover_now(&self) {
+        let store = &self.deps.store;
+        store.prune_now();
+        let recovered = store.recover(
+            oma_win::power::boot_time_unix_ms(),
+            oma_win::eventlog::crash_evidence,
+            &self.deps.app_version,
+        );
+        if let Some(summary) = recovered {
+            let lang = self.lang();
+            self.deps.toaster.show(
+                t(lang, "performance.toast.title", &[]),
+                t(lang, "performance.toast.recovered", &[]),
+                launch_for_performance(&summary.id),
+            );
+        }
     }
 
     /// The plan for `request` on this machine, with its topology.
@@ -472,7 +469,8 @@ impl PerformanceRunner {
             asleep_ms: 0,
         };
         let starting = RunController::new(session.clone(), config.clone(), zero).status();
-        *lock(&self.status) = starting.clone();
+        // Set before the thread runs, so a later status from it is never overwritten.
+        let previous = std::mem::replace(&mut *lock(&self.status), starting.clone());
 
         let (samples, sample_rx) = mpsc::sync_channel(SAMPLE_QUEUE);
         let control = Arc::new(Control::default());
@@ -488,7 +486,11 @@ impl PerformanceRunner {
         let thread = std::thread::Builder::new()
             .name("oma-perf-runner".into())
             .spawn(move || worker.run(session, config, starting))
-            .map_err(|e| StartError::System(e.to_string()))?;
+            .map_err(|e| {
+                // Nothing started: the status goes back to what it was.
+                *lock(&self.status) = previous;
+                StartError::System(e.to_string())
+            })?;
         *active = Some(Active {
             thread,
             control,
@@ -540,24 +542,25 @@ impl PerformanceRunner {
     /// Stops the test in progress and waits for its session to be saved:
     /// `Stop`, the helper's answer for at most `timeout`, then the Job kills
     /// it (DA16). No toast: the app is going away.
+    ///
+    /// The test stays the one in progress until its thread ends: a start
+    /// meanwhile is `Busy`, and a second shutdown waits for the same thread.
     pub fn shutdown(&self, timeout: Duration) {
-        let Some(a) = lock(&self.active).take() else {
-            return;
-        };
-        if a.running() {
-            *lock(&a.control.deadline) = Some(Instant::now() + timeout);
+        if let Some(a) = lock(&self.active).as_ref().filter(|a| a.running()) {
+            lock(&a.control.deadline).get_or_insert(Instant::now() + timeout);
             a.control.stop.store(true, Ordering::Release);
-            // The final WHEA poll and the save come after the deadline.
-            let until = Instant::now() + timeout + Duration::from_secs(1);
-            while a.running() && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if a.running() {
-                tracing::warn!("the stress test did not end in time");
-                return;
-            }
         }
-        let _ = a.thread.join();
+        // The final WHEA poll and the save come after the deadline.
+        let until = Instant::now() + timeout + Duration::from_secs(1);
+        while self.is_running() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut active = lock(&self.active);
+        if active.as_ref().is_some_and(Active::running) {
+            tracing::warn!("the stress test did not end in time");
+        } else if let Some(a) = active.take() {
+            let _ = a.thread.join();
+        }
     }
 }
 
@@ -660,7 +663,11 @@ impl Worker {
             let a = d.ctl.on_whea(Err(()), d.worker.clock());
             d.exec(a);
         }
-        if let Err(err) = d.host.send(&LoadMessage::Run(RunRequest { plan })) {
+        if d.worker.control.stop.swap(false, Ordering::AcqRel) {
+            // Stopped during the handshake: the plan never runs.
+            let a = d.ctl.on_user_stop(d.worker.clock());
+            d.exec(a);
+        } else if let Err(err) = d.host.send(&LoadMessage::Run(RunRequest { plan })) {
             // The pipe is gone: `Closed` and `Exited` follow.
             tracing::warn!(%err, "cannot send the plan to oma-load");
         }
@@ -894,6 +901,10 @@ mod tests {
         /// After the messages: `Closed`, then `Exited(Some(0))`.
         exit_after_run: bool,
         exit_after_stop: bool,
+        /// Plays the `Run` answer from a thread, one message per interval.
+        spread: Option<Duration>,
+        /// What the helper received, by name.
+        received: Arc<Mutex<Vec<&'static str>>>,
     }
 
     struct FakeLink {
@@ -903,24 +914,40 @@ mod tests {
         topology: Topology,
     }
 
-    impl FakeLink {
-        fn play(&self, msgs: &[LoadMessage], exit: bool) {
-            for m in msgs {
-                let _ = self.tx.send(HostEvent::Message(m.clone()));
+    fn play(tx: &Sender<HostEvent>, msgs: &[LoadMessage], exit: bool, every: Option<Duration>) {
+        for m in msgs {
+            if let Some(every) = every {
+                std::thread::sleep(every);
             }
-            if exit {
-                let _ = self.tx.send(HostEvent::Closed);
-                let _ = self.tx.send(HostEvent::Exited(Some(0)));
-            }
+            let _ = tx.send(HostEvent::Message(m.clone()));
+        }
+        if exit {
+            let _ = tx.send(HostEvent::Closed);
+            let _ = tx.send(HostEvent::Exited(Some(0)));
         }
     }
 
     impl LoadLink for FakeLink {
         fn send(&self, msg: &LoadMessage) -> io::Result<()> {
+            let s = &self.script;
             match msg {
-                LoadMessage::Run(_) => self.play(&self.script.on_run, self.script.exit_after_run),
+                LoadMessage::Run(_) => {
+                    s.received.lock().unwrap().push("run");
+                    let (tx, msgs, exit, every) = (
+                        self.tx.clone(),
+                        s.on_run.clone(),
+                        s.exit_after_run,
+                        s.spread,
+                    );
+                    if every.is_some() {
+                        std::thread::spawn(move || play(&tx, &msgs, exit, every));
+                    } else {
+                        play(&tx, &msgs, exit, None);
+                    }
+                }
                 LoadMessage::Stop(_) => {
-                    self.play(&self.script.on_stop, self.script.exit_after_stop)
+                    s.received.lock().unwrap().push("stop");
+                    play(&self.tx, &s.on_stop, s.exit_after_stop, None);
                 }
                 _ => {}
             }
@@ -949,17 +976,30 @@ mod tests {
         toasts: Toasts,
         emitted: Arc<AtomicUsize>,
         window: Arc<AtomicBool>,
+        /// Last: removed after the runner is gone.
+        _dir: TempDir,
     }
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "oma-perf-runner-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A test's store folder, removed when the test ends.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "oma-perf-runner-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn rig_with(name: &str, launcher: Launcher) -> Rig {
@@ -969,8 +1009,9 @@ mod tests {
         let emitted = Arc::new(AtomicUsize::new(0));
         let window = Arc::new(AtomicBool::new(true));
         let (e, w) = (emitted.clone(), window.clone());
+        let dir = TempDir::new(name);
         let runner = PerformanceRunner::new(RunnerDeps {
-            store: Arc::new(PerformanceStore::new(temp_dir(name))),
+            store: Arc::new(PerformanceStore::new(dir.0.clone())),
             settings,
             machine: Box::new(FakeMachine),
             launcher,
@@ -993,6 +1034,7 @@ mod tests {
             toasts,
             emitted,
             window,
+            _dir: dir,
         }
     }
 
@@ -1064,6 +1106,18 @@ mod tests {
         let list = runner.store().list();
         assert_eq!(list.len(), 1, "{list:?}");
         runner.store().load(&list[0].id).unwrap().unwrap()
+    }
+
+    /// A launcher that waits until `release` is sent, then plays `script`.
+    fn gated(script: Script) -> (Launcher, mpsc::Sender<()>) {
+        let (release, wait) = mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let inner = scripted(script);
+        let launcher: Launcher = Box::new(move |tx| {
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(3));
+            inner(tx)
+        });
+        (launcher, release)
     }
 
     /// A launcher that waits until `release` is sent, then fails.
@@ -1242,7 +1296,13 @@ mod tests {
         rig.runner.start(request()).unwrap();
         wait_running(&rig.runner);
         let t0 = Instant::now();
-        rig.runner.shutdown(Duration::from_millis(300));
+        std::thread::scope(|scope| {
+            scope.spawn(|| rig.runner.shutdown(Duration::from_millis(300)));
+            std::thread::sleep(Duration::from_millis(100));
+            // Still the test in progress until its thread ends.
+            assert!(rig.runner.is_running());
+            assert!(matches!(rig.runner.start(request()), Err(StartError::Busy)));
+        });
         assert!(t0.elapsed() < Duration::from_secs(2));
         assert!(!rig.runner.is_running());
         let s = only_session(&rig.runner);
@@ -1272,5 +1332,47 @@ mod tests {
             Some(Outcome::StoppedUser)
         );
         assert_eq!(rig.toasts.0.lock().unwrap()[0].1, "Stopped by you");
+    }
+
+    #[test]
+    fn running_status_events_are_at_most_one_a_second() {
+        // About 2.2 s of progress, one message every 50 ms.
+        let mut on_run: Vec<LoadMessage> = (0..44).map(|_| progress(0)).collect();
+        on_run.push(finished(FinishReason::Completed, 0));
+        let rig = rig_with(
+            "throttle",
+            scripted(Script {
+                on_run,
+                exit_after_run: true,
+                spread: Some(Duration::from_millis(50)),
+                ..Default::default()
+            }),
+        );
+        rig.runner.start(request()).unwrap();
+        wait_idle(&rig.runner);
+        let n = rig.emitted.load(Ordering::SeqCst);
+        // Starting, running, finished, and one or two once-a-second updates.
+        assert!((3..=6).contains(&n), "{n} events");
+    }
+
+    #[test]
+    fn stop_during_the_handshake_never_sends_the_plan() {
+        let script = Script {
+            on_stop: vec![finished(FinishReason::Stopped, 0)],
+            exit_after_stop: true,
+            ..Default::default()
+        };
+        let received = script.received.clone();
+        let (launcher, release) = gated(script);
+        let rig = rig_with("handshake", launcher);
+        rig.runner.start(request()).unwrap();
+        rig.runner.stop();
+        release.send(()).unwrap();
+        wait_idle(&rig.runner);
+        assert_eq!(*received.lock().unwrap(), ["stop"]);
+        assert_eq!(
+            only_session(&rig.runner).outcome,
+            Some(Outcome::StoppedUser)
+        );
     }
 }

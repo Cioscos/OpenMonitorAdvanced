@@ -5,7 +5,8 @@
 //! The link ends the process: [`run`] returns the exit code.
 
 use oma_ipc::load::{
-    load_compatible, FinishReason, Finished, Isa, LoadHello, LoadMessage, LOAD_PROTOCOL_VERSION,
+    detected_isa, load_compatible, FinishReason, Finished, LoadHello, LoadMessage,
+    LOAD_PROTOCOL_VERSION,
 };
 
 /// The pipe closed after a working session.
@@ -16,23 +17,6 @@ pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_CONNECT: i32 = 2;
 /// The app speaks another load protocol version.
 pub const EXIT_INCOMPATIBLE: i32 = 3;
-
-/// The instruction sets this CPU has, best first. `avx512` asks for AVX-512F only (the
-/// kernels use F alone); `avx2` also needs FMA; SSE2 is part of x86_64.
-pub fn detected_isa() -> Vec<Isa> {
-    let mut isa = Vec::new();
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx512f") {
-            isa.push(Isa::Avx512);
-        }
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            isa.push(Isa::Avx2);
-        }
-        isa.push(Isa::Sse2);
-    }
-    isa
-}
 
 /// What to do with one received message.
 #[derive(Debug, PartialEq)]
@@ -254,11 +238,5 @@ mod tests {
             },
         });
         assert_eq!(route(empty), Route::Exit(EXIT_USAGE));
-    }
-
-    #[test]
-    fn sse2_is_always_detected() {
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(detected_isa().last(), Some(&Isa::Sse2));
     }
 }

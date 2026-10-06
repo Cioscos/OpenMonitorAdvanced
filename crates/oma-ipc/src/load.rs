@@ -49,6 +49,24 @@ pub enum Isa {
     Sse2,
 }
 
+/// The instruction sets this CPU runs, best first; the app and `oma-load` use the same
+/// policy. `avx512` asks for AVX-512F only (the kernels use F alone); `avx2` also needs
+/// FMA; SSE2 is part of x86_64. Empty on other architectures, which have no kernels.
+pub fn detected_isa() -> Vec<Isa> {
+    let mut isa = Vec::new();
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            isa.push(Isa::Avx512);
+        }
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            isa.push(Isa::Avx2);
+        }
+        isa.push(Isa::Sse2);
+    }
+    isa
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KernelId {
@@ -360,6 +378,12 @@ pub fn load_compatible(hello: &LoadHello) -> bool {
 mod tests {
     use super::*;
     use crate::{encode_frame_of, FrameDecoder};
+
+    #[test]
+    fn sse2_is_always_detected() {
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(detected_isa().last(), Some(&Isa::Sse2));
+    }
 
     fn round_trip(msg: LoadMessage) {
         let frame = encode_frame_of(&msg).unwrap();

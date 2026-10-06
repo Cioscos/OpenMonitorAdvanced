@@ -473,9 +473,16 @@ fn main() {
                         service_available: Box::new(move || {
                             svc.get().1.state == oma_ipc::ServiceState::Connected
                         }),
-                        window_open: Box::new(move || window::any_open(&open_handle)),
+                        // Only the main window has the Performance view.
+                        window_open: Box::new(move || {
+                            open_handle.get_webview_window(window::MAIN).is_some()
+                        }),
                         emit: Box::new(move |status| {
-                            let _ = emit_handle.emit(performance::runner::EVENT_STATUS, status);
+                            let _ = emit_handle.emit_to(
+                                window::MAIN,
+                                performance::runner::EVENT_STATUS,
+                                status,
+                            );
                         }),
                         on_state: Box::new(|_| {}),
                         app_version: app.package_info().version.to_string(),

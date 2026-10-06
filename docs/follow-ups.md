@@ -91,6 +91,9 @@ The variable persists in that shell: the app started from it injects the fault i
 | P12 | Tooltips | Every technical term in the wizard, during the test, in the result, history and settings shows its explanation on hover and on Tab. |
 | P13 | Budget during a test | `scripts/measure-footprint.ps1` (release build, no `pnpm tauri dev` running) with a CPU Quick test started by hand: window < 200 MB; `oma-load` noted. |
 | P14 | No service (stopped by the user) | The CPU stress starts with the warning; no thermal stop; the chart shows the note. |
+| P15 | End `oma-app.exe` in Task Manager during a test | `oma-load.exe` disappears at once; after a restart of the app the result reads "Interrupted: the app closed during the test" («Interrotto: l'app si è chiusa durante il test»), and the journal is gone. |
+| P16 | Sleep from Start during a test, then wake the PC | The session ends as `suspended` ("Interrupted by sleep"), never `hung`. |
+| P17 | One CPU run on the Balanced power plan (parked cores) | The per-core cycle tests every core, parked ones included (the hard affinity wakes them); no phase ends skipped as `no_cpu`. |
 
 P7: set the threshold in the stress settings (`cpuStopC` = 60), then run any CPU test.
 
@@ -101,6 +104,8 @@ pwsh scripts/measure-footprint.ps1
 ```
 
 Start the CPU Quick test by hand in the app the script launched and note the figures of the `oma-load` process (Task Manager) next to the window figure.
+
+P15 and P16 end a running test on purpose: ask the user first. P17: switch to the Balanced plan in Settings > System > Power, then run a CPU Overclock stability test (Standard) and watch the core grid.
 
 P9 is a forced restart: ask the user first. Results go in this file and in the project memory (`m8a1-followups.md`); then `superpowers:finishing-a-development-branch` (whole-branch review, local merge, no push unless asked).
 

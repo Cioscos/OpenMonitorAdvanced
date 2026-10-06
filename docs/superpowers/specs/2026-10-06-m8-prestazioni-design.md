@@ -307,7 +307,7 @@ Il tooltip di K10 dice che lavora in modalità utente, cioè sulla memoria che W
 - **Leggero:** uno o due thread SSE2 o scalari con pause periodiche, per il boost massimo a basso carico, tipico dell'instabilità con Curve Optimizer.
 - **Un core alla volta:**
   - un thread per core fisico, con il fratello SMT a riposo, perché un core da solo raggiunge il boost più alto; l'opzione «entrambi i thread» è in Personalizza;
-  - prima i core P, poi gli E; i core parcheggiati si saltano;
+  - prima i core P, poi gli E; i core parcheggiati non si saltano: `Parked` è solo lo stato di riposo del momento e l'affinità rigida li risveglia (revisione finale della M8a1);
   - tempo per core secondo il profilo;
   - un core che sbaglia si segna e si passa al successivo; i risultati si raggruppano per CCD (`LastLevelCacheIndex`).
 - **Tutti i core:** un thread per processore logico.

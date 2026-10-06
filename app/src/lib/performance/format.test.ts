@@ -71,6 +71,15 @@ test('event_text_counts_phases_from_one_and_reads_recovered_whea', () => {
   i18n.locale = 'en';
 });
 
+test('verdict_title_translates_a_reason_key', () => {
+  expect(verdictTitle({ verdict: 'failed_to_start', params: { reason: 'performance.start.nothing_ran' } }, t)).toBe(
+    t('performance.outcome.failed_to_start', { reason: t('performance.start.nothing_ran') }),
+  );
+  expect(verdictTitle({ verdict: 'failed_to_start', params: { reason: 'start failed' } }, t)).toBe(
+    t('performance.outcome.failed_to_start', { reason: 'start failed' }),
+  );
+});
+
 test('verdict_title_reads_the_recovered_phase', () => {
   expect(verdictTitle({ verdict: 'system_crash', params: { phase: '3' } }, t)).toBe(t('performance.outcome.system_crash', { phase: t('performance.result.phaseN', { n: 3 }) }));
   expect(verdictTitle({ verdict: 'errors_core', params: { core: '2' } }, t)).toBe(t('performance.outcome.errors_core', { core: 2 }));

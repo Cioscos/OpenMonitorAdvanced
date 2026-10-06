@@ -103,6 +103,8 @@ export function verdictTitle(detail: { verdict: string | null; params: Record<st
   if (!detail?.verdict) return t('performance.result.unknown');
   const params: Params = { ...detail.params };
   if (params.phase !== undefined) params.phase = t('performance.result.phaseN', { n: params.phase });
+  // A `failed_to_start` reason is a text, or the key of one (`performance.start.*`).
+  if (typeof params.reason === 'string' && params.reason.startsWith('performance.start.')) params.reason = t(params.reason);
   return t(`performance.outcome.${detail.verdict}`, params);
 }
 

@@ -21,7 +21,7 @@
 
   /** The chart's window (spec §3.5). */
   const CHART_SECONDS = 600;
-  const WARN_TERMS: Partial<Record<RunWarning, string>> = { noService: 'thermalStop', ramReduced: 'ramShare' };
+  const WARN_TERMS: Partial<Record<RunWarning, string>> = { noService: 'thermalStop', ramReduced: 'ramShare', ramInsufficient: 'ramShare' };
   const PLACEMENT_TERM: Record<PhaseInfo['placement'], string | null> = { all_logical: 'mode.allCore', core_cycle: 'mode.coreCycle', one_per_core: null };
 
   const status = $derived(performanceStore.status);

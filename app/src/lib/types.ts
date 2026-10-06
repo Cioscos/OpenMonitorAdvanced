@@ -747,7 +747,7 @@ export type Outcome =
   | 'suspended'
   | 'failed_to_start';
 export type RunState = 'idle' | 'starting' | 'running' | 'stopping' | 'finished';
-export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced';
+export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced' | 'ramInsufficient';
 
 /** One mode of «Personalizza»: `minutes` null keeps the profile's duration. */
 export interface ModeEdit {

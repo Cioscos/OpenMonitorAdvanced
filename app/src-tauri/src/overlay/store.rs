@@ -208,7 +208,7 @@ fn write(path: &Path, profile: &Profile) -> Result<(), StoreError> {
 /// replaces `path` with it. Concurrent writes to one target never share a
 /// temporary file, and it is removed on every failure (a profile has no
 /// leftover recovery, unlike `settings.json`).
-pub(super) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);

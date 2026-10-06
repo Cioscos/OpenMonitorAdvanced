@@ -20,6 +20,6 @@ pub use sensors::{read_sample, resolve_cpu_sensors, CpuSensorIds, SensorSample};
 pub use session::{
     is_session_file_name, is_session_id, parse_journal, parse_session, prune, session_file_name,
     summary, CoreResult, ErrorRecord, FormatError, Journal, OutcomeDetail, PhaseResult, Sample,
-    Session, SessionEvent, SessionSummary, Stats, WheaCounts, KEEP_SESSIONS, MAX_ERRORS,
+    Session, SessionEvent, SessionSummary, Stats, WheaCounts, FORMAT, KEEP_SESSIONS, MAX_ERRORS,
 };
 pub use thermal::{cpu_stop_threshold, ThermalEvent, ThermalGuard};

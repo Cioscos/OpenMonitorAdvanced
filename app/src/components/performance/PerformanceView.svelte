@@ -5,13 +5,14 @@
   import { t } from '../../lib/i18n/index.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
+  import StressHistory from './StressHistory.svelte';
   import StressResult from './StressResult.svelte';
   import StressRun from './StressRun.svelte';
   import StressWizard from './StressWizard.svelte';
 
   // The Performance view (spec M8 §3.1): the sidebar with the «Stress test» group on the left, the
   // page on the right. The store is connected only while the view is on screen. `new` is the
-  // wizard, `run` the test under way, `result:<id>` a saved session; the history comes next.
+  // wizard, `run` the test under way, `result:<id>` a saved session; `history` lists the saved ones.
   // `store` is the app's live store, for the run page's chart.
   let { backend, store, page = $bindable('new') }: { backend: Backend; store: LiveStore; page?: PerformancePage } = $props();
   const open = (next: PerformancePage) => (page = next);
@@ -85,6 +86,8 @@
       <StressWizard {backend} onStarted={() => (page = 'run')} />
     {:else if page === 'run'}
       <StressRun {backend} {store} onOpen={open} />
+    {:else if page === 'history'}
+      <StressHistory {backend} onOpen={open} />
     {:else if page.startsWith('result:')}
       {#key page}<StressResult {backend} id={page.slice('result:'.length)} onOpen={open} />{/key}
     {/if}

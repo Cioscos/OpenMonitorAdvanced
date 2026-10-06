@@ -1128,5 +1128,19 @@
   "performance.result.phaseCount.skipped": "{n} saltate",
   "performance.result.phaseCount.skipped.one": "1 saltata",
   "performance.result.phaseCount.notRun": "{n} non eseguite",
-  "performance.result.phaseCount.notRun.one": "1 non eseguita"
+  "performance.result.phaseCount.notRun.one": "1 non eseguita",
+  "performance.history.filter": "Componente",
+  "performance.history.all": "Tutti",
+  "performance.history.list": "Test salvati",
+  "performance.history.open": "Apri il risultato del {when}",
+  "performance.history.empty": "Nessun test salvato.",
+  "performance.history.emptyAction": "Nuovo test",
+  "performance.history.repeat": "Ripeti il test",
+  "performance.history.delete": "Elimina",
+  "performance.history.deleteConfirm": "Eliminare il test del {when}?",
+  "performance.history.cancel": "Annulla",
+  "performance.history.missing": "Questo test non è più salvato.",
+  "performance.history.mark.ok": "Ok",
+  "performance.history.mark.warn": "Avviso",
+  "performance.history.mark.crit": "Problema"
 }

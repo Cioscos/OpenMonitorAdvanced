@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import AdvancedView from './components/advanced/AdvancedView.svelte';
+  import QuitDialog from './components/performance/QuitDialog.svelte';
   import SafeModeNotice from './components/SafeModeNotice.svelte';
   import SettingsView from './components/settings/SettingsView.svelte';
   import SimpleView from './components/simple/SimpleView.svelte';
@@ -36,6 +37,8 @@
   let gear = $state<HTMLButtonElement | undefined>();
   /** The device page a clicked toast asked for, until the Advanced view has opened it. */
   let focus = $state<{ deviceId: string } | null>(null);
+  /** The tray's «Quit» came while a stress test runs: the question is shown (DA16). */
+  let askingQuit = $state(false);
   /** The settings section (and rule) that a component asked for; `null` opens the settings on General. */
   let settingsTarget = $state<SettingsTarget | null>(null);
 
@@ -54,6 +57,7 @@
     if (target.deviceId !== undefined) focus = { deviceId: target.deviceId };
     showView(target.view);
     if (target.settingsSection === 'about') openSettings({ section: 'about' });
+    if (target.performance?.page === 'quit') askingQuit = true;
   }
 
   onMount(() => {
@@ -72,7 +76,15 @@
     let offLog: (() => void) | undefined;
     let offOverlay: (() => void) | undefined;
     let offUpdates: (() => void) | undefined;
+    let offQuit: (() => void) | undefined;
     let cancelled = false;
+    backend
+      .onPerformanceQuit(() => (askingQuit = true))
+      .then((unsubscribe) => {
+        if (cancelled) unsubscribe();
+        else offQuit = unsubscribe;
+      })
+      .catch((error) => console.error('quit requests unavailable', error));
     // Ordering race (spec §6): a late `getServiceStatus` reply must never overwrite a status
     // already delivered by `oma:service`, so the event subscription is set up first and this
     // flag guards the initial read.
@@ -188,6 +200,7 @@
       offService?.();
       offSettings?.();
       offNavigate?.();
+      offQuit?.();
     };
   });
 
@@ -254,6 +267,15 @@
     {/if}
   {/if}
 </main>
+{#if askingQuit}
+  <QuitDialog
+    onConfirm={() => {
+      askingQuit = false;
+      backend.performanceQuitConfirmed().catch((error) => console.error('stop and quit failed', error));
+    }}
+    onCancel={() => (askingQuit = false)}
+  />
+{/if}
 
 <style>
   main {

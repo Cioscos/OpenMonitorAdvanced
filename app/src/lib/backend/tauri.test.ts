@@ -136,6 +136,7 @@ test('editor and benchmark commands match the Rust shell', async () => {
     [() => backend.overlayEditorDirty(true), 'overlay_editor_dirty', { dirty: true }],
     [() => backend.openOverlayEditor(), 'open_overlay_editor'],
     [() => backend.appQuitConfirmed(), 'app_quit_confirmed'],
+    [() => backend.performanceQuitConfirmed(), 'performance_quit_confirmed'],
     [() => backend.benchmarkToggle(), 'benchmark_toggle'],
     [() => backend.benchmarkList(), 'benchmark_list'],
     [() => backend.benchmarkOpenCsv('x'), 'benchmark_open_csv', { id: 'x' }],

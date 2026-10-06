@@ -159,6 +159,10 @@ export interface Backend {
   onOverlayPreview(cb: (event: { open: boolean }) => void): Promise<Unsubscribe>;
   /** The tray's «Quit» waits for the editor to save or discard its changes. */
   onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe>;
+  /** The tray's «Quit» during a stress test: the window asks before it goes on. */
+  onPerformanceQuit(cb: () => void): Promise<Unsubscribe>;
+  /** The answer «stop and quit»: the test ends (saved as stopped) and the app exits. */
+  performanceQuitConfirmed(): Promise<void>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */
   benchmarkToggle(): Promise<void>;
   /** The saved benchmarks, newest first. */

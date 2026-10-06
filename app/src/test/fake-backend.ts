@@ -549,6 +549,18 @@ export class FakeBackend implements Backend {
     return () => this.#previewListeners.delete(cb);
   }
 
+  readonly performanceQuitListeners = new Set<() => void>();
+  performanceQuitCalls = 0;
+
+  async onPerformanceQuit(cb: () => void): Promise<Unsubscribe> {
+    this.performanceQuitListeners.add(cb);
+    return () => this.performanceQuitListeners.delete(cb);
+  }
+
+  async performanceQuitConfirmed(): Promise<void> {
+    this.performanceQuitCalls++;
+  }
+
   async onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe> {
     this.#editorQuitListeners.add(cb);
     return () => this.#editorQuitListeners.delete(cb);

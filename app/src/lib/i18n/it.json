@@ -848,5 +848,15 @@
   "performance.outcome.suspended": "Interrotto dalla sospensione",
   "performance.outcome.failed_to_start": "Non avviato: {reason}",
   "performance.toast.title": "Stress test finito",
-  "performance.toast.recovered": "Il test precedente si è interrotto: apri il risultato."
+  "performance.toast.recovered": "Il test precedente si è interrotto: apri il risultato.",
+  "tray.performance.stop": "Ferma il test",
+  "tray.performance.open": "Apri il test in corso",
+  "tray.performance.tooltip": "Stress test in corso: {component} · {objective}",
+  "performance.objective.normal": "Verifica normale",
+  "performance.objective.overclock": "Stabilità overclock",
+  "performance.quit.title": "Un test è in corso",
+  "performance.quit.body": "Fermare il test e uscire? La sessione si salva come interrotta.",
+  "performance.quit.confirm": "Ferma ed esci",
+  "performance.quit.cancel": "Annulla",
+  "performance.closeToTray": "Il test continua nella tray."
 }

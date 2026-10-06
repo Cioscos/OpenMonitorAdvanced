@@ -109,9 +109,19 @@ fn run_quit_only(context: tauri::Context<tauri::Wry>) -> ! {
     std::process::exit(app.run_return(|_, _| {}));
 }
 
-/// Whether closing the last window keeps the app running in the tray.
-fn keep_running_on_last_close(close_to_tray: bool) -> bool {
-    close_to_tray
+/// Whether closing the last window keeps the app running in the tray: when
+/// the user wants it, and always while a stress test runs (DA16).
+fn keep_running_on_last_close(close_to_tray: bool, test_running: bool) -> bool {
+    close_to_tray || test_running
+}
+
+/// Whether the toast «the test keeps running in the tray» was shown for the
+/// test in progress.
+static CLOSE_TOAST_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once per test: the first close of the last window while it runs.
+fn close_toast_due(test_running: bool, shown: &std::sync::atomic::AtomicBool) -> bool {
+    test_running && !shown.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(windows)]
@@ -454,6 +464,7 @@ fn main() {
                 let engine = engine.clone();
                 let svc = svc_status.clone();
                 let (open_handle, emit_handle) = (app.handle().clone(), app.handle().clone());
+                let state_tray = tray.clone();
                 let runner = Arc::new(performance::runner::PerformanceRunner::new(
                     performance::runner::RunnerDeps {
                         store: Arc::new(performance::store::PerformanceStore::new(
@@ -484,7 +495,17 @@ fn main() {
                                 status,
                             );
                         }),
-                        on_state: Box::new(|_| {}),
+                        // The tray dot, tooltip and items follow the test (DA17).
+                        on_state: Box::new(move |status| {
+                            let mark = tray::TestMark::from_status(status);
+                            if mark.is_none() || status.state == oma_core::load::RunState::Starting
+                            {
+                                // The next test may toast again.
+                                CLOSE_TOAST_SHOWN
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            state_tray.set_test(mark);
+                        }),
                         app_version: app.package_info().version.to_string(),
                     },
                 ));
@@ -636,8 +657,25 @@ fn main() {
             let close_to_tray = app
                 .try_state::<Arc<SettingsStore>>()
                 .is_none_or(|store| store.snapshot().tray.close_to_tray);
-            if keep_running_on_last_close(close_to_tray) {
+            let test_running = app
+                .try_state::<Arc<performance::runner::PerformanceRunner>>()
+                .is_some_and(|runner| runner.is_running());
+            if keep_running_on_last_close(close_to_tray, test_running) {
                 api.prevent_exit();
+                if close_toast_due(test_running, &CLOSE_TOAST_SHOWN) {
+                    use notifier::ToastSink;
+                    let lang = tray::language_for(
+                        app.state::<Arc<SettingsStore>>()
+                            .settings()
+                            .general
+                            .language,
+                    );
+                    app.state::<Arc<notifier::SystemToaster>>().show(
+                        tray_icon::PRODUCT_NAME.to_owned(),
+                        i18n::t(lang, "performance.closeToTray", &[]),
+                        notifier::launch_for_main(),
+                    );
+                }
             }
         }
         RunEvent::Exit => {
@@ -791,7 +829,23 @@ mod tests {
 
     #[test]
     fn last_close_exits_when_close_to_tray_is_off() {
-        assert!(keep_running_on_last_close(true));
-        assert!(!keep_running_on_last_close(false));
+        assert!(keep_running_on_last_close(true, false));
+        assert!(!keep_running_on_last_close(false, false));
+    }
+
+    #[test]
+    fn closing_the_window_keeps_running_during_a_test() {
+        assert!(keep_running_on_last_close(false, true));
+        assert!(keep_running_on_last_close(true, true));
+    }
+
+    #[test]
+    fn close_toast_comes_once_per_test() {
+        let shown = std::sync::atomic::AtomicBool::new(false);
+        assert!(!close_toast_due(false, &shown), "no test, no toast");
+        assert!(close_toast_due(true, &shown));
+        assert!(!close_toast_due(true, &shown));
+        shown.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(close_toast_due(true, &shown));
     }
 }

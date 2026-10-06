@@ -139,6 +139,12 @@ pub const RUST_KEYS: &[&str] = &[
     "performance.outcome.failed_to_start",
     "performance.toast.title",
     "performance.toast.recovered",
+    "tray.performance.stop",
+    "tray.performance.open",
+    "tray.performance.tooltip",
+    "performance.objective.normal",
+    "performance.objective.overclock",
+    "performance.closeToTray",
 ];
 
 type Catalog = HashMap<String, String>;

@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use oma_core::load::{Component, Objective, RunState, RunStatus};
 use oma_core::model::{Schema, Snapshot, Unit};
 use oma_core::roles::{role_sensor, Role};
 use oma_core::rules::HealthReport;
@@ -18,13 +19,14 @@ use crate::i18n::{resolve, t, Lang};
 use crate::log::session::{LogState, LogStatus};
 use crate::log::LogService;
 use crate::notifier::SystemToaster;
+use crate::performance::runner::PerformanceRunner;
 use crate::service::ServiceShell;
 use crate::settings::SettingsStore;
 use crate::tray_icon::{
-    icon_content, render, style_for, tooltip, verdict, IconContent, IconStyle, TooltipItem,
-    ICON_SIZE, PRODUCT_NAME,
+    icon_content, render, style_for, tooltip, verdict, IconContent, IconMarks, IconStyle,
+    TooltipItem, ICON_SIZE, PRODUCT_NAME,
 };
-use crate::window;
+use crate::window::{self, PerformanceNav};
 
 /// What the controller needs from the real tray, so its decisions can be
 /// tested without a window. Implementations must not block the caller.
@@ -32,8 +34,9 @@ pub trait TrayBackend: Send + Sync {
     /// A 32x32 RGBA image.
     fn set_icon(&self, rgba: Vec<u8>);
     fn set_tooltip(&self, text: String);
-    /// Rebuilds the menu in `lang`, with the log items of `log`.
-    fn set_menu(&self, lang: Lang, log: LogState);
+    /// Rebuilds the menu in `lang`, with the log items of `log` and, while a
+    /// stress test runs (`test`), its items.
+    fn set_menu(&self, lang: Lang, log: LogState, test: bool);
     /// The overlay's «show/hide» item: clickable and ticked.
     fn set_overlay_item(&self, enabled: bool, checked: bool);
 }
@@ -64,6 +67,66 @@ pub fn editor_item_clicked(id: &str, open: impl FnOnce()) -> bool {
     }
     open();
     true
+}
+
+/// The stress test items of the tray menu (DA17): stop it, or show it.
+pub const PERF_STOP_ID: &str = "perf_stop";
+pub const PERF_OPEN_ID: &str = "perf_open";
+
+/// The menu items `(id, label key)` to show: none without a test.
+pub fn test_menu(test: bool) -> &'static [(&'static str, &'static str)] {
+    if test {
+        &[
+            (PERF_STOP_ID, "tray.performance.stop"),
+            (PERF_OPEN_ID, "tray.performance.open"),
+        ]
+    } else {
+        &[]
+    }
+}
+
+/// The stress test in progress, as the tray shows it: the ids of the status
+/// (`cpu`, `normal`), translated when the tooltip is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestMark {
+    pub component: String,
+    pub objective: String,
+}
+
+impl TestMark {
+    /// The mark for `status`: none while idle or once finished.
+    pub fn from_status(status: &RunStatus) -> Option<Self> {
+        if matches!(status.state, RunState::Idle | RunState::Finished) {
+            return None;
+        }
+        let component = match status.component {
+            Component::Cpu => "cpu",
+            Component::Ram => "ram",
+        };
+        let objective = match status.objective {
+            Objective::Normal => "normal",
+            Objective::Overclock => "overclock",
+        };
+        Some(Self {
+            component: component.to_owned(),
+            objective: objective.to_owned(),
+        })
+    }
+
+    /// `Stress test in progress: CPU · Normal check`.
+    fn text(&self, lang: Lang) -> String {
+        let component = t(lang, &format!("tray.tooltip.{}", self.component), &[]);
+        let objective = t(
+            lang,
+            &format!("performance.objective.{}", self.objective),
+            &[],
+        );
+        t(
+            lang,
+            "tray.performance.tooltip",
+            &[("component", &component), ("objective", &objective)],
+        )
+    }
 }
 
 /// The log items of the tray menu.
@@ -194,11 +257,22 @@ struct State {
     lang: Lang,
     resolved: Option<Resolved>,
     log: LogState,
-    /// What the icon last sent shows, its style and whether it has the dot.
-    icon: Option<(IconContent, IconStyle, bool)>,
+    /// What the icon last sent shows, its style and its dots.
+    icon: Option<(IconContent, IconStyle, IconMarks)>,
+    /// The stress test in progress, if any.
+    test: Option<TestMark>,
     tooltip: Option<String>,
     /// What the overlay item last got: (enabled, checked).
     overlay: Option<(bool, bool)>,
+}
+
+impl State {
+    fn marks(&self) -> IconMarks {
+        IconMarks {
+            recording: self.log == LogState::Recording,
+            testing: self.test.is_some(),
+        }
+    }
 }
 
 /// Keeps the tray icon, tooltip and labels in line with the readings and the
@@ -217,6 +291,7 @@ impl<B: TrayBackend> TrayController<B> {
                 log: LogState::Idle,
                 resolved: None,
                 icon: None,
+                test: None,
                 tooltip: None,
                 overlay: None,
             }),
@@ -262,12 +337,16 @@ impl<B: TrayBackend> TrayController<B> {
         let (value, unit) = reading(icon);
         let content = icon_content(value, unit, temperature);
         let style = style_for(health.level);
-        let recording = state.log == LogState::Recording;
-        if !state.icon.as_ref().is_some_and(|(sent, sent_style, dot)| {
-            *sent == content && *sent_style == style && *dot == recording
-        }) {
-            self.backend.set_icon(render(&content, style, recording));
-            state.icon = Some((content, style, recording));
+        let marks = state.marks();
+        if !state
+            .icon
+            .as_ref()
+            .is_some_and(|(sent, sent_style, sent_marks)| {
+                *sent == content && *sent_style == style && *sent_marks == marks
+            })
+        {
+            self.backend.set_icon(render(&content, style, marks));
+            state.icon = Some((content, style, marks));
         }
 
         let item = |label_key, index| {
@@ -285,6 +364,14 @@ impl<B: TrayBackend> TrayController<B> {
             temperature,
             settings.general.throughput_unit,
         );
+        // The test leads the tooltip, the verdict follows.
+        let verdict = match (&state.test, verdict) {
+            (Some(test), Some(verdict)) => {
+                Some(format!("{} \u{b7} {verdict}", test.text(state.lang)))
+            }
+            (Some(test), None) => Some(test.text(state.lang)),
+            (None, verdict) => verdict,
+        };
         let text = tooltip(
             state.lang,
             verdict.as_deref(),
@@ -310,7 +397,31 @@ impl<B: TrayBackend> TrayController<B> {
         state.lang = lang;
         // The tooltip words change with the language: rebuild it on the next tick.
         state.tooltip = None;
-        self.backend.set_menu(lang, state.log);
+        self.backend.set_menu(lang, state.log, state.test.is_some());
+    }
+
+    /// Follows the stress test: the dot, the tooltip's lead and the menu items
+    /// appear while `test` is set. A no-op when nothing changed.
+    pub fn set_test(&self, test: Option<TestMark>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.test == test {
+            return;
+        }
+        let menu_changed = state.test.is_some() != test.is_some();
+        state.test = test;
+        // The tooltip is rebuilt on the next tick.
+        state.tooltip = None;
+        if menu_changed {
+            self.backend
+                .set_menu(state.lang, state.log, state.test.is_some());
+        }
+        let marks = state.marks();
+        if let Some((content, style, sent)) = state.icon.take() {
+            if sent != marks {
+                self.backend.set_icon(render(&content, style, marks));
+            }
+            state.icon = Some((content, style, marks));
+        }
     }
 
     /// Follows the overlay: its item is clickable only while the overlay is
@@ -333,13 +444,13 @@ impl<B: TrayBackend> TrayController<B> {
             return;
         }
         state.log = log;
-        self.backend.set_menu(state.lang, log);
-        let recording = log == LogState::Recording;
-        if let Some((content, style, dot)) = state.icon.take() {
-            if dot != recording {
-                self.backend.set_icon(render(&content, style, recording));
+        self.backend.set_menu(state.lang, log, state.test.is_some());
+        let marks = state.marks();
+        if let Some((content, style, sent)) = state.icon.take() {
+            if sent != marks {
+                self.backend.set_icon(render(&content, style, marks));
             }
-            state.icon = Some((content, style, recording));
+            state.icon = Some((content, style, marks));
         }
     }
 }
@@ -365,7 +476,17 @@ impl MenuItems {
     /// items keep their handles (the anti-cheat checkbox follows the settings
     /// store through one, the overlay item the overlay's status), and may sit
     /// in the old and the new menu at once.
-    fn menu(&self, app: &AppHandle, lang: Lang, log: LogState) -> tauri::Result<Menu<Wry>> {
+    fn menu(
+        &self,
+        app: &AppHandle,
+        lang: Lang,
+        log: LogState,
+        test: bool,
+    ) -> tauri::Result<Menu<Wry>> {
+        let test_items = test_menu(test)
+            .iter()
+            .map(|(id, key)| MenuItem::with_id(app, id, t(lang, key, &[]), true, None::<&str>))
+            .collect::<tauri::Result<Vec<_>>>()?;
         let log_items = log_menu(log)
             .iter()
             .map(|item| {
@@ -391,9 +512,9 @@ impl MenuItems {
             &self.overlay,
             &self.editor,
             &self.anti_cheat,
-            &separators[2],
-            &self.quit,
         ]);
+        entries.extend(test_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
+        entries.extend([&separators[2] as &dyn IsMenuItem<Wry>, &self.quit]);
         Menu::with_items(app, &entries)
     }
 }
@@ -421,7 +542,7 @@ impl TrayBackend for TauriBackend {
         });
     }
 
-    fn set_menu(&self, lang: Lang, log: LogState) {
+    fn set_menu(&self, lang: Lang, log: LogState, test: bool) {
         let (app, tray, items) = (self.app.clone(), self.tray.clone(), self.items.clone());
         let _ = self.app.run_on_main_thread(move || {
             let _ = items.open.set_text(t(lang, "tray.open", &[]));
@@ -431,7 +552,7 @@ impl TrayBackend for TauriBackend {
             let _ = items.editor.set_text(t(lang, EDITOR_ITEM_LABEL, &[]));
             let _ = items.anti_cheat.set_text(t(lang, "tray.antiCheat", &[]));
             let _ = items.quit.set_text(t(lang, "tray.quit", &[]));
-            if let Ok(menu) = items.menu(&app, lang, log) {
+            if let Ok(menu) = items.menu(&app, lang, log, test) {
                 let _ = tray.set_menu(Some(menu));
             }
         });
@@ -555,7 +676,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
         anti_cheat,
         quit,
     };
-    let menu = items.menu(app, lang, LogState::Idle)?;
+    let menu = items.menu(app, lang, LogState::Idle, false)?;
     // The checkbox follows the settings store (see `ToggleState`), whichever
     // way `sources.antiCheat` changes: this item, the `set_anti_cheat`
     // command or the settings view.
@@ -583,6 +704,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
                 let _ = shell.set_anti_cheat(enabled);
             }
             "quit" => window::quit(app, window::QuitSource::Tray),
+            PERF_STOP_ID => {
+                if let Some(runner) = app.try_state::<Arc<PerformanceRunner>>() {
+                    runner.stop();
+                }
+            }
+            PERF_OPEN_ID => window::show_performance(app, PerformanceNav::run()),
             id => {
                 if let Some(item) = LogMenuItem::from_id(id) {
                     run_log_command(app, item);
@@ -758,6 +885,8 @@ mod tests {
         icons: Vec<Vec<u8>>,
         tooltips: Vec<String>,
         menus: Vec<(Lang, LogState)>,
+        /// Whether each menu rebuild had the stress test items.
+        test_menus: Vec<bool>,
         /// (enabled, checked) of the overlay item.
         overlay: Vec<(bool, bool)>,
     }
@@ -772,8 +901,10 @@ mod tests {
         fn set_tooltip(&self, text: String) {
             self.0.lock().unwrap().tooltips.push(text);
         }
-        fn set_menu(&self, lang: Lang, log: LogState) {
-            self.0.lock().unwrap().menus.push((lang, log));
+        fn set_menu(&self, lang: Lang, log: LogState, test: bool) {
+            let mut calls = self.0.lock().unwrap();
+            calls.menus.push((lang, log));
+            calls.test_menus.push(test);
         }
         fn set_overlay_item(&self, enabled: bool, checked: bool) {
             self.0.lock().unwrap().overlay.push((enabled, checked));
@@ -865,7 +996,11 @@ mod tests {
             );
             assert_eq!(
                 calls.icons[0],
-                render(&IconContent::Text("62".to_owned()), NEUTRAL, false)
+                render(
+                    &IconContent::Text("62".to_owned()),
+                    NEUTRAL,
+                    IconMarks::default()
+                )
             );
         }
 
@@ -900,8 +1035,12 @@ mod tests {
         assert_eq!(
             calls.icons,
             [
-                render(&IconContent::Text("62".to_owned()), NEUTRAL, false),
-                render(&IconContent::Bar(48), NEUTRAL, false)
+                render(
+                    &IconContent::Text("62".to_owned()),
+                    NEUTRAL,
+                    IconMarks::default()
+                ),
+                render(&IconContent::Bar(48), NEUTRAL, IconMarks::default())
             ]
         );
         assert_eq!(
@@ -954,7 +1093,7 @@ mod tests {
         let calls = backend.0.lock().unwrap();
         assert_eq!(
             calls.icons[2],
-            render(&IconContent::Bar(49), NEUTRAL, false)
+            render(&IconContent::Bar(49), NEUTRAL, IconMarks::default())
         );
     }
 
@@ -1064,10 +1203,30 @@ mod tests {
         assert_eq!(count(), 4);
 
         let calls = backend.0.lock().unwrap();
-        assert_eq!(calls.icons[0], render(&icon, NEUTRAL, true));
-        assert_eq!(calls.icons[1], render(&icon, NEUTRAL, false));
-        assert_eq!(calls.icons[2], render(&icon, NEUTRAL, true));
-        assert_eq!(calls.icons[3], render(&icon, NEUTRAL, false));
+        assert_eq!(
+            calls.icons[0],
+            render(
+                &icon,
+                NEUTRAL,
+                IconMarks {
+                    recording: true,
+                    testing: false
+                }
+            )
+        );
+        assert_eq!(calls.icons[1], render(&icon, NEUTRAL, IconMarks::default()));
+        assert_eq!(
+            calls.icons[2],
+            render(
+                &icon,
+                NEUTRAL,
+                IconMarks {
+                    recording: true,
+                    testing: false
+                }
+            )
+        );
+        assert_eq!(calls.icons[3], render(&icon, NEUTRAL, IconMarks::default()));
     }
 
     fn status(state: LogState, error: Option<LogError>) -> LogStatus {
@@ -1150,7 +1309,13 @@ mod tests {
         let tray = TrayController::new(backend.clone(), Lang::En);
         let settings = Settings::default();
         let snap = snapshot(&schema, &HOT);
-        let drawn = |style| render(&IconContent::Text("92".to_owned()), style, false);
+        let drawn = |style| {
+            render(
+                &IconContent::Text("92".to_owned()),
+                style,
+                IconMarks::default(),
+            )
+        };
 
         // Only the level changes between these ticks: each change redraws.
         for level in [
@@ -1259,5 +1424,45 @@ mod tests {
         assert_eq!(text("de-DE", "tray.quit"), "Quit");
         assert_eq!(text("", "tray.open"), "Open");
         assert_eq!(text("en", "tray.antiCheat"), "Anti-cheat compatible mode");
+    }
+
+    fn mark() -> TestMark {
+        TestMark {
+            component: "cpu".to_owned(),
+            objective: "normal".to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_menu_items_only_while_running() {
+        assert!(test_menu(false).is_empty());
+        let ids: Vec<_> = test_menu(true).iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [PERF_STOP_ID, PERF_OPEN_ID]);
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        tray.set_test(Some(mark()));
+        tray.set_test(Some(mark()));
+        tray.set_test(None);
+        assert_eq!(backend.0.lock().unwrap().test_menus, [true, false]);
+    }
+
+    #[test]
+    fn test_mark_redraws_the_icon_and_leads_the_tooltip() {
+        let schema = full_schema();
+        let backend = FakeBackend::default();
+        let tray = TrayController::new(backend.clone(), Lang::En);
+        let settings = Settings::default();
+        let snap = snapshot(&schema, &HOT);
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
+        tray.set_test(Some(mark()));
+        tray.update(&schema, &snap, &HealthReport::default(), &settings);
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(calls.icons.len(), 2);
+        assert_ne!(calls.icons[0], calls.icons[1]);
+        let tooltip = calls.tooltips.last().unwrap();
+        assert!(
+            tooltip.starts_with("Stress test running: CPU \u{b7} Normal check"),
+            "{tooltip}"
+        );
     }
 }

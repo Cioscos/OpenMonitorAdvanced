@@ -484,3 +484,19 @@ test('the stale threshold follows the sampling interval of the settings', async 
     vi.useRealTimers();
   }
 });
+
+test('the quit question shows on a performance quit request, cold or open, and confirming tells the shell', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  // A window created for the tray's «Quit» finds the request pending.
+  backend.pendingView = { view: 'simple', performance: { page: 'quit' } };
+  render(App, { backend, store: new LiveStore() });
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Stop and quit' }));
+  expect(backend.performanceQuitCalls).toBe(1);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  // An open window gets the event.
+  backend.performanceQuitListeners.forEach((cb) => cb());
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(backend.performanceQuitCalls).toBe(1);
+});

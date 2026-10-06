@@ -16,6 +16,7 @@ use tauri::{
 };
 
 use crate::i18n::t;
+use crate::performance::runner::PerformanceRunner;
 use crate::settings::SettingsStore;
 use crate::tray::language_for;
 
@@ -27,6 +28,8 @@ pub const EDITOR: &str = "overlay-editor";
 pub const EVENT_EDITOR_QUIT: &str = "overlay-editor-quit";
 /// Sent to an already open window; the payload is a [`NavigationTarget`].
 pub const EVENT_NAVIGATE: &str = "oma:navigate";
+/// The tray's «Quit» during a stress test: the main window asks first.
+pub const EVENT_PERFORMANCE_QUIT: &str = "performance-quit";
 
 /// Where a tray item or a toast sends the window: a view and, for a toast,
 /// the device whose page opens in the Advanced view. A Tauri payload, not a
@@ -51,8 +54,10 @@ pub struct NavigationTarget {
 #[serde(rename_all = "camelCase")]
 pub enum PerformancePage {
     /// The test in progress.
-    #[allow(dead_code)] // removed in A21
     Run,
+    /// The test in progress, with the question «stop it and quit?» (the tray's
+    /// «Quit»). A page, not only an event, so a window created for it gets it.
+    Quit,
     /// A saved session's result.
     Result,
 }
@@ -66,10 +71,16 @@ pub struct PerformanceNav {
 }
 
 impl PerformanceNav {
-    #[allow(dead_code)] // removed in A21
     pub fn run() -> Self {
         Self {
             page: PerformancePage::Run,
+            session_id: None,
+        }
+    }
+
+    pub fn quit() -> Self {
+        Self {
+            page: PerformancePage::Quit,
             session_id: None,
         }
     }
@@ -345,12 +356,24 @@ pub enum QuitAction {
     Exit,
     /// Show the editor and let it ask: save, discard or cancel.
     AskEditor,
+    /// Show the main window and ask «stop the test and quit?» (DA16).
+    AskPerformance,
 }
 
-/// The tray asks first while the editor holds unsaved changes; `--quit`
-/// never asks, so the installer can always close the app (DD13).
-pub fn quit_action(source: QuitSource, editor_open: bool, editor_dirty: bool) -> QuitAction {
-    if source == QuitSource::Tray && editor_open && editor_dirty {
+/// The tray asks first while a stress test runs (that answer ends in a new
+/// quit), then while the editor holds unsaved changes; `--quit` never asks,
+/// so the installer can always close the app (DD13, DA16).
+pub fn quit_action(
+    source: QuitSource,
+    editor_open: bool,
+    editor_dirty: bool,
+    test_running: bool,
+) -> QuitAction {
+    if source == QuitSource::Flag {
+        QuitAction::Exit
+    } else if test_running {
+        QuitAction::AskPerformance
+    } else if editor_open && editor_dirty {
         QuitAction::AskEditor
     } else {
         QuitAction::Exit
@@ -363,8 +386,16 @@ pub fn quit(app: &AppHandle, source: QuitSource) {
     let dirty = app
         .try_state::<EditorState>()
         .is_some_and(|s| s.dirty.load(Ordering::Acquire));
-    match quit_action(source, open, dirty) {
+    let test_running = app
+        .try_state::<Arc<PerformanceRunner>>()
+        .is_some_and(|runner| runner.is_running());
+    match quit_action(source, open, dirty, test_running) {
         QuitAction::Exit => app.exit(0),
+        QuitAction::AskPerformance => {
+            // The page carries the question for a window that is still loading.
+            show_performance(app, PerformanceNav::quit());
+            let _ = app.emit_to(MAIN, EVENT_PERFORMANCE_QUIT, ());
+        }
         QuitAction::AskEditor => {
             show_editor(app);
             let _ = app.emit_to(EDITOR, EVENT_EDITOR_QUIT, ());
@@ -510,24 +541,48 @@ mod tests {
     #[test]
     fn tray_quit_with_a_dirty_editor_asks_first() {
         assert_eq!(
-            quit_action(QuitSource::Tray, true, true),
+            quit_action(QuitSource::Tray, true, true, false),
             QuitAction::AskEditor
         );
-        assert_eq!(quit_action(QuitSource::Tray, true, false), QuitAction::Exit);
-        assert_eq!(quit_action(QuitSource::Tray, false, true), QuitAction::Exit);
         assert_eq!(
-            quit_action(QuitSource::Tray, false, false),
+            quit_action(QuitSource::Tray, true, false, false),
+            QuitAction::Exit
+        );
+        assert_eq!(
+            quit_action(QuitSource::Tray, false, true, false),
+            QuitAction::Exit
+        );
+        assert_eq!(
+            quit_action(QuitSource::Tray, false, false, false),
             QuitAction::Exit
         );
     }
 
     #[test]
-    fn quit_flag_never_asks() {
+    fn tray_quit_with_a_test_asks_first() {
+        // Before the editor, whatever the editor holds.
         for (open, dirty) in [(true, true), (true, false), (false, true), (false, false)] {
             assert_eq!(
-                quit_action(QuitSource::Flag, open, dirty),
-                QuitAction::Exit,
+                quit_action(QuitSource::Tray, open, dirty, true),
+                QuitAction::AskPerformance,
                 "{open} {dirty}"
+            );
+        }
+    }
+
+    #[test]
+    fn quit_flag_never_asks() {
+        for (open, dirty, test) in [
+            (true, true, true),
+            (true, false, true),
+            (false, true, false),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                quit_action(QuitSource::Flag, open, dirty, test),
+                QuitAction::Exit,
+                "{open} {dirty} {test}"
             );
         }
     }

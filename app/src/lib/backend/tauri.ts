@@ -98,6 +98,8 @@ export function createTauriBackend(): Backend {
     onOverlayEditorData: (cb) => listen<EditorData>('overlay-editor-data', (e) => cb(e.payload)),
     onOverlayPreview: (cb) => listen<{ open: boolean }>('overlay-preview', (e) => cb(e.payload)),
     onOverlayEditorQuit: (cb) => listen<null>('overlay-editor-quit', () => cb()),
+    onPerformanceQuit: (cb) => listen<null>('performance-quit', () => cb()),
+    performanceQuitConfirmed: () => invoke<void>('performance_quit_confirmed'),
     benchmarkToggle: () => invoke<void>('benchmark_toggle'),
     benchmarkList: () => invoke<BenchmarkEntry[]>('benchmark_list'),
     benchmarkOpenCsv: (id) => invoke<void>('benchmark_open_csv', { id }),

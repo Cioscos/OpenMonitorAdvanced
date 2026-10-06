@@ -848,5 +848,15 @@
   "performance.outcome.suspended": "Interrupted by sleep",
   "performance.outcome.failed_to_start": "Not started: {reason}",
   "performance.toast.title": "Stress test finished",
-  "performance.toast.recovered": "The previous test was interrupted: open the result."
+  "performance.toast.recovered": "The previous test was interrupted: open the result.",
+  "tray.performance.stop": "Stop the test",
+  "tray.performance.open": "Open the running test",
+  "tray.performance.tooltip": "Stress test running: {component} · {objective}",
+  "performance.objective.normal": "Normal check",
+  "performance.objective.overclock": "Overclock stability",
+  "performance.quit.title": "A test is running",
+  "performance.quit.body": "Stop the test and quit? The session is saved as stopped.",
+  "performance.quit.confirm": "Stop and quit",
+  "performance.quit.cancel": "Cancel",
+  "performance.closeToTray": "The test keeps running in the tray."
 }

@@ -232,6 +232,8 @@ export interface NavigationTarget {
   deviceId?: string;
   /** The settings section to open, for the update toast. */
   settingsSection?: 'about';
+  /** The Performance page the tray or a toast asked for; `quit` also asks «stop the test and quit?». */
+  performance?: { page: 'run' | 'result' | 'quit'; sessionId?: string };
 }
 
 export interface ServiceModules {

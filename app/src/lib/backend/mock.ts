@@ -659,6 +659,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
     onOverlayEditorData: async (cb) => editorData.subscribe(cb),
     onOverlayPreview: async (cb) => overlay.onPreview(cb),
     onOverlayEditorQuit: async () => () => {},
+    onPerformanceQuit: async () => () => {},
+    performanceQuitConfirmed: async () => console.info('mock: stop and quit'),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),
     benchmarkList: async () => structuredClone(benchmarks),
     benchmarkOpenCsv: async (id) => console.info('mock: open benchmark CSV', id),

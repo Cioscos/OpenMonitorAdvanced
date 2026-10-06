@@ -11,6 +11,7 @@
   import GeneralSection from './GeneralSection.svelte';
   import LogSection from './LogSection.svelte';
   import OverlaySection from './OverlaySection.svelte';
+  import PerformanceSection from './PerformanceSection.svelte';
   import PersistenceNotice from './PersistenceNotice.svelte';
   import RulesSection from './RulesSection.svelte';
   import SourcesSection from './SourcesSection.svelte';
@@ -25,8 +26,8 @@
     onBack,
   }: { store: LiveStore; backend: Backend; service: ServiceStatus | null; target?: SettingsTarget | null; onBack: () => void } = $props();
 
-  type Section = 'general' | 'rules' | 'log' | 'overlay' | 'benchmark' | 'sources' | 'about';
-  const SECTIONS: Section[] = ['general', 'rules', 'log', 'overlay', 'benchmark', 'sources', 'about'];
+  type Section = 'general' | 'rules' | 'log' | 'overlay' | 'benchmark' | 'performance' | 'sources' | 'about';
+  const SECTIONS: Section[] = ['general', 'rules', 'log', 'overlay', 'benchmark', 'performance', 'sources', 'about'];
   // Opened on a target (a sensor row's "Create rule…"), the screen starts on that section.
   // svelte-ignore state_referenced_locally
   let section = $state<Section>(target?.section ?? 'general');
@@ -82,6 +83,8 @@
       <OverlaySection {backend} />
     {:else if section === 'benchmark'}
       <BenchmarkSection {backend} />
+    {:else if section === 'performance'}
+      <PerformanceSection />
     {:else if section === 'sources'}
       <SourcesSection {store} {backend} {service} />
     {:else}

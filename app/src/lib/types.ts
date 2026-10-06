@@ -284,6 +284,17 @@ export interface OverlaySettings {
   editorBounds: { x: number; y: number; width: number; height: number } | null;
 }
 
+/** The `performance` section (stress test); `null` threshold = automatic, `null` stopOnFirstError = as the profile says. */
+export interface PerformanceSettings {
+  thermalStop: boolean;
+  /** 60 to 110 °C, or null for Tjmax − 5 (95 without Tjmax). */
+  cpuStopC: number | null;
+  stopOnFirstError: boolean | null;
+  /** 10 to 90. */
+  ramSharePercent: number;
+  riskNoticeSeen: boolean;
+}
+
 export interface Settings {
   version: number;
   general: {
@@ -322,6 +333,8 @@ export interface Settings {
   log: LogSettings;
   /** In-game overlay. */
   overlay: OverlaySettings;
+  /** Stress test limits. */
+  performance: PerformanceSettings;
   migrations: { serviceV1: boolean; webviewV1: boolean };
 }
 

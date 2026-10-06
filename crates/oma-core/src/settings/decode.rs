@@ -8,9 +8,10 @@ use serde_json::{Map, Value};
 
 use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
 use super::overlay::{is_profile_id, normalize_exe, WindowBounds, CHART_FPS, MAX_GAMES, TEXT_HZ};
+use super::performance::{CPU_STOP_C, RAM_SHARE_PERCENT};
 use super::{
-    Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, Settings,
-    TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
+    Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, PerformanceSettings,
+    Settings, TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
 };
 use crate::rules::{
     is_builtin, nested, validate_override, validate_rules, CustomRules, Rule, RuleOverride,
@@ -183,6 +184,7 @@ pub fn decode_lenient(value: &Value) -> Decoded {
     }
     settings.log = reader.log(root);
     settings.overlay = reader.overlay(root, &settings.log);
+    settings.performance = reader.performance(root);
 
     let migrations = reader.section(root, "", "migrations");
     let m = &mut settings.migrations;
@@ -556,6 +558,71 @@ impl Reader {
             log.hotkey_pause = None;
         }
         log
+    }
+
+    /// The `performance` section: an out-of-range threshold becomes automatic,
+    /// a RAM share is brought inside its range.
+    fn performance(&mut self, root: &Obj) -> PerformanceSettings {
+        let section = self.section(root, "", "performance");
+        let mut p = PerformanceSettings::default();
+        p.thermal_stop = self.boolean(&section, "performance", "thermalStop", p.thermal_stop);
+        p.risk_notice_seen = self.boolean(
+            &section,
+            "performance",
+            "riskNoticeSeen",
+            p.risk_notice_seen,
+        );
+        match lookup(&section, "stopOnFirstError", true) {
+            None => {}
+            Some(Value::Bool(b)) => p.stop_on_first_error = Some(*b),
+            Some(_) => self.push(
+                "performance.stopOnFirstError".into(),
+                DiagnosticKind::WrongType,
+            ),
+        }
+        match lookup(&section, "cpuStopC", true) {
+            None => {}
+            Some(Value::Number(n)) => {
+                match n
+                    .as_u64()
+                    .and_then(|x| u32::try_from(x).ok())
+                    .filter(|x| CPU_STOP_C.contains(x))
+                {
+                    Some(x) => p.cpu_stop_c = Some(x),
+                    None => self.push(
+                        "performance.cpuStopC".into(),
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: "null".into(),
+                        },
+                    ),
+                }
+            }
+            Some(_) => self.push("performance.cpuStopC".into(), DiagnosticKind::WrongType),
+        }
+        match lookup(&section, "ramSharePercent", false) {
+            None => {}
+            Some(Value::Number(n)) => {
+                let x = n.as_f64().unwrap_or(f64::from(p.ram_share_percent));
+                let (min, max) = (*RAM_SHARE_PERCENT.start(), *RAM_SHARE_PERCENT.end());
+                let clamped = x.clamp(f64::from(min), f64::from(max)).round() as u32;
+                if x != f64::from(clamped) {
+                    self.push(
+                        "performance.ramSharePercent".into(),
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: clamped.to_string(),
+                        },
+                    );
+                }
+                p.ram_share_percent = clamped;
+            }
+            Some(_) => self.push(
+                "performance.ramSharePercent".into(),
+                DiagnosticKind::WrongType,
+            ),
+        }
+        p
     }
 
     /// The `overlay` section: values outside the rules become the default,
@@ -1477,5 +1544,60 @@ mod tests {
         let d = decode(json!({"version": 1, "overlay": {"hotkeyNextProfile": "nonsense"}}));
         assert_eq!(d.settings.overlay.hotkey_next_profile, None);
         assert_eq!(d.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn performance_defaults() {
+        let d = decode(json!({"version": 1}));
+        assert_eq!(d.settings.performance, PerformanceSettings::default());
+        assert!(d.diagnostics.is_empty());
+        let p = &d.settings.performance;
+        assert!(p.thermal_stop && !p.risk_notice_seen);
+        assert_eq!(
+            (p.cpu_stop_c, p.stop_on_first_error, p.ram_share_percent),
+            (None, None, 70)
+        );
+        let want = everything_changed();
+        let d = decode(encode(&want));
+        assert_eq!(d.settings.performance, want.performance);
+        assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+    }
+
+    #[test]
+    fn cpu_stop_out_of_range_is_corrected() {
+        let d = decode(json!({"version": 1, "performance": {"cpuStopC": 120}}));
+        assert_eq!(d.settings.performance.cpu_stop_c, None);
+        assert_eq!(
+            d.diagnostics,
+            vec![corrected("performance.cpuStopC", "120", "null")]
+        );
+        let d =
+            decode(json!({"version": 1, "performance": {"cpuStopC": 59, "ramSharePercent": "x"}}));
+        assert_eq!(d.settings.performance.cpu_stop_c, None);
+        assert_eq!(d.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn null_cpu_stop_is_automatic() {
+        let d = decode(json!({"version": 1, "performance":
+            {"cpuStopC": null, "stopOnFirstError": null}}));
+        assert_eq!(d.settings.performance, PerformanceSettings::default());
+        assert!(d.diagnostics.is_empty());
+        let d = decode(json!({"version": 1, "performance":
+            {"cpuStopC": 90, "stopOnFirstError": false}}));
+        assert_eq!(d.settings.performance.cpu_stop_c, Some(90));
+        assert_eq!(d.settings.performance.stop_on_first_error, Some(false));
+    }
+
+    #[test]
+    fn ram_share_snaps_into_range() {
+        let d = decode(json!({"version": 1, "performance": {"ramSharePercent": 95}}));
+        assert_eq!(d.settings.performance.ram_share_percent, 90);
+        assert_eq!(
+            d.diagnostics,
+            vec![corrected("performance.ramSharePercent", "95", "90")]
+        );
+        let d = decode(json!({"version": 1, "performance": {"ramSharePercent": 3}}));
+        assert_eq!(d.settings.performance.ram_share_percent, 10);
     }
 }

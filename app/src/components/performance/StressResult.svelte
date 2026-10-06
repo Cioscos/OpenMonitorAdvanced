@@ -165,7 +165,7 @@
           <div>
             <dt><Term term="phase" /></dt>
             <dd>
-              {facts.phase + 1}{#if facts.kernel} · <Term term={`mode.${facts.kernel}`} />{/if}{#if facts.isa} · <Term term={`isa.${facts.isa}`} />{/if}
+              {facts.phase + 1}{#if facts.kernel}{' · '}<Term term={`mode.${facts.kernel}`} />{/if}{#if facts.isa}{' · '}<Term term={`isa.${facts.isa}`} />{/if}
             </dd>
           </div>
           {#if facts.core !== null}

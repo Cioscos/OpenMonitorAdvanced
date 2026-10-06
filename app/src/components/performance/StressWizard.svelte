@@ -216,9 +216,9 @@
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
         {#each plan.phases as p, index (index)}
           <li style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
-            <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel} + <Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)} · <Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
+            <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             <span class="isa"><Term term={`isa.${p.isa}`} /></span>
-            <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt} · <Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}</span>
+            <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}</span>
             <span class="dur">{formatDuration(p.duration_s)}</span>
           </li>
         {/each}

@@ -95,7 +95,7 @@
         <div class="sub">
           {t('performance.run.max', { value: formatTemperature(status.tempMaxC, locale) })} · <Term term="thermalStop" />
           {status.stopC === null ? t('performance.run.stopOff') : t('performance.run.stopAt', { temp: formatTemperature(status.stopC, locale) })}{#if system?.tjmaxC != null}
-            · <Term term="tjmax" /> {formatTemperature(system.tjmaxC, locale)}{/if}
+            {' · '}<Term term="tjmax" /> {formatTemperature(system.tjmaxC, locale)}{/if}
         </div>
       </div>
       <div class="tile">

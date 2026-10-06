@@ -71,7 +71,7 @@ test('result_shows_unstable_core_with_advice_and_retry', async () => {
   const { backend } = await setup(UNSTABLE());
   expect(screen.getByRole('heading', { name: t('performance.outcome.errors_core', { core: 2 }) })).toBeTruthy();
   // Where and when: the first error of the core, not the end of the test.
-  expect(fact(t('glossary.phase.name'))).toContain('2');
+  expect(fact(t('glossary.phase.name'))).toMatch(/^2 · /);
   expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.k2.name'));
   expect(fact(t('performance.result.fact.core'))).toBe('2');
   expect(fact(t('performance.result.fact.time'))).toBe('00:02:14');

@@ -24,7 +24,7 @@
 <ul class="cores" aria-label={t('performance.run.cores')}>
   {#each cores as c (c.core)}
     <li class={c.state} class:now={c.core === current && c.state === 'testing'} aria-current={c.core === current && c.state === 'testing' ? 'true' : undefined}>
-      <b>{t('performance.core.label', { core: c.core })}</b><span>{stateText(c.state)}{#if notes[c.core]} · {notes[c.core]}{/if}</span>
+      <b>{t('performance.core.label', { core: c.core })}</b><span>{stateText(c.state)}{#if notes[c.core]}{' · '}{notes[c.core]}{/if}</span>
     </li>
   {/each}
 </ul>

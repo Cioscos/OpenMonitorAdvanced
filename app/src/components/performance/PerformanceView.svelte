@@ -4,11 +4,11 @@
   import { t } from '../../lib/i18n/index.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
+  import StressWizard from './StressWizard.svelte';
 
   // The Performance view (spec M8 §3.1): the sidebar with the «Stress test» group on the left, the
-  // page on the right. The store is connected only while the view is on screen. The pages
-  // themselves arrive with the wizard (new), the run and result screens (run, result) and the
-  // history (history).
+  // page on the right. The store is connected only while the view is on screen. `new` is the
+  // wizard; the run and result screens (run, result) and the history (history) come next.
   let { backend, page = $bindable('new') }: { backend: Backend; page?: PerformancePage } = $props();
 
   onMount(() => {
@@ -76,6 +76,9 @@
 
   <section class="content" aria-labelledby="performance-page-title">
     <h2 id="performance-page-title">{title}</h2>
+    {#if page === 'new'}
+      <StressWizard {backend} onStarted={() => (page = 'run')} />
+    {/if}
   </section>
 </div>
 

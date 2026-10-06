@@ -1,0 +1,292 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { i18n, t } from '../../lib/i18n/index.svelte';
+import { performanceStore } from '../../lib/performance/performance.svelte';
+import type { Phase, Plan, SettingsPatch, StartRequest, SystemInfo } from '../../lib/types';
+import { makeRunStatus, makeSystemInfo, type FakeBackend } from '../../test/fake-backend';
+import { connectSettings, disconnectSettings } from '../../test/settings';
+import PerformanceView from './PerformanceView.svelte';
+import StressWizard from './StressWizard.svelte';
+
+const MIB = 1024 ** 2;
+
+const phase = (over: Partial<Phase> & Pick<Phase, 'kernel' | 'duration_s'>): Phase => ({
+  alt_kernel: null,
+  isa: 'avx2',
+  size: 'auto',
+  mode: 'steady',
+  placement: 'all_logical',
+  per_core_s: null,
+  both_smt: false,
+  cores: null,
+  patterns: [],
+  stop_on_error: false,
+  ...over,
+});
+
+/** 10 + 20 + 5 minutes: full load, one core at a time, variable. */
+const PLAN: Plan = {
+  seed: 1,
+  ram_bytes: 4 * 1024 * MIB,
+  phases: [
+    phase({ kernel: 'k1', duration_s: 600 }),
+    phase({ kernel: 'k2', duration_s: 1200, size: 'l2', placement: 'core_cycle', per_core_s: 150, cores: [0, 1, 2, 3, 4, 5, 6, 7] }),
+    phase({ kernel: 'k5', duration_s: 300, size: 'l2', mode: 'variable' }),
+  ],
+};
+
+let off: (() => void) | undefined;
+
+beforeEach(() => {
+  localStorage.clear();
+  i18n.locale = 'en';
+});
+afterEach(() => {
+  cleanup();
+  off?.();
+  off = undefined;
+  disconnectSettings();
+});
+
+interface Setup {
+  system?: Partial<SystemInfo>;
+  settings?: SettingsPatch;
+  running?: boolean;
+  /** Renders the whole view instead of the wizard alone. */
+  view?: boolean;
+}
+
+async function setup({ system, settings, running, view }: Setup = {}) {
+  const backend = await connectSettings(settings);
+  backend.performanceSystemInfo = makeSystemInfo(system);
+  backend.performancePlan = structuredClone(PLAN);
+  if (running) backend.performanceStatusValue = makeRunStatus({ state: 'running', sessionId: 'x' });
+  const patches: SettingsPatch[] = [];
+  const update = backend.updateSettings.bind(backend);
+  backend.updateSettings = async (patch) => {
+    patches.push(patch);
+    return update(patch);
+  };
+  const onStarted = vi.fn();
+  if (view) {
+    render(PerformanceView, { backend });
+  } else {
+    off = await performanceStore.connect(backend);
+    render(StressWizard, { backend, onStarted });
+  }
+  await screen.findByRole('radio', { name: 'CPU' });
+  return { backend, patches, onStarted };
+}
+
+const next = () => fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.next') }));
+const back = () => fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.back') }));
+const radio = (name: string) => screen.getByRole('radio', { name }) as HTMLInputElement;
+const preset = (id: string, duration: string) => `${t(`performance.preset.${id}`)} · ${duration}`;
+
+/** Through the first three steps with the defaults, to the summary. */
+async function toSummary(backend: FakeBackend) {
+  await next();
+  await next();
+  await next();
+  await screen.findByRole('heading', { name: t('performance.wizard.step.summary') });
+  await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
+  await screen.findByText(t('performance.wizard.total', { duration: '35 min' }));
+}
+
+const lastPreview = (backend: FakeBackend): StartRequest => backend.performancePreviewRequests.at(-1)!;
+
+test('wizard_walks_four_steps_and_back', async () => {
+  const { backend } = await setup();
+  // 1 · Component: the CPU with its model and size, the RAM with its total and share.
+  expect(radio('CPU').checked).toBe(true);
+  expect(screen.getByText('Fake Ryzen 7 7800X3D')).toBeTruthy();
+  expect(screen.getByText(t('performance.wizard.cpu.detail', { cores: 8, threads: 16 }))).toBeTruthy();
+  expect(radio('RAM').disabled).toBe(false);
+  expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(t('performance.wizard.step.component'));
+  await next();
+  // 2 · Objective: two large tiles with the T4 texts.
+  expect(radio(t('performance.objective.normal')).checked).toBe(true);
+  await fireEvent.click(radio(t('performance.objective.overclock')));
+  await next();
+  // 3 · Duration: the presets of the overclock profile (no «quick»).
+  expect(screen.queryByRole('radio', { name: preset('quick', '5 min') })).toBeNull();
+  expect(radio(preset('standard', '1 h')).checked).toBe(true);
+  await fireEvent.click(radio(preset('night', '8 h')));
+  await next();
+  // 4 · Summary, previewed with the choices.
+  await screen.findByRole('heading', { name: t('performance.wizard.step.summary') });
+  await waitFor(() =>
+    expect(lastPreview(backend)).toEqual({ component: 'cpu', objective: 'overclock', preset: 'night', custom: null, retryCore: null }),
+  );
+  // Back keeps every choice.
+  await back();
+  expect(radio(preset('night', '8 h')).checked).toBe(true);
+  await back();
+  expect(radio(t('performance.objective.overclock')).checked).toBe(true);
+  // Back to normal: «night» does not exist there, the duration falls back to standard.
+  await fireEvent.click(radio(t('performance.objective.normal')));
+  await back();
+  expect(radio('CPU').checked).toBe(true);
+  expect(screen.queryByRole('button', { name: t('performance.wizard.back') })).toBeNull();
+  await next();
+  await next();
+  expect(radio(preset('standard', '30 min')).checked).toBe(true);
+  expect(radio(preset('quick', '5 min'))).toBeTruthy();
+});
+
+test('ram_is_disabled_with_reason_below_budget', async () => {
+  await setup({ system: { ramBudget: 200 * MIB } });
+  expect(radio('RAM').disabled).toBe(true);
+  expect(screen.getByText(t('performance.wizard.ram.low'))).toBeTruthy();
+  expect(radio('CPU').disabled).toBe(false);
+  cleanup();
+  off?.();
+  await setup({ system: { ramBudget: 256 * MIB } });
+  expect(radio('RAM').disabled).toBe(false);
+  expect(screen.queryByText(t('performance.wizard.ram.low'))).toBeNull();
+});
+
+test('no_service_shows_the_warning_but_allows_cpu', async () => {
+  const { backend } = await setup({ system: { serviceConnected: false } });
+  const warning = () => [...document.querySelectorAll('.warn')].map((n) => n.textContent?.trim());
+  expect(warning()).toContain(t('performance.warn.noService'));
+  // The thermal stop in it is a term.
+  expect(document.querySelector('.warn .term')?.textContent?.toLowerCase()).toBe(t('glossary.thermalStop.name').toLowerCase());
+  expect(radio('CPU').disabled).toBe(false);
+  await toSummary(backend);
+  expect(warning()).toContain(t('performance.warn.noService'));
+  expect(screen.getByRole('button', { name: t('performance.wizard.start') })).toHaveProperty('disabled', false);
+});
+
+test('summary_lists_phases_with_terms', async () => {
+  const { backend } = await setup({ system: { hypervisor: true } });
+  await toSummary(backend);
+  const list = screen.getByRole('list', { name: t('performance.wizard.phases') });
+  const rows = within(list).getAllByRole('listitem');
+  expect(rows).toHaveLength(3);
+  const terms = (row: HTMLElement) => [...row.querySelectorAll('.term')].map((n) => n.textContent);
+  expect(terms(rows[0])).toEqual([t('glossary.mode.k1.name'), 'AVX2', t('glossary.mode.steady.name'), t('glossary.mode.allCore.name')]);
+  expect(terms(rows[1])).toEqual([t('glossary.mode.k2.name'), 'AVX2', t('glossary.mode.steady.name'), t('glossary.mode.coreCycle.name')]);
+  expect(terms(rows[2])[2]).toBe(t('glossary.mode.variable.name'));
+  expect(rows[1].textContent).toContain('20 min');
+  // Every term is reachable with Tab.
+  expect(rows[0].querySelector('.term')?.getAttribute('tabindex')).toBe('0');
+  // The warnings: the detected set, the RAM share and the virtual machine.
+  const warnings = document.querySelector('.warnings')!;
+  expect([...warnings.querySelectorAll('.term')].map((n) => n.textContent)).toEqual(
+    expect.arrayContaining(['AVX2', t('glossary.ramShare.name'), t('glossary.vm.name')]),
+  );
+  expect(warnings.textContent).toContain('4.0 GB');
+});
+
+test('customize_rebuilds_the_preview_and_total', async () => {
+  const { backend } = await setup();
+  await toSummary(backend);
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  const panel = screen.getByRole('region', { name: t('performance.wizard.customize') });
+  // One row per kernel of the plan, with its minutes.
+  const k5 = within(panel).getByRole('checkbox', { name: t('glossary.mode.k5.name') }) as HTMLInputElement;
+  expect(k5.checked).toBe(true);
+  expect((within(panel).getByRole('spinbutton', { name: t('performance.custom.minutesOf', { name: t('glossary.mode.k2.name') }) }) as HTMLInputElement).value).toBe('20');
+  // Without K5 the plan is shorter.
+  backend.performancePlan = { ...PLAN, phases: PLAN.phases.slice(0, 2) };
+  await fireEvent.click(k5);
+  await waitFor(() => expect(lastPreview(backend).custom?.modes).toContainEqual({ kernel: 'k5', enabled: false, minutes: null }));
+  await screen.findByText(t('performance.wizard.total', { duration: '30 min' }));
+  // Minutes, set, threads, both SMT threads and the first error go into the same Custom.
+  backend.performancePlan = PLAN;
+  const minutes = within(panel).getByRole('spinbutton', { name: t('performance.custom.minutesOf', { name: t('glossary.mode.k1.name') }) });
+  await fireEvent.input(minutes, { target: { value: '15' } });
+  await fireEvent.change(minutes, { target: { value: '15' } });
+  await fireEvent.click(within(panel).getByRole('radio', { name: 'SSE2' }));
+  await fireEvent.click(within(panel).getByRole('radio', { name: t('performance.custom.threads.onePerCore') }));
+  await fireEvent.click(within(panel).getByRole('checkbox', { name: new RegExp(t('performance.custom.bothSmt')) }));
+  await fireEvent.click(within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') }));
+  await waitFor(() =>
+    expect(lastPreview(backend).custom).toEqual({
+      modes: [
+        { kernel: 'k1', enabled: true, minutes: 15 },
+        { kernel: 'k2', enabled: true, minutes: null },
+        { kernel: 'k5', enabled: false, minutes: null },
+      ],
+      isa: 'sse2',
+      threads: 'onePerCore',
+      bothSmt: true,
+      stopOnFirstError: true,
+    }),
+  );
+  await screen.findByText(t('performance.wizard.total', { duration: '35 min' }));
+  // The debounce sends one preview for a burst of changes, not one per change.
+  expect(backend.performancePreviewRequests.length).toBeLessThan(8);
+});
+
+test('avx512_hidden_when_unsupported', async () => {
+  const { backend } = await setup({ system: { isa: ['avx2', 'sse2'] } });
+  await toSummary(backend);
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  const panel = screen.getByRole('region', { name: t('performance.wizard.customize') });
+  expect(within(panel).getByRole('radio', { name: t('performance.custom.isa.auto') })).toHaveProperty('checked', true);
+  expect(within(panel).getByRole('radio', { name: 'AVX2' })).toBeTruthy();
+  expect(within(panel).queryByRole('radio', { name: 'AVX-512' })).toBeNull();
+  cleanup();
+  off?.();
+  const again = await setup({ system: { isa: ['avx512', 'avx2', 'sse2'] } });
+  await toSummary(again.backend);
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  expect(screen.getByRole('radio', { name: 'AVX-512' })).toBeTruthy();
+});
+
+test('risk_notice_shows_once_then_never', async () => {
+  const { backend, patches } = await setup();
+  await toSummary(backend);
+  const start = () => fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  // Cancelling starts nothing and writes nothing.
+  await start();
+  let dialog = screen.getByRole('dialog', { name: t('performance.risk.title') });
+  expect(dialog.textContent).toContain(t('performance.risk.body'));
+  await fireEvent.click(within(dialog).getByRole('button', { name: t('performance.risk.cancel') }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(backend.performanceStartRequests).toEqual([]);
+  // «Don't show again» and Start: the setting is written and the test starts.
+  await start();
+  dialog = screen.getByRole('dialog', { name: t('performance.risk.title') });
+  await fireEvent.click(within(dialog).getByRole('checkbox', { name: t('performance.risk.dontShow') }));
+  await fireEvent.click(within(dialog).getByRole('button', { name: t('performance.wizard.start') }));
+  await waitFor(() => expect(backend.performanceStartRequests).toHaveLength(1));
+  expect(patches).toEqual([{ performance: { riskNoticeSeen: true } }]);
+  // Seen: no notice any more.
+  cleanup();
+  off?.();
+  const seen = await setup({ settings: { performance: { riskNoticeSeen: true } } });
+  await toSummary(seen.backend);
+  await start();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() => expect(seen.backend.performanceStartRequests).toHaveLength(1));
+  expect(seen.patches).toEqual([]);
+});
+
+test('start_goes_to_the_run_page', async () => {
+  const { backend } = await setup({ view: true, settings: { performance: { riskNoticeSeen: true } } });
+  await toSummary(backend);
+  // A refusal of the shell stays on the page with its reason.
+  backend.performanceStartError = 'oma-load.exe not found';
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  expect((await screen.findByRole('alert')).textContent).toContain('oma-load.exe not found');
+  backend.performanceStartError = null;
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  await screen.findByRole('heading', { name: t('performance.run.title') });
+  expect(backend.performanceStartRequests).toEqual([{ component: 'cpu', objective: 'normal', preset: 'standard', custom: null, retryCore: null }]);
+});
+
+test('start_disabled_while_running', async () => {
+  const { backend, onStarted } = await setup({ running: true, settings: { performance: { riskNoticeSeen: true } } });
+  await toSummary(backend);
+  const start = screen.getByRole('button', { name: t('performance.wizard.start') }) as HTMLButtonElement;
+  expect(start.disabled).toBe(true);
+  expect(screen.getByText(t('performance.wizard.running'))).toBeTruthy();
+  await fireEvent.click(start);
+  expect(backend.performanceStartRequests).toEqual([]);
+  expect(onStarted).not.toHaveBeenCalled();
+  // When the test finishes, Start is back.
+  backend.emitPerformanceStatus(makeRunStatus({ state: 'finished', sessionId: 'x', outcome: 'passed' }));
+  await waitFor(() => expect(start.disabled).toBe(false));
+});

@@ -611,6 +611,7 @@ export class FakeBackend implements Backend {
   performancePlan: Plan = { seed: 1, ram_bytes: 0, phases: [] };
   performanceCalls: string[] = [];
   performanceStartRequests: StartRequest[] = [];
+  performancePreviewRequests: StartRequest[] = [];
   /** Set to reject `performanceStart` with this text instead of starting. */
   performanceStartError: string | null = null;
   readonly performanceStatusListeners = new Set<(status: RunStatus) => void>();
@@ -620,8 +621,9 @@ export class FakeBackend implements Backend {
     return structuredClone(this.performanceSystemInfo);
   }
 
-  async performancePreview(): Promise<Plan> {
+  async performancePreview(request: StartRequest): Promise<Plan> {
     this.performanceCalls.push('performancePreview');
+    this.performancePreviewRequests.push(structuredClone(request));
     return structuredClone(this.performancePlan);
   }
 

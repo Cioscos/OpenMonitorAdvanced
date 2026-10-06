@@ -768,3 +768,24 @@ fn unsupported_alt_kernel_leaves_the_main_one_and_a_panic_skips() {
     assert_eq!(fin.reason, FinishReason::Completed);
     assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("kernel_panic"));
 }
+
+#[test]
+fn k9_needs_two_workers() {
+    let factory = CountFactory::new(0..0);
+    let f = |_: KernelId| Some(&factory as &dyn KernelFactory);
+    let (_, msgs) = run_test(
+        &plan(vec![phase(KernelId::K9, Placement::AllLogical, 60)]),
+        &topology(1, 1),
+        &f,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert!(msgs
+        .iter()
+        .any(|m| matches!(m, LoadMessage::Notice(n) if n.code == "k9_needs_two_cores")));
+    assert_eq!(
+        done(&msgs)[0].skipped.as_deref(),
+        Some("k9_needs_two_cores")
+    );
+}

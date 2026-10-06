@@ -502,6 +502,14 @@ impl Engine<'_, '_> {
         mut cpus: Vec<LogicalCpu>,
         deadline: Instant,
     ) -> End {
+        if pr.spec.kernel == KernelId::K9 {
+            // K9 works in pairs: an odd last worker has no partner and is dropped.
+            cpus.truncate(cpus.len() & !1);
+            if cpus.is_empty() {
+                self.notice(pr, "k9_needs_two_cores", None);
+                return End::Skipped("k9_needs_two_cores");
+            }
+        }
         loop {
             let mut budget = ThreadBudget::for_workers(self.topology, &cpus, self.plan.ram_bytes);
             if let Some(cap) = memo.ram_cap {

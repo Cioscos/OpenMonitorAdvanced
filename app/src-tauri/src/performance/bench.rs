@@ -195,6 +195,10 @@ impl BenchWorker {
             Ok(run) => run,
             Err(failure) => return self.failed(&ctl, &failure),
         };
+        // A priming sample: PDH needs two collections, and the handshake separates them,
+        // so the poll after the launch already has the share (DB7: "all'avvio").
+        let mut busy = self.deps.machine.busy_probe(logical);
+        let _ = busy();
         let (tx, rx) = mpsc::channel();
         let host = match (self.deps.launcher)(tx) {
             Ok(host) => host,
@@ -202,7 +206,6 @@ impl BenchWorker {
         };
         // The handshake already took the `Hello`: the controller gets the version from it.
         let _ = ctl.on_load(&LoadMessage::Hello(host.hello().clone()), self.clock());
-        let mut busy = self.deps.machine.busy_probe(logical);
         let mut r = BenchRun {
             ctl,
             host,
@@ -566,6 +569,51 @@ mod tests {
             BenchState::Stopped
         );
         assert!(rig.toasts.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn busy_share_is_known_from_the_start() {
+        // The first PDH sample gives nothing: it is taken before the launch, so
+        // the poll right after it already has a value (DB7).
+        let machine = FakeMachine {
+            busy: Some(0.5),
+            busy_primes: true,
+            ..Default::default()
+        };
+        let rig = rig_on("bench-busy-prime", scripted(full_run()), machine);
+        let id = rig.runner.start_bench().unwrap();
+        wait_idle(&rig.runner);
+        let s = rig.runner.store().load_score(&id).unwrap().unwrap();
+        assert!(
+            s.flags.contains(&"busy_system".to_string()),
+            "{:?}",
+            s.flags
+        );
+    }
+
+    #[test]
+    fn a_silent_helper_is_hung_and_frees_the_slot() {
+        let rig = rig_with(
+            "bench-hung",
+            scripted(Script {
+                on_run: vec![progress(0)],
+                ..Default::default()
+            }),
+        );
+        let t0 = Instant::now();
+        rig.runner.start_bench().unwrap();
+        while rig.runner.is_running() {
+            assert!(t0.elapsed() < Duration::from_secs(8), "never hung");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let st = rig.runner.bench_status().unwrap();
+        assert_eq!(st.state, BenchState::Failed);
+        assert_eq!(st.error.as_deref(), Some("hung"));
+        assert!(rig.runner.store().list_scores().is_empty());
+        assert!(!rig.bench_mark.load(Ordering::SeqCst));
+        // The slot is free again: a stress test starts (and is shut down at once).
+        assert!(rig.runner.start(request()).is_ok());
+        rig.runner.shutdown(Duration::from_millis(300));
     }
 
     fn assert_no_toast(rig: &Rig) {

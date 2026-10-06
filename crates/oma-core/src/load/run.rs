@@ -23,7 +23,7 @@ const SAMPLE_EVERY_MS: u64 = 5_000;
 const JOURNAL_EVERY_MS: u64 = 30_000;
 const SAVE_EVERY_MS: u64 = 60_000;
 const WHEA_EVERY_MS: u64 = 5_000;
-const SILENT_PIPE_MS: u64 = 5_000;
+pub(crate) const SILENT_PIPE_MS: u64 = 5_000;
 const STOP_GRACE_MS: u64 = 3_000;
 const SLEEP_JUMP_MS: u64 = 1_000;
 const STATUS_EVENTS: usize = 200;
@@ -31,7 +31,7 @@ const MAX_EVENTS: usize = 1_000;
 const FINAL_POLL_MS: u64 = 2_000;
 const TEMP_MISSING_MS: u64 = 10_000;
 /// How long a run may outlast its plan before it counts as hung.
-const OVERRUN_MS: u64 = 120_000;
+pub(crate) const OVERRUN_MS: u64 = 120_000;
 /// `oma-load` exits with this code on an invalid command line or message (`EXIT_USAGE`).
 const LOAD_EXIT_USAGE: i32 = 1;
 const INVALID_PLAN: &str = "performance.start.invalid_plan";

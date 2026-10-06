@@ -4,7 +4,7 @@
 mod catalog;
 mod outcome;
 mod plan;
-mod run;
+pub(crate) mod run;
 mod sensors;
 mod session;
 mod thermal;

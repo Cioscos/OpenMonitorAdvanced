@@ -8,9 +8,10 @@ use oma_ipc::load::{FinishReason, Isa, LoadMessage, PhaseDone};
 use serde::Serialize;
 
 use super::file::{Device, KernelRate, ScoreFile, ScoreSample, Scores, FORMAT};
-use super::plan::{BenchMode, BenchStep};
+use super::plan::{BenchMode, BenchStep, CAP_S, WARMUP_PAUSE_MS};
 use super::score::{median3, per_second_to_units, points, rate, scaling, Baseline, SCALE_POINTS};
 use super::workloads::{BenchKernel, WORKLOADS};
+use crate::load::run::{OVERRUN_MS, SILENT_PIPE_MS};
 use crate::load::{Clock, SensorSample};
 
 const SAMPLE_EVERY_MS: u64 = 5_000;
@@ -102,6 +103,11 @@ pub struct BenchController {
     start_mono: u64,
     mono: u64,
     stop_deadline: Option<u64>,
+    /// The last helper message; a running benchmark silent for longer than
+    /// `SILENT_PIPE_MS` is hung, like a stress test.
+    last_msg: u64,
+    /// The plan's length at its caps: past it plus `OVERRUN_MS`, hung.
+    plan_ms: u64,
     segments: Vec<SegmentState>,
     step: Option<usize>,
     live_points: Option<f64>,
@@ -117,6 +123,13 @@ pub struct BenchController {
 
 impl BenchController {
     pub fn new(steps: Vec<BenchStep>, ctx: BenchContext, now: Clock) -> Self {
+        let plan_ms = steps
+            .iter()
+            .map(|s| {
+                let pause = if s.rep == 0 { WARMUP_PAUSE_MS } else { 0 };
+                u64::from(CAP_S) * 1000 + u64::from(pause)
+            })
+            .sum();
         let mut c = Self {
             segments: vec![SegmentState::Pending; steps.len()],
             steps,
@@ -124,6 +137,8 @@ impl BenchController {
             start_mono: now.mono_ms,
             mono: now.mono_ms,
             stop_deadline: None,
+            last_msg: now.mono_ms,
+            plan_ms,
             step: None,
             live_points: None,
             reps: BTreeMap::new(),
@@ -169,6 +184,7 @@ impl BenchController {
             return vec![];
         }
         self.tick(now);
+        self.last_msg = self.mono;
         if self.state == BenchState::Starting {
             self.state = BenchState::Running;
         }
@@ -298,8 +314,20 @@ impl BenchController {
         vec![BenchAction::SendStop]
     }
 
-    /// Kills a process that ignores our stop request.
+    /// Kills a process that ignores our stop request, or that is hung: silent
+    /// for more than `SILENT_PIPE_MS`, or running past its plan by `OVERRUN_MS`.
+    /// Call it on every tick.
     pub fn on_clock(&mut self, now: Clock) -> Vec<BenchAction> {
+        if self.state == BenchState::Running {
+            self.tick(now);
+            let silent = self.mono - self.last_msg > SILENT_PIPE_MS;
+            let overrun = self.mono - self.start_mono > self.plan_ms + OVERRUN_MS;
+            if silent || overrun {
+                let mut out = vec![BenchAction::Kill];
+                out.extend(self.end_failed("hung"));
+                return out;
+            }
+        }
         if self.state != BenchState::Stopping {
             return vec![];
         }
@@ -788,5 +816,67 @@ mod tests {
         assert_eq!(c.status().step, Some(2));
         assert_eq!(c.status().segments.len(), 48);
         assert_eq!(c.status().single, None);
+    }
+
+    #[test]
+    fn silent_pipe_kills_and_fails_without_saving() {
+        let mut c = ctl();
+        c.on_load(&progress(0, None), clock(1000));
+        // Within the silence limit: nothing.
+        assert!(c.on_clock(clock(1000 + SILENT_PIPE_MS)).is_empty());
+        let a = c.on_clock(clock(1001 + SILENT_PIPE_MS));
+        assert_eq!(
+            a,
+            vec![
+                BenchAction::Kill,
+                BenchAction::Finished(BenchEnd::Failed("hung".into()))
+            ]
+        );
+        let st = c.status();
+        assert_eq!(st.state, BenchState::Failed);
+        assert_eq!(st.error.as_deref(), Some("hung"));
+        assert!(c.on_clock(clock(60_000)).is_empty());
+    }
+
+    #[test]
+    fn a_message_resets_the_silence() {
+        let mut c = ctl();
+        c.on_load(&progress(0, None), clock(0));
+        c.on_load(&progress(0, None), clock(4_000));
+        assert!(c.on_clock(clock(8_000)).is_empty());
+    }
+
+    #[test]
+    fn silence_while_stopping_is_not_hung() {
+        let mut c = ctl();
+        c.on_load(&progress(0, None), clock(0));
+        c.on_user_stop(clock(100));
+        // The stop grace (3 s) ends it as stopped, never as hung.
+        let a = c.on_clock(clock(SILENT_PIPE_MS + 1_000));
+        assert_eq!(
+            a,
+            vec![BenchAction::Kill, BenchAction::Finished(BenchEnd::Stopped)]
+        );
+    }
+
+    #[test]
+    fn running_past_the_plan_is_hung() {
+        let mut c = ctl();
+        // 48 caps of 30 s plus 12 warm-up pauses of 2 s.
+        let plan_ms = 48 * 30_000 + 12 * 2_000;
+        let mut t = 0;
+        while t <= plan_ms + OVERRUN_MS {
+            c.on_load(&progress(0, None), clock(t));
+            assert!(c.on_clock(clock(t)).is_empty(), "at {t}");
+            t += 1_000;
+        }
+        c.on_load(&progress(0, None), clock(t));
+        assert_eq!(
+            c.on_clock(clock(t)),
+            vec![
+                BenchAction::Kill,
+                BenchAction::Finished(BenchEnd::Failed("hung".into()))
+            ]
+        );
     }
 }

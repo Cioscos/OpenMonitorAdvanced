@@ -1036,6 +1036,8 @@ pub(crate) mod tests {
         pub(crate) battery: Option<bool>,
         /// What each poll of the other processes' CPU share gives.
         pub(crate) busy: Option<f64>,
+        /// The first poll gives `None`, like the real PDH counter.
+        pub(crate) busy_primes: bool,
     }
 
     impl Machine for FakeMachine {
@@ -1061,8 +1063,14 @@ pub(crate) mod tests {
             self.battery
         }
         fn busy_probe(&self, _logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
-            let busy = self.busy;
-            Box::new(move || busy)
+            let (busy, mut first) = (self.busy, self.busy_primes);
+            Box::new(move || {
+                if std::mem::take(&mut first) {
+                    None
+                } else {
+                    busy
+                }
+            })
         }
     }
 

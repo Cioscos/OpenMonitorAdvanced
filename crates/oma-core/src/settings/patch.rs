@@ -138,6 +138,16 @@ const SCHEMA: &[(&str, Node)] = &[
         ]),
     ),
     (
+        "performance",
+        Node::Object(&[
+            ("thermalStop", leaf()),
+            ("cpuStopC", nullable()),
+            ("stopOnFirstError", nullable()),
+            ("ramSharePercent", leaf()),
+            ("riskNoticeSeen", leaf()),
+        ]),
+    ),
+    (
         "rules",
         Node::Object(&[
             (
@@ -1001,5 +1011,51 @@ mod tests {
         );
         let cleared = apply_patch(&set, &json!({"overlay": {"editorBounds": null}})).unwrap();
         assert_eq!(cleared.overlay.editor_bounds, None);
+    }
+
+    #[test]
+    fn patch_rejects_out_of_range_with_settings_error_range() {
+        let base = Settings::default();
+        for (patch, want) in [
+            (
+                json!({"performance": {"cpuStopC": 120}}),
+                err("performance.cpuStopC", "settings.error.range"),
+            ),
+            (
+                json!({"performance": {"cpuStopC": 59}}),
+                err("performance.cpuStopC", "settings.error.range"),
+            ),
+            (
+                json!({"performance": {"ramSharePercent": 91}}),
+                err("performance.ramSharePercent", "settings.error.range"),
+            ),
+            (
+                json!({"performance": {"ramSharePercent": 9}}),
+                err("performance.ramSharePercent", "settings.error.range"),
+            ),
+            (
+                json!({"performance": {"thermalStop": null}}),
+                err("performance.thermalStop", "settings.error.null"),
+            ),
+            (
+                json!({"performance": {"nope": 1}}),
+                err("performance.nope", "settings.error.unknownField"),
+            ),
+        ] {
+            assert_eq!(apply_patch(&base, &patch), Err(want), "{patch}");
+        }
+        let ok = apply_patch(
+            &base,
+            &json!({"performance": {"cpuStopC": 100, "stopOnFirstError": true, "ramSharePercent": 50}}),
+        )
+        .unwrap();
+        assert_eq!(ok.performance.cpu_stop_c, Some(100));
+        let back = apply_patch(
+            &ok,
+            &json!({"performance": {"cpuStopC": null, "stopOnFirstError": null}}),
+        )
+        .unwrap();
+        assert_eq!(back.performance.cpu_stop_c, None);
+        assert_eq!(back.performance.stop_on_first_error, None);
     }
 }

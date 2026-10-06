@@ -7,6 +7,7 @@
   let {
     id,
     label,
+    term = null,
     description = null,
     checked,
     disabled = false,
@@ -17,6 +18,8 @@
   }: {
     id: string;
     label: string;
+    /** A glossary term the label explains with a tooltip. */
+    term?: string | null;
     description?: string | null;
     checked: boolean;
     disabled?: boolean;
@@ -32,7 +35,7 @@
   );
 </script>
 
-<Field {id} {label} {description} {error} {notes}>
+<Field {id} {label} {term} {description} {error} {notes}>
   {#snippet control()}
     <button
       type="button"

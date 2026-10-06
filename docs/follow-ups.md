@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M7d).
+Updated at the end of every milestone (last update: M8a1).
 
 ## Open: code
 
@@ -38,6 +38,76 @@ Updated at the end of every milestone (last update: M7d).
 | Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
 | The disk critical warning exists only for NVMe (the DIT `CriticalWarning` attribute and the core's NVMe health log). A SATA rule from `SmartInfo.DiskStatus == Bad` (a CrystalDiskInfo-style heuristic, S1 §2) would be a separate rule, to be discussed. | `service/OpenMonitorAdvanced.Service/Sensors/` | to discuss |
 | The machine schema fixture `crates/oma-core/tests/fixtures/this-machine-schema.json` holds this PC's Windows volume GUIDs and network adapter GUID (no serials or MACs). Regenerate it with hashed ids before the repository is pushed. | `crates/oma-core/tests/fixtures/` | before any push |
+
+## Open: stress test (M8a1)
+
+Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a1-stress-cpu-ram.md`, tasks A1-A26; the branch `feat/m8a1-stress-cpu` is not merged: it waits for the live checks below).
+
+- M8a2, the CPU benchmark (spec M8 §4.6), has no plan yet; M8b (GPU), M8c (disk) and M8d (leaderboard) follow the spec.
+- The installer paths of the stress test (`oma-load.exe` installed and signed, removed by the uninstaller) were never run: NSIS compiles only at the final verification and the paths need a VM or Windows Sandbox, as for M7c/M7d.
+- Core numbering: «Core N» of the app is compared with Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer only in check P11.
+- K1 uses 10 accumulators (FIRESTARTER 12/27), so AVX-512 is slightly latency-bound; K2 working set is 48·N against 16·N in DA9; block times of K1 (10/8/2.5 ms) to recheck live. `crates/oma-load/src/kernels/`; when the benchmark touches them.
+- `Region::alloc` commits 1 GiB chunks until failure under an arbitrary 4 TiB cap: replace the cap with a pre-check against `GlobalMemoryStatusEx.ullAvailPageFile`. `crates/oma-load/src/kernels/`; before merge if cheap.
+- A hung kernel build or reference is masked by the 1 s `Progress` of `wait()` (no deadline): a wait limit of deadline + 30 s then `failed` would close it. `crates/oma-load/src/engine/`; before merge if cheap.
+- `crash_evidence` keeps the 100 oldest events, so a WHEA flood can cut a BugCheck or Kernel-Power; one failed `EvtRender` aborts the whole query. `crates/oma-win/src/eventlog.rs`; before merge if cheap.
+- A WHEA of level 18 during a session does not change the outcome; the history lists up to 500 sessions by parsing each (a summary index later). `app/src-tauri/src/performance/`; when touched.
+- Accessibility: `QuitDialog` and `RiskNotice` have no focus trap or focus restore; a `Term` inside a radio label may toggle the radio when clicked. `app/src/components/performance/`; when touched.
+- Handshake failure paths of the host (timeout, incompatible, no topology, early exit) are not tested end to end; a spawn failure saves no `failed_to_start` session. `app/src-tauri/src/performance/`; when touched.
+- Hypervisor flag: the Hyper-V root partition (VBS on bare metal) is not flagged as a VM; a nested root with the same privilege would not be. `crates/oma-win/src/topology.rs`; accepted.
+
+## Manual checks owed after M8a1 (plan task A28)
+
+To run with the user, one block at a time, before merging into `main`. Heavy loads only with the user's go. Build first (normal shell, repository root):
+
+```powershell
+cargo build -p oma-load
+```
+
+For P3 only, in a shell of its own, set the fault injection first (debug builds only), then start the app in that same shell:
+
+```powershell
+$env:OMA_LOAD_INJECT='k5:2'
+```
+
+```powershell
+cd app; pnpm tauri dev
+```
+
+The variable persists in that shell: the app started from it injects the fault in every test. Run P1, P2 and P4-P8 from a new shell without it (just `cd app; pnpm tauri dev`), or after `Remove-Item Env:OMA_LOAD_INJECT` and a restart of the app.
+
+| # | Check | Expected |
+|---|---|---|
+| P1 | CPU, normal check, Quick (5 min) | Regular end, "Passed", session in the history, final toast. |
+| P2 | RAM, normal check, Quick (15 min) | Regular end; the RAM quota in the summary is the one used (Task Manager). |
+| P3 | Overclock stability, Standard, stopped after the per-core cycle, with the fault injected (command below) | "Unstable · core 2" with clock and temperature; "Retry only core 2" starts the short plan. |
+| P4 | "Stop and save" halfway | "Stopped by you", session saved. |
+| P5 | "Stop the test" from the tray | Same as P4. |
+| P6 | Close the window during a test | The test goes on, toast "The test continues in the tray", final toast with the verdict, a click opens the result. |
+| P7 | Thermal stop with `cpuStopC` = 60 | "Stopped: temperature at N °C" within two readings above the threshold. |
+| P8 | "Exit" from the tray during a test | Confirmation question; "Stop and exit" saves `stopped_user` and exits; `oma-load.exe` is gone from Task Manager. |
+| P9 | Optional, only if the user wants: forced restart during a test | After the restart, toast and result "Interrupted by a system crash during ...", with the event log entries. |
+| P10 | WHEA readable | No "Unreadable hardware errors" warning on this PC. |
+| P11 | Core numbering | "Core N" of the app against Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer, if the user opens it. |
+| P12 | Tooltips | Every technical term in the wizard, during the test, in the result, history and settings shows its explanation on hover and on Tab. |
+| P13 | Budget during a test | `scripts/measure-footprint.ps1` (release build, no `pnpm tauri dev` running) with a CPU Quick test started by hand: window < 200 MB; `oma-load` noted. |
+| P14 | No service (stopped by the user) | The CPU stress starts with the warning; no thermal stop; the chart shows the note. |
+| P15 | End `oma-app.exe` in Task Manager during a test | `oma-load.exe` disappears at once; after a restart of the app the result reads "Interrupted: the app closed during the test" («Interrotto: l'app si è chiusa durante il test»), and the journal is gone. |
+| P16 | Sleep from Start during a test, then wake the PC | The session ends as `suspended` ("Interrupted by sleep"), never `hung`. |
+| P17 | One CPU run on the Balanced power plan (parked cores) | The per-core cycle tests every core, parked ones included (the hard affinity wakes them); no phase ends skipped as `no_cpu`. |
+
+P7: set the threshold in the stress settings (`cpuStopC` = 60), then run any CPU test.
+
+P13: `scripts/measure-footprint.ps1` starts the release build itself, so close any `pnpm tauri dev` instance first, then (normal shell, repository root):
+
+```powershell
+pwsh scripts/measure-footprint.ps1
+```
+
+Start the CPU Quick test by hand in the app the script launched and note the figures of the `oma-load` process (Task Manager) next to the window figure.
+
+P15 and P16 end a running test on purpose: ask the user first. P17: switch to the Balanced plan in Settings > System > Power, then run a CPU Overclock stability test (Standard) and watch the core grid.
+
+P9 is a forced restart: ask the user first. Results go in this file and in the project memory (`m8a1-followups.md`); then `superpowers:finishing-a-development-branch` (whole-branch review, local merge, no push unless asked).
 
 ## Open: minor items from the M5b reviews
 

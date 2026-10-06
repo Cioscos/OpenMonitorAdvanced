@@ -55,12 +55,14 @@ BeforeAll {
             Plugins   = @()
             Service   = Join-Path $root 'target\installer-payload\service\oma-service.exe'
             Overlay   = Join-Path $root 'target\installer-payload\overlay\oma-overlay.exe'
+            Load      = Join-Path $root 'target\installer-payload\load\oma-load.exe'
             Context   = New-Context
         }
         Write-Fake $r.App 'app patched by tauri'
         Write-Fake $r.Setup 'setup of the first pass'
         Write-Fake $r.Service 'service unsigned'
         Write-Fake $r.Overlay 'overlay unsigned'
+        Write-Fake $r.Load 'load unsigned'
         $r.Plugins = foreach ($p in $pluginNames) {
             $full = Join-Path $r.PluginDir $p
             Write-Fake $full "plugin $p"
@@ -93,9 +95,10 @@ BeforeAll {
         Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Overlay
+        Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Load
     }
 
-    function New-SignedDir($r, [string[]]$Names = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe')) {
+    function New-SignedDir($r, [string[]]$Names = @('oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe')) {
         $dir = Join-Path (Split-Path $r.Root) ('returned-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         foreach ($n in $Names) { Write-Fake (Join-Path $dir $n) "signed $n" }
         $dir
@@ -157,6 +160,7 @@ Describe 'Initialize-OmaSigningState' {
         $m.expected.setupName | Should -Be 'OpenMonitor Advanced_0.3.0_x64-setup.exe'
         $m.expected.service | Should -Be $r.Service
         $m.expected.overlay | Should -Be $r.Overlay
+        $m.expected.load | Should -Be $r.Load
         @($m.collect).Count | Should -Be 0
         @($m.apply).Count | Should -Be 0
 
@@ -293,6 +297,19 @@ Describe 'Invoke-OmaSignShim collect' {
         { Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $other } | Should -Throw
     }
 
+    It 'register-payload accepts oma-load.exe' {
+        Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Load
+        $c = @((Read-Manifest $r).collect)
+        $c.Count | Should -Be 1
+        $c[0].role | Should -Be 'load'
+        $c[0].name | Should -Be 'oma-load.exe'
+        $c[0].path | Should -Be $r.Load
+        $c[0].sha256 | Should -BeExactly (Get-Sha 'load unsigned')
+        Get-OmaSha256 (Join-Path $r.State 'unsigned\oma-load.exe') | Should -BeExactly (Get-Sha 'load unsigned')
+        { Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Load } |
+            Should -Throw -ExpectedMessage 'duplicate load call'
+    }
+
     It 'register-payload accepts oma-overlay.exe and oma-service.exe only' {
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Overlay
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
@@ -310,7 +327,7 @@ Describe 'Invoke-OmaSignShim collect' {
             Should -Throw -ExpectedMessage 'duplicate overlay call'
 
         # Anything else, even with one of the two names or from the payload folder, is refused.
-        foreach ($rel in 'target\release\oma-overlay.exe', 'target\installer-payload\service\oma-overlay.exe',
+        foreach ($rel in 'target\release\oma-overlay.exe', 'target\installer-payload\service\oma-overlay.exe', 'target\installer-payload\overlay\oma-load.exe',
             'target\installer-payload\PawnIO_setup.exe', 'target\installer-payload\presentmon\PresentMon-2.6.0-x64.exe') {
             $odd = Join-Path $r.Root $rel
             Write-Fake $odd 'not a payload exe'
@@ -338,6 +355,7 @@ Describe 'Invoke-OmaSignShim collect' {
         Invoke-OmaSignShim -Mode collect -StateRoot $r.State -ExpectedContext $r.Context -Path $r.SetupArg
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Service
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Overlay
+        Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Load
         Import-FakeSigned $r
         Write-Fake (Join-Path $r.PluginDir 'System.dll') 'a different System.dll'
         { Invoke-OmaSignShim -Mode apply -StateRoot $r.State -ExpectedContext $r.Context -Path (Join-Path $r.PluginDir 'System.dll') } |
@@ -483,17 +501,18 @@ Describe 'Import-OmaSignedFiles' {
         Invoke-CollectPass $r
     }
 
-    It 'import-signed requires the four signed files' {
+    It 'import-signed requires the five signed files' {
         $three = New-SignedDir $r @('oma-app.exe', 'uninstall.exe', 'oma-service.exe')
         { Import-OmaSignedFiles -StateRoot $r.State -From $three } |
-            Should -Throw -ExpectedMessage '*exactly oma-app.exe, uninstall.exe, oma-service.exe, oma-overlay.exe*missing: oma-overlay.exe*'
+            Should -Throw -ExpectedMessage '*exactly oma-app.exe, uninstall.exe, oma-service.exe, oma-overlay.exe, oma-load.exe*missing: oma-overlay.exe, oma-load.exe*'
         Get-ChildItem -LiteralPath (Join-Path $r.State 'signed') | Should -BeNullOrEmpty
 
         Import-FakeSigned $r
         $s = (Read-Manifest $r).signed
-        ($s.PSObject.Properties.Name | Sort-Object) | Should -Be @('oma-app.exe', 'oma-overlay.exe', 'oma-service.exe', 'uninstall.exe')
+        ($s.PSObject.Properties.Name | Sort-Object) | Should -Be @('oma-app.exe', 'oma-load.exe', 'oma-overlay.exe', 'oma-service.exe', 'uninstall.exe')
         $s.'oma-overlay.exe' | Should -BeExactly (Get-Sha 'signed oma-overlay.exe')
         Get-OmaSha256 (Join-Path $r.State 'signed\oma-overlay.exe') | Should -BeExactly (Get-Sha 'signed oma-overlay.exe')
+        $s.'oma-load.exe' | Should -BeExactly (Get-Sha 'signed oma-load.exe')
     }
 
     It 'import-signed needs the overlay in the collect pass' {
@@ -502,14 +521,15 @@ Describe 'Import-OmaSignedFiles' {
         Invoke-OmaSignShim -Mode collect -StateRoot $r2.State -ExpectedContext $r2.Context -Path $r2.App
         Invoke-OmaSignShim -Mode collect -StateRoot $r2.State -ExpectedContext $r2.Context -Path (New-Uninstaller)
         Register-OmaPayload -StateRoot $r2.State -ExpectedContext $r2.Context -Path $r2.Service
+        Register-OmaPayload -StateRoot $r2.State -ExpectedContext $r2.Context -Path $r2.Load
         { Import-OmaSignedFiles -StateRoot $r2.State -From (New-SignedDir $r2) } |
             Should -Throw -ExpectedMessage '*the collect pass has no overlay*'
     }
 
     It 'import_signed_rejects_extra_or_missing_files' {
-        $missing = New-SignedDir $r @('oma-app.exe', 'oma-service.exe', 'oma-overlay.exe')
+        $missing = New-SignedDir $r @('oma-app.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe')
         { Import-OmaSignedFiles -StateRoot $r.State -From $missing } | Should -Throw -ExpectedMessage '*uninstall.exe*'
-        $extra = New-SignedDir $r @('oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'PawnIO_setup.exe')
+        $extra = New-SignedDir $r @('oma-app.exe', 'uninstall.exe', 'oma-service.exe', 'oma-overlay.exe', 'oma-load.exe', 'PawnIO_setup.exe')
         { Import-OmaSignedFiles -StateRoot $r.State -From $extra } | Should -Throw -ExpectedMessage '*PawnIO_setup.exe*'
         $nested = New-SignedDir $r
         New-Item -ItemType Directory (Join-Path $nested 'sub') | Out-Null
@@ -519,7 +539,7 @@ Describe 'Import-OmaSignedFiles' {
 
         Import-FakeSigned $r
         $s = (Read-Manifest $r).signed
-        ($s.PSObject.Properties.Name | Sort-Object) | Should -Be @('oma-app.exe', 'oma-overlay.exe', 'oma-service.exe', 'uninstall.exe')
+        ($s.PSObject.Properties.Name | Sort-Object) | Should -Be @('oma-app.exe', 'oma-load.exe', 'oma-overlay.exe', 'oma-service.exe', 'uninstall.exe')
         $s.'oma-service.exe' | Should -BeExactly (Get-Sha 'signed oma-service.exe')
         Get-OmaSha256 (Join-Path $r.State 'signed\uninstall.exe') | Should -BeExactly (Get-Sha 'signed uninstall.exe')
         { Import-FakeSigned $r } | Should -Throw
@@ -551,6 +571,9 @@ Describe 'Assert-OmaSigningPass' {
         { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*overlay*'
         Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Overlay
+        { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
+            Should -Throw -ExpectedMessage '*load*'
+        Register-OmaPayload -StateRoot $r.State -ExpectedContext $r.Context -Path $r.Load
         { Assert-OmaSigningPass -RepoRoot $r.Root -StateRoot $r.State -Pass collect -ExpectedContext $r.Context } |
             Should -Throw -ExpectedMessage '*NSISdl.dll*'
     }
@@ -728,7 +751,7 @@ Describe 'sign-shim.ps1' {
             $x = Invoke-OmaNative -FilePath $sc.cmd -ArgumentList $a -WorkingDirectory $elsewhere -AllowFailure
             $x.ExitCode | Should -Be 0 -Because "$f -> $($x.Stderr)"
         }
-        foreach ($exe in $r.Service, $r.Overlay) {
+        foreach ($exe in $r.Service, $r.Overlay, $r.Load) {
             $res = Invoke-ShimScript (@('-Mode', 'register-payload', '-StateRoot', $r.State, '-Path', $exe) + $ctxArgs) $elsewhere
             $res.ExitCode | Should -Be 0 -Because $res.Stderr
             $res.Stdout | Should -BeLike "*sign-shim register-payload: $(Split-Path -Leaf $exe) *"

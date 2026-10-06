@@ -188,12 +188,12 @@ pub(crate) fn local_now(now_ms: u64) -> LocalTime {
 }
 
 #[cfg(windows)]
-fn documents_dir() -> Option<PathBuf> {
+pub(crate) fn documents_dir() -> Option<PathBuf> {
     oma_win::known_folder::documents_dir().ok()
 }
 
 #[cfg(not(windows))]
-fn documents_dir() -> Option<PathBuf> {
+pub(crate) fn documents_dir() -> Option<PathBuf> {
     None
 }
 

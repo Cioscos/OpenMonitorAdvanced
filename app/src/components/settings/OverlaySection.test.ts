@@ -52,7 +52,7 @@ test('section order includes overlay between log and sources', async () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((b) => b.textContent?.trim());
-  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'benchmark', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
+  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'benchmark', 'performance', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
   await fireEvent.click(within(nav).getByRole('button', { name: t('settings.section.overlay') }));
   expect(screen.getByRole('switch', { name: t('overlay.enabled') })).toBeTruthy();
 });

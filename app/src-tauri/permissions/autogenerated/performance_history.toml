@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-history"
+description = "Enables the performance_history command without any pre-configured scope."
+commands.allow = ["performance_history"]
+
+[[permission]]
+identifier = "deny-performance-history"
+description = "Denies the performance_history command without any pre-configured scope."
+commands.deny = ["performance_history"]

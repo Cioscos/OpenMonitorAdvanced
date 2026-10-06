@@ -43,6 +43,7 @@
     store,
     backend,
     rate = 'bytes',
+    fixedWindow,
   }: {
     /** Section id; parents re-key the component when it changes. */
     sectionId: string;
@@ -54,6 +55,8 @@
     backend: Backend;
     /** How `bytes_per_second` series are drawn: 'bits' on network pages when so chosen. */
     rate?: ThroughputUnit;
+    /** A window in seconds that the user cannot change (the stress test's 10 minutes); not saved. */
+    fixedWindow?: number;
   } = $props();
 
   const HEIGHT = 260;
@@ -61,7 +64,7 @@
   const DOT_RADIUS = 3;
 
   const candidateIds = $derived(sensors.map((s) => s.id));
-  let windowSeconds = $state<WindowSeconds>(loadWindow() ?? DEFAULT_WINDOW);
+  let windowSeconds = $state<number>(untrack(() => fixedWindow) ?? loadWindow() ?? DEFAULT_WINDOW);
   let chosen = $state<string[]>(untrack(() => initialSeries(loadSeries(sectionId), candidateIds, defaults, schema)));
   const selected = $derived(fitSelection(chosen, candidateIds, schema));
   const selectionKey = $derived(selected.join('\n'));
@@ -388,7 +391,7 @@
     saveSeries(sectionId, chosen);
   }
 
-  async function reseed(ids: string[], seconds: WindowSeconds) {
+  async function reseed(ids: string[], seconds: number) {
     const token = ++generation;
     const revision = schema.revision;
     const previousEdge = viewportRevision === revision ? viewport.range(performance.now())?.max : undefined;
@@ -662,13 +665,15 @@
 
 <section class="chart">
   <div class="controls">
-    <div class="windows" role="group" aria-label={t('advanced.chart.window.label')}>
-      {#each WINDOWS as w (w)}
-        <button type="button" aria-pressed={windowSeconds === w} class:on={windowSeconds === w} onclick={() => chooseWindow(w)}>
-          {t(`advanced.chart.window.${w}`)}
-        </button>
-      {/each}
-    </div>
+    {#if fixedWindow === undefined}
+      <div class="windows" role="group" aria-label={t('advanced.chart.window.label')}>
+        {#each WINDOWS as w (w)}
+          <button type="button" aria-pressed={windowSeconds === w} class:on={windowSeconds === w} onclick={() => chooseWindow(w)}>
+            {t(`advanced.chart.window.${w}`)}
+          </button>
+        {/each}
+      </div>
+    {/if}
     <details class="picker">
       <summary>{t('advanced.chart.series')} · {selected.length}/{MAX_SERIES}</summary>
       <p class="hint">{t('advanced.chart.maxSeries')}</p>

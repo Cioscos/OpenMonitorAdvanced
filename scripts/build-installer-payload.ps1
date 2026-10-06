@@ -21,10 +21,11 @@
   4. Checks that the publish output holds nothing but oma-service.exe (and its .pdb), since the
      installer copies only the exe, and that oma-service.exe exists and carries the expected
      metadata: ProductName "OpenMonitor Advanced", ProductVersion X.Y.Z, FileVersion X.Y.Z.0.
-  4b. `cargo build --release --locked -p oma-overlay` and stages target/release/oma-overlay.exe as
-     overlay/oma-overlay.exe (plan M7c DP7; oma.nsh installs it as $INSTDIR\oma-overlay.exe),
+  4b. `cargo build --release --locked -p oma-overlay` and `-p oma-load`, and stages
+     target/release/oma-overlay.exe as overlay/oma-overlay.exe (plan M7c DP7) and oma-load.exe as
+     load/oma-load.exe (M8a1; oma.nsh installs them as $INSTDIR\oma-overlay.exe and $INSTDIR\oma-load.exe),
      after removing the previous copy, with the same metadata check as step 4 (FileVersion X.Y.Z,
-     like the app). The logic lives in scripts/lib/OmaOverlayPayload.psm1 (Save-OmaOverlayExe).
+     like the app). The logic lives in scripts/lib/OmaOverlayPayload.psm1 (Save-OmaHelperExe).
   5. Downloads PawnIO_setup.exe 2.2.0 (or reuses the cached copy) and verifies its SHA-256
      against the pinned hash (app/src-tauri/nsis/pawnio.sha256, the single source also read by
      oma.nsh at compile time) and its Authenticode signature (Valid, pinned signer). The pins
@@ -47,7 +48,7 @@
 .PARAMETER CargoTargetDir
   Cargo's target directory: CARGO_TARGET_DIR when set, else target/ in the repository.
 .PARAMETER OverlayOnly
-  Only step 4b: leaves the service payload, PawnIO and PresentMon alone. For tests.
+  Only step 4b (overlay and load generator): leaves the service payload, PawnIO and PresentMon alone. For tests.
 .PARAMETER PawnIoOnly
   Only step 5: leaves the service payload, the overlay and PresentMon alone. For tests.
 .PARAMETER PawnIoSource
@@ -174,16 +175,18 @@ if ($all) {
     Write-Host "$($only[0]) only: the other parts of the payload are left as they are"
 }
 
-# --- 4b. overlay process ----------------------------------------------------------------------
+# --- 4b. helper processes: overlay (M7c) and load generator (M8a1) -----------------------------
 if ($all -or $OverlayOnly) {
     $appVersion = (Get-Content -Raw (Join-Path $repoRoot 'app\src-tauri\tauri.conf.json') | ConvertFrom-Json).version
-    try {
-        $overlay = Save-OmaOverlayExe -CargoExe $CargoExe -RepoRoot $repoRoot -TargetDir $CargoTargetDir `
-            -Destination (Join-Path $OutputRoot 'overlay\oma-overlay.exe') -Version $appVersion
-    } catch {
-        Fail $_.Exception.Message
+    foreach ($helper in @(@('oma-overlay', 'overlay'), @('oma-load', 'load'))) {
+        try {
+            $staged = Save-OmaHelperExe -Package $helper[0] -CargoExe $CargoExe -RepoRoot $repoRoot -TargetDir $CargoTargetDir `
+                -Destination (Join-Path $OutputRoot "$($helper[1])\$($helper[0]).exe") -Version $appVersion
+        } catch {
+            Fail $_.Exception.Message
+        }
+        Write-Host ("{0}.exe {1}, {2:n1} MB" -f $helper[0], $staged.FileVersion, ((Get-Item -LiteralPath $staged.Path).Length / 1MB))
     }
-    Write-Host ("oma-overlay.exe {0}, {1:n1} MB" -f $overlay.FileVersion, ((Get-Item -LiteralPath $overlay.Path).Length / 1MB))
 }
 
 # --- 5. PawnIO setup --------------------------------------------------------------------------

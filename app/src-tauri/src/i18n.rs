@@ -119,6 +119,34 @@ pub const RUST_KEYS: &[&str] = &[
     "log.hotkey.failed",
     "updates.toast.title",
     "updates.toast.body",
+    "performance.start.missing",
+    "performance.start.spawn",
+    "performance.start.timeout",
+    "performance.start.foreign_client",
+    "performance.start.incompatible",
+    "performance.start.no_topology",
+    "performance.start.nothing_ran",
+    "performance.start.invalid_plan",
+    "performance.outcome.passed",
+    "performance.outcome.marginal",
+    "performance.outcome.errors",
+    "performance.outcome.errors_core",
+    "performance.outcome.crashed",
+    "performance.outcome.crashed_app",
+    "performance.outcome.hung",
+    "performance.outcome.system_crash",
+    "performance.outcome.stopped_user",
+    "performance.outcome.stopped_thermal",
+    "performance.outcome.suspended",
+    "performance.outcome.failed_to_start",
+    "performance.toast.title",
+    "performance.toast.recovered",
+    "tray.performance.stop",
+    "tray.performance.open",
+    "tray.performance.tooltip",
+    "performance.objective.normal",
+    "performance.objective.overclock",
+    "performance.closeToTray",
 ];
 
 type Catalog = HashMap<String, String>;
@@ -255,6 +283,14 @@ mod tests {
         // Distinct texts in the two languages prove the Italian catalog is read.
         assert_eq!(t(Lang::It, "tray.viewAdvanced", &[]), "Vista Avanzata");
         assert_eq!(t(Lang::En, "tray.viewSimple", &[]), "Simple view");
+        assert_eq!(
+            t(
+                Lang::It,
+                "performance.outcome.errors_core",
+                &[("core", "2")]
+            ),
+            "Instabile · core 2"
+        );
     }
 
     #[test]

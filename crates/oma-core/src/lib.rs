@@ -7,6 +7,7 @@ pub mod format;
 pub mod frames;
 pub mod history;
 pub mod hotkey;
+pub mod load;
 pub mod merge;
 pub mod model;
 pub mod overlay;

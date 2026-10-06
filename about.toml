@@ -44,3 +44,6 @@ accepted = ["GPL-3.0-or-later"]
 
 [oma-overlay]
 accepted = ["GPL-3.0-or-later"]
+
+[oma-load]
+accepted = ["GPL-3.0-or-later"]

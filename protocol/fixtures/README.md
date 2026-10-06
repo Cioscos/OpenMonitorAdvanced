@@ -220,3 +220,16 @@ byte-for-byte and decode back to the reference messages.
 `hello.msgpack` starts with `82 a4 74 79 70 65` (a 2-entry fixmap, then the
 fixstr `"type"`), as expected for the `{"type": "hello", "body": {...}}`
 envelope.
+
+## `load/` (app <-> `oma-load.exe`, load protocol v1)
+
+The stress-test helper protocol (`crates/oma-ipc/src/load.rs`) has its own fixtures in
+`protocol/fixtures/load/`: `hello`, `run`, `stop`, `topology`, `progress`, `error`,
+`notice`, `phase_done` and `finished` (`.msgpack`, the payload without the length
+prefix). Regenerate them only with `OMA_WRITE_FIXTURES=1`, single-threaded:
+
+```powershell
+$env:OMA_WRITE_FIXTURES = '1'
+cargo test -p oma-ipc --test load_fixtures -- --test-threads=1
+Remove-Item Env:OMA_WRITE_FIXTURES
+```

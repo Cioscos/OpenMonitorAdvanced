@@ -55,7 +55,7 @@ test('section_order_includes_log', async () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((b) => b.textContent?.trim());
-  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'benchmark', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
+  expect(names.slice(1)).toEqual(['general', 'rules', 'log', 'overlay', 'benchmark', 'performance', 'sources', 'about'].map((s) => t(`settings.section.${s}`)));
   await fireEvent.click(within(nav).getByRole('button', { name: t('settings.section.log') }));
   expect(screen.getByRole('heading', { name: t('settings.section.log'), level: 2 })).toBeTruthy();
   expect(screen.getByRole('switch', { name: t('settings.log.sensors.all') })).toBeTruthy();

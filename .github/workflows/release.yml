@@ -95,15 +95,15 @@ jobs:
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Publishes oma-service (trim gate), builds oma-overlay (cargo --locked) and fetches the
+      # Publishes oma-service (trim gate), builds oma-overlay and oma-load (cargo --locked) and fetches the
       # pinned, signature-checked PawnIO setup and PresentMon console.
       - name: Build installer payload
         run: |
           ./scripts/build-installer-payload.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Recreates target/signing empty (never cached, never reused) and records the two payload
-      # executables, service and overlay. The run context comes from GitHub, not from the
+      # Recreates target/signing empty (never cached, never reused) and records the three payload
+      # executables, service, overlay and load generator. The run context comes from GitHub, not from the
       # manifest being checked.
       - name: Initialise the signing state
         env:
@@ -113,7 +113,7 @@ jobs:
           $context = @{ Commit = $env:GITHUB_SHA; Version = $env:VERSION; RunId = $env:GITHUB_RUN_ID; RunAttempt = $env:GITHUB_RUN_ATTEMPT }
           ./scripts/sign-shim.ps1 -Mode init -StateRoot $state @context
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe') {
+          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe', 'load\oma-load.exe') {
             $exe = Join-Path $env:GITHUB_WORKSPACE "target\installer-payload\$rel"
             ./scripts/sign-shim.ps1 -Mode register-payload -StateRoot $state -Path $exe @context
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -167,7 +167,7 @@ jobs:
           $setup = New-Item -ItemType Directory -Path (Join-Path $root 'returned-setup')
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "returned-binaries=$($binaries.FullName)", "returned-setup=$($setup.FullName)"
 
-      # Flat ZIP: the four files share one folder, so they sit at the root of the artifact.
+      # Flat ZIP: the five files share one folder, so they sit at the root of the artifact.
       - name: Upload the binaries to sign
         id: upload-binaries
         if: steps.pre.outputs.signing == 'enabled'
@@ -179,6 +179,7 @@ jobs:
             target/signing/unsigned/uninstall.exe
             target/signing/unsigned/oma-service.exe
             target/signing/unsigned/oma-overlay.exe
+            target/signing/unsigned/oma-load.exe
           if-no-files-found: error
 
       # Same inputs as sign-setup except the artifact id, the configuration and the output folder.
@@ -200,7 +201,7 @@ jobs:
           parameters: |
             version: ${{ toJSON(steps.version.outputs.version) }}
 
-      # Before anything uses them: exactly the four files, each signed with the approved
+      # Before anything uses them: exactly the five files, each signed with the approved
       # certificate of the policy, timestamped, with the expected product metadata.
       - name: Verify the signed binaries
         if: steps.pre.outputs.signing == 'enabled'
@@ -220,15 +221,15 @@ jobs:
           ./scripts/sign-shim.ps1 -Mode import-signed -StateRoot (Join-Path $env:GITHUB_WORKSPACE 'target\signing') -From $env:RETURNED_BINARIES
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # oma-service.exe and oma-overlay.exe do not pass through Tauri: the NSIS script takes
+      # oma-service.exe, oma-overlay.exe and oma-load.exe do not pass through Tauri: the NSIS script takes
       # them from the payload.
-      - name: Put the signed service and overlay into the payload
+      - name: Put the signed service, overlay and load generator into the payload
         if: steps.pre.outputs.signing == 'enabled'
         run: |
           Import-Module ./scripts/lib/OmaCommon.psm1
           $state = Join-Path $env:GITHUB_WORKSPACE 'target\signing'
           $signedHashes = (Get-Content -Raw -LiteralPath (Join-Path $state 'manifest.json') | ConvertFrom-Json -AsHashtable)['signed']
-          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe') {
+          foreach ($rel in 'service\oma-service.exe', 'overlay\oma-overlay.exe', 'load\oma-load.exe') {
             $name = Split-Path -Leaf $rel
             $want = $signedHashes[$name]
             if (-not $want) { throw "the manifest has no imported signed $name" }

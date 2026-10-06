@@ -16,6 +16,7 @@ use tauri::{
 };
 
 use crate::i18n::t;
+use crate::performance::runner::PerformanceRunner;
 use crate::settings::SettingsStore;
 use crate::tray::language_for;
 
@@ -27,6 +28,8 @@ pub const EDITOR: &str = "overlay-editor";
 pub const EVENT_EDITOR_QUIT: &str = "overlay-editor-quit";
 /// Sent to an already open window; the payload is a [`NavigationTarget`].
 pub const EVENT_NAVIGATE: &str = "oma:navigate";
+/// The tray's «Quit» during a stress test: the main window asks first.
+pub const EVENT_PERFORMANCE_QUIT: &str = "performance-quit";
 
 /// Where a tray item or a toast sends the window: a view and, for a toast,
 /// the device whose page opens in the Advanced view. A Tauri payload, not a
@@ -41,6 +44,53 @@ pub struct NavigationTarget {
     /// The settings section to open (`about`), for the update toast.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_section: Option<String>,
+    /// The Performance view's page (M8a1), for the tray and the stress toasts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance: Option<PerformanceNav>,
+}
+
+/// A page of the Performance view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PerformancePage {
+    /// The test in progress.
+    Run,
+    /// The test in progress, with the question «stop it and quit?» (the tray's
+    /// «Quit»). A page, not only an event, so a window created for it gets it.
+    Quit,
+    /// A saved session's result.
+    Result,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceNav {
+    pub page: PerformancePage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl PerformanceNav {
+    pub fn run() -> Self {
+        Self {
+            page: PerformancePage::Run,
+            session_id: None,
+        }
+    }
+
+    pub fn quit() -> Self {
+        Self {
+            page: PerformancePage::Quit,
+            session_id: None,
+        }
+    }
+
+    pub fn result(session_id: &str) -> Self {
+        Self {
+            page: PerformancePage::Result,
+            session_id: Some(session_id.to_owned()),
+        }
+    }
 }
 
 fn view_name<S: Serializer>(view: &ViewKind, serializer: S) -> Result<S::Ok, S::Error> {
@@ -53,6 +103,7 @@ impl NavigationTarget {
             view,
             device_id: None,
             settings_section: None,
+            performance: None,
         }
     }
 
@@ -62,6 +113,7 @@ impl NavigationTarget {
             view: ViewKind::Advanced,
             device_id: Some(device_id.to_owned()),
             settings_section: None,
+            performance: None,
         }
     }
 
@@ -71,6 +123,17 @@ impl NavigationTarget {
             view,
             device_id: None,
             settings_section: Some("about".to_owned()),
+            performance: None,
+        }
+    }
+
+    /// A page of the Performance view, with `view` as the view it returns to.
+    pub fn performance(view: ViewKind, nav: PerformanceNav) -> Self {
+        Self {
+            view,
+            device_id: None,
+            settings_section: None,
+            performance: Some(nav),
         }
     }
 }
@@ -293,12 +356,24 @@ pub enum QuitAction {
     Exit,
     /// Show the editor and let it ask: save, discard or cancel.
     AskEditor,
+    /// Show the main window and ask «stop the test and quit?» (DA16).
+    AskPerformance,
 }
 
-/// The tray asks first while the editor holds unsaved changes; `--quit`
-/// never asks, so the installer can always close the app (DD13).
-pub fn quit_action(source: QuitSource, editor_open: bool, editor_dirty: bool) -> QuitAction {
-    if source == QuitSource::Tray && editor_open && editor_dirty {
+/// The tray asks first while a stress test runs (that answer ends in a new
+/// quit), then while the editor holds unsaved changes; `--quit` never asks,
+/// so the installer can always close the app (DD13, DA16).
+pub fn quit_action(
+    source: QuitSource,
+    editor_open: bool,
+    editor_dirty: bool,
+    test_running: bool,
+) -> QuitAction {
+    if source == QuitSource::Flag {
+        QuitAction::Exit
+    } else if test_running {
+        QuitAction::AskPerformance
+    } else if editor_open && editor_dirty {
         QuitAction::AskEditor
     } else {
         QuitAction::Exit
@@ -311,8 +386,16 @@ pub fn quit(app: &AppHandle, source: QuitSource) {
     let dirty = app
         .try_state::<EditorState>()
         .is_some_and(|s| s.dirty.load(Ordering::Acquire));
-    match quit_action(source, open, dirty) {
+    let test_running = app
+        .try_state::<Arc<PerformanceRunner>>()
+        .is_some_and(|runner| runner.is_running());
+    match quit_action(source, open, dirty, test_running) {
         QuitAction::Exit => app.exit(0),
+        QuitAction::AskPerformance => {
+            // The page carries the question for a window that is still loading.
+            show_performance(app, PerformanceNav::quit());
+            let _ = app.emit_to(MAIN, EVENT_PERFORMANCE_QUIT, ());
+        }
         QuitAction::AskEditor => {
             show_editor(app);
             let _ = app.emit_to(EDITOR, EVENT_EDITOR_QUIT, ());
@@ -354,13 +437,21 @@ pub fn show_device(app: &AppHandle, device_id: &str) {
 /// Shows Settings › About (a clicked update toast); Back returns to the last
 /// view, Simple when none is remembered.
 pub fn show_about(app: &AppHandle) {
-    let view = app
-        .state::<std::sync::Arc<crate::settings::SettingsStore>>()
+    navigate(app, NavigationTarget::about(last_view(app)));
+}
+
+/// Shows a page of the Performance view (a clicked stress toast, the tray).
+pub fn show_performance(app: &AppHandle, nav: PerformanceNav) {
+    navigate(app, NavigationTarget::performance(last_view(app), nav));
+}
+
+/// The last view, Simple when none is remembered.
+fn last_view(app: &AppHandle) -> ViewKind {
+    app.state::<Arc<SettingsStore>>()
         .snapshot()
         .view
         .last
-        .unwrap_or(ViewKind::Simple);
-    navigate(app, NavigationTarget::about(view));
+        .unwrap_or(ViewKind::Simple)
 }
 
 /// Leaves `target` pending, tells an open window at once, and shows it.
@@ -450,26 +541,67 @@ mod tests {
     #[test]
     fn tray_quit_with_a_dirty_editor_asks_first() {
         assert_eq!(
-            quit_action(QuitSource::Tray, true, true),
+            quit_action(QuitSource::Tray, true, true, false),
             QuitAction::AskEditor
         );
-        assert_eq!(quit_action(QuitSource::Tray, true, false), QuitAction::Exit);
-        assert_eq!(quit_action(QuitSource::Tray, false, true), QuitAction::Exit);
         assert_eq!(
-            quit_action(QuitSource::Tray, false, false),
+            quit_action(QuitSource::Tray, true, false, false),
+            QuitAction::Exit
+        );
+        assert_eq!(
+            quit_action(QuitSource::Tray, false, true, false),
+            QuitAction::Exit
+        );
+        assert_eq!(
+            quit_action(QuitSource::Tray, false, false, false),
             QuitAction::Exit
         );
     }
 
     #[test]
-    fn quit_flag_never_asks() {
+    fn tray_quit_with_a_test_asks_first() {
+        // Before the editor, whatever the editor holds.
         for (open, dirty) in [(true, true), (true, false), (false, true), (false, false)] {
             assert_eq!(
-                quit_action(QuitSource::Flag, open, dirty),
-                QuitAction::Exit,
+                quit_action(QuitSource::Tray, open, dirty, true),
+                QuitAction::AskPerformance,
                 "{open} {dirty}"
             );
         }
+    }
+
+    #[test]
+    fn quit_flag_never_asks() {
+        for (open, dirty, test) in [
+            (true, true, true),
+            (true, false, true),
+            (false, true, false),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                quit_action(QuitSource::Flag, open, dirty, test),
+                QuitAction::Exit,
+                "{open} {dirty} {test}"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_target_serializes_performance() {
+        let json = |nav| {
+            serde_json::to_string(&NavigationTarget::performance(ViewKind::Simple, nav)).unwrap()
+        };
+        assert_eq!(
+            json(PerformanceNav::run()),
+            r#"{"view":"simple","performance":{"page":"run"}}"#
+        );
+        assert_eq!(
+            json(PerformanceNav::result(
+                "0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"
+            )),
+            r#"{"view":"simple","performance":{"page":"result","sessionId":"0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"}}"#
+        );
     }
 
     #[test]

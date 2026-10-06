@@ -9,6 +9,7 @@ mod log;
 mod notifier;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod overlay;
+mod performance;
 mod report;
 mod rules;
 mod service;
@@ -108,9 +109,19 @@ fn run_quit_only(context: tauri::Context<tauri::Wry>) -> ! {
     std::process::exit(app.run_return(|_, _| {}));
 }
 
-/// Whether closing the last window keeps the app running in the tray.
-fn keep_running_on_last_close(close_to_tray: bool) -> bool {
-    close_to_tray
+/// Whether closing the last window keeps the app running in the tray: when
+/// the user wants it, and always while a stress test runs (DA16).
+fn keep_running_on_last_close(close_to_tray: bool, test_running: bool) -> bool {
+    close_to_tray || test_running
+}
+
+/// Whether the toast «the test keeps running in the tray» was shown for the
+/// test in progress.
+static CLOSE_TOAST_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once per test: the first close of the last window while it runs.
+fn close_toast_due(test_running: bool, shown: &std::sync::atomic::AtomicBool) -> bool {
+    test_running && !shown.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(windows)]
@@ -365,6 +376,16 @@ fn main() {
             window::open_overlay_editor,
             window::overlay_editor_dirty,
             window::app_quit_confirmed,
+            performance::commands::performance_system,
+            performance::commands::performance_preview,
+            performance::commands::performance_start,
+            performance::commands::performance_stop,
+            performance::commands::performance_status,
+            performance::commands::performance_history,
+            performance::commands::performance_session,
+            performance::commands::performance_delete,
+            performance::commands::performance_export,
+            performance::commands::performance_quit_confirmed,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -437,6 +458,65 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            // The stress test runner: without a test it does no periodic work (§11).
+            #[cfg(windows)]
+            let perf = {
+                let engine = engine.clone();
+                let svc = svc_status.clone();
+                let (open_handle, emit_handle) = (app.handle().clone(), app.handle().clone());
+                let state_tray = tray.clone();
+                let runner = Arc::new(performance::runner::PerformanceRunner::new(
+                    performance::runner::RunnerDeps {
+                        store: Arc::new(performance::store::PerformanceStore::new(
+                            performance::performance_dir(),
+                        )),
+                        settings: store.clone(),
+                        machine: Box::new(performance::runner::WinMachine),
+                        launcher: performance::runner::load_host_launcher(),
+                        toaster: Box::new(toaster.clone()),
+                        schema: Box::new(move || {
+                            engine
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .schema()
+                                .clone()
+                        }),
+                        service_available: Box::new(move || {
+                            svc.get().1.state == oma_ipc::ServiceState::Connected
+                        }),
+                        // Only the main window has the Performance view.
+                        window_open: Box::new(move || {
+                            open_handle.get_webview_window(window::MAIN).is_some()
+                        }),
+                        emit: Box::new(move |status| {
+                            let _ = emit_handle.emit_to(
+                                window::MAIN,
+                                performance::runner::EVENT_STATUS,
+                                status,
+                            );
+                        }),
+                        // The tray dot, tooltip and items follow the test (DA17).
+                        on_state: Box::new(move |status| {
+                            let mark = tray::TestMark::from_status(status);
+                            if mark.is_none() || status.state == oma_core::load::RunState::Starting
+                            {
+                                // The next test may toast again.
+                                CLOSE_TOAST_SHOWN
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            state_tray.set_test(mark);
+                        }),
+                        app_version: app.package_info().version.to_string(),
+                    },
+                ));
+                app.manage(runner.clone());
+                // A test the last run left open becomes a session (DA14), off the main thread.
+                let recover = runner.clone();
+                std::thread::Builder::new()
+                    .name("oma-perf-recover".into())
+                    .spawn(move || recover.recover())?;
+                runner
+            };
             // The overlay controller: with the overlay off and without
             // `OMA_FRAMES_DEBUG` its thread only waits (§11).
             #[cfg(windows)]
@@ -512,6 +592,9 @@ fn main() {
                     tray.update(schema, &out.snapshot, alerts.health(), &settings);
                     // The log row, window or not; never waits on the writer.
                     log_service.on_tick(out, schema, &settings);
+                    // CPU readings for a stress test; never waits on it.
+                    #[cfg(windows)]
+                    perf.on_tick(out, schema);
                 }
                 // Sensor values for the overlay; never waits on it.
                 #[cfg(windows)]
@@ -574,8 +657,25 @@ fn main() {
             let close_to_tray = app
                 .try_state::<Arc<SettingsStore>>()
                 .is_none_or(|store| store.snapshot().tray.close_to_tray);
-            if keep_running_on_last_close(close_to_tray) {
+            let test_running = app
+                .try_state::<Arc<performance::runner::PerformanceRunner>>()
+                .is_some_and(|runner| runner.is_running());
+            if keep_running_on_last_close(close_to_tray, test_running) {
                 api.prevent_exit();
+                if close_toast_due(test_running, &CLOSE_TOAST_SHOWN) {
+                    use notifier::ToastSink;
+                    let lang = tray::language_for(
+                        app.state::<Arc<SettingsStore>>()
+                            .settings()
+                            .general
+                            .language,
+                    );
+                    app.state::<Arc<notifier::SystemToaster>>().show(
+                        tray_icon::PRODUCT_NAME.to_owned(),
+                        i18n::t(lang, "performance.closeToTray", &[]),
+                        notifier::launch_for_main(),
+                    );
+                }
             }
         }
         RunEvent::Exit => {
@@ -601,6 +701,11 @@ fn main() {
                 {
                     runner.stop();
                 }
+            }
+            // A stress test in progress ends as `stopped_user` (bounded, DA16).
+            #[cfg(windows)]
+            if let Some(runner) = app.try_state::<Arc<performance::runner::PerformanceRunner>>() {
+                runner.shutdown(Duration::from_secs(2));
             }
             // No tick is running any more: stop the CSV log (bounded, L6).
             if let Some(log) = app.try_state::<Arc<log::LogService>>() {
@@ -724,7 +829,23 @@ mod tests {
 
     #[test]
     fn last_close_exits_when_close_to_tray_is_off() {
-        assert!(keep_running_on_last_close(true));
-        assert!(!keep_running_on_last_close(false));
+        assert!(keep_running_on_last_close(true, false));
+        assert!(!keep_running_on_last_close(false, false));
+    }
+
+    #[test]
+    fn closing_the_window_keeps_running_during_a_test() {
+        assert!(keep_running_on_last_close(false, true));
+        assert!(keep_running_on_last_close(true, true));
+    }
+
+    #[test]
+    fn close_toast_comes_once_per_test() {
+        let shown = std::sync::atomic::AtomicBool::new(false);
+        assert!(!close_toast_due(false, &shown), "no test, no toast");
+        assert!(close_toast_due(true, &shown));
+        assert!(!close_toast_due(true, &shown));
+        shown.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(close_toast_due(true, &shown));
     }
 }

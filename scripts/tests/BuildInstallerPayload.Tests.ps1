@@ -282,7 +282,8 @@ Describe 'overlay staging (plan DP7)' {
 Set-Content -LiteralPath '$argsFile' -Value (`$args -join "``n")
 `$t = `$args[[array]::IndexOf(`$args, '--target-dir') + 1]
 New-Item -ItemType Directory -Force (Join-Path `$t 'release') | Out-Null
-`$exe = Join-Path `$t 'release\oma-overlay.exe'
+`$pkg = `$args[[array]::IndexOf(`$args, '-p') + 1]
+`$exe = Join-Path `$t "release\`$pkg.exe"
 if (Test-Path -LiteralPath '$Source' -PathType Leaf) { Copy-Item -LiteralPath '$Source' -Destination `$exe -Force }
 else { Set-Content -LiteralPath `$exe -Value '$Source' -NoNewline }
 'Finished release profile'
@@ -300,7 +301,7 @@ exit $ExitCode
 
     It 'payload stages oma-overlay.exe' {
         $c = New-FakeCargo
-        $r = Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+        $r = Save-OmaHelperExe -Package 'oma-overlay' -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
             -Version '1.2.3' -VersionInfoProvider $goodInfo
         Get-Content -Raw -LiteralPath $c.Destination | Should -BeExactly 'fake overlay bytes'
         Test-Path -LiteralPath "$($c.Destination).partial" | Should -BeFalse
@@ -313,11 +314,21 @@ exit $ExitCode
         $a[$a.IndexOf('--target-dir') + 1] | Should -Be $c.TargetDir
     }
 
+    It 'payload stages oma-load.exe' {
+        $c = New-FakeCargo -Source 'fake load bytes'
+        $dest = Join-Path (Split-Path $c.Destination) '..\load\oma-load.exe'
+        $r = Save-OmaHelperExe -Package 'oma-load' -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $dest `
+            -Version '1.2.3' -VersionInfoProvider $goodInfo
+        Get-Content -Raw -LiteralPath $dest | Should -BeExactly 'fake load bytes'
+        @(Get-Content -LiteralPath $c.ArgsFile)[0..4] | Should -Be @('build', '--release', '--locked', '-p', 'oma-load')
+        $r.Sha256 | Should -BeExactly (Get-OmaSha256 $dest)
+    }
+
     It 'replaces a previous overlay and stages nothing when the build fails' {
         $c = New-FakeCargo -ExitCode 101
         New-Item -ItemType Directory -Force (Split-Path $c.Destination) | Out-Null
         Set-Content -LiteralPath $c.Destination -Value 'stale overlay'
-        { Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+        { Save-OmaHelperExe -Package 'oma-overlay' -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
                 -Version '1.2.3' -VersionInfoProvider $goodInfo } | Should -Throw '*cargo build of oma-overlay failed with exit code 101*'
         Test-Path -LiteralPath $c.Destination | Should -BeFalse
     }
@@ -325,7 +336,7 @@ exit $ExitCode
     It 'refuses an overlay without the product metadata and stages nothing' {
         $c = New-FakeCargo
         $bad = { param($Path) [pscustomobject]@{ ProductName = 'oma-overlay'; ProductVersion = '1.2.3'; FileVersion = '1.2.3.0' } }
-        { Save-OmaOverlayExe -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
+        { Save-OmaHelperExe -Package 'oma-overlay' -CargoExe $c.Cargo -RepoRoot $repoRoot -TargetDir $c.TargetDir -Destination $c.Destination `
                 -Version '1.2.3' -VersionInfoProvider $bad } |
             Should -Throw "*oma-overlay.exe has ProductName 'oma-overlay', expected 'OpenMonitor Advanced'*FileVersion '1.2.3.0', expected '1.2.3'*"
         Test-Path -LiteralPath $c.Destination | Should -BeFalse

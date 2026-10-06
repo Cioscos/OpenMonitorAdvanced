@@ -6,6 +6,7 @@ mod decode;
 pub mod log;
 pub mod overlay;
 mod patch;
+pub mod performance;
 
 use std::collections::BTreeMap;
 
@@ -15,6 +16,7 @@ use crate::rules::RulesSettings;
 
 pub use log::LogSettings;
 pub use overlay::OverlaySettings;
+pub use performance::PerformanceSettings;
 
 pub use decode::{decode_lenient, Decoded, Diagnostic, DiagnosticKind, VersionStatus};
 pub use patch::{apply_patch, reset_rule_override, PatchError};
@@ -282,6 +284,7 @@ pub struct Settings {
     pub rules: RulesSettings,
     pub log: LogSettings,
     pub overlay: OverlaySettings,
+    pub performance: PerformanceSettings,
     pub migrations: Migrations,
 }
 
@@ -298,6 +301,7 @@ impl Default for Settings {
             rules: RulesSettings::default(),
             log: LogSettings::default(),
             overlay: OverlaySettings::default(),
+            performance: PerformanceSettings::default(),
             migrations: Migrations::default(),
         }
     }
@@ -364,6 +368,7 @@ pub fn encode(settings: &Settings) -> Value {
         "rules": serde_json::to_value(&settings.rules).unwrap_or_else(|_| json!({})),
         "log": settings.log.encode(),
         "overlay": settings.overlay.encode(),
+        "performance": settings.performance.encode(),
         "migrations": {
             "serviceV1": settings.migrations.service_v1,
             "webviewV1": settings.migrations.webview_v1,
@@ -485,6 +490,13 @@ pub(crate) mod test_support {
                     height: 900,
                 }),
             },
+            performance: PerformanceSettings {
+                thermal_stop: false,
+                cpu_stop_c: Some(88),
+                stop_on_first_error: Some(true),
+                ram_share_percent: 40,
+                risk_notice_seen: true,
+            },
             migrations: Migrations {
                 service_v1: true,
                 webview_v1: true,
@@ -524,6 +536,8 @@ mod tests {
                         "defaultProfile": "builtin-gaming", "gameProfiles": {},
                         "blockedGames": [], "hotkeyToggle": null, "hotkeyNextProfile": null,
                         "hotkeyBenchmark": null, "editorBounds": null},
+            "performance": {"thermalStop": true, "cpuStopC": null, "stopOnFirstError": null,
+                            "ramSharePercent": 70, "riskNoticeSeen": false},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

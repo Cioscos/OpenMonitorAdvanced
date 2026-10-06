@@ -60,6 +60,16 @@ fn main() {
             "benchmark_open_csv",
             "benchmark_open_folder",
             "benchmark_delete",
+            "performance_system",
+            "performance_preview",
+            "performance_start",
+            "performance_stop",
+            "performance_status",
+            "performance_history",
+            "performance_session",
+            "performance_delete",
+            "performance_export",
+            "performance_quit_confirmed",
         ]),
     ))
     .expect("Tauri build")

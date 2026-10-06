@@ -86,6 +86,7 @@ const SHAPE: { [key: string]: Node } = {
     hotkeyBenchmark: 'nullable',
     editorBounds: 'nullable',
   },
+  performance: { thermalStop: 'leaf', cpuStopC: 'nullable', stopOnFirstError: 'nullable', ramSharePercent: 'leaf', riskNoticeSeen: 'leaf' },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
 const READ_ONLY = ['version', 'migrations'];
@@ -154,6 +155,22 @@ function checkTypes(merged: Record<string, unknown>): void {
   const series = advanced.series;
   if (!isObject(series) || !Object.values(series).every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === 'string'))) {
     fail('advanced.series', 'settings.error.type');
+  }
+}
+
+/** The performance checks of the strict decoder: the threshold and the RAM share are integers in range. */
+function checkPerformance(p: Record<string, unknown>): void {
+  for (const key of ['thermalStop', 'riskNoticeSeen']) if (typeof p[key] !== 'boolean') fail(`performance.${key}`, 'settings.error.type');
+  if (p.stopOnFirstError !== null && typeof p.stopOnFirstError !== 'boolean') fail('performance.stopOnFirstError', 'settings.error.type');
+  const ranges = [
+    ['cpuStopC', 60, 110],
+    ['ramSharePercent', 10, 90],
+  ] as const;
+  for (const [key, min, max] of ranges) {
+    const value = p[key];
+    if (value === null && key === 'cpuStopC') continue;
+    if (typeof value !== 'number') fail(`performance.${key}`, 'settings.error.type');
+    if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) fail(`performance.${key}`, 'settings.error.range');
   }
 }
 
@@ -377,6 +394,7 @@ export function defaultSettings(): Settings {
       hotkeyBenchmark: null,
       editorBounds: null,
     },
+    performance: { thermalStop: true, cpuStopC: null, stopOnFirstError: null, ramSharePercent: 70, riskNoticeSeen: false },
     migrations: { serviceV1: false, webviewV1: false },
   };
 }
@@ -441,6 +459,7 @@ export class MockSettings {
     checkTypes(merged);
     checkLog(merged.log as Record<string, unknown>);
     checkOverlay(merged.overlay as Record<string, unknown>, merged.log as Record<string, unknown>);
+    checkPerformance(merged.performance as Record<string, unknown>);
     checkRules(merged.rules);
     // An unset field is absent, never null (the Rust encoding).
     const advanced = merged.advanced as Record<string, unknown>;

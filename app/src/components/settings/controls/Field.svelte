@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import Term from '../../common/Term.svelte';
 
   // One settings row: the name and a short description on the left, the control on the right,
   // and under both the notes and the error of the field. Controls point `aria-describedby` at
@@ -8,6 +9,7 @@
     id,
     label,
     labelFor = null,
+    term = null,
     description = null,
     error = null,
     control,
@@ -18,6 +20,8 @@
     label: string;
     /** The id of a native control the label names (`<label for>`); otherwise the label is a plain name. */
     labelFor?: string | null;
+    /** A glossary term the label explains with a tooltip (`Term`). */
+    term?: string | null;
     description?: string | null;
     /** Already translated. */
     error?: string | null;
@@ -26,12 +30,16 @@
   } = $props();
 </script>
 
+{#snippet name()}
+  {#if term}<Term {term}>{label}</Term>{:else}{label}{/if}
+{/snippet}
+
 <div class="field" class:invalid={error !== null}>
   <div class="text">
     {#if labelFor}
-      <label id="{id}-label" for={labelFor}>{label}</label>
+      <label id="{id}-label" for={labelFor}>{@render name()}</label>
     {:else}
-      <span class="name" id="{id}-label">{label}</span>
+      <span class="name" id="{id}-label">{@render name()}</span>
     {/if}
     {#if description}<p class="description" id="{id}-desc">{description}</p>{/if}
   </div>

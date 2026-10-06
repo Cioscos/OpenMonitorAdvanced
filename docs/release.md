@@ -16,7 +16,7 @@ passi 1-5 qui sotto servono per quando la Foundation risponde.
 - `workflow_dispatch` (solo da `main`) è la prova generale: stessa pipeline, policy `test-signing`,
   nessuna release; il setup resta come artifact del run.
 - Con la firma attiva il job chiede **due** approvazioni su SignPath (arrivano per email): la
-  prima per `oma-app.exe`, `oma-service.exe`, `oma-overlay.exe` e `uninstall.exe` (configurazione
+  prima per `oma-app.exe`, `oma-service.exe`, `oma-overlay.exe`, `oma-load.exe` e `uninstall.exe` (configurazione
   `binaries`), la seconda per il setup (configurazione `setup`).
 - Senza credenziali SignPath la bozza contiene l'installer non firmato, finché `REQUIRE_SIGNING`
   non è `true` (passo 5).
@@ -66,7 +66,8 @@ Su SignPath crea:
   - **`test-signing`**, con il certificato di prova: la usa `workflow_dispatch`;
 - due *artifact configuration*, copiate dalle versioni nel repository:
   - slug **`binaries`** da `.signpath/artifact-configuration-binaries.xml` (`oma-app.exe`,
-    `uninstall.exe`, `oma-service.exe`, `oma-overlay.exe`);
+    `uninstall.exe`, `oma-service.exe`, `oma-overlay.exe`, `oma-load.exe`: i cinque file firmati;
+    `oma-load.exe` è il processo dei test di carico che l'app avvia, installato accanto all'app);
   - slug **`setup`** da `.signpath/artifact-configuration-setup.xml` (il setup).
 
 **Policy vincolate all'origine.** Le due signing policy devono consentire solo il repository
@@ -259,7 +260,7 @@ lavoro, e senza input sintetico sul desktop dell'utente):
 
 1. installa il setup preso dall'artifact del `workflow_dispatch` o dalla bozza;
 2. in `C:\Program Files\OpenMonitor Advanced` controlla con `Get-AuthenticodeSignature` le firme
-   di `oma-app.exe`, `oma-overlay.exe`, `service\oma-service.exe` e `uninstall.exe`;
+   di `oma-app.exe`, `oma-overlay.exe`, `oma-load.exe`, `service\oma-service.exe` e `uninstall.exe`;
 3. controlla l'editore nella conferma UAC dell'installazione e in quella della disinstallazione;
 4. scarica il setup dal browser e annota il comportamento di SmartScreen.
 

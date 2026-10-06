@@ -14,7 +14,7 @@ pub(crate) fn used_pct(total: u64, available: u64) -> Option<f64> {
     (total > 0).then(|| used_bytes(total, available) as f64 * 100.0 / total as f64)
 }
 
-fn memory_status() -> Result<MEMORYSTATUSEX, ProviderError> {
+fn status_ex() -> Result<MEMORYSTATUSEX, ProviderError> {
     let mut status = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..Default::default()
@@ -23,6 +23,12 @@ fn memory_status() -> Result<MEMORYSTATUSEX, ProviderError> {
     unsafe { GlobalMemoryStatusEx(&mut status) }
         .map_err(|e| ProviderError::Failed(format!("GlobalMemoryStatusEx: {e}")))?;
     Ok(status)
+}
+
+/// Total and available physical memory, in bytes.
+pub fn memory_status() -> std::io::Result<(u64, u64)> {
+    let s = status_ex().map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok((s.ullTotalPhys, s.ullAvailPhys))
 }
 
 #[derive(Default)]
@@ -34,7 +40,7 @@ impl Provider for MemoryProvider {
     }
 
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
-        memory_status()?;
+        status_ex()?;
         Ok(Inventory {
             devices: vec![Device {
                 id: DEVICE_ID.to_owned(),
@@ -73,7 +79,7 @@ impl Provider for MemoryProvider {
     }
 
     fn poll(&mut self) -> Result<Vec<Option<f64>>, ProviderError> {
-        let s = memory_status()?;
+        let s = status_ex()?;
         Ok(vec![
             used_pct(s.ullTotalPhys, s.ullAvailPhys),
             Some(used_bytes(s.ullTotalPhys, s.ullAvailPhys) as f64),

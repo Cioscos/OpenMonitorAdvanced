@@ -32,6 +32,7 @@ import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
 import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
+import { mockPerformance, parsePerfScenario } from './mockPerformance';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
@@ -510,6 +511,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const overlay = mockOverlay(settings, parseOverlayFrames(typeof location === 'undefined' ? '' : location.search));
   const editorData = mockEditorData();
   let benchmarks = structuredClone(MOCK_BENCHMARKS);
+  const perf = mockPerformance(parsePerfScenario(typeof location === 'undefined' ? '' : location.search), () => serviceStatus.state === 'connected');
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -659,6 +661,20 @@ export function createMockBackend(intervalMs = 1000): Backend {
     onOverlayEditorData: async (cb) => editorData.subscribe(cb),
     onOverlayPreview: async (cb) => overlay.onPreview(cb),
     onOverlayEditorQuit: async () => () => {},
+    // Commands reject with plain text, like the Tauri commands.
+    performanceSystem: async () => perf.system(),
+    performancePreview: async (request) => perf.preview(request),
+    performanceStart: async (request) => perf.start(request),
+    performanceStop: async () => perf.stop(),
+    performanceStatus: async () => perf.status(),
+    performanceHistory: async () => perf.history(),
+    performanceSession: async (id) => perf.session(id),
+    performanceDelete: async (id) => perf.remove(id),
+    // No native dialog in the browser: pretend the user saved the file.
+    performanceExport: async () => 'oma-stress-20261006-090507.json',
+    onPerformanceStatus: async (cb) => perf.subscribe(cb),
+    onPerformanceQuit: async () => () => {},
+    performanceQuitConfirmed: async () => console.info('mock: stop and quit'),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),
     benchmarkList: async () => structuredClone(benchmarks),
     benchmarkOpenCsv: async (id) => console.info('mock: open benchmark CSV', id),

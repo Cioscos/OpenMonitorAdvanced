@@ -157,11 +157,19 @@ struct OpenLaunch {
     open: String,
 }
 
+/// A clicked stress test toast: `{"performance":"<session id>"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PerformanceLaunch {
+    performance: String,
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Launch {
     Device(DeviceLaunch),
     Open(OpenLaunch),
+    Performance(PerformanceLaunch),
 }
 
 /// Where a clicked toast leads.
@@ -173,6 +181,8 @@ pub enum LaunchTarget {
     Main,
     /// Settings › About (update toasts).
     About,
+    /// The result of this stress session (M8a1).
+    Performance(String),
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -190,6 +200,11 @@ pub fn launch_for_about() -> String {
     serde_json::json!({ "open": "about" }).to_string()
 }
 
+/// The launch string of a toast that opens the result of a stress session.
+pub fn launch_for_performance(session_id: &str) -> String {
+    serde_json::json!({ "performance": session_id }).to_string()
+}
+
 /// The target of a clicked toast; `None` for anything but a launch string
 /// made by [`launch_for`] or [`launch_for_main`].
 pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
@@ -199,6 +214,11 @@ pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
         }
         Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
         Launch::Open(OpenLaunch { open }) if open == "about" => Some(LaunchTarget::About),
+        Launch::Performance(PerformanceLaunch { performance })
+            if oma_core::load::is_session_id(&performance) =>
+        {
+            Some(LaunchTarget::Performance(performance))
+        }
         _ => None,
     }
 }
@@ -231,6 +251,9 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
             LaunchTarget::Device(device) => crate::window::show_device(&handle, &device),
             LaunchTarget::Main => crate::window::show_main(&handle),
             LaunchTarget::About => crate::window::show_about(&handle),
+            LaunchTarget::Performance(id) => {
+                crate::window::show_performance(&handle, crate::window::PerformanceNav::result(&id))
+            }
         });
         if let Err(err) = result {
             tracing::warn!(%err, "cannot open the window for a toast");
@@ -591,6 +614,22 @@ mod tests {
             Some(LaunchTarget::About)
         );
         assert_eq!(launch_target(r#"{"open":"other"}"#), None);
+    }
+
+    #[test]
+    fn launch_target_performance_round_trips() {
+        let id = "0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10";
+        assert_eq!(
+            launch_for_performance(id),
+            format!(r#"{{"performance":"{id}"}}"#)
+        );
+        assert_eq!(
+            launch_target(&launch_for_performance(id)),
+            Some(LaunchTarget::Performance(id.into()))
+        );
+        for bad in [r#"{"performance":"../x"}"#, r#"{"performance":""}"#] {
+            assert_eq!(launch_target(bad), None, "{bad}");
+        }
     }
 
     #[test]

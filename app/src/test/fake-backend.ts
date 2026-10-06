@@ -31,6 +31,12 @@ import type {
   CommandError,
   EditableProfile,
   EditorData,
+  Plan,
+  RunStatus,
+  StartRequest,
+  StressSession,
+  StressSessionSummary,
+  SystemInfo,
 } from '../lib/types';
 import defaultRulesFixture from './fixtures/default-rules.json';
 
@@ -76,6 +82,102 @@ export function makeOverlayStatus(over: Partial<OverlayStatus> = {}): OverlaySta
     preview: false,
     previewFailure: null,
     benchmark: { state: 'idle', game: null, elapsedS: null, error: null },
+    ...over,
+  };
+}
+
+/** A stress test run status for tests: idle, before any test; override what matters. */
+export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
+  return {
+    state: 'idle',
+    sessionId: '',
+    component: 'cpu',
+    objective: 'normal',
+    preset: 'quick',
+    elapsedMs: 0,
+    totalMs: 0,
+    phaseIndex: 0,
+    phases: [],
+    tempC: null,
+    tempMaxC: null,
+    stopC: null,
+    powerW: null,
+    clockMhz: null,
+    checks: 0,
+    errors: 0,
+    wheaCorrected: 0,
+    wheaFatal: 0,
+    cores: [],
+    currentCore: null,
+    events: [],
+    warnings: [],
+    outcome: null,
+    ...over,
+  };
+}
+
+/** A saved stress session for tests: a CPU test that passed, with one phase; override what matters. */
+export function makeStressSession(over: Partial<StressSession> = {}): StressSession {
+  return {
+    format: 1,
+    id: 'session-1',
+    startedAt: '2026-10-06T19:04:00Z',
+    endedAt: '2026-10-06T19:09:00Z',
+    component: 'cpu',
+    device: 'Fake Ryzen 7 7800X3D',
+    objective: 'normal',
+    preset: 'quick',
+    request: { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null },
+    plan: {
+      seed: 1,
+      ram_bytes: 0,
+      phases: [
+        {
+          kernel: 'k1',
+          alt_kernel: null,
+          isa: 'avx2',
+          size: 'auto',
+          mode: 'steady',
+          placement: 'all_logical',
+          duration_s: 300,
+          per_core_s: null,
+          both_smt: false,
+          cores: null,
+          patterns: [],
+          stop_on_error: false,
+        },
+      ],
+    },
+    outcome: 'passed',
+    outcomeDetail: { verdict: 'passed', params: {}, phase: 0, kernel: 'k1', core: null, tempC: 70, clockMhz: 4800, atMs: 300_000 },
+    phases: [{ index: 0, kernel: 'k1', outcome: 'passed', durationMs: 300_000, checks: 1000, errors: 0, skipped: null }],
+    cores: [],
+    errors: [],
+    errorsDropped: 0,
+    eventsDropped: 0,
+    whea: { byId: {}, byApic: {}, unreadable: false, lastRecord: null },
+    stats: { tempMaxC: 80, tempAvgC: 70, powerMaxW: 120, powerAvgW: 100, clockMaxMhz: 5000, clockAvgMhz: 4800 },
+    samples: [],
+    events: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+    ...over,
+  };
+}
+
+/** An 8-core, 16-thread CPU with AVX2, 32 GB of RAM and the service connected; override what matters. */
+export function makeSystemInfo(over: Partial<SystemInfo> = {}): SystemInfo {
+  return {
+    cpuModel: 'Fake Ryzen 7 7800X3D',
+    logical: 16,
+    cores: 8,
+    isa: ['avx2', 'sse2'],
+    ramTotal: 32 * 1024 ** 3,
+    ramBudget: 20 * 1024 ** 3,
+    serviceConnected: true,
+    tjmaxC: 89,
+    stopC: 84,
+    hypervisor: false,
     ...over,
   };
 }
@@ -547,6 +649,92 @@ export class FakeBackend implements Backend {
   async onOverlayPreview(cb: (e: { open: boolean }) => void): Promise<Unsubscribe> {
     this.#previewListeners.add(cb);
     return () => this.#previewListeners.delete(cb);
+  }
+
+  /** What the stress test reads return; `performanceCalls` records every call in order. */
+  performanceStatusValue: RunStatus = makeRunStatus();
+  performanceSystemInfo: SystemInfo = makeSystemInfo();
+  performanceSessions: StressSessionSummary[] = [];
+  /** Full sessions by id, for `performanceSession`. */
+  performanceSessionsById: Record<string, StressSession> = {};
+  performancePlan: Plan = { seed: 1, ram_bytes: 0, phases: [] };
+  performanceCalls: string[] = [];
+  performanceStartRequests: StartRequest[] = [];
+  performancePreviewRequests: StartRequest[] = [];
+  /** Set to reject `performanceStart` with this text instead of starting. */
+  performanceStartError: string | null = null;
+  readonly performanceStatusListeners = new Set<(status: RunStatus) => void>();
+
+  async performanceSystem(): Promise<SystemInfo> {
+    this.performanceCalls.push('performanceSystem');
+    return structuredClone(this.performanceSystemInfo);
+  }
+
+  async performancePreview(request: StartRequest): Promise<Plan> {
+    this.performanceCalls.push('performancePreview');
+    this.performancePreviewRequests.push(structuredClone(request));
+    return structuredClone(this.performancePlan);
+  }
+
+  async performanceStart(request: StartRequest): Promise<string> {
+    this.performanceCalls.push('performanceStart');
+    if (this.performanceStartError !== null) throw this.performanceStartError;
+    this.performanceStartRequests.push(structuredClone(request));
+    return 'fake-session';
+  }
+
+  async performanceStop(): Promise<void> {
+    this.performanceCalls.push('performanceStop');
+  }
+
+  async performanceStatus(): Promise<RunStatus> {
+    this.performanceCalls.push('performanceStatus');
+    return structuredClone(this.performanceStatusValue);
+  }
+
+  async performanceHistory(): Promise<StressSessionSummary[]> {
+    this.performanceCalls.push('performanceHistory');
+    return structuredClone(this.performanceSessions);
+  }
+
+  async performanceSession(id: string): Promise<StressSession | null> {
+    this.performanceCalls.push(`performanceSession:${id}`);
+    return structuredClone(this.performanceSessionsById[id] ?? null);
+  }
+
+  async performanceDelete(id: string): Promise<void> {
+    this.performanceCalls.push(`performanceDelete:${id}`);
+    this.performanceSessions = this.performanceSessions.filter((s) => s.id !== id);
+    delete this.performanceSessionsById[id];
+  }
+
+  async performanceExport(id: string): Promise<string | null> {
+    this.performanceCalls.push(`performanceExport:${id}`);
+    return 'oma-stress-20261006-090507.json';
+  }
+
+  async onPerformanceStatus(cb: (status: RunStatus) => void): Promise<Unsubscribe> {
+    this.performanceCalls.push('onPerformanceStatus');
+    this.performanceStatusListeners.add(cb);
+    return () => this.performanceStatusListeners.delete(cb);
+  }
+
+  /** Replaces the status and notifies the listeners, like a `performance-status` event. */
+  emitPerformanceStatus(status: RunStatus): void {
+    this.performanceStatusValue = status;
+    this.performanceStatusListeners.forEach((cb) => cb(structuredClone(status)));
+  }
+
+  readonly performanceQuitListeners = new Set<() => void>();
+  performanceQuitCalls = 0;
+
+  async onPerformanceQuit(cb: () => void): Promise<Unsubscribe> {
+    this.performanceQuitListeners.add(cb);
+    return () => this.performanceQuitListeners.delete(cb);
+  }
+
+  async performanceQuitConfirmed(): Promise<void> {
+    this.performanceQuitCalls++;
   }
 
   async onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe> {

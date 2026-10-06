@@ -161,17 +161,34 @@ fn glyph(c: char) -> Option<[&'static str; GLYPH_H]> {
 
 /// A rounded square in `style.background` (transparent corners, anti-aliased
 /// edge) with the content drawn in `style.foreground`, as RGBA: a number
-/// centered, or a bar filling up from the bottom. With `recording`, a red dot
-/// with a dark ring is drawn last, in the top right corner (L9).
-pub fn render(content: &IconContent, style: IconStyle, recording: bool) -> Vec<u8> {
+/// centered, or a bar filling up from the bottom. With `marks.recording`, a
+/// red dot with a dark ring is drawn last, in the top right corner (L9); with
+/// `marks.testing` (a stress test runs, DA17) an amber one takes that corner
+/// and the red one moves to the bottom right.
+pub fn render(content: &IconContent, style: IconStyle, marks: IconMarks) -> Vec<u8> {
     let mut rgba = match content {
         IconContent::Text(text) => render_text(text, style),
         IconContent::Bar(level) => render_bar(*level, style),
     };
-    if recording {
-        draw_recording_dot(&mut rgba);
+    if marks.testing {
+        draw_dot(&mut rgba, TESTING_COLOR, DOT_CENTER);
+    }
+    if marks.recording {
+        let center = if marks.testing {
+            DOT_CENTER_LOW
+        } else {
+            DOT_CENTER
+        };
+        draw_dot(&mut rgba, DOT_COLOR, center);
     }
     rgba
+}
+
+/// The dots drawn over the icon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IconMarks {
+    pub recording: bool,
+    pub testing: bool,
 }
 
 /// `--crit`, the recording dot.
@@ -179,18 +196,21 @@ const DOT_COLOR: [u8; 4] = [0xff, 0x4d, 0x4d, 0xff];
 /// `--bg`, the ring that keeps the dot apart from any background.
 const DOT_RING: [u8; 4] = [0x0f, 0x0a, 0x1a, 0xff];
 const DOT_CENTER: (f64, f64) = (26.5, 5.5);
+const DOT_CENTER_LOW: (f64, f64) = (26.5, 26.5);
+/// `--warn`, the stress test dot.
+const TESTING_COLOR: [u8; 4] = [0xff, 0xc5, 0x3d, 0xff];
 const DOT_RADIUS: f64 = 4.5;
 const DOT_RING_WIDTH: f64 = 1.0;
 
 /// A filled circle with a ring, hard-edged on pixel centers, over whatever is
 /// drawn already (also over the transparent corner).
-fn draw_recording_dot(rgba: &mut [u8]) {
+fn draw_dot(rgba: &mut [u8], fill: [u8; 4], center: (f64, f64)) {
     let size = ICON_SIZE as usize;
     for y in 0..size {
         for x in 0..size {
-            let distance = (x as f64 + 0.5 - DOT_CENTER.0).hypot(y as f64 + 0.5 - DOT_CENTER.1);
+            let distance = (x as f64 + 0.5 - center.0).hypot(y as f64 + 0.5 - center.1);
             let color = if distance <= DOT_RADIUS {
-                DOT_COLOR
+                fill
             } else if distance <= DOT_RADIUS + DOT_RING_WIDTH {
                 DOT_RING
             } else {
@@ -572,7 +592,13 @@ mod tests {
     #[test]
     fn percent_is_drawn_as_a_bar() {
         let full = BAR_FILL_BOTTOM - BAR_FILL_TOP + 1;
-        let rows = |level: u8| fill_probe(&render(&IconContent::Bar(level), NEUTRAL, false));
+        let rows = |level: u8| {
+            fill_probe(&render(
+                &IconContent::Bar(level),
+                NEUTRAL,
+                IconMarks::default(),
+            ))
+        };
 
         assert!(rows(0).is_empty(), "0 leaves the track empty");
         let one = rows(1);
@@ -597,7 +623,7 @@ mod tests {
         assert!(heights.windows(2).all(|w| w[0] <= w[1]));
 
         // A track, not a fill only: an outline of 14..=18 px by 22..=24 px, centred.
-        let img = render(&IconContent::Bar(0), NEUTRAL, false);
+        let img = render(&IconContent::Bar(0), NEUTRAL, IconMarks::default());
         let pixels = fg_pixels(&img, NEUTRAL);
         let (min_x, max_x) = (
             pixels.iter().map(|p| p.0).min().unwrap(),
@@ -613,8 +639,8 @@ mod tests {
         assert_eq!(min_y, ICON_SIZE - 1 - max_y, "centred vertically");
         // No digits on the bar: the level is not written anywhere.
         assert_ne!(
-            render(&IconContent::Bar(48), NEUTRAL, false),
-            render(&num("48"), NEUTRAL, false)
+            render(&IconContent::Bar(48), NEUTRAL, IconMarks::default()),
+            render(&num("48"), NEUTRAL, IconMarks::default())
         );
         assert!(pixels.len() < 200, "an empty track is only an outline");
     }
@@ -622,7 +648,7 @@ mod tests {
     #[test]
     fn bar_fits_the_icon() {
         for level in [0, 1, 50, 99, 100] {
-            let img = render(&IconContent::Bar(level), NEUTRAL, false);
+            let img = render(&IconContent::Bar(level), NEUTRAL, IconMarks::default());
             let pixels = fg_pixels(&img, NEUTRAL);
             assert!(!pixels.is_empty());
             assert!(
@@ -645,7 +671,7 @@ mod tests {
         // A temperature is the number alone, 24 rows tall and centred as before.
         let c = icon_content(Some(45.0), Unit::Celsius, C);
         assert_eq!(c, num("45"));
-        let pixels = fg_pixels(&render(&c, NEUTRAL, false), NEUTRAL);
+        let pixels = fg_pixels(&render(&c, NEUTRAL, IconMarks::default()), NEUTRAL);
         let (top, bottom) = (
             pixels.iter().map(|p| p.1).min().unwrap(),
             pixels.iter().map(|p| p.1).max().unwrap(),
@@ -654,7 +680,7 @@ mod tests {
         // Nothing in the top-right corner where a unit mark would sit.
         assert!(pixels.iter().all(|&(x, y)| !(x >= 24 && y < 4)));
         // Three characters stay at the smaller scale.
-        let pixels = fg_pixels(&render(&num("212"), NEUTRAL, false), NEUTRAL);
+        let pixels = fg_pixels(&render(&num("212"), NEUTRAL, IconMarks::default()), NEUTRAL);
         assert_eq!(pixels.iter().map(|p| p.1).min(), Some(8));
         assert_eq!(pixels.iter().map(|p| p.1).max(), Some(23));
     }
@@ -683,7 +709,7 @@ mod tests {
 
     #[test]
     fn render_is_rgba_32x32() {
-        let img = render(&num("45"), NEUTRAL, false);
+        let img = render(&num("45"), NEUTRAL, IconMarks::default());
         assert_eq!(img.len(), 4096);
         assert_eq!(px(&img, 0, 0)[3], 0, "corner is transparent");
         assert_eq!(px(&img, 16, 2), NEUTRAL.background);
@@ -693,7 +719,7 @@ mod tests {
     #[test]
     fn render_fits_three_digits_and_minus() {
         for text in ["212", "-99", "999", "—"] {
-            let img = render(&num(text), NEUTRAL, false);
+            let img = render(&num(text), NEUTRAL, IconMarks::default());
             let pixels = fg_pixels(&img, NEUTRAL);
             assert!(!pixels.is_empty(), "{text} draws something");
             assert!(
@@ -705,7 +731,7 @@ mod tests {
 
     #[test]
     fn render_draws_two_digits_large() {
-        let img = render(&num("88"), NEUTRAL, false);
+        let img = render(&num("88"), NEUTRAL, IconMarks::default());
         let pixels = fg_pixels(&img, NEUTRAL);
         let top = pixels.iter().map(|&(_, y)| y).min().unwrap();
         let bottom = pixels.iter().map(|&(_, y)| y).max().unwrap();
@@ -715,12 +741,12 @@ mod tests {
     #[test]
     fn render_distinguishes_glyphs() {
         assert_ne!(
-            render(&num("45"), NEUTRAL, false),
-            render(&num("46"), NEUTRAL, false)
+            render(&num("45"), NEUTRAL, IconMarks::default()),
+            render(&num("46"), NEUTRAL, IconMarks::default())
         );
         assert_ne!(
-            render(&num("-"), NEUTRAL, false),
-            render(&num("—"), NEUTRAL, false)
+            render(&num("-"), NEUTRAL, IconMarks::default()),
+            render(&num("—"), NEUTRAL, IconMarks::default())
         );
     }
 
@@ -874,10 +900,10 @@ mod tests {
             assert_eq!(style.foreground, opaque(foreground), "{level:?}");
             // The drawn pixels: the square in the background, digits and bar
             // in the foreground.
-            let digits = render(&num("88"), style, false);
+            let digits = render(&num("88"), style, IconMarks::default());
             assert_eq!(px(&digits, 16, 2), opaque(background), "{level:?}");
             assert!(!fg_pixels(&digits, style).is_empty(), "{level:?}");
-            let bar = render(&IconContent::Bar(100), style, false);
+            let bar = render(&IconContent::Bar(100), style, IconMarks::default());
             assert_eq!(px(&bar, 16, 20), opaque(foreground), "{level:?}");
         }
         assert_eq!(style_for(OverallLevel::Neutral), NEUTRAL);
@@ -1149,7 +1175,7 @@ mod tests {
             println!(
                 "== {name}
 {}",
-                ascii(&render(&content, NEUTRAL, false), NEUTRAL)
+                ascii(&render(&content, NEUTRAL, IconMarks::default()), NEUTRAL)
             );
         }
     }
@@ -1159,8 +1185,8 @@ mod tests {
 
     #[test]
     fn recording_dot_is_drawn_in_the_corner() {
-        let plain = render(&num("48"), NEUTRAL, false);
-        let dotted = render(&num("48"), NEUTRAL, true);
+        let plain = render(&num("48"), NEUTRAL, IconMarks::default());
+        let dotted = render(&num("48"), NEUTRAL, RECORDING);
         assert_eq!(px(&dotted, 26, 5), DOT);
         assert_eq!(px(&dotted, 26, 0), RING);
         assert_eq!(px(&dotted, 21, 5), RING);
@@ -1177,7 +1203,7 @@ mod tests {
     #[test]
     fn dot_stays_visible_on_the_critical_background() {
         for content in [num("48"), IconContent::Bar(100)] {
-            let img = render(&content, CRIT, true);
+            let img = render(&content, CRIT, RECORDING);
             assert_eq!(px(&img, 26, 5), DOT);
             assert_eq!(
                 px(&img, 21, 5),
@@ -1186,5 +1212,40 @@ mod tests {
             );
             assert_eq!(px(&img, 26, 0), RING);
         }
+    }
+
+    const RECORDING: IconMarks = IconMarks {
+        recording: true,
+        testing: false,
+    };
+    const AMBER: [u8; 4] = [0xff, 0xc5, 0x3d, 0xff];
+
+    #[test]
+    fn testing_mark_draws_the_amber_dot() {
+        let plain = render(&num("48"), NEUTRAL, IconMarks::default());
+        let testing = IconMarks {
+            recording: false,
+            testing: true,
+        };
+        let marked = render(&num("48"), NEUTRAL, testing);
+        assert_eq!(px(&marked, 26, 5), AMBER);
+        assert_eq!(px(&marked, 26, 0), RING);
+        assert_ne!(plain, marked);
+        for y in 12..32 {
+            for x in 0..32 {
+                assert_eq!(px(&plain, x, y), px(&marked, x, y), "({x}, {y})");
+            }
+        }
+        // Both marks: amber on top, red below.
+        let both = render(
+            &num("48"),
+            NEUTRAL,
+            IconMarks {
+                recording: true,
+                testing: true,
+            },
+        );
+        assert_eq!(px(&both, 26, 5), AMBER);
+        assert_eq!(px(&both, 26, 26), DOT);
     }
 }

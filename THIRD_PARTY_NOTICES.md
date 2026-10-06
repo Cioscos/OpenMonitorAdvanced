@@ -135,3 +135,34 @@ the console compiles in cereal 1.3.2 (BSD-3-Clause, Copyright (c) 2013-2022,
 Randolph Voorhies, Shane Grant). Both licence texts are in
 `THIRD_PARTY_LICENSES.txt`. No PresentMon source is included here: the service
 only reads the CSV the console writes to its standard output.
+
+## FIRESTARTER
+
+`oma-load.exe`, the process that runs the stress tests (`crates/oma-load`), is
+partly adapted from FIRESTARTER (https://github.com/tud-zih-energy/FIRESTARTER),
+at commit `927ae17e55f3f90f7575f6a68630a366fde9c94e`: the instruction groups
+and the sequence of the floating-point load kernel (`crates/oma-load/build.rs`,
+`crates/oma-load/src/kernels/k1/groups.rs` and `mod.rs`: register roles, initial
+values, L1 and L2 buffers, memory initialisation) and the CRC32 hash of the
+vector registers used for error detection (`crates/oma-load/src/kernels/k1/crc.rs`).
+The code is rewritten in Rust; each adapted file opens with the origin note and
+the original copyright, "Copyright (C) 2020-2023 TU Dresden, Center for
+Information Services and High Performance Computing" (2020 in `groups.rs`, as in
+the upstream header). FIRESTARTER is licensed GPL-3.0-or-later, the same licence
+as OpenMonitor Advanced; the full text is in `LICENSE`. No FIRESTARTER binary is
+redistributed.
+
+## OpenDCDiag
+
+`oma-load.exe` also adapts ideas and structure from OpenDCDiag
+(https://github.com/opendcdiag/opendcdiag), at commit
+`9957c45b899e2ff7deb7bad94229246e2281d667`, from `framework/sandstone.h` and
+`tests/examples/vector_add.c`: a golden value computed at start, the same
+computation repeated and compared in the loop, a reproducible seed. It is
+rewritten in Rust (`crates/oma-load/src/kernel.rs` and `verify.rs`, each with the
+origin note); the reference is computed on three cores that must agree and the
+comparison uses 64-bit digests. OpenDCDiag is "Copyright 2022 Intel
+Corporation", licensed under the Apache License, Version 2.0; the full text is in
+`THIRD_PARTY_LICENSES.txt`, section "Source code adapted into OpenMonitor
+Advanced". The modifications are part of OpenMonitor Advanced,
+GPL-3.0-or-later. No OpenDCDiag binary is redistributed.

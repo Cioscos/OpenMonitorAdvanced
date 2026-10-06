@@ -8,11 +8,13 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 # Sections of the generated file, in this order; any other ecosystem follows, by name.
-$script:EcosystemOrder = @('Rust', 'JavaScript', '.NET', 'Programs')
+$script:EcosystemOrder = @('Rust', 'JavaScript', '.NET', 'Programs', 'Adapted')
 $script:SectionTitles = @{
     'Rust' = 'Rust crates'; 'JavaScript' = 'JavaScript packages'; '.NET' = '.NET packages'
     # Executables shipped unmodified next to the service (M7b: Intel PresentMon), with what they embed.
     'Programs' = 'Programs shipped with the service'
+    # Third-party source code adapted into our own crates (M8a1: OpenDCDiag in oma-load).
+    'Adapted' = 'Source code adapted into OpenMonitor Advanced'
 }
 $script:Rule = '-' * 79
 
@@ -179,7 +181,7 @@ function Test-OmaLicenseAccepted {
 .DESCRIPTION
   -Sections are @{ Ecosystem; Entries }, each entry @{ Ecosystem; Name; Version; License;
   Copyright; Texts = @(@{ Title; Body }) }. Sections of the same ecosystem are joined and
-  ordered Rust, JavaScript, .NET, Programs, then by name; entries are sorted by name (ordinal,
+  ordered Rust, JavaScript, .NET, Programs, Adapted, then by name; entries are sorted by name (ordinal,
   ignoring case) and version (numeric segments compared as numbers), and the same name and
   version is one entry. Texts are compared after normalisation (LF line ends, no BOM, no trailing
   whitespace, no leading or trailing blank lines), so the same text from two packages is kept
@@ -239,8 +241,10 @@ function Merge-OmaLicenseSections {
                 if (-not $texts.ContainsKey($body)) {
                     $texts[$body] = [pscustomobject]@{
                         Title = $t.Title; Body = $body; FirstName = $m.Name; FirstVersion = $m.Version; Label = $null
+                        Neutral = $false
                     }
                 }
+                if ($t.PSObject.Properties['Neutral'] -and $t.Neutral) { $texts[$body].Neutral = $true }
                 if (-not $keys.Contains($body)) { $keys.Add($body) }
             }
             [pscustomobject]@{
@@ -257,9 +261,11 @@ function Merge-OmaLicenseSections {
 
     # Labels, stable when a dependency is added: "<title> (<first user>)", where the first user
     # is the first entry of the file that references the text. Should two texts collide, the
-    # user's version is added, then the start of the text's SHA-256.
+    # user's version is added, then the start of the text's SHA-256. A text marked Neutral (a
+    # standard text of our own scripts/licenses folder) is labelled by its title alone, so a
+    # component never points at a text named after an unrelated package.
     $all = [object[]]@($texts.Values)
-    foreach ($t in $all) { $t.Label = "$($t.Title) ($($t.FirstName))" }
+    foreach ($t in $all) { $t.Label = if ($t.Neutral) { $t.Title } else { "$($t.Title) ($($t.FirstName))" } }
     foreach ($t in (Get-OmaCollidingTexts $all)) { $t.Label = "$($t.Title) ($($t.FirstName) $($t.FirstVersion))" }
     foreach ($t in (Get-OmaCollidingTexts $all)) {
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($t.Body)))
@@ -312,8 +318,9 @@ function ConvertTo-OmaLicenseText {
     $out.Add('OpenMonitor Advanced is licensed under GPL-3.0-or-later (see LICENSE). It includes the')
     $out.Add('third-party components listed below: the Rust crates compiled into the application, the')
     $out.Add('JavaScript packages bundled into its user interface, the .NET packages and runtime built')
-    $out.Add('into the oma-service hardware service and the programs shipped unmodified with that')
-    $out.Add('service. Each component names, in square brackets, the licence texts that apply to it;')
+    $out.Add('into the oma-service hardware service, the programs shipped unmodified with that')
+    $out.Add('service and the source code adapted into the oma-load program. Each component names, in')
+    $out.Add('square brackets, the licence texts that apply to it;')
     $out.Add('every text is printed once, at the end of this file. Further notices are in')
     $out.Add('THIRD_PARTY_NOTICES.')
     $out.Add('')

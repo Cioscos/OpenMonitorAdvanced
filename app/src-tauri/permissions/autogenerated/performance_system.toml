@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-system"
+description = "Enables the performance_system command without any pre-configured scope."
+commands.allow = ["performance_system"]
+
+[[permission]]
+identifier = "deny-performance-system"
+description = "Denies the performance_system command without any pre-configured scope."
+commands.deny = ["performance_system"]

@@ -6,6 +6,7 @@
 
 mod drive_key;
 mod frame;
+pub mod load;
 mod message;
 pub mod overlay;
 mod status;

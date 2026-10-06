@@ -175,7 +175,7 @@ pub enum OverlayMessage {
     Benchmark(BenchmarkOverlay),
 }
 
-fn check_len(what: &str, n: usize, max: usize) -> Result<(), IpcError> {
+pub(crate) fn check_len(what: &str, n: usize, max: usize) -> Result<(), IpcError> {
     if n > max {
         Err(IpcError::Decode(format!(
             "{what} has {n} entries, the maximum is {max}"

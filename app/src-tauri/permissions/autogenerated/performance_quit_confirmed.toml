@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-quit-confirmed"
+description = "Enables the performance_quit_confirmed command without any pre-configured scope."
+commands.allow = ["performance_quit_confirmed"]
+
+[[permission]]
+identifier = "deny-performance-quit-confirmed"
+description = "Denies the performance_quit_confirmed command without any pre-configured scope."
+commands.deny = ["performance_quit_confirmed"]

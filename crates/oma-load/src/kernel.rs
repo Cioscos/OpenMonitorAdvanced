@@ -186,7 +186,9 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
         KernelId::K5 => Some(&crate::kernels::k5::K5Factory),
         #[cfg(target_arch = "x86_64")]
         KernelId::K7 => Some(&crate::kernels::k7::K7Factory),
-        // The other kernels arrive with A13–A15.
+        #[cfg(target_arch = "x86_64")]
+        KernelId::K8 => Some(&crate::kernels::k8::K8Factory),
+        // The other kernels arrive with A14–A15.
         _ => None,
     }
 }

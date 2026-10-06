@@ -5,6 +5,8 @@
 pub mod args;
 pub mod engine;
 pub mod kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod kernels;
 pub mod link;
 pub mod log;
 pub mod rng;

@@ -174,16 +174,10 @@ pub struct WorkerCtx {
 /// The factory of kernel `id`, or `None` while it does not exist yet.
 pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
     match id {
-        // The kernels arrive with A9–A15.
-        KernelId::K1
-        | KernelId::K2
-        | KernelId::K3
-        | KernelId::K4
-        | KernelId::K5
-        | KernelId::K7
-        | KernelId::K8
-        | KernelId::K9
-        | KernelId::K10 => None,
+        #[cfg(target_arch = "x86_64")]
+        KernelId::K1 => Some(&crate::kernels::k1::K1Factory),
+        // The other kernels arrive with A10–A15.
+        _ => None,
     }
 }
 

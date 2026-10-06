@@ -192,8 +192,18 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
         KernelId::K9 => Some(&crate::kernels::k9::K9Factory),
         #[cfg(target_arch = "x86_64")]
         KernelId::K10 => Some(&crate::kernels::k10::K10Factory),
-        // The benchmark loads arrive with B3; until then they take the unsupported path.
-        KernelId::Hash | KernelId::Compress | KernelId::Sort => None,
+        #[cfg(target_arch = "x86_64")]
+        KernelId::Hash => Some(&crate::kernels::bench::BenchFactory(
+            crate::kernels::bench::Kind::Hash,
+        )),
+        #[cfg(target_arch = "x86_64")]
+        KernelId::Compress => Some(&crate::kernels::bench::BenchFactory(
+            crate::kernels::bench::Kind::Compress,
+        )),
+        #[cfg(target_arch = "x86_64")]
+        KernelId::Sort => Some(&crate::kernels::bench::BenchFactory(
+            crate::kernels::bench::Kind::Sort,
+        )),
         #[cfg(not(target_arch = "x86_64"))]
         _ => None,
     }

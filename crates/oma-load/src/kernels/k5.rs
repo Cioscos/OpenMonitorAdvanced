@@ -23,6 +23,8 @@ pub const M61: u64 = (1 << 61) - 1;
 const MAX_RAM_POINTS: usize = 1 << 24;
 /// Bytes per point of the whole footprint: input, work buffer and twiddles, 8 each.
 const BYTES_PER_POINT: u64 = 24;
+/// DB2: the NTT length of `DataSize::Fixed`, the same on every machine.
+pub const FIXED_NTT_N: usize = 1 << 15;
 
 // Montgomery arithmetic with R = 2^64. P < 2^63, so sums of two residues never overflow.
 const PINV: u64 = {
@@ -265,6 +267,7 @@ pub(crate) struct K5 {
 impl K5 {
     pub(crate) fn new(ctx: &WorkerCtx) -> Result<Self, KernelError> {
         let n = match ctx.size {
+            DataSize::Fixed => FIXED_NTT_N,
             DataSize::L3 => n_l3(ctx),
             DataSize::Ram => n_ram(ctx)?,
             _ => n_l2(ctx),

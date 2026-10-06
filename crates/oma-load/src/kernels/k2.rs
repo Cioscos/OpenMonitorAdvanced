@@ -22,6 +22,8 @@ pub(crate) const RAM_CAP: u64 = 1024 * MIB;
 pub(crate) const RAM_FLOOR: u64 = 256 * MIB;
 /// Bytes per point of the whole footprint: input, work buffer and twiddles, 16 each.
 const BYTES_PER_POINT: u64 = 48;
+/// DB2: the FFT length of `DataSize::Fixed`, the same on every machine.
+pub const FIXED_FFT_N: usize = 4096;
 /// DA7: the tolerances of the reference's own checks.
 const SUM_TOLERANCE: f64 = 1e-9;
 const ROUND_TRIP_TOLERANCE: f64 = 1e-9;
@@ -214,7 +216,9 @@ pub(crate) struct K2 {
 
 impl K2 {
     pub(crate) fn new(ctx: &WorkerCtx, ram: bool) -> Result<Self, KernelError> {
-        let (n, tried) = if ram {
+        let (n, tried) = if ctx.size == DataSize::Fixed {
+            (FIXED_FFT_N, None)
+        } else if ram {
             let share = ram_share(ctx.budget.ram_per_thread)?;
             (n_ram(share), Some(share))
         } else if matches!(ctx.size, DataSize::L1 | DataSize::Auto) {

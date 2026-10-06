@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Backend } from '../../lib/backend';
-  import { LiveStore } from '../../lib/live.svelte';
+  import type { LiveStore } from '../../lib/live.svelte';
   import { t } from '../../lib/i18n/index.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
@@ -13,7 +13,7 @@
   // page on the right. The store is connected only while the view is on screen. `new` is the
   // wizard, `run` the test under way, `result:<id>` a saved session; the history comes next.
   // `store` is the app's live store, for the run page's chart.
-  let { backend, store = new LiveStore(), page = $bindable('new') }: { backend: Backend; store?: LiveStore; page?: PerformancePage } = $props();
+  let { backend, store, page = $bindable('new') }: { backend: Backend; store: LiveStore; page?: PerformancePage } = $props();
   const open = (next: PerformancePage) => (page = next);
 
   onMount(() => {

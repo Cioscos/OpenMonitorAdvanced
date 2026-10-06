@@ -53,10 +53,14 @@ async function setup(status: RunStatus = RUNNING(), schema: Schema = SERVICE_MOC
   return { backend, view };
 }
 
-const tile = (label: string) => screen.getByText(label, { selector: '.tile .label, .tile .label *' }).closest('.tile') as HTMLElement;
+const tile = (label: string) => [...document.querySelectorAll<HTMLElement>('.tile')].find((e) => e.querySelector('.label')?.textContent === label)!;
 
 test('run_shows_tiles_phases_and_stop', async () => {
-  await setup(RUNNING({ events: [{ atMs: 1000, code: 'mystery', params: {} }, { atMs: 300_000, code: 'thermal_stop', params: { temp: '96' } }] }));
+  await setup(RUNNING({ events: [
+      { atMs: 1000, code: 'mystery', params: {} },
+      { atMs: 200_000, code: 'whea', params: { id: '19', apic: '4', core: '2' } },
+      { atMs: 300_000, code: 'thermal_stop', params: { temp: '96' } },
+    ] }));
   // Header: objective and component, state, elapsed and total time.
   expect(screen.getByRole('heading', { name: `${t('performance.objective.overclock')} · CPU` })).toBeTruthy();
   expect(screen.getByText(t('performance.run.pill.ok'))).toBeTruthy();
@@ -66,26 +70,32 @@ test('run_shows_tiles_phases_and_stop', async () => {
   const items = within(phases).getAllByRole('listitem');
   expect(items.map((li) => li.querySelector('.term')?.textContent)).toEqual(['k1', 'k2', 'k5'].map((k) => t(`glossary.mode.${k}.name`)));
   expect(items[0].getAttribute('aria-current')).toBe('step');
+  expect(items.map((li) => li.querySelector('.visually-hidden')?.textContent)).toEqual(['now', 'todo', 'todo'].map((s) => t(`performance.run.phase.${s}`)));
   // Five tiles: temperature with max, thermal stop and Tjmax; power; clock; errors with checks; WHEA.
   const temp = tile(t('performance.run.temp'));
   expect(temp.textContent).toContain('78 °C');
   expect(temp.textContent).toContain(t('performance.run.max', { value: '87 °C' }));
   expect([...temp.querySelectorAll('.term')].map((e) => e.textContent)).toEqual([t('glossary.thermalStop.name'), t('glossary.tjmax.name')]);
   expect(temp.textContent).toContain('84 °C');
-  expect(tile(t('performance.run.power')).textContent).toContain('61 W');
+  expect(tile(t('glossary.packagePower.name')).querySelector('.label .term')).toBeTruthy();
+  expect(tile(t('glossary.packagePower.name')).textContent).toContain('61 W');
+  expect(tile(t('performance.run.clock')).querySelector('.label .term')?.textContent?.toLowerCase()).toBe(t('glossary.clock.name').toLowerCase());
   expect(tile(t('performance.run.clock')).textContent).toContain('4.85 GHz');
   const errors = tile(t('performance.run.errors'));
   expect(errors.querySelector('.value')?.textContent).toBe('0');
   expect(errors.querySelector('.term')?.textContent).toBe(t('performance.run.checks'));
   expect(errors.textContent).toContain('1,284');
-  const whea = screen.getByText('WHEA', { selector: '.tile .term' }).closest('.tile') as HTMLElement;
+  const whea = tile(t('performance.run.whea'));
   expect(whea.textContent).toContain(t('performance.run.wheaSub', { corrected: 0, fatal: 0 }));
   // Events, newest first and translated; an unknown code shows itself.
   const log = screen.getByRole('list', { name: t('performance.run.events') });
   const lines = within(log).getAllByRole('listitem').map((li) => li.textContent);
   expect(lines[0]).toContain('00:05:00');
   expect(lines[0]).toContain(t('performance.event.thermal_stop', { temp: '96' }));
-  expect(lines[1]).toContain('mystery');
+  expect(lines[2]).toContain('mystery');
+  // A line can carry several terms: WHEA, the core number and the APIC ID.
+  const terms = [...within(log).getAllByRole('listitem')[1].querySelectorAll('.term')].map((e) => e.textContent);
+  expect(terms).toEqual(['WHEA', 'core 2', 'APIC ID']);
 });
 
 test('stop_calls_the_backend', async () => {

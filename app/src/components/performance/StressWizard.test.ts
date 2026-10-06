@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { i18n, t } from '../../lib/i18n/index.svelte';
+import { LiveStore } from '../../lib/live.svelte';
 import { performanceStore } from '../../lib/performance/performance.svelte';
 import type { Phase, Plan, SettingsPatch, StartRequest, SystemInfo } from '../../lib/types';
 import { makeRunStatus, makeSystemInfo, type FakeBackend } from '../../test/fake-backend';
@@ -68,7 +69,7 @@ async function setup({ system, settings, running, view }: Setup = {}) {
   };
   const onStarted = vi.fn();
   if (view) {
-    render(PerformanceView, { backend });
+    render(PerformanceView, { backend, store: new LiveStore() });
   } else {
     off = await performanceStore.connect(backend);
     render(StressWizard, { backend, onStarted });

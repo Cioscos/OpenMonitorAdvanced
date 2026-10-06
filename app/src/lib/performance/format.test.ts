@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
 import type { Phase } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, errorText, eventText, formatDuration, marked, phaseLabel } from './format';
+import { cpuChartSensors, errorText, eventText, formatDuration, marked, phaseLabel, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -56,12 +56,25 @@ test('shell_errors_are_translated_by_code', () => {
 test('event_text_counts_phases_from_one_and_reads_recovered_whea', () => {
   i18n.locale = 'it';
   const ev = (code: string, params: Record<string, string> = {}) => eventText({ atMs: 0, code, params }, t, 'it');
-  expect(ev('ram_insufficient', { phase: '0' })).toEqual({ text: t('performance.event.ram_insufficient', { phase: 1 }), term: null });
-  expect(ev('ram_reduced', { phase: '2', value: String(4 * 1024 ** 3) }).text).toBe(t('performance.event.ram_reduced', { phase: 3, value: '4,0 GB' }));
-  expect(ev('whea', { id: '19', apic: '4', core: '2' })).toEqual({ text: 'Errore WHEA 19 sul core 2', term: 'whea' });
-  expect(ev('whea18', { record: '7', apic: '6' }).text).toBe("Errore WHEA 18 dall'APIC ID 6");
-  expect(ev('mystery')).toEqual({ text: 'mystery', term: null });
+  const text = (code: string, params: Record<string, string> = {}) => ev(code, params).map((p) => p.text).join('');
+  const terms = (code: string, params: Record<string, string> = {}) => ev(code, params).filter((p) => p.term).map((p) => [p.term, p.text]);
+  expect(text('ram_insufficient', { phase: '0' })).toBe(t('performance.event.ram_insufficient', { phase: 1 }));
+  expect(terms('ram_insufficient', { phase: '0' })).toEqual([['phase', 'Fase']]);
+  expect(text('ram_reduced', { phase: '2', value: String(4 * 1024 ** 3) })).toBe('Fase 3: memoria per thread ridotta a 4,0 GB');
+  expect(terms('ram_reduced', { phase: '2', value: '1' })).toEqual([['phase', 'Fase'], ['threads', 'thread']]);
+  expect(text('whea', { id: '19', apic: '4', core: '2' })).toBe('Errore WHEA 19 sul core 2 (APIC ID 4)');
+  expect(terms('whea', { id: '19', apic: '4', core: '2' })).toEqual([['whea', 'WHEA'], ['coreNumber', 'core 2'], ['apicId', 'APIC ID']]);
+  expect(text('whea18', { record: '7', apic: '6' })).toBe(t('performance.event.whea', { id: 18, where: t('performance.event.where.apic', { apic: 6 }) }));
+  expect(terms('bugcheck')).toEqual([['bugcheck', 'BugCheck']]);
+  expect(terms('kernelPower41')).toEqual([['kernelPower41', 'Kernel-Power 41']]);
+  expect(ev('mystery')).toEqual([{ text: 'mystery', term: null }]);
   i18n.locale = 'en';
+});
+
+test('verdict_title_reads_the_recovered_phase', () => {
+  expect(verdictTitle({ verdict: 'system_crash', params: { phase: '3' } }, t)).toBe(t('performance.outcome.system_crash', { phase: t('performance.result.phaseN', { n: 3 }) }));
+  expect(verdictTitle({ verdict: 'errors_core', params: { core: '2' } }, t)).toBe(t('performance.outcome.errors_core', { core: 2 }));
+  expect(verdictTitle(null, t)).toBe(t('performance.result.unknown'));
 });
 
 test('chart_sensors_follow_da5', () => {

@@ -37,34 +37,73 @@ export function around(text: string, word: string): [string, string, string] {
   return at < 0 ? [text, '', ''] : [text.slice(0, at), text.slice(at, at + word.length), text.slice(at + word.length)];
 }
 
-/** The glossary term each event's text mentions (by its `glossary.<term>.name`). */
-const EVENT_TERMS: Record<string, string> = {
-  thermal_stop: 'thermalStop',
-  reference_invalid: 'reference',
-  ram_reduced: 'ramShare',
-  k9_needs_two_cores: 'mode.k9',
-  whea: 'whea',
-  whea_unreadable: 'whea',
+/** A run of text, carrying a glossary term or not. */
+export interface Piece {
+  text: string;
+  term: string | null;
+}
+
+/**
+ * `text` cut into pieces so each term's word (its `glossary.<term>.name` unless `word` is given,
+ * any case, first occurrence) carries its term; a word that is not there is skipped.
+ */
+export function pieces(text: string, terms: { term: string; word?: string }[], t: Translate): Piece[] {
+  let out: Piece[] = [{ text, term: null }];
+  for (const { term, word = t(`glossary.${term}.name`) } of terms) {
+    const i = out.findIndex((p) => p.term === null && p.text.toLowerCase().includes(word.toLowerCase()));
+    if (i < 0) continue;
+    const [before, hit, after] = around(out[i].text, word);
+    const split = [{ text: before, term: null }, { text: hit, term }, { text: after, term: null }].filter((p) => p.text !== '');
+    out = [...out.slice(0, i), ...split, ...out.slice(i + 1)];
+  }
+  return out;
+}
+
+/** The glossary terms each event's text mentions. */
+const EVENT_TERMS: Record<string, string[]> = {
+  thermal_stop: ['thermalStop'],
+  reference_invalid: ['phase', 'reference'],
+  ram_reduced: ['phase', 'threads'],
+  ram_insufficient: ['phase'],
+  k9_needs_two_cores: ['phase', 'mode.k9'],
+  whea: ['whea', 'apicId'],
+  whea_unreadable: ['whea'],
+  bugcheck: ['bugcheck'],
+  kernelPower41: ['kernelPower41'],
 };
 
 /**
- * A line of the event log in words (`performance.event.<code>`) and the term it mentions. Phases
- * count from 1 as a person does; `whea17`…`whea19` (found after a crash) read like the live `whea`.
- * An unknown code shows itself.
+ * A line of the event log in words (`performance.event.<code>`), cut around the terms it
+ * mentions. Phases count from 1 as a person does; `whea17`…`whea19` (found after a crash) read
+ * like the live `whea`. An unknown code shows itself.
  */
-export function eventText(event: SessionEvent, t: Translate, locale: string): { text: string; term: string | null } {
+export function eventText(event: SessionEvent, t: Translate, locale: string): Piece[] {
   const recovered = /^whea(\d+)$/.exec(event.code);
   const code = recovered ? 'whea' : event.code;
   const p: Params = { ...event.params };
   if (recovered) p.id = recovered[1];
   if (p.phase !== undefined && Number.isFinite(Number(p.phase))) p.phase = Number(p.phase) + 1;
   if (code === 'ram_reduced' && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  const terms: { term: string; word?: string }[] = (EVENT_TERMS[code] ?? []).map((term) => ({ term }));
   if (code === 'whea') {
-    p.where = p.core !== undefined ? t('performance.event.where.core', p) : p.apic !== undefined ? t('performance.event.where.apic', p) : '';
+    const where = p.core === undefined ? 'apic' : p.apic === undefined ? 'core' : 'coreApic';
+    p.where = p.core === undefined && p.apic === undefined ? '' : t(`performance.event.where.${where}`, p);
+    if (p.core !== undefined) terms.push({ term: 'coreNumber', word: t('performance.core.label', { core: p.core }) });
   }
   const key = `performance.event.${code}`;
   const text = t(key, p);
-  return text === key ? { text: event.code, term: null } : { text, term: EVENT_TERMS[code] ?? null };
+  return text === key ? [{ text: event.code, term: null }] : pieces(text, terms, t);
+}
+
+/**
+ * A verdict's title: the T3 text (`performance.outcome.<verdict>`) with its parameters; a
+ * recovered `phase` (counted from 1) reads «during phase 3».
+ */
+export function verdictTitle(detail: { verdict: string | null; params: Record<string, string> } | null, t: Translate): string {
+  if (!detail?.verdict) return t('performance.result.unknown');
+  const params: Params = { ...detail.params };
+  if (params.phase !== undefined) params.phase = t('performance.result.phaseN', { n: params.phase });
+  return t(`performance.outcome.${detail.verdict}`, params);
 }
 
 /** DA5: the CPU temperature (first present) and package power, as the chart's series. */

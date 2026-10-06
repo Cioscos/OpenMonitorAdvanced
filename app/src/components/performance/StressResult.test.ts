@@ -73,7 +73,7 @@ test('result_shows_unstable_core_with_advice_and_retry', async () => {
   expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.k2.name'));
   expect(fact(t('performance.result.fact.core'))).toBe('2');
   expect(fact(t('performance.result.fact.time'))).toBe('00:02:14');
-  expect(fact(t('performance.result.fact.clock'))).toBe('5.10 GHz');
+  expect(fact(t('glossary.clock.name'))).toBe('5.10 GHz');
   expect(fact(t('performance.result.fact.temp'))).toBe('71 °C');
   expect(fact(t('glossary.iteration.name'))).toBe('17');
   const sentences = [...document.querySelectorAll('.verdict p')].map((p) => p.textContent);
@@ -85,6 +85,12 @@ test('result_shows_unstable_core_with_advice_and_retry', async () => {
   expect(document.body.textContent).not.toContain('expected');
   // WHEA by APIC with its core, from the session's own events.
   expect(screen.getByText(t('performance.result.wheaApicCore', { apic: 4, core: 2, n: 2 }))).toBeTruthy();
+  // WHEA by ID says whether the hardware corrected it, with the term.
+  const byIdText = `WHEA ${t('performance.result.wheaId', { id: 19, kind: t('performance.result.wheaKind.corrected'), n: 2 })}`;
+  const byId = screen.getByText((_, node) => node?.tagName === 'LI' && node.textContent === byIdText);
+  expect(byId.querySelector('.term')?.textContent).toBe('WHEA');
+  // Phase counts agree in number.
+  expect(screen.getByText(t('performance.result.phaseCount.passed.one'), { exact: false })).toBeTruthy();
   // Cores and the error list with the dropped ones counted.
   const cores = screen.getByRole('list', { name: t('performance.run.cores') });
   expect(within(cores).getAllByRole('listitem')[3].textContent).toContain(t('performance.core.untestedFinal'));
@@ -134,4 +140,21 @@ test('system_crash_result_shows_the_phase', async () => {
   expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.k5.name'));
   const log = screen.getByRole('list', { name: t('performance.run.events') });
   expect(log.textContent).toContain(t('performance.event.bugcheck'));
+});
+
+test('crash_facts_come_from_the_journal_not_an_earlier_error', async () => {
+  await setup(
+    makeStressSession({
+      id: 'crash2',
+      outcome: 'system_crash',
+      outcomeDetail: { verdict: 'system_crash', params: { phase: '3' }, phase: 2, kernel: 'k5', core: 5, tempC: null, clockMhz: null, atMs: null },
+      errors: [error({ phase: 0, kernel: 'k1', core: 1 })],
+    }),
+  );
+  expect(fact(t('glossary.phase.name'))).toContain('3');
+  expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.k5.name'));
+  expect(fact(t('performance.result.fact.core'))).toBe('5');
+  expect(screen.queryByText(t('performance.result.fact.time'), { selector: '.facts dt' })).toBeNull();
+  expect(screen.queryByText(t('glossary.iteration.name'), { selector: '.facts dt *' })).toBeNull();
+  expect(document.querySelector('.verdict p')).toBeNull();
 });

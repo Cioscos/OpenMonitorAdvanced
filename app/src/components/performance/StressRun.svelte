@@ -47,6 +47,7 @@
   const chartSensors = $derived(cpuChartSensors(store.schema));
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
+  const clockLabel = $derived(around(t('performance.run.clock'), t('glossary.clock.name')));
   const onePerCore = $derived(marked(t('performance.wizard.onePerCore')));
 
   // The test is over: its result is the page to see.
@@ -75,6 +76,7 @@
         <li style:flex-grow={segment.phase.durationS} style:--p={segment.done} class:now={index === status.phaseIndex} aria-current={index === status.phaseIndex ? 'step' : undefined}>
           <span class="bar"></span>
           <span class="name"><Term term={`mode.${segment.phase.kernel}`} /></span>
+          <span class="visually-hidden">{t(`performance.run.phase.${index < status.phaseIndex ? 'done' : index === status.phaseIndex ? 'now' : 'todo'}`)}</span>
         </li>
       {/each}
     </ol>
@@ -97,11 +99,11 @@
         </div>
       </div>
       <div class="tile">
-        <div class="label">{t('performance.run.power')}</div>
+        <div class="label"><Term term="packagePower" /></div>
         <div class="value"><AnimatedNumber value={status.powerW} format={(v) => formatPower(v, locale)} /></div>
       </div>
       <div class="tile">
-        <div class="label">{t('performance.run.clock')}</div>
+        <div class="label">{clockLabel[0]}{#if clockLabel[1]}<Term term="clock">{clockLabel[1]}</Term>{/if}{clockLabel[2]}</div>
         <div class="value"><AnimatedNumber value={status.clockMhz} format={(v) => formatClock(v, locale)} /></div>
         <div class="sub">{t('performance.run.clockSub')}</div>
       </div>
@@ -256,6 +258,14 @@
   }
   .now .name {
     color: var(--text);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .current {
     margin: 0;

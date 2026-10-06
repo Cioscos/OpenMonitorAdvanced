@@ -2,7 +2,7 @@
   import type { Backend } from '../../lib/backend';
   import { DASH, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { around, errorText } from '../../lib/performance/format';
+  import { around, errorText, verdictTitle } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { ErrorRecord, Isa, KernelId, StartRequest, StressSession } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
@@ -51,19 +51,18 @@
   const locale = $derived(i18n.locale);
   const detail = $derived(session?.outcomeDetail ?? null);
   const verdict = $derived(detail?.verdict ?? session?.outcome ?? null);
-  const title = $derived.by(() => {
-    if (!verdict) return t('performance.result.unknown');
-    const params: Record<string, string> = { ...detail?.params };
-    // The recovered phase is a number a person counts: «during phase 3».
-    if (params.phase !== undefined) params.phase = t('performance.result.phaseN', { n: params.phase });
-    return t(`performance.outcome.${verdict}`, params);
-  });
+  const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t));
   const tone = $derived(verdict === 'passed' ? 'ok' : verdict && CRIT.includes(verdict) ? 'crit' : 'warn');
-  /** The error the verdict speaks of: the first one of the unstable core, else the first of all. */
+  /**
+   * The error the verdict speaks of, only when the verdict is about errors: the first one of the
+   * unstable core, else the first of all. A crash, a hang or a stop speaks of where it happened.
+   */
   const firstError = $derived<ErrorRecord | null>(
-    (detail?.core != null ? session?.cores.find((c) => c.core === detail.core)?.firstError : null) ?? session?.errors[0] ?? null,
+    verdict === 'errors' || verdict === 'errors_core'
+      ? ((detail?.core != null ? session?.cores.find((c) => c.core === detail.core)?.firstError : null) ?? session?.errors[0] ?? null)
+      : null,
   );
-  /** Where and when: at the error when there was one, else where the test ended. */
+  /** Where and when: at that error, else where the test ended (the journal's place after a crash). */
   const facts = $derived.by(() => {
     if (!session || verdict === 'passed') return null;
     const e = firstError;
@@ -92,7 +91,10 @@
   const phaseCounts = $derived.by(() => {
     const phases = session?.phases ?? [];
     const count = (outcome: string) => phases.filter((p) => p.outcome === outcome).length;
-    return { passed: count('passed'), errors: count('errors'), skipped: count('skipped'), notRun: Math.max(0, (session?.plan.phases.length ?? 0) - phases.length) };
+    const counts = { passed: count('passed'), errors: count('errors'), skipped: count('skipped'), notRun: Math.max(0, (session?.plan.phases.length ?? 0) - phases.length) };
+    return Object.entries(counts)
+      .map(([key, n]) => t(`performance.result.phaseCount.${key}${n === 1 ? '.one' : ''}`, { n }))
+      .join(' · ');
   });
   const checks = $derived(session?.phases.reduce((sum, p) => sum + p.checks, 0) ?? 0);
   const counter = $derived(new Intl.NumberFormat(locale));
@@ -139,7 +141,7 @@
       const name = await backend.performanceExport(id);
       if (name) exported = t('performance.result.exported', { name });
     } catch (error) {
-      actionError = t('performance.result.exportError', { reason: String(error) });
+      actionError = t('performance.result.exportError', { reason: errorText(error, t) });
     }
   }
 </script>
@@ -169,7 +171,7 @@
             <div><dt>{t('performance.result.fact.time')}</dt><dd>{formatTapeCounter(facts.atMs)}</dd></div>
           {/if}
           {#if facts.clockMhz !== null}
-            <div><dt>{t('performance.result.fact.clock')}</dt><dd>{formatClock(facts.clockMhz, locale)}</dd></div>
+            <div><dt><Term term="clock" /></dt><dd>{formatClock(facts.clockMhz, locale)}</dd></div>
           {/if}
           {#if facts.tempC !== null}
             <div><dt>{t('performance.result.fact.temp')}</dt><dd>{formatTemperature(facts.tempC, locale)}</dd></div>
@@ -209,18 +211,22 @@
             <dt>{t('performance.result.duration')}</dt>
             <dd>{t('performance.result.durationOf', { done: durationMs === null ? DASH : formatTapeCounter(durationMs), total: formatTapeCounter(totalMs) })}</dd>
           </div>
-          <div><dt>{t('performance.result.phases')}</dt><dd>{t('performance.result.phaseCounts', phaseCounts)}</dd></div>
+          <div><dt><Term term="phase">{t('performance.result.phases')}</Term></dt><dd>{phaseCounts}</dd></div>
           <div><dt><Term term="check" /></dt><dd>{counter.format(checks)}</dd></div>
           <div><dt>{t('performance.result.fact.temp')}</dt><dd>{maxAvg(session.stats.tempMaxC, session.stats.tempAvgC, formatTemperature)}</dd></div>
-          <div><dt>{t('performance.run.power')}</dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
-          <div><dt>{t('performance.result.fact.clock')}</dt><dd>{maxAvg(session.stats.clockMaxMhz, session.stats.clockAvgMhz, formatClock)}</dd></div>
+          <div><dt><Term term="packagePower" /></dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
+          <div><dt><Term term="clock" /></dt><dd>{maxAvg(session.stats.clockMaxMhz, session.stats.clockAvgMhz, formatClock)}</dd></div>
           {#if whea}
             <div>
               <dt><Term term="whea" /></dt>
               <dd>
                 {#if whea.unreadable}{t('performance.warn.wheaUnreadable')}{:else}{t('performance.run.wheaSub', { corrected: whea.corrected, fatal: whea.fatal })}{/if}
                 {#if whea.ids.length > 0}
-                  <ul class="plain">{#each whea.ids as [wheaId, n] (wheaId)}<li>{t('performance.result.wheaId', { id: wheaId, n })}</li>{/each}</ul>
+                  <ul class="plain">
+                    {#each whea.ids as [wheaId, n] (wheaId)}
+                      <li><Term term="whea" /> {t('performance.result.wheaId', { id: wheaId, kind: t(`performance.result.wheaKind.${wheaId === '18' ? 'fatal' : 'corrected'}`), n })}</li>
+                    {/each}
+                  </ul>
                 {/if}
               </dd>
             </div>
@@ -259,7 +265,7 @@
                 <th>{t('performance.result.col.mode')}</th>
                 <th><Term term="coreNumber">{t('performance.result.fact.core')}</Term></th>
                 <th>{t('performance.result.col.result')}</th>
-                <th>{t('performance.result.fact.clock')}</th>
+                <th><Term term="clock" /></th>
                 <th>{t('performance.result.fact.temp')}</th>
               </tr>
             </thead>

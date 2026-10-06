@@ -28,6 +28,8 @@ const STOP_GRACE_MS: u64 = 3_000;
 const SLEEP_JUMP_MS: u64 = 1_000;
 const STATUS_EVENTS: usize = 200;
 const MAX_EVENTS: usize = 1_000;
+const FINAL_POLL_MS: u64 = 2_000;
+const TEMP_MISSING_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -54,6 +56,8 @@ pub struct RunConfig {
     /// Core numbers (plan DA4).
     pub cores: Vec<u32>,
     pub apic_to_core: BTreeMap<u32, u32>,
+    /// Newest WHEA record already in the log at the start (older history is ignored).
+    pub whea_after: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +179,11 @@ pub struct RunController {
     last_journal_ms: u64,
     last_save_ms: u64,
     next_whea_ms: u64,
+    started: bool,
+    /// Set at the end; the final verdict waits for the last WHEA poll.
+    ended: bool,
+    final_deadline: Option<u64>,
+    temp_since: Option<u64>,
     // Facts for the outcome.
     completed: bool,
     crashed: bool,
@@ -189,28 +198,12 @@ pub struct RunController {
 }
 
 fn rfc3339(wall_ms: i64) -> String {
-    let secs = wall_ms.div_euclid(1000);
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil date from days since 1970-01-01 (Hinnant).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+    crate::report::utc_iso8601(wall_ms.max(0) as u64)
 }
 
 impl RunController {
     pub fn new(mut session: Session, config: RunConfig, now: Clock) -> Self {
+        session.whea.last_record = config.whea_after;
         for &core in &config.cores {
             if !session.cores.iter().any(|c| c.core == core) {
                 session.cores.push(CoreResult {
@@ -241,6 +234,10 @@ impl RunController {
             last_journal_ms: now.mono_ms,
             last_save_ms: now.mono_ms,
             next_whea_ms: now.mono_ms + WHEA_EVERY_MS,
+            started: false,
+            ended: false,
+            final_deadline: None,
+            temp_since: None,
             completed: false,
             crashed: false,
             hung: false,
@@ -274,20 +271,22 @@ impl RunController {
     }
 
     fn event(&mut self, code: &str, params: &[(&str, String)]) {
-        if self.session.events.len() < MAX_EVENTS {
-            self.session.events.push(SessionEvent {
-                at_ms: self.mono - self.start_mono,
-                code: code.to_string(),
-                params: params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect(),
-            });
+        if self.session.events.len() >= MAX_EVENTS {
+            self.session.events.remove(0);
+            self.session.events_dropped += 1;
         }
+        self.session.events.push(SessionEvent {
+            at_ms: self.mono - self.start_mono,
+            code: code.to_string(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        });
     }
 
     fn tick(&mut self, now: Clock) {
-        if self.state != RunState::Finished {
+        if !self.ended {
             self.mono = now.mono_ms.max(self.mono);
         }
     }
@@ -378,12 +377,8 @@ impl RunController {
             whea_corrected: self.whea_count(&[17, 19]),
             completed: self.completed,
         };
-        let (outcome, mut verdict) = decide(&facts);
+        let (outcome, verdict) = decide(&facts);
         let e = self.end;
-        // `decide` cannot fill `{phase}`.
-        if verdict.key == "system_crash" {
-            verdict.params.insert("phase".into(), e.phase.to_string());
-        }
         let core = match (self.error_cores.len(), self.errors) {
             (1, _) => self.error_cores.iter().next().copied(),
             (_, 0) if outcome == Outcome::Marginal => self.whea_core,
@@ -414,15 +409,7 @@ impl RunController {
         outcome
     }
 
-    fn finish(&mut self, now: Clock) -> Vec<Action> {
-        self.end = End {
-            phase: self.phase,
-            at_ms: self.mono - self.start_mono,
-            temp_c: self.last_sample.temp_c,
-            current_core: self.current_core,
-        };
-        self.state = RunState::Finished;
-        self.session.ended_at = Some(rfc3339(now.wall_ms));
+    fn update_stats(&mut self) {
         self.session.stats = Stats {
             temp_max_c: self.sums[0].max,
             temp_avg_c: self.sums[0].avg(),
@@ -431,11 +418,30 @@ impl RunController {
             clock_max_mhz: self.sums[2].max,
             clock_avg_mhz: self.sums[2].avg(),
         };
+    }
+
+    /// Ends the session; the verdict waits for the last WHEA poll (or 2 s).
+    fn finish(&mut self, now: Clock) -> Vec<Action> {
+        self.end = End {
+            phase: self.phase,
+            at_ms: self.mono - self.start_mono,
+            temp_c: self.last_sample.temp_c,
+            current_core: self.current_core,
+        };
+        self.ended = true;
+        self.final_deadline = Some(self.mono + FINAL_POLL_MS);
+        self.session.ended_at = Some(rfc3339(now.wall_ms));
+        self.update_stats();
+        vec![Action::PollWhea {
+            after_record: self.session.whea.last_record,
+        }]
+    }
+
+    fn complete(&mut self) -> Vec<Action> {
+        self.final_deadline = None;
+        self.state = RunState::Finished;
         let outcome = self.compute_outcome();
         vec![
-            Action::PollWhea {
-                after_record: self.session.whea.last_record,
-            },
             Action::SaveSession,
             Action::DeleteJournal,
             Action::Toast,
@@ -443,8 +449,26 @@ impl RunController {
         ]
     }
 
+    /// The first call of any `on_*` writes the journal and the session, so a crash in
+    /// the first minute can be recovered.
+    fn guarded(&mut self, now: Clock, f: impl FnOnce(&mut Self) -> Vec<Action>) -> Vec<Action> {
+        let mut out = vec![];
+        if !self.started && !self.ended {
+            self.started = true;
+            self.last_save_ms = now.mono_ms;
+            out.push(Action::WriteJournal(self.journal(now)));
+            out.push(Action::SaveSession);
+        }
+        out.extend(f(self));
+        out
+    }
+
     pub fn on_load(&mut self, msg: &LoadMessage, now: Clock) -> Vec<Action> {
-        if self.state == RunState::Finished {
+        self.guarded(now, |s| s.load(msg, now))
+    }
+
+    fn load(&mut self, msg: &LoadMessage, now: Clock) -> Vec<Action> {
+        if self.ended {
             return vec![];
         }
         self.tick(now);
@@ -470,6 +494,10 @@ impl RunController {
                 self.hung = true;
                 self.event("hung", &[("phase", e.phase.to_string())]);
             }
+            LoadMessage::Error(e) if e.kind == ErrorKind::ReferenceInvalid => {
+                // A defect of our own reference, never an error of a core.
+                self.event("reference_invalid", &[("phase", e.phase.to_string())]);
+            }
             LoadMessage::Error(e) => {
                 self.errors += 1;
                 let clock = e
@@ -482,7 +510,8 @@ impl RunController {
                     temp_c: self.last_sample.temp_c,
                     clock_mhz: clock,
                 };
-                if let Some(core) = e.core {
+                let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
+                if let Some(core) = core {
                     self.error_cores.insert(core);
                     let c = self.set_core(core, CoreState::Failed);
                     c.first_error.get_or_insert_with(|| record.clone());
@@ -550,7 +579,16 @@ impl RunController {
         service_available: bool,
         now: Clock,
     ) -> Vec<Action> {
-        if self.state == RunState::Finished {
+        self.guarded(now, |s| s.sample(sample, service_available, now))
+    }
+
+    fn sample(
+        &mut self,
+        sample: &SensorSample,
+        service_available: bool,
+        now: Clock,
+    ) -> Vec<Action> {
+        if self.ended {
             return vec![];
         }
         self.tick(now);
@@ -571,6 +609,19 @@ impl RunController {
         self.sums[0].add(sample.temp_c);
         self.sums[1].add(sample.power_w);
         self.sums[2].add(sample.clock_mhz);
+        self.update_stats();
+        match sample.temp_c {
+            Some(_) => {
+                self.temp_since = Some(now.mono_ms);
+                self.warnings.retain(|w| w != "tempMissing");
+            }
+            None => {
+                let since = *self.temp_since.get_or_insert(now.mono_ms);
+                if now.mono_ms.saturating_sub(since) > TEMP_MISSING_MS {
+                    self.warn("tempMissing");
+                }
+            }
+        }
         let t = self.mono - self.start_mono;
         if self
             .last_sample_push
@@ -584,23 +635,26 @@ impl RunController {
                 clock_mhz: sample.clock_mhz,
             });
         }
-        let ev = match self.guard.as_mut() {
-            Some(g) => g.observe(sample.temp_c, now.mono_ms),
-            None => ThermalEvent::None,
-        };
-        match ev {
-            ThermalEvent::Trip(t) if self.state != RunState::Stopping => {
+        match self
+            .guard
+            .as_mut()
+            .map(|g| g.observe(sample.temp_c, now.mono_ms))
+        {
+            Some(ThermalEvent::Trip(t)) if self.state != RunState::Stopping => {
                 self.begin_stop(StopCause::Thermal(t))
-            }
-            ThermalEvent::Missing => {
-                self.warn("tempMissing");
-                vec![]
             }
             _ => vec![],
         }
     }
 
     pub fn on_whea(&mut self, result: Result<Vec<WheaEvent>, ()>, now: Clock) -> Vec<Action> {
+        self.guarded(now, |s| s.whea(result, now))
+    }
+
+    fn whea(&mut self, result: Result<Vec<WheaEvent>, ()>, now: Clock) -> Vec<Action> {
+        if self.state == RunState::Finished {
+            return vec![];
+        }
         self.tick(now);
         let events = match result {
             Ok(e) => e,
@@ -610,10 +664,9 @@ impl RunController {
                     self.warn("wheaUnreadable");
                     self.event("whea_unreadable", &[]);
                 }
-                return vec![];
+                return if self.ended { self.complete() } else { vec![] };
             }
         };
-        let before = self.whea_count(&[17, 18, 19]);
         for e in events {
             if !matches!(e.event_id, 17..=19)
                 || self
@@ -644,17 +697,23 @@ impl RunController {
             }
             self.event("whea", &params);
         }
-        if self.state == RunState::Finished && self.whea_count(&[17, 18, 19]) != before {
-            // The final poll after the end: the outcome may become `marginal`.
-            self.compute_outcome();
-            return vec![Action::SaveSession];
+        if self.ended {
+            return self.complete();
         }
         vec![]
     }
 
     pub fn on_clock(&mut self, now: Clock) -> Vec<Action> {
-        if self.state == RunState::Finished {
-            return vec![];
+        self.guarded(now, |s| s.clock(now))
+    }
+
+    fn clock(&mut self, now: Clock) -> Vec<Action> {
+        if self.ended {
+            // Waiting for the final WHEA poll; give up after 2 s.
+            return match self.final_deadline {
+                Some(d) if now.mono_ms >= d => self.complete(),
+                _ => vec![],
+            };
         }
         self.tick(now);
         // Before any pipe check: after a sleep the pipe is silent too (DA15).
@@ -702,7 +761,11 @@ impl RunController {
     }
 
     pub fn on_user_stop(&mut self, now: Clock) -> Vec<Action> {
-        if !matches!(self.state, RunState::Starting | RunState::Running) {
+        self.guarded(now, |s| s.user_stop(now))
+    }
+
+    fn user_stop(&mut self, now: Clock) -> Vec<Action> {
+        if self.ended || !matches!(self.state, RunState::Starting | RunState::Running) {
             return vec![];
         }
         self.tick(now);
@@ -710,7 +773,11 @@ impl RunController {
     }
 
     pub fn on_exit(&mut self, code: Option<i32>, now: Clock) -> Vec<Action> {
-        if self.state == RunState::Finished {
+        self.guarded(now, |s| s.exit(code, now))
+    }
+
+    fn exit(&mut self, code: Option<i32>, now: Clock) -> Vec<Action> {
+        if self.ended {
             return vec![];
         }
         self.tick(now);
@@ -831,6 +898,7 @@ mod tests {
             cores: vec![],
             errors: vec![],
             errors_dropped: 0,
+            events_dropped: 0,
             whea: Default::default(),
             stats: Default::default(),
             samples: vec![],
@@ -857,6 +925,7 @@ mod tests {
                 service_available: service,
                 cores: vec![0, 1, 2, 3],
                 apic_to_core: [(8, 1)].into(),
+                whea_after: None,
             },
             clock(0),
         )
@@ -908,6 +977,13 @@ mod tests {
         }
     }
 
+    /// The final WHEA poll answers (nothing new): the verdict is out.
+    fn settle(c: &mut RunController, mut a: Vec<Action>) -> Vec<Action> {
+        assert!(a.iter().any(is_poll), "the end asks for a final poll");
+        a.extend(c.on_whea(Ok(vec![]), clock(c.mono)));
+        a
+    }
+
     fn has_finished(a: &[Action], o: Outcome) -> bool {
         a.contains(&Action::Finished(o))
     }
@@ -951,6 +1027,7 @@ mod tests {
             clock(2000),
         );
         let a = c.on_load(&finished(FinishReason::Completed), clock(3000));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Passed));
         for want in [Action::SaveSession, Action::DeleteJournal, Action::Toast] {
             assert!(a.contains(&want), "{want:?}");
@@ -974,6 +1051,7 @@ mod tests {
         c.on_sample(&sample(Some(71.0)), true, clock(1500));
         c.on_load(&error(Some(2), ErrorKind::Mismatch), clock(2000));
         let a = c.on_load(&finished(FinishReason::FirstError), clock(2500));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Errors));
         let s = c.session();
         assert_eq!(verdict(&c), "errors_core");
@@ -999,6 +1077,7 @@ mod tests {
         assert_eq!(a, vec![Action::SendStop]);
         assert_eq!(c.status().state, RunState::Stopping);
         let a = c.on_load(&finished(FinishReason::Stopped), clock(2200));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::StoppedThermal));
         let d = c.session().outcome_detail.as_ref().unwrap();
         assert_eq!(d.params["temp"], "96");
@@ -1031,6 +1110,7 @@ mod tests {
         assert_eq!(c.on_user_stop(clock(2000)), vec![Action::SendStop]);
         assert!(c.on_user_stop(clock(2100)).is_empty());
         let a = c.on_load(&finished(FinishReason::Stopped), clock(2500));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::StoppedUser));
         assert!(a.contains(&Action::SaveSession));
     }
@@ -1044,6 +1124,7 @@ mod tests {
             wall_ms: 0,
             asleep_ms: 50_000,
         });
+        let a = settle(&mut c, a);
         assert_eq!(a[..2], [Action::SendStop, Action::Kill]);
         assert!(has_finished(&a, Outcome::Suspended));
     }
@@ -1074,6 +1155,7 @@ mod tests {
         c.on_load(&progress(0, None), clock(1000));
         assert!(c.on_clock(clock(6000)).iter().all(|a| *a != Action::Kill));
         let a = c.on_clock(clock(6001));
+        let a = settle(&mut c, a);
         assert_eq!(a[0], Action::Kill);
         assert!(has_finished(&a, Outcome::Hung));
     }
@@ -1090,9 +1172,11 @@ mod tests {
         let mut c = ctl(false, true);
         c.on_load(&error(Some(1), ErrorKind::Hung), clock(1000));
         let a = c.on_load(&finished(FinishReason::Failed), clock(1100));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Hung));
         let mut c = ctl(false, true);
         let a = c.on_load(&finished(FinishReason::Failed), clock(1100));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Crashed));
     }
 
@@ -1101,6 +1185,7 @@ mod tests {
         let mut c = ctl(false, true);
         c.on_load(&progress(1, Some(3)), clock(1000));
         let a = c.on_exit(Some(-1), clock(2000));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Crashed));
         let d = c.session().outcome_detail.as_ref().unwrap();
         assert_eq!(
@@ -1114,11 +1199,166 @@ mod tests {
         let mut c = ctl(false, true);
         c.on_load(&progress(0, None), clock(1000));
         c.on_user_stop(clock(2000));
-        // The silent-pipe rule does not apply while stopping.
         assert!(c.on_clock(clock(4999)).iter().all(|a| *a != Action::Kill));
         let a = c.on_clock(clock(5000));
+        let a = settle(&mut c, a);
         assert_eq!(a[0], Action::Kill);
         assert!(has_finished(&a, Outcome::StoppedUser));
+    }
+
+    #[test]
+    fn silence_while_stopping_ends_by_the_grace_not_as_hung() {
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(1000));
+        c.on_user_stop(clock(10_000));
+        // 12 s without a message, but we are stopping: no `hung`.
+        let a = c.on_clock(clock(13_000));
+        let a = settle(&mut c, a);
+        assert_eq!(a[0], Action::Kill);
+        assert!(has_finished(&a, Outcome::StoppedUser));
+    }
+
+    #[test]
+    fn thermal_stop_without_answer_ends_in_kill() {
+        let mut c = ctl(true, true);
+        c.on_load(&progress(0, None), clock(1000));
+        c.on_sample(&sample(Some(99.0)), true, clock(2000));
+        c.on_sample(&sample(Some(99.0)), true, clock(3000));
+        let a = c.on_clock(clock(6000));
+        let a = settle(&mut c, a);
+        assert_eq!(a[0], Action::Kill);
+        assert!(has_finished(&a, Outcome::StoppedThermal));
+    }
+
+    #[test]
+    fn sleep_while_stopping_is_suspended() {
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(1000));
+        c.on_user_stop(clock(2000));
+        let a = c.on_clock(Clock {
+            mono_ms: 2500,
+            wall_ms: 0,
+            asleep_ms: 9000,
+        });
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::Suspended));
+    }
+
+    #[test]
+    fn final_poll_timeout_finishes_after_two_seconds() {
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(1000));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(2000));
+        assert_eq!(count(&a, is_poll), 1);
+        assert!(!has_finished(&a, Outcome::Passed));
+        assert!(!c.is_finished());
+        assert!(c.on_clock(clock(3999)).is_empty());
+        let a = c.on_clock(clock(4000));
+        assert!(has_finished(&a, Outcome::Passed));
+        assert!(c.is_finished());
+        // A late answer changes nothing.
+        assert!(c.on_whea(Ok(vec![]), clock(4100)).is_empty());
+    }
+
+    #[test]
+    fn unreadable_final_poll_finishes_and_warns() {
+        let mut c = ctl(false, true);
+        c.on_load(&finished(FinishReason::Completed), clock(2000));
+        let a = c.on_whea(Err(()), clock(2100));
+        assert!(has_finished(&a, Outcome::Passed));
+        assert!(c.session().whea.unreadable);
+    }
+
+    #[test]
+    fn first_call_writes_journal_and_session() {
+        let mut c = ctl(false, true);
+        let a = c.on_sample(&sample(Some(50.0)), true, clock(500));
+        assert!(matches!(a[0], Action::WriteJournal(_)));
+        assert_eq!(a[1], Action::SaveSession);
+        assert!(c
+            .on_sample(&sample(Some(50.0)), true, clock(1500))
+            .is_empty());
+    }
+
+    #[test]
+    fn whea_history_before_the_start_is_ignored() {
+        let mut c = RunController::new(
+            session(),
+            RunConfig {
+                threshold_c: 90.0,
+                thermal_stop: false,
+                service_available: true,
+                cores: vec![],
+                apic_to_core: BTreeMap::new(),
+                whea_after: Some(100),
+            },
+            clock(0),
+        );
+        assert_eq!(c.session().whea.last_record, Some(100));
+        let ev = |rec| WheaEvent {
+            record_id: rec,
+            event_id: 19,
+            apic_id: None,
+            time_utc: String::new(),
+        };
+        c.on_whea(Ok(vec![ev(90), ev(100), ev(101)]), clock(1000));
+        assert_eq!(c.status().whea_corrected, 1);
+        let a = c.on_clock(clock(5000));
+        assert!(a.contains(&Action::PollWhea {
+            after_record: Some(101)
+        }));
+    }
+
+    #[test]
+    fn reference_invalid_is_an_event_not_an_error() {
+        let mut c = ctl(false, true);
+        c.on_load(&error(Some(1), ErrorKind::ReferenceInvalid), clock(1000));
+        assert_eq!(c.status().errors, 0);
+        assert!(c.session().errors.is_empty());
+        assert_eq!(c.session().cores[1].state, CoreState::Untested);
+        assert!(c
+            .status()
+            .events
+            .iter()
+            .any(|e| e.code == "reference_invalid"));
+        c.on_load(
+            &error(Some(1), ErrorKind::ReferenceDisagreement),
+            clock(1100),
+        );
+        assert_eq!(c.status().errors, 1);
+        assert_eq!(c.session().cores[1].state, CoreState::Untested);
+        let a = c.on_load(&finished(FinishReason::FirstError), clock(1200));
+        let _ = settle(&mut c, a);
+        assert_eq!(verdict(&c), "errors");
+    }
+
+    #[test]
+    fn events_keep_the_newest_and_count_the_dropped() {
+        let mut c = ctl(false, true);
+        for i in 0..(MAX_EVENTS + 5) {
+            c.on_load(
+                &LoadMessage::Notice(Notice {
+                    phase: i as u32,
+                    code: "x".into(),
+                    value: None,
+                }),
+                clock(1000),
+            );
+        }
+        let s = c.session();
+        assert_eq!(s.events.len(), MAX_EVENTS);
+        assert_eq!(s.events_dropped, 5);
+        assert_eq!(s.events[0].params["phase"], "5");
+        assert_eq!(c.status().events.len(), 200);
+    }
+
+    #[test]
+    fn stats_are_in_the_session_before_the_end() {
+        let mut c = ctl(false, true);
+        c.on_sample(&sample(Some(60.0)), true, clock(0));
+        c.on_sample(&sample(Some(80.0)), true, clock(1000));
+        let st = &c.session().stats;
+        assert_eq!((st.temp_max_c, st.temp_avg_c), (Some(80.0), Some(70.0)));
     }
 
     #[test]
@@ -1126,6 +1366,7 @@ mod tests {
         let mut c = ctl(false, true);
         c.on_user_stop(clock(1000));
         let a = c.on_exit(Some(0), clock(1500));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::StoppedUser));
     }
 
@@ -1165,14 +1406,16 @@ mod tests {
     fn session_saved_every_sixty_seconds() {
         let mut c = ctl(false, true);
         let saves = |a: &[Action]| count(a, |x| *x == Action::SaveSession);
-        for t in (1..=59).map(|s| s * 1000) {
+        // The first call (t = 1 s) saves once; then every 60 s.
+        assert_eq!(saves(&c.on_load(&progress(0, None), clock(1000))), 1);
+        for t in (2..=60).map(|s| s * 1000) {
             c.on_load(&progress(0, None), clock(t));
             assert_eq!(saves(&c.on_clock(clock(t))), 0);
         }
-        c.on_load(&progress(0, None), clock(60_000));
-        assert_eq!(saves(&c.on_clock(clock(60_000))), 1);
         c.on_load(&progress(0, None), clock(61_000));
-        assert_eq!(saves(&c.on_clock(clock(61_000))), 0);
+        assert_eq!(saves(&c.on_clock(clock(61_000))), 1);
+        c.on_load(&progress(0, None), clock(62_000));
+        assert_eq!(saves(&c.on_clock(clock(62_000))), 0);
     }
 
     #[test]
@@ -1199,6 +1442,7 @@ mod tests {
             .iter()
             .any(|e| e.code == "whea" && e.params["core"] == "1"));
         let a = c.on_load(&finished(FinishReason::Completed), clock(3000));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Marginal));
         assert_eq!(c.session().outcome_detail.as_ref().unwrap().core, Some(1));
     }
@@ -1207,17 +1451,16 @@ mod tests {
     fn whea_found_by_the_final_poll_updates_the_outcome() {
         let mut c = ctl(false, true);
         let a = c.on_load(&finished(FinishReason::Completed), clock(1000));
-        assert!(has_finished(&a, Outcome::Passed));
+        assert!(!has_finished(&a, Outcome::Passed));
         let e = WheaEvent {
             record_id: 1,
             event_id: 17,
             apic_id: None,
             time_utc: String::new(),
         };
-        assert_eq!(
-            c.on_whea(Ok(vec![e]), clock(1100)),
-            vec![Action::SaveSession]
-        );
+        let a = c.on_whea(Ok(vec![e]), clock(1100));
+        assert!(has_finished(&a, Outcome::Marginal));
+        assert_eq!(count(&a, |x| *x == Action::SaveSession), 1);
         assert_eq!(c.session().outcome, Some(Outcome::Marginal));
     }
 
@@ -1247,6 +1490,7 @@ mod tests {
         assert_eq!(c.session().errors_dropped, 5);
         assert_eq!(c.status().errors, 205);
         let a = c.on_load(&finished(FinishReason::FirstError), clock(2000));
+        let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::Errors));
         assert_eq!(verdict(&c), "errors");
     }
@@ -1259,7 +1503,6 @@ mod tests {
         }
         let ts: Vec<u64> = c.session().samples.iter().map(|s| s.t_ms).collect();
         assert_eq!(ts, [0, 5000, 10_000]);
-        c.on_load(&finished(FinishReason::Completed), clock(13_000));
         let st = &c.session().stats;
         assert_eq!(st.temp_max_c, Some(72.0));
         assert_eq!(st.temp_avg_c, Some(66.0));
@@ -1290,23 +1533,21 @@ mod tests {
         assert_eq!(c.status().warnings, ["ramReduced"]);
         assert_eq!(c.status().events[0].code, "ram_reduced");
         // Messages from the app side are ignored.
-        c.on_load(&LoadMessage::Stop(StopRequest {}), clock(1100));
+        let a = c.on_load(&LoadMessage::Stop(StopRequest {}), clock(1100));
+        assert!(a.is_empty());
+        assert_eq!(c.status().events.len(), 1);
     }
 
     #[test]
-    fn thermal_missing_warns() {
-        let mut c = ctl(true, true);
-        for t in [0, 5000, 10_000, 10_001] {
+    fn temp_missing_warns_without_thermal_stop_and_clears() {
+        let mut c = ctl(false, true);
+        for t in [0, 5000, 10_000] {
             c.on_sample(&sample(None), true, clock(t));
         }
+        assert!(c.status().warnings.is_empty());
+        c.on_sample(&sample(None), true, clock(10_001));
         assert_eq!(c.status().warnings, ["tempMissing"]);
-    }
-
-    #[test]
-    fn rfc3339_known_dates() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339(1_000_000_000_000), "2001-09-09T01:46:40Z");
-        assert_eq!(rfc3339(951_782_400_000), "2000-02-29T00:00:00Z");
-        assert_eq!(rfc3339(-1000), "1969-12-31T23:59:59Z");
+        c.on_sample(&sample(Some(60.0)), true, clock(11_000));
+        assert!(c.status().warnings.is_empty());
     }
 }

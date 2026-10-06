@@ -44,6 +44,9 @@ pub struct Session {
     /// At most `MAX_ERRORS`.
     pub errors: Vec<ErrorRecord>,
     pub errors_dropped: u64,
+    /// Oldest events dropped once the list is full.
+    #[serde(default)]
+    pub events_dropped: u64,
     pub whea: WheaCounts,
     pub stats: Stats,
     pub samples: Vec<Sample>,
@@ -336,6 +339,7 @@ mod tests {
             }],
             errors: vec![],
             errors_dropped: 0,
+            events_dropped: 0,
             whea: WheaCounts::default(),
             stats: Stats::default(),
             samples: vec![Sample {

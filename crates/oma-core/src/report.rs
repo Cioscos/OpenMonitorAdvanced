@@ -182,7 +182,7 @@ fn quality_name(quality: Quality) -> &'static str {
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`.
-fn utc_iso8601(unix_ms: u64) -> String {
+pub(crate) fn utc_iso8601(unix_ms: u64) -> String {
     let t = crate::csv::local_time(unix_ms, 0);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",

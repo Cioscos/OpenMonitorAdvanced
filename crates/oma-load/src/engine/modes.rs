@@ -47,10 +47,12 @@ pub(crate) fn pause_until(deadline: Instant, beat: &AtomicU64, quit: &AtomicBool
 }
 
 /// Runs `kernels` in `mode` until `quit`; `step(k, kernel)` runs and checks one iteration
-/// of `kernels[k]`. In `variable` the bursts take the kernels in turn.
+/// of `kernels[k]`. In `variable` the bursts take the kernels in turn. With `iterations`
+/// (fixed work, `steady` only) it returns after that many steps.
 pub(crate) fn work(
     mode: LoadMode,
     seed: u64,
+    iterations: Option<u64>,
     kernels: &mut [Box<dyn Kernel>],
     beat: &AtomicU64,
     quit: &AtomicBool,
@@ -58,8 +60,10 @@ pub(crate) fn work(
 ) {
     let running = || !quit.load(Ordering::Relaxed);
     if mode == LoadMode::Steady {
-        while running() {
+        let mut left = iterations.unwrap_or(u64::MAX);
+        while left > 0 && running() {
             step(0, kernels[0].as_mut());
+            left -= 1;
         }
         return;
     }

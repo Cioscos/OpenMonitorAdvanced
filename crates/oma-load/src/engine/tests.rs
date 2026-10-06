@@ -96,6 +96,7 @@ struct CountFactory {
     created: AtomicU32,
     bad: Range<u32>,
     count: Arc<AtomicU64>,
+    ref_delay: Duration,
 }
 
 impl CountFactory {
@@ -104,12 +105,14 @@ impl CountFactory {
             created: AtomicU32::new(0),
             bad,
             count: Arc::new(AtomicU64::new(0)),
+            ref_delay: Duration::ZERO,
         }
     }
 }
 
 impl KernelFactory for CountFactory {
     fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        thread::sleep(self.ref_delay);
         Some(Ok(vec![REF]))
     }
 
@@ -962,4 +965,116 @@ fn cores_limit_all_logical_and_one_per_core() {
         assert_eq!(fin.reason, FinishReason::Completed);
         assert_eq!(f.created.load(Ordering::Relaxed), workers, "{placement:?}");
     }
+}
+
+fn fixed(iterations: u64, duration_s: u32) -> Phase {
+    let mut p = phase(KernelId::K2, Placement::AllLogical, duration_s);
+    p.iterations = Some(iterations);
+    p
+}
+
+fn run_one(f: &CountFactory, p: Phase, logical: u32) -> (Finished, Vec<LoadMessage>) {
+    let factory = |_: KernelId| Some(f as &dyn KernelFactory);
+    run_test(
+        &plan(vec![p]),
+        &topology(logical, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    )
+}
+
+#[test]
+fn fixed_work_phase_runs_exact_iterations_per_worker() {
+    let f = CountFactory::new(0..0);
+    let (fin, msgs) = run_one(&f, fixed(50, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs);
+    assert_eq!(d[0].checks, 100);
+    assert_eq!(d[0].skipped, None);
+    assert_eq!(f.count.load(Ordering::Relaxed), 100);
+    assert!(d[0].work_ms.is_some());
+}
+
+#[test]
+fn fixed_work_phase_stops_at_the_cap_and_reports_work_ms() {
+    let f = CountFactory::new(0..0);
+    let (fin, msgs) = run_one(&f, fixed(1_000_000, 1), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs)[0];
+    assert_eq!(d.skipped, None);
+    assert!(d.checks < 2_000_000);
+    let w = d.work_ms.expect("work_ms");
+    assert!((950..1400).contains(&w), "{w}");
+}
+
+#[test]
+fn work_ms_excludes_the_reference_and_the_pause() {
+    let mut f = CountFactory::new(0..0);
+    f.ref_delay = Duration::from_millis(300);
+    let mut p = fixed(20, 30);
+    p.pause_before_ms = 200;
+    let (_, msgs) = run_one(&f, p, 1);
+    let d = done(&msgs)[0];
+    assert!(d.duration_ms >= 500, "{}", d.duration_ms);
+    let w = d.work_ms.expect("work_ms");
+    assert!(w < d.duration_ms - 400, "work {w} of {}", d.duration_ms);
+}
+
+#[test]
+fn pause_is_not_a_hang() {
+    // The test sentinel calls a worker hung after 1 s without beats.
+    let f = CountFactory::new(0..0);
+    let mut p = fixed(5, 30);
+    p.pause_before_ms = 1_500;
+    let (fin, msgs) = run_one(&f, p, 1);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert!(done(&msgs)[0].duration_ms >= 1_500);
+    assert!(errors(&msgs).is_empty());
+}
+
+#[test]
+fn pause_reacts_to_a_stop() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let stop = AtomicBool::new(false);
+    let mut p = fixed(5, 30);
+    p.pause_before_ms = 10_000;
+    let started = Instant::now();
+    let (fin, _) = thread::scope(|s| {
+        s.spawn(|| {
+            thread::sleep(Duration::from_millis(200));
+            stop.store(true, Ordering::Relaxed);
+        });
+        run_test(
+            &plan(vec![p]),
+            &topology(1, 1),
+            &factory,
+            None,
+            &stop,
+            &no_hang,
+        )
+    });
+    assert_eq!(fin.reason, FinishReason::Stopped);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn timed_phase_has_no_work_ms() {
+    let f = CountFactory::new(0..0);
+    let (_, msgs) = run_one(&f, phase(KernelId::K2, Placement::AllLogical, 1), 1);
+    assert_eq!(done(&msgs)[0].work_ms, None);
+}
+
+#[test]
+fn fixed_work_error_stops_the_phase() {
+    let f = CountFactory::new(0..u32::MAX);
+    let mut p = fixed(1_000, 30);
+    p.stop_on_error = true;
+    let started = Instant::now();
+    let (fin, msgs) = run_one(&f, p, 1);
+    assert_eq!(fin.reason, FinishReason::FirstError);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(done(&msgs)[0].checks < 1_000);
 }

@@ -19,7 +19,7 @@ mod sentinel;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -204,6 +204,8 @@ struct Cursor {
     memory_bytes: u64,
     sent_at: Instant,
     rate_iterations: u64,
+    /// The work time of the fixed-work phase being run, set when its set ends.
+    work_ms: Option<u64>,
 }
 
 impl Cursor {
@@ -248,6 +250,12 @@ struct Live {
     failed: AtomicBool,
     first_error: AtomicBool,
     inject_worker: Option<usize>,
+    /// When the gate opened, for the work time of a fixed-work phase.
+    opened: OnceLock<Instant>,
+    /// Workers that ran all their iterations, and when (ms after `opened`) the last did.
+    finished: AtomicU32,
+    last_finished_ms: AtomicU64,
+    workers: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +369,7 @@ impl Engine<'_, '_> {
             memory_bytes: 0,
             sent_at: now,
             rate_iterations: 0,
+            work_ms: None,
         };
         for (index, spec) in self.plan.phases.iter().enumerate() {
             if self.stop.load(Ordering::Relaxed) {
@@ -370,6 +379,7 @@ impl Engine<'_, '_> {
             cur.phase = index;
             cur.phase_start = Instant::now();
             cur.current_core = None;
+            cur.work_ms = None;
             self.progress(&mut cur);
             let (checks, errors) = (
                 self.checks.load(Ordering::Relaxed),
@@ -388,7 +398,10 @@ impl Engine<'_, '_> {
                     End::Skipped(reason) => Some(reason.to_owned()),
                     _ => None,
                 },
-                work_ms: None,
+                work_ms: cur
+                    .work_ms
+                    .take()
+                    .filter(|_| !matches!(end, End::Skipped(_))),
             }));
             match end {
                 End::Stopped => return self.finish(FinishReason::Stopped),
@@ -410,6 +423,17 @@ impl Engine<'_, '_> {
                     Some(f) => kernels.push((alt, f)),
                     None => tracing::info!(kernel = ?alt, "no alt kernel: the main one runs alone"),
                 }
+            }
+        }
+        if spec.pause_before_ms > 0 {
+            // No load threads exist yet and nothing is published: the sentinel has no beats.
+            let until = Instant::now() + Duration::from_millis(spec.pause_before_ms.into());
+            if let Err(end) = self.wait(cur, |t| {
+                let left = until.saturating_duration_since(Instant::now());
+                thread::sleep(t.min(left));
+                Instant::now() >= until
+            }) {
+                return end;
             }
         }
         let pr = PhaseRun {
@@ -653,6 +677,10 @@ impl Engine<'_, '_> {
             failed: AtomicBool::new(false),
             first_error: AtomicBool::new(false),
             inject_worker: self.inject_worker(kernels, cpus),
+            opened: OnceLock::new(),
+            finished: AtomicU32::new(0),
+            last_finished_ms: AtomicU64::new(0),
+            workers: cpus.len() as u32,
         };
         let gate = Gate::default();
         let (tx, rx) = mpsc::channel();
@@ -691,12 +719,28 @@ impl Engine<'_, '_> {
             if !fails.is_empty() {
                 return self.decide(pr, &fails, cpus, budget);
             }
+            let opened = Instant::now();
+            let _ = live.opened.set(opened);
             gate.set(true);
             self.publish(pr, &slots);
             if matches!(pr.spec.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10) {
                 cur.memory_bytes = budget.ram_per_thread * cpus.len() as u64;
             }
+            // A fixed-work phase counts its cap from the gate: the reference and the pause
+            // do not eat into it.
+            let deadline = match pr.spec.iterations {
+                Some(_) => opened + Duration::from_secs(pr.spec.duration_s.into()),
+                None => deadline,
+            };
             let end = self.monitor(cur, pr, &live, deadline);
+            if pr.spec.iterations.is_some() {
+                let all = live.finished.load(Ordering::Acquire) == cpus.len() as u32;
+                cur.work_ms = Some(if all {
+                    live.last_finished_ms.load(Ordering::Acquire)
+                } else {
+                    ms(opened.elapsed())
+                });
+            }
             self.unpublish();
             cur.memory_bytes = 0;
             Attempt::End(end)
@@ -855,6 +899,10 @@ impl Engine<'_, '_> {
             if pr.spec.placement == Placement::CoreCycle && live.failed.load(Ordering::Relaxed) {
                 return End::CoreFailed;
             }
+            if pr.spec.iterations.is_some() && live.finished.load(Ordering::Acquire) == live.workers
+            {
+                return End::Done;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return End::Done;
@@ -970,6 +1018,7 @@ impl Engine<'_, '_> {
             modes::work(
                 pr.spec.mode,
                 pr.seed,
+                pr.spec.iterations,
                 &mut built,
                 &slot.beat,
                 &ctx.shared.quit,
@@ -979,6 +1028,10 @@ impl Engine<'_, '_> {
         if run.is_err() {
             tracing::error!(kernel = ?pr.spec.kernel, "a kernel panicked");
             self.crashed.store(true, Ordering::Relaxed);
+        } else if pr.spec.iterations.is_some() && !ctx.shared.quit.load(Ordering::Relaxed) {
+            let at = live.opened.get().map_or(0, |o| ms(o.elapsed()));
+            live.last_finished_ms.fetch_max(at, Ordering::AcqRel);
+            live.finished.fetch_add(1, Ordering::AcqRel);
         }
     }
 

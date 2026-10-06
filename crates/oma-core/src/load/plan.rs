@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 const MIN_PHASE_S: u32 = 60;
 const MIN_RAM_BYTES: u64 = 256 << 20;
-const KEEP_FREE_BYTES: u64 = 2 << 30;
+/// The memory a RAM share always leaves to Windows (DA10).
+pub const KEEP_FREE_BYTES: u64 = 2 << 30;
 const RETRY_S: u32 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,11 +120,12 @@ pub fn ram_budget(available: u64, percent: u32) -> u64 {
     share.min(available.saturating_sub(KEEP_FREE_BYTES))
 }
 
-/// Physical cores in test order (DA4): higher efficiency class first, then by number;
-/// cores whose logical processors are all parked are left out.
+/// Physical cores in test order (DA4): higher efficiency class first, then by number.
+/// Parked cores are included: `Parked` is only the idle state of the moment, and the hard
+/// affinity of the workers wakes them.
 pub fn core_order(topology: &Topology) -> Vec<u32> {
     let mut cores: Vec<(u8, u32)> = Vec::new();
-    for l in topology.logical.iter().filter(|l| !l.parked) {
+    for l in &topology.logical {
         if !cores.iter().any(|&(_, c)| c == l.core) {
             cores.push((l.efficiency_class, l.core));
         }
@@ -339,6 +341,10 @@ fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> V
     for m in &c.modes {
         if !m.enabled || m.minutes == Some(0) {
             out.retain(|p| p.kernel != m.kernel);
+            // A disabled kernel does not run as the alt kernel of a `variable` phase either.
+            out.iter_mut()
+                .filter(|p| p.alt_kernel == Some(m.kernel))
+                .for_each(|p| p.alt_kernel = None);
             continue;
         }
         let idx: Vec<usize> = (0..out.len())
@@ -421,7 +427,8 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     };
 
     let mut stop = input.stop_override;
-    if let Some(c) = &req.custom {
+    // A retry keeps its own fixed phases: "Personalizza" does not apply to it.
+    if let Some(c) = req.custom.as_ref().filter(|_| req.retry_core.is_none()) {
         phases = apply_custom(phases, c, &has);
         stop = c.stop_on_first_error.or(stop);
     }
@@ -678,12 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn core_cycle_orders_p_before_e_and_skips_parked() {
+    fn core_cycle_orders_p_before_e_and_includes_parked() {
         let mut t = topo(6, false, 1, true); // cores 0,1 P; 2..5 E
-        t.logical[0].parked = true; // core 0 parked entirely
-        assert_eq!(core_order(&t), [1, 2, 3, 4, 5]);
+        t.logical[0].parked = true; // core 0 parked entirely: still tested
+        assert_eq!(core_order(&t), [0, 1, 2, 3, 4, 5]);
         t.logical[3].efficiency_class = 2; // core 3 becomes the fastest
-        assert_eq!(core_order(&t), [3, 1, 2, 4, 5]);
+        assert_eq!(core_order(&t), [3, 0, 1, 2, 4, 5]);
         let plan = ok(
             &req(Component::Cpu, Objective::Overclock, Preset::Standard),
             &t,
@@ -694,7 +701,27 @@ mod tests {
             .iter()
             .find(|p| p.placement == Placement::CoreCycle)
             .unwrap();
-        assert_eq!(c.cores.as_deref(), Some(&[3, 1, 2, 4, 5][..]));
+        assert_eq!(c.cores.as_deref(), Some(&[3, 0, 1, 2, 4, 5][..]));
+    }
+
+    #[test]
+    fn parked_smt_siblings_keep_their_core() {
+        let mut t = topo(4, true, 1, false);
+        // Core 1 fully parked, core 2 with one parked sibling.
+        for i in [2, 3, 5] {
+            t.logical[i].parked = true;
+        }
+        assert_eq!(core_order(&t), [0, 1, 2, 3]);
+        let plan = ok(
+            &req(Component::Cpu, Objective::Overclock, Preset::Standard),
+            &t,
+            &ALL,
+        );
+        assert!(plan
+            .phases
+            .iter()
+            .filter(|p| p.placement == Placement::CoreCycle)
+            .all(|p| p.cores.as_deref() == Some(&[0, 1, 2, 3][..])));
     }
 
     #[test]
@@ -717,8 +744,15 @@ mod tests {
                 }
             }
         }
+        let mut parked = t.clone();
+        parked.logical[0].parked = true;
+        ok(
+            &req(Component::Cpu, Objective::Normal, Preset::Quick),
+            &parked,
+            &ALL,
+        );
         let mut empty = t;
-        empty.logical[0].parked = true;
+        empty.logical.clear();
         assert_eq!(
             build(
                 &req(Component::Cpu, Objective::Normal, Preset::Quick),
@@ -865,6 +899,48 @@ mod tests {
             kernel: KernelId::K2,
         });
         assert_eq!(build(&r, &t, &ALL), Err(BuildError::UnknownCore(99)));
+    }
+
+    #[test]
+    fn retry_core_ignores_custom() {
+        let t = topo(8, true, 1, false);
+        let mut r = req(Component::Cpu, Objective::Overclock, Preset::Standard);
+        r.retry_core = Some(RetryCore {
+            core: 5,
+            kernel: KernelId::K2,
+        });
+        let plain = ok(&r, &t, &ALL);
+        let mut c = custom();
+        c.modes = vec![ModeEdit {
+            kernel: KernelId::K2,
+            enabled: false,
+            minutes: None,
+        }];
+        c.isa = Some(Isa::Avx512);
+        c.both_smt = true;
+        c.stop_on_first_error = Some(true);
+        r.custom = Some(c);
+        assert_eq!(ok(&r, &t, &ALL), plain);
+    }
+
+    #[test]
+    fn custom_without_k5_drops_the_alt_kernel() {
+        let mut r = req(Component::Cpu, Objective::Overclock, Preset::Standard);
+        let mut c = custom();
+        c.modes = vec![ModeEdit {
+            kernel: KernelId::K5,
+            enabled: false,
+            minutes: None,
+        }];
+        r.custom = Some(c);
+        let plan = ok(&r, &topo(8, true, 1, false), &ALL);
+        assert!(plan.phases.iter().all(|p| p.kernel != KernelId::K5));
+        let var = plan
+            .phases
+            .iter()
+            .find(|p| p.mode == LoadMode::Variable)
+            .unwrap();
+        assert_eq!((var.kernel, var.alt_kernel), (KernelId::K1, None));
     }
 
     #[test]

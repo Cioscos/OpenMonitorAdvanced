@@ -13,7 +13,7 @@ pub use catalog::catalog_json;
 pub use outcome::{decide, Outcome, OutcomeFacts, VerdictKey};
 pub use plan::{
     build_plan, core_order, presets, ram_budget, BuildError, BuildInput, Component, Custom,
-    ModeEdit, Objective, Preset, RetryCore, StartRequest, ThreadChoice,
+    ModeEdit, Objective, Preset, RetryCore, StartRequest, ThreadChoice, KEEP_FREE_BYTES,
 };
 pub use run::{Action, Clock, PhaseInfo, RunConfig, RunController, RunState, RunStatus, WheaEvent};
 pub use sensors::{read_sample, resolve_cpu_sensors, CpuSensorIds, SensorSample};

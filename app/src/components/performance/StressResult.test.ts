@@ -127,6 +127,17 @@ test('result_without_core_cycle_has_no_core_grid', async () => {
   expect(screen.queryByRole('list', { name: t('performance.run.cores') })).toBeNull();
 });
 
+test('phase_cut_by_a_stop_counts_as_stopped', async () => {
+  await setup(
+    makeStressSession({
+      outcome: 'stopped_thermal',
+      phases: [{ index: 0, kernel: 'k1', outcome: 'stopped', durationMs: 2000, checks: 10, errors: 0, skipped: null }],
+    }),
+  );
+  const counts = screen.getByText(t('performance.result.phaseCount.stopped.one'), { exact: false }).textContent;
+  expect(counts).toContain(t('performance.result.phaseCount.passed', { n: 0 }));
+});
+
 test('export_calls_the_backend', async () => {
   const { backend } = await setup(makeStressSession({ id: 'ok' }));
   await fireEvent.click(screen.getByRole('button', { name: t('performance.result.export') }));

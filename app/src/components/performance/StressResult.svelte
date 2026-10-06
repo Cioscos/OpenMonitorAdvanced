@@ -95,8 +95,10 @@
   const phaseCounts = $derived.by(() => {
     const phases = session?.phases ?? [];
     const count = (outcome: string) => phases.filter((p) => p.outcome === outcome).length;
-    const counts = { passed: count('passed'), errors: count('errors'), skipped: count('skipped'), notRun: Math.max(0, (session?.plan.phases.length ?? 0) - phases.length) };
+    const counts = { passed: count('passed'), errors: count('errors'), skipped: count('skipped'), stopped: count('stopped'), notRun: Math.max(0, (session?.plan.phases.length ?? 0) - phases.length) };
     return Object.entries(counts)
+      // «Stopped» only when a stop cut a phase: the other counts always show.
+      .filter(([key, n]) => key !== 'stopped' || n > 0)
       .map(([key, n]) => t(`performance.result.phaseCount.${key}${n === 1 ? '.one' : ''}`, { n }))
       .join(' · ');
   });

@@ -557,6 +557,8 @@ impl RunController {
                 if let Some(p) = self.session.plan.phases.get(d.phase as usize) {
                     let outcome = match (&d.skipped, d.errors) {
                         (Some(_), _) => "skipped",
+                        // The phase our stop cut short did not run its time: not «passed».
+                        (None, 0) if self.state == RunState::Stopping => "stopped",
                         (None, 0) => "passed",
                         _ => "errors",
                     };
@@ -1165,6 +1167,16 @@ mod tests {
         let d = c.session().outcome_detail.as_ref().unwrap();
         assert_eq!(d.params["temp"], "96");
         assert_eq!(d.temp_c, Some(96.0));
+    }
+
+    #[test]
+    fn phase_cut_by_a_stop_reads_stopped_not_passed() {
+        let mut c = ctl(true, true);
+        c.on_load(&progress(0, None), clock(1000));
+        c.on_sample(&sample(Some(95.0)), true, clock(1000));
+        c.on_sample(&sample(Some(96.0)), true, clock(2000));
+        c.on_load(&phase_done(0, None), clock(2100));
+        assert_eq!(c.session().phases[0].outcome, "stopped");
     }
 
     #[test]

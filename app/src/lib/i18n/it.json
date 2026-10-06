@@ -1130,6 +1130,8 @@
   "performance.result.phaseCount.errors.one": "1 con errori",
   "performance.result.phaseCount.skipped": "{n} saltate",
   "performance.result.phaseCount.skipped.one": "1 saltata",
+  "performance.result.phaseCount.stopped": "{n} interrotte",
+  "performance.result.phaseCount.stopped.one": "1 interrotta",
   "performance.result.phaseCount.notRun": "{n} non eseguite",
   "performance.result.phaseCount.notRun.one": "1 non eseguita",
   "performance.history.filter": "Componente",

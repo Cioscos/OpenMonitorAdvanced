@@ -291,17 +291,17 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
-## M8a1 — stress test CPU e RAM (spec M8 §11)
+## M8a1 — CPU and RAM stress test (spec M8 §11)
 
-Non misurato in questa sessione: `scripts/measure-footprint.ps1` avvia l'app (release) e ne apre la finestra; un agente non pilota l'app né il desktop dell'utente (regola delle verifiche dal vivo). La misura a riposo e quella sotto carico spettano quindi alle verifiche dal vivo (A28, P13). Il codice della M8a1 non aggiunge lavoro a riposo: `oma-load.exe` esiste solo mentre un test è in corso e il modulo `performance/` dell'app resta inattivo senza test.
+Not measured in this session: `scripts/measure-footprint.ps1` starts the release build of the app and opens its window, and an agent does not drive the app or the user's desktop (live-check rule). The idle and under-load measurements are owed to the live checks (A28, P13). M8a1 adds no idle work: `oma-load.exe` exists only while a test runs, and the app's `performance/` module stays inactive without a test.
 
-Comando per l'utente (shell normale, dalla radice del repository):
+Command for the user (normal shell, repository root). The script starts the release build itself, so close any `pnpm tauri dev` instance first:
 
 ```powershell
 pwsh scripts/measure-footprint.ps1
 ```
 
-A riposo, senza test: attesi nucleo < 1% CPU, tray < 30 MB, finestra < 200 MB (WebView2 compresa), come per la M7. Poi, durante P1 (CPU, Verifica normale, Rapido), lo stesso script con la finestra aperta: finestra < 200 MB; la memoria privata di `oma-load.exe` si annota a parte (non rientra nel budget dell'app, è il carico stesso). I valori vanno in questa sezione dopo A28.
+At rest, with no test: expected core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included), as for M7. Then, in the app the script launched, start a CPU Quick test by hand (normal check) and measure again with the window open: window < 200 MB. Note the private memory and CPU of `oma-load.exe` from Task Manager separately: it is the load itself, not part of the app budget. The values go in this section after A28.
 
 ## M7 — motore dei frame e overlay (spec M7 §11)
 

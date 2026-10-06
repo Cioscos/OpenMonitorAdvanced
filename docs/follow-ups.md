@@ -57,15 +57,23 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 
 ## Manual checks owed after M8a1 (plan task A28)
 
-To run with the user, one block at a time, before merging into `main`. Heavy loads only with the user's go. Build first, then start the app in development (normal shell, repository root):
+To run with the user, one block at a time, before merging into `main`. Heavy loads only with the user's go. Build first (normal shell, repository root):
 
 ```powershell
 cargo build -p oma-load
 ```
 
+For P3 only, in a shell of its own, set the fault injection first (debug builds only), then start the app in that same shell:
+
+```powershell
+$env:OMA_LOAD_INJECT='k5:2'
+```
+
 ```powershell
 cd app; pnpm tauri dev
 ```
+
+The variable persists in that shell: the app started from it injects the fault in every test. Run P1, P2 and P4-P8 from a new shell without it (just `cd app; pnpm tauri dev`), or after `Remove-Item Env:OMA_LOAD_INJECT` and a restart of the app.
 
 | # | Check | Expected |
 |---|---|---|
@@ -81,20 +89,18 @@ cd app; pnpm tauri dev
 | P10 | WHEA readable | No "Unreadable hardware errors" warning on this PC. |
 | P11 | Core numbering | "Core N" of the app against Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer, if the user opens it. |
 | P12 | Tooltips | Every technical term in the wizard, during the test, in the result, history and settings shows its explanation on hover and on Tab. |
-| P13 | Budget during a test | `scripts/measure-footprint.ps1` during P1: window < 200 MB; `oma-load` noted. |
+| P13 | Budget during a test | `scripts/measure-footprint.ps1` (release build, no `pnpm tauri dev` running) with a CPU Quick test started by hand: window < 200 MB; `oma-load` noted. |
 | P14 | No service (stopped by the user) | The CPU stress starts with the warning; no thermal stop; the chart shows the note. |
 
-P3 needs the fault injection (debug builds only), set in the shell that starts `pnpm tauri dev`:
+P7: set the threshold in the stress settings (`cpuStopC` = 60), then run any CPU test.
 
-```powershell
-$env:OMA_LOAD_INJECT='k5:2'
-```
-
-P7: set the threshold in the stress settings (`cpuStopC` = 60), then run any CPU test. P13, in a second normal shell during P1:
+P13: `scripts/measure-footprint.ps1` starts the release build itself, so close any `pnpm tauri dev` instance first, then (normal shell, repository root):
 
 ```powershell
 pwsh scripts/measure-footprint.ps1
 ```
+
+Start the CPU Quick test by hand in the app the script launched and note the figures of the `oma-load` process (Task Manager) next to the window figure.
 
 P9 is a forced restart: ask the user first. Results go in this file and in the project memory (`m8a1-followups.md`); then `superpowers:finishing-a-development-branch` (whole-branch review, local merge, no push unless asked).
 

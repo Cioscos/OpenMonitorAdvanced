@@ -1,6 +1,7 @@
 <script lang="ts">
   import catalog from '../../../../testdata/performance/catalog.json';
   import { t } from '../../lib/i18n/index.svelte';
+  import { marked } from '../../lib/performance/format';
   import type { Custom, Isa, KernelId, Plan } from '../../lib/types';
   import Term from '../common/Term.svelte';
 
@@ -17,14 +18,23 @@
   });
   const sets = $derived((catalog.isa as Isa[]).filter((i) => isa.includes(i)));
   const hasCycle = $derived(base.phases.some((p) => p.placement === 'core_cycle'));
-  const profileStops = $derived(base.phases.some((p) => p.stop_on_error));
+  /** The profile's «stop at the first error»: all, none, or mixed (null) across its phases. */
+  const profileStops = $derived.by(() => {
+    const stops = base.phases.filter((p) => p.stop_on_error).length;
+    return stops === 0 ? false : stops === base.phases.length ? true : null;
+  });
+  /** The profile's minutes of a kernel, never 0. */
+  const profileMinutes = (kernel: KernelId) => Math.max(1, Math.ceil((kernels.get(kernel) ?? 0) / 60));
+  const all = $derived(marked(t('performance.custom.threads.all')));
+  const onePerCore = $derived(marked(t('performance.custom.threads.onePerCore')));
+  const hint = $derived(marked(t('performance.custom.threads.hint')));
   const MAX_MINUTES = 24 * 60;
 
   function setMinutes(input: HTMLInputElement, kernel: KernelId) {
     const edit = custom.modes.find((m) => m.kernel === kernel)!;
     const next = Math.round(Number(input.value));
     if (input.value !== '' && next >= 1 && next <= MAX_MINUTES) edit.minutes = next;
-    else input.value = String(edit.minutes ?? Math.round(kernels.get(kernel)! / 60));
+    else input.value = String(edit.minutes ?? profileMinutes(kernel));
   }
 </script>
 
@@ -46,7 +56,7 @@
               step="1"
               disabled={!edit.enabled}
               aria-label={t('performance.custom.minutesOf', { name: t(`glossary.mode.${edit.kernel}.name`) })}
-              value={edit.minutes ?? Math.round((kernels.get(edit.kernel) ?? 0) / 60)}
+              value={edit.minutes ?? profileMinutes(edit.kernel)}
               onchange={(e) => setMinutes(e.currentTarget, edit.kernel)}
             />
             {t('performance.custom.minutes')}
@@ -67,12 +77,12 @@
   </fieldset>
 
   <fieldset>
-    <legend>{t('performance.custom.threads')}</legend>
+    <legend><Term term="threads" /></legend>
     <div class="options">
-      <label class="option"><input type="radio" name="custom-threads" checked={custom.threads === 'allLogical'} onchange={() => (custom.threads = 'allLogical')} />{t('performance.custom.threads.all')}</label>
-      <label class="option"><input type="radio" name="custom-threads" checked={custom.threads === 'onePerCore'} onchange={() => (custom.threads = 'onePerCore')} />{t('performance.custom.threads.onePerCore')}</label>
+      <label class="option"><input type="radio" name="custom-threads" checked={custom.threads === 'allLogical'} onchange={() => (custom.threads = 'allLogical')} />{all[0]}<Term term="threads">{all[1]}</Term>{all[2]}</label>
+      <label class="option"><input type="radio" name="custom-threads" checked={custom.threads === 'onePerCore'} onchange={() => (custom.threads = 'onePerCore')} />{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}</label>
     </div>
-    <p class="hint">{t('performance.custom.threads.hint')}</p>
+    <p class="hint">{hint[0]}<Term term="mode.allCore">{hint[1]}</Term>{hint[2]}</p>
   </fieldset>
 
   <div class="flags">
@@ -80,7 +90,12 @@
       <label class="check"><input type="checkbox" bind:checked={custom.bothSmt} />{t('performance.custom.bothSmt')} (<Term term="smt" />)</label>
     {/if}
     <label class="check">
-      <input type="checkbox" checked={custom.stopOnFirstError ?? profileStops} onchange={(e) => (custom.stopOnFirstError = e.currentTarget.checked)} />
+      <input
+        type="checkbox"
+        checked={custom.stopOnFirstError ?? profileStops ?? false}
+        indeterminate={custom.stopOnFirstError === null && profileStops === null}
+        onchange={(e) => (custom.stopOnFirstError = e.currentTarget.checked)}
+      />
       {t('performance.custom.stopOnFirstError')}
     </label>
   </div>

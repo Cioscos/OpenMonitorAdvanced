@@ -23,3 +23,21 @@ export function sizeLabel(phase: Phase): string | null {
 export function phaseLabel(phase: Phase, t: Translate): string {
   return [t(`glossary.mode.${phase.kernel}.name`), sizeLabel(phase), t(`glossary.isa.${phase.isa}.name`)].filter(Boolean).join(' · ');
 }
+
+/** A text whose `[term]` carries a tooltip, cut around it: `[before, term, after]` (no brackets: `[text, '', '']`). */
+export function marked(text: string): [string, string, string] {
+  const match = /\[([^\]]+)\]/.exec(text);
+  return match ? [text.slice(0, match.index), match[1], text.slice(match.index + match[0].length)] : [text, '', ''];
+}
+
+/**
+ * A refusal of the shell in words: `build:<code>` (a plan that cannot be built) and `busy` are
+ * translated, anything else is the shell's own text.
+ */
+export function errorText(error: unknown, t: Translate): string {
+  const text = String(error);
+  if (text === 'busy') return t('performance.wizard.busy');
+  if (!text.startsWith('build:')) return text;
+  const key = `performance.wizard.error.${text.slice('build:'.length)}`;
+  return t(key) === key ? text : t(key);
+}

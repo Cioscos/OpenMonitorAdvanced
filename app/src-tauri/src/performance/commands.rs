@@ -27,13 +27,13 @@ pub fn performance_system(runner: Runner<'_>) -> SystemInfo {
 
 #[tauri::command(async)]
 pub fn performance_preview(runner: Runner<'_>, request: StartRequest) -> Result<Plan, String> {
-    runner.preview(&request).map_err(|e| e.to_string())
+    runner.preview(&request).map_err(|e| e.wire())
 }
 
 /// Starts a test; the session id, or why it cannot start.
 #[tauri::command(async)]
 pub fn performance_start(runner: Runner<'_>, request: StartRequest) -> Result<String, String> {
-    runner.start(request).map_err(|e| e.to_string())
+    runner.start(request).map_err(|e| e.wire())
 }
 
 #[tauri::command]

@@ -30,7 +30,7 @@ const PLAN: Plan = {
   phases: [
     phase({ kernel: 'k1', duration_s: 600 }),
     phase({ kernel: 'k2', duration_s: 1200, size: 'l2', placement: 'core_cycle', per_core_s: 150, cores: [0, 1, 2, 3, 4, 5, 6, 7] }),
-    phase({ kernel: 'k5', duration_s: 300, size: 'l2', mode: 'variable' }),
+    phase({ kernel: 'k5', duration_s: 300, size: 'l3', mode: 'variable' }),
   ],
 };
 
@@ -81,6 +81,8 @@ const next = () => fireEvent.click(screen.getByRole('button', { name: t('perform
 const back = () => fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.back') }));
 const radio = (name: string) => screen.getByRole('radio', { name }) as HTMLInputElement;
 const preset = (id: string, duration: string) => `${t(`performance.preset.${id}`)} · ${duration}`;
+/** A text as shown: the brackets that mark its term go. */
+const plain = (key: string, params?: Record<string, string | number>) => t(key, params).replace(/[[\]]/g, '');
 
 /** Through the first three steps with the defaults, to the summary. */
 async function toSummary(backend: FakeBackend) {
@@ -99,7 +101,8 @@ test('wizard_walks_four_steps_and_back', async () => {
   // 1 · Component: the CPU with its model and size, the RAM with its total and share.
   expect(radio('CPU').checked).toBe(true);
   expect(screen.getByText('Fake Ryzen 7 7800X3D')).toBeTruthy();
-  expect(screen.getByText(t('performance.wizard.cpu.detail', { cores: 8, threads: 16 }))).toBeTruthy();
+  const detail = screen.getByText((_, node) => node?.textContent === plain('performance.wizard.cpu.detail', { cores: 8, threads: 16 }) && node.tagName === 'SPAN');
+  expect(detail.querySelector('.term')?.textContent).toBe('threads');
   expect(radio('RAM').disabled).toBe(false);
   expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(t('performance.wizard.step.component'));
   await next();
@@ -136,7 +139,8 @@ test('wizard_walks_four_steps_and_back', async () => {
 test('ram_is_disabled_with_reason_below_budget', async () => {
   await setup({ system: { ramBudget: 200 * MIB } });
   expect(radio('RAM').disabled).toBe(true);
-  expect(screen.getByText(t('performance.wizard.ram.low'))).toBeTruthy();
+  const reason = screen.getByText(t('performance.wizard.ram.low'));
+  expect(radio('RAM').getAttribute('aria-describedby')).toBe(reason.id);
   expect(radio('CPU').disabled).toBe(false);
   cleanup();
   off?.();
@@ -159,14 +163,17 @@ test('no_service_shows_the_warning_but_allows_cpu', async () => {
 
 test('summary_lists_phases_with_terms', async () => {
   const { backend } = await setup({ system: { hypervisor: true } });
+  backend.performancePlan.phases[1].both_smt = true;
   await toSummary(backend);
   const list = screen.getByRole('list', { name: t('performance.wizard.phases') });
   const rows = within(list).getAllByRole('listitem');
   expect(rows).toHaveLength(3);
   const terms = (row: HTMLElement) => [...row.querySelectorAll('.term')].map((n) => n.textContent);
   expect(terms(rows[0])).toEqual([t('glossary.mode.k1.name'), 'AVX2', t('glossary.mode.steady.name'), t('glossary.mode.allCore.name')]);
-  expect(terms(rows[1])).toEqual([t('glossary.mode.k2.name'), 'AVX2', t('glossary.mode.steady.name'), t('glossary.mode.coreCycle.name')]);
-  expect(terms(rows[2])[2]).toBe(t('glossary.mode.variable.name'));
+  // Both threads of the core are marked with the SMT term.
+  expect(terms(rows[1])).toEqual([t('glossary.mode.k2.name'), 'AVX2', t('glossary.mode.steady.name'), t('glossary.mode.coreCycle.name'), t('performance.wizard.bothSmt')]);
+  // A size that is not the kernel's own carries the cache term.
+  expect(terms(rows[2])).toEqual([t('glossary.mode.k5.name'), 'L3', 'AVX2', t('glossary.mode.variable.name'), t('glossary.mode.allCore.name')]);
   expect(rows[1].textContent).toContain('20 min');
   // Every term is reachable with Tab.
   expect(rows[0].querySelector('.term')?.getAttribute('tabindex')).toBe('0');
@@ -180,6 +187,7 @@ test('summary_lists_phases_with_terms', async () => {
 
 test('customize_rebuilds_the_preview_and_total', async () => {
   const { backend } = await setup();
+  backend.performancePlan.phases[0].stop_on_error = true;
   await toSummary(backend);
   await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
   const panel = screen.getByRole('region', { name: t('performance.wizard.customize') });
@@ -192,13 +200,16 @@ test('customize_rebuilds_the_preview_and_total', async () => {
   await fireEvent.click(k5);
   await waitFor(() => expect(lastPreview(backend).custom?.modes).toContainEqual({ kernel: 'k5', enabled: false, minutes: null }));
   await screen.findByText(t('performance.wizard.total', { duration: '30 min' }));
+  // The profile stops in the first phase only: «stop at the first error» is mixed until set.
+  const stop = within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') }) as HTMLInputElement;
+  expect(stop.indeterminate).toBe(true);
   // Minutes, set, threads, both SMT threads and the first error go into the same Custom.
   backend.performancePlan = PLAN;
   const minutes = within(panel).getByRole('spinbutton', { name: t('performance.custom.minutesOf', { name: t('glossary.mode.k1.name') }) });
   await fireEvent.input(minutes, { target: { value: '15' } });
   await fireEvent.change(minutes, { target: { value: '15' } });
   await fireEvent.click(within(panel).getByRole('radio', { name: 'SSE2' }));
-  await fireEvent.click(within(panel).getByRole('radio', { name: t('performance.custom.threads.onePerCore') }));
+  await fireEvent.click(within(panel).getByRole('radio', { name: plain('performance.custom.threads.onePerCore') }));
   await fireEvent.click(within(panel).getByRole('checkbox', { name: new RegExp(t('performance.custom.bothSmt')) }));
   await fireEvent.click(within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') }));
   await waitFor(() =>
@@ -271,6 +282,10 @@ test('start_goes_to_the_run_page', async () => {
   backend.performanceStartError = 'oma-load.exe not found';
   await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
   expect((await screen.findByRole('alert')).textContent).toContain('oma-load.exe not found');
+  // A plan the shell cannot build comes as a code, in words.
+  backend.performanceStartError = 'build:too_long';
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(t('performance.wizard.error.too_long')));
   backend.performanceStartError = null;
   await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
   await screen.findByRole('heading', { name: t('performance.run.title') });
@@ -289,4 +304,42 @@ test('start_disabled_while_running', async () => {
   // When the test finishes, Start is back.
   backend.emitPerformanceStatus(makeRunStatus({ state: 'finished', sessionId: 'x', outcome: 'passed' }));
   await waitFor(() => expect(start.disabled).toBe(false));
+});
+
+test('a_late_preview_reply_is_dropped', async () => {
+  const { backend } = await setup();
+  const replies: ((plan: Plan) => void)[] = [];
+  vi.spyOn(backend, 'performancePreview').mockImplementation(() => new Promise((resolve) => replies.push(resolve)));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(replies).toHaveLength(1));
+  // Back to the durations: the standard plan answers only now, for a choice already left.
+  await back();
+  await fireEvent.click(radio(preset('quick', '5 min')));
+  replies[0](PLAN);
+  await new Promise((r) => setTimeout(r, 0));
+  await next();
+  await waitFor(() => expect(replies).toHaveLength(2));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByText(t('performance.wizard.total', { duration: '35 min' }))).toBeNull();
+  expect(screen.getByRole('button', { name: t('performance.wizard.customize') })).toHaveProperty('disabled', true);
+  // Two replies out of order: only the newer one counts.
+  await back();
+  await next();
+  await waitFor(() => expect(replies).toHaveLength(3));
+  replies[2]({ ...PLAN, phases: PLAN.phases.slice(0, 1) });
+  await screen.findByText(t('performance.wizard.total', { duration: '10 min' }));
+  replies[1](PLAN);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByText(t('performance.wizard.total', { duration: '10 min' }))).toBeTruthy();
+});
+
+test('each_step_moves_the_focus_to_its_title', async () => {
+  await setup();
+  expect(document.activeElement?.tagName).not.toBe('H3');
+  await next();
+  expect(document.activeElement?.textContent).toBe(t('performance.wizard.step.objective'));
+  await back();
+  expect(document.activeElement?.textContent).toBe(t('performance.wizard.step.component'));
 });

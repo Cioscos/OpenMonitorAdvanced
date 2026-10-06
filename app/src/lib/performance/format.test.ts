@@ -1,6 +1,6 @@
 import { i18n, t } from '../i18n/index.svelte';
 import type { Phase } from '../types';
-import { formatDuration, phaseLabel } from './format';
+import { errorText, formatDuration, marked, phaseLabel } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -36,4 +36,18 @@ test('phase_label_names_the_kernel_size_and_set', () => {
   expect(phaseLabel(phase({ kernel: 'k5', size: 'l3' }), t)).toBe('Interi esatti (NTT) · L3 · AVX2');
   expect(phaseLabel(phase({ kernel: 'k8', size: 'auto', isa: 'sse2' }), t)).toBe('Crittografia e compressione · SSE2');
   i18n.locale = 'en';
+});
+
+test('marked_cuts_around_the_bracketed_term', () => {
+  expect(marked('Un [thread] per core')).toEqual(['Un ', 'thread', ' per core']);
+  expect(marked('no term')).toEqual(['no term', '', '']);
+});
+
+test('shell_errors_are_translated_by_code', () => {
+  expect(errorText('build:too_long', t)).toBe(t('performance.wizard.error.too_long'));
+  expect(errorText('build:ram_budget', t)).toBe(t('performance.wizard.error.ram_budget'));
+  expect(errorText('busy', t)).toBe(t('performance.wizard.busy'));
+  // An unknown code and any other text stay as the shell wrote them.
+  expect(errorText('build:something_new', t)).toBe('build:something_new');
+  expect(errorText('oma-load.exe not found', t)).toBe('oma-load.exe not found');
 });

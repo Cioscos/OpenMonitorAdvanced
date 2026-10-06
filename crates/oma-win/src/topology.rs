@@ -285,12 +285,32 @@ fn cpuid_identity() -> (String, String, bool) {
         }
         (vendor, brand, __cpuid(1).ecx >> 31 & 1 == 1)
     };
+    let hypervisor = hypervisor && {
+        // SAFETY: as above; the hypervisor leaves exist whenever the hypervisor bit is set.
+        let l = unsafe { __cpuid(0x4000_0000) };
+        let mut hv_vendor = Vec::with_capacity(12);
+        for r in [l.ebx, l.ecx, l.edx] {
+            hv_vendor.extend_from_slice(&r.to_le_bytes());
+        }
+        // SAFETY: as above; read only when the hypervisor reports the leaf.
+        let features = (l.eax >= 0x4000_0003).then(|| unsafe { __cpuid(0x4000_0003) }.ebx);
+        is_guest(&hv_vendor, l.eax, features.unwrap_or(0))
+    };
     let text = |b: Vec<u8>| {
         String::from_utf8_lossy(&b)
             .trim_matches(|c: char| c == '\0' || c.is_whitespace())
             .to_owned()
     };
     (text(vendor), text(brand), hypervisor)
+}
+
+/// Whether Windows runs as a guest, given that CPUID 1 reports a hypervisor. The bit is also set on
+/// bare metal with VBS or Memory Integrity, where Windows is Hyper-V's root partition: that one
+/// holds the CreatePartitions privilege (leaf 0x40000003, EBX bit 0) and is not a VM.
+fn is_guest(hv_vendor: &[u8], hv_max_leaf: u32, hv_features_ebx: u32) -> bool {
+    let root =
+        hv_vendor == b"Microsoft Hv" && hv_max_leaf >= 0x4000_0003 && hv_features_ebx & 1 == 1;
+    !root
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -324,6 +344,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn hyperv_root_partition_is_not_a_vm() {
+        // Bare metal with VBS: Microsoft Hv with CreatePartitions.
+        assert!(!is_guest(b"Microsoft Hv", 0x4000_000B, 0x0000_3FFF));
+        // A Hyper-V guest: no CreatePartitions.
+        assert!(is_guest(b"Microsoft Hv", 0x4000_000B, 0x0000_3FFE));
+        // The features leaf missing: a guest.
+        assert!(is_guest(b"Microsoft Hv", 0x4000_0001, 1));
+        // Other hypervisors are always guests, whatever their EBX says.
+        assert!(is_guest(b"VMwareVMware", 0x4000_0010, 1));
+        assert!(is_guest(b"KVMKVMKVM\0\0\0", 0x4000_0001, 1));
+    }
 
     fn bytes_of<T: Copy>(v: &T, len: usize) -> Vec<u8> {
         let mut out = vec![0u8; len.max(size_of::<T>())];
@@ -506,6 +539,9 @@ mod tests {
         assert!(t.logical.iter().any(|c| c.core == 0));
         assert!(t.caches.l2_bytes > 0, "{:?}", t.caches);
         assert!(!t.vendor.is_empty());
-        eprintln!("{} ({}) {:?}", t.brand, t.vendor, t.caches);
+        eprintln!(
+            "{} ({}) {:?} hypervisor={}",
+            t.brand, t.vendor, t.caches, t.hypervisor
+        );
     }
 }

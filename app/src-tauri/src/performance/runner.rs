@@ -171,6 +171,23 @@ impl std::fmt::Display for StartError {
     }
 }
 
+impl StartError {
+    /// What the commands send to the UI: `busy`, `build:<code>` for a plan that cannot be built
+    /// (the UI translates both), or the text of anything else.
+    pub fn wire(&self) -> String {
+        let code = match self {
+            Self::Busy => return "busy".into(),
+            Self::System(e) => return e.clone(),
+            Self::Plan(BuildError::NoCores) => "no_cores",
+            Self::Plan(BuildError::NoPhases) => "no_phases",
+            Self::Plan(BuildError::TooLong) => "too_long",
+            Self::Plan(BuildError::UnknownCore(_)) => "unknown_core",
+            Self::Plan(BuildError::RamBudget) => "ram_budget",
+        };
+        format!("build:{code}")
+    }
+}
+
 /// What the machine offers for a test (`performance_system`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -839,6 +856,18 @@ mod tests {
 
     use super::*;
     use crate::settings::fake_fs::FakeFs;
+
+    #[test]
+    fn start_errors_reach_the_ui_as_stable_codes() {
+        let wire = |e: BuildError| StartError::Plan(e).wire();
+        assert_eq!(wire(BuildError::NoCores), "build:no_cores");
+        assert_eq!(wire(BuildError::NoPhases), "build:no_phases");
+        assert_eq!(wire(BuildError::TooLong), "build:too_long");
+        assert_eq!(wire(BuildError::UnknownCore(3)), "build:unknown_core");
+        assert_eq!(wire(BuildError::RamBudget), "build:ram_budget");
+        assert_eq!(StartError::Busy.wire(), "busy");
+        assert_eq!(StartError::System("no pipe".into()).wire(), "no pipe");
+    }
 
     const CORES: u32 = 4;
 

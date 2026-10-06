@@ -3,7 +3,7 @@
   import type { Backend } from '../../lib/backend';
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { formatDuration, sizeLabel } from '../../lib/performance/format';
+  import { errorText, formatDuration, marked, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { Custom, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
@@ -59,6 +59,9 @@
     custom = null;
     customizing = false;
     plan = base = null;
+    previewError = null;
+    // A preview still on its way is for the old choice.
+    generation++;
   }
 
   // The summary previews the plan of the current choices; a superseded reply is dropped.
@@ -80,7 +83,7 @@
           .catch((error) => {
             if (id !== generation) return;
             plan = null;
-            previewError = String(error);
+            previewError = errorText(error, t);
           }),
       next.custom ? DEBOUNCE_MS : 0,
     );
@@ -109,6 +112,8 @@
 
   async function confirmRisk(dontShowAgain: boolean) {
     asking = false;
+    // Start stays off while the setting is written.
+    starting = true;
     if (dontShowAgain) await settings.update({ performance: { riskNoticeSeen: true } });
     await start();
   }
@@ -121,7 +126,7 @@
       if (result.ok) onStarted();
       else startError = t(`performance.wizard.${result.reason}`);
     } catch (error) {
-      startError = t('performance.wizard.startError', { reason: String(error) });
+      startError = t('performance.wizard.startError', { reason: errorText(error, t) });
     } finally {
       starting = false;
     }
@@ -134,6 +139,17 @@
   }
   const noService = $derived(around(t('performance.warn.noService'), t('glossary.thermalStop.name')));
   const overclockHint = $derived(around(t('performance.objective.overclock.hint'), t('glossary.curveOptimizer.name')));
+
+  const cpuDetail = $derived(system && marked(t('performance.wizard.cpu.detail', { cores: system.cores, threads: system.logical })));
+  const onePerCore = $derived(marked(t('performance.wizard.onePerCore')));
+
+  // Each new step takes the focus to its title, so a screen reader reads where it is; not on mount.
+  let title = $state<HTMLElement>();
+  let shownStep = 0;
+  $effect(() => {
+    if (step !== shownStep) title?.focus();
+    shownStep = step;
+  });
 
   const PLACEMENT_TERM: Record<Phase['placement'], string | null> = { all_logical: 'mode.allCore', core_cycle: 'mode.coreCycle', one_per_core: null };
 </script>
@@ -152,7 +168,7 @@
     {/each}
   </ol>
 
-  <h3>{t(`performance.wizard.step.${STEPS[step]}`)}</h3>
+  <h3 tabindex="-1" bind:this={title}>{t(`performance.wizard.step.${STEPS[step]}`)}</h3>
 
   {#if step === 0}
     {#if system === null}
@@ -163,14 +179,14 @@
           <input type="radio" name="wizard-component" aria-labelledby="wizard-cpu" checked={component === 'cpu'} onchange={() => choose(() => (component = 'cpu'))} />
           <b id="wizard-cpu">{t('performance.wizard.cpu')}</b>
           <span>{system.cpuModel}</span>
-          <span class="muted">{t('performance.wizard.cpu.detail', { cores: system.cores, threads: system.logical })}</span>
+          {#if cpuDetail}<span class="muted">{cpuDetail[0]}{#if cpuDetail[1]}<Term term="threads">{cpuDetail[1]}</Term>{/if}{cpuDetail[2]}</span>{/if}
         </label>
         <label class="tile" class:on={component === 'ram'} class:disabled={!ramOk}>
-          <input type="radio" name="wizard-component" aria-labelledby="wizard-ram" disabled={!ramOk} checked={component === 'ram'} onchange={() => choose(() => (component = 'ram'))} />
+          <input type="radio" name="wizard-component" aria-labelledby="wizard-ram" aria-describedby={ramOk ? undefined : 'wizard-ram-low'} disabled={!ramOk} checked={component === 'ram'} onchange={() => choose(() => (component = 'ram'))} />
           <b id="wizard-ram">{t('performance.wizard.ram')}</b>
           <span>{t('performance.wizard.ram.detail', { total: formatBytes(system.ramTotal, i18n.locale) })}</span>
           <span class="muted"><Term term="ramShare" />: {formatBytes(system.ramBudget, i18n.locale)}</span>
-          {#if !ramOk}<span class="reason">{t('performance.wizard.ram.low')}</span>{/if}
+          {#if !ramOk}<span class="reason" id="wizard-ram-low">{t('performance.wizard.ram.low')}</span>{/if}
         </label>
       </div>
       {#if !system.serviceConnected}{@render noServiceWarning()}{/if}
@@ -205,9 +221,9 @@
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
         {#each plan.phases as p, index (index)}
           <li style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
-            <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel} + <Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)} · {sizeLabel(p)}{/if}</span>
+            <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel} + <Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)} · <Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             <span class="isa"><Term term={`isa.${p.isa}`} /></span>
-            <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{t('performance.wizard.onePerCore')}{/if}</span>
+            <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt} · <Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}</span>
             <span class="dur">{formatDuration(p.duration_s)}</span>
           </li>
         {/each}
@@ -299,6 +315,7 @@
     color: var(--ok);
   }
   h3 {
+    outline: none;
     margin: 0;
     font-size: 16px;
     font-weight: 600;

@@ -117,7 +117,13 @@ impl Twiddles {
     }
 }
 
+/// Elements between two ticks in the passes outside the butterflies, so that a `ram`-size
+/// iteration (2^24 points) keeps bumping the beat and polling `quit`.
+const CHUNK: usize = 1 << 18;
+
 /// `len` zeroed words, or `Insufficient` when the memory is not there (never aborts).
+/// K5 is not in DA10's list, so a failure is `Insufficient`, not `Memory(next)`: the size
+/// already comes from the quota, with the whole footprint accounted for.
 fn alloc(len: usize) -> Result<Vec<u64>, KernelError> {
     let mut v = Vec::new();
     v.try_reserve_exact(len)
@@ -131,10 +137,10 @@ fn alloc(len: usize) -> Result<Vec<u64>, KernelError> {
 fn forward(a: &mut [u64], tw: &Twiddles, tick: &mut impl FnMut() -> bool) -> bool {
     let n = a.len();
     let shift = 64 - n.ilog2();
-    if !tick() {
-        return false;
-    }
     for i in 0..n {
+        if i % CHUNK == 0 && !tick() {
+            return false;
+        }
         let j = ((i as u64).reverse_bits() >> shift) as usize;
         if i < j {
             a.swap(i, j);
@@ -171,13 +177,13 @@ fn inverse(a: &mut [u64], tw: &Twiddles, tick: &mut impl FnMut() -> bool) -> boo
 }
 
 /// Forward NTT in place; `a.len()` is a power of 2, at least 2.
-pub fn ntt_forward(a: &mut [u64]) {
+pub(crate) fn ntt_forward(a: &mut [u64]) {
     let tw = Twiddles::new(a.len()).expect("twiddles");
     forward(a, &tw, &mut || true);
 }
 
 /// Inverse NTT in place; `ntt_inverse(ntt_forward(x))` is `x`.
-pub fn ntt_inverse(a: &mut [u64]) {
+pub(crate) fn ntt_inverse(a: &mut [u64]) {
     let tw = Twiddles::new(a.len()).expect("twiddles");
     inverse(a, &tw, &mut || true);
 }
@@ -193,16 +199,21 @@ fn mul_m61(a: u64, b: u64) -> u64 {
     }
 }
 
-/// Σ Xₖ·(k+1) mod M61.
-fn digest(spectrum: &[u64]) -> u64 {
+/// Σ Xₖ·(k+1) mod M61; `None` when `tick` asked to stop.
+fn digest(spectrum: &[u64], tick: &mut impl FnMut() -> bool) -> Option<u64> {
     let mut acc = 0u64;
-    for (k, &x) in spectrum.iter().enumerate() {
-        acc += mul_m61(x % M61, k as u64 + 1);
-        if acc >= M61 {
-            acc -= M61;
+    for (c, chunk) in spectrum.chunks(CHUNK).enumerate() {
+        if !tick() {
+            return None;
+        }
+        for (k, &x) in chunk.iter().enumerate() {
+            acc += mul_m61(x % M61, (c * CHUNK + k) as u64 + 1);
+            if acc >= M61 {
+                acc -= M61;
+            }
         }
     }
-    acc
+    Some(acc)
 }
 
 /// The largest power of 2 not above `v`, and at least `min`.
@@ -225,7 +236,8 @@ fn n_l3(ctx: &WorkerCtx) -> usize {
 }
 
 /// DA9, `ram`: 2^24 points (128 MiB) when the whole footprint fits the memory per thread,
-/// otherwise the largest power of 2 that does; never below the `l3` size.
+/// otherwise the largest power of 2 that does. A `ram` run smaller than the `l3` size would
+/// be no memory test at all, so that is `Insufficient` too (the extra `n < n_l3` rejection).
 fn n_ram(ctx: &WorkerCtx) -> Result<usize, KernelError> {
     let n = pow2_floor(ctx.budget.ram_per_thread / BYTES_PER_POINT, 1).min(MAX_RAM_POINTS);
     if (n as u64) * BYTES_PER_POINT > ctx.budget.ram_per_thread || n < n_l3(ctx) {
@@ -239,7 +251,11 @@ pub(crate) struct K5 {
     input: Vec<u64>,
     work: Vec<u64>,
     shared: Arc<PhaseShared>,
-    /// Test hook: (word of the spectrum, bit) flipped once between the two transforms.
+    /// Test hook: (word of the spectrum, bit) flipped once right after the forward
+    /// transform, before the sum check.
+    #[cfg(test)]
+    pub(crate) flip_before_sum: Option<(usize, u32)>,
+    /// Test hook: flipped once after the sum check, before the digest.
     #[cfg(test)]
     pub(crate) flip: Option<(usize, u32)>,
 }
@@ -255,12 +271,17 @@ impl K5 {
         let work = alloc(n)?;
         let tw = Twiddles::new(n)?;
         let mut rng = Xoshiro256ss::new(ctx.seed);
-        input.iter_mut().for_each(|x| *x = rng.next_u64() % P);
+        // Never null: a zero becomes 1.
+        input
+            .iter_mut()
+            .for_each(|x| *x = (rng.next_u64() % P).max(1));
         Ok(Self {
             tw,
             input,
             work,
             shared: ctx.shared.clone(),
+            #[cfg(test)]
+            flip_before_sum: None,
             #[cfg(test)]
             flip: None,
         })
@@ -274,11 +295,26 @@ impl Kernel for K5 {
             beat.fetch_add(1, Ordering::Relaxed);
             !quit.load(Ordering::Relaxed)
         };
-        self.work.copy_from_slice(&self.input);
+        for (w, i) in self.work.chunks_mut(CHUNK).zip(self.input.chunks(CHUNK)) {
+            if !tick() {
+                return Check::Ok;
+            }
+            w.copy_from_slice(i);
+        }
         if !forward(&mut self.work, &self.tw, &mut tick) {
             return Check::Ok;
         }
-        let sum = self.work.iter().fold(0, |s, &x| add_mod(s, x));
+        #[cfg(test)]
+        if let Some((word, bit)) = self.flip_before_sum.take() {
+            self.work[word] ^= 1 << bit;
+        }
+        let mut sum = 0;
+        for chunk in self.work.chunks(CHUNK) {
+            if !tick() {
+                return Check::Ok;
+            }
+            sum = chunk.iter().fold(sum, |s, &x| add_mod(s, x));
+        }
         let expected = mul_mod(self.work.len() as u64 % P, self.input[0]);
         if sum != expected {
             return Check::Mismatch {
@@ -286,18 +322,28 @@ impl Kernel for K5 {
                 actual: sum,
             };
         }
-        let d = digest(&self.work);
         #[cfg(test)]
         if let Some((word, bit)) = self.flip.take() {
             self.work[word] ^= 1 << bit;
         }
+        let Some(d) = digest(&self.work, &mut tick) else {
+            return Check::Ok;
+        };
         if !inverse(&mut self.work, &self.tw, &mut tick) {
             return Check::Ok;
         }
-        match self.work.iter().zip(&self.input).find(|(w, i)| w != i) {
-            Some((&actual, &expected)) => Check::Mismatch { expected, actual },
-            None => Check::Digest(d),
+        for (w, i) in self.work.chunks(CHUNK).zip(self.input.chunks(CHUNK)) {
+            if !tick() {
+                return Check::Ok;
+            }
+            if let Some(k) = (0..w.len()).find(|&k| w[k] != i[k]) {
+                return Check::Mismatch {
+                    expected: i[k],
+                    actual: w[k],
+                };
+            }
         }
+        Check::Digest(d)
     }
 }
 
@@ -486,6 +532,43 @@ mod tests {
         ));
         // The hook fires once: the next iteration is right again.
         assert_eq!(digest_of(&mut k), expected);
+    }
+
+    #[test]
+    fn a_flip_before_the_sum_check_is_caught_by_it() {
+        let c = ctx(DataSize::L2, 7);
+        let mut k = K5::new(&c).unwrap();
+        let n = k.work.len() as u64;
+        let expected = mul_mod(n, k.input[0]);
+        k.flip_before_sum = Some((5, 40));
+        match k.iterate(&AtomicU64::new(0)) {
+            Check::Mismatch {
+                expected: e,
+                actual,
+            } => {
+                assert_eq!(e, expected);
+                assert_ne!(actual, expected);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_flip_after_the_sum_check_never_passes() {
+        // The digest is taken from the damaged spectrum and differs from the right one
+        // (the helper below), and the round trip fails too: never a passing digest.
+        let c = ctx(DataSize::L2, 7);
+        let mut spectrum = K5::new(&c).unwrap().input.clone();
+        ntt_forward(&mut spectrum);
+        let right = digest(&spectrum, &mut || true).unwrap();
+        spectrum[5] ^= 1 << 40;
+        assert_ne!(digest(&spectrum, &mut || true).unwrap(), right);
+        let mut k = K5::new(&c).unwrap();
+        k.flip = Some((5, 40));
+        assert!(matches!(
+            k.iterate(&AtomicU64::new(0)),
+            Check::Mismatch { .. }
+        ));
     }
 
     #[test]

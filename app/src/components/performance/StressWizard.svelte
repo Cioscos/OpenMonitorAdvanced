@@ -43,6 +43,18 @@
   const presets = $derived(PRESETS.filter((p) => presetSeconds[p] !== undefined));
   const request = $derived<StartRequest>({ component, objective, preset, custom: custom && $state.snapshot(custom), retryCore: null });
   const total = $derived(plan?.phases.reduce((sum, p) => sum + p.duration_s, 0) ?? 0);
+  /**
+   * The summary's rows: with «Personalizza», every phase of the profile stays in place and those of an
+   * unticked mode read «excluded», so the list keeps its length and the panel below does not jump.
+   * The other rows take the preview's phase (minutes, set) in order; until it arrives, the profile's.
+   */
+  const rows = $derived.by(() => {
+    if (!plan) return [];
+    if (!base || !custom) return plan.phases.map((p) => ({ p, off: false }));
+    const off = new Set(custom.modes.filter((m) => !m.enabled || m.minutes === 0).map((m) => m.kernel));
+    let i = 0;
+    return base.phases.map((b) => (off.has(b.kernel) ? { p: b, off: true } : { p: plan!.phases[i]?.kernel === b.kernel ? plan!.phases[i++]! : b, off: false }));
+  });
   const bestIsa = $derived((catalog.isa as Isa[]).find((i) => system?.isa.includes(i)) ?? null);
   const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || ramOk) : true);
   const canStart = $derived(plan !== null && !performanceStore.running && !starting);
@@ -210,16 +222,16 @@
   {:else}
     {#if plan}
       <div class="tape" aria-hidden="true">
-        {#each plan.phases as p, index (index)}<span style:flex-grow={p.duration_s} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})"></span>{/each}
+        {#each rows.filter((r) => !r.off) as { p }, index (index)}<span style:flex-grow={p.duration_s} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})"></span>{/each}
       </div>
       <p class="total">{t('performance.wizard.total', { duration: formatDuration(total) })}</p>
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
-        {#each plan.phases as p, index (index)}
-          <li style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
+        {#each rows as { p, off }, index (index)}
+          <li class:off style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
             <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             <span class="isa"><Term term={`isa.${p.isa}`} /></span>
             <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}</span>
-            <span class="dur">{formatDuration(p.duration_s)}</span>
+            <span class="dur">{off ? t('performance.wizard.excluded') : formatDuration(p.duration_s)}</span>
           </li>
         {/each}
       </ol>
@@ -421,6 +433,13 @@
   .load,
   .isa {
     color: var(--text-muted);
+  }
+  .phases li.off {
+    box-shadow: none;
+    opacity: 0.45;
+  }
+  .phases li.off .name {
+    text-decoration: line-through;
   }
   .dur {
     text-align: right;

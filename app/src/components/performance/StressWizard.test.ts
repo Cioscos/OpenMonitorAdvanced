@@ -201,6 +201,11 @@ test('customize_rebuilds_the_preview_and_total', async () => {
   await fireEvent.click(k5);
   await waitFor(() => expect(lastPreview(backend).custom?.modes).toContainEqual({ kernel: 'k5', enabled: false, minutes: null }));
   await screen.findByText(t('performance.wizard.total', { duration: '30 min' }));
+  // The K5 phase stays in the list, marked excluded, so the panel below does not move.
+  const rows = within(screen.getByRole('list', { name: t('performance.wizard.phases') })).getAllByRole('listitem');
+  expect(rows).toHaveLength(PLAN.phases.length);
+  const k5Row = rows[PLAN.phases.findIndex((p) => p.kernel === 'k5')]!;
+  expect(k5Row.textContent).toContain(t('performance.wizard.excluded'));
   // The profile stops in the first phase only: «stop at the first error» is mixed until set.
   const stop = within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') }) as HTMLInputElement;
   expect(stop.indeterminate).toBe(true);

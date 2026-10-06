@@ -993,6 +993,7 @@
   "performance.wizard.ram.detail": "{total} in total",
   "performance.wizard.ram.low": "Not available: there is too little free memory, the share is under 256 MiB.",
   "performance.wizard.phases": "Planned phases",
+  "performance.wizard.excluded": "excluded",
   "performance.wizard.total": "Total: {duration}",
   "performance.wizard.onePerCore": "One [thread] per core",
   "performance.wizard.isaDetected": "Instruction set detected:",

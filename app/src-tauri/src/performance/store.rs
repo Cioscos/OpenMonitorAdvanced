@@ -50,6 +50,11 @@ impl PerformanceStore {
         self.root.join("journal.json")
     }
 
+    /// Sidecar with the number of starts that failed to save the recovered session.
+    fn attempts_path(&self) -> PathBuf {
+        self.root.join("journal.attempts")
+    }
+
     /// Valid session file names in the folder, newest first.
     fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.dir())
@@ -71,6 +76,10 @@ impl PerformanceStore {
         }
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
         let mut s = parse_session(&bytes).map_err(|e| e.to_string())?;
+        // `AAAAMMGG-HHMMSS-` is 16 bytes; `is_session_file_name` checked the form.
+        if name.get(16..name.len() - 5) != Some(s.id.as_str()) {
+            return Err("session id does not match the file name".into());
+        }
         cap(&mut s);
         Ok(s)
     }
@@ -85,14 +94,22 @@ impl PerformanceStore {
             ));
         }
         let json = serde_json::to_vec(session).map_err(io::Error::other)?;
-        write_file(&self.dir().join(name), &json)?;
-        self.prune_now();
+        write_file(&self.dir().join(&name), &json)?;
+        self.prune_keeping(Some(&name));
         Ok(())
     }
 
     /// Removes the oldest sessions beyond `KEEP_SESSIONS`.
     pub fn prune_now(&self) {
+        self.prune_keeping(None);
+    }
+
+    /// Never removes `keep`, the file just written.
+    fn prune_keeping(&self, keep: Option<&str>) {
         for name in prune(&self.names(), KEEP_SESSIONS) {
+            if keep == Some(name.as_str()) {
+                continue;
+            }
             if let Err(err) = fs::remove_file(self.dir().join(&name)) {
                 tracing::warn!(%err, %name, "cannot prune a stress session");
             }
@@ -150,7 +167,9 @@ impl PerformanceStore {
         )
     }
 
+    /// Also removes the retry counter.
     pub fn delete_journal(&self) -> io::Result<()> {
+        let _ = fs::remove_file(self.attempts_path());
         match fs::remove_file(self.journal_path()) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             r => r,
@@ -193,16 +212,23 @@ impl PerformanceStore {
                 return None;
             }
         };
-        let updated_ms = parse_rfc3339_ms(&journal.updated_at);
-        let (Some(updated_ms), true) = (updated_ms, is_session_id(&journal.session_id)) else {
-            tracing::warn!("removing a stress journal with a bad id or time");
+        if !is_session_id(&journal.session_id) {
+            tracing::warn!("removing a stress journal with a bad session id");
             let _ = self.delete_journal();
             return None;
-        };
+        }
+        // A bad time is treated as an app close, without evidence.
+        let updated_ms = parse_rfc3339_ms(&journal.updated_at);
 
         let mut s = match self.load(&journal.session_id) {
             Ok(Some(s)) => s,
-            _ => minimal_session(&journal, app_version),
+            Ok(None) => minimal_session(&journal, app_version),
+            Err(err) => {
+                // Never a second session under the same id.
+                tracing::warn!(%err, "saved stress session unreadable, dropping the journal");
+                let _ = self.delete_journal();
+                return None;
+            }
         };
         if s.outcome.is_some() {
             // Already closed: only the journal was left behind.
@@ -210,7 +236,7 @@ impl PerformanceStore {
             return Some(summary(&s));
         }
 
-        let system_crash = boot_ms > updated_ms;
+        let system_crash = updated_ms.is_some_and(|u| boot_ms > u);
         let facts = OutcomeFacts {
             system_crash,
             app_closed: !system_crash,
@@ -231,25 +257,51 @@ impl PerformanceStore {
             clock_mhz: None,
             at_ms: None,
         });
-        s.ended_at = Some(journal.updated_at.clone());
+        if updated_ms.is_some() {
+            s.ended_at = Some(journal.updated_at.clone());
+        }
 
-        let started_ms = parse_rfc3339_ms(&s.started_at).unwrap_or(updated_ms);
-        let since = to_rfc3339(updated_ms - 60_000);
-        match evidence(&since) {
-            Ok(events) => add_evidence(&mut s, &events, started_ms),
-            Err(err) => {
-                tracing::warn!(%err, "crash evidence unreadable");
-                s.whea.unreadable = true;
+        let started_ms = parse_rfc3339_ms(&s.started_at);
+        if let Some(updated_ms) = updated_ms {
+            // From a minute before the last update, but not before the test began.
+            let since = (updated_ms - 60_000).max(started_ms.unwrap_or(i64::MIN));
+            match evidence(&to_rfc3339(since)) {
+                Ok(events) => add_evidence(&mut s, &events, started_ms.unwrap_or(updated_ms)),
+                Err(err) => {
+                    tracing::warn!(%err, "crash evidence unreadable");
+                    s.whea.unreadable = true;
+                }
             }
         }
 
         if let Err(err) = self.save(&s) {
-            // Keep the journal: the next start tries again.
-            tracing::warn!(%err, "cannot save the recovered stress session");
+            self.save_failed(&err);
             return None;
         }
         let _ = self.delete_journal();
         Some(summary(&s))
+    }
+}
+
+/// Starts that may fail to save a recovered session before the journal is dropped.
+const MAX_SAVE_ATTEMPTS: u32 = 3;
+
+impl PerformanceStore {
+    /// `InvalidInput` can never succeed: the journal goes at once. Other I/O
+    /// errors keep it for the next start, counted in `journal.attempts`.
+    fn save_failed(&self, err: &io::Error) {
+        let attempts = fs::read_to_string(self.attempts_path())
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            + 1;
+        if err.kind() == io::ErrorKind::InvalidInput || attempts >= MAX_SAVE_ATTEMPTS {
+            tracing::warn!(%err, attempts, "cannot save the recovered stress session, dropping the journal");
+            let _ = self.delete_journal();
+        } else {
+            tracing::warn!(%err, attempts, "cannot save the recovered stress session, will retry");
+            let _ = fs::write(self.attempts_path(), attempts.to_string());
+        }
     }
 }
 
@@ -354,7 +406,11 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
 /// `YYYY-MM-DDTHH:MM:SS[.fff]Z` to Unix ms.
 fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
+    let fraction_ok = b.len() == 20
+        || (b.len() > 21 && b[19] == b'.' && b[20..b.len() - 1].iter().all(u8::is_ascii_digit));
     if b.len() < 20
+        || !fraction_ok
+        || !s.ends_with('Z')
         || b[4] != b'-'
         || b[7] != b'-'
         || b[10] != b'T'
@@ -366,7 +422,14 @@ fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, mo, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
     let (h, mi, sec) = (n(11..13)?, n(14..16)?, n(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = match mo {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&mo) || !(1..=dim).contains(&d) || h > 23 || mi > 59 || sec > 60 {
         return None;
     }
     // Days from civil (proleptic Gregorian).
@@ -614,6 +677,88 @@ mod tests {
         assert_eq!(s.app_version, "1.2.3");
         assert_eq!(s.ended_at.as_deref(), Some(UPDATED));
         assert!(store.read_journal().is_none());
+    }
+
+    #[test]
+    fn unreadable_saved_session_drops_the_journal_without_a_second_session() {
+        let store = PerformanceStore::new(temp_dir("unreadable"));
+        let mut v = serde_json::to_value(session(ID, "2026-10-06T14:03:09Z")).unwrap();
+        v["format"] = 99.into();
+        let name = session_file_name("2026-10-06T14:03:09Z", ID);
+        write_file(&store.dir().join(&name), v.to_string().as_bytes()).unwrap();
+        store.write_journal(&journal(ID, UPDATED)).unwrap();
+        assert!(store.recover(0, none, "1.0").is_none());
+        assert!(store.read_journal().is_none());
+        assert_eq!(store.names(), [name]);
+    }
+
+    #[test]
+    fn save_failure_drops_or_retries_the_journal() {
+        let dir = temp_dir("savefail");
+        let store = PerformanceStore::new(dir.clone());
+        // Journal time out of form: the minimal session cannot be named.
+        let mut j = journal(ID, "x");
+        store.write_journal(&j).unwrap();
+        assert!(store.recover(0, none, "1.0").is_none());
+        assert!(store.read_journal().is_none());
+        // A real I/O error (`stress` is a file): kept twice, dropped at the third start.
+        j.updated_at = UPDATED.into();
+        fs::write(dir.join("stress"), b"x").unwrap();
+        for n in 1..=3 {
+            store.write_journal(&j).unwrap_or(());
+            assert!(store.recover(0, none, "1.0").is_none());
+            assert_eq!(store.read_journal().is_some(), n < 3, "start {n}");
+        }
+    }
+
+    #[test]
+    fn evidence_starts_at_the_session_start_and_bad_times_are_rejected() {
+        let store = PerformanceStore::new(temp_dir("since"));
+        store.save(&session(ID, "2026-10-06T14:09:30Z")).unwrap();
+        store.write_journal(&journal(ID, UPDATED)).unwrap();
+        let seen = std::cell::RefCell::new(String::new());
+        let evidence = |since: &str| {
+            *seen.borrow_mut() = since.to_string();
+            Ok(vec![])
+        };
+        store.recover(0, evidence, "1.0").unwrap();
+        assert_eq!(*seen.borrow(), "2026-10-06T14:09:30Z");
+        assert_eq!(parse_rfc3339_ms("2026-02-30T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_ms("2026-02-28T00:00:00+01:00"), None);
+        assert_eq!(parse_rfc3339_ms("2026-02-28T00:00:00"), None);
+        assert!(parse_rfc3339_ms("2024-02-29T00:00:00.5Z").is_some());
+    }
+
+    #[test]
+    fn mismatched_content_id_is_skipped_and_bad_time_marks_the_session_crashed() {
+        let store = PerformanceStore::new(temp_dir("mismatch"));
+        let other = session(&uuid(5), "2026-10-06T14:03:09Z");
+        let name = session_file_name("2026-10-06T14:03:09Z", ID);
+        write_file(
+            &store.dir().join(name),
+            &serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        assert!(store.list().is_empty());
+        store
+            .save(&session(&uuid(6), "2026-10-06T14:03:09Z"))
+            .unwrap();
+        store.write_journal(&journal(&uuid(6), "bad")).unwrap();
+        let sum = store.recover(0, none, "1.0").unwrap();
+        assert_eq!(sum.verdict.as_deref(), Some("crashed_app"));
+    }
+
+    #[test]
+    fn saving_never_prunes_the_file_just_written() {
+        let store = PerformanceStore::new(temp_dir("keepnew"));
+        for i in 1..=KEEP_SESSIONS as u32 {
+            let s = session(&uuid(i), "2026-06-01T00:00:00Z");
+            let name = session_file_name(&s.started_at, &s.id);
+            write_file(&store.dir().join(name), &serde_json::to_vec(&s).unwrap()).unwrap();
+        }
+        // Older than all the others.
+        store.save(&session(ID, "2020-01-01T00:00:00Z")).unwrap();
+        assert!(store.load(ID).unwrap().is_some());
     }
 
     #[test]

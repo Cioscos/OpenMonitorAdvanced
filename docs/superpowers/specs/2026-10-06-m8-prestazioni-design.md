@@ -34,7 +34,7 @@ Successo: chi fa overclock o undervolt capisce in pochi clic se il sistema è st
 | D10 | **Requisito (importante per l'utente):** ogni termine tecnico delle pagine ha un tooltip in parole semplici, e ogni modalità spiega cosa fa e che tipo di test è. |
 | D11 | Se si chiude la finestra, il test continua: la tray lo segnala, il menu ha «Ferma il test» e alla fine arriva un toast con il verdetto. «Esci» chiede conferma e salva la sessione come interrotta. |
 | D12 | I carichi girano in un **processo ausiliario `oma-load.exe`** (approccio 1). Sono stati scartati i thread dentro l'app e il servizio. |
-| D13 | I punteggi di CPU e GPU sono in **punti** (macchina base = 1000), con le velocità vere di ogni carico in una tabella di dettaglio. I contagiri del **disco** sono in **MB/s**, e i punti del disco servono alla classifica. |
+| D13 | I punteggi di CPU e GPU sono in **punti** (per la CPU una scala fissa con il 7800X3D di taratura a 1500, §4.6; per la GPU la macchina base = 1000, da rivedere nella M8b), con le velocità vere di ogni carico in una tabella di dettaglio. I contagiri del **disco** sono in **MB/s**, e i punti del disco servono alla classifica. |
 | D14 | La classifica parte da una tabella di riferimento inclusa nell'app. La community la alimenta con **issue GitHub precompilate** dall'app. Un'Action valida e aggrega le issue e pubblica la tabella su GitHub Pages. L'app la **scarica da sola** (al massimo una volta al giorno, attivo di default, si può spegnere). |
 | D15 | Codice di terzi da adattare, non solo da studiare: **FIRESTARTER** (GPL-3.0-or-later), **OpenDCDiag** (Apache-2.0), **memtest_vulkan** (Zlib) (§12). |
 
@@ -186,9 +186,9 @@ Ogni piano ha il suo branch `feat/m8x-…`. La release la decide l'utente alla f
 
   I colori vengono dai token di `theme.css`.
 - **Font.** Orbitron per titolo ed etichette, Share Tech Mono per il display. Entrambi sono OFL e si includono nell'app come file locali: niente Google Fonts, la CSP non cambia.
-- **Scala.** Si sceglie prima della misura: il primo «numero tondo» della serie 1-2-2,5-5 × 10ⁿ sopra 1,1 × max(record, riferimento, stima). La stima è il valore della macchina base per CPU e GPU, e il massimo teorico del tipo di bus per il disco. Durante la misura la scala può solo crescere.
+- **Scala.** Si sceglie prima della misura: il primo «numero tondo» della serie 1-2-2,5-5 × 10ⁿ sopra 1,1 × max(record, riferimento, stima). La stima è 1500 per la CPU (§4.6), il valore della macchina base per la GPU e il massimo teorico del tipo di bus per il disco. Durante la misura la scala può solo crescere.
 - **Movimento.**
-  - **Durante la misura:** l'ago segue la velocità dal vivo del carico in corso. Per CPU e GPU la velocità è già trasformata in punti dal rapporto con la macchina base; per il disco è in MB/s.
+  - **Durante la misura:** l'ago segue la velocità dal vivo del carico in corso. Per CPU e GPU la velocità è già trasformata in punti dal rapporto con la velocità di riferimento (la macchina base per la GPU); per il disco è in MB/s.
   - **Alla fine:** l'ago si ferma sul risultato.
   - **Animazione:** una media esponenziale breve via `requestAnimationFrame`, solo mentre la pagina è visibile e l'ago non è fermo. Con `prefers-reduced-motion` l'ago salta al valore.
 
@@ -340,9 +340,10 @@ Il tooltip di K10 dice che lavora in modalità utente, cioè sulla memoria che W
 - **Single core.** Il carico gira su un thread fissato al primo core della classe `EfficiencyClass` più alta.
 - **Multi core.** Una copia indipendente del carico per ogni processore logico. Il **fattore di scala**, cioè multi diviso per (single × thread), compare sotto i contagiri.
 - **Svolgimento.** Un giro di riscaldamento da scartare, poi 3 ripetizioni per carico, di cui si tiene la mediana. Fra un carico e l'altro ci sono 2 s di pausa. In tutto circa 2 minuti.
-- **Punteggio.** Media geometrica, sui sei carichi, del rapporto fra la velocità misurata e quella della macchina base, × 1000. Single e multi sono separati, e non c'è un punteggio combinato.
-  - **Macchina base:** il Ryzen 7 7800X3D dell'autore, misurato una volta con le impostazioni di fabbrica; vale 1000 in single e 1000 in multi.
-  - **Versione:** `cpu-1`. Ogni cambio dei carichi, della loro dimensione o della macchina base cambia la versione.
+- **Punteggio.** Media geometrica, sui sei carichi, del rapporto fra la velocità misurata e una velocità di riferimento fissa, × 1500. Single e multi sono separati, e non c'è un punteggio combinato.
+  - **Scala fissa** (decisione dell'utente del 2026-10-07, che sostituisce la «macchina base = 1000»): le velocità di riferimento si tarano una volta sul Ryzen 7 7800X3D dell'autore con le impostazioni di fabbrica, che vale quindi 1500 in single e 1500 in multi. L'interfaccia non nomina la CPU di taratura e parla di «punti su una scala fissa».
+  - **Dimensioni dei dati fisse**, uguali su ogni macchina, e non legate alla cache come nello stress test.
+  - **Versione:** `cpu-1`. Ogni cambio dei carichi, della loro dimensione o delle velocità di riferimento cambia la versione.
 - **Validità.**
   - **Non valida:** una verifica fallita rende la misura non valida, con il messaggio «Errore di calcolo durante il benchmark: prova lo stress test».
   - **Valida con avviso** quando la misura è fatta:

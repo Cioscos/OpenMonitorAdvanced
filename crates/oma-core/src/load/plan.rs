@@ -325,9 +325,6 @@ fn cpu_overclock(avx2: Isa, avx512: bool, cores: &[u32], duration: u32) -> Vec<P
             if left >= MIN_PHASE_S || out.is_empty() {
                 let mut cut = p.clone();
                 cut.duration_s = left;
-                if let Some(pc) = cut.per_core_s {
-                    cut.per_core_s = Some((left / n).clamp(1, pc));
-                }
                 out.push(cut);
             } else if let Some(prev) = out.last_mut() {
                 prev.duration_s += left;
@@ -340,7 +337,7 @@ fn cpu_overclock(avx2: Isa, avx512: bool, cores: &[u32], duration: u32) -> Vec<P
 /// Applies "Personalizza" (DA12) to the built phases.
 fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> Vec<Phase> {
     for m in &c.modes {
-        if !m.enabled {
+        if !m.enabled || m.minutes == Some(0) {
             out.retain(|p| p.kernel != m.kernel);
             continue;
         }
@@ -351,12 +348,9 @@ fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> V
             continue;
         };
         let weights: Vec<u32> = idx.iter().map(|&i| out[i].duration_s).collect();
-        for (&i, d) in idx.iter().zip(scale(&weights, minutes * 60)) {
+        for (&i, d) in idx.iter().zip(scale(&weights, minutes.saturating_mul(60))) {
             let p = &mut out[i];
-            p.duration_s = d.max(1);
-            if let (Some(pc), Some(cores)) = (p.per_core_s, &p.cores) {
-                p.per_core_s = Some((d / cores.len().max(1) as u32).clamp(1, pc.max(1)));
-            }
+            p.duration_s = d.max(MIN_PHASE_S);
         }
     }
     for p in &mut out {
@@ -373,6 +367,10 @@ fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> V
 }
 
 /// Builds the plan for a start request (DA11, DA12).
+///
+/// Contract for `core_cycle` phases: `duration_s` is authoritative and
+/// `per_core_s == clamp(duration_s / n, 1, 3600)` with `n` the length of `cores`; the
+/// engine cycles through the cores, wrapping, until `duration_s` has elapsed.
 pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     let req = input.request;
     let cores = core_order(input.topology);
@@ -430,6 +428,14 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     if phases.is_empty() {
         return Err(BuildError::NoPhases);
     }
+    // `duration_s` is authoritative; per_core_s follows it.
+    for p in phases
+        .iter_mut()
+        .filter(|p| p.placement == Placement::CoreCycle)
+    {
+        let n = p.cores.as_ref().map_or(cores.len(), Vec::len).max(1) as u32;
+        p.per_core_s = Some((p.duration_s / n).clamp(1, 3600));
+    }
     if let Some(s) = stop {
         phases.iter_mut().for_each(|p| p.stop_on_error = s);
     }
@@ -441,11 +447,8 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
         return Err(BuildError::TooLong);
     }
-    let uses_ram = plan
-        .phases
-        .iter()
-        .any(|p| matches!(p.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10));
-    if uses_ram && input.ram_budget < MIN_RAM_BYTES {
+    // CPU plans with K3/K4 build anyway: the runtime reduces or skips them (DA10).
+    if req.component == Component::Ram && input.ram_budget < MIN_RAM_BYTES {
         return Err(BuildError::RamBudget);
     }
     Ok(plan)
@@ -556,6 +559,18 @@ mod tests {
                             let what = format!("{c:?} {o:?} {p:?}");
                             assert_eq!(plan.total_seconds(), u64::from(secs), "{what}");
                             assert!(plan.phases.iter().all(|x| x.duration_s >= 60), "{what}");
+                            for x in plan
+                                .phases
+                                .iter()
+                                .filter(|x| x.placement == Placement::CoreCycle)
+                            {
+                                let n = x.cores.as_ref().unwrap().len() as u32;
+                                assert_eq!(
+                                    x.per_core_s,
+                                    Some((x.duration_s / n).clamp(1, 3600)),
+                                    "{what}"
+                                );
+                            }
                             LoadMessage::Run(RunRequest { plan }).validate().unwrap();
                         }
                     }
@@ -866,7 +881,122 @@ mod tests {
         let low = |r: &StartRequest, b| build_with(r, &t, &ALL, b, None);
         assert_eq!(low(&ram, (256 << 20) - 1), Err(BuildError::RamBudget));
         assert!(low(&ram, 256 << 20).is_ok());
-        // A CPU quick profile does not use the RAM kernels.
-        assert!(low(&req(Component::Cpu, Objective::Normal, Preset::Quick), 0).is_ok());
+    }
+
+    #[test]
+    fn cpu_plan_builds_with_a_tiny_ram_budget() {
+        let t = topo(4, true, 1, false);
+        for p in [Preset::Standard, Preset::Long] {
+            let r = req(Component::Cpu, Objective::Normal, p);
+            let plan = build_with(&r, &t, &ALL, 0, None).unwrap();
+            assert!(plan.phases.iter().any(|x| x.kernel == KernelId::K3));
+        }
+        let oc = req(Component::Cpu, Objective::Overclock, Preset::Standard);
+        assert!(build_with(&oc, &t, &ALL, 0, None).is_ok());
+    }
+
+    #[test]
+    fn custom_minutes_edge_cases() {
+        let t = topo(4, true, 1, false);
+        let with = |minutes| {
+            let mut r = req(Component::Cpu, Objective::Normal, Preset::Standard);
+            let mut c = custom();
+            c.modes = vec![ModeEdit {
+                kernel: KernelId::K2,
+                enabled: true,
+                minutes: Some(minutes),
+            }];
+            r.custom = Some(c);
+            build(&r, &t, &ALL)
+        };
+        assert_eq!(with(u32::MAX), Err(BuildError::TooLong));
+        let zero = with(0).unwrap();
+        assert!(zero.phases.iter().all(|p| p.kernel != KernelId::K2));
+        let one = with(1).unwrap();
+        assert!(one.phases.iter().all(|p| p.duration_s >= 60));
+    }
+
+    #[test]
+    fn profile_snapshots() {
+        use DataSize::*;
+        use Isa::*;
+        use KernelId::*;
+        use LoadMode::*;
+        use Placement::*;
+        let t = topo(8, true, 1, false);
+        let oc = ok(
+            &req(Component::Cpu, Objective::Overclock, Preset::Standard),
+            &t,
+            &ALL,
+        );
+        let got: Vec<_> = oc
+            .phases
+            .iter()
+            .map(|p| {
+                (
+                    p.kernel,
+                    p.alt_kernel,
+                    p.isa,
+                    p.size,
+                    p.mode,
+                    p.placement,
+                    p.stop_on_error,
+                )
+            })
+            .collect();
+        let want = vec![
+            (K2, None, Avx2, L2, Steady, AllLogical, true),
+            (K5, None, Avx2, L3, Steady, AllLogical, true),
+            (K7, None, Avx2, L3, Steady, AllLogical, true),
+            (K3, None, Avx2, Ram, Steady, AllLogical, true),
+            (K2, None, Avx2, L2, Steady, CoreCycle, false),
+            (K5, None, Avx2, L2, Steady, CoreCycle, false),
+            (K2, None, Sse2, L2, Light, CoreCycle, false),
+            (K1, Some(K5), Avx2, Auto, Variable, AllLogical, true),
+            (K4, None, Avx2, Auto, Steady, AllLogical, true),
+            (K9, None, Avx2, Auto, Steady, AllLogical, true),
+            (K2, None, Avx512, L2, Steady, AllLogical, true),
+            (K1, None, Avx512, Auto, Steady, AllLogical, true),
+        ];
+        assert_eq!(got, want);
+
+        let all = vec![
+            RamPattern::MovingInversions,
+            RamPattern::Modulo20,
+            RamPattern::Random,
+            RamPattern::Address,
+            RamPattern::CrcCopy,
+        ];
+        let ram = |o| {
+            let p = ok(&req(Component::Ram, o, Preset::Standard), &t, &ALL);
+            p.phases
+                .iter()
+                .map(|x| (x.kernel, x.patterns.clone(), x.duration_s, x.stop_on_error))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ram(Objective::Normal),
+            vec![
+                (
+                    K10,
+                    vec![
+                        RamPattern::MovingInversions,
+                        RamPattern::Random,
+                        RamPattern::CrcCopy
+                    ],
+                    1260,
+                    false
+                ),
+                (K3, vec![], 540, false),
+            ]
+        );
+        assert_eq!(
+            ram(Objective::Overclock),
+            vec![
+                (K10, all, 2160, true),
+                (K3, vec![], 900, true),
+                (K4, vec![], 540, true)
+            ]
+        );
     }
 }

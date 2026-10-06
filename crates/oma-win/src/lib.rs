@@ -10,7 +10,9 @@ pub mod foreground;
 pub mod fsutil;
 pub mod gpu;
 pub mod http;
+pub mod job;
 pub mod known_folder;
+pub mod load_pipe;
 pub mod local_time;
 pub mod memory;
 pub mod network;
@@ -18,6 +20,8 @@ pub mod os_version;
 pub mod overlay_pipe;
 mod pdh;
 pub mod pipe_io;
+pub mod power;
+pub mod private_pipe;
 pub mod qpc;
 pub mod shell_open;
 pub mod storage;
@@ -28,6 +32,7 @@ mod storage_ioctl;
 mod storage_temperature;
 pub mod svc;
 pub mod toast;
+pub mod topology;
 
 use oma_core::provider::Provider;
 

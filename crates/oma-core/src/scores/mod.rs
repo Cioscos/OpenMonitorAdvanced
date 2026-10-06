@@ -1,12 +1,16 @@
 //! CPU benchmark: the six workloads, the fixed-work plan, the fixed-scale score, the
 //! gauge full scale and the score file (pure; no Windows code).
 
+mod bench;
 mod file;
 mod gauge;
 mod plan;
 mod score;
 mod workloads;
 
+pub use bench::{
+    BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, SegmentState,
+};
 pub use file::{
     parse_score, score_file_name, summary, Device, KernelRate, ScoreFile, ScoreSample,
     ScoreSummary, Scores, FORMAT,

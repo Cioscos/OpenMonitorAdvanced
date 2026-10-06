@@ -1,6 +1,7 @@
 //! The benchmark plan (DB4, DB5): 6 workloads x (single, multi) x (warm-up + 3 reps).
 
 use oma_ipc::load::{DataSize, Isa, LoadMode, Phase, Placement, Plan, Topology};
+use serde::Serialize;
 
 use super::workloads::{BenchKernel, WORKLOADS};
 use crate::load::core_order;
@@ -10,14 +11,15 @@ pub const CAP_S: u32 = 30;
 /// Pause before each warm-up phase.
 pub const WARMUP_PAUSE_MS: u32 = 2000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BenchMode {
     Single,
     Multi,
 }
 
 /// `rep` 0 is the warm-up, 1-3 the repetitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BenchStep {
     pub kernel: BenchKernel,
     pub mode: BenchMode,

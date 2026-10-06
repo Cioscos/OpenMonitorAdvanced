@@ -18,13 +18,13 @@ use std::io;
 
 use oma_ipc::load::{CacheSizes, LogicalCpu, Topology};
 use windows::Win32::System::SystemInformation::{
-    GetLogicalProcessorInformationEx, GetSystemCpuSetInformation, RelationCache,
-    CACHE_RELATIONSHIP, GROUP_AFFINITY, SYSTEM_CPU_SET_INFORMATION,
+    CacheData, CacheUnified, GetLogicalProcessorInformationEx, GetSystemCpuSetInformation,
+    RelationCache, CACHE_RELATIONSHIP, GROUP_AFFINITY, SYSTEM_CPU_SET_INFORMATION,
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
-use crate::overlay_pipe::os_error;
+use crate::private_pipe::os_error;
 
 /// `CpuSetInformation`, the only value of `CPU_SET_INFORMATION_TYPE`.
 const CPU_SET_TYPE: u32 = 0;
@@ -44,15 +44,31 @@ struct RawCpu {
 }
 
 /// Reads a `T` at `off` of `buf` if it fits (the buffer has no alignment promise).
-fn read_at<T: Copy>(buf: &[u8], off: usize) -> Option<T> {
+///
+/// # Safety
+/// Every bit pattern must be a valid `T`: plain integers, arrays of them, and FFI structs and
+/// unions made of them (no `bool`, no enum, no reference).
+unsafe fn read_at<T: Copy>(buf: &[u8], off: usize) -> Option<T> {
     let end = off.checked_add(size_of::<T>())?;
     if end > buf.len() {
         return None;
     }
-    // SAFETY: the range `off..end` is inside `buf`; `T` is a plain-old-data FFI struct for which
-    // every bit pattern is valid, and `read_unaligned` needs no alignment.
+    // SAFETY: the range `off..end` is inside `buf`; the caller guarantees every bit pattern is a
+    // valid `T`, and `read_unaligned` needs no alignment.
     Some(unsafe { buf.as_ptr().add(off).cast::<T>().read_unaligned() })
 }
+
+// The parsers read the `windows` crate's structs; these pin the layout the docs give (x64).
+const _: () = {
+    assert!(size_of::<SYSTEM_CPU_SET_INFORMATION>() == 32);
+    assert!(size_of::<GROUP_AFFINITY>() == 16);
+    assert!(size_of::<CACHE_RELATIONSHIP>() == 48);
+    assert!(
+        core::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous)
+            + core::mem::offset_of!(CACHE_RELATIONSHIP, Anonymous)
+            == 40
+    );
+};
 
 /// Rank of `key` among the distinct values of `keys`, from 0.
 fn rank<K: Ord + Copy>(keys: &BTreeSet<K>, key: K) -> u32 {
@@ -66,7 +82,8 @@ fn rank<K: Ord + Copy>(keys: &BTreeSet<K>, key: K) -> u32 {
 pub fn parse_cpu_sets(buf: &[u8]) -> Vec<LogicalCpu> {
     let mut raw = Vec::new();
     let mut off = 0usize;
-    while let Some(rec) = read_at::<SYSTEM_CPU_SET_INFORMATION>(buf, off) {
+    // SAFETY (read_at): SYSTEM_CPU_SET_INFORMATION is integers and unions of integers.
+    while let Some(rec) = unsafe { read_at::<SYSTEM_CPU_SET_INFORMATION>(buf, off) } {
         let size = rec.Size as usize;
         if size < 8 || off + size > buf.len() {
             break;
@@ -116,8 +133,6 @@ pub fn parse_caches(buf: &[u8]) -> CacheSizes {
     const CACHE_OFF: usize =
         core::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
     const MASKS_OFF: usize = CACHE_OFF + core::mem::offset_of!(CACHE_RELATIONSHIP, Anonymous);
-    const CACHE_DATA: i32 = 2;
-    const CACHE_INSTRUCTION: i32 = 1;
 
     let mut out = CacheSizes {
         l1d_bytes: 0,
@@ -129,32 +144,41 @@ pub fn parse_caches(buf: &[u8]) -> CacheSizes {
     let mut off = 0usize;
     // Only the 8-byte header is read at first: the records vary in size and the cache ones are
     // shorter than the whole union.
-    while let Some([relationship, size]) = read_at::<[u32; 2]>(buf, off) {
+    // SAFETY (read_at): an array of integers.
+    while let Some([relationship, size]) = unsafe { read_at::<[u32; 2]>(buf, off) } {
         let size = size as usize;
         if size < 8 || off + size > buf.len() {
             break;
         }
         if relationship == RelationCache.0 as u32 && size >= MASKS_OFF + size_of::<GROUP_AFFINITY>()
         {
-            let Some(cache) = read_at::<CACHE_RELATIONSHIP>(buf, off + CACHE_OFF) else {
+            // SAFETY (read_at): CACHE_RELATIONSHIP is integers, byte arrays and a GROUP_AFFINITY.
+            let Some(cache) = (unsafe { read_at::<CACHE_RELATIONSHIP>(buf, off + CACHE_OFF) })
+            else {
                 break;
             };
             let bytes = u64::from(cache.CacheSize);
             match cache.Level {
-                1 if cache.Type.0 != CACHE_INSTRUCTION && out.l1d_bytes == 0 => {
-                    debug_assert!(cache.Type.0 == CACHE_DATA || cache.Type.0 == 0);
+                1 if (cache.Type == CacheData || cache.Type == CacheUnified)
+                    && out.l1d_bytes == 0 =>
+                {
                     out.l1d_bytes = bytes;
                 }
                 2 if out.l2_bytes == 0 => {
                     out.l2_bytes = bytes;
+                    // Windows 10 leaves GroupCount at 0 with one mask filled in.
                     let masks = usize::from(cache.GroupCount)
+                        .max(1)
                         .min((size - MASKS_OFF) / size_of::<GROUP_AFFINITY>());
                     out.l2_shared_by = (0..masks)
                         .filter_map(|i| {
-                            read_at::<GROUP_AFFINITY>(
-                                buf,
-                                off + MASKS_OFF + i * size_of::<GROUP_AFFINITY>(),
-                            )
+                            // SAFETY: GROUP_AFFINITY is integers and an integer array.
+                            unsafe {
+                                read_at::<GROUP_AFFINITY>(
+                                    buf,
+                                    off + MASKS_OFF + i * size_of::<GROUP_AFFINITY>(),
+                                )
+                            }
                         })
                         .map(|m| m.Mask.count_ones())
                         .sum();
@@ -300,19 +324,6 @@ mod tests {
     };
 
     use super::*;
-
-    // The parsers read the `windows` crate's structs, so these pin the layout
-    // the docs give (x64): the records are 32 bytes, the cache masks start at 40.
-    #[test]
-    fn struct_layouts_match_the_documented_ones() {
-        assert_eq!(size_of::<SYSTEM_CPU_SET_INFORMATION>(), 32);
-        assert_eq!(size_of::<GROUP_AFFINITY>(), 16);
-        assert_eq!(
-            core::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous)
-                + core::mem::offset_of!(CACHE_RELATIONSHIP, Anonymous),
-            40
-        );
-    }
 
     fn bytes_of<T: Copy>(v: &T, len: usize) -> Vec<u8> {
         let mut out = vec![0u8; len.max(size_of::<T>())];
@@ -471,6 +482,20 @@ mod tests {
         assert_eq!((no_l3.l3_bytes, no_l3.l3_total_bytes), (0, 0));
         assert_eq!((no_l3.l2_bytes, no_l3.l2_shared_by), (512 * 1024, 1));
         assert_eq!(parse_caches(&[]).l2_bytes, 0);
+    }
+
+    #[test]
+    fn parse_caches_windows_10_group_count_zero_and_trace_cache() {
+        let mut buf = Vec::new();
+        buf.extend(cache(1, PROCESSOR_CACHE_TYPE(3), 99, &[(0, 0b1)]));
+        buf.extend(cache(1, CacheData, 32 * 1024, &[(0, 0b11)]));
+        let mut l2 = cache(2, CacheUnified, 1 << 20, &[(0, 0b1111)]);
+        // GroupCount sits at offset 38 of the record.
+        l2[38..40].copy_from_slice(&0u16.to_le_bytes());
+        buf.extend(l2);
+        let c = parse_caches(&buf);
+        assert_eq!(c.l1d_bytes, 32 * 1024);
+        assert_eq!(c.l2_shared_by, 4);
     }
 
     #[test]

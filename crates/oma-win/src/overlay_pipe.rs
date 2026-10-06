@@ -21,17 +21,10 @@ use std::io;
 use std::time::Duration;
 
 use oma_ipc::overlay::{OverlayMessage, OVERLAY_PIPE_PREFIX};
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
-use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
-use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use crate::pipe_io::OwnedHandle;
 pub use crate::pipe_io::{CloseReason, PipeEvent, PipeReader};
 use crate::private_pipe::{connect_private_client, PrivateConnection, PrivatePipeServer};
-use crate::svc::win32_code;
 
 /// A fresh overlay pipe name: [`OVERLAY_PIPE_PREFIX`] followed by a UUID v4
 /// drawn from the system-preferred RNG.
@@ -54,14 +47,6 @@ pub fn random_uuid_v4() -> io::Result<String> {
     Ok(uuid_v4(bytes))
 }
 
-/// The pipe's security descriptor: owner `sid` (so an elevated app does not
-/// hand ownership to Administrators), a protected DACL with one ACE (generic
-/// all for `sid`), and a medium mandatory label with no-write-up and
-/// no-read-up, so low-integrity processes of the same user cannot open it.
-pub(crate) fn user_only_sddl(sid: &str) -> String {
-    format!("O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;ME)")
-}
-
 /// Formats 16 random bytes as a UUID v4 (RFC 4122 variant), lowercase.
 pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -75,73 +60,6 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
-}
-
-pub(crate) fn os_error(e: &windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(win32_code(e) as i32)
-}
-
-pub(crate) fn code_error(code: u32) -> io::Error {
-    io::Error::from_raw_os_error(code as i32)
-}
-
-/// Memory the security APIs allocated with `LocalAlloc`, freed on drop.
-pub(crate) struct LocalMem(pub(crate) *mut core::ffi::c_void);
-
-impl Drop for LocalMem {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: the pointer came from LocalAlloc inside the API that returned it, is owned
-            // by this guard alone and is freed exactly once.
-            unsafe {
-                let _ = LocalFree(Some(HLOCAL(self.0)));
-            }
-        }
-    }
-}
-
-/// The SID of the user of this process's token, as a string (`S-1-5-21-…`).
-pub(crate) fn current_user_sid() -> io::Result<String> {
-    let mut token = HANDLE::default();
-    // SAFETY: the pseudo-handle of the current process needs no closing; `token` receives a
-    // handle that the `OwnedHandle` below closes.
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-        .map_err(|e| os_error(&e))?;
-    let token = OwnedHandle(token);
-
-    let mut needed = 0u32;
-    // SAFETY: a size query without a buffer: it fails with ERROR_INSUFFICIENT_BUFFER and
-    // writes the size the TOKEN_USER needs into `needed`.
-    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut needed) };
-    if (needed as usize) < size_of::<TOKEN_USER>() {
-        return Err(io::Error::last_os_error());
-    }
-    // `u64` elements keep the buffer aligned for TOKEN_USER (pointer-aligned).
-    let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
-    let len = (buf.len() * size_of::<u64>()) as u32;
-    // SAFETY: `buf` is a live, writable, 8-aligned buffer of `len` bytes for the call.
-    unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenUser,
-            Some(buf.as_mut_ptr().cast()),
-            len,
-            &mut needed,
-        )
-    }
-    .map_err(|e| os_error(&e))?;
-    // SAFETY: the call succeeded, so the buffer starts with an initialised TOKEN_USER whose SID
-    // points inside `buf`, which outlives this borrow and is not written while it lives.
-    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
-
-    let mut text = PWSTR::null();
-    // SAFETY: `user.User.Sid` is a valid SID inside `buf` (alive here); `text` receives a
-    // LocalAlloc'd NUL-terminated string that the `LocalMem` guard frees.
-    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.map_err(|e| os_error(&e))?;
-    let text = LocalMem(text.0.cast());
-    // SAFETY: `text` is a NUL-terminated wide string, alive until the guard drops.
-    unsafe { PWSTR(text.0.cast()).to_string() }
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// The server end of the overlay pipe, owned by the app.
@@ -186,7 +104,8 @@ mod tests {
         OverlayHello, PxArea, SetPlacement, OVERLAY_PIPE_PREFIX, OVERLAY_PROTOCOL_VERSION,
     };
 
-    use windows::core::HSTRING;
+    use crate::pipe_io::OwnedHandle;
+    use windows::core::{HSTRING, PWSTR};
     use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -203,7 +122,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::private_pipe::BUFFER_BYTES;
+    use crate::private_pipe::{current_user_sid, user_only_sddl, LocalMem, BUFFER_BYTES};
 
     const WAIT: Duration = Duration::from_secs(5);
 

@@ -14,8 +14,8 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
-use crate::overlay_pipe::os_error;
 use crate::pipe_io::OwnedHandle;
+use crate::private_pipe::os_error;
 
 /// A Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Dropping it closes
 /// the handle, which kills every process assigned to it.
@@ -43,6 +43,10 @@ impl KillOnCloseJob {
     }
 
     /// Puts `child` in the job.
+    ///
+    /// `std::process` starts the child running before this call, so it runs briefly outside the
+    /// job: it must not spawn processes (they would escape the job), and the caller must kill
+    /// the child if `assign` fails.
     pub fn assign(&self, child: &Child) -> io::Result<()> {
         let process = HANDLE(child.as_raw_handle());
         // SAFETY: both handles are live: the job is owned by `self`, the process handle by `child`.

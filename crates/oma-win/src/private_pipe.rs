@@ -22,15 +22,18 @@ use std::time::{Duration, Instant};
 use oma_ipc::encode_frame_of;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use windows::core::HSTRING;
+use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    INVALID_HANDLE_VALUE,
+    GetLastError, LocalFree, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::Security::{
+    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+    TOKEN_USER,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
@@ -40,16 +43,92 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use crate::overlay_pipe::{code_error, current_user_sid, os_error, user_only_sddl, LocalMem};
 use crate::pipe_io::{new_event, overlapped_io, IoFailure, OwnedHandle, PipeConn};
 pub use crate::pipe_io::{CloseReason, PipeEvent, PipeReader};
+use crate::svc::win32_code;
 
 /// Size of each of the pipe's two buffers.
 pub(crate) const BUFFER_BYTES: u32 = 64 * 1024;
 
 /// Names the other end in logs and errors.
 const PEER: &str = "private pipe peer";
+
+/// The pipe's security descriptor: owner `sid` (so an elevated app does not
+/// hand ownership to Administrators), a protected DACL with one ACE (generic
+/// all for `sid`), and a medium mandatory label with no-write-up and
+/// no-read-up, so low-integrity processes of the same user cannot open it.
+pub(crate) fn user_only_sddl(sid: &str) -> String {
+    format!("O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;ME)")
+}
+
+pub(crate) fn os_error(e: &windows::core::Error) -> io::Error {
+    io::Error::from_raw_os_error(win32_code(e) as i32)
+}
+
+pub(crate) fn code_error(code: u32) -> io::Error {
+    io::Error::from_raw_os_error(code as i32)
+}
+
+/// Memory the security APIs allocated with `LocalAlloc`, freed on drop.
+pub(crate) struct LocalMem(pub(crate) *mut core::ffi::c_void);
+
+impl Drop for LocalMem {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the pointer came from LocalAlloc inside the API that returned it, is owned
+            // by this guard alone and is freed exactly once.
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0)));
+            }
+        }
+    }
+}
+
+/// The SID of the user of this process's token, as a string (`S-1-5-21-…`).
+pub(crate) fn current_user_sid() -> io::Result<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo-handle of the current process needs no closing; `token` receives a
+    // handle that the `OwnedHandle` below closes.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+        .map_err(|e| os_error(&e))?;
+    let token = OwnedHandle(token);
+
+    let mut needed = 0u32;
+    // SAFETY: a size query without a buffer: it fails with ERROR_INSUFFICIENT_BUFFER and
+    // writes the size the TOKEN_USER needs into `needed`.
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut needed) };
+    if (needed as usize) < size_of::<TOKEN_USER>() {
+        return Err(io::Error::last_os_error());
+    }
+    // `u64` elements keep the buffer aligned for TOKEN_USER (pointer-aligned).
+    let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+    let len = (buf.len() * size_of::<u64>()) as u32;
+    // SAFETY: `buf` is a live, writable, 8-aligned buffer of `len` bytes for the call.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut needed,
+        )
+    }
+    .map_err(|e| os_error(&e))?;
+    // SAFETY: the call succeeded, so the buffer starts with an initialised TOKEN_USER whose SID
+    // points inside `buf`, which outlives this borrow and is not written while it lives.
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+
+    let mut text = PWSTR::null();
+    // SAFETY: `user.User.Sid` is a valid SID inside `buf` (alive here); `text` receives a
+    // LocalAlloc'd NUL-terminated string that the `LocalMem` guard frees.
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.map_err(|e| os_error(&e))?;
+    let text = LocalMem(text.0.cast());
+    // SAFETY: `text` is a NUL-terminated wide string, alive until the guard drops.
+    unsafe { PWSTR(text.0.cast()).to_string() }
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
 
 /// The name starts with `prefix` and names nothing below it.
 fn check_name(prefix: &str, name: &str) -> io::Result<()> {

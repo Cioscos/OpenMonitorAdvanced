@@ -3,18 +3,30 @@
 use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+use windows::Win32::System::Power::{
+    SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED, EXECUTION_STATE,
+};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 
 /// Keeps the system awake (no idle sleep) while alive. The state belongs to
 /// the thread that calls it, so the guard is `!Send`: drop it on that thread.
-pub struct KeepAwake(PhantomData<*const ()>);
+pub struct KeepAwake {
+    /// The state `SetThreadExecutionState` returned in `new`, restored on drop.
+    previous: EXECUTION_STATE,
+    _not_send: PhantomData<*const ()>,
+}
 
 impl KeepAwake {
     pub fn new() -> Self {
         // SAFETY: plain flags; the call only changes this thread's execution state.
-        unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
-        Self(PhantomData)
+        let previous = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        if previous.0 == 0 {
+            tracing::warn!("SetThreadExecutionState failed: the PC may sleep during the test");
+        }
+        Self {
+            previous,
+            _not_send: PhantomData,
+        }
     }
 }
 
@@ -26,8 +38,11 @@ impl Default for KeepAwake {
 
 impl Drop for KeepAwake {
     fn drop(&mut self) {
-        // SAFETY: as in `new`; ES_CONTINUOUS alone clears the requirement.
-        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        // Back to what the thread had before (correct with nested guards); a failed `new`
+        // (previous 0) falls back to plain ES_CONTINUOUS, which clears the requirement.
+        let restore = EXECUTION_STATE(self.previous.0 | ES_CONTINUOUS.0);
+        // SAFETY: as in `new`.
+        unsafe { SetThreadExecutionState(restore) };
     }
 }
 

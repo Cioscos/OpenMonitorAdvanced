@@ -2,7 +2,8 @@
 name = "oma-load"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# The AVX-512 intrinsics of K1 are stable since Rust 1.89.
+rust-version = "1.89"
 license.workspace = true
 description = "OpenMonitor Advanced load generator"
 

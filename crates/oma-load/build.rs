@@ -164,10 +164,40 @@ fn pass(t: &Target) -> String {
 
     let mut body = String::new();
     let (mut add, mut mov, mut l2) = (1, TRANS_START, 0);
+    let mut prev: Vec<String> = Vec::new();
     for (i, &item) in lines.iter().enumerate() {
         let x = format!("x{add}");
         let l1_at = |disp: usize| format!("l1.add(o1 + {disp})");
         let l2_at = |disp: usize| format!("l2.add({})", l2 * 8 + disp);
+        // Without FMA, LLVM computes the loop-invariant `a * c` and `c * b` once, and its
+        // scheduler mixes the lines until the 16 xmm registers spill. An asm with no
+        // instruction (the operands appear only in an assembler comment) takes `c`, the
+        // accumulators of the line before and those of this line, and may touch memory, so
+        // each line keeps its own `mulpd` and the lines, loads and stores stay in
+        // FIRESTARTER's order.
+        let mut regs = vec![x.clone()];
+        if item == "REG" {
+            regs.push(format!("x{mov}"));
+        }
+        let barrier = if t.fma {
+            String::new()
+        } else {
+            let c_dir = if i + 1 == lines.len() { "in" } else { "inout" };
+            let mut operands = vec![format!("{c_dir}(xmm_reg) c")];
+            for r in prev.iter().chain(&regs) {
+                let op = format!("inout(xmm_reg) {r}");
+                if !operands.contains(&op) {
+                    operands.push(op);
+                }
+            }
+            let comment: Vec<String> = (0..operands.len()).map(|n| format!("{{{n}}}")).collect();
+            format!(
+                "core::arch::asm!(\"/* {} */\", {}, options(nostack, preserves_flags)); ",
+                comment.join(" "),
+                operands.join(", ")
+            )
+        };
+        prev = regs;
         let code = match item {
             "REG" => {
                 let code = format!(
@@ -201,6 +231,7 @@ fn pass(t: &Target) -> String {
             ),
             other => unreachable!("parse_groups refuses {other}"),
         };
+        let code = format!("{barrier}{code}");
         let _ = writeln!(body, "        // {i}: {item}\n        {code}");
         if item.starts_with("L1") && Some(i) != last_l1 {
             // FIRESTARTER advances one cache line and wraps at the end of the zone.
@@ -217,12 +248,6 @@ fn pass(t: &Target) -> String {
 
     let name = t.name;
     let upper = name.to_uppercase();
-    // The AVX-512 intrinsics are stable since Rust 1.89; rust-toolchain.toml pins 1.90.
-    let allow = if name == "avx512" {
-        "#[allow(clippy::incompatible_msrv)]\n"
-    } else {
-        ""
-    };
     let mut f = String::new();
     let _ = writeln!(
         f,
@@ -235,20 +260,23 @@ const L2_PER_PASS_{upper}: usize = {l2};
 /// # Safety
 /// The CPU has `{feature}`. `l1` points to `st.l1_mask + 1` words plus `K1_PAD`, `l2` to
 /// `L2_PER_PASS_{upper} * 8` words plus `K1_PAD`.
-{allow}#[target_feature(enable = \"{feature}\")]
+#[target_feature(enable = \"{feature}\")]
 #[inline(never)]
 unsafe fn k1_block_{name}(st: &mut K1State, l1: *mut f64, l2: *mut f64) {{
     // SAFETY: the caller guarantees the feature and the sizes; the L1 offsets are masked
-    // to the zone and the L2 offsets stay below the bound, both plus at most 24 words.
+    // to the zone and the L2 offsets stay below the bound, both plus at most 24 words. An
+    // empty asm (SSE2) has no instruction: it touches no memory or stack and leaves every
+    // register it names as it was.
     unsafe {{
         let a = {load_a};
         let b = {load_b};
-        let c = {load_c};",
+        let {mut_c}c = {load_c};",
         n = lines.len(),
         feature = t.feature,
         load_a = load("st.a.as_ptr()"),
         load_b = load("st.b.as_ptr()"),
         load_c = load("st.c.as_ptr()"),
+        mut_c = if t.fma { "" } else { "mut " },
     );
     for i in 0..=TRANS_END {
         let _ = writeln!(

@@ -81,12 +81,16 @@ fn sw_bytes(acc: u32, data: &[u8]) -> u32 {
         .fold(acc, |c, &b| (c >> 8) ^ TABLE[usize::from((c as u8) ^ b)])
 }
 
+/// # Safety
+/// The CPU has SSE4.2.
 #[target_feature(enable = "sse4.2")]
 unsafe fn hw_u64(acc: u32, x: u64) -> u32 {
     // The upper half of the result is always zero.
     _mm_crc32_u64(u64::from(acc), x) as u32
 }
 
+/// # Safety
+/// The CPU has SSE4.2.
 #[target_feature(enable = "sse4.2")]
 unsafe fn hw_bytes(acc: u32, data: &[u8]) -> u32 {
     let mut chunks = data.chunks_exact(8);

@@ -51,9 +51,9 @@ const PASSES_SSE2: u32 = 4096;
 /// The beat moves every this many passes.
 const BEAT_PASSES: u32 = 1024;
 /// `initMemory`: the first `INIT_BLOCK` words are `0.25 + i * 8 * INIT_STEP`, the rest
-/// copies of them.
+/// copies of them. `INIT_STEP` is the value FMAPayload and AVX512Payload pass to it.
 const INIT_BLOCK: usize = 1024;
-const INIT_STEP: f64 = 1e-7;
+const INIT_STEP: f64 = 0.279_489_959_82e-4;
 const KIB: u64 = 1024;
 
 // `k1_block_avx512`, `k1_block_avx2`, `k1_block_sse2` and their `L2_PER_PASS_*`.
@@ -82,6 +82,12 @@ const _: () = assert!(std::mem::size_of::<Line>() == 64);
 
 type Pass = unsafe fn(&mut K1State, *mut f64, *mut f64);
 
+/// One worker's K1. What its digest catches, and what it cannot:
+/// - the upper 32 bits hash the accumulators, so a wrong product or a wrong loaded value
+///   shows, unless it only flips low-order mantissa bits late in a block: the additions
+///   that follow can round such a difference away, which is inherent to the scheme;
+/// - the lower 32 bits hash the L1 zone, where only the `L1_LS` lines store: with the
+///   AVX-512 groups (no L1 stores) they are the same for every block.
 pub(crate) struct K1 {
     pass: Pass,
     lanes: usize,
@@ -117,7 +123,10 @@ impl K1 {
         // getL2LoopCount: the passes that fit in 80% of the L2 zone.
         let l2_loops = ((0.8 * l2_bytes as f64 / 64.0 / l2_per_pass as f64) as u64).max(1);
         let l2_stride = l2_per_pass * 8;
-        let l2_words = (l2_bytes / 8).max(l2_loops as usize * l2_stride);
+        let l2_words = (l2_loops as usize)
+            .checked_mul(l2_stride)
+            .ok_or(KernelError::Insufficient)?
+            .max(l2_bytes / 8);
 
         // The seed moves every value by less than 1e-3.
         let offset = (Xoshiro256ss::new(ctx.seed).next_u64() >> 11) as f64 / (1u64 << 63) as f64;
@@ -184,7 +193,9 @@ impl Kernel for K1 {
             let l2_at = (self.st.count % self.l2_loops) as usize * self.l2_stride;
             // SAFETY: `new` picked `pass` for an instruction set this CPU has, and sized
             // `l1` to the masked zone plus K1_PAD and `l2` to `l2_loops` strides plus
-            // K1_PAD, so `l2_at` plus one stride and K1_PAD stays inside.
+            // K1_PAD, so `l2_at` plus one stride and K1_PAD stays inside. The fields are
+            // private to this module and nothing changes them after `new` (the test hook
+            // only flips a bit of the data).
             unsafe {
                 (self.pass)(
                     &mut self.st,
@@ -318,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_parse_and_fill_1536_lines() {
+    fn groups_parse_and_fill_up_to_1536_lines() {
         assert_eq!(
             groups::parse_groups(groups::AVX512_GROUPS).unwrap(),
             [("REG", 140), ("L1_L", 40), ("L2_L", 70), ("L2_S", 4)]

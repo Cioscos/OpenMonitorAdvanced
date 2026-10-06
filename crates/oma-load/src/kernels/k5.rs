@@ -177,12 +177,14 @@ fn inverse(a: &mut [u64], tw: &Twiddles, tick: &mut impl FnMut() -> bool) -> boo
 }
 
 /// Forward NTT in place; `a.len()` is a power of 2, at least 2.
+#[cfg(test)]
 pub(crate) fn ntt_forward(a: &mut [u64]) {
     let tw = Twiddles::new(a.len()).expect("twiddles");
     forward(a, &tw, &mut || true);
 }
 
 /// Inverse NTT in place; `ntt_inverse(ntt_forward(x))` is `x`.
+#[cfg(test)]
 pub(crate) fn ntt_inverse(a: &mut [u64]) {
     let tw = Twiddles::new(a.len()).expect("twiddles");
     inverse(a, &tw, &mut || true);

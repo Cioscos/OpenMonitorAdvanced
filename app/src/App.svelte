@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import AdvancedView from './components/advanced/AdvancedView.svelte';
+  import PerformanceView from './components/performance/PerformanceView.svelte';
   import QuitDialog from './components/performance/QuitDialog.svelte';
   import SafeModeNotice from './components/SafeModeNotice.svelte';
   import SettingsView from './components/settings/SettingsView.svelte';
@@ -15,8 +16,8 @@
   import { updates } from './lib/updates.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
-  import type { NavigationTarget, ServiceStatus, Session, StartupStatus, ViewKind } from './lib/types';
-  import { openSettings, setSettingsOpener, type SettingsTarget, type View } from './lib/view';
+  import type { NavigationTarget, ServiceStatus, Session, StartupStatus } from './lib/types';
+  import { openSettings, setSettingsOpener, type PerformancePage, type SettingsTarget, type View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
   // The first view is chosen once the settings and the tray's request are known (see `start`).
@@ -33,7 +34,9 @@
   const stale = $derived(isStale(store.lastReceivedAtMs ?? openedAtMs, nowMs, intervalMs));
 
   /** The view the settings screen goes back to. */
-  let previous = $state<ViewKind>('simple');
+  let previous = $state<Exclude<View, 'settings'>>('simple');
+  /** The page of the Performance view, kept while another view is shown. */
+  let performancePage = $state<PerformancePage>('new');
   let gear = $state<HTMLButtonElement | undefined>();
   /** The device page a clicked toast asked for, until the Advanced view has opened it. */
   let focus = $state<{ deviceId: string } | null>(null);
@@ -42,12 +45,12 @@
   /** The settings section (and rule) that a component asked for; `null` opens the settings on General. */
   let settingsTarget = $state<SettingsTarget | null>(null);
 
-  /** Shows a view and remembers Simple/Advanced as the last one (the settings screen is never saved). */
+  /** Shows a view and remembers Simple/Advanced as the last one (the settings and Performance are never saved). */
   function showView(next: View) {
     if (next === 'settings' && view !== 'settings') previous = view;
     view = next;
     if (next !== 'settings') settingsTarget = null;
-    if (next !== 'settings' && settings.state?.settings.view.last !== next) {
+    if (next !== 'settings' && next !== 'performance' && settings.state?.settings.view.last !== next) {
       settings.update({ view: { last: next } });
     }
   }
@@ -57,7 +60,13 @@
     if (target.deviceId !== undefined) focus = { deviceId: target.deviceId };
     showView(target.view);
     if (target.settingsSection === 'about') openSettings({ section: 'about' });
-    if (target.performance?.page === 'quit') askingQuit = true;
+    const perf = target.performance;
+    if (perf?.page === 'quit') askingQuit = true;
+    // The tray's «Open the running test» and a stress toast's result.
+    if (perf?.page === 'run' || (perf?.page === 'result' && perf.sessionId)) {
+      performancePage = perf.page === 'run' ? 'run' : `result:${perf.sessionId}`;
+      showView('performance');
+    }
   }
 
   onMount(() => {
@@ -262,6 +271,8 @@
       <SimpleView {store} onOpenAdvanced={openAdvanced} />
     {:else if view === 'advanced'}
       <AdvancedView {store} {backend} {service} {focus} onFocused={() => (focus = null)} />
+    {:else if view === 'performance'}
+      <PerformanceView {backend} bind:page={performancePage} />
     {:else}
       <SettingsView {store} {backend} {service} target={settingsTarget} onBack={closeSettings} />
     {/if}

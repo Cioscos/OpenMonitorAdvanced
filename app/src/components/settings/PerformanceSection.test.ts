@@ -52,7 +52,8 @@ test('automatic_threshold_sends_null', async () => {
   patches.length = 0;
   await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.cpuStop.useAuto') }));
   await waitFor(() => expect(patches).toEqual([{ performance: { cpuStopC: null } }]));
-  expect(screen.getByText(t('settings.performance.cpuStop.auto'))).toBeTruthy();
+  // The text carries a Tjmax tooltip in the middle.
+  expect(document.querySelector('.auto')?.textContent?.replace(t('glossary.tjmax'), '')).toBe(t('settings.performance.cpuStop.auto'));
 });
 
 test('reset_risk_notice', async () => {

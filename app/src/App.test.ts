@@ -8,7 +8,7 @@ import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
 import { settings } from './lib/settings.svelte';
 import type { Schema } from './lib/types';
-import { FakeBackend, makeLogStatus } from './test/fake-backend';
+import { FakeBackend, makeLogStatus, makeRunStatus } from './test/fake-backend';
 
 const IGPU = 'gpu/pci-0000:11:00.0';
 
@@ -499,4 +499,49 @@ test('the quit question shows on a performance quit request, cold or open, and c
   await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(backend.performanceQuitCalls).toBe(1);
+});
+
+test('performance_view_is_never_saved_as_last_view', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  await backend.settings.update({ general: { defaultView: 'last' } });
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  await vi.waitFor(() => expect(screen.getByRole('navigation', { name: 'Performance' })).toBeTruthy());
+  expect(settings.state?.settings.view.last).toBeUndefined();
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  await vi.waitFor(() => expect(screen.getByRole('navigation', { name: 'Performance' })).toBeTruthy());
+  expect(settings.state?.settings.view.last).toBe('advanced');
+  // The settings opened from Performance go back to it.
+  await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  await vi.waitFor(() => expect(screen.getByRole('navigation', { name: 'Performance' })).toBeTruthy());
+});
+
+test('the tray and a toast open the running test and a result', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.pendingView = { view: 'simple', performance: { page: 'result', sessionId: 'abc' } };
+  render(App, { backend, store: new LiveStore() });
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Result' })).toBeTruthy());
+  backend.emitNavigate({ view: 'simple', performance: { page: 'run' } });
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Test in progress' })).toBeTruthy());
+});
+
+test('a test that starts opens its page and marks the sidebar entry', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  render(App, { backend, store: new LiveStore() });
+  await simpleShown();
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'New test' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'History' }));
+  backend.emitPerformanceStatus(makeRunStatus({ state: 'running', sessionId: 'x' }));
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Test in progress' })).toBeTruthy());
+  expect(screen.getByRole('button', { name: 'Running ●' }).getAttribute('aria-current')).toBe('page');
+  // While it runs, the user can move to another page.
+  await fireEvent.click(screen.getByRole('button', { name: 'History' }));
+  backend.emitPerformanceStatus(makeRunStatus({ state: 'running', sessionId: 'x', elapsedMs: 1000 }));
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'History' })).toBeTruthy());
 });

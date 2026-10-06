@@ -26,6 +26,12 @@ import type {
   BenchmarkEntry,
   EditableProfile,
   EditorData,
+  Plan,
+  RunStatus,
+  StartRequest,
+  StressSession,
+  StressSessionSummary,
+  SystemInfo,
 } from '../types';
 
 export type Unsubscribe = () => void;
@@ -159,6 +165,25 @@ export interface Backend {
   onOverlayPreview(cb: (event: { open: boolean }) => void): Promise<Unsubscribe>;
   /** The tray's «Quit» waits for the editor to save or discard its changes. */
   onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe>;
+  /** What the machine offers for a stress test. */
+  performanceSystem(): Promise<SystemInfo>;
+  /** The plan a request would run; rejects with the reason it cannot be built. */
+  performancePreview(request: StartRequest): Promise<Plan>;
+  /** Starts a test and replies with its session id; rejects with the reason (one test at a time). */
+  performanceStart(request: StartRequest): Promise<string>;
+  /** Asks the running test to stop; it is saved as stopped by the user. */
+  performanceStop(): Promise<void>;
+  performanceStatus(): Promise<RunStatus>;
+  /** The saved sessions, newest first. */
+  performanceHistory(): Promise<StressSessionSummary[]>;
+  /** A saved session, or null when it is gone. */
+  performanceSession(id: string): Promise<StressSession | null>;
+  /** Deletes a saved session; rejects for the running one. */
+  performanceDelete(id: string): Promise<void>;
+  /** Save dialog and export as JSON: the file name, or null when the dialog is cancelled. */
+  performanceExport(id: string): Promise<string | null>;
+  /** The run status on every change and at 1 Hz during a test, only while a window is open. */
+  onPerformanceStatus(cb: (status: RunStatus) => void): Promise<Unsubscribe>;
   /** The tray's «Quit» during a stress test: the window asks before it goes on. */
   onPerformanceQuit(cb: () => void): Promise<Unsubscribe>;
   /** The answer «stop and quit»: the test ends (saved as stopped) and the app exits. */

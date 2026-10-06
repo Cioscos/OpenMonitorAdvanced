@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '../../lib/i18n/index.svelte';
   import { settings } from '../../lib/settings.svelte';
+  import Term from '../common/Term.svelte';
   import type { SettingsPatch } from '../../lib/types';
   import Field from './controls/Field.svelte';
   import Group from './controls/Group.svelte';
@@ -32,6 +33,8 @@
   type FirstError = 'profile' | 'yes' | 'no';
   const firstError = $derived<FirstError>(current?.stopOnFirstError == null ? 'profile' : current.stopOnFirstError ? 'yes' : 'no');
   const FIRST_ERROR: Record<FirstError, boolean | null> = { profile: null, yes: true, no: false };
+  // «Automatic (Tjmax − 5 °C or 95 °C)»: Tjmax, the same word in every language, gets its tooltip.
+  const autoText = $derived(t('settings.performance.cpuStop.auto').split('Tjmax'));
 </script>
 
 <svelte:window onkeydown={(e) => e.key === 'Escape' && askingOff && (askingOff = false)} />
@@ -41,6 +44,7 @@
     <Toggle
       id="performance-thermal"
       label={t('settings.performance.thermalStop')}
+      term="thermalStop"
       description={t('settings.performance.thermalStop.hint')}
       checked={current.thermalStop}
       error={errorOf('performance.thermalStop')}
@@ -61,7 +65,7 @@
       {#snippet control()}
         <div class="buttons">
           {#if current.cpuStopC === null}
-            <span class="auto">{t('settings.performance.cpuStop.auto')}</span>
+            <span class="auto">{autoText[0]}{#if autoText.length > 1}<Term term="tjmax" />{autoText.slice(1).join('Tjmax')}{/if}</span>
             <button type="button" class="action" onclick={() => send({ cpuStopC: 95 })}>{t('settings.performance.cpuStop.set')}</button>
           {:else}
             <NumberInput
@@ -94,7 +98,7 @@
       error={errorOf('performance.stopOnFirstError')}
       onChange={(next) => send({ stopOnFirstError: FIRST_ERROR[next] })}
     />
-    <Field id="performance-ram" label={t('settings.performance.ramShare')} labelFor="performance-ram-input" description={t('settings.performance.ramShare.hint')} error={errorOf('performance.ramSharePercent')}>
+    <Field id="performance-ram" label={t('settings.performance.ramShare')} term="ramShare" labelFor="performance-ram-input" description={t('settings.performance.ramShare.hint')} error={errorOf('performance.ramSharePercent')}>
       {#snippet control()}
         <NumberInput
           id="performance-ram-input"

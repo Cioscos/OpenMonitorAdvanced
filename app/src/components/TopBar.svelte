@@ -57,6 +57,14 @@
     >
       {t('view.advanced')}
     </button>
+    <button
+      role="tab"
+      aria-selected={view === 'performance'}
+      class:on={view === 'performance'}
+      onclick={() => onViewChange('performance')}
+    >
+      {t('view.performance')}
+    </button>
   </div>
 
   <div class="right">

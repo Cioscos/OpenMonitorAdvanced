@@ -1,5 +1,11 @@
-/** `settings` is the settings screen; only `simple` and `advanced` are ever remembered as the last view. */
-export type View = 'simple' | 'advanced' | 'settings';
+/**
+ * `settings` is the settings screen and `performance` the stress test view; only `simple` and
+ * `advanced` are ever remembered as the last view.
+ */
+export type View = 'simple' | 'advanced' | 'settings' | 'performance';
+
+/** A page of the Performance view: a saved session's result is `result:<id>`. */
+export type PerformancePage = 'new' | 'run' | 'history' | `result:${string}`;
 
 /** A place inside the settings screen: the rules, optionally with "New rule" filled in for a sensor. */
 export interface SettingsTarget {

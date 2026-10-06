@@ -31,8 +31,18 @@ test('the gear opens the settings and shows when they are open', async () => {
   expect(onSettings).toHaveBeenCalledTimes(1);
   await rerender({ view: 'settings', ...props });
   expect(gear.getAttribute('aria-pressed')).toBe('true');
-  // Neither view tab is selected on the settings screen.
-  expect(screen.getAllByRole('tab').map((tab) => tab.getAttribute('aria-selected'))).toEqual(['false', 'false']);
+  // No view tab is selected on the settings screen.
+  expect(screen.getAllByRole('tab').map((tab) => tab.getAttribute('aria-selected'))).toEqual(['false', 'false', 'false']);
+});
+
+test('performance_tab_switches_view', async () => {
+  const onViewChange = vi.fn();
+  const props = { onViewChange, onSettings: () => {}, service: null, onLeaveAntiCheat: vi.fn(), onStartService: vi.fn(), onOpenLogFolder: vi.fn() };
+  const { rerender } = render(TopBar, { view: 'simple', ...props });
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  expect(onViewChange).toHaveBeenCalledWith('performance');
+  await rerender({ view: 'performance', ...props });
+  expect(screen.getAllByRole('tab').map((tab) => tab.getAttribute('aria-selected'))).toEqual(['false', 'false', 'true']);
 });
 
 test('the badge is hidden while connected', () => {

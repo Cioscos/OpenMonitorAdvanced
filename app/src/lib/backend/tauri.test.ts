@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { createTauriBackend } from './tauri';
+import type { StartRequest } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
@@ -118,7 +119,9 @@ test('overlay commands and event match the Rust shell', async () => {
   expect(listen).toHaveBeenLastCalledWith('overlay-status', expect.any(Function));
 });
 
-// Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs and window.rs.
+const REQUEST: StartRequest = { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null };
+
+// Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs, performance/commands.rs and window.rs.
 test('editor and benchmark commands match the Rust shell', async () => {
   const { listen } = await import('@tauri-apps/api/event');
   const backend = createTauriBackend();
@@ -137,6 +140,15 @@ test('editor and benchmark commands match the Rust shell', async () => {
     [() => backend.openOverlayEditor(), 'open_overlay_editor'],
     [() => backend.appQuitConfirmed(), 'app_quit_confirmed'],
     [() => backend.performanceQuitConfirmed(), 'performance_quit_confirmed'],
+    [() => backend.performanceSystem(), 'performance_system'],
+    [() => backend.performancePreview(REQUEST), 'performance_preview', { request: REQUEST }],
+    [() => backend.performanceStart(REQUEST), 'performance_start', { request: REQUEST }],
+    [() => backend.performanceStop(), 'performance_stop'],
+    [() => backend.performanceStatus(), 'performance_status'],
+    [() => backend.performanceHistory(), 'performance_history'],
+    [() => backend.performanceSession('x'), 'performance_session', { id: 'x' }],
+    [() => backend.performanceDelete('x'), 'performance_delete', { id: 'x' }],
+    [() => backend.performanceExport('x'), 'performance_export', { id: 'x' }],
     [() => backend.benchmarkToggle(), 'benchmark_toggle'],
     [() => backend.benchmarkList(), 'benchmark_list'],
     [() => backend.benchmarkOpenCsv('x'), 'benchmark_open_csv', { id: 'x' }],
@@ -148,6 +160,8 @@ test('editor and benchmark commands match the Rust shell', async () => {
     if (args === undefined) expect(invoke).toHaveBeenLastCalledWith(name);
     else expect(invoke).toHaveBeenLastCalledWith(name, args);
   }
+  await backend.onPerformanceStatus(() => {});
+  expect(listen).toHaveBeenLastCalledWith('performance-status', expect.any(Function));
   await backend.onOverlayEditorData(() => {});
   expect(listen).toHaveBeenLastCalledWith('overlay-editor-data', expect.any(Function));
   await backend.onOverlayPreview(() => {});

@@ -719,3 +719,245 @@ export interface BenchmarkEntry {
     summary: SessionSummary;
   };
 }
+
+// --- Stress test (mirrors crates/oma-core/src/load, crates/oma-ipc/src/load and app/src-tauri/src/performance; plan M8a1 A2–A4, A20) ---
+// The plan and its phases come from `oma-ipc::load` and keep its snake_case field names; the
+// rest is camelCase. Values that are u64 in Rust (seeds, `expected`/`actual`) arrive as JSON
+// numbers and lose precision past 2^53: the UI only shows them.
+
+export type StressComponent = 'cpu' | 'ram';
+export type Objective = 'normal' | 'overclock';
+export type Preset = 'quick' | 'standard' | 'long' | 'night';
+export type Isa = 'avx512' | 'avx2' | 'sse2';
+export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10';
+export type LoadMode = 'steady' | 'variable' | 'light';
+export type Placement = 'all_logical' | 'one_per_core' | 'core_cycle';
+export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto';
+export type RamPattern = 'moving_inversions' | 'modulo20' | 'random' | 'address' | 'crc_copy';
+export type CoreState = 'untested' | 'testing' | 'passed' | 'failed';
+export type Outcome =
+  | 'passed'
+  | 'marginal'
+  | 'errors'
+  | 'crashed'
+  | 'hung'
+  | 'system_crash'
+  | 'stopped_user'
+  | 'stopped_thermal'
+  | 'suspended'
+  | 'failed_to_start';
+export type RunState = 'idle' | 'starting' | 'running' | 'stopping' | 'finished';
+export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced';
+
+/** One mode of «Personalizza»: `minutes` null keeps the profile's duration. */
+export interface ModeEdit {
+  kernel: KernelId;
+  enabled: boolean;
+  minutes: number | null;
+}
+
+/** «Personalizza» (DA12); `isa` null = automatic, `stopOnFirstError` null = as the profile says. */
+export interface Custom {
+  modes: ModeEdit[];
+  isa: Isa | null;
+  threads: 'allLogical' | 'onePerCore';
+  /** In the «one core at a time» phases, both threads of the core. */
+  bothSmt: boolean;
+  stopOnFirstError: boolean | null;
+}
+
+export interface StartRequest {
+  component: StressComponent;
+  objective: Objective;
+  preset: Preset;
+  custom: Custom | null;
+  /** «Retry only core N»: a plan with only the cycle on that core. */
+  retryCore: { core: number; kernel: KernelId } | null;
+}
+
+/** One phase of the plan (`oma-ipc::load::Phase`, snake_case). */
+export interface Phase {
+  kernel: KernelId;
+  alt_kernel: KernelId | null;
+  isa: Isa;
+  size: DataSize;
+  mode: LoadMode;
+  placement: Placement;
+  duration_s: number;
+  per_core_s: number | null;
+  both_smt: boolean;
+  cores: number[] | null;
+  patterns: RamPattern[];
+  stop_on_error: boolean;
+}
+
+/** `performance_preview`'s reply and a session's plan (`oma-ipc::load::Plan`, snake_case). */
+export interface Plan {
+  seed: number;
+  ram_bytes: number;
+  phases: Phase[];
+}
+
+/** A phase as the run status shows it. */
+export interface PhaseInfo {
+  kernel: KernelId;
+  mode: LoadMode;
+  placement: Placement;
+  durationS: number;
+  isa: Isa;
+}
+
+export interface CoreProgress {
+  core: number;
+  state: CoreState;
+}
+
+/** A line of the event log; the UI translates `code` with `performance.event.<code>`. */
+export interface SessionEvent {
+  atMs: number;
+  code: string;
+  params: Record<string, string>;
+}
+
+/**
+ * The `performance-status` payload and `performance_status`'s reply. Before any test `state` is
+ * `idle` with an empty `sessionId`; after one it stays `finished`, with its outcome, until the next start.
+ */
+export interface RunStatus {
+  state: RunState;
+  sessionId: string;
+  component: StressComponent;
+  objective: Objective;
+  preset: Preset;
+  elapsedMs: number;
+  totalMs: number;
+  phaseIndex: number;
+  phases: PhaseInfo[];
+  tempC: number | null;
+  tempMaxC: number | null;
+  stopC: number | null;
+  powerW: number | null;
+  clockMhz: number | null;
+  checks: number;
+  errors: number;
+  wheaCorrected: number;
+  wheaFatal: number;
+  cores: CoreProgress[];
+  currentCore: number | null;
+  /** The last 200. */
+  events: SessionEvent[];
+  warnings: RunWarning[];
+  outcome: Outcome | null;
+}
+
+/** What the machine offers for a test (`performance_system`). */
+export interface SystemInfo {
+  cpuModel: string;
+  logical: number;
+  cores: number;
+  isa: Isa[];
+  ramTotal: number;
+  /** The RAM a test may use now (DA10), in bytes. */
+  ramBudget: number;
+  serviceConnected: boolean;
+  tjmaxC: number | null;
+  /** The thermal stop threshold (DA5). */
+  stopC: number;
+  hypervisor: boolean;
+}
+
+/** A computation error (`ComputeError`, flattened) with when it happened. */
+export interface ErrorRecord {
+  phase: number;
+  kernel: KernelId;
+  isa: Isa;
+  kind: 'mismatch' | 'reference_disagreement' | 'reference_invalid' | 'hung';
+  logical: number | null;
+  core: number | null;
+  iteration: number;
+  expected: number;
+  actual: number;
+  seed: number;
+  atMs: number;
+  tempC: number | null;
+  clockMhz: number | null;
+}
+
+/** The verdict: a T3 key (`performance.outcome.<verdict>`) with its parameters, and where it happened. */
+export interface OutcomeDetail {
+  verdict: string;
+  params: Record<string, string>;
+  phase: number | null;
+  kernel: KernelId | null;
+  core: number | null;
+  tempC: number | null;
+  clockMhz: number | null;
+  atMs: number | null;
+}
+
+export interface PhaseResult {
+  index: number;
+  kernel: KernelId;
+  outcome: string;
+  durationMs: number;
+  checks: number;
+  errors: number;
+  skipped: string | null;
+}
+
+export interface CoreResult {
+  core: number;
+  state: CoreState;
+  firstError: ErrorRecord | null;
+}
+
+/** A saved stress session (`performance_session`); named apart from the sampling `Session`. */
+export interface StressSession {
+  format: number;
+  id: string;
+  /** RFC 3339, UTC. */
+  startedAt: string;
+  endedAt: string | null;
+  component: StressComponent;
+  /** The CPU model, or `<n> GB RAM`. */
+  device: string;
+  objective: Objective;
+  preset: Preset;
+  request: StartRequest;
+  plan: Plan;
+  outcome: Outcome | null;
+  outcomeDetail: OutcomeDetail | null;
+  phases: PhaseResult[];
+  cores: CoreResult[];
+  errors: ErrorRecord[];
+  errorsDropped: number;
+  eventsDropped: number;
+  /** Counts by event id and by APIC id (JSON object keys are the numbers as text). */
+  whea: { byId: Record<string, number>; byApic: Record<string, number>; unreadable: boolean; lastRecord: number | null };
+  stats: {
+    tempMaxC: number | null;
+    tempAvgC: number | null;
+    powerMaxW: number | null;
+    powerAvgW: number | null;
+    clockMaxMhz: number | null;
+    clockAvgMhz: number | null;
+  };
+  /** One every 5 s. */
+  samples: { tMs: number; tempC: number | null; powerW: number | null; clockMhz: number | null }[];
+  events: SessionEvent[];
+  appVersion: string;
+  loadVersion: string | null;
+}
+
+/** One entry of `performance_history`, newest first; `verdict` is a T3 key. Named apart from the benchmark `SessionSummary`. */
+export interface StressSessionSummary {
+  id: string;
+  startedAt: string;
+  component: StressComponent;
+  objective: Objective;
+  preset: Preset;
+  durationMs: number;
+  outcome: Outcome | null;
+  verdict: string | null;
+  params: Record<string, string>;
+}

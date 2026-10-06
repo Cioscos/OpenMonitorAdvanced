@@ -427,7 +427,17 @@ impl Engine<'_, '_> {
             Placement::OnePerCore => 1,
             _ => usize::MAX,
         };
-        let mut cpus = schedule::phase_cpus(self.topology, &self.order, per_core);
+        // `cores` limits every placement to the listed cores (the order of `self.order`).
+        let order: Vec<u32> = match &spec.cores {
+            Some(list) => self
+                .order
+                .iter()
+                .copied()
+                .filter(|c| list.contains(c))
+                .collect(),
+            None => self.order.clone(),
+        };
+        let mut cpus = schedule::phase_cpus(self.topology, &order, per_core);
         if spec.mode == LoadMode::Light {
             cpus.truncate(1);
         }

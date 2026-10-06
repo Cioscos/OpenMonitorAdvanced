@@ -806,3 +806,24 @@ fn k9_with_three_workers_runs_two() {
     assert_eq!(factory.created.load(Ordering::Relaxed), 2);
     assert_eq!(done(&msgs)[0].skipped, None);
 }
+
+#[test]
+fn cores_limit_all_logical_and_one_per_core() {
+    // 4 cores of 2 threads; the phases name cores 1 and 2.
+    for (placement, workers) in [(Placement::AllLogical, 4), (Placement::OnePerCore, 2)] {
+        let f = CountFactory::new(0..0);
+        let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+        let mut p = phase(KernelId::K2, placement, 1);
+        p.cores = Some(vec![1, 2]);
+        let (fin, _) = run_test(
+            &plan(vec![p]),
+            &topology(8, 2),
+            &factory,
+            None,
+            &AtomicBool::new(false),
+            &no_hang,
+        );
+        assert_eq!(fin.reason, FinishReason::Completed);
+        assert_eq!(f.created.load(Ordering::Relaxed), workers, "{placement:?}");
+    }
+}

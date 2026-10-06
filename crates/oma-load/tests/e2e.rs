@@ -180,6 +180,10 @@ fn handshake_topology_and_short_plan_complete() {
     let mut s = Session::start(&[]);
     let mut p = s.phase(KernelId::K5, 2, 2);
     p.size = DataSize::L2;
+    // `cores` limits one_per_core too: 2 threads, one on each of the 2 cores.
+    p.placement = Placement::OnePerCore;
+    p.per_core_s = None;
+    p.both_smt = false;
     s.run(vec![p]);
     let all = s.until_finished();
     let pos = |f: fn(&LoadMessage) -> bool| all.iter().position(f).expect("message missing");

@@ -44,9 +44,10 @@ pub fn inject_from_env() -> Option<String> {
 pub enum StartFailure {
     /// `oma-load.exe` is not there.
     Missing,
-    /// The process, its pipe or its job could not be created.
+    /// The process, its pipe or its job could not be created, or it exited or closed the pipe
+    /// during the handshake, or our `Hello` could not be sent.
     Spawn(std::io::Error),
-    /// No connection or no `Hello` within 5 s.
+    /// No connection or no `Hello` within 5 s, the child still running.
     Timeout,
     /// The pipe client is not the process we spawned.
     ForeignClient,
@@ -86,18 +87,18 @@ impl fmt::Display for StartFailure {
 impl std::error::Error for StartFailure {}
 
 #[cfg(windows)]
-#[allow(unused_imports)] // used from A20
+#[allow(unused_imports)] // removed in A20
 pub use imp::{HostEvent, LoadHost};
 
 #[cfg(windows)]
 mod imp {
+    use std::cell::Cell;
     use std::io;
     use std::os::windows::process::CommandExt;
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
     use oma_ipc::load::{
@@ -116,9 +117,11 @@ mod imp {
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
     const SLICE: Duration = Duration::from_millis(250);
 
-    /// What the helper does after the handshake.
+    /// What the helper does after the handshake. `Exited` may still arrive after `kill()` or
+    /// `Drop`: consumers ignore the events of a host they let go.
     #[derive(Debug)]
     pub enum HostEvent {
+        /// A message that passed `validate()`.
         Message(LoadMessage),
         /// The pipe closed (the helper exited or was killed).
         Closed,
@@ -131,9 +134,41 @@ mod imp {
         conn: Option<LoadConnection>,
         reader: Option<PipeReader>,
         job: Option<KillOnCloseJob>,
-        live: Arc<AtomicBool>,
         hello: LoadHello,
         topology: Topology,
+    }
+
+    /// A started child that is gone before the handshake ends: `Spawn`, exit code logged.
+    fn exited(child: &mut Child) -> StartFailure {
+        std::thread::sleep(Duration::from_millis(50));
+        let code = child.try_wait().ok().flatten().and_then(|s| s.code());
+        tracing::warn!(?code, "oma-load closed the pipe during the handshake");
+        StartFailure::Spawn(io::Error::other("oma-load exited during the handshake"))
+    }
+
+    /// Turns a live pipe event into a host event. A message that fails `validate()` is dropped,
+    /// with at most one warning per second (`last_warn`).
+    pub(super) fn forward(
+        event: PipeEvent<LoadMessage>,
+        last_warn: &Cell<Option<Instant>>,
+    ) -> Option<HostEvent> {
+        match event {
+            PipeEvent::Closed(_) => Some(HostEvent::Closed),
+            PipeEvent::Message(m) => match m.validate() {
+                Ok(()) => Some(HostEvent::Message(m)),
+                Err(e) => {
+                    let now = Instant::now();
+                    if last_warn
+                        .get()
+                        .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+                    {
+                        last_warn.set(Some(now));
+                        tracing::warn!(error = %e, "invalid load message dropped");
+                    }
+                    None
+                }
+            },
+        }
     }
 
     /// Kills and reaps a child we are giving up on.
@@ -199,19 +234,21 @@ mod imp {
             }
 
             let conn: LoadConnection = server.into_connection();
-            let live = Arc::new(AtomicBool::new(false));
+            // `Some` during the handshake: the reader hands events to it. Going live takes
+            // the sender under the lock and drains what is left, so nothing is lost or reordered.
             let (hs_tx, hs_rx) = mpsc::channel();
+            let gate = Arc::new(Mutex::new(Some(hs_tx)));
             let reader = {
-                let (live, events) = (Arc::clone(&live), events.clone());
+                let (gate, events) = (Arc::clone(&gate), events.clone());
+                let last_warn = Cell::new(None);
                 conn.start_reader(move |event| {
-                    if live.load(Ordering::Acquire) {
-                        let ev = match event {
-                            PipeEvent::Message(m) => HostEvent::Message(m),
-                            PipeEvent::Closed(_) => HostEvent::Closed,
-                        };
-                        events.send(ev).is_ok()
-                    } else {
-                        hs_tx.send(event).is_ok()
+                    let gate = gate.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(hs) = gate.as_ref() {
+                        return hs.send(event).is_ok();
+                    }
+                    match forward(event, &last_warn) {
+                        Some(ev) => events.send(ev).is_ok(),
+                        None => true,
                     }
                 })
             };
@@ -220,7 +257,6 @@ mod imp {
                 conn: Some(conn),
                 reader: Some(reader),
                 job: Some(job),
-                live,
                 hello: LoadHello {
                     protocol_version: 0,
                     version: String::new(),
@@ -245,7 +281,10 @@ mod imp {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 isa: Vec::new(),
             });
-            host.send(&ours).map_err(|_| StartFailure::Timeout)?;
+            if let Err(e) = host.send(&ours) {
+                tracing::warn!(error = %e, "cannot send the hello to oma-load");
+                return Err(StartFailure::Spawn(e));
+            }
 
             let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
             let mut hello = None;
@@ -253,16 +292,17 @@ mod imp {
                 let left = deadline.saturating_duration_since(Instant::now());
                 let event = match hs_rx.recv_timeout(left) {
                     Ok(e) => e,
-                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                    Err(RecvTimeoutError::Timeout) => {
                         return Err(if hello.is_some() {
                             StartFailure::NoTopology
                         } else {
                             StartFailure::Timeout
                         });
                     }
+                    Err(RecvTimeoutError::Disconnected) => return Err(exited(&mut child)),
                 };
                 let PipeEvent::Message(msg) = event else {
-                    return Err(StartFailure::Timeout);
+                    return Err(exited(&mut child));
                 };
                 if let Err(e) = msg.validate() {
                     tracing::warn!(error = %e, "invalid load message dropped");
@@ -281,14 +321,28 @@ mod imp {
             };
             host.hello = hello.expect("hello seen before the topology");
             host.topology = topology;
-            host.live.store(true, Ordering::Release);
+            {
+                let mut gate = gate.lock().unwrap_or_else(PoisonError::into_inner);
+                gate.take();
+                let last_warn = Cell::new(None);
+                while let Ok(event) = hs_rx.try_recv() {
+                    if let Some(ev) = forward(event, &last_warn) {
+                        let _ = events.send(ev);
+                    }
+                }
+            }
 
-            let _ = std::thread::Builder::new()
+            let exit_tx = events.clone();
+            let spawned = std::thread::Builder::new()
                 .name("oma-load-wait".into())
                 .spawn(move || {
                     let code = child.wait().ok().and_then(|s| s.code());
-                    let _ = events.send(HostEvent::Exited(code));
+                    let _ = exit_tx.send(HostEvent::Exited(code));
                 });
+            if let Err(e) = spawned {
+                tracing::error!(error = %e, "cannot start the oma-load exit watcher");
+                let _ = events.send(HostEvent::Exited(None));
+            }
             Ok(host)
         }
 
@@ -309,7 +363,6 @@ mod imp {
 
         /// Closes the pipe (reader included) and the Job, which kills the helper.
         pub fn kill(&mut self) {
-            self.live.store(false, Ordering::Release);
             if let Some(reader) = self.reader.take() {
                 reader.stop();
             }
@@ -368,6 +421,30 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), 6);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_live_messages_are_dropped() {
+        use oma_ipc::load::{LoadMessage, Progress};
+        use oma_win::private_pipe::PipeEvent;
+        use std::cell::Cell;
+        let mut p = Progress {
+            phase: 0,
+            phase_elapsed_ms: 0,
+            elapsed_ms: 0,
+            checks: 0,
+            errors: 0,
+            current_core: None,
+            cores: vec![],
+            memory_bytes: 0,
+            rate: Some(1.0),
+        };
+        let w = Cell::new(None);
+        let ok = imp::forward(PipeEvent::Message(LoadMessage::Progress(p.clone())), &w);
+        assert!(matches!(ok, Some(imp::HostEvent::Message(_))));
+        p.rate = Some(f64::NAN);
+        assert!(imp::forward(PipeEvent::Message(LoadMessage::Progress(p)), &w).is_none());
     }
 
     #[cfg(windows)]

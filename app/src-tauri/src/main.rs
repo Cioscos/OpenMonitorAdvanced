@@ -9,7 +9,7 @@ mod log;
 mod notifier;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod overlay;
-#[allow(dead_code)]
+#[allow(dead_code)] // removed in A20
 mod performance;
 mod report;
 mod rules;

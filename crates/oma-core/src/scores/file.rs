@@ -4,7 +4,10 @@ use oma_ipc::load::Isa;
 use serde::{Deserialize, Serialize};
 
 use super::workloads::BenchKernel;
-use crate::load::{check_format, session_file_name, FormatError};
+use crate::load::{session_file_name, FormatError};
+
+/// Score file format, independent of the stress-session one.
+pub const FORMAT: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scores {
@@ -71,9 +74,16 @@ pub struct ScoreSummary {
     pub provisional: bool,
 }
 
-/// Rejects a file of a newer format.
+/// Rejects any format other than `FORMAT` (`FormatError::Future` carries the found value).
 pub fn parse_score(bytes: &[u8]) -> Result<ScoreFile, FormatError> {
-    check_format(bytes)?;
+    #[derive(Deserialize)]
+    struct Probe {
+        format: u32,
+    }
+    let probe: Probe = serde_json::from_slice(bytes)?;
+    if probe.format != FORMAT {
+        return Err(FormatError::Future(probe.format));
+    }
     Ok(serde_json::from_slice(bytes)?)
 }
 
@@ -97,7 +107,6 @@ pub fn score_file_name(at_utc: &str, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load::FORMAT;
 
     fn sample() -> ScoreFile {
         ScoreFile {
@@ -144,10 +153,16 @@ mod tests {
         let text = String::from_utf8(bytes.clone()).unwrap();
         assert!(text.contains("\"scoreVersion\"") && text.contains("\"tMs\""));
         assert_eq!(parse_score(&bytes).unwrap(), s);
-        let future = text.replace("\"format\":1", "\"format\":2");
+        let with_format =
+            |n: u32| text.replace(&format!("\"format\":{FORMAT}"), &format!("\"format\":{n}"));
+        let future = with_format(FORMAT + 1);
         assert!(matches!(
             parse_score(future.as_bytes()),
             Err(FormatError::Future(2))
+        ));
+        assert!(matches!(
+            parse_score(with_format(0).as_bytes()),
+            Err(FormatError::Future(0))
         ));
         assert!(parse_score(b"{\"format\":1").is_err());
         assert_eq!(

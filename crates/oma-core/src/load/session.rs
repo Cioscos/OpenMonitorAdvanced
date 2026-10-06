@@ -158,7 +158,7 @@ struct FormatProbe {
     format: u32,
 }
 
-pub(crate) fn check_format(bytes: &[u8]) -> Result<(), FormatError> {
+fn check_format(bytes: &[u8]) -> Result<(), FormatError> {
     let p: FormatProbe = serde_json::from_slice(bytes)?;
     if p.format > FORMAT {
         return Err(FormatError::Future(p.format));

@@ -9,7 +9,7 @@ mod workloads;
 
 pub use file::{
     parse_score, score_file_name, summary, Device, KernelRate, ScoreFile, ScoreSample,
-    ScoreSummary, Scores,
+    ScoreSummary, Scores, FORMAT,
 };
 pub use gauge::full_scale;
 pub use plan::{bench_plan, BenchMode, BenchStep, CAP_S, WARMUP_PAUSE_MS};

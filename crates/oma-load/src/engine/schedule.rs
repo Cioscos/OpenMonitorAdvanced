@@ -1,14 +1,12 @@
 //! Which logical processors a phase runs on (DA4, DA7). `order` is the core order of
-//! `oma_core::load::core_order`: the best cores first, parked ones left out.
+//! `oma_core::load::core_order`: the best cores first. Parked processors are placed like the
+//! others: `Parked` is only their idle state, and the hard affinity wakes them.
 
 use oma_ipc::load::{LogicalCpu, Topology};
 
-/// The usable logical processors of `core`, in topology order.
+/// The logical processors of `core`, in topology order.
 fn logical_of(topology: &Topology, core: u32) -> impl Iterator<Item = &LogicalCpu> {
-    topology
-        .logical
-        .iter()
-        .filter(move |l| l.core == core && !l.parked)
+    topology.logical.iter().filter(move |l| l.core == core)
 }
 
 /// Up to `per_core` logical processors of every core of `order`: `usize::MAX` for
@@ -104,22 +102,32 @@ mod tests {
     fn placements_pick_the_right_processors() {
         let t = topology();
         let order = oma_core::load::core_order(&t);
-        assert_eq!(order, [0, 1, 2]);
+        assert_eq!(order, [0, 1, 2, 3], "the parked core is tested too");
         assert_eq!(
             indexes(&phase_cpus(&t, &order, usize::MAX)),
-            [0, 1, 2, 3, 4, 5]
+            [0, 1, 2, 3, 4, 5, 6, 7]
         );
-        assert_eq!(indexes(&phase_cpus(&t, &order, 1)), [0, 2, 4]);
+        assert_eq!(indexes(&phase_cpus(&t, &order, 1)), [0, 2, 4, 6]);
         assert_eq!(indexes(&core_cpus(&t, 1, true)), [2, 3]);
         assert_eq!(indexes(&core_cpus(&t, 1, false)), [2]);
+        assert_eq!(indexes(&core_cpus(&t, 3, true)), [6, 7]);
         assert_eq!(
             indexes(&one_per_core(&phase_cpus(&t, &order, 9))),
-            [0, 2, 4]
+            [0, 2, 4, 6]
         );
-        assert_eq!(indexes(&reference_cpus(&t, &order)), [0, 2, 4]);
+        assert_eq!(indexes(&reference_cpus(&t, &order)), [0, 4, 6]);
         assert_eq!(indexes(&reference_cpus(&t, &order[..2])), [0, 2]);
         assert_eq!(indexes(&reference_cpus(&t, &order[..1])), [0]);
         assert!(reference_cpus(&t, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_parked_smt_sibling_is_still_placed() {
+        let mut t = topology();
+        t.logical[3].parked = true; // the second thread of core 1
+        assert_eq!(indexes(&core_cpus(&t, 1, true)), [2, 3]);
+        let order = oma_core::load::core_order(&t);
+        assert_eq!(phase_cpus(&t, &order, 2).len(), 8);
     }
 
     #[test]

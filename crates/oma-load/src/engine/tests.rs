@@ -168,6 +168,11 @@ fn no_hang() {
     panic!("unexpected hung worker");
 }
 
+/// No memory reading: the plan's share is used as is.
+fn no_memory() -> Option<u64> {
+    None
+}
+
 fn run_test(
     plan: &Plan,
     topology: &Topology,
@@ -178,7 +183,11 @@ fn run_test(
 ) -> (Finished, Vec<LoadMessage>) {
     let log = Mutex::new(Vec::new());
     let out = |m: LoadMessage| log.lock().unwrap().push(m);
-    let hooks = Hooks { factory, on_hung };
+    let hooks = Hooks {
+        factory,
+        on_hung,
+        available: &no_memory,
+    };
     let finished = run_with(plan, topology, &out, stop, inject, &hooks);
     (finished, log.into_inner().unwrap())
 }
@@ -406,36 +415,161 @@ fn missing_factory_skips_the_phase() {
     assert!(matches!(msgs.first(), Some(LoadMessage::Progress(_))));
 }
 
+fn notices(msgs: &[LoadMessage]) -> Vec<(&str, Option<u64>)> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            LoadMessage::Notice(n) => Some((n.code.as_str(), n.value)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn ram_reduction_halves_then_one_per_core_then_skips() {
-    let factory = |_: KernelId| Some(&MemoryFactory as &dyn KernelFactory);
-    // One core with two threads: 2 MiB each, then one thread with 4 MiB.
+    // K10 has the same fallback as K3 and K4.
+    for kernel in [KernelId::K3, KernelId::K4, KernelId::K10] {
+        let factory = |_: KernelId| Some(&MemoryFactory as &dyn KernelFactory);
+        // One core with two threads: 2 MiB each, then one thread with 4 MiB.
+        let (fin, msgs) = run_test(
+            &plan(vec![phase(kernel, Placement::AllLogical, 60)]),
+            &topology(2, 2),
+            &factory,
+            None,
+            &AtomicBool::new(false),
+            &no_hang,
+        );
+        assert_eq!(fin.reason, FinishReason::Completed);
+        assert_eq!(
+            notices(&msgs),
+            [
+                ("ram_reduced", Some(MIB)),
+                ("ram_reduced", Some(2 * MIB)),
+                ("ram_reduced", Some(MIB)),
+                ("ram_insufficient", None),
+            ],
+            "{kernel:?}"
+        );
+        assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("ram_insufficient"));
+    }
+}
+
+/// Records the memory per thread its workers were given.
+struct BudgetFactory(Mutex<Vec<u64>>);
+
+impl KernelFactory for BudgetFactory {
+    fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        Some(Ok(vec![REF]))
+    }
+
+    fn worker(&self, ctx: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
+        self.0.lock().unwrap().push(ctx.budget.ram_per_thread);
+        Ok(Box::new(StallKernel(Arc::new(AtomicBool::new(true)))))
+    }
+}
+
+/// Runs `p` on two single-thread cores with `available` as the free memory; returns the
+/// memory per thread of every worker and the notices.
+fn run_with_memory(p: Phase, available: Option<u64>) -> (Vec<u64>, Vec<(String, Option<u64>)>) {
+    let f = BudgetFactory(Mutex::new(Vec::new()));
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let read = move || available;
+    let hooks = Hooks {
+        factory: &factory,
+        on_hung: &no_hang,
+        available: &read,
+    };
+    let log = Mutex::new(Vec::new());
+    let out = |m: LoadMessage| log.lock().unwrap().push(m);
+    let stop = AtomicBool::new(false);
+    let fin = run_with(&plan(vec![p]), &topology(2, 1), &out, &stop, None, &hooks);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let msgs = log.into_inner().unwrap();
+    let notices = notices(&msgs)
+        .into_iter()
+        .map(|(c, v)| (c.to_owned(), v))
+        .collect();
+    (f.0.into_inner().unwrap(), notices)
+}
+
+#[test]
+fn ram_share_is_capped_by_the_memory_available_at_each_set() {
+    let mut p = phase(KernelId::K10, Placement::AllLogical, 1);
+    p.size = DataSize::Ram;
+    // Plan share 4 MiB on 2 workers: 2 MiB each.
+    for (available, per_thread, notice) in [
+        // 2 GiB + 2 MiB free: 1 MiB each, with a notice.
+        (Some((2 << 30) + 2 * MIB), MIB, Some(MIB)),
+        // Plenty free: never above the plan's share.
+        (Some(64 << 30), 2 * MIB, None),
+        (None, 2 * MIB, None),
+    ] {
+        let (budgets, notices) = run_with_memory(p.clone(), available);
+        assert_eq!(budgets, [per_thread; 2], "{available:?}");
+        let want: Vec<_> = notice
+            .map(|v| ("ram_reduced".to_owned(), Some(v)))
+            .into_iter()
+            .collect();
+        assert_eq!(notices, want, "{available:?}");
+    }
+}
+
+#[test]
+fn ram_cap_leaves_phases_without_ram_alone() {
+    let (budgets, notices) =
+        run_with_memory(phase(KernelId::K2, Placement::AllLogical, 1), Some(0));
+    assert!(notices.is_empty());
+    assert_eq!(budgets, [2 * MIB; 2]);
+}
+
+#[test]
+fn core_cycle_without_cores_is_skipped_as_no_cpu() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let mut p = phase(KernelId::K2, Placement::CoreCycle, 60);
+    p.per_core_s = Some(30);
+    p.cores = Some(vec![9]); // not a core of this machine
+    let started = Instant::now();
     let (fin, msgs) = run_test(
-        &plan(vec![phase(KernelId::K3, Placement::AllLogical, 60)]),
-        &topology(2, 2),
+        &plan(vec![p]),
+        &topology(2, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!((fin.reason, fin.checks), (FinishReason::Completed, 0));
+    assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("no_cpu"));
+}
+
+#[test]
+fn parked_processors_take_part_in_core_cycle() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let mut t = topology(2, 1);
+    t.logical[1].parked = true;
+    let mut p = phase(KernelId::K2, Placement::CoreCycle, 2);
+    p.per_core_s = Some(1);
+    let (fin, msgs) = run_test(
+        &plan(vec![p]),
+        &t,
         &factory,
         None,
         &AtomicBool::new(false),
         &no_hang,
     );
     assert_eq!(fin.reason, FinishReason::Completed);
-    let notices: Vec<_> = msgs
+    let cores: Vec<_> = last_progress(&msgs)
+        .cores
         .iter()
-        .filter_map(|m| match m {
-            LoadMessage::Notice(n) => Some((n.code.as_str(), n.value)),
-            _ => None,
-        })
+        .map(|c| (c.core, c.state))
         .collect();
+    assert_eq!(cores, [(0, CoreState::Passed), (1, CoreState::Passed)]);
     assert_eq!(
-        notices,
-        [
-            ("ram_reduced", Some(MIB)),
-            ("ram_reduced", Some(2 * MIB)),
-            ("ram_reduced", Some(MIB)),
-            ("ram_insufficient", None),
-        ]
+        f.created.load(Ordering::Relaxed),
+        2,
+        "a worker on each core"
     );
-    assert_eq!(done(&msgs)[0].skipped.as_deref(), Some("ram_insufficient"));
 }
 
 #[test]

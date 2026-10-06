@@ -49,3 +49,18 @@ pub fn asleep_ms() -> u64 {
         0
     }
 }
+
+/// The physical memory available now, in bytes (DA10); `None` when it cannot be read.
+pub fn available_memory() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        oma_win::memory::memory_status()
+            .map_err(|e| tracing::warn!(error = %e, "cannot read the available memory"))
+            .ok()
+            .map(|(_, available)| available)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}

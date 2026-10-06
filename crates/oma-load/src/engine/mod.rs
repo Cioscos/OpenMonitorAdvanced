@@ -23,10 +23,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use oma_core::load::KEEP_FREE_BYTES;
 use oma_ipc::load::{
-    ComputeError, CoreProgress, CoreState, ErrorKind, FinishReason, Finished, Isa, KernelId,
-    LoadMessage, LoadMode, LogicalCpu, Notice, Phase, PhaseDone, Placement, Plan, Progress,
-    Topology,
+    ComputeError, CoreProgress, CoreState, DataSize, ErrorKind, FinishReason, Finished, Isa,
+    KernelId, LoadMessage, LoadMode, LogicalCpu, Notice, Phase, PhaseDone, Placement, Plan,
+    Progress, Topology,
 };
 
 use crate::args::Inject;
@@ -44,6 +45,8 @@ pub struct Hooks<'h, 'f> {
     /// Called by the sentinel after it sent `Error { hung }` and `Finished { failed }`:
     /// the process exits, since a hung thread cannot be stopped.
     pub on_hung: &'h (dyn Fn() + Sync),
+    /// The physical memory available now, in bytes; `None` when it cannot be read.
+    pub available: &'h (dyn Fn() -> Option<u64> + Sync),
 }
 
 /// How often the engine thread looks at the clock, the stop flag and the errors.
@@ -75,6 +78,7 @@ pub fn run(
     let hooks = Hooks {
         factory: &crate::kernel::factory,
         on_hung: &exit,
+        available: &crate::sys::available_memory,
     };
     run_with(plan, topology, out, stop, inject, &hooks)
 }
@@ -471,6 +475,7 @@ impl Engine<'_, '_> {
         let per_core = Duration::from_secs(spec.per_core_s.unwrap_or(spec.duration_s).into());
         let both = spec.both_smt && spec.mode != LoadMode::Light;
         let mut from = 0;
+        let mut ran = false;
         while Instant::now() < deadline {
             let Some(i) = schedule::next_core(&cores, from, |c| self.is_failed(c)) else {
                 break;
@@ -478,6 +483,7 @@ impl Engine<'_, '_> {
             from = i + 1;
             let core = cores[i];
             let cpus = schedule::core_cpus(self.topology, core, both);
+            ran = true;
             let before = cur.state(core);
             cur.set_state(core, CoreState::Testing);
             cur.current_core = Some(core);
@@ -499,7 +505,12 @@ impl Engine<'_, '_> {
                 other => return other,
             }
         }
-        End::Done
+        // No slice ran: no core to cycle through, never a phase passed without a check.
+        if ran {
+            End::Done
+        } else {
+            End::Skipped("no_cpu")
+        }
     }
 
     /// Runs one set on `cpus` until `deadline`, starting it again smaller when memory is
@@ -524,6 +535,17 @@ impl Engine<'_, '_> {
             let mut budget = ThreadBudget::for_workers(self.topology, &cpus, self.plan.ram_bytes);
             if let Some(cap) = memo.ram_cap {
                 budget.ram_per_thread = budget.ram_per_thread.min(cap);
+            }
+            // The memory may have gone since the plan was built: each set leaves 2 GiB free.
+            if uses_ram(pr.spec) {
+                if let Some(available) = (self.hooks.available)() {
+                    let cap = available.saturating_sub(KEEP_FREE_BYTES) / cpus.len().max(1) as u64;
+                    if cap < budget.ram_per_thread {
+                        self.notice(pr, "ram_reduced", Some(cap));
+                        budget.ram_per_thread = cap;
+                        memo.ram_cap = Some(cap);
+                    }
+                }
             }
             match self.attempt(cur, pr, memo, &cpus, budget, deadline) {
                 Attempt::End(end) => return end,
@@ -582,7 +604,7 @@ impl Engine<'_, '_> {
             return Attempt::Reduce(b);
         }
         let reducible = schedule::one_per_core(cpus).len() < cpus.len();
-        if matches!(pr.spec.kernel, KernelId::K3 | KernelId::K4) && reducible {
+        if matches!(pr.spec.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10) && reducible {
             return Attempt::OnePerCore;
         }
         self.notice(pr, "ram_insufficient", None);
@@ -1108,6 +1130,11 @@ impl Engine<'_, '_> {
         }
         (self.hooks.on_hung)();
     }
+}
+
+/// Whether a phase sizes its data from the RAM share (DA9, DA10).
+fn uses_ram(spec: &Phase) -> bool {
+    matches!(spec.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10) || spec.size == DataSize::Ram
 }
 
 /// The first entry where a vector of `values` differs from the first one: (expected,

@@ -70,6 +70,13 @@ fn main() {
             "performance_delete",
             "performance_export",
             "performance_quit_confirmed",
+            "performance_bench_start",
+            "performance_bench_stop",
+            "performance_bench_status",
+            "performance_scores",
+            "performance_score",
+            "performance_score_delete",
+            "performance_baseline",
         ]),
     ))
     .expect("Tauri build")

@@ -60,6 +60,9 @@ pub enum PerformancePage {
     Quit,
     /// A saved session's result.
     Result,
+    /// The CPU benchmark (M8a2): the one in progress, or the last scores.
+    #[serde(rename = "score-cpu")]
+    ScoreCpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,6 +84,13 @@ impl PerformanceNav {
     pub fn quit() -> Self {
         Self {
             page: PerformancePage::Quit,
+            session_id: None,
+        }
+    }
+
+    pub fn score_cpu() -> Self {
+        Self {
+            page: PerformancePage::ScoreCpu,
             session_id: None,
         }
     }
@@ -362,7 +372,8 @@ pub enum QuitAction {
 
 /// The tray asks first while a stress test runs (that answer ends in a new
 /// quit), then while the editor holds unsaved changes; `--quit` never asks,
-/// so the installer can always close the app (DD13, DA16).
+/// so the installer can always close the app (DD13, DA16). A CPU benchmark
+/// never asks: the exit stops it and saves nothing (DB9).
 pub fn quit_action(
     source: QuitSource,
     editor_open: bool,
@@ -388,7 +399,7 @@ pub fn quit(app: &AppHandle, source: QuitSource) {
         .is_some_and(|s| s.dirty.load(Ordering::Acquire));
     let test_running = app
         .try_state::<Arc<PerformanceRunner>>()
-        .is_some_and(|runner| runner.is_running());
+        .is_some_and(|runner| runner.stress_running());
     match quit_action(source, open, dirty, test_running) {
         QuitAction::Exit => app.exit(0),
         QuitAction::AskPerformance => {

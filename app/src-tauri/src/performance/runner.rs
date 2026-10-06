@@ -1,4 +1,5 @@
-//! The stress test runner (M8a1): one test at a time, on its own thread
+//! The stress test runner (M8a1): one test at a time (the CPU benchmark of
+//! [`super::bench`] shares the slot, DB8), on its own thread
 //! (`oma-perf-runner`), driving the pure `RunController` with the helper's
 //! messages, the sampler's CPU readings, WHEA polls and a 250 ms clock, and
 //! executing its `Action`s: pipe, Job, store, toast.
@@ -24,6 +25,7 @@ use oma_core::load::{
     SensorSample, Session, StartRequest, VerdictKey, WheaEvent, FORMAT,
 };
 use oma_core::model::Schema;
+use oma_core::scores::BenchStatus;
 use oma_ipc::load::{Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology};
 
 use super::host::{HostEvent, StartFailure};
@@ -37,12 +39,12 @@ use crate::tray::language_for;
 /// test, only while a window is open; the payload is a [`RunStatus`].
 pub const EVENT_STATUS: &str = "performance-status";
 
-const TICK: Duration = Duration::from_millis(250);
+pub(super) const TICK: Duration = Duration::from_millis(250);
 const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// How long an `Exited` waits for the pipe's `Closed` (the messages before it).
-const EXIT_GRACE: Duration = Duration::from_secs(1);
+pub(super) const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// Samples waiting for the thread; more are dropped, the sampler never waits.
-const SAMPLE_QUEUE: usize = 4;
+pub(super) const SAMPLE_QUEUE: usize = 4;
 
 /// The helper as the runner drives it: [`super::host::LoadHost`], or a script in the tests.
 pub trait LoadLink {
@@ -97,6 +99,11 @@ pub trait Machine: Send + Sync {
     fn whea_after(&self, after: Option<u64>) -> io::Result<Vec<WheaEvent>>;
     /// Time the PC has slept since boot (DA15).
     fn asleep_ms(&self) -> u64;
+    /// Whether the PC runs on battery; `None` when unknown.
+    fn on_battery(&self) -> Option<bool>;
+    /// Polls the other processes' share of the whole CPU (0-1); each call is
+    /// one poll, the first may give `None`. Made and used on the runner's thread.
+    fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>>;
 }
 
 /// This PC.
@@ -130,6 +137,20 @@ impl Machine for WinMachine {
     fn asleep_ms(&self) -> u64 {
         oma_win::power::asleep_ms()
     }
+
+    fn on_battery(&self) -> Option<bool> {
+        oma_win::power::on_battery()
+    }
+
+    fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
+        match oma_win::proc_cpu::OtherCpu::open() {
+            Ok(mut other) => Box::new(move || other.sample(logical)),
+            Err(err) => {
+                tracing::warn!(%err, "other processes' CPU unreadable");
+                Box::new(|| None)
+            }
+        }
+    }
 }
 
 /// What the runner is given.
@@ -145,16 +166,22 @@ pub struct RunnerDeps {
     pub service_available: Box<dyn Fn() -> bool + Send + Sync>,
     /// Whether the main window, the only one with the Performance view, is open.
     pub window_open: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Whether it is open, shown and not minimised (the benchmark toast, DB9).
+    pub window_visible: Box<dyn Fn() -> bool + Send + Sync>,
     /// Sends [`EVENT_STATUS`]; called only while a window is open.
     pub emit: Box<dyn Fn(&RunStatus) + Send + Sync>,
     /// Every state change, window or not (the tray).
     pub on_state: Box<dyn Fn(&RunStatus) + Send + Sync>,
+    /// Sends [`super::bench::EVENT_BENCH`]; called only while a window is open.
+    pub emit_bench: Box<dyn Fn(&BenchStatus) + Send + Sync>,
+    /// Every benchmark state change, window or not (the tray).
+    pub on_bench: Box<dyn Fn(&BenchStatus) + Send + Sync>,
     pub app_version: String,
 }
 
 #[derive(Debug)]
 pub enum StartError {
-    /// A test is already running.
+    /// A stress test or a benchmark is already running.
     Busy,
     Plan(BuildError),
     /// The topology, the session id or the thread could not be had.
@@ -164,7 +191,7 @@ pub enum StartError {
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Busy => write!(f, "a stress test is already running"),
+            Self::Busy => write!(f, "a test is already running"),
             Self::Plan(e) => write!(f, "{e}"),
             Self::System(e) => write!(f, "{e}"),
         }
@@ -208,47 +235,51 @@ pub struct SystemInfo {
 
 /// Asks the thread to stop; `deadline` bounds the wait for the helper (DA16).
 #[derive(Default)]
-struct Control {
-    stop: AtomicBool,
-    deadline: Mutex<Option<Instant>>,
+pub(super) struct Control {
+    pub(super) stop: AtomicBool,
+    pub(super) deadline: Mutex<Option<Instant>>,
 }
 
 impl Control {
-    fn deadline(&self) -> Option<Instant> {
+    pub(super) fn deadline(&self) -> Option<Instant> {
         *self.deadline.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// The test in progress (or the last one, its thread finished).
-struct Active {
-    thread: JoinHandle<()>,
-    control: Arc<Control>,
-    samples: SyncSender<(SensorSample, bool)>,
+/// The test or benchmark in progress (or the last one, its thread finished).
+pub(super) struct Active {
+    pub(super) thread: JoinHandle<()>,
+    pub(super) control: Arc<Control>,
+    pub(super) samples: SyncSender<(SensorSample, bool)>,
     /// Physical cores, for the per-core clocks.
-    cores: usize,
+    pub(super) cores: usize,
     /// The schema revision the ids were resolved on.
-    sensors: Option<(u64, CpuSensorIds)>,
+    pub(super) sensors: Option<(u64, CpuSensorIds)>,
+    /// The CPU benchmark, not a stress test.
+    pub(super) bench: bool,
 }
 
 impl Active {
-    fn running(&self) -> bool {
+    pub(super) fn running(&self) -> bool {
         !self.thread.is_finished()
     }
 }
 
 pub struct PerformanceRunner {
-    deps: Arc<RunnerDeps>,
-    active: Mutex<Option<Active>>,
+    pub(super) deps: Arc<RunnerDeps>,
+    pub(super) active: Mutex<Option<Active>>,
     status: Arc<Mutex<RunStatus>>,
+    /// The benchmark in progress or the last one; `None` before any.
+    pub(super) bench_status: Arc<Mutex<Option<BenchStatus>>>,
     /// The journal of an earlier run is turned into a session before any start.
     recovery: Once,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn unix_now_ms() -> i64 {
+pub(super) fn unix_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -284,7 +315,7 @@ fn idle_status() -> RunStatus {
 }
 
 /// Core numbers run from 0 (DA4): the highest plus one.
-fn core_count(topology: &Topology) -> usize {
+pub(super) fn core_count(topology: &Topology) -> usize {
     topology
         .logical
         .iter()
@@ -293,8 +324,22 @@ fn core_count(topology: &Topology) -> usize {
         .unwrap_or(0)
 }
 
+/// The uuid's first 64 bits are random enough for the data seed.
+pub(super) fn seed_of(id: &str) -> u64 {
+    u64::from_str_radix(&id.replace('-', "")[..16], 16).unwrap_or(1)
+}
+
+/// The clock of a runner thread started at `epoch`.
+pub(super) fn clock_at(epoch: Instant, machine: &dyn Machine) -> Clock {
+    Clock {
+        mono_ms: epoch.elapsed().as_millis() as u64,
+        wall_ms: unix_now_ms(),
+        asleep_ms: machine.asleep_ms(),
+    }
+}
+
 /// The `Run` message of `plan`, refused when it would not pass the helper's validation.
-fn plan_message(plan: Plan) -> Result<LoadMessage, StartFailure> {
+pub(super) fn plan_message(plan: Plan) -> Result<LoadMessage, StartFailure> {
     let msg = LoadMessage::Run(RunRequest { plan });
     msg.validate().map_err(|err| {
         tracing::error!(%err, "the stress plan is not valid");
@@ -377,6 +422,7 @@ impl PerformanceRunner {
             deps: Arc::new(deps),
             active: Mutex::new(None),
             status: Arc::new(Mutex::new(idle_status())),
+            bench_status: Arc::new(Mutex::new(None)),
             recovery: Once::new(),
         }
     }
@@ -499,8 +545,7 @@ impl PerformanceRunner {
         }
         let id = oma_win::overlay_pipe::random_uuid_v4()
             .map_err(|e| StartError::System(e.to_string()))?;
-        // The uuid's first 64 bits are random enough for the data seed.
-        let seed = u64::from_str_radix(&id.replace('-', "")[..16], 16).unwrap_or(1);
+        let seed = seed_of(&id);
         let (topology, plan) = self.plan(&request, seed)?;
         let perf = self.deps.settings.snapshot().performance.clone();
         let tjmax_c = resolve_cpu_sensors(&(self.deps.schema)(), 0).tjmax_c;
@@ -588,11 +633,13 @@ impl PerformanceRunner {
             samples,
             cores: core_count(&topology),
             sensors: None,
+            bench: false,
         });
         Ok(id)
     }
 
-    /// Asks the test in progress to stop (saved as `stopped_user`).
+    /// Asks the test or benchmark in progress to stop (a test is saved as
+    /// `stopped_user`, a benchmark not at all); the tray's «Stop the test».
     pub fn stop(&self) {
         if let Some(a) = lock(&self.active).as_ref() {
             a.control.stop.store(true, Ordering::Release);
@@ -604,8 +651,22 @@ impl PerformanceRunner {
         lock(&self.status).clone()
     }
 
+    /// A stress test or a benchmark is in progress.
     pub fn is_running(&self) -> bool {
         lock(&self.active).as_ref().is_some_and(Active::running)
+    }
+
+    /// A stress test (not a benchmark) is in progress: only it asks before quitting.
+    pub fn stress_running(&self) -> bool {
+        lock(&self.active)
+            .as_ref()
+            .is_some_and(|a| a.running() && !a.bench)
+    }
+
+    pub fn bench_running(&self) -> bool {
+        lock(&self.active)
+            .as_ref()
+            .is_some_and(|a| a.running() && a.bench)
     }
 
     /// The CPU reading of a sampler tick for the test in progress. Never
@@ -630,7 +691,8 @@ impl PerformanceRunner {
             .try_send((sample, (self.deps.service_available)()));
     }
 
-    /// Stops the test in progress and waits for its session to be saved:
+    /// Stops the test or benchmark in progress and waits for its thread
+    /// (a benchmark saves nothing):
     /// `Stop`, the helper's answer for at most `timeout`, then the Job kills
     /// it (DA16). No toast: the app is going away.
     ///
@@ -677,11 +739,7 @@ struct Driver<'a> {
 
 impl Worker {
     fn clock(&self) -> Clock {
-        Clock {
-            mono_ms: self.epoch.elapsed().as_millis() as u64,
-            wall_ms: unix_now_ms(),
-            asleep_ms: self.deps.machine.asleep_ms(),
-        }
+        clock_at(self.epoch, self.deps.machine.as_ref())
     }
 
     fn lang(&self) -> Lang {
@@ -916,7 +974,7 @@ impl Driver<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
@@ -941,9 +999,9 @@ mod tests {
         assert_eq!(StartError::System("no pipe".into()).wire(), "no pipe");
     }
 
-    const CORES: u32 = 4;
+    pub(crate) const CORES: u32 = 4;
 
-    fn topology() -> Topology {
+    pub(crate) fn topology() -> Topology {
         Topology {
             logical: (0..CORES)
                 .map(|core| LogicalCpu {
@@ -972,9 +1030,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeMachine {
+    pub(crate) struct FakeMachine {
         /// The time asleep it reports; a script moves it on.
-        asleep: Arc<AtomicU64>,
+        pub(crate) asleep: Arc<AtomicU64>,
+        pub(crate) battery: Option<bool>,
+        /// What each poll of the other processes' CPU share gives.
+        pub(crate) busy: Option<f64>,
     }
 
     impl Machine for FakeMachine {
@@ -996,22 +1057,29 @@ mod tests {
         fn asleep_ms(&self) -> u64 {
             self.asleep.load(Ordering::SeqCst)
         }
+        fn on_battery(&self) -> Option<bool> {
+            self.battery
+        }
+        fn busy_probe(&self, _logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
+            let busy = self.busy;
+            Box::new(move || busy)
+        }
     }
 
     /// The helper's answers: what it sends after `Run`, and after `Stop`.
     #[derive(Clone, Default)]
-    struct Script {
-        on_run: Vec<LoadMessage>,
-        on_stop: Vec<LoadMessage>,
+    pub(crate) struct Script {
+        pub(crate) on_run: Vec<LoadMessage>,
+        pub(crate) on_stop: Vec<LoadMessage>,
         /// After the messages: `Closed`, then `Exited(Some(0))`.
-        exit_after_run: bool,
-        exit_after_stop: bool,
+        pub(crate) exit_after_run: bool,
+        pub(crate) exit_after_stop: bool,
         /// Plays the `Run` answer from a thread, one message per interval.
-        spread: Option<Duration>,
+        pub(crate) spread: Option<Duration>,
         /// What the helper received, by name.
-        received: Arc<Mutex<Vec<&'static str>>>,
+        pub(crate) received: Arc<Mutex<Vec<&'static str>>>,
         /// Set to this much time asleep when `Run` arrives, before the answer.
-        sleep_on_run: Option<(Arc<AtomicU64>, u64)>,
+        pub(crate) sleep_on_run: Option<(Arc<AtomicU64>, u64)>,
     }
 
     struct FakeLink {
@@ -1073,7 +1141,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct Toasts(Arc<Mutex<Vec<(String, String, String)>>>);
+    pub(crate) struct Toasts(pub(crate) Arc<Mutex<Vec<(String, String, String)>>>);
 
     impl ToastSink for Toasts {
         fn show(&self, title: String, body: String, launch: String) {
@@ -1081,11 +1149,17 @@ mod tests {
         }
     }
 
-    struct Rig {
-        runner: PerformanceRunner,
-        toasts: Toasts,
-        emitted: Arc<AtomicUsize>,
-        window: Arc<AtomicBool>,
+    pub(crate) struct Rig {
+        pub(crate) runner: PerformanceRunner,
+        pub(crate) toasts: Toasts,
+        pub(crate) emitted: Arc<AtomicUsize>,
+        pub(crate) window: Arc<AtomicBool>,
+        /// Whether the main window is visible (the bench toast).
+        pub(crate) visible: Arc<AtomicBool>,
+        /// Benchmark events sent to the window.
+        pub(crate) bench_emitted: Arc<AtomicUsize>,
+        /// The tray's benchmark mark, as the last state change left it.
+        pub(crate) bench_mark: Arc<AtomicBool>,
         /// Last: removed after the runner is gone.
         _dir: TempDir,
     }
@@ -1112,17 +1186,21 @@ mod tests {
         }
     }
 
-    fn rig_with(name: &str, launcher: Launcher) -> Rig {
+    pub(crate) fn rig_with(name: &str, launcher: Launcher) -> Rig {
         rig_on(name, launcher, FakeMachine::default())
     }
 
-    fn rig_on(name: &str, launcher: Launcher, machine: FakeMachine) -> Rig {
+    pub(crate) fn rig_on(name: &str, launcher: Launcher, machine: FakeMachine) -> Rig {
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         settings.update_with(|s| s.general.language = Language::En);
         let toasts = Toasts::default();
         let emitted = Arc::new(AtomicUsize::new(0));
         let window = Arc::new(AtomicBool::new(true));
-        let (e, w) = (emitted.clone(), window.clone());
+        let visible = Arc::new(AtomicBool::new(true));
+        let bench_emitted = Arc::new(AtomicUsize::new(0));
+        let bench_mark = Arc::new(AtomicBool::new(false));
+        let (e, w, v) = (emitted.clone(), window.clone(), visible.clone());
+        let (be, bm) = (bench_emitted.clone(), bench_mark.clone());
         let dir = TempDir::new(name);
         let runner = PerformanceRunner::new(RunnerDeps {
             store: Arc::new(PerformanceStore::new(dir.0.clone())),
@@ -1137,10 +1215,20 @@ mod tests {
             }),
             service_available: Box::new(|| false),
             window_open: Box::new(move || w.load(Ordering::SeqCst)),
+            window_visible: Box::new(move || v.load(Ordering::SeqCst)),
             emit: Box::new(move |_| {
                 e.fetch_add(1, Ordering::SeqCst);
             }),
             on_state: Box::new(|_| {}),
+            emit_bench: Box::new(move |_| {
+                be.fetch_add(1, Ordering::SeqCst);
+            }),
+            on_bench: Box::new(move |status| {
+                bm.store(
+                    crate::tray::TestMark::from_bench(status).is_some(),
+                    Ordering::SeqCst,
+                );
+            }),
             app_version: "0.0.0-test".into(),
         });
         Rig {
@@ -1148,11 +1236,14 @@ mod tests {
             toasts,
             emitted,
             window,
+            visible,
+            bench_emitted,
+            bench_mark,
             _dir: dir,
         }
     }
 
-    fn scripted(script: Script) -> Launcher {
+    pub(crate) fn scripted(script: Script) -> Launcher {
         Box::new(move |tx| {
             Ok(Box::new(FakeLink {
                 script: script.clone(),
@@ -1167,7 +1258,7 @@ mod tests {
         })
     }
 
-    fn request() -> StartRequest {
+    pub(crate) fn request() -> StartRequest {
         StartRequest {
             component: Component::Cpu,
             objective: Objective::Normal,
@@ -1177,7 +1268,7 @@ mod tests {
         }
     }
 
-    fn progress(phase: u32) -> LoadMessage {
+    pub(crate) fn progress(phase: u32) -> LoadMessage {
         LoadMessage::Progress(Progress {
             phase,
             phase_elapsed_ms: 0,
@@ -1191,7 +1282,7 @@ mod tests {
         })
     }
 
-    fn finished(reason: FinishReason, errors: u64) -> LoadMessage {
+    pub(crate) fn finished(reason: FinishReason, errors: u64) -> LoadMessage {
         LoadMessage::Finished(Finished {
             reason,
             checks: 10,
@@ -1200,7 +1291,7 @@ mod tests {
     }
 
     /// Waits (at most 3 s) for the runner's thread to end.
-    fn wait_idle(runner: &PerformanceRunner) {
+    pub(crate) fn wait_idle(runner: &PerformanceRunner) {
         let until = Instant::now() + Duration::from_secs(3);
         while runner.is_running() {
             assert!(Instant::now() < until, "the runner did not finish");
@@ -1223,7 +1314,7 @@ mod tests {
     }
 
     /// A launcher that waits until `release` is sent, then plays `script`.
-    fn gated(script: Script) -> (Launcher, mpsc::Sender<()>) {
+    pub(crate) fn gated(script: Script) -> (Launcher, mpsc::Sender<()>) {
         let (release, wait) = mpsc::channel::<()>();
         let wait = Mutex::new(wait);
         let inner = scripted(script);
@@ -1235,7 +1326,7 @@ mod tests {
     }
 
     /// A launcher that waits until `release` is sent, then fails.
-    fn blocked() -> (Launcher, mpsc::Sender<()>) {
+    pub(crate) fn blocked() -> (Launcher, mpsc::Sender<()>) {
         let (release, wait) = mpsc::channel::<()>();
         let wait = Mutex::new(wait);
         let launcher: Launcher = Box::new(move |_tx| {
@@ -1515,6 +1606,12 @@ mod tests {
             fn asleep_ms(&self) -> u64 {
                 0
             }
+            fn on_battery(&self) -> Option<bool> {
+                None
+            }
+            fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
+                self.0.busy_probe(logical)
+            }
         }
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         let dir = TempDir::new("baseline");
@@ -1535,8 +1632,11 @@ mod tests {
             }),
             service_available: Box::new(|| false),
             window_open: Box::new(|| false),
+            window_visible: Box::new(|| false),
             emit: Box::new(|_| {}),
             on_state: Box::new(|_| {}),
+            emit_bench: Box::new(|_| {}),
+            on_bench: Box::new(|_| {}),
             app_version: "0.0.0-test".into(),
         });
         runner.start(request()).unwrap();

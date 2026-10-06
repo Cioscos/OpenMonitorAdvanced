@@ -1,6 +1,7 @@
 //! Stress session history, crash journal and recovery (M8a1, spec §8.1, §8.3).
 //!
-//! Sessions live in `<root>\stress\AAAAMMGG-HHMMSS-<uuid>.json`, the journal in
+//! Sessions live in `<root>\stress\AAAAMMGG-HHMMSS-<uuid>.json`, CPU benchmark
+//! scores (M8a2, DB11) in `<root>\scores\` under the same names, the journal in
 //! `<root>\journal.json`. Ids and file names are checked before any path is built,
 //! and a file read back is capped, so a hostile or huge file cannot escape the
 //! folder or blow up memory.
@@ -17,6 +18,7 @@ use oma_core::load::{
     OutcomeFacts, Preset, Session, SessionEvent, SessionSummary, StartRequest, KEEP_SESSIONS,
     MAX_ERRORS,
 };
+use oma_core::scores::{parse_score, score_file_name, ScoreFile, ScoreSummary};
 use oma_ipc::load::Plan;
 use oma_win::eventlog::{EventProvider, SystemEvent};
 
@@ -27,6 +29,8 @@ const MAX_SAMPLES: usize = 20_000;
 const MAX_EVENTS: usize = 1_000;
 /// `crash_evidence` returns at most this many events.
 const EVIDENCE_LIMIT: usize = 100;
+/// Scores kept, like the sessions (DB11).
+const KEEP_SCORES: usize = KEEP_SESSIONS;
 
 pub struct PerformanceStore {
     root: PathBuf,
@@ -55,35 +59,142 @@ impl PerformanceStore {
         self.root.join("journal.attempts")
     }
 
-    /// Valid session file names in the folder, newest first.
     fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(self.dir())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| is_session_file_name(n))
-            .collect();
-        names.sort_unstable_by(|a, b| b.cmp(a));
-        names
+        names_in(&self.dir())
+    }
+
+    pub(crate) fn scores_dir(&self) -> PathBuf {
+        self.root.join("scores")
+    }
+
+    pub(crate) fn score_names(&self) -> Vec<String> {
+        names_in(&self.scores_dir())
+    }
+
+    /// Logs a file skipped by a listing once per run.
+    fn warn_once(&self, key: String, err: &str, what: &str) {
+        if self.warned.lock().is_ok_and(|mut w| w.insert(key.clone())) {
+            tracing::warn!(%err, name = %key, "skipping a {what}");
+        }
     }
 
     fn read(&self, name: &str) -> Result<Session, String> {
-        let path = self.dir().join(name);
-        let len = fs::metadata(&path).map_err(|e| e.to_string())?.len();
-        if len > MAX_FILE_BYTES {
-            return Err(format!("file too large ({len} bytes)"));
-        }
-        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = read_capped(&self.dir().join(name))?;
         let mut s = parse_session(&bytes).map_err(|e| e.to_string())?;
-        // `AAAAMMGG-HHMMSS-` is 16 bytes; `is_session_file_name` checked the form.
-        if name.get(16..name.len() - 5) != Some(s.id.as_str()) {
+        if !id_matches(name, &s.id) {
             return Err("session id does not match the file name".into());
         }
         cap(&mut s);
         Ok(s)
     }
 
+    fn read_score(&self, name: &str) -> Result<ScoreFile, String> {
+        let bytes = read_capped(&self.scores_dir().join(name))?;
+        let mut s = parse_score(&bytes).map_err(|e| e.to_string())?;
+        if !id_matches(name, &s.id) {
+            return Err("score id does not match the file name".into());
+        }
+        s.samples.truncate(MAX_SAMPLES);
+        Ok(s)
+    }
+
+    /// Atomic write (the store's temporary file), then the oldest beyond 500 go.
+    pub fn save_score(&self, score: &ScoreFile) -> io::Result<()> {
+        let name = score_file_name(&score.at, &score.id);
+        if !is_session_file_name(&name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "score id or time out of form",
+            ));
+        }
+        let json = serde_json::to_vec(score).map_err(io::Error::other)?;
+        write_file(&self.scores_dir().join(&name), &json)?;
+        for old in prune(&self.score_names(), KEEP_SCORES) {
+            if old == name {
+                continue;
+            }
+            if let Err(err) = fs::remove_file(self.scores_dir().join(&old)) {
+                tracing::warn!(%err, name = %old, "cannot prune a score");
+            }
+        }
+        Ok(())
+    }
+
+    /// Newest first; unreadable and future-format files are skipped with one
+    /// warning per file and run.
+    pub fn list_scores(&self) -> Vec<ScoreSummary> {
+        let mut out = Vec::new();
+        for name in self.score_names() {
+            match self.read_score(&name) {
+                Ok(s) => out.push(oma_core::scores::summary(&s)),
+                Err(err) => self.warn_once(format!("scores/{name}"), &err, "score"),
+            }
+        }
+        out
+    }
+
+    /// The score file for `id`, found by listing the folder (no path from the id).
+    fn find_score(&self, id: &str) -> io::Result<Option<String>> {
+        check_id(id)?;
+        let suffix = format!("-{id}.json");
+        Ok(self
+            .score_names()
+            .into_iter()
+            .find(|n| n.ends_with(&suffix)))
+    }
+
+    pub fn load_score(&self, id: &str) -> io::Result<Option<ScoreFile>> {
+        match self.find_score(id)? {
+            Some(name) => self.read_score(&name).map(Some).map_err(io::Error::other),
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_score(&self, id: &str) -> io::Result<()> {
+        match self.find_score(id)? {
+            Some(name) => fs::remove_file(self.scores_dir().join(name)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Valid file names (`AAAAMMGG-HHMMSS-<uuid>.json`) in `dir`, newest first.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| is_session_file_name(n))
+        .collect();
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names
+}
+
+/// A file of at most `MAX_FILE_BYTES`.
+fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let len = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len > MAX_FILE_BYTES {
+        return Err(format!("file too large ({len} bytes)"));
+    }
+    fs::read(path).map_err(|e| e.to_string())
+}
+
+/// `AAAAMMGG-HHMMSS-` is 16 bytes; `is_session_file_name` checked the form.
+fn id_matches(name: &str, id: &str) -> bool {
+    name.get(16..name.len() - 5) == Some(id)
+}
+
+/// Ids are accepted only in the lowercase uuid form, before any path is built.
+fn check_id(id: &str) -> io::Result<()> {
+    if is_session_id(id) {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "not an id"))
+    }
+}
+
+impl PerformanceStore {
     /// Atomic write, then the history is pruned to `KEEP_SESSIONS`.
     pub fn save(&self, session: &Session) -> io::Result<()> {
         let name = session_file_name(&session.started_at, &session.id);
@@ -123,12 +234,7 @@ impl PerformanceStore {
         for name in self.names() {
             match self.read(&name) {
                 Ok(s) => out.push(summary(&s)),
-                Err(err) => {
-                    let first = self.warned.lock().is_ok_and(|mut w| w.insert(name.clone()));
-                    if first {
-                        tracing::warn!(%err, %name, "skipping a stress session");
-                    }
-                }
+                Err(err) => self.warn_once(name, &err, "stress session"),
             }
         }
         out
@@ -136,12 +242,7 @@ impl PerformanceStore {
 
     /// The file for `id`, found by listing the folder (no path from the id).
     fn find(&self, id: &str) -> io::Result<Option<String>> {
-        if !is_session_id(id) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a session id",
-            ));
-        }
+        check_id(id)?;
         let suffix = format!("-{id}.json");
         Ok(self.names().into_iter().find(|n| n.ends_with(&suffix)))
     }
@@ -787,5 +888,159 @@ mod tests {
         assert_eq!(l.events.len(), 1_000);
         assert_eq!(l.events_dropped, 5);
         assert_eq!(l.events[0].at_ms, 5);
+    }
+
+    fn score(id: &str, at: &str) -> ScoreFile {
+        ScoreFile {
+            format: oma_core::scores::FORMAT,
+            id: id.into(),
+            at: at.into(),
+            category: "cpu".into(),
+            score_version: "cpu-1".into(),
+            provisional: true,
+            isa: oma_ipc::load::Isa::Avx2,
+            scores: oma_core::scores::Scores {
+                single: Some(1500),
+                multi: Some(9000),
+            },
+            kernels: vec![],
+            device: oma_core::scores::Device {
+                model: "CPU".into(),
+                cores: 8,
+                logical: 16,
+            },
+            flags: vec![],
+            valid: true,
+            scaling: Some(0.75),
+            samples: vec![],
+            app_version: "0.0.0".into(),
+            load_version: None,
+        }
+    }
+
+    #[test]
+    fn scores_round_trip_newest_first() {
+        let store = PerformanceStore::new(temp_dir("scores-rt"));
+        store
+            .save_score(&score(ID, "2026-10-06T14:03:09Z"))
+            .unwrap();
+        store
+            .save_score(&score(&uuid(1), "2026-10-07T10:00:00Z"))
+            .unwrap();
+        let ids: Vec<String> = store.list_scores().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, [uuid(1), ID.to_string()]);
+        assert_eq!(
+            store.load_score(ID).unwrap().unwrap(),
+            score(ID, "2026-10-06T14:03:09Z")
+        );
+        assert!(store.load_score(&uuid(9)).unwrap().is_none());
+        store.delete_score(ID).unwrap();
+        assert!(store.load_score(ID).unwrap().is_none());
+        // Scores and sessions never mix.
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn score_ids_outside_the_uuid_form_are_rejected() {
+        let root = temp_dir("scores-ids");
+        let store = PerformanceStore::new(root.clone());
+        store
+            .save_score(&score(ID, "2026-10-06T14:03:09Z"))
+            .unwrap();
+        // A file outside the scores folder that a bad id could point at.
+        fs::write(root.join("victim.json"), b"{}").unwrap();
+        let before = store.score_names();
+        for bad in [
+            r"..\..\victim",
+            r"..\victim",
+            r"C:\x",
+            "a/b",
+            "",
+            "0B9F6C1E-7D2A-4C53-9A1E-3F5D8E2B7A10",
+        ] {
+            assert_eq!(
+                store.load_score(bad).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                store.delete_score(bad).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        let mut bad = score(ID, "2026-10-06T14:03:09Z");
+        bad.id = r"..\..\victim".into();
+        assert_eq!(
+            store.save_score(&bad).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(store.score_names(), before);
+        assert!(root.join("victim.json").exists());
+    }
+
+    #[test]
+    fn corrupt_and_future_scores_are_skipped() {
+        let store = PerformanceStore::new(temp_dir("scores-bad"));
+        store
+            .save_score(&score(ID, "2026-10-06T14:03:09Z"))
+            .unwrap();
+        let dir = store.scores_dir();
+        // Truncated JSON.
+        let truncated = serde_json::to_string(&score(&uuid(1), "2026-10-07T10:00:00Z")).unwrap();
+        let name = score_file_name("2026-10-07T10:00:00Z", &uuid(1));
+        write_file(
+            &dir.join(name),
+            &truncated.as_bytes()[..truncated.len() / 2],
+        )
+        .unwrap();
+        // A future format.
+        let mut v = serde_json::to_value(score(&uuid(2), "2026-10-08T10:00:00Z")).unwrap();
+        v["format"] = 2.into();
+        let name = score_file_name("2026-10-08T10:00:00Z", &uuid(2));
+        write_file(&dir.join(name), v.to_string().as_bytes()).unwrap();
+        // The id inside does not match the file name.
+        let name = score_file_name("2026-10-09T10:00:00Z", &uuid(3));
+        let other = serde_json::to_vec(&score(&uuid(4), "2026-10-09T10:00:00Z")).unwrap();
+        write_file(&dir.join(name), &other).unwrap();
+
+        let ids: Vec<String> = store.list_scores().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, [ID.to_string()]);
+        assert_eq!(store.warned.lock().unwrap().len(), 3);
+        store.list_scores();
+        assert_eq!(
+            store.warned.lock().unwrap().len(),
+            3,
+            "one warning per file"
+        );
+        assert!(store.load_score(&uuid(2)).is_err());
+    }
+
+    #[test]
+    fn scores_are_pruned_to_500() {
+        let store = PerformanceStore::new(temp_dir("scores-prune"));
+        for i in 0..502u32 {
+            let at = format!("2026-01-01T00:{:02}:{:02}Z", i / 60, i % 60);
+            let s = score(&uuid(i), &at);
+            // Written directly: `save_score` would prune on every call.
+            let name = score_file_name(&s.at, &s.id);
+            write_file(
+                &store.scores_dir().join(name),
+                &serde_json::to_vec(&s).unwrap(),
+            )
+            .unwrap();
+        }
+        store
+            .save_score(&score(&uuid(502), "2026-01-01T09:00:00Z"))
+            .unwrap();
+        let names = store.score_names();
+        assert_eq!(names.len(), 500);
+        assert!(!names
+            .iter()
+            .any(|n| n.ends_with(&format!("{}.json", uuid(2)))));
+        assert!(names
+            .iter()
+            .any(|n| n.ends_with(&format!("{}.json", uuid(3)))));
+        assert!(names
+            .iter()
+            .any(|n| n.ends_with(&format!("{}.json", uuid(502)))));
     }
 }

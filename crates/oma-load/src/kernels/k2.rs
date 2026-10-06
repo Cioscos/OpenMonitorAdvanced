@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use oma_ipc::load::DataSize;
 
-use super::fft::{alloc_f64, digest, Fft};
+use super::fft::{alloc_f64, digest, F64Buf, Fft};
 use crate::kernel::{
     Check, Kernel, KernelError, KernelFactory, PhaseShared, RefFailure, WorkerCtx,
 };
@@ -74,6 +74,11 @@ pub(crate) fn n_ram(share: u64) -> usize {
     pow2_floor(share / BYTES_PER_POINT, 64)
 }
 
+/// The smallest memory per thread DA10 reduces to.
+pub(crate) fn floor() -> u64 {
+    limits().1
+}
+
 /// DA10: half of what was tried, or `Insufficient` when that would go below the floor.
 pub(crate) fn memory_error(tried: u64) -> KernelError {
     match tried / 2 {
@@ -86,10 +91,10 @@ pub(crate) fn memory_error(tried: u64) -> KernelError {
 /// and the transform. The current size `n` can change (K4); the buffers are prefixes.
 pub(crate) struct FftCore {
     fft: Fft,
-    in_re: Vec<f64>,
-    in_im: Vec<f64>,
-    re: Vec<f64>,
-    im: Vec<f64>,
+    in_re: F64Buf,
+    in_im: F64Buf,
+    re: F64Buf,
+    im: F64Buf,
     n: usize,
     seed: u64,
     shared: Arc<PhaseShared>,

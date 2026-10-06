@@ -9,6 +9,7 @@ use std::arch::x86_64::*;
 use oma_ipc::load::Isa;
 
 use crate::kernel::KernelError;
+use crate::sys::memory::Region;
 
 type Stage = unsafe fn(*mut f64, *mut f64, usize, usize, *const f64, *const f64);
 
@@ -16,18 +17,59 @@ pub struct Fft {
     max_n: usize,
     lanes: usize,
     stage: Stage,
-    tw_re: Vec<f64>,
-    tw_im: Vec<f64>,
+    tw_re: F64Buf,
+    tw_im: F64Buf,
+}
+
+/// Buffers above this many bytes come from `Region` (VirtualAlloc), below from the heap.
+const REGION_ABOVE: usize = 64 << 20;
+
+/// A zeroed f64 buffer: a `Vec` when small, a `Region` when big.
+pub enum F64Buf {
+    Heap(Vec<f64>),
+    Region(Region),
+}
+
+impl std::ops::Deref for F64Buf {
+    type Target = [f64];
+    fn deref(&self) -> &[f64] {
+        match self {
+            Self::Heap(v) => v,
+            Self::Region(r) => {
+                let s = r.as_slice();
+                // SAFETY: u64 and f64 have the same size and alignment, and every bit
+                // pattern is a valid f64.
+                unsafe { std::slice::from_raw_parts(s.as_ptr().cast(), s.len()) }
+            }
+        }
+    }
+}
+
+impl std::ops::DerefMut for F64Buf {
+    fn deref_mut(&mut self) -> &mut [f64] {
+        match self {
+            Self::Heap(v) => v,
+            Self::Region(r) => {
+                let s = r.as_mut_slice();
+                // SAFETY: as in `deref`; `&mut self` makes this the only access.
+                unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len()) }
+            }
+        }
+    }
 }
 
 /// `len` zeroed f64, or `Err` when the memory is not there (never aborts). The one place
 /// the FFT kernels allocate their big buffers.
-pub fn alloc_f64(len: usize) -> Result<Vec<f64>, KernelError> {
+pub fn alloc_f64(len: usize) -> Result<F64Buf, KernelError> {
+    let bytes = len.checked_mul(8).ok_or(KernelError::Insufficient)?;
+    if bytes > REGION_ABOVE {
+        return Region::alloc(bytes as u64).map(F64Buf::Region);
+    }
     let mut v = Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| KernelError::Insufficient)?;
     v.resize(len, 0.0);
-    Ok(v)
+    Ok(F64Buf::Heap(v))
 }
 
 impl Fft {
@@ -43,7 +85,9 @@ impl Fft {
             Isa::Sse2 => (2, stage_sse2),
             _ => return Err(KernelError::Unsupported),
         };
-        let (mut tw_re, mut tw_im) = (alloc_f64(n)?, alloc_f64(n)?);
+        let (mut tw_re_buf, mut tw_im_buf) = (alloc_f64(n)?, alloc_f64(n)?);
+        // One deref, not one per element (a call per access in a debug build).
+        let (tw_re, tw_im) = (&mut tw_re_buf[..], &mut tw_im_buf[..]);
         // The top stage from the formula, the others are every other entry of the one above.
         let top = n / 2;
         for j in 0..top {
@@ -63,8 +107,8 @@ impl Fft {
             max_n: n,
             lanes,
             stage,
-            tw_re,
-            tw_im,
+            tw_re: tw_re_buf,
+            tw_im: tw_im_buf,
         })
     }
 
@@ -409,5 +453,16 @@ pub(crate) mod tests {
             calls < 3
         }));
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn big_buffers_come_from_a_region() {
+        let mut big = alloc_f64(REGION_ABOVE / 8 + 8).unwrap();
+        assert!(matches!(big, F64Buf::Region(_)));
+        assert!(big.iter().all(|&x| x == 0.0));
+        let last = big.len() - 1;
+        big[last] = 1.5;
+        assert_eq!(big[last], 1.5);
+        assert!(matches!(alloc_f64(1024).unwrap(), F64Buf::Heap(_)));
     }
 }

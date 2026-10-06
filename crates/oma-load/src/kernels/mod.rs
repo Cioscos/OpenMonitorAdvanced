@@ -2,6 +2,7 @@
 
 pub mod fft;
 pub mod k1;
+pub mod k10;
 pub mod k2;
 pub mod k4;
 pub mod k5;

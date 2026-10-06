@@ -171,7 +171,7 @@ pub struct WorkerCtx {
     pub shared: Arc<PhaseShared>,
 }
 
-/// The factory of kernel `id`, or `None` while it does not exist yet.
+/// The factory of kernel `id`, or `None` for a kernel not built off x86-64.
 pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
     match id {
         #[cfg(target_arch = "x86_64")]
@@ -190,7 +190,9 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
         KernelId::K8 => Some(&crate::kernels::k8::K8Factory),
         #[cfg(target_arch = "x86_64")]
         KernelId::K9 => Some(&crate::kernels::k9::K9Factory),
-        // The other kernels arrive with A15.
+        #[cfg(target_arch = "x86_64")]
+        KernelId::K10 => Some(&crate::kernels::k10::K10Factory),
+        #[cfg(not(target_arch = "x86_64"))]
         _ => None,
     }
 }

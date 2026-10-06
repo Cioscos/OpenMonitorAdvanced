@@ -3,6 +3,7 @@
 #[cfg(windows)]
 pub mod affinity;
 pub mod cpuid;
+pub mod memory;
 
 #[cfg(windows)]
 pub use affinity::full_topology;

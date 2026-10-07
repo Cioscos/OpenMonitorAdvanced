@@ -1465,6 +1465,8 @@ mod tests {
     #[test]
     fn bench_mark_leads_the_tooltip_only_while_it_runs() {
         let status = |state| BenchStatus {
+            category: "cpu".into(),
+            device_id: None,
             state,
             step: None,
             steps: vec![],
@@ -1472,6 +1474,8 @@ mod tests {
             live_points: None,
             single: None,
             multi: None,
+            compute: None,
+            graphics: None,
             flags: vec![],
             score_id: None,
             error: None,

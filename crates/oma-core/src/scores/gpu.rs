@@ -125,7 +125,7 @@ pub struct GpuBaseline {
 }
 
 impl GpuBaseline {
-    fn table(&self, mode: BenchMode) -> Option<&BTreeMap<BenchKernel, f64>> {
+    pub(super) fn table(&self, mode: BenchMode) -> Option<&BTreeMap<BenchKernel, f64>> {
         match mode {
             BenchMode::Compute => Some(&self.compute),
             BenchMode::Graphics => Some(&self.graphics),

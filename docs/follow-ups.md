@@ -57,13 +57,18 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 
 ## Open: GPU stress test (M8b1)
 
-Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-07-m8b1-stress-gpu.md`, task G1-G13). Il branch `feat/m8b1-gpu-stress` non è unito: aspetta le prove dal vivo G14, la misura a riposo e la decisione dell'utente sul merge.
+Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-07-m8b1-stress-gpu.md`, task G1-G13) e dopo le prove dal vivo G14 del 2026-10-07.
 
-**Prove dal vivo G14, da fare con l'utente (un blocco alla volta, carichi pesanti solo con il suo via):**
+**Prove dal vivo G14 (2026-10-07, con l'utente, build di sviluppo):** superate Q1-Q8; Q10 (riavvio di Windows) saltata, facoltativa.
 
-- Prima: `cargo build -p oma-load` e `cargo build -p oma-overlay`, poi `cd app && pnpm tauri dev`.
-- Q1 RTX 4080 · Verifica normale · Rapido; Q2 iGPU AMD · Verifica normale · Rapido (desktop fluido, avviso sulla RAM condivisa); Q3 RTX 4080 · Stabilità overclock · Standard (le sette fasi, `vram_allocated` vicino al 95% del budget meno 400 MB); Q4 errore iniettato con `$env:OMA_LOAD_INJECT='s1'` (fase e livello di carico se l'errore cade nella rampa); Q5 «Ferma e salva» e «Ferma il test» dal tray; Q6 stop termico con `gpuStopC` = 60; Q7 chiusura della finestra durante un test; Q8 tooltip dei termini della GPU con il mouse e con Tab; Q10 «Ripeti il test» dopo un riavvio di Windows, solo se l'utente vuole.
-- **Q9 e misura a riposo:** `pwsh scripts/measure-footprint.ps1` a riposo (nucleo < 1% CPU, tray < 30 MB, finestra < 200 MB) e durante Q1 (finestra < 200 MB, `oma-load` con la sua VRAM annotata a parte); i valori vanno nella sezione M8b1 di `docs/perf-budget.md`. Un agente non l'ha fatta.
+- Q1 (RTX 4080, Verifica normale, Rapido): la prima prova ha dato un falso «Instabile: velocità non costante (96,5%)» su una scheda sana (clock fisso a 2,76 GHz, 66 °C). Con un log temporaneo della velocità al secondo: a PC fermo le finestre da 10 s variavano dell'1% circa, e pochi secondi di lavoro di un altro programma sulla GPU bastavano a scendere sotto il 97%. Correzione `4b9e74e`: finestre da 60 s, come i giri di 3DMark citati dal §5.4 (DG7 aggiornato), più la nota «non usare il PC e riduci a icona la finestra» nella procedura guidata. Riprove: 99,9% con la finestra dell'app aperta e Claude Code in uso.
+- Q2 (iGPU AMD, Rapido): superata, 99,9%. Il risultato mostrava «max — · media —» per la potenza, che la iGPU non legge: ora un solo «—» (`73919fb`).
+- Q3 (RTX 4080, Stabilità overclock, Standard, 30 min): sette fasi superate, S4 a piena dimensione con `vram_allocated` = 14,80 GB (28 pezzi da 512 MiB), 84 °C e 300 W di picco in S4, stabilità 98,4%: il flag di throttling non scarta tutte le finestre.
+- Q4 (`OMA_LOAD_INJECT=s1`, Personalizza con solo S1, senza «Fermati al primo errore», fermato nella rampa): «Errori trovati», gli errori della rampa hanno `load_percent` = 20; 178 + 63 errori contati, 16 per fase nella tabella (tetto di `oma-load`).
+- Q5 e Q7: «Ferma e salva», chiusura della finestra durante il test e «Ferma il test» dalla tray danno «Fermato da te», la notifica e la sessione salvata.
+- Q6: con `gpuStopC` = 60, da 42 °C a 68 °C in circa 3 s con S2 a 280 W, fermato a 4 s con «Fermato: temperatura a 68 °C».
+- Q8: tooltip dei termini della GPU a posto.
+- Q9: in sviluppo, durante Q2 con la finestra aperta, app e WebView2 a 270 MB privati e 1,4% della macchina, `oma-load` a 37 MB, 1% di un core e 46 MB di VRAM. Non confrontabile con il budget (la build di sviluppo carica i moduli non compilati e gli strumenti di WebView2; nella M8a1, in release, 165,9 MB): la misura con la build release, a riposo e durante un test della GPU, si fa insieme alla B11 della M8a2.
 
 **Rinviato alla M8b2 (DG1, DG15):**
 
@@ -74,7 +79,7 @@ Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-
 **Da riprendere (minori rinviati nelle revisioni, dal registro del branch):**
 
 - **Protocollo e piano:** `run_gpu` mappa un `plan.gpu` mancante sul LUID 0 e conta su `validate`; `check_phase` non rifiuta `cores`, `per_core_s` e `core_cycle` nelle fasi della GPU; `GpuTarget.integrated` non si confronta con la scheda vera. Il codice d'uscita 4 dà `device_lost` anche per un'esecuzione della CPU (latente: da legare a `is_gpu`). `oma-ipc/`, `oma-core/`, `oma-load/src/engine/`; quando si tocca.
-- **Stabilità:** l'ultima finestra completa di una fase si scarta sempre (limite da documentare); una fase tutta a zero non dà stabilità (protezione senza test); manca il test della sessione GPU con il servizio che passa da presente ad assente. `oma-core/src/load/`.
+- **Stabilità:** l'ultima finestra completa di una fase si scarta sempre (limite da documentare; con le finestre da 60 s il Rapido ha solo 2 o 3 finestre utili e una fase personalizzata sotto i 2 min e mezzo non dà stabilità); una fase tutta a zero non dà stabilità (protezione senza test); manca il test della sessione GPU con il servizio che passa da presente ad assente. `oma-core/src/load/`.
 - **`oma-win`:** NVML tiene in cache per sempre un caricamento fallito (un solo tentativo per processo), come già annotato per il driver aggiornato a caldo; `pci_from_device_id` accetta solo il dominio 0000 e non ha un test di andata e ritorno con `Adapter::device_id`; `pcie_replay_count` senza commento di documentazione. `crates/oma-win/src/gpu/`.
 - **Fondamenta D3D11 (`oma-load/src/gpu/`):** `EnumAdapters1` mappa ogni errore su «non trovata»; `Map` senza guardia RAII per l'`Unmap`; il timer di «bloccato» parte dall'invio, quindi con 2 invii in volo la seconda attesa include il tempo del primo (trascurabile a 40 ms); `D3DDDIERR_DEVICEREMOVED` non è mappato su `Lost`; `build.rs` dice che il bytecode è identico, ma dipende dalla versione di `fxc.exe` dell'SDK (da fissare prima del benchmark, per la classifica); commenti `// SAFETY:` sottili in `compute.rs` e `device.rs`; controllo del contesto solo con `debug_assert`.
 - **Motore (`oma-load/src/gpu/`):** un errore non fatale di `open` arriva a `fatal()` con una riga di log e l'app vede `failed` senza un avviso con il motivo; un errore fatale a metà fase non manda `PhaseDone` e salta la verifica finale; i percorsi `Hung` e di panico tengono vivo il processo con il dispositivo aperto; `ComputeLoad::new` va in panico su kernel che non sono S1 e S2 (meglio `unreachable!`).

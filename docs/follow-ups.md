@@ -43,7 +43,7 @@ Updated at the end of every milestone (last update: M8b1).
 
 Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a1-stress-cpu-ram.md`, tasks A1-A26; the branch `feat/m8a1-stress-cpu` is not merged: it waits for the live checks below).
 
-- M8a2, the CPU benchmark (spec M8 §4.6), is implemented (see "Open: CPU benchmark (M8a2)" below); M8b1 (GPU stress test) is implemented (see "Open: GPU stress test (M8b1)" below); M8b2 (GPU benchmark), M8c (disk) and M8d (leaderboard) follow the spec.
+- M8a2, the CPU benchmark (spec M8 §4.6), is implemented and merged into `main` on 2026-10-07 (c84be32; see "Open: CPU benchmark (M8a2)" below); M8b1 (GPU stress test) is implemented (see "Open: GPU stress test (M8b1)" below); M8b2 (GPU benchmark), M8c (disk) and M8d (leaderboard) follow the spec.
 - The installer paths of the stress test (`oma-load.exe` installed and signed, removed by the uninstaller) were never run: NSIS compiles only at the final verification and the paths need a VM or Windows Sandbox, as for M7c/M7d.
 - Core numbering: «Core N» of the app is compared with Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer only in check P11.
 - K1 uses 10 accumulators (FIRESTARTER 12/27), so AVX-512 is slightly latency-bound; K2 working set is 48·N against 16·N in DA9; block times of K1 (10/8/2.5 ms) to recheck live. `crates/oma-load/src/kernels/`; when the benchmark touches them.

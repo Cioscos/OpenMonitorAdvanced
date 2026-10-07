@@ -15,10 +15,12 @@
   // target's status and scores never show here. One benchmark or stress test at a time (DB8).
   // A GPU target without `name` is a GPU that is no longer in the system: its history only.
 
-  let { target }: { target: ScoreTarget & { name?: string; integrated?: boolean } } = $props();
+  let { target }: { target: ScoreTarget & { name?: string; integrated?: boolean; unavailable?: boolean } } = $props();
 
   const gpu = $derived(target.category === 'gpu');
-  const missing = $derived(target.category === 'gpu' && target.name === undefined);
+  const noGpu = $derived(target.category === 'gpu' && target.name === undefined);
+  // The GPU list could not be read: the GPU is not known to be gone, so no «gone» claim.
+  const missing = $derived(noGpu && !target.unavailable);
   const MODES = $derived<BenchMode[]>(gpu ? ['compute', 'graphics'] : ['single', 'multi']);
   const TERM: Record<BenchMode, string> = { single: 'singleCore', multi: 'multiCore', compute: 'computeScore', graphics: 'graphicsScore' };
   /** The invalid reasons (DH9): each is the message of a measurement that is not valid, never a warning. */
@@ -226,7 +228,7 @@
         <button
           type="button"
           class="go"
-          disabled={busy || starting || missing}
+          disabled={busy || starting || noGpu}
           title={busy ? t('performance.score.error.busy') : undefined}
           onclick={start}>{t('performance.score.start')}</button
         >
@@ -243,6 +245,7 @@
   </section>
 
   {#if missing}<p class="notice warn">{t('performance.score.gpu.missing')}</p>{/if}
+  {#if noGpu && target.unavailable}<p class="notice warn">{t('performance.score.gpu.unavailable')}</p>{/if}
   {#if message}<p class="notice crit" role="alert">{message}</p>{/if}
   {#if provisional}<p class="notice warn">{t('performance.score.provisional')}</p>{/if}
 

@@ -216,7 +216,7 @@ parole semplici.
   macchina virtuale o senza il servizio resta valida ma con un avviso; un errore di calcolo la
   rende non valida. Finché la scala non è tarata i punti sono segnati come provvisori.
   Esportazione e condivisione arriveranno dopo.
-- **Benchmark della GPU.** *Prestazioni › Punteggio › GPU* misura una scheda grafica alla volta con
+- **Benchmark della GPU.** *Prestazioni › Punteggio › <nome della GPU>* (la barra laterale elenca ogni scheda per nome sotto Punteggio) misura una scheda grafica alla volta con
   lo stesso processo di carico, in due punteggi su una scala fissa (il doppio dei punti, il doppio
   del lavoro nello stesso tempo): Calcolo (calcolo in virgola mobile e intero, banda della memoria) e
   Grafica (riempimento di pixel, letture di texture, sovrapposizione). Ogni carico è cronometrato in

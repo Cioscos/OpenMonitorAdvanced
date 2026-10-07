@@ -37,3 +37,13 @@ test('sidebar lists one score entry per gpu', async () => {
   // The GPU list is read once, when the view opens.
   expect(backend.performanceCalls.filter((c) => c === 'performanceSystem')).toHaveLength(1);
 });
+
+test('a failed system read shows the unavailable text on a GPU page, not the missing one', async () => {
+  const backend: FakeBackend = await connectSettings();
+  backend.performanceSystemError = 'boom';
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'score-gpu:gpu-a' });
+  await screen.findByText(t('performance.score.gpu.unavailable'));
+  expect(screen.queryByText(t('performance.score.gpu.missing'))).toBeNull();
+  expect((screen.getByRole('button', { name: t('performance.score.start') }) as HTMLButtonElement).disabled).toBe(true);
+});

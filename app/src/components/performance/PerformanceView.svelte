@@ -75,7 +75,7 @@
     if (!page.startsWith('score-gpu:')) return null;
     const deviceId = page.slice('score-gpu:'.length);
     const known = gpus?.find((g) => g.deviceId === deviceId);
-    return { category: 'gpu' as const, deviceId, name: known?.name, integrated: known?.integrated };
+    return { category: 'gpu' as const, deviceId, name: known?.name, integrated: known?.integrated, unavailable: systemFailed && !known };
   });
   const liveOn = (deviceId: string) => benchStore.running && benchStore.status?.deviceId === deviceId;
   const cpuLive = $derived(benchStore.running && benchStore.status?.category === 'cpu');

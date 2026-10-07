@@ -205,7 +205,7 @@ from the tray. Technical terms have a plain-words tooltip.
   battery, thermally limited, with a busy system, in a virtual machine or without the service
   stays valid but carries a warning; a calculation error makes it invalid. Until the scale is
   calibrated the points are marked as provisional. Exporting and sharing come later.
-- **GPU benchmark.** *Performance › Score › GPU* measures one graphics card at a time with the same
+- **GPU benchmark.** *Performance › Score › <GPU name>* (the sidebar lists each graphics card by name under Score) measures one graphics card at a time with the same
   load process, in two scores on a fixed scale (twice the points, twice the work in the same time):
   Compute (floating-point and integer compute, memory bandwidth) and Graphics (pixel fill, texture
   reads, overdraw). Each load is timed in one-second windows and the median of the windows counts, so

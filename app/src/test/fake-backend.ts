@@ -799,8 +799,12 @@ export class FakeBackend implements Backend {
   performanceStartError: string | null = null;
   readonly performanceStatusListeners = new Set<(status: RunStatus) => void>();
 
+  /** Set to reject `performanceSystem` with this text. */
+  performanceSystemError: string | null = null;
+
   async performanceSystem(): Promise<SystemInfo> {
     this.performanceCalls.push('performanceSystem');
+    if (this.performanceSystemError !== null) throw this.performanceSystemError;
     return structuredClone(this.performanceSystemInfo);
   }
 

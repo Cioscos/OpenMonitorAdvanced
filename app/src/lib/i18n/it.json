@@ -1282,6 +1282,7 @@
   "performance.score.graphics": "Grafica",
   "performance.score.gpu.duration": "Circa un minuto. Chiudi giochi e programmi che usano la GPU prima di iniziare.",
   "performance.score.gpu.phase": "{kernel} · {group}",
+  "performance.score.gpu.unavailable": "Non riesco a leggere l'elenco delle GPU: chiudi e riapri la vista Prestazioni.",
   "performance.score.gpu.missing": "Questa GPU non c'è più: collegala o scegline un'altra.",
   "performance.score.col.value": "Velocità",
   "performance.score.col.spread": "Dispersione",

@@ -292,6 +292,7 @@ const idle = (): RunStatus => ({
   outcome: null,
   loadPercent: null,
   stability: null,
+  gpuDeviceId: null,
 });
 
 export function mockPerformance(scenario: Scenario, serviceConnected: () => boolean) {
@@ -371,6 +372,7 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
         totalMs: TEST_S * 1000,
         phases: phases.map(info),
         stopC: 84,
+        gpuDeviceId: isGpu(request) ? (request.gpu ?? null) : null,
         cores: isGpu(request) ? [] : coreStates(phases, 0, false, false).map((state, core) => ({ core, state })),
         warnings: serviceConnected() || isGpu(request) ? [] : ['noService', 'tempMissing'],
       });

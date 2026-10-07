@@ -70,7 +70,8 @@
     const e = firstError;
     const phase = e?.phase ?? detail?.phase ?? null;
     if (phase === null) return null;
-    const isa: Isa | null = e?.isa ?? session.plan.phases[phase]?.isa ?? null;
+    // A GPU has no instruction set to show.
+    const isa: Isa | null = session.component === 'gpu' ? null : (e?.isa ?? session.plan.phases[phase]?.isa ?? null);
     const kernel: KernelId | null = e?.kernel ?? detail?.kernel ?? null;
     return {
       phase,

@@ -1255,7 +1255,7 @@
   "performance.result.deviceLostCode": "Codice del driver: {code}",
   "performance.result.stability": "Stabilità della velocità: {stability} %",
   "performance.objective.overclock.hint.gpu": "Ho alzato frequenze o tensioni della GPU o della VRAM e voglio trovare gli errori.",
-  "performance.run.clock.gpu": "Frequenza GPU",
+  "performance.run.clock.gpu": "Clock GPU",
   "performance.run.power": "Potenza",
   "performance.result.kind.device_lost": "Windows o il driver hanno azzerato la GPU (TDR) durante il test.",
   "performance.result.kindShort.device_lost": "GPU azzerata",

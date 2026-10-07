@@ -122,11 +122,10 @@ export function cpuChartSensors(schema: Schema | null): Sensor[] {
   return [temperature, byId.get('cpu/0/power/package')].filter((s): s is Sensor => s !== undefined);
 }
 
-/** DA5/DG12: the GPU temperature (core, else hotspot) and board power of a GPU device, as the chart's series. */
+/** DA5/DG12: the GPU temperature (core, else hotspot) and board power of a GPU device, as the chart's series; `deviceId` is the test's GPU (`RunStatus.gpuDeviceId`). */
 export function gpuChartSensors(schema: Schema | null, deviceId: string | null): Sensor[] {
   const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
-  // Without a known device (a test started elsewhere) the first GPU that has a temperature.
-  const device = deviceId ?? schema?.sensors.find((s) => s.deviceId.startsWith('gpu/') && s.kind === 'temperature')?.deviceId ?? null;
+  const device = deviceId;
   if (device === null) return [];
   const temperature = ['core', 'hotspot'].map((name) => byId.get(`${device}/temperature/${name}`)).find(Boolean);
   return [temperature, byId.get(`${device}/power/board`)].filter((s): s is Sensor => s !== undefined);

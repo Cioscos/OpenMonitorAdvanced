@@ -18,8 +18,6 @@ class PerformanceStore {
   system = $state.raw<SystemInfo | null>(null);
   /** Saved sessions, newest first; kept across reconnections until a newer list arrives. */
   history = $state.raw<StressSessionSummary[]>([]);
-  /** The GPU of the last test started here (device id), for the run page's chart; null for the others. */
-  gpuDevice = $state<string | null>(null);
   readonly running = $derived(isRunning(this.status));
   #backend: Backend | null = null;
   #starting = false;
@@ -89,9 +87,7 @@ class PerformanceStore {
     if (this.running || this.#starting) return { ok: false, reason: 'busy' };
     this.#starting = true;
     try {
-      const id = await backend.performanceStart(request);
-      this.gpuDevice = request.component === 'gpu' ? (request.gpu ?? null) : null;
-      return { ok: true, id };
+      return { ok: true, id: await backend.performanceStart(request) };
     } finally {
       this.#starting = false;
     }

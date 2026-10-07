@@ -208,3 +208,9 @@ test('gpu warnings carry their terms and the reduced size', async () => {
   expect(vram.textContent).toBe(t('performance.warn.vramReduced', { size: '2.0 GB' }));
   expect(vram.querySelector('.term')?.textContent).toBe('VRAM');
 });
+
+test('the GPU clock tile carries the clock term in every language', async () => {
+  i18n.locale = 'it';
+  await setup(GPU_RUNNING());
+  expect(tile(t('performance.run.clock.gpu')).querySelector('.label .term')?.textContent?.toLowerCase()).toBe(t('glossary.clock.name').toLowerCase());
+});

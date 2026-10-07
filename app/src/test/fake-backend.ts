@@ -180,6 +180,7 @@ export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
     outcome: null,
     loadPercent: null,
     stability: null,
+    gpuDeviceId: null,
     ...over,
   };
 }

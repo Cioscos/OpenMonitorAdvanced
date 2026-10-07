@@ -233,3 +233,16 @@ test('gpu result has no retry-core action', async () => {
   await fireEvent.click(screen.getByRole('button', { name: t('performance.result.repeat') }));
   await waitFor(() => expect(backend.performanceStartRequests).toEqual([GPU_REQUEST]));
 });
+
+test('a GPU result shows no instruction set', async () => {
+  const lost = error({ kind: 'device_lost', kernel: 's1', isa: 'sse2', phase: 0, core: null, actual: 0x887a0005 });
+  await setup(
+    gpuSession({
+      outcome: 'device_lost',
+      outcomeDetail: { verdict: 'device_lost', params: {}, phase: 0, kernel: 's1', core: null, tempC: null, clockMhz: null, atMs: 1000 },
+      errors: [lost],
+    }),
+  );
+  expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.s1.name'));
+  expect(fact(t('glossary.phase.name'))).not.toContain(t('glossary.isa.sse2.name'));
+});

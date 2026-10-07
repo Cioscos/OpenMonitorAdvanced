@@ -52,7 +52,7 @@
     return status && status.errors > 0 ? { tone: 'crit', text: t('performance.run.pill.errors', { n: status.errors }) } : { tone: 'ok', text: t('performance.run.pill.ok') };
   });
   const gpu = $derived(status?.component === 'gpu');
-  const chartSensors = $derived(gpu ? gpuChartSensors(store.schema, performanceStore.gpuDevice) : cpuChartSensors(store.schema));
+  const chartSensors = $derived(gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : cpuChartSensors(store.schema));
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
   const clockLabel = $derived(around(t('performance.run.clock'), t('glossary.clock.name')));

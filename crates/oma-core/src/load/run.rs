@@ -125,6 +125,8 @@ pub struct RunStatus {
     pub load_percent: Option<u8>,
     /// GPU runs: the throughput stability so far, 0-1.
     pub stability: Option<f64>,
+    /// GPU runs: the schema device id of the GPU under test, for the UI's chart.
+    pub gpu_device_id: Option<String>,
     pub checks: u64,
     pub errors: u64,
     pub whea_corrected: u64,
@@ -987,6 +989,7 @@ impl RunController {
                 .as_ref()
                 .and_then(StabilityMeter::result)
                 .or(s.stability),
+            gpu_device_id: s.gpu_device_id.clone(),
             checks: self.checks,
             errors: self.errors,
             whea_corrected: self.whea_count(&[17, 19]),
@@ -2134,6 +2137,29 @@ mod tests {
         c.on_load(&gpu_progress(16_000, 25.0, None), clock(16_000));
         let a = c.on_load(&finished(FinishReason::Completed), clock(17_000));
         assert!(has_finished(&settle(&mut c, a), Outcome::Passed));
+    }
+
+    #[test]
+    fn status_carries_the_gpu_device_id_only_for_gpu_runs() {
+        let config = || RunConfig {
+            threshold_c: 90.0,
+            thermal_stop: true,
+            service_available: false,
+            cores: vec![],
+            apic_to_core: BTreeMap::new(),
+            whea_after: None,
+            whea_baseline_missing: false,
+        };
+        let mut gpu = session();
+        gpu.component = Component::Gpu;
+        gpu.gpu_device_id = Some("gpu/pci-0000:01:00.0".into());
+        let gpu = RunController::new(gpu, config(), clock(0));
+        assert_eq!(
+            gpu.status().gpu_device_id.as_deref(),
+            Some("gpu/pci-0000:01:00.0")
+        );
+        let cpu = RunController::new(session(), config(), clock(0));
+        assert_eq!(cpu.status().gpu_device_id, None);
     }
 
     #[test]

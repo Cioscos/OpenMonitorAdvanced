@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
 import type { Phase } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, errorText, eventText, formatDuration, marked, phaseLabel, verdictTitle } from './format';
+import { cpuChartSensors, errorText, gpuChartSensors, eventText, formatDuration, marked, phaseLabel, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -92,4 +92,13 @@ test('chart_sensors_follow_da5', () => {
   const tdie = { ...SERVICE_MOCK_SCHEMA.sensors[0], id: 'cpu/0/temperature/tdie' };
   expect(cpuChartSensors({ ...SERVICE_MOCK_SCHEMA, sensors: [...SERVICE_MOCK_SCHEMA.sensors, tdie] })[0].id).toBe('cpu/0/temperature/tdie');
   expect(cpuChartSensors(null)).toEqual([]);
+});
+
+test('gpu chart sensors come from the status device, not from a guess', () => {
+  const first = MOCK_SCHEMA.sensors.filter((x) => x.deviceId.startsWith('gpu/'));
+  const other = first.map((x) => ({ ...x, id: x.id.replace('gpu/pci-0000:01:00.0', 'gpu/pci-0000:0c:00.0'), deviceId: 'gpu/pci-0000:0c:00.0' }));
+  const schema = { ...MOCK_SCHEMA, sensors: [...first, ...other] };
+  expect(gpuChartSensors(schema, 'gpu/pci-0000:0c:00.0').map((x) => x.id)).toEqual(['gpu/pci-0000:0c:00.0/temperature/core', 'gpu/pci-0000:0c:00.0/power/board']);
+  expect(gpuChartSensors(schema, 'gpu/pci-0000:01:00.0')[0].deviceId).toBe('gpu/pci-0000:01:00.0');
+  expect(gpuChartSensors(schema, null)).toEqual([]);
 });

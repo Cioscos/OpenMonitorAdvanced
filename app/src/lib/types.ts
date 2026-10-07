@@ -859,6 +859,8 @@ export interface RunStatus {
   loadPercent: number | null;
   /** GPU runs: the throughput stability so far, 0-1, or null before it is known (DG7). */
   stability: number | null;
+  /** GPU runs: the schema device id of the GPU under test, else null. */
+  gpuDeviceId: string | null;
 }
 
 /** What the machine offers for a test (`performance_system`). */

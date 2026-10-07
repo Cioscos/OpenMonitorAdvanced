@@ -347,6 +347,7 @@ fn idle_status() -> RunStatus {
         clock_mhz: None,
         load_percent: None,
         stability: None,
+        gpu_device_id: None,
         checks: 0,
         errors: 0,
         whea_corrected: 0,

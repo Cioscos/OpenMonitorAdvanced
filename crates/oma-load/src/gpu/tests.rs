@@ -93,6 +93,8 @@ struct FakeLoad {
     mismatch: Option<(u32, GpuMismatch)>,
     checks_done: u32,
     since_check: u64,
+    /// Given by every check.
+    notices: Vec<(String, u64)>,
 }
 
 impl GpuWorkload for FakeLoad {
@@ -121,7 +123,7 @@ impl GpuWorkload for FakeLoad {
         Ok(GpuCheck {
             checks: std::mem::take(&mut self.since_check),
             mismatches,
-            notices: vec![],
+            notices: self.notices.clone(),
         })
     }
 }
@@ -135,6 +137,7 @@ struct Setup {
     prepare_err: Option<(KernelId, GpuError)>,
     mismatch: Option<(u32, GpuMismatch)>,
     inject: Option<Inject>,
+    notices: Vec<(String, u64)>,
 }
 
 impl Default for Setup {
@@ -148,6 +151,7 @@ impl Default for Setup {
             prepare_err: None,
             mismatch: None,
             inject: None,
+            notices: vec![],
         }
     }
 }
@@ -284,6 +288,7 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
             mismatch: setup.mismatch.filter(|_| kernel == KernelId::S1),
             checks_done: 0,
             since_check: 0,
+            notices: setup.notices.clone(),
         })))
     };
     let now = || clock.now();
@@ -482,6 +487,42 @@ fn mismatch() -> GpuMismatch {
         iteration: 7,
         expected: 0xAA,
         actual: 0xAB,
+    }
+}
+
+#[test]
+fn per_error_notices_are_capped_per_phase() {
+    // 20 bad frames (S6) and 20 bad rounds (S4) in every check: at most 16 notices of each
+    // per-error code per phase, while the other notices all go through.
+    let per_check = 20;
+    let mut notices = vec![];
+    for code in ["artifact_tiles", "vram_bits", "vram_words", "vram_reduced"] {
+        notices.extend(std::iter::repeat_n((code.to_owned(), 1), per_check));
+    }
+    let ran = run(
+        &plan(vec![
+            phase(KernelId::S1, LoadMode::Steady, 1),
+            phase(KernelId::S2, LoadMode::Steady, 1),
+        ]),
+        &Setup {
+            notices,
+            ..Setup::default()
+        },
+    );
+    for phase in 0..2 {
+        let count = |code: &str| {
+            ran.msgs
+                .iter()
+                .filter(
+                    |m| matches!(m, LoadMessage::Notice(n) if n.phase == phase && n.code == code),
+                )
+                .count()
+        };
+        for code in ["artifact_tiles", "vram_bits", "vram_words"] {
+            assert_eq!(count(code), 16, "{code} in phase {phase}");
+        }
+        assert_eq!(count("vram_reduced") % per_check, 0);
+        assert!(count("vram_reduced") >= per_check);
     }
 }
 

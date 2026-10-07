@@ -161,6 +161,7 @@ pub fn run_gpu_with<D>(
         checks: 0,
         errors: 0,
         errors_sent: 0,
+        notices_sent: [0; PER_ERROR_NOTICES.len()],
         submissions: 0,
         rate_from: now,
         rate_count: 0,
@@ -183,6 +184,7 @@ pub fn run_gpu_with<D>(
         run.phase_base = run.submissions;
         run.level = None;
         run.errors_sent = 0;
+        run.notices_sent = [0; PER_ERROR_NOTICES.len()];
         run.restart_rate();
         run.progress();
         let (checks, errors) = (run.checks, run.errors);
@@ -216,6 +218,9 @@ const CHECK_EVERY: Duration = Duration::from_secs(1);
 const IDLE_SLICE: Duration = Duration::from_millis(10);
 /// `Error` messages per phase; the mismatches after them are only counted.
 const ERRORS_PER_PHASE: u32 = 16;
+/// `Notice` codes a load sends once per bad frame or round: capped like the errors, so a
+/// GPU that fails all the time does not flood the app's diary.
+const PER_ERROR_NOTICES: [&str; 3] = ["artifact_tiles", "vram_bits", "vram_words"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum End {
@@ -253,6 +258,8 @@ struct Run<'r, D> {
     checks: u64,
     errors: u64,
     errors_sent: u32,
+    /// Per-error notices sent in this phase, by code (see [`PER_ERROR_NOTICES`]).
+    notices_sent: [u32; PER_ERROR_NOTICES.len()],
     /// Submissions sent; all of them are completed right after a check.
     submissions: u64,
     rate_from: Instant,
@@ -490,6 +497,12 @@ impl<D> Run<'_, D> {
             };
             self.checks += checked.checks;
             for (code, value) in checked.notices {
+                if let Some(i) = PER_ERROR_NOTICES.iter().position(|c| *c == code) {
+                    if self.notices_sent[i] == ERRORS_PER_PHASE {
+                        continue;
+                    }
+                    self.notices_sent[i] += 1;
+                }
                 self.send(LoadMessage::Notice(Notice {
                     phase: self.phase,
                     code,

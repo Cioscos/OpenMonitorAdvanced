@@ -278,8 +278,11 @@ impl BenchController {
                 .push(r);
         }
         self.step = Some((i + 1).min(self.steps.len().saturating_sub(1)));
+        // The needle holds the rep's rate only while the next step has the same mode:
+        // another mode's gauge must not show it.
+        let same_mode = self.steps.get(i + 1).is_none_or(|n| n.mode == step.mode);
         if r.is_some() {
-            self.live_points = r.and_then(|r| self.live_units(i, r));
+            self.live_points = r.filter(|_| same_mode).and_then(|r| self.live_units(i, r));
         }
     }
 
@@ -696,6 +699,52 @@ mod tests {
         c.on_load(&progress_at(1, 0, None), clock(3000));
         assert_eq!(c.status().live_points, Some(v));
         assert_eq!(c.status().step, Some(1));
+    }
+
+    fn done_with(i: usize, workers: Vec<WorkerDone>) -> LoadMessage {
+        let mut d = done(i, Some(1000));
+        if let LoadMessage::PhaseDone(p) = &mut d {
+            p.workers = workers;
+        }
+        d
+    }
+
+    fn wd(iterations: u64, work_ms: u64) -> WorkerDone {
+        WorkerDone {
+            logical: 0,
+            iterations,
+            work_ms,
+        }
+    }
+
+    #[test]
+    fn needle_is_not_carried_over_to_the_next_mode() {
+        let mut c = ctl();
+        // Step 23 is the last single rep, step 24 the first multi warm-up.
+        c.on_load(&done_with(22, vec![wd(1000, 1000)]), clock(1000));
+        assert!(c.status().live_points.is_some());
+        c.on_load(&done_with(23, vec![wd(1000, 1000)]), clock(2000));
+        assert_eq!(c.status().step, Some(24));
+        assert_eq!(c.status().live_points, None);
+    }
+
+    #[test]
+    fn multi_score_uses_the_per_thread_sum() {
+        let mut c = ctl();
+        // Multi Ntt reps (steps 25-27): two threads at 1000 it/s and 500 it/s = 1500 it/s,
+        // where checks / work_ms would say something else.
+        for i in 24..28 {
+            let w = vec![wd(1000, 1000), wd(1000, 2000)];
+            c.on_load(&done_with(i, w), clock(1000));
+        }
+        let a = c.on_load(&finished(FinishReason::Completed), clock(2000));
+        let want = per_second_to_units(&WORKLOADS[0], 1500.0);
+        let got = saved(&a).kernels[0].multi.unwrap();
+        assert!((got - want).abs() < 1e-9, "{got} {want}");
+        assert_ne!(
+            Some(got),
+            rate(&WORKLOADS[0], WORKLOADS[0].iterations, 1000)
+        );
     }
 
     #[test]

@@ -264,8 +264,16 @@ test('gpu detail shows value and spread', async () => {
   const bandwidth = within(table).getByText(t('glossary.gpuBench.bandwidth.name')).closest('tr')!;
   expect(bandwidth.textContent).toContain('593');
   expect(bandwidth.textContent).toContain('GB/s');
-  const fill = within(table).getByText(t('glossary.gpuBench.fill.name')).closest('tr')!;
-  expect(fill.textContent).toContain('Gpixel/s');
+  const unitTerm = (row: Element) => row.querySelector('.unit .term')?.textContent;
+  expect(unitTerm(fma)).toBe('TFLOPS');
+  expect(unitTerm(bandwidth)).toBe('GB/s');
+  for (const [id, unit] of [['fill', 'Gpixel/s'], ['texture', 'Gtexel/s'], ['overdraw', 'Gpixel/s']]) {
+    const row = within(table).getByText(t(`glossary.gpuBench.${id}.name`)).closest('tr')!;
+    expect(unitTerm(row), id).toBe(unit);
+  }
+  // The heading explains the median of the five windows, with the GPU's own term.
+  const heading = screen.getByRole('heading', { name: new RegExp(t('performance.score.detail')) });
+  expect(heading.querySelector('.term')?.textContent).toBe(t('glossary.gpuMedian.name'));
   // No CPU columns on a GPU page.
   expect(headers.join(' ')).not.toContain(t('performance.score.single'));
 });

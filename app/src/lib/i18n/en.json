@@ -1311,5 +1311,9 @@
   "glossary.gpuBench.texture.name": "Texture",
   "glossary.gpuBench.texture": "Reads 8 points of a texture for every pixel: it measures how many billions of texels per second the GPU reads.",
   "glossary.gpuBench.overdraw.name": "Overdraw",
-  "glossary.gpuBench.overdraw": "Draws transparent layers one on top of the other, blending them with the ones below: the work of smoke, glass and effects in games."
+  "glossary.gpuBench.overdraw": "Draws transparent layers one on top of the other, blending them with the ones below: the work of smoke, glass and effects in games.",
+  "glossary.gpixels.name": "Gpixel/s",
+  "glossary.gpixels": "Billions of pixels per second that the GPU writes. Gtexel/s is the same for texels, the points of the textures the GPU reads.",
+  "glossary.gpuMedian.name": "median",
+  "glossary.gpuMedian": "The middle value of the five measured seconds: a second disturbed by another program does not change the result."
 }

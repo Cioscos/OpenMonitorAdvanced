@@ -259,7 +259,7 @@
 
     <section class="panel">
       {#if gpu}
-        <h3>{t('performance.score.detail')}</h3>
+        <h3>{t('performance.score.detail')} <span class="note">(<Term term="gpuMedian" />)</span></h3>
         <table aria-label={t('performance.score.detail')}>
           <thead>
             <tr>
@@ -277,7 +277,7 @@
                   <span class="unit"
                     >{#if k.unit === 'TFLOPS' || k.unit === 'TIOPS'}<Term term="tflops">{k.unit}</Term>{:else if k.unit === 'GB/s'}<Term
                         term="gbps">{k.unit}</Term
-                      >{:else}{k.unit}{/if}</span
+                      >{:else if k.unit === 'Gpixel/s' || k.unit === 'Gtexel/s'}<Term term="gpixels">{k.unit}</Term>{:else}{k.unit}{/if}</span
                   ></td
                 >
                 <td class="num">{percent(k.spread)}</td>

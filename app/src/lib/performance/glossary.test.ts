@@ -50,7 +50,7 @@ test('every_gpu_bench_load_has_an_entry', () => {
   // The six loads of the GPU score scale `oma-core` ships (DH2), and the terms of table T2 of the M8b2 plan.
   const loads = [...Object.keys(gpuBaseline.compute), ...Object.keys(gpuBaseline.graphics)];
   expect([...GPU_BENCH_TERMS].sort()).toEqual(loads.map((id) => `gpuBench.${id}`).sort());
-  expect([...GPU_SCORE_TERMS].sort()).toEqual(['computeScore', 'gbps', 'graphicsScore', 'spread', 'tflops']);
+  expect([...GPU_SCORE_TERMS].sort()).toEqual(['computeScore', 'gbps', 'gpixels', 'gpuMedian', 'graphicsScore', 'spread', 'tflops']);
   expect(TERMS).toEqual(expect.arrayContaining(GPU_SCORE_TERMS));
   expect(missing([...GPU_BENCH_TERMS, ...GPU_SCORE_TERMS].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

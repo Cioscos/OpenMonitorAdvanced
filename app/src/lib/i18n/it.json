@@ -1311,5 +1311,9 @@
   "glossary.gpuBench.texture.name": "Texture",
   "glossary.gpuBench.texture": "Legge 8 punti di una texture per ogni pixel: misura quanti miliardi di texel al secondo la GPU legge.",
   "glossary.gpuBench.overdraw.name": "Sovrapposizione",
-  "glossary.gpuBench.overdraw": "Disegna strati trasparenti uno sopra l'altro, fondendoli con quelli sotto: è il lavoro di fumo, vetri ed effetti nei giochi."
+  "glossary.gpuBench.overdraw": "Disegna strati trasparenti uno sopra l'altro, fondendoli con quelli sotto: è il lavoro di fumo, vetri ed effetti nei giochi.",
+  "glossary.gpixels.name": "Gpixel/s",
+  "glossary.gpixels": "Miliardi di pixel al secondo che la GPU scrive. Gtexel/s è lo stesso per i texel, i punti delle texture che la GPU legge.",
+  "glossary.gpuMedian.name": "mediana",
+  "glossary.gpuMedian": "Il valore centrale dei cinque secondi misurati: un secondo disturbato da un altro programma non sposta il risultato."
 }

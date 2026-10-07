@@ -20,7 +20,7 @@ export const SCORE_TERMS: string[] = ['benchPoints', 'singleCore', 'multiCore', 
 export const GPU_BENCH_TERMS: string[] = ['fma', 'int_hash', 'bandwidth', 'fill', 'texture', 'overdraw'].map((id) => `gpuBench.${id}`);
 
 /** The terms of the GPU score pages (table T2 of the M8b2 plan). */
-export const GPU_SCORE_TERMS: string[] = ['computeScore', 'graphicsScore', 'spread', 'tflops', 'gbps'];
+export const GPU_SCORE_TERMS: string[] = ['computeScore', 'graphicsScore', 'spread', 'tflops', 'gbps', 'gpixels', 'gpuMedian'];
 
 /** The terms of the GPU stress pages (table T2 of the M8b1 plan). */
 export const GPU_TERMS: string[] = ['tdr', 'vram', 'deviceLost', 'stability', 'pcieReplay', 'artifact', 'loadLevel'];

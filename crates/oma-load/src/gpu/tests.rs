@@ -72,13 +72,14 @@ struct FakeSub {
     windows_ended: u32,
     /// `submitted` at the last `window_begin`.
     window_from: u64,
+    window_open: bool,
 }
 
 impl Submit for FakeSub {
     fn submit(&mut self, _: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<(), GpuError> {
         self.submitted += 1;
         if let Some((n, e)) = self.fail_at {
-            if self.submitted >= n {
+            if self.submitted == n {
                 return Err(e);
             }
         }
@@ -93,10 +94,15 @@ impl Submit for FakeSub {
         Ok(1.0)
     }
     fn window_begin(&mut self) -> Result<(), GpuError> {
+        assert!(!self.window_open, "window_begin with a window open");
+        self.window_open = true;
         self.window_from = self.submitted;
         Ok(())
     }
     fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+        if !std::mem::take(&mut self.window_open) {
+            return Ok(None);
+        }
         self.windows_ended += 1;
         let n = self.windows_ended;
         if self.bad_windows.contains(&n) {
@@ -322,6 +328,7 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
                 bad_value: setup.bad_value,
                 windows_ended: 0,
                 window_from: 0,
+                window_open: false,
             }),
         ))
     };
@@ -985,6 +992,29 @@ fn progress_rate_is_the_last_window_in_units() {
     let rates: Vec<f64> = p.iter().filter_map(|p| p.rate).collect();
     let expected: Vec<f64> = (1..=9).map(|n| 1e8 / f64::from(n)).collect();
     assert!(all_close(&rates, &expected), "{rates:?}");
+}
+
+#[test]
+fn skipped_bench_phase_leaves_no_window_open() {
+    // The 3rd submission runs out of memory inside a window of the first phase: it is
+    // skipped, and the second phase opens its windows (the fake panics on a second open).
+    let mut first = phase(KernelId::S1, LoadMode::Steady, 30);
+    first.windows = Some(5);
+    let mut second = first.clone();
+    second.kernel = KernelId::S2;
+    let ran = run(
+        &plan(vec![first, second]),
+        &Setup {
+            fail_at: Some((3, GpuError::OutOfMemory)),
+            ..bench_setup()
+        },
+    );
+    let done = ran.done();
+    assert_eq!(done[0].skipped.as_deref(), Some("vram"));
+    assert!(done[0].rates.is_empty());
+    assert_eq!(done[1].skipped, None);
+    assert!(all_close(&done[1].rates, &[1e8; 5]), "{:?}", done[1].rates);
+    assert_eq!(ran.end.finished.reason, FinishReason::Completed);
 }
 
 #[test]

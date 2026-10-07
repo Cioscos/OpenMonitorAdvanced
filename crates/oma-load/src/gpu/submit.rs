@@ -33,7 +33,10 @@ pub trait Submit {
     /// [`Submit::window_end`] are timed together, without stopping the queue.
     fn window_begin(&mut self) -> Result<(), GpuError>;
     /// Ends the window, waits for the GPU and gives its milliseconds; `None` when the
-    /// timestamps were disjoint.
+    /// timestamps were disjoint or no window is open (so a phase may always call it once
+    /// more, to be sure none is left open). At most one window is open: the next
+    /// `window_begin` closes one left open. The time includes everything submitted in the
+    /// window, the compare dispatch of S1 and S2 too (`ComputeLoad::work_per_submission`).
     fn window_end(&mut self) -> Result<Option<f64>, GpuError>;
 }
 
@@ -51,6 +54,8 @@ pub struct Submitter {
     window_disjoint: ID3D11Query,
     window_start: ID3D11Query,
     window_end: ID3D11Query,
+    /// A window is open: `window_disjoint` is begun.
+    in_window: bool,
 }
 
 impl Submitter {
@@ -75,6 +80,7 @@ impl Submitter {
             window_disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
             window_start: query(D3D11_QUERY_TIMESTAMP)?,
             window_end: query(D3D11_QUERY_TIMESTAMP)?,
+            in_window: false,
             in_flight: VecDeque::with_capacity(IN_FLIGHT),
             next: 0,
             context: gpu.context().clone(),
@@ -190,17 +196,32 @@ impl Submit for Submitter {
     }
 
     fn window_begin(&mut self) -> Result<(), GpuError> {
-        // SAFETY: queries of this device; the window's disjoint query brackets its two
-        // timestamps, and `gpu_ms` (with its own queries) never runs inside a window.
+        // SAFETY: queries of this device. Invariant: at most one window is open; it is
+        // closed by `window_end`, or here when a phase left it open (an error that skipped
+        // the phase), so `Begin` never runs on a disjoint query already begun. The window's
+        // disjoint query brackets its two timestamps; `gpu_ms` (with its own queries)
+        // never runs inside a window. A `finish` or a buffer read inside a window (the
+        // checks, the debug-only fault injection of S1/S2) is sound: it only lengthens the
+        // GPU time of that window.
         unsafe {
+            if self.in_window {
+                self.context.End(&self.window_end);
+                self.context.End(&self.window_disjoint);
+            }
             self.context.Begin(&self.window_disjoint);
             self.context.End(&self.window_start);
         }
+        self.in_window = true;
         Ok(())
     }
 
     fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
-        // SAFETY: as in `window_begin`.
+        if !self.in_window {
+            return Ok(None);
+        }
+        self.in_window = false;
+        // SAFETY: queries of this device; the window opened by `window_begin` is still
+        // open (`in_window`), so the disjoint query is begun and its `End` is paired.
         unsafe {
             self.context.End(&self.window_end);
             self.context.End(&self.window_disjoint);

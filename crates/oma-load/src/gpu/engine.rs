@@ -436,7 +436,15 @@ impl<D> Run<'_, D> {
         }
         // The calibration is not part of the rate.
         self.restart_rate();
-        self.submit_loop(sub, spec, seed, &mut loads)
+        let end = self.submit_loop(sub, spec, seed, &mut loads);
+        if spec.windows.is_some() && end.is_ok() {
+            // A submission error that only skips the phase leaves its window open: close
+            // it (a no-op when already closed), so the next phase can open its own.
+            if let Err(e) = sub.window_end() {
+                tracing::warn!(error = ?e, "cannot close the benchmark window");
+            }
+        }
+        end
     }
 
     /// Creates and prepares the loads of `spec`; `Some` when the phase ends before submitting.

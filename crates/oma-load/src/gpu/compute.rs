@@ -38,7 +38,8 @@ const HASH_OPS_PER_STEP: f64 = 112.0;
 fn submission_work(kernel: KernelId, steps: u32) -> f64 {
     let per_step = match kernel {
         KernelId::S1 => FMA_FLOP_PER_STEP,
-        _ => HASH_OPS_PER_STEP,
+        KernelId::S2 => HASH_OPS_PER_STEP,
+        other => unreachable!("{other:?} is not a compute load"),
     };
     per_step * f64::from(steps) * f64::from(THREADS)
 }
@@ -245,6 +246,9 @@ impl GpuWorkload for ComputeLoad {
     }
 
     fn work_per_submission(&self) -> f64 {
+        // The window times the compare dispatch too (DH9 needs it), so the rate is a bit
+        // low: under 1% on a 40 ms submission of a fast dedicated GPU, a few % on an
+        // integrated one. The fixed scale (`gpu-1-baseline.json`) is calibrated the same way.
         submission_work(self.id, self.steps)
     }
 }

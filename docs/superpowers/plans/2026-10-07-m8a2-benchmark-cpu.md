@@ -299,7 +299,7 @@ In più:
     - single = la velocità di B3 per carico;
     - multi = single × processori logici di questo PC × 0,75;
     - `"provisional": true`, `"version": "cpu-1"`.
-  - **`calibrate_cpu`:** `cargo run -p oma-core --example calibrate_cpu -- <score.json>` riscrive `cpu-1-baseline.json` con le velocità mediane del file, arrotondate a 4 cifre significative, e `provisional: false`.
+  - **`calibrate_cpu`:** `cargo run -p oma-core --example calibrate_cpu -- <score.json>` riscrive `cpu-1-baseline.json` con le velocità mediane del file, arrotondate a 4 cifre significative, e `provisional: false`. Il controllo sta in `oma_core::scores::calibration_from`: rifiuta un file non valido, con flag, di un'altra versione del punteggio o senza tutti i sei carichi nei due modi; prima di scrivere stampa modello, core, processori logici, set d'istruzioni e mediane, da confrontare con il 7800X3D al BIOS di fabbrica.
 
 - [ ] **Step 1: test che falliscono:**
   - `bench_plan_has_48_phases_single_then_multi`;

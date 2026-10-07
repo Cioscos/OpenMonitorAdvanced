@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use super::file::ScoreFile;
 use super::workloads::{BenchKernel, Workload, WORKLOADS};
 
 pub const SCALE_POINTS: f64 = 1500.0;
@@ -25,18 +26,61 @@ pub struct BaselineError(String);
 
 const BASELINE_JSON: &str = include_str!("cpu-1-baseline.json");
 
-fn parse_baseline(text: &str) -> Result<Baseline, BaselineError> {
-    let b: Baseline = serde_json::from_str(text).map_err(|e| BaselineError(e.to_string()))?;
+fn checked(b: Baseline) -> Result<Baseline, BaselineError> {
     let complete = |m: &BTreeMap<BenchKernel, f64>| {
         WORKLOADS
             .iter()
             .all(|w| m.get(&w.id).is_some_and(|v| v.is_finite() && *v > 0.0))
     };
-    if complete(&b.single) && complete(&b.multi) {
-        Ok(b)
-    } else {
+    if b.version != SCORE_VERSION {
+        Err(BaselineError(format!(
+            "version {} is not {SCORE_VERSION}",
+            b.version
+        )))
+    } else if !complete(&b.single) || !complete(&b.multi) {
         Err(BaselineError("a kernel is missing or not positive".into()))
+    } else {
+        Ok(b)
     }
+}
+
+fn parse_baseline(text: &str) -> Result<Baseline, BaselineError> {
+    checked(serde_json::from_str(text).map_err(|e| BaselineError(e.to_string()))?)
+}
+
+/// The baseline calibrated from a score file (DB1): its medians to 4 significant digits,
+/// `provisional: false`. Refuses a run that is invalid, flagged, of another score version
+/// or without all six kernels in both modes.
+pub fn calibration_from(score: &ScoreFile) -> Result<Baseline, BaselineError> {
+    if !score.valid {
+        return Err(BaselineError("the run is not valid".into()));
+    }
+    if !score.flags.is_empty() {
+        return Err(BaselineError(format!(
+            "the run has flags: {}",
+            score.flags.join(", ")
+        )));
+    }
+    if score.score_version != SCORE_VERSION {
+        return Err(BaselineError(format!(
+            "score version {} is not {SCORE_VERSION}",
+            score.score_version
+        )));
+    }
+    let round4 = |x: f64| format!("{x:.3e}").parse().unwrap_or(x);
+    let medians = |f: fn(&super::file::KernelRate) -> Option<f64>| {
+        score
+            .kernels
+            .iter()
+            .filter_map(|k| f(k).map(|v| (k.id, round4(v))))
+            .collect()
+    };
+    checked(Baseline {
+        version: SCORE_VERSION.into(),
+        provisional: false,
+        single: medians(|k| k.single),
+        multi: medians(|k| k.multi),
+    })
 }
 
 /// The reference rates of the fixed scale (compiled in).
@@ -177,6 +221,83 @@ mod tests {
         let m: BTreeMap<_, _> = s.iter().map(|(k, v)| (*k, v * 6.0)).collect();
         let x = scaling(&s, &m, 8).unwrap();
         assert!((x - 0.75).abs() < 1e-12, "{x}");
+    }
+
+    #[test]
+    fn baseline_of_another_score_version_is_rejected() {
+        let text = BASELINE_JSON.replace("\"cpu-1\"", "\"cpu-2\"");
+        assert_ne!(text, BASELINE_JSON);
+        assert!(parse_baseline(&text).is_err());
+    }
+
+    fn calibration_score() -> ScoreFile {
+        use super::super::file::{Device, KernelRate, Scores, FORMAT};
+        let b = cpu_baseline();
+        ScoreFile {
+            format: FORMAT,
+            id: "0b9c5a2e-1d3f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            at: "2026-10-07T10:00:00Z".into(),
+            category: "cpu".into(),
+            score_version: SCORE_VERSION.into(),
+            provisional: true,
+            isa: oma_ipc::load::Isa::Avx512,
+            scores: Scores {
+                single: Some(1500),
+                multi: Some(1500),
+            },
+            kernels: WORKLOADS
+                .iter()
+                .map(|w| KernelRate {
+                    id: w.id,
+                    unit: w.unit.into(),
+                    single: Some(b.single[&w.id] * 1.000_04),
+                    multi: Some(b.multi[&w.id]),
+                })
+                .collect(),
+            device: Device {
+                model: "AMD Ryzen 7 7800X3D".into(),
+                cores: 8,
+                logical: 16,
+            },
+            flags: vec![],
+            valid: true,
+            scaling: Some(0.6),
+            samples: vec![],
+            app_version: "0.5.0".into(),
+            load_version: None,
+        }
+    }
+
+    #[test]
+    fn calibration_takes_the_medians_of_a_clean_valid_run() {
+        let s = calibration_score();
+        let c = calibration_from(&s).unwrap();
+        assert_eq!((c.version.as_str(), c.provisional), (SCORE_VERSION, false));
+        let ntt = s.kernels[0].single.unwrap();
+        assert_eq!(
+            c.single[&BenchKernel::Ntt],
+            format!("{ntt:.3e}").parse::<f64>().unwrap()
+        );
+        assert_eq!((c.single.len(), c.multi.len()), (6, 6));
+    }
+
+    #[test]
+    fn calibration_refuses_an_invalid_flagged_foreign_or_partial_run() {
+        let mut s = calibration_score();
+        s.valid = false;
+        assert!(calibration_from(&s).is_err());
+        let mut s = calibration_score();
+        s.flags = vec!["battery".into()];
+        assert!(calibration_from(&s).is_err());
+        let mut s = calibration_score();
+        s.score_version = "cpu-0".into();
+        assert!(calibration_from(&s).is_err());
+        let mut s = calibration_score();
+        s.kernels[3].multi = None;
+        assert!(calibration_from(&s).is_err());
+        let mut s = calibration_score();
+        s.kernels.pop();
+        assert!(calibration_from(&s).is_err());
     }
 
     #[test]

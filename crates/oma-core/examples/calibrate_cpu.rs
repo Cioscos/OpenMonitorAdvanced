@@ -1,39 +1,27 @@
 //! `cargo run -p oma-core --example calibrate_cpu -- <score.json>`: rewrites
-//! `src/scores/cpu-1-baseline.json` with the rates of a score file (4 significant digits)
-//! and `provisional: false`.
+//! `src/scores/cpu-1-baseline.json` with the medians of a score file (4 significant digits)
+//! and `provisional: false`. The run must be valid, without flags and of the current score
+//! version; check the printed device and medians before committing the result (DB1: the
+//! author's Ryzen 7 7800X3D at factory settings).
 
-use std::collections::BTreeMap;
-
-use oma_core::scores::{parse_score, Baseline, BenchKernel, SCORE_VERSION};
-
-fn round4(x: f64) -> f64 {
-    format!("{x:.3e}").parse().unwrap_or(x)
-}
+use oma_core::scores::{calibration_from, parse_score};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
         .ok_or("usage: calibrate_cpu <score.json>")?;
     let score = parse_score(&std::fs::read(path)?)?;
-    let mut single: BTreeMap<BenchKernel, f64> = BTreeMap::new();
-    let mut multi: BTreeMap<BenchKernel, f64> = BTreeMap::new();
-    for k in &score.kernels {
-        if let Some(v) = k.single {
-            single.insert(k.id, round4(v));
-        }
-        if let Some(v) = k.multi {
-            multi.insert(k.id, round4(v));
+    let baseline = calibration_from(&score)?;
+    let d = &score.device;
+    println!(
+        "device: {} ({} cores, {} logical), isa {:?}",
+        d.model, d.cores, d.logical, score.isa
+    );
+    for (mode, table) in [("single", &baseline.single), ("multi", &baseline.multi)] {
+        for (kernel, v) in table {
+            println!("{mode:>6} {kernel:?}: {v}");
         }
     }
-    if single.len() != 6 || multi.len() != 6 {
-        return Err("the score file needs all six kernels in both modes".into());
-    }
-    let baseline = Baseline {
-        version: SCORE_VERSION.into(),
-        provisional: false,
-        single,
-        multi,
-    };
     let out = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/scores/cpu-1-baseline.json"

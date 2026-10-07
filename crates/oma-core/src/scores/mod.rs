@@ -18,7 +18,7 @@ pub use file::{
 pub use gauge::full_scale;
 pub use plan::{bench_plan, BenchMode, BenchStep, CAP_S, WARMUP_PAUSE_MS};
 pub use score::{
-    cpu_baseline, median3, per_second_to_units, points, rate, scaling, Baseline, BaselineError,
-    SCALE_POINTS, SCORE_VERSION,
+    calibration_from, cpu_baseline, median3, per_second_to_units, points, rate, scaling, Baseline,
+    BaselineError, SCALE_POINTS, SCORE_VERSION,
 };
 pub use workloads::{BenchKernel, Workload, WORKLOADS};

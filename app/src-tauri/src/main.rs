@@ -387,6 +387,7 @@ fn main() {
             performance::commands::performance_export,
             performance::commands::performance_quit_confirmed,
             performance::commands::performance_bench_start,
+            performance::commands::performance_gpu_bench_start,
             performance::commands::performance_bench_stop,
             performance::commands::performance_bench_status,
             performance::commands::performance_scores,
@@ -479,7 +480,9 @@ fn main() {
                             performance::performance_dir(),
                         )),
                         settings: store.clone(),
-                        machine: Box::new(performance::runner::WinMachine),
+                        machine: Box::new(performance::runner::WinMachine::new(
+                            app.state::<GpuProcessState>().0.clone(),
+                        )),
                         launcher: performance::runner::load_host_launcher(),
                         toaster: Box::new(toaster.clone()),
                         schema: Box::new(move || {

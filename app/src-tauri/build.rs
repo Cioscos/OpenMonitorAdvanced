@@ -71,6 +71,7 @@ fn main() {
             "performance_export",
             "performance_quit_confirmed",
             "performance_bench_start",
+            "performance_gpu_bench_start",
             "performance_bench_stop",
             "performance_bench_status",
             "performance_scores",

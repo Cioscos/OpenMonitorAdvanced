@@ -6,7 +6,7 @@ use std::time::Duration;
 use oma_core::csv::LocalTime;
 use oma_core::load::{RunStatus, Session, SessionSummary, StartRequest};
 use oma_core::sampler::unix_ms;
-use oma_core::scores::{cpu_baseline, BenchStatus, ScoreFile, ScoreSummary};
+use oma_core::scores::{cpu_baseline, gpu_baseline, BenchStatus, ScoreFile, ScoreSummary};
 use oma_ipc::load::Plan;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -73,7 +73,17 @@ pub fn performance_bench_start(runner: Runner<'_>) -> Result<String, String> {
     runner.start_bench().map_err(|e| e.wire())
 }
 
-/// Stops the benchmark; nothing is saved.
+/// Starts the benchmark of GPU `device_id` (one of `performance_system`'s); the
+/// score id, or `busy`, `build:no_gpu` (no such GPU) or the text of a system error.
+#[tauri::command(async)]
+pub fn performance_gpu_bench_start(
+    runner: Runner<'_>,
+    device_id: String,
+) -> Result<String, String> {
+    runner.start_gpu_bench(&device_id).map_err(|e| e.wire())
+}
+
+/// Stops the benchmark (CPU or GPU); nothing is saved.
 #[tauri::command]
 pub fn performance_bench_stop(runner: Runner<'_>) {
     runner.stop_bench();
@@ -102,15 +112,19 @@ pub fn performance_score_delete(runner: Runner<'_>, id: String) -> Result<(), St
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BaselineInfo {
-    /// The scale is not calibrated yet: the points will change.
+    /// The CPU scale is not calibrated yet: the points will change.
     provisional: bool,
+    /// The same for the GPU scale.
+    gpu_provisional: bool,
 }
 
 #[tauri::command]
 pub fn performance_baseline() -> BaselineInfo {
     BaselineInfo {
         provisional: cpu_baseline().provisional,
+        gpu_provisional: gpu_baseline().provisional,
     }
 }
 

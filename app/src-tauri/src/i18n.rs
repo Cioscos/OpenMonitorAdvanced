@@ -155,6 +155,10 @@ pub const RUST_KEYS: &[&str] = &[
     "performance.toast.benchDone",
     "performance.toast.benchInvalid",
     "tray.benchRunning",
+    "performance.score.gpu.title",
+    "performance.toast.gpuBenchDone",
+    "performance.toast.gpuBenchInvalid",
+    "tray.gpuBenchRunning",
 ];
 
 type Catalog = HashMap<String, String>;

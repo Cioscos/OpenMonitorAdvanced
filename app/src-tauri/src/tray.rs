@@ -97,6 +97,19 @@ pub enum TestMark {
     },
     /// The CPU benchmark (DB9).
     Bench,
+    /// The GPU benchmark (DH12).
+    GpuBench,
+}
+
+/// The page of the benchmark in progress: its GPU's, or the CPU one (DH12).
+fn bench_nav(status: Option<&BenchStatus>) -> PerformanceNav {
+    match status {
+        Some(s) if s.category == "gpu" => s
+            .device_id
+            .as_deref()
+            .map_or_else(PerformanceNav::score_cpu, PerformanceNav::score_gpu),
+        _ => PerformanceNav::score_cpu(),
+    }
 }
 
 impl TestMark {
@@ -106,7 +119,11 @@ impl TestMark {
             status.state,
             BenchState::Starting | BenchState::Running | BenchState::Stopping
         )
-        .then_some(Self::Bench)
+        .then_some(if status.category == "gpu" {
+            Self::GpuBench
+        } else {
+            Self::Bench
+        })
     }
 
     /// The mark for `status`: none while idle or once finished.
@@ -131,12 +148,13 @@ impl TestMark {
 
     /// `Stress test in progress: CPU · Normal check`, or `CPU benchmark running`.
     fn text(&self, lang: Lang) -> String {
-        let Self::Stress {
-            component,
-            objective,
-        } = self
-        else {
-            return t(lang, "tray.benchRunning", &[]);
+        let (component, objective) = match self {
+            Self::Stress {
+                component,
+                objective,
+            } => (component, objective),
+            Self::Bench => return t(lang, "tray.benchRunning", &[]),
+            Self::GpuBench => return t(lang, "tray.gpuBenchRunning", &[]),
         };
         let component = t(lang, &format!("tray.tooltip.{component}"), &[]);
         let objective = t(lang, &format!("performance.objective.{objective}"), &[]);
@@ -729,14 +747,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
                 }
             }
             PERF_OPEN_ID => {
-                let bench = app
+                let nav = app
                     .try_state::<Arc<PerformanceRunner>>()
-                    .is_some_and(|runner| runner.bench_running());
-                let nav = if bench {
-                    PerformanceNav::score_cpu()
-                } else {
-                    PerformanceNav::run()
-                };
+                    .filter(|runner| runner.bench_running())
+                    .map_or_else(PerformanceNav::run, |runner| {
+                        bench_nav(runner.bench_status().as_ref())
+                    });
                 window::show_performance(app, nav);
             }
             id => {
@@ -1495,6 +1511,22 @@ mod tests {
             );
         }
         assert_eq!(TestMark::Bench.text(Lang::En), "CPU benchmark running");
+        let gpu = BenchStatus {
+            category: "gpu".into(),
+            device_id: Some("gpu/0".into()),
+            ..status(BenchState::Running)
+        };
+        assert_eq!(TestMark::from_bench(&gpu), Some(TestMark::GpuBench));
+        assert_eq!(TestMark::GpuBench.text(Lang::En), "GPU benchmark running");
+        assert_eq!(
+            TestMark::GpuBench.text(Lang::It),
+            "Benchmark della GPU in corso"
+        );
+        assert_eq!(bench_nav(Some(&gpu)), PerformanceNav::score_gpu("gpu/0"));
+        assert_eq!(
+            bench_nav(Some(&status(BenchState::Running))),
+            PerformanceNav::score_cpu()
+        );
         assert_eq!(
             TestMark::Bench.text(Lang::It),
             "Benchmark della CPU in corso"

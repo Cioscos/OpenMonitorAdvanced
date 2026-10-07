@@ -5,6 +5,8 @@
 /// integer and FP32 stays exact. It travels in the constant buffer so the compiler cannot
 /// fold it.
 pub const FMA_M: f32 = -1.0;
+// `fma_thread` computes `mad(v, FMA_M, c)` as `c - v`.
+const _: () = assert!(FMA_M == -1.0);
 /// The multiplier of the S2 hash steps.
 pub const HASH_K: u32 = 0x9E37_79B1;
 
@@ -21,20 +23,21 @@ pub fn hash_params(steps: u32, seed: u32) -> [u32; 4] {
 /// Output of S1 thread `id` (the bits of its `float4`).
 pub fn fma_thread(id: u32, seed: u32, steps: u32) -> [u32; 4] {
     let b = ((id ^ seed) & 255) as f32;
-    // Lane `l` of chain `j` starts at `b + l + 4 j` with constant `1000 + l + 4 j`; each
-    // step applies four `mad`s to every chain.
-    std::array::from_fn(|l| {
-        let x: [f32; 4] = std::array::from_fn(|j| {
-            let offset = l as f32 + 4.0 * j as f32;
-            let c = 1000.0 + offset;
-            let mut v = b + offset;
-            for _ in 0..u64::from(steps) * 4 {
-                v = v.mul_add(FMA_M, c);
-            }
-            v
-        });
-        (x[0] + x[1] * 2.0 + x[2] * 4.0 + x[3] * 8.0).to_bits()
-    })
+    // Value `k = 4 j + l` (lane `l` of chain `j`) starts at `b + k` with constant
+    // `1000 + k`; each step applies four `mad`s to every chain. The 16 values step together:
+    // independent operations pipeline and vectorize, where one chain at a time waits on
+    // each result (~0.45 s a phase for the sample check).
+    let c: [f32; 16] = std::array::from_fn(|k| 1000.0 + k as f32);
+    let mut v: [f32; 16] = std::array::from_fn(|k| b + k as f32);
+    for _ in 0..u64::from(steps) * 4 {
+        for (v, c) in v.iter_mut().zip(&c) {
+            // `mad(v, -1, c)`: the product is exact, so the FMA rounds once, as the
+            // subtraction does; bit for bit the same, without the software `fmaf` of
+            // `f32::mul_add` (no `fma` target feature).
+            *v = c - *v;
+        }
+    }
+    std::array::from_fn(|l| (v[l] + v[4 + l] * 2.0 + v[8 + l] * 4.0 + v[12 + l] * 8.0).to_bits())
 }
 
 /// Output of S2 thread `id`.

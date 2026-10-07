@@ -2,7 +2,10 @@
 //! the same steps and seed, then `compare.hlsl` against the golden output of the first
 //! one; the counters are read and reset once a second.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use oma_ipc::load::KernelId;
+use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Buffer, ID3D11ComputeShader, ID3D11DeviceContext, ID3D11ShaderResourceView,
     ID3D11UnorderedAccessView,
@@ -83,12 +86,20 @@ impl ComputeLoad {
         })
     }
 
-    /// The kernel with `steps`, writing the output.
+    /// The kernel with `steps`, writing the output. `ctx` must be `self.gpu.context()`:
+    /// the constants are written through the device's context and must land in order with
+    /// the dispatches recorded on `ctx`.
     fn run_kernel(&self, ctx: &ID3D11DeviceContext, steps: u32) {
+        debug_assert_eq!(
+            ctx.as_raw(),
+            self.gpu.context().as_raw(),
+            "the submission queue must wrap the load's own device context"
+        );
         self.gpu
             .set_constants(&self.constants, (self.params)(steps, self.seed));
-        // SAFETY: resources of this device; GROUPS groups of 256 threads fill the THREADS
-        // elements; the UAV is unbound afterwards so the output can be read as an SRV.
+        // SAFETY: `ctx` is this device's immediate context (asserted above), used only on
+        // this thread; resources of this device; GROUPS groups of 256 threads fill the
+        // THREADS elements; the UAV is unbound afterwards so the output can be read as an SRV.
         unsafe {
             ctx.CSSetShader(&self.kernel, None);
             ctx.CSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
@@ -107,26 +118,46 @@ impl ComputeLoad {
 }
 
 impl GpuWorkload for ComputeLoad {
-    fn prepare(&mut self, sub: &mut dyn Submit, target_ms: f64) -> Result<(), GpuError> {
+    fn prepare(
+        &mut self,
+        sub: &mut dyn Submit,
+        target_ms: f64,
+        stop: &AtomicBool,
+    ) -> Result<(), GpuError> {
+        let stopped = || {
+            if stop.load(Ordering::Relaxed) {
+                Err(GpuError::Stopped)
+            } else {
+                Ok(())
+            }
+        };
         // The GPU against the CPU reference, on a short run (DG5).
         sub.submit(&mut |ctx| self.run_kernel(ctx, SAMPLE_STEPS))?;
         sub.finish()?;
         let out = Self::words(&self.gpu.read_buffer(&self.out, THREADS * 16)?);
-        for id in (0..THREADS as usize).step_by(SAMPLE_EVERY) {
+        stopped()?;
+        for (i, id) in (0..THREADS as usize).step_by(SAMPLE_EVERY).enumerate() {
+            // ~0.2 s of CPU for the whole sample (S1): look at the stop every ~20 ms.
+            if i % 1024 == 0 {
+                stopped()?;
+            }
             if out[id * 4..id * 4 + 4] != (self.reference)(id as u32, self.seed, SAMPLE_STEPS) {
                 tracing::error!(thread = id, "GPU output differs from the CPU reference");
                 return Err(GpuError::ReferenceInvalid);
             }
         }
+        stopped()?;
         self.steps = calibrate(sub, target_ms, &mut |ctx, steps| {
             self.run_kernel(ctx, steps)
         })?;
         tracing::info!(steps = self.steps, target_ms, "compute load calibrated");
+        stopped()?;
         // The golden output: the first submission with the calibrated steps.
         let steps = self.steps;
         sub.submit(&mut |ctx| {
             self.run_kernel(ctx, steps);
-            // SAFETY: two buffers of this device with the same description.
+            // SAFETY: `ctx` is this device's context (asserted in `run_kernel`); two buffers
+            // of this device with the same description.
             unsafe { ctx.CopyResource(&self.golden, &self.out) };
         })?;
         self.gpu.write_words(&self.counters, &COUNTERS_RESET);
@@ -140,8 +171,10 @@ impl GpuWorkload for ComputeLoad {
             self.run_kernel(ctx, steps);
             self.gpu
                 .set_constants(&self.compare_constants, [THREADS, n as u32, 0, 0]);
-            // SAFETY: resources of this device; the SRVs are unbound afterwards so the
-            // kernel can write the output again.
+            // SAFETY: `ctx` is this device's context (asserted in `run_kernel`), so the
+            // compare constants written just above land before this dispatch; resources of
+            // this device; the SRVs are unbound afterwards so the kernel can write the
+            // output again.
             unsafe {
                 ctx.CSSetShader(&self.compare, None);
                 ctx.CSSetConstantBuffers(0, Some(&[Some(self.compare_constants.clone())]));
@@ -218,7 +251,8 @@ mod tests {
                 };
                 let mut load = ComputeLoad::new(kernel, &gpu, &ctx).unwrap();
                 // Short submissions: the test stays far below its GPU budget.
-                load.prepare(&mut sub, 5.0).unwrap();
+                load.prepare(&mut sub, 5.0, &AtomicBool::new(false))
+                    .unwrap();
                 for _ in 0..6 {
                     load.submit(&mut sub).unwrap();
                 }

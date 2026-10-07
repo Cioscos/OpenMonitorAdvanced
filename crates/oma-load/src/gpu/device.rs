@@ -42,6 +42,8 @@ pub enum GpuError {
     /// The GPU's output differs from the CPU reference in the sample check of a phase
     /// (plan DG5): a defect of the implementation or the driver, not of the GPU.
     ReferenceInvalid,
+    /// The stop flag was raised while a load was being prepared.
+    Stopped,
 }
 
 /// Classifies a failed HRESULT; `removed_reason` is asked only for a lost device.
@@ -85,7 +87,9 @@ fn luid_to_u64(luid: LUID) -> u64 {
     ((luid.HighPart as u32 as u64) << 32) | luid.LowPart as u64
 }
 
-/// A D3D11 device (feature level 11_0) on one hardware adapter. A clone shares the device.
+/// A D3D11 device (feature level 11_0) on one hardware adapter. A clone shares the device
+/// and its immediate context, which D3D11 does not let two threads use at once: keep the
+/// device, its clones and its `Submitter` on one thread (the GPU engine's).
 #[derive(Clone)]
 pub struct GpuDevice {
     adapter: IDXGIAdapter3,

@@ -21,11 +21,19 @@ use crate::args::Inject;
 use crate::link::{EXIT_DEVICE_LOST, EXIT_OK};
 use crate::rng::phase_seed;
 
-/// One verified GPU load of a phase.
+/// One verified GPU load of a phase. `sub` must be the submission queue of the load's own
+/// device (it wraps `GpuDevice::context()`): the loads write constants through the device
+/// and record dispatches on the context `sub` hands them, in one order.
 pub trait GpuWorkload {
     /// Calibrates one submission to about `target_ms` of GPU time and writes the golden
-    /// output; `ReferenceInvalid` when the GPU disagrees with the CPU reference.
-    fn prepare(&mut self, sub: &mut dyn Submit, target_ms: f64) -> Result<(), GpuError>;
+    /// output; `ReferenceInvalid` when the GPU disagrees with the CPU reference. Looks at
+    /// `stop` at least every 100 ms and gives `Stopped` when it is raised.
+    fn prepare(
+        &mut self,
+        sub: &mut dyn Submit,
+        target_ms: f64,
+        stop: &AtomicBool,
+    ) -> Result<(), GpuError>;
     /// Sends one calibrated submission, with its comparison against the golden output.
     fn submit(&mut self, sub: &mut dyn Submit) -> Result<(), GpuError>;
     /// The verdicts of the submissions since the last check.
@@ -313,6 +321,7 @@ impl<D> Run<'_, D> {
                 self.error(kernel, ErrorKind::ReferenceInvalid, 0, 0, 0);
                 Ok(End::Skipped("reference_invalid"))
             }
+            GpuError::Stopped => Ok(End::Stopped),
             GpuError::OutOfMemory => Ok(End::Skipped("vram")),
             GpuError::Create(_) | GpuError::TimingDisjoint => {
                 tracing::warn!(kernel = ?kernel, error = ?error, "GPU phase skipped");
@@ -370,7 +379,7 @@ impl<D> Run<'_, D> {
         }
         let target_ms = submit_target_ms(integrated);
         for (kernel, load) in &mut loads {
-            if let Err(e) = load.prepare(sub, target_ms) {
+            if let Err(e) = load.prepare(sub, target_ms, self.stop) {
                 return self.failed(*kernel, e);
             }
         }

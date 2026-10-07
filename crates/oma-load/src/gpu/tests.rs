@@ -96,8 +96,14 @@ struct FakeLoad {
 }
 
 impl GpuWorkload for FakeLoad {
-    fn prepare(&mut self, _: &mut dyn Submit, _: f64) -> Result<(), GpuError> {
+    fn prepare(&mut self, _: &mut dyn Submit, _: f64, stop: &AtomicBool) -> Result<(), GpuError> {
         push(&self.log, Ev::Prepare(self.kernel));
+        if self.prepare_err == Some(GpuError::Stopped) {
+            // A long preparation that looks at the stop every 10 ms.
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
         self.prepare_err.map_or(Ok(()), Err)
     }
     fn submit(&mut self, sub: &mut dyn Submit) -> Result<(), GpuError> {
@@ -551,6 +557,33 @@ fn stop_flag_finishes_within_200_ms() {
     assert!(took < Duration::from_millis(200), "{took:?}");
     assert_eq!(ran.end.finished.reason, FinishReason::Stopped);
     assert_eq!(ran.done().len(), 1);
+}
+
+#[test]
+fn stop_during_prepare_finishes_within_200_ms() {
+    let stop = AtomicBool::new(false);
+    let stopped_at = Mutex::new(None);
+    let ran = thread::scope(|s| {
+        s.spawn(|| {
+            thread::sleep(Duration::from_millis(300));
+            *stopped_at.lock().unwrap() = Some(Instant::now());
+            stop.store(true, Ordering::Relaxed);
+        });
+        run_with_stop(
+            &plan(vec![phase(KernelId::S1, LoadMode::Steady, 10)]),
+            &Setup {
+                prepare_err: Some((KernelId::S1, GpuError::Stopped)),
+                ..Setup::default()
+            },
+            &stop,
+        )
+    });
+    let took = stopped_at.lock().unwrap().unwrap().elapsed();
+    assert!(took < Duration::from_millis(200), "{took:?}");
+    assert_eq!(ran.end.finished.reason, FinishReason::Stopped);
+    assert_eq!(ran.done().len(), 1);
+    assert_eq!(ran.done()[0].skipped, None);
+    assert!(ran.submits().is_empty());
 }
 
 #[test]

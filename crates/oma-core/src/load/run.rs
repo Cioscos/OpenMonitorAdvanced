@@ -580,7 +580,10 @@ impl RunController {
                         .get(p.phase as usize)
                         .is_some_and(|ph| {
                             ph.mode == LoadMode::Steady
-                                && matches!(ph.kernel, KernelId::S1 | KernelId::S2 | KernelId::S5)
+                                && matches!(
+                                    ph.kernel,
+                                    KernelId::S1 | KernelId::S2 | KernelId::S3 | KernelId::S5
+                                )
                         });
                     let start = self.mono.saturating_sub(p.phase_elapsed_ms);
                     m.phase_started(p.phase, counts, start);
@@ -1184,6 +1187,7 @@ mod tests {
             clock_mhz: Some(4500.0),
             core_clock_mhz: vec![Some(4000.0), Some(4100.0), Some(4200.0), Some(4300.0)],
             throttling: None,
+            thermal_throttling: None,
         }
     }
 
@@ -1975,10 +1979,14 @@ mod tests {
 
     /// A GPU run without the service (GPU sensors do not need it, DG12).
     fn gpu_ctl(objective: Objective) -> RunController {
+        gpu_ctl_with(objective, KernelId::S1)
+    }
+
+    fn gpu_ctl_with(objective: Objective, kernel: KernelId) -> RunController {
         let mut s = session();
         s.component = Component::Gpu;
         s.objective = objective;
-        s.plan.phases = vec![gpu_phase(KernelId::S1, LoadMode::Steady)];
+        s.plan.phases = vec![gpu_phase(kernel, LoadMode::Steady)];
         s.plan.gpu = Some(oma_ipc::load::GpuTarget {
             luid: 7,
             integrated: false,
@@ -2036,6 +2044,7 @@ mod tests {
             clock_mhz: Some(2700.0),
             core_clock_mhz: vec![],
             throttling,
+            thermal_throttling: None,
         }
     }
 
@@ -2197,6 +2206,17 @@ mod tests {
             "90.0"
         );
         assert!((s.stability.unwrap() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn s3_rates_count_for_stability() {
+        let mut c = gpu_ctl_with(Objective::Overclock, KernelId::S3);
+        for s in 1..=270u64 {
+            let t = s * 1000;
+            let rate = if (150..210).contains(&s) { 90.0 } else { 100.0 };
+            c.on_load(&gpu_progress(t, rate, None), clock(t));
+        }
+        assert!((c.status().stability.unwrap() - 0.9).abs() < 1e-9);
     }
 
     #[test]

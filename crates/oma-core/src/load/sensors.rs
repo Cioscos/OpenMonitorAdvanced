@@ -21,6 +21,8 @@ pub struct SensorSample {
     pub core_clock_mhz: Vec<Option<f64>>,
     /// GPU only: a power or thermal throttle flag is on; `None` when no flag reads.
     pub throttling: Option<bool>,
+    /// GPU only: the thermal throttle flag alone (the power one is normal under load).
+    pub thermal_throttling: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -29,6 +31,7 @@ pub struct GpuSensorIds {
     pub power: Option<usize>,
     pub clock: Option<usize>,
     pub throttle: Vec<usize>,
+    pub thermal: Option<usize>,
 }
 
 /// Indices into `schema.sensors` (and so into snapshot values). Core `N`
@@ -81,6 +84,7 @@ pub fn resolve_gpu_sensors(schema: &Schema, device_id: &str) -> GpuSensorIds {
             .iter()
             .filter_map(|r| find(r))
             .collect(),
+        thermal: find("flag/throttle-thermal"),
     }
 }
 
@@ -106,6 +110,7 @@ pub fn read_sample(ids: &CpuSensorIds, snapshot: &Snapshot, quality: &[Quality])
         clock_mhz: get(ids.clock),
         core_clock_mhz: ids.core_clock.iter().map(|i| get(*i)).collect(),
         throttling: None,
+        thermal_throttling: None,
     }
 }
 
@@ -127,6 +132,7 @@ pub fn read_gpu_sample(
         clock_mhz: get(ids.clock),
         core_clock_mhz: vec![],
         throttling: (!flags.is_empty()).then(|| flags.iter().any(|v| *v >= 1.0)),
+        thermal_throttling: get(ids.thermal).map(|v| v >= 1.0),
     }
 }
 
@@ -236,6 +242,7 @@ mod tests {
                 power: Some(2),
                 clock: Some(3),
                 throttle: vec![4, 5],
+                thermal: Some(5),
             }
         );
         // Another device's sensors never match.
@@ -269,6 +276,22 @@ mod tests {
         let r = read_gpu_sample(&ids, &snap(vec![Some(70.0), None, None]), &q);
         assert_eq!(r.throttling, None);
         assert!(r.core_clock_mhz.is_empty());
+    }
+
+    #[test]
+    fn thermal_flag_is_read_apart_from_power() {
+        let s = gpu_schema(&[
+            ("throttle-power", SensorKind::Flag),
+            ("throttle-thermal", SensorKind::Flag),
+        ]);
+        let ids = resolve_gpu_sensors(&s, GPU);
+        let r = read_gpu_sample(
+            &ids,
+            &snap(vec![Some(1.0), Some(0.0)]),
+            &[Quality::Fresh; 2],
+        );
+        assert_eq!(r.throttling, Some(true));
+        assert_eq!(r.thermal_throttling, Some(false));
     }
 
     #[test]

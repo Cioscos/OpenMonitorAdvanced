@@ -285,15 +285,16 @@ fn gpu_phases(objective: Objective, duration: u32) -> Vec<Phase> {
             vec![load, gpu(S1, LoadMode::Ramp, d[1])]
         }
         Objective::Overclock => {
-            let d = scale(&[20, 10, 10, 15, 20, 10, 15], duration);
+            let d = scale(&[15, 10, 10, 10, 15, 20, 10, 10], duration);
             let mut v = vec![
                 gpu(S4, steady, d[0]),
-                gpu(S2, steady, d[1]),
-                gpu(S1, steady, d[2]),
-                gpu(S6, steady, d[3]),
-                gpu(S1, LoadMode::Ramp, d[4]),
-                gpu(S1, LoadMode::Alternate, d[5]),
-                gpu(S1, LoadMode::PauseResume, d[6]),
+                gpu(S3, steady, d[1]),
+                gpu(S2, steady, d[2]),
+                gpu(S1, steady, d[3]),
+                gpu(S6, steady, d[4]),
+                gpu(S1, LoadMode::Ramp, d[5]),
+                gpu(S1, LoadMode::Alternate, d[6]),
+                gpu(S1, LoadMode::PauseResume, d[7]),
             ];
             v.iter_mut().for_each(|p| p.stop_on_error = true);
             v
@@ -1217,20 +1218,21 @@ mod tests {
     }
 
     #[test]
-    fn gpu_overclock_round_has_the_seven_phases() {
+    fn gpu_overclock_round_has_the_eight_phases() {
         use KernelId::*;
         use LoadMode::*;
         let plan = ok_gpu(&gpu_req(Objective::Overclock, Preset::Standard));
         assert_eq!(
             shape(&plan),
             [
-                (S4, Steady, 360),
+                (S4, Steady, 270),
+                (S3, Steady, 180),
                 (S2, Steady, 180),
                 (S1, Steady, 180),
                 (S6, Steady, 270),
                 (S1, Ramp, 360),
                 (S1, Alternate, 180),
-                (S1, PauseResume, 270),
+                (S1, PauseResume, 180),
             ]
         );
         assert!(plan.phases.iter().all(|p| p.stop_on_error));
@@ -1280,7 +1282,7 @@ mod tests {
         });
         let plan = ok_gpu(&r);
         assert_eq!(plan.phases[0].duration_s, 600);
-        assert_eq!(plan.total_seconds(), 600 + 1440);
+        assert_eq!(plan.total_seconds(), 600 + 1530);
     }
 
     #[test]

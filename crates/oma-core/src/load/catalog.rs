@@ -31,7 +31,7 @@ pub fn catalog_json() -> Value {
     }
     json!({
         "kernels": ids(&[K1, K2, K3, K4, K5, K7, K8, K9, K10]),
-        "gpuKernels": ids(&[S1, S2, S4, S5, S6]),
+        "gpuKernels": ids(&[S1, S2, S3, S4, S5, S6]),
         "isa": ids(&[Isa::Avx512, Isa::Avx2, Isa::Sse2]),
         "modes": ["steady", "variable", "light", "coreCycle", "allCore", "ramp", "alternate", "pauseResume"],
         "patterns": ids(&[
@@ -70,7 +70,7 @@ mod tests {
     fn catalog_lists_gpu_entries() {
         let c = catalog_json();
         assert!(c["components"].as_array().unwrap().contains(&json!("gpu")));
-        assert_eq!(c["gpuKernels"].as_array().unwrap().len(), 5);
+        assert_eq!(c["gpuKernels"].as_array().unwrap().len(), 6);
         assert_eq!(c["presets"]["gpu.normal"]["standard"], 900);
         assert_eq!(c["presets"]["gpu.overclock"]["night"], 7200);
         assert!(c["modes"]

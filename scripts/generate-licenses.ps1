@@ -22,6 +22,8 @@
   5. Adapted: source code of OpenDCDiag (Apache-2.0) adapted into crates/oma-load (M8a1). The
      FIRESTARTER code adapted there is GPL-3.0-or-later, our own licence: it is attributed in
      THIRD_PARTY_NOTICES.md only.
+  6. Fonts: Orbitron and Share Tech Mono (OFL-1.1, M8a2), bundled in app/src/assets/fonts/; texts
+     (with the copyright line) from the OFL.txt of the pinned google/fonts commit, in scripts/licenses/.
   Every licence expression must be satisfiable with the `accepted` list of about.toml. The
   output is UTF-8 without BOM, LF, with no date and no local path, so it is deterministic.
   -Check writes to a temporary folder and compares; exit code 1 lists the differing lines.
@@ -235,6 +237,23 @@ function Get-AdaptedEntries([string[]]$Accepted) {
     }
 }
 
+# Fonts bundled in the app (M8a2): github.com/google/fonts at commit 7085eb89a950e85db5b166b7a58d414544b4140c,
+# files and SHA-256 in app/src/styles/fonts.css. The licence file of each starts with its copyright line.
+function Get-FontEntries([string[]]$Accepted) {
+    $fonts = @(
+        @{ Name = 'Orbitron'; File = 'Orbitron-OFL.txt'; Copyright = '2018 The Orbitron Project Authors (https://github.com/theleagueof/orbitron), with Reserved Font Name "Orbitron"' }
+        @{ Name = 'Share Tech Mono'; File = 'ShareTechMono-OFL.txt'; Copyright = '2012 Carrois Type Design, Ralph du Carrois (post@carrois.com www.carrois.com), with Reserved Font Name "Share"' }
+    )
+    foreach ($f in $fonts) {
+        Assert-Accepted $f.Name 'OFL-1.1' $Accepted
+        [pscustomobject]@{
+            Ecosystem = 'Fonts'; Name = $f.Name; Version = '7085eb89'; License = 'OFL-1.1'
+            Copyright = $f.Copyright
+            Texts = @([pscustomobject]@{ Title = 'OFL-1.1'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir $f.File)) })
+        }
+    }
+}
+
 # Warns (never fails, so the output stays the same on every machine) when the THIRD-PARTY-NOTICES
 # of the restored runtime pack differ from the pinned copy, which then needs a review and update.
 function Test-RuntimeNotices($Assets, [string]$PackagesRoot) {
@@ -271,6 +290,7 @@ try {
         Get-NuGetEntries $accepted
         Get-ProgramEntries $accepted
         Get-AdaptedEntries $accepted
+        Get-FontEntries $accepted
     )
     $text = ConvertTo-OmaLicenseText -Entries $entries
     $target = Join-Path $RepoRoot 'THIRD_PARTY_LICENSES.txt'

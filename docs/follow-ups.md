@@ -43,7 +43,7 @@ Updated at the end of every milestone (last update: M8a1).
 
 Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a1-stress-cpu-ram.md`, tasks A1-A26; the branch `feat/m8a1-stress-cpu` is not merged: it waits for the live checks below).
 
-- M8a2, the CPU benchmark (spec M8 §4.6), has no plan yet; M8b (GPU), M8c (disk) and M8d (leaderboard) follow the spec.
+- M8a2, the CPU benchmark (spec M8 §4.6), is implemented (see "Open: CPU benchmark (M8a2)" below); M8b (GPU), M8c (disk) and M8d (leaderboard) follow the spec.
 - The installer paths of the stress test (`oma-load.exe` installed and signed, removed by the uninstaller) were never run: NSIS compiles only at the final verification and the paths need a VM or Windows Sandbox, as for M7c/M7d.
 - Core numbering: «Core N» of the app is compared with Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer only in check P11.
 - K1 uses 10 accumulators (FIRESTARTER 12/27), so AVX-512 is slightly latency-bound; K2 working set is 48·N against 16·N in DA9; block times of K1 (10/8/2.5 ms) to recheck live. `crates/oma-load/src/kernels/`; when the benchmark touches them.
@@ -54,6 +54,18 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 - Accessibility: `QuitDialog` and `RiskNotice` have no focus trap or focus restore; a `Term` inside a radio label may toggle the radio when clicked. `app/src/components/performance/`; when touched.
 - Handshake failure paths of the host (timeout, incompatible, no topology, early exit) are not tested end to end; a spawn failure saves no `failed_to_start` session. `app/src-tauri/src/performance/`; when touched.
 - Hypervisor flag: the Hyper-V root partition (VBS on bare metal) is not flagged as a VM; a nested root with the same privilege would not be. `crates/oma-win/src/topology.rs`; accepted.
+
+## Open: CPU benchmark (M8a2)
+
+Voci aperte dopo le revisioni della M8a2 (piano `docs/superpowers/plans/2026-10-07-m8a2-benchmark-cpu.md`, task B1-B10; il branch `feat/m8a2-cpu-bench` aspetta le verifiche dal vivo B11).
+
+- **B11, da fare con l'utente:** la taratura della scala (`crates/oma-core/src/scores/cpu-1-baseline.json`, oggi `provisional: true`) sul Ryzen 7 7800X3D con il BIOS di fabbrica, il benchmark completo, le misure di `scripts/measure-footprint.ps1` a riposo e con la pagina CPU aperta (sezione M8a2 di `docs/perf-budget.md`, Step 2 del B10 non eseguito da un agente).
+- **`calibrate_cpu` accetta file di punteggio non validi:** legge anche file non validi, con flag o di una versione diversa del punteggio. Va corretto o controllato prima della taratura B11. `app/src-tauri/src/performance/`.
+- **Test instabile:** `updates::tests` di `oma-app` fallisce a volte nell'esecuzione completa del workspace (`cargo test --workspace`) e passa da solo. `app/src-tauri/src/updates/`; da indagare.
+- **`others_share` conta il nostro WebView2 come CPU «altra»:** i processi della finestra dell'app possono far scattare il flag `busy_system` senza che l'utente abbia aperto altro. `crates/oma-win/`; da escludere i processi figli dell'app.
+- **Esportazione e condivisione (M8d):** «Esporta JSON» e «Condividi su GitHub» (formato del §8.5 della spec) e il riferimento ▲ «modello della tabella» sono rinviati alla M8d; la M8a2 ha solo «Il mio record» e «L'ultima misura».
+- **Portatili:** il flag `battery` (misura a batteria) non è provato su un portatile; il benchmark va ripetuto su un portatile a batteria e collegato alla rete, anche per vedere se i valori di soglia termica (Tjmax − 2, 93 °C senza Tjmax) hanno senso lì.
+- **Percorsi dell'installer:** `oma-load.exe` e i font non sono stati provati con un setup installato (VM o Windows Sandbox), come per la M7c e la M7d.
 
 ## M8a1 live checks (plan task A28): done 2026-10-06, P16 owed on another PC
 

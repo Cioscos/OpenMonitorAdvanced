@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8a2).
+Updated at the end of every milestone (last update: M8b1).
 
 ## Open: code
 
@@ -43,7 +43,7 @@ Updated at the end of every milestone (last update: M8a2).
 
 Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a1-stress-cpu-ram.md`, tasks A1-A26; the branch `feat/m8a1-stress-cpu` is not merged: it waits for the live checks below).
 
-- M8a2, the CPU benchmark (spec M8 §4.6), is implemented (see "Open: CPU benchmark (M8a2)" below); M8b (GPU), M8c (disk) and M8d (leaderboard) follow the spec.
+- M8a2, the CPU benchmark (spec M8 §4.6), is implemented (see "Open: CPU benchmark (M8a2)" below); M8b1 (GPU stress test) is implemented (see "Open: GPU stress test (M8b1)" below); M8b2 (GPU benchmark), M8c (disk) and M8d (leaderboard) follow the spec.
 - The installer paths of the stress test (`oma-load.exe` installed and signed, removed by the uninstaller) were never run: NSIS compiles only at the final verification and the paths need a VM or Windows Sandbox, as for M7c/M7d.
 - Core numbering: «Core N» of the app is compared with Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer only in check P11.
 - K1 uses 10 accumulators (FIRESTARTER 12/27), so AVX-512 is slightly latency-bound; K2 working set is 48·N against 16·N in DA9; block times of K1 (10/8/2.5 ms) to recheck live. `crates/oma-load/src/kernels/`; when the benchmark touches them.
@@ -54,6 +54,37 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 - Accessibility: `QuitDialog` and `RiskNotice` have no focus trap or focus restore; a `Term` inside a radio label may toggle the radio when clicked. `app/src/components/performance/`; when touched.
 - Handshake failure paths of the host (timeout, incompatible, no topology, early exit) are not tested end to end; a spawn failure saves no `failed_to_start` session. `app/src-tauri/src/performance/`; when touched.
 - Hypervisor flag: the Hyper-V root partition (VBS on bare metal) is not flagged as a VM; a nested root with the same privilege would not be. `crates/oma-win/src/topology.rs`; accepted.
+
+## Open: GPU stress test (M8b1)
+
+Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-07-m8b1-stress-gpu.md`, task G1-G13). Il branch `feat/m8b1-gpu-stress` non è unito: aspetta le prove dal vivo G14, la misura a riposo e la decisione dell'utente sul merge.
+
+**Prove dal vivo G14, da fare con l'utente (un blocco alla volta, carichi pesanti solo con il suo via):**
+
+- Prima: `cargo build -p oma-load` e `cargo build -p oma-overlay`, poi `cd app && pnpm tauri dev`.
+- Q1 RTX 4080 · Verifica normale · Rapido; Q2 iGPU AMD · Verifica normale · Rapido (desktop fluido, avviso sulla RAM condivisa); Q3 RTX 4080 · Stabilità overclock · Standard (le sette fasi, `vram_allocated` vicino al 95% del budget meno 400 MB); Q4 errore iniettato con `$env:OMA_LOAD_INJECT='s1'` (fase e livello di carico se l'errore cade nella rampa); Q5 «Ferma e salva» e «Ferma il test» dal tray; Q6 stop termico con `gpuStopC` = 60; Q7 chiusura della finestra durante un test; Q8 tooltip dei termini della GPU con il mouse e con Tab; Q10 «Ripeti il test» dopo un riavvio di Windows, solo se l'utente vuole.
+- **Q9 e misura a riposo:** `pwsh scripts/measure-footprint.ps1` a riposo (nucleo < 1% CPU, tray < 30 MB, finestra < 200 MB) e durante Q1 (finestra < 200 MB, `oma-load` con la sua VRAM annotata a parte); i valori vanno nella sezione M8b1 di `docs/perf-budget.md`. Un agente non l'ha fatta.
+
+**Rinviato alla M8b2 (DG1, DG15):**
+
+- Benchmark della GPU Calcolo e Grafica (spec §5.2), pagina di punteggio, contagiri e la voce «GPU» del gruppo Punteggio nella barra laterale.
+- **S3 (flusso di memoria):** nessun profilo del §5.4 lo usa; serve al benchmark per la banda. Il protocollo v4 non ha `s3`: arriverà con la versione del benchmark.
+- **Avviso «altro processo sulla GPU»:** lo chiede il §5.2 solo per il benchmark.
+
+**Da riprendere (minori rinviati nelle revisioni, dal registro del branch):**
+
+- **Protocollo e piano:** `run_gpu` mappa un `plan.gpu` mancante sul LUID 0 e conta su `validate`; `check_phase` non rifiuta `cores`, `per_core_s` e `core_cycle` nelle fasi della GPU; `GpuTarget.integrated` non si confronta con la scheda vera. Il codice d'uscita 4 dà `device_lost` anche per un'esecuzione della CPU (latente: da legare a `is_gpu`). `oma-ipc/`, `oma-core/`, `oma-load/src/engine/`; quando si tocca.
+- **Stabilità:** l'ultima finestra completa di una fase si scarta sempre (limite da documentare); una fase tutta a zero non dà stabilità (protezione senza test); manca il test della sessione GPU con il servizio che passa da presente ad assente. `oma-core/src/load/`.
+- **`oma-win`:** NVML tiene in cache per sempre un caricamento fallito (un solo tentativo per processo), come già annotato per il driver aggiornato a caldo; `pci_from_device_id` accetta solo il dominio 0000 e non ha un test di andata e ritorno con `Adapter::device_id`; `pcie_replay_count` senza commento di documentazione. `crates/oma-win/src/gpu/`.
+- **Fondamenta D3D11 (`oma-load/src/gpu/`):** `EnumAdapters1` mappa ogni errore su «non trovata»; `Map` senza guardia RAII per l'`Unmap`; il timer di «bloccato» parte dall'invio, quindi con 2 invii in volo la seconda attesa include il tempo del primo (trascurabile a 40 ms); `D3DDDIERR_DEVICEREMOVED` non è mappato su `Lost`; `build.rs` dice che il bytecode è identico, ma dipende dalla versione di `fxc.exe` dell'SDK (da fissare prima del benchmark, per la classifica); commenti `// SAFETY:` sottili in `compute.rs` e `device.rs`; controllo del contesto solo con `debug_assert`.
+- **Motore (`oma-load/src/gpu/`):** un errore non fatale di `open` arriva a `fatal()` con una riga di log e l'app vede `failed` senza un avviso con il motivo; un errore fatale a metà fase non manda `PhaseDone` e salta la verifica finale; i percorsi `Hung` e di panico tengono vivo il processo con il dispositivo aperto; `ComputeLoad::new` va in panico su kernel che non sono S1 e S2 (meglio `unreachable!`).
+- **S4 (VRAM):** `vram_words` e `vram_bits` sono per lettura, non per giro (l'app dovrebbe sommarli); con allocazioni piccole le statistiche si scrivono a ogni giro, più spesso di 1 Hz; gli errori diversi da memoria esaurita si nascondono come mancanza; `CreateBuffer` riuscito non garantisce che la VRAM sia residente (verificare con l'uso in `QueryVideoMemoryInfo`); `vram_allocated` e `vram_reduced` arrivano con la prima verifica al secondo, fino a 1 s dopo l'inizio della fase.
+- **S6 (artefatti):** il commento sull'invio (`draw` + `compare` + `record`) esagera; filtro dell'iniezione ridondante in `graphics.rs`; il conteggio dei riquadri si ricalcola da `tile_count`.
+- **App:** il polling dell'evento WHEA continua anche durante un test della GPU; il test `pcie_replay_is_polled_every_five_seconds` si basa sul tempo (circa 6 s reali). `app/src-tauri/src/performance/`.
+- **UI:** la stabilità compare come «95.3» nel titolo `low_stability` (parametro del backend) e «95,3» nella riga del risultato; la riga sta nella sezione del verdetto, non nel riepilogo; costruzione `{#if component === 'gpu'}{''}{:else}` da ripulire; `gpuId` resta vecchio se l'elenco delle GPU cambia; file Svelte non formattati con prettier; manca il test che la tela usi `status.gpuDeviceId`; il suggerimento sul Curve Optimizer non si nasconde per la GPU (irraggiungibile: gli errori della GPU non hanno core); nessun tooltip `Term` su «core» nel suggerimento di `gpuStopC` (come per il campo della CPU). `app/src/components/performance/`.
+- **Personalizza:** i minuti di S1 si riscalano insieme per tutte e quattro le fasi S1 del giro di overclock: da confermare con l'utente alla prova.
+- **Percorsi dell'installer:** `oma-load.exe` con il codice della GPU e gli shader compilati non sono stati provati con un setup installato (VM o Windows Sandbox), come per la M8a.
+- **Build:** `oma-load` ora richiede il Windows SDK (`fxc.exe`, o la variabile `OMA_FXC`) per compilare gli shader; i runner `windows-latest` lo hanno, da confermare alla prima CI del branch.
 
 ## Open: CPU benchmark (M8a2)
 

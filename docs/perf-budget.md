@@ -330,6 +330,12 @@ pwsh scripts/measure-footprint.ps1
 
 At rest: expected core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included). Then, in the app the script launched, run the CPU benchmark by hand (check B11) and measure again with the CPU page open and the gauges moving: window < 200 MB. `oma-load.exe` is reported apart. The values go in this section after B11.
 
+## M8b1 — GPU stress test (spec M8 §11)
+
+Nothing changes at rest. `oma-load.exe` exists only while a test runs, and the `performance/` module of the app does no periodic work without a test. The GPU list is read only when the UI asks for it (`performance_system`), never in a timer. During a GPU test the load uses VRAM within the plan limit (DG6: 95 % of the budget minus 400 MiB on a dedicated GPU; on an integrated one at most 4 GiB and 25 % of the available RAM), a few MB of RAM, and about 1 % of one CPU core while it waits for the submissions with `sleep(1)` (spike, Q7).
+
+Not measured in this session: `scripts/measure-footprint.ps1` starts the app and opens its window, and an agent does not drive the app or the user's desktop (live-check rule). The measurement is owed in the live checks (G14): at rest expected core < 1 % CPU, tray < 30 MB, window < 200 MB (WebView2 included), as for M8a; then during a GPU test with the window open, window < 200 MB, with `oma-load.exe` and its VRAM noted apart. The values go in this section after G14.
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

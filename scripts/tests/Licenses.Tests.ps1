@@ -87,6 +87,18 @@ Describe 'Merge-OmaLicenseSections' {
         $m.Sections[2].Title | Should -BeExactly 'Source code adapted into OpenMonitor Advanced'
     }
 
+    It 'renders memtest_vulkan next to OpenDCDiag with its zlib text and copyright' {
+        $zlib = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\licenses\Zlib.txt'))
+        $zlib | Should -Match 'Copyright \(c\) 2022 galkinvv by GpuZelenograd'
+        $e = [pscustomobject]@{ Ecosystem = 'Adapted'; Name = 'memtest_vulkan'; Version = 'fd9ff59c'; License = 'Zlib'
+            Copyright = '2022 galkinvv by GpuZelenograd'; Texts = @((Text 'Zlib' $zlib)) }
+        $m = Merge-OmaLicenseSections -Sections @(
+            [pscustomobject]@{ Ecosystem = 'Adapted'; Entries = @((New-Entry 'Adapted' 'OpenDCDiag' '9957c45b' 'Apache-2.0' @((Text 'Apache-2.0' $apache)))) },
+            [pscustomobject]@{ Ecosystem = 'Adapted'; Entries = @($e) })
+        ($m.Sections[0].Entries | ForEach-Object Name) -join ',' | Should -BeExactly 'memtest_vulkan,OpenDCDiag'
+        $m.Sections[0].Entries[0].Copyright | Should -Contain '2022 galkinvv by GpuZelenograd'
+    }
+
     It 'labels a text marked neutral by its title alone, whoever uses it first' {
         $sections = @(
             [pscustomobject]@{ Ecosystem = 'Adapted'; Entries = @((New-Entry 'Adapted' 'OpenDCDiag' '9957c45b' 'Apache-2.0' @(

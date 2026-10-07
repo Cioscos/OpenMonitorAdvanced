@@ -70,7 +70,7 @@ SMART data.
   the reason in the deck.
 - **In-game overlay.** FPS, frame times, lows and sensors over a game, from a separate
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
-- **Performance view.** A stress test for the CPU and the RAM, with a guided wizard (normal check
+- **Performance view.** A stress test for the CPU, the RAM and the GPU, with a guided wizard (normal check
   or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
   of past sessions, and a CPU benchmark with a single-core and a multi-core score on gauges
   (see [Performance view](#performance-view)).
@@ -180,7 +180,7 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
 
 ## Performance view
 
-The Performance view runs a stress test on the CPU or the RAM. The load comes from a separate
+The Performance view runs a stress test on the CPU, the RAM or a GPU. The load comes from a separate
 small process, `oma-load.exe`, installed next to the app; it is stopped when you stop the test or
 close the app. A wizard asks what to test, how long and with which thresholds; during the run the
 page shows clocks, temperature, power and errors, and a thermal stop ends the test if the CPU gets
@@ -188,6 +188,16 @@ too hot. Each session ends with a verdict (passed, unstable with the core, stopp
 a system crash) and is kept in the history. Closing the window does not stop a test: it goes on
 from the tray. Technical terms have a plain-words tooltip.
 
+- **GPU stress test.** The wizard lists every GPU suitable for the test (integrated ones too) and
+  offers a normal check and an overclock-stability profile. The load is Direct3D 11 and is
+  verified: floating-point and integer compute whose result is compared bit for bit with a
+  reference, a check of the video memory (VRAM), a graphics load and an artifact scan that
+  compares every drawn frame with the first one. The load level ramps up, alternates or pauses
+  to catch instabilities that only show at partial load. The test ends with a verdict: errors,
+  GPU reset by the driver, a speed that is not constant (below 97 %), thermal stop at the
+  maximum GPU temperature you set (default 90 °C, Settings › Performance). The PCIe replay
+  counter (NVIDIA only) is shown as a warning. It needs no administrator rights and no service.
+  The graphics benchmark comes later.
 - **CPU benchmark.** *Performance › Score › CPU* runs six workloads (integer: NTT, hash, compression,
   sort; floating point: FFT, matrix product) first on one core, then on every thread, in about 2
   minutes, with the same load process. The score is in points on a fixed scale, the same for every
@@ -202,7 +212,7 @@ from the tray. Technical terms have a plain-words tooltip.
   not a replacement for MemTest86, TestMem5 or Karhu.
 - **Crashes.** Fatal hardware errors and system crashes show up only after the restart; the core
   named in the result is the one under test, not proof that it is at fault.
-- The load kernels are partly adapted from FIRESTARTER and OpenDCDiag; see
+- The load kernels are partly adapted from FIRESTARTER, OpenDCDiag and memtest_vulkan; see
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## In-game overlay
@@ -400,7 +410,7 @@ ends up in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Data model, sampling scheduler, per-source merge, history. No Windows code. |
 | `crates/oma-win` | Windows providers: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, disks, network |
 | `crates/oma-ipc` | Protocol types, MessagePack encoding and framing for talking to `oma-service` and to the overlay |
-| `crates/oma-load` | `oma-load.exe`, the stress-test load process (CPU and RAM kernels) |
+| `crates/oma-load` | `oma-load.exe`, the stress-test load process (CPU, RAM and GPU kernels) |
 | `crates/oma-overlay` | `oma-overlay.exe`, the in-game overlay window (Direct2D, DirectWrite, DirectComposition) |
 | `app/src-tauri` | Tauri 2 shell (`oma-app`): commands, tray, window, safe mode, NSIS template and hooks |
 | `app/src` | Svelte 5 + TypeScript UI, English and Italian translations |

@@ -167,6 +167,21 @@ Corporation", licensed under the Apache License, Version 2.0; the full text is i
 Advanced". The modifications are part of OpenMonitor Advanced,
 GPL-3.0-or-later. No OpenDCDiag binary is redistributed.
 
+## memtest_vulkan
+
+The VRAM check of the GPU stress test (S4) adapts ideas and structure from
+memtest_vulkan (https://github.com/GpuZelenograd/memtest_vulkan), at commit
+`fd9ff59cde85cf11e25263e3f32d7adae0ba5e3b`: a pattern derived from the address
+and rotated, written once and read back in a rotated order, with bit-error
+statistics. It is rewritten as a Direct3D 11 compute shader
+(`crates/oma-load/shaders/s4_vram.hlsl`) and Rust
+(`crates/oma-load/src/gpu/vram.rs`), each with the origin note; the memory is
+sized from the DXGI video memory budget and classic passes are added.
+memtest_vulkan is "Copyright (c) 2022 galkinvv by GpuZelenograd", licensed under
+the zlib License; the full text is in `THIRD_PARTY_LICENSES.txt`, section "Source
+code adapted into OpenMonitor Advanced". The modifications are part of
+OpenMonitor Advanced, GPL-3.0-or-later. No memtest_vulkan binary is redistributed.
+
 ## Orbitron and Share Tech Mono
 
 The gauges of the CPU benchmark use two fonts, bundled as local files in

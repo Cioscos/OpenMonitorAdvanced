@@ -73,7 +73,7 @@ temperature, tensioni, ventole e dati SMART.
   quando cambiano le colonne: lingua, unità o sensori selezionati. *Impostazioni › Log CSV*
   imposta cartella, sensori, intervallo, limite di dimensione e scorciatoie. Un errore, come una
   unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
-- **Vista Prestazioni.** Uno stress test per CPU e RAM, con una procedura guidata (verifica
+- **Vista Prestazioni.** Uno stress test per CPU, RAM e GPU, con una procedura guidata (verifica
   normale o stabilità dell'overclock, da Rapido a Lungo), una pagina dal vivo, un risultato con
   verdetto e la cronologia delle sessioni, più un benchmark della CPU con un punteggio single core e uno
   multi core su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
@@ -188,7 +188,7 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
 
 ## Vista Prestazioni
 
-La vista Prestazioni esegue uno stress test della CPU o della RAM. Il carico viene da un piccolo
+La vista Prestazioni esegue uno stress test della CPU, della RAM o di una GPU. Il carico viene da un piccolo
 processo a parte, `oma-load.exe`, installato accanto all'app; si ferma quando fermi il test o
 chiudi l'app. Una procedura guidata chiede cosa provare, per quanto tempo e con quali soglie;
 durante la prova la pagina mostra frequenze, temperatura, potenza ed errori, e uno stop termico
@@ -197,6 +197,17 @@ instabile con il core, fermato, interrotto da un crash del sistema) e resta nell
 Chiudere la finestra non ferma un test: continua dal tray. I termini tecnici hanno un tooltip in
 parole semplici.
 
+- **Stress test della GPU.** La procedura guidata elenca le GPU adatte al test (anche le
+  integrate) e offre una verifica normale e un profilo di stabilità dell'overclock. Il carico è
+  Direct3D 11 ed è verificato: calcolo in virgola mobile e su interi, il cui risultato si
+  confronta bit per bit con un riferimento, una verifica della memoria video (VRAM), un carico
+  grafico e una scansione degli artefatti che confronta ogni fotogramma disegnato con il primo. Il
+  livello di carico sale, si alterna o si ferma, per trovare le instabilità che compaiono solo a
+  carico parziale. Il test finisce con un verdetto: errori, GPU azzerata dal driver, velocità non
+  costante (sotto il 97 %), stop termico alla temperatura massima della GPU che imposti (90 °C di
+  default, Impostazioni › Prestazioni). Il contatore dei replay PCIe (solo NVIDIA) compare come
+  avviso. Non servono i privilegi di amministratore né il servizio. Il benchmark grafico arriverà
+  dopo.
 - **Benchmark della CPU.** *Prestazioni › Punteggio › CPU* esegue sei carichi (interi: NTT, hash,
   compressione, ordinamento; virgola mobile: FFT, prodotto di matrici) prima su un core, poi su
   tutti i thread, in circa 2 minuti, con lo stesso processo di carico. Il punteggio è in punti su
@@ -212,7 +223,7 @@ parole semplici.
   (pagine da 4 KB): non sostituisce MemTest86, TestMem5 o Karhu.
 - **Crash.** Gli errori hardware fatali e i crash del sistema si vedono solo dopo il riavvio; il
   core indicato nel risultato è quello in prova, non la prova che sia il colpevole.
-- I kernel di carico sono in parte adattati da FIRESTARTER e OpenDCDiag; vedi
+- I kernel di carico sono in parte adattati da FIRESTARTER, OpenDCDiag e memtest_vulkan; vedi
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Controllo degli aggiornamenti
@@ -311,7 +322,7 @@ finisce in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Modello dati, scheduler di campionamento, merge per fonte, storico. Niente codice Windows. |
 | `crates/oma-win` | Provider Windows: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete |
 | `crates/oma-ipc` | Tipi del protocollo, codifica MessagePack e framing per parlare con `oma-service` |
-| `crates/oma-load` | `oma-load.exe`, il processo di carico dello stress test (kernel di CPU e RAM) |
+| `crates/oma-load` | `oma-load.exe`, il processo di carico dello stress test (kernel di CPU, RAM e GPU) |
 | `app/src-tauri` | Shell Tauri 2 (`oma-app`): comandi, tray, finestra, modalità sicura, template e hook NSIS |
 | `app/src` | Interfaccia Svelte 5 + TypeScript, traduzioni italiana e inglese |
 | `service/` | `oma-service`, servizio Windows .NET 10 basato su LibreHardwareMonitorLib, con i suoi test |

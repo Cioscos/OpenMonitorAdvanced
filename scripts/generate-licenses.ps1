@@ -19,7 +19,8 @@
      runtime pack has different ones).
   4. Programs: Intel PresentMon 2.6.0, shipped unmodified with the service, and cereal 1.3.2,
      compiled into it; texts from pinned copies in scripts/licenses/.
-  5. Adapted: source code of OpenDCDiag (Apache-2.0) adapted into crates/oma-load (M8a1). The
+  5. Adapted: source code of OpenDCDiag (Apache-2.0, M8a1) and memtest_vulkan (zlib, M8b1) adapted
+     into crates/oma-load. The
      FIRESTARTER code adapted there is GPL-3.0-or-later, our own licence: it is attributed in
      THIRD_PARTY_NOTICES.md only.
   6. Fonts: Orbitron and Share Tech Mono (OFL-1.1, M8a2), bundled in app/src/assets/fonts/; texts
@@ -224,16 +225,24 @@ function Get-ProgramEntries([string[]]$Accepted) {
 
 # Third-party source adapted into our own crates (M8a1), written by hand like the programs above. Only
 # what is not under our own licence appears here: OpenDCDiag at commit 9957c45b (Copyright 2022 Intel
-# Corporation, Apache-2.0), adapted in crates/oma-load/src/verify.rs and kernel.rs. FIRESTARTER
+# Corporation, Apache-2.0), adapted in crates/oma-load/src/verify.rs and kernel.rs, and memtest_vulkan at
+# commit fd9ff59c (Copyright (c) 2022 galkinvv by GpuZelenograd, zlib), adapted in gpu/vram.rs. FIRESTARTER
 # (GPL-3.0-or-later) is covered by LICENSE and THIRD_PARTY_NOTICES.md.
 function Get-AdaptedEntries([string[]]$Accepted) {
     Assert-Accepted 'OpenDCDiag 9957c45b' 'Apache-2.0' $Accepted
+    Assert-Accepted 'memtest_vulkan fd9ff59c' 'Zlib' $Accepted
     [pscustomobject]@{
         Ecosystem = 'Adapted'; Name = 'OpenDCDiag'; Version = '9957c45b'; License = 'Apache-2.0'
         Copyright = '2022 Intel Corporation'
         Texts = @([pscustomobject]@{
                 Title = 'Apache-2.0'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir 'Apache-2.0.txt')); Neutral = $true
             })
+    }
+    # M8b1: memtest_vulkan, adapted in crates/oma-load (S4); the text of the pinned commit includes the copyright line.
+    [pscustomobject]@{
+        Ecosystem = 'Adapted'; Name = 'memtest_vulkan'; Version = 'fd9ff59c'; License = 'Zlib'
+        Copyright = '2022 galkinvv by GpuZelenograd'
+        Texts = @([pscustomobject]@{ Title = 'Zlib'; Body = [IO.File]::ReadAllText((Join-Path $licensesDir 'Zlib.txt')) })
     }
 }
 

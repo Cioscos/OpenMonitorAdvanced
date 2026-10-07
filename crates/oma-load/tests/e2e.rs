@@ -88,6 +88,7 @@ impl Session {
                 protocol_version: LOAD_PROTOCOL_VERSION,
                 version: "e2e".into(),
                 isa: vec![],
+                shader_digest: None,
             }))
             .unwrap();
     }
@@ -135,6 +136,7 @@ impl Session {
             stop_on_error: false,
             iterations: None,
             pause_before_ms: 0,
+            windows: None,
         }
     }
 

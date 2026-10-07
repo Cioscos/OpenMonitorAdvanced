@@ -316,6 +316,7 @@ mod tests {
                     stop_on_error: false,
                     iterations: None,
                     pause_before_ms: 0,
+                    windows: None,
                 }],
                 gpu: None,
             },

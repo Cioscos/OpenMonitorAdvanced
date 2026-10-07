@@ -205,7 +205,15 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
             crate::kernels::bench::Kind::Sort,
         )),
         // GPU kernels run in the GPU engine, not as CPU kernels.
-        KernelId::S1 | KernelId::S2 | KernelId::S4 | KernelId::S5 | KernelId::S6 => None,
+        KernelId::S1
+        | KernelId::S2
+        | KernelId::S3
+        | KernelId::S4
+        | KernelId::S5
+        | KernelId::S6
+        | KernelId::Fill
+        | KernelId::Texture
+        | KernelId::Overdraw => None,
         #[cfg(not(target_arch = "x86_64"))]
         _ => None,
     }

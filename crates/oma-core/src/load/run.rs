@@ -1068,6 +1068,7 @@ mod tests {
             stop_on_error: false,
             iterations: None,
             pause_before_ms: 0,
+            windows: None,
         }
     }
 
@@ -1221,6 +1222,7 @@ mod tests {
                 protocol_version: 1,
                 version: "9".into(),
                 isa: vec![],
+                shader_digest: None,
             }),
             clock(100),
         );
@@ -1234,6 +1236,7 @@ mod tests {
                 skipped: None,
                 work_ms: None,
                 workers: vec![],
+                rates: vec![],
             }),
             clock(2000),
         );
@@ -1814,6 +1817,7 @@ mod tests {
             skipped: skipped.map(str::to_owned),
             work_ms: None,
             workers: vec![],
+            rates: vec![],
         })
     }
 

@@ -46,6 +46,7 @@ mod tests {
             protocol_version: LOAD_PROTOCOL_VERSION,
             version: "test".to_owned(),
             isa: vec![],
+            shader_digest: None,
         })
     }
 

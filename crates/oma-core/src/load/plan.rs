@@ -184,6 +184,7 @@ fn phase(kernel: KernelId, isa: Isa, size: DataSize, duration_s: u32) -> Phase {
         stop_on_error: false,
         iterations: None,
         pause_before_ms: 0,
+        windows: None,
     }
 }
 

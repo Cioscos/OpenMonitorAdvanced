@@ -51,6 +51,7 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
                     stop_on_error: true,
                     iterations: Some(w.iterations),
                     pause_before_ms: if rep == 0 { WARMUP_PAUSE_MS } else { 0 },
+                    windows: None,
                 });
                 steps.push(BenchStep {
                     kernel: w.id,

@@ -12,7 +12,10 @@ use crate::overlay::check_len;
 use crate::IpcError;
 
 /// Load protocol version, sent in [`LoadHello::protocol_version`] by both sides.
-pub const LOAD_PROTOCOL_VERSION: u32 = 4;
+pub const LOAD_PROTOCOL_VERSION: u32 = 5;
+
+/// Warm-up of a GPU benchmark phase, in seconds: the first windows are not reported.
+pub const GPU_BENCH_WARMUP_S: u32 = 4;
 
 /// Prefix of the load pipe name; the app appends a random UUID v4.
 pub const LOAD_PIPE_PREFIX: &str = r"\\.\pipe\OpenMonitorAdvanced-Load-";
@@ -39,6 +42,9 @@ pub struct LoadHello {
     pub protocol_version: u32,
     pub version: String,
     pub isa: Vec<Isa>,
+    /// `oma-load` only: fingerprint of the compiled shaders (16 lowercase hex digits).
+    #[serde(default)]
+    pub shader_digest: Option<String>,
 }
 
 /// App to process: stop the running plan.
@@ -93,12 +99,33 @@ pub enum KernelId {
     S4,
     S5,
     S6,
+    /// Memory stream (stress and benchmark) and the benchmark-only graphics loads.
+    S3,
+    Fill,
+    Texture,
+    Overdraw,
 }
 
 impl KernelId {
     /// True for the loads that run on the GPU.
     pub fn is_gpu(self) -> bool {
-        matches!(self, Self::S1 | Self::S2 | Self::S4 | Self::S5 | Self::S6)
+        matches!(
+            self,
+            Self::S1
+                | Self::S2
+                | Self::S3
+                | Self::S4
+                | Self::S5
+                | Self::S6
+                | Self::Fill
+                | Self::Texture
+                | Self::Overdraw
+        )
+    }
+
+    /// True for the GPU loads that only run as benchmark phases (`windows` required).
+    pub fn is_gpu_bench_only(self) -> bool {
+        matches!(self, Self::Fill | Self::Texture | Self::Overdraw)
     }
 
     /// True for the loads that only run as fixed-work benchmark phases.
@@ -241,6 +268,9 @@ pub struct Phase {
     /// Pause before the phase starts, in milliseconds.
     #[serde(default)]
     pub pause_before_ms: u32,
+    /// GPU benchmark: the measured 1 s windows after the warm-up.
+    #[serde(default)]
+    pub windows: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,7 +354,7 @@ pub struct Notice {
     pub value: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseDone {
     pub phase: u32,
     pub checks: u64,
@@ -338,6 +368,10 @@ pub struct PhaseDone {
     /// timed and the skipped phases.
     #[serde(default)]
     pub workers: Vec<WorkerDone>,
+    /// GPU benchmark phases: one rate per measured window, in base units per second
+    /// (FLOP, operations, bytes, pixels or texels); empty for the other phases.
+    #[serde(default)]
+    pub rates: Vec<f64>,
 }
 
 /// One thread of a fixed-work phase: the iterations it counted and the milliseconds from
@@ -411,6 +445,29 @@ fn check_phase(p: &Phase, gpu: bool) -> Result<(), IpcError> {
     if p.duration_s == 0 {
         return Err(IpcError::Decode("duration_s is 0".into()));
     }
+    match p.windows {
+        Some(w) => {
+            if !(1..=30).contains(&w) {
+                return Err(IpcError::Decode(format!("windows {w} is out of 1-30")));
+            }
+            if !is_gpu || p.mode != LoadMode::Steady || p.alt_kernel.is_some() {
+                return Err(IpcError::Decode(
+                    "windows need a steady GPU phase without alt_kernel".into(),
+                ));
+            }
+            if p.duration_s < GPU_BENCH_WARMUP_S + u32::from(w) {
+                return Err(IpcError::Decode(
+                    "duration_s is shorter than the warm-up plus the windows".into(),
+                ));
+            }
+        }
+        None if p.kernel.is_gpu_bench_only() => {
+            return Err(IpcError::Decode(
+                "fill, texture and overdraw need windows".into(),
+            ))
+        }
+        None => {}
+    }
     match p.per_core_s {
         Some(s) if !(1..=3600).contains(&s) => {
             return Err(IpcError::Decode(format!("per_core_s {s} is out of 1-3600")))
@@ -466,7 +523,12 @@ impl LoadMessage {
     /// receiver calls it after decoding; the decoder alone lets them through.
     pub fn validate(&self) -> Result<(), IpcError> {
         match self {
-            Self::Hello(h) => check_text("version", &h.version),
+            Self::Hello(h) => {
+                check_text("version", &h.version)?;
+                h.shader_digest
+                    .as_deref()
+                    .map_or(Ok(()), |d| check_text("shader_digest", d))
+            }
             Self::Run(r) => {
                 let plan = &r.plan;
                 check_len("phases", plan.phases.len(), MAX_PHASES)?;
@@ -506,6 +568,12 @@ impl LoadMessage {
             Self::Notice(n) => check_text("code", &n.code),
             Self::PhaseDone(d) => {
                 check_len("workers", d.workers.len(), MAX_LOGICAL)?;
+                check_len("rates", d.rates.len(), 64)?;
+                if d.rates.iter().any(|r| !r.is_finite() || *r < 0.0) {
+                    return Err(IpcError::Decode(
+                        "rates must be finite and non-negative".into(),
+                    ));
+                }
                 d.skipped
                     .as_deref()
                     .map_or(Ok(()), |s| check_text("skipped", s))
@@ -554,6 +622,7 @@ mod tests {
             stop_on_error: true,
             iterations: None,
             pause_before_ms: 0,
+            windows: None,
         }
     }
 
@@ -617,6 +686,7 @@ mod tests {
             protocol_version: LOAD_PROTOCOL_VERSION,
             version: "0.6.0".into(),
             isa: vec![Isa::Avx2, Isa::Sse2],
+            shader_digest: None,
         }
     }
 
@@ -658,6 +728,7 @@ mod tests {
             skipped: Some("isa".into()),
             work_ms: Some(900),
             workers: vec![],
+            rates: vec![],
         }));
         round_trip(LoadMessage::Finished(Finished {
             reason: FinishReason::FirstError,
@@ -867,6 +938,7 @@ mod tests {
             skipped: None,
             work_ms: Some(4),
             workers,
+            rates: vec![],
         }
     }
 
@@ -930,6 +1002,7 @@ mod tests {
             skipped: Some(long),
             work_ms: None,
             workers: vec![],
+            rates: vec![],
         });
         assert!(done.validate().is_err());
     }
@@ -968,9 +1041,9 @@ mod tests {
     fn hello_compatibility() {
         assert!(load_compatible(&hello()));
         let mut h = hello();
-        h.protocol_version = 3;
-        assert!(!load_compatible(&h));
         h.protocol_version = 4;
+        assert!(!load_compatible(&h));
+        h.protocol_version = 5;
         assert!(load_compatible(&h));
     }
 
@@ -1091,5 +1164,152 @@ mod tests {
         });
         let pr: Progress = serde_json::from_value(json).unwrap();
         assert_eq!(pr.load_percent, None);
+    }
+
+    fn gpu_bench_phase(kernel: KernelId) -> Phase {
+        let mut p = gpu_phase();
+        p.kernel = kernel;
+        p.duration_s = 30;
+        p.windows = Some(5);
+        p
+    }
+
+    fn valid(p: Phase) -> bool {
+        gpu_plan(vec![p]).validate().is_ok()
+    }
+
+    #[test]
+    fn bench_gpu_kernels_are_snake_case() {
+        assert_eq!(serde_json::to_value(KernelId::S3).unwrap(), "s3");
+        assert_eq!(serde_json::to_value(KernelId::Fill).unwrap(), "fill");
+        assert_eq!(serde_json::to_value(KernelId::Texture).unwrap(), "texture");
+        assert_eq!(
+            serde_json::to_value(KernelId::Overdraw).unwrap(),
+            "overdraw"
+        );
+        for k in [
+            KernelId::S3,
+            KernelId::Fill,
+            KernelId::Texture,
+            KernelId::Overdraw,
+        ] {
+            assert!(k.is_gpu(), "{k:?}");
+        }
+        assert!(!KernelId::S3.is_gpu_bench_only());
+        assert!(KernelId::Fill.is_gpu_bench_only());
+        assert!(!KernelId::S1.is_gpu_bench_only());
+    }
+
+    #[test]
+    fn gpu_bench_phase_round_trips() {
+        round_trip(gpu_plan(vec![
+            gpu_bench_phase(KernelId::S1),
+            gpu_bench_phase(KernelId::Fill),
+        ]));
+        assert!(valid(gpu_bench_phase(KernelId::Overdraw)));
+        round_trip(LoadMessage::PhaseDone(PhaseDone {
+            phase: 1,
+            checks: 0,
+            errors: 0,
+            duration_ms: 9000,
+            skipped: None,
+            work_ms: None,
+            workers: vec![],
+            rates: vec![1.5e9, 2.5e9],
+        }));
+        let mut h = hello();
+        h.shader_digest = Some("0123456789abcdef".into());
+        round_trip(LoadMessage::Hello(h));
+    }
+
+    #[test]
+    fn windows_out_of_range_is_rejected() {
+        for (n, ok) in [(0, false), (1, true), (30, true), (31, false)] {
+            let mut p = gpu_bench_phase(KernelId::S1);
+            p.windows = Some(n);
+            p.duration_s = 100;
+            assert_eq!(valid(p), ok, "{n}");
+        }
+    }
+
+    #[test]
+    fn windows_need_a_steady_gpu_phase_without_alt_kernel() {
+        let mut p = gpu_bench_phase(KernelId::S1);
+        p.windows = Some(5);
+        let mut c = phase();
+        c.kernel = KernelId::K2;
+        c.windows = Some(5);
+        assert!(plan(vec![c]).validate().is_err());
+        let mut r = p.clone();
+        r.mode = LoadMode::Ramp;
+        assert!(!valid(r));
+        let mut a = p.clone();
+        a.alt_kernel = Some(KernelId::S1);
+        assert!(!valid(a));
+        assert!(valid(p));
+    }
+
+    #[test]
+    fn windows_need_the_warmup() {
+        let mut p = gpu_bench_phase(KernelId::S1);
+        p.duration_s = 8;
+        assert!(!valid(p.clone()));
+        p.duration_s = GPU_BENCH_WARMUP_S + 5;
+        assert_eq!(p.duration_s, 9);
+        assert!(valid(p));
+    }
+
+    #[test]
+    fn bench_only_gpu_kernels_need_windows() {
+        for k in [KernelId::Fill, KernelId::Texture, KernelId::Overdraw] {
+            let mut p = gpu_bench_phase(k);
+            assert!(valid(p.clone()), "{k:?}");
+            p.windows = None;
+            assert!(!valid(p), "{k:?}");
+        }
+        let mut s3 = gpu_bench_phase(KernelId::S3);
+        s3.windows = None;
+        assert!(valid(s3));
+    }
+
+    #[test]
+    fn rates_must_be_finite_and_few() {
+        let done = |rates: Vec<f64>| {
+            LoadMessage::PhaseDone(PhaseDone {
+                phase: 0,
+                checks: 0,
+                errors: 0,
+                duration_ms: 1,
+                skipped: None,
+                work_ms: None,
+                workers: vec![],
+                rates,
+            })
+        };
+        assert!(done(vec![0.0, 1.0e12]).validate().is_ok());
+        assert!(done(vec![1.0; 64]).validate().is_ok());
+        assert!(done(vec![f64::NAN]).validate().is_err());
+        assert!(done(vec![-1.0]).validate().is_err());
+        assert!(done(vec![1.0; 65]).validate().is_err());
+    }
+
+    #[test]
+    fn v4_messages_still_decode() {
+        let json = serde_json::json!({
+            "kernel": "s1", "alt_kernel": null, "isa": "sse2", "size": "auto",
+            "mode": "steady", "placement": "all_logical", "duration_s": 5,
+            "per_core_s": null, "both_smt": false, "cores": null, "patterns": [],
+            "stop_on_error": true
+        });
+        let p: Phase = serde_json::from_value(json).unwrap();
+        assert_eq!(p.windows, None);
+        let json = serde_json::json!({
+            "phase": 0, "checks": 0, "errors": 0, "duration_ms": 1, "skipped": null
+        });
+        let d: PhaseDone = serde_json::from_value(json).unwrap();
+        assert!(d.rates.is_empty());
+        let json = serde_json::json!({"protocol_version": 4, "version": "x", "isa": []});
+        let h: LoadHello = serde_json::from_value(json).unwrap();
+        assert_eq!(h.shader_digest, None);
     }
 }

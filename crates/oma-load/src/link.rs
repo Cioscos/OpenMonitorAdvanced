@@ -77,6 +77,7 @@ pub fn hello() -> LoadMessage {
         protocol_version: LOAD_PROTOCOL_VERSION,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         isa: detected_isa(),
+        shader_digest: None,
     })
 }
 
@@ -230,6 +231,7 @@ mod tests {
             protocol_version: v,
             version: "0.5.0".into(),
             isa: vec![],
+            shader_digest: None,
         })
     }
 

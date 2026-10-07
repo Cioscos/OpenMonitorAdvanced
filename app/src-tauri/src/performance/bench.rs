@@ -409,6 +409,7 @@ mod tests {
                     skipped: None,
                     work_ms: Some(1000),
                     workers: vec![],
+                    rates: vec![],
                 })
             })
             .collect()

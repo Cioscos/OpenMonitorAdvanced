@@ -560,6 +560,7 @@ mod tests {
             skipped: None,
             work_ms,
             workers: vec![],
+            rates: vec![],
         })
     }
 
@@ -615,6 +616,7 @@ mod tests {
                 protocol_version: 2,
                 version: "9".into(),
                 isa: vec![],
+                shader_digest: None,
             }),
             clock(10),
         );

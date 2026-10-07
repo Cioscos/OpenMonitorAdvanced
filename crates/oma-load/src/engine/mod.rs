@@ -417,6 +417,7 @@ impl Engine<'_, '_> {
                     End::Skipped(_) => Vec::new(),
                     _ => std::mem::take(&mut cur.workers),
                 },
+                rates: vec![],
             }));
             match end {
                 End::Stopped => return self.finish(FinishReason::Stopped),

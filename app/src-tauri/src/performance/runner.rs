@@ -1393,6 +1393,7 @@ pub(crate) mod tests {
                     protocol_version: oma_ipc::load::LOAD_PROTOCOL_VERSION,
                     version: "9.9.9".into(),
                     isa: vec![Isa::Avx2, Isa::Sse2],
+                    shader_digest: None,
                 },
                 topology: topology(),
             }) as Box<dyn LoadLink>)
@@ -1833,6 +1834,7 @@ pub(crate) mod tests {
                     protocol_version: oma_ipc::load::LOAD_PROTOCOL_VERSION,
                     version: "9.9.9".into(),
                     isa: vec![],
+                    shader_digest: None,
                 },
                 topology(),
             )) as Box<dyn LoadLink>)

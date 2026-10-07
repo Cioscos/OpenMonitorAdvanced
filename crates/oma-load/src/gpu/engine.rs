@@ -204,6 +204,7 @@ pub fn run_gpu_with<D>(
             },
             work_ms: None,
             workers: Vec::new(),
+            rates: vec![],
         }));
         match end {
             End::Stopped => return run.end(FinishReason::Stopped),

@@ -1233,6 +1233,8 @@
   "glossary.mode.s1": "Chains of floating-point multiplications and additions on every compute unit of the GPU. The numbers are small integers, so the result is exact and is compared bit by bit with the one the CPU computes.",
   "glossary.mode.s2.name": "Integer hash",
   "glossary.mode.s2": "Integer calculations (multiplications, rotations, XOR) repeated on millions of threads. The result is exact and is compared with the one the CPU computes.",
+  "glossary.mode.s3.name": "Memory stream",
+  "glossary.mode.s3": "Keeps copying 1 GB of data in video memory and measures the speed. A VRAM overclock that makes mistakes is silently corrected by the card, but the correction slows the copy: a drop in speed gives it away.",
   "glossary.mode.s4.name": "VRAM check",
   "glossary.mode.s4": "Fills almost all the video memory with bit patterns derived from the address and reads them back in scattered order, like memtest_vulkan. It finds wrong memory cells, for example with a VRAM overclock.",
   "glossary.mode.s5.name": "Graphics load",

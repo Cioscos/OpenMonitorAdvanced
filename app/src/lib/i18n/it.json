@@ -1233,6 +1233,8 @@
   "glossary.mode.s1": "Catene di moltiplicazioni e somme in virgola mobile su tutte le unità di calcolo della GPU. I numeri sono interi piccoli, così il risultato è esatto e si confronta bit per bit con quello calcolato dalla CPU.",
   "glossary.mode.s2.name": "Hash su interi",
   "glossary.mode.s2": "Calcoli su interi (moltiplicazioni, rotazioni, XOR) ripetuti su milioni di thread. Il risultato è esatto e si confronta con quello calcolato dalla CPU.",
+  "glossary.mode.s3.name": "Flusso di memoria",
+  "glossary.mode.s3": "Copia di continuo 1 GB di dati nella memoria video e ne misura la velocità. Un overclock della VRAM che sbaglia viene corretto in silenzio dalla scheda, ma la correzione rallenta la copia: un calo della velocità lo rivela.",
   "glossary.mode.s4.name": "Verifica della VRAM",
   "glossary.mode.s4": "Riempie quasi tutta la memoria video con schemi di bit derivati dall'indirizzo e li rilegge in ordine sparso, come memtest_vulkan. Trova celle di memoria sbagliate, per esempio con un overclock della VRAM.",
   "glossary.mode.s5.name": "Carico grafico",

@@ -9,6 +9,11 @@ pub fn cpu_stop_threshold(setting: Option<u32>, tjmax_c: Option<f64>) -> f64 {
     }
 }
 
+/// `gpuStopC` (DG12): the setting itself, already within 60-110.
+pub fn gpu_stop_threshold(setting: u32) -> f64 {
+    f64::from(setting)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThermalEvent {
     None,

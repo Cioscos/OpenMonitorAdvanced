@@ -303,6 +303,8 @@ fn idle_status() -> RunStatus {
         stop_c: None,
         power_w: None,
         clock_mhz: None,
+        load_percent: None,
+        stability: None,
         checks: 0,
         errors: 0,
         whea_corrected: 0,
@@ -593,6 +595,9 @@ impl PerformanceRunner {
             events: vec![],
             app_version: self.deps.app_version.clone(),
             load_version: None,
+            stability: None,
+            // TODO(G10): the requested GPU's device_id.
+            gpu_device_id: None,
         };
         let zero = Clock {
             mono_ms: 0,

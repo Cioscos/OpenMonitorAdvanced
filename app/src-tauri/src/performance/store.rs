@@ -505,6 +505,8 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         events: vec![],
         app_version: app_version.to_string(),
         load_version: None,
+        stability: None,
+        gpu_device_id: None,
     }
 }
 

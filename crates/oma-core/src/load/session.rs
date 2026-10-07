@@ -53,6 +53,12 @@ pub struct Session {
     pub events: Vec<SessionEvent>,
     pub app_version: String,
     pub load_version: Option<String>,
+    /// GPU runs: the throughput stability, 0-1 (DG7).
+    #[serde(default)]
+    pub stability: Option<f64>,
+    /// GPU runs: the schema `device_id` of the GPU, for «Repeat the test» (DG13).
+    #[serde(default)]
+    pub gpu_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,12 +99,16 @@ pub struct CoreResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorRecord {
-    // ComputeError's fields are single words, so camelCase and snake_case coincide.
+    // ComputeError's fields are single words, so camelCase and snake_case coincide, but
+    // for `load_percent`: the UI reads its copy below, `loadPercent`.
     #[serde(flatten)]
     pub error: oma_ipc::load::ComputeError,
     pub at_ms: u64,
     pub temp_c: Option<f64>,
     pub clock_mhz: Option<f64>,
+    /// GPU `ramp` and `alternate`: the load level of the error (DG10).
+    #[serde(default)]
+    pub load_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +350,7 @@ mod tests {
                     at_ms: 1234,
                     temp_c: None,
                     clock_mhz: Some(4500.0),
+                    load_percent: None,
                 }),
             }],
             errors: vec![],
@@ -356,6 +367,8 @@ mod tests {
             events: vec![],
             app_version: "0.5.0".into(),
             load_version: None,
+            stability: None,
+            gpu_device_id: None,
         }
     }
 
@@ -370,6 +383,26 @@ mod tests {
         assert_eq!(back, s);
         assert_eq!(summary(&s).duration_ms, 5000);
         assert_eq!(summary(&s).verdict.as_deref(), Some("errors_core"));
+    }
+
+    #[test]
+    fn sessions_without_stability_still_parse() {
+        let mut s = session();
+        s.stability = Some(0.98);
+        s.gpu_device_id = Some("gpu/pci-0000:01:00.0".into());
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["stability"], 0.98);
+        assert_eq!(v["gpuDeviceId"], "gpu/pci-0000:01:00.0");
+        assert!(v["cores"][0]["firstError"]["loadPercent"].is_null());
+        // A session saved before the M8b1.
+        let o = v.as_object_mut().unwrap();
+        o.remove("stability");
+        o.remove("gpuDeviceId");
+        let e = v["cores"][0]["firstError"].as_object_mut().unwrap();
+        e.remove("loadPercent");
+        e.remove("load_percent");
+        let back = parse_session(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(back, session());
     }
 
     #[test]

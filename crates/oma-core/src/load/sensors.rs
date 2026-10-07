@@ -1,4 +1,5 @@
-//! CPU sensor pick and sampling for the stop guard and the summary (plan DA5).
+//! CPU (plan DA5) and GPU (plan DG12) sensor pick and sampling for the stop guard and the
+//! summary.
 
 use crate::model::{Schema, Snapshot};
 use crate::provider::Quality;
@@ -18,6 +19,16 @@ pub struct SensorSample {
     pub power_w: Option<f64>,
     pub clock_mhz: Option<f64>,
     pub core_clock_mhz: Vec<Option<f64>>,
+    /// GPU only: a power or thermal throttle flag is on; `None` when no flag reads.
+    pub throttling: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GpuSensorIds {
+    pub temp: Option<usize>,
+    pub power: Option<usize>,
+    pub clock: Option<usize>,
+    pub throttle: Vec<usize>,
 }
 
 /// Indices into `schema.sensors` (and so into snapshot values). Core `N`
@@ -56,25 +67,66 @@ pub fn resolve_cpu_sensors(schema: &Schema, cores: usize) -> CpuSensorIds {
     }
 }
 
+/// Indices of the GPU `device_id`'s sensors (DG12).
+pub fn resolve_gpu_sensors(schema: &Schema, device_id: &str) -> GpuSensorIds {
+    let find = |rest: &str| {
+        let id = format!("{device_id}/{rest}");
+        schema.sensors.iter().position(|s| s.id == id)
+    };
+    GpuSensorIds {
+        temp: find("temperature/core").or_else(|| find("temperature/hotspot")),
+        power: find("power/board"),
+        clock: find("clock/core"),
+        throttle: ["flag/throttle-power", "flag/throttle-thermal"]
+            .iter()
+            .filter_map(|r| find(r))
+            .collect(),
+    }
+}
+
+/// The value at `i` if its quality is `Fresh` or `Held`.
+fn value(snapshot: &Snapshot, quality: &[Quality], i: usize) -> Option<f64> {
+    match quality.get(i)? {
+        Quality::Fresh | Quality::Held => snapshot
+            .values
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|v| v.is_finite()),
+        _ => None,
+    }
+}
+
 /// Only `Fresh` and `Held` readings count.
 pub fn read_sample(ids: &CpuSensorIds, snapshot: &Snapshot, quality: &[Quality]) -> SensorSample {
-    let get = |i: Option<usize>| {
-        let i = i?;
-        match quality.get(i)? {
-            Quality::Fresh | Quality::Held => snapshot
-                .values
-                .get(i)
-                .copied()
-                .flatten()
-                .filter(|v| v.is_finite()),
-            _ => None,
-        }
-    };
+    let get = |i: Option<usize>| value(snapshot, quality, i?);
     SensorSample {
         temp_c: get(ids.temp),
         power_w: get(ids.power),
         clock_mhz: get(ids.clock),
         core_clock_mhz: ids.core_clock.iter().map(|i| get(*i)).collect(),
+        throttling: None,
+    }
+}
+
+/// Only `Fresh` and `Held` readings count; a flag is on at 1.
+pub fn read_gpu_sample(
+    ids: &GpuSensorIds,
+    snapshot: &Snapshot,
+    quality: &[Quality],
+) -> SensorSample {
+    let get = |i: Option<usize>| value(snapshot, quality, i?);
+    let flags: Vec<f64> = ids
+        .throttle
+        .iter()
+        .filter_map(|i| value(snapshot, quality, *i))
+        .collect();
+    SensorSample {
+        temp_c: get(ids.temp),
+        power_w: get(ids.power),
+        clock_mhz: get(ids.clock),
+        core_clock_mhz: vec![],
+        throttling: (!flags.is_empty()).then(|| flags.iter().any(|v| *v >= 1.0)),
     }
 }
 
@@ -141,6 +193,90 @@ mod tests {
             let s = schema(&[("package", SensorKind::Temperature)], Some(t));
             assert_eq!(resolve_cpu_sensors(&s, 0).tjmax_c, None, "{t}");
         }
+    }
+
+    const GPU: &str = "gpu/pci-0000:01:00.0";
+
+    fn gpu_schema(names: &[(&str, SensorKind)]) -> Schema {
+        Schema {
+            revision: 1,
+            devices: vec![],
+            sensors: names
+                .iter()
+                .map(|(n, k)| Sensor::new(GPU, *k, n, Unit::Celsius, Label::new(n), Source::Lhm))
+                .collect(),
+        }
+    }
+
+    fn snap(values: Vec<Option<f64>>) -> Snapshot {
+        Snapshot {
+            revision: 1,
+            seq: 1,
+            timestamp_ms: 0,
+            values,
+        }
+    }
+
+    #[test]
+    fn gpu_sensor_ids_follow_dg12() {
+        let s = gpu_schema(&[
+            ("hotspot", SensorKind::Temperature),
+            ("core", SensorKind::Temperature),
+            ("board", SensorKind::Power),
+            ("core", SensorKind::Clock),
+            ("throttle-power", SensorKind::Flag),
+            ("throttle-thermal", SensorKind::Flag),
+            ("memory", SensorKind::Clock),
+        ]);
+        let ids = resolve_gpu_sensors(&s, GPU);
+        assert_eq!(
+            ids,
+            GpuSensorIds {
+                temp: Some(1),
+                power: Some(2),
+                clock: Some(3),
+                throttle: vec![4, 5],
+            }
+        );
+        // Another device's sensors never match.
+        assert_eq!(
+            resolve_gpu_sensors(&s, "gpu/pci-0000:02:00.0"),
+            GpuSensorIds::default()
+        );
+    }
+
+    #[test]
+    fn gpu_temperature_falls_back_to_hotspot() {
+        let s = gpu_schema(&[("hotspot", SensorKind::Temperature)]);
+        assert_eq!(resolve_gpu_sensors(&s, GPU).temp, Some(0));
+    }
+
+    #[test]
+    fn throttling_is_true_when_any_flag_is_one() {
+        let s = gpu_schema(&[
+            ("core", SensorKind::Temperature),
+            ("throttle-power", SensorKind::Flag),
+            ("throttle-thermal", SensorKind::Flag),
+        ]);
+        let ids = resolve_gpu_sensors(&s, GPU);
+        let q = [Quality::Fresh; 3];
+        let r = read_gpu_sample(&ids, &snap(vec![Some(70.0), Some(0.0), Some(1.0)]), &q);
+        assert_eq!(r.temp_c, Some(70.0));
+        assert_eq!(r.throttling, Some(true));
+        let r = read_gpu_sample(&ids, &snap(vec![Some(70.0), Some(0.0), Some(0.0)]), &q);
+        assert_eq!(r.throttling, Some(false));
+        // No readable flag: unknown.
+        let r = read_gpu_sample(&ids, &snap(vec![Some(70.0), None, None]), &q);
+        assert_eq!(r.throttling, None);
+        assert!(r.core_clock_mhz.is_empty());
+    }
+
+    #[test]
+    fn cpu_samples_have_no_throttling() {
+        let s = schema(&[("package", SensorKind::Temperature)], None);
+        let ids = resolve_cpu_sensors(&s, 0);
+        let r = read_sample(&ids, &snap(vec![Some(70.0)]), &[Quality::Fresh]);
+        assert_eq!(r.throttling, None);
     }
 
     #[test]

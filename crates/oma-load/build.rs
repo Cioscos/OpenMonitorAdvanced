@@ -84,6 +84,7 @@ const SHADERS: [(&str, &str, &str, &str); 11] = [
 const DIGEST_SHADERS: &[&str] = &[
     "s1_fma",
     "s2_hash",
+    "compare",
     "s3_stream",
     "bench_gfx_vs",
     "bench_gfx_ps",

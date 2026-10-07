@@ -100,15 +100,12 @@ pub struct CoreResult {
 #[serde(rename_all = "camelCase")]
 pub struct ErrorRecord {
     // ComputeError's fields are single words, so camelCase and snake_case coincide, but
-    // for `load_percent`: the UI reads its copy below, `loadPercent`.
+    // for `load_percent` (GPU load level, DG10), which stays snake_case.
     #[serde(flatten)]
     pub error: oma_ipc::load::ComputeError,
     pub at_ms: u64,
     pub temp_c: Option<f64>,
     pub clock_mhz: Option<f64>,
-    /// GPU `ramp` and `alternate`: the load level of the error (DG10).
-    #[serde(default)]
-    pub load_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,7 +347,6 @@ mod tests {
                     at_ms: 1234,
                     temp_c: None,
                     clock_mhz: Some(4500.0),
-                    load_percent: None,
                 }),
             }],
             errors: vec![],
@@ -393,13 +389,13 @@ mod tests {
         let mut v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["stability"], 0.98);
         assert_eq!(v["gpuDeviceId"], "gpu/pci-0000:01:00.0");
-        assert!(v["cores"][0]["firstError"]["loadPercent"].is_null());
+        assert!(v["cores"][0]["firstError"]["load_percent"].is_null());
+        assert!(v["cores"][0]["firstError"].get("loadPercent").is_none());
         // A session saved before the M8b1.
         let o = v.as_object_mut().unwrap();
         o.remove("stability");
         o.remove("gpuDeviceId");
         let e = v["cores"][0]["firstError"].as_object_mut().unwrap();
-        e.remove("loadPercent");
         e.remove("load_percent");
         let back = parse_session(&serde_json::to_vec(&v).unwrap()).unwrap();
         assert_eq!(back, session());

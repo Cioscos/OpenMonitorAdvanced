@@ -600,7 +600,6 @@ impl RunController {
                     at_ms: self.mono - self.start_mono,
                     temp_c: self.last_sample.temp_c,
                     clock_mhz: clock,
-                    load_percent: e.load_percent,
                 };
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
                 self.coreless_errors |= core.is_none();
@@ -2143,7 +2142,9 @@ mod tests {
         c.on_load(&gpu_progress(1000, 25.0, Some(60)), clock(1000));
         assert_eq!(c.status().load_percent, Some(60));
         c.on_load(&gpu_error(ErrorKind::Mismatch, 2, Some(45)), clock(2000));
-        assert_eq!(c.session().errors[0].load_percent, Some(45));
+        assert_eq!(c.session().errors[0].error.load_percent, Some(45));
+        let v = serde_json::to_value(&c.session().errors[0]).unwrap();
+        assert_eq!(v["load_percent"], 45);
         assert_eq!(c.status().errors, 1);
     }
 

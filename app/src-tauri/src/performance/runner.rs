@@ -189,7 +189,8 @@ impl Machine for WinMachine {
 
     fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
         match oma_win::proc_cpu::OtherCpu::open() {
-            Ok(mut other) => Box::new(move || other.sample(logical)),
+            // One Toolhelp snapshot per poll, as for the GPU: our WebView2 is not "another program".
+            Ok(mut other) => Box::new(move || other.sample(logical, &our_tree())),
             Err(err) => {
                 tracing::warn!(%err, "other processes' CPU unreadable");
                 Box::new(|| None)
@@ -207,13 +208,17 @@ impl Machine for WinMachine {
 
     /// Read only during the GPU benchmark, every 5 s: one Toolhelp snapshot each time.
     fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
-        let me = std::process::id();
-        let ours = oma_win::process_tree::descendants(me).unwrap_or_else(|err| {
-            tracing::warn!(%err, "process tree unreadable: only the app itself is left out");
-            HashSet::from([me])
-        });
-        other_gpu_share(&self.processes.processes(device_id), &ours)
+        other_gpu_share(&self.processes.processes(device_id), &our_tree())
     }
+}
+
+/// The app and its descendants (WebView2, `oma-load`), from one Toolhelp snapshot.
+fn our_tree() -> HashSet<u32> {
+    let me = std::process::id();
+    oma_win::process_tree::descendants(me).unwrap_or_else(|err| {
+        tracing::warn!(%err, "process tree unreadable: only the app itself is left out");
+        HashSet::from([me])
+    })
 }
 
 /// What the runner is given.

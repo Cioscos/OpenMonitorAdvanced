@@ -414,6 +414,8 @@ Codice da buttare, sulla RTX 4080 e sulla iGPU AMD. Serve a rispondere a:
 6. effetto del nome del processo sulla limitazione del driver;
 7. costo del processo sulla CPU durante lo stress della GPU.
 
+Esiti e scelte (2026-10-07): `docs/superpowers/references/m8/spike-gpu.md`. Correggono il §5.1 su due punti: l'invio si tara a 20 ms sulle GPU integrate, e la VRAM delle integrate ha un tetto, perché il loro budget è la RAM condivisa.
+
 ## 6. M8c — Disco
 
 ### 6.1 Vincoli

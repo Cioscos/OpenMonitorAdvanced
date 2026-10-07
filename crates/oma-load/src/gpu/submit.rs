@@ -26,7 +26,8 @@ pub trait Submit {
     fn submit(&mut self, work: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<(), GpuError>;
     /// Waits for every submission in flight.
     fn finish(&mut self) -> Result<(), GpuError>;
-    /// Runs `work` alone and returns its GPU time in milliseconds.
+    /// Runs `work` alone and returns its GPU time in milliseconds; `TimingDisjoint` when
+    /// the GPU clock kept changing.
     fn gpu_ms(&mut self, work: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<f64, GpuError>;
 }
 
@@ -138,7 +139,6 @@ impl Submit for Submitter {
 
     fn gpu_ms(&mut self, work: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<f64, GpuError> {
         self.finish()?;
-        let mut ms = 0.0;
         for _ in 0..TIMING_TRIES {
             // SAFETY: queries of this device, in the order D3D11 asks: the disjoint query
             // brackets the two timestamps.
@@ -158,13 +158,19 @@ impl Submit for Submitter {
             let clock = self.wait_for(&self.disjoint, pending, since)?;
             let start = self.wait_for(&self.start, u64::MAX, since)?;
             let end = self.wait_for(&self.end, u64::MAX, since)?;
-            ms = end.saturating_sub(start) as f64 * 1e3 / clock.Frequency as f64;
-            if !clock.Disjoint.as_bool() {
-                break;
+            if let Some(ms) = timing_ms(start, end, clock) {
+                return Ok(ms);
             }
         }
-        Ok(ms)
+        Err(GpuError::TimingDisjoint)
     }
+}
+
+/// Milliseconds between two GPU timestamps; `None` when the clock was disjoint (or gave
+/// no frequency), since the difference then means nothing.
+fn timing_ms(start: u64, end: u64, clock: D3D11_QUERY_DATA_TIMESTAMP_DISJOINT) -> Option<f64> {
+    (!clock.Disjoint.as_bool() && clock.Frequency != 0)
+        .then(|| end.saturating_sub(start) as f64 * 1e3 / clock.Frequency as f64)
 }
 
 /// The parameter of `run` (iterations, instances) that makes one submission take about
@@ -217,6 +223,20 @@ mod tests {
             self.calls += 1;
             Ok(param as f64 * self.per_unit_ms)
         }
+    }
+
+    #[test]
+    fn disjoint_timings_are_rejected() {
+        let clock = |frequency, disjoint: bool| D3D11_QUERY_DATA_TIMESTAMP_DISJOINT {
+            Frequency: frequency,
+            Disjoint: disjoint.into(),
+        };
+        assert_eq!(
+            timing_ms(1_000, 41_000, clock(1_000_000, false)),
+            Some(40.0)
+        );
+        assert_eq!(timing_ms(1_000, 41_000, clock(1_000_000, true)), None);
+        assert_eq!(timing_ms(1_000, 41_000, clock(0, false)), None);
     }
 
     #[test]

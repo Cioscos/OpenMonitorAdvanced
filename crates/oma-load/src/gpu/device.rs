@@ -36,6 +36,8 @@ pub enum GpuError {
     Lost(u32),
     /// A submission did not finish within 1 s.
     Hung,
+    /// The GPU clock changed during every try of a timing, so there is no GPU time.
+    TimingDisjoint,
     OutOfMemory,
 }
 
@@ -65,6 +67,14 @@ pub(crate) fn removed_reason(device: &ID3D11Device) -> u32 {
 /// A failed call on `device`, classified by [`map_hresult`].
 pub(crate) fn gpu_error(device: &ID3D11Device, e: &windows::core::Error) -> GpuError {
     map_hresult(e.code().0, || removed_reason(device))
+}
+
+/// The size of `buffer` in bytes.
+fn byte_width(buffer: &ID3D11Buffer) -> u32 {
+    let mut desc = D3D11_BUFFER_DESC::default();
+    // SAFETY: `desc` is a live local of the type the method fills.
+    unsafe { buffer.GetDesc(&mut desc) };
+    desc.ByteWidth
 }
 
 /// `(HighPart << 32) | LowPart`, as in `oma-win`.
@@ -181,10 +191,18 @@ impl GpuDevice {
         self.write_words(buffer, &values);
     }
 
-    /// Replaces the whole of `buffer`, which must be exactly `4 * words.len()` bytes.
+    /// Replaces the whole of `buffer`, a DEFAULT buffer of this device.
+    ///
+    /// # Panics
+    /// When `buffer` is not exactly `4 * words.len()` bytes.
     pub fn write_words(&self, buffer: &ID3D11Buffer, words: &[u32]) {
-        // SAFETY: `buffer` is a DEFAULT buffer of this device of `words.len()` words
-        // (caller); whole-resource update, so no box and the pitches are ignored.
+        assert_eq!(
+            byte_width(buffer) as usize,
+            size_of_val(words),
+            "write_words must fill the whole buffer"
+        );
+        // SAFETY: the update without a box reads `ByteWidth` bytes from the source, which
+        // is exactly `words` (asserted); the pitches are ignored for buffers.
         unsafe {
             self.context
                 .UpdateSubresource(buffer, 0, None, words.as_ptr().cast(), 0, 0)
@@ -233,7 +251,14 @@ impl GpuDevice {
 
     /// Copies the first `bytes` of `src` to the CPU. `Map` waits for the GPU without the
     /// 1 s limit of the submissions, so call it after `Submit::finish`.
+    ///
+    /// # Panics
+    /// When `src` is smaller than `bytes`.
     pub fn read_buffer(&self, src: &ID3D11Buffer, bytes: u32) -> Result<Vec<u8>, GpuError> {
+        assert!(
+            bytes <= byte_width(src),
+            "read_buffer past the end of the buffer"
+        );
         // ponytail: a staging buffer per read; keep one if reads ever get frequent.
         let staging = self.buffer(&D3D11_BUFFER_DESC {
             ByteWidth: bytes,
@@ -241,6 +266,7 @@ impl GpuDevice {
             CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
             ..Default::default()
         })?;
+        assert_eq!(byte_width(&staging), bytes);
         let region = D3D11_BOX {
             right: bytes,
             bottom: 1,
@@ -248,7 +274,7 @@ impl GpuDevice {
             ..Default::default()
         };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: `src` holds at least `bytes` (caller) and `staging` exactly `bytes`, so
+        // SAFETY: `src` holds at least `bytes` and `staging` exactly `bytes` (asserted), so
         // the box fits both; the mapped pointer is valid for `bytes` until `Unmap`, and the
         // slice is copied out before it.
         unsafe {
@@ -300,5 +326,29 @@ mod tests {
             GpuError::Create(invalid_arg)
         );
         assert_eq!(map_hresult(E_OUTOFMEMORY, never), GpuError::OutOfMemory);
+    }
+
+    /// The first hardware GPU; these tests only create buffers, they run no GPU work.
+    fn first_gpu() -> GpuDevice {
+        let adapter = oma_win::gpu::stress_adapters().into_iter().next();
+        GpuDevice::open(adapter.expect("no hardware GPU").luid).unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    #[should_panic(expected = "write_words must fill the whole buffer")]
+    fn write_words_rejects_a_short_slice() {
+        let gpu = first_gpu();
+        let (counters, _, _) = gpu.structured_buffer(32, 4).unwrap();
+        gpu.write_words(&counters, &[0; 4]);
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    #[should_panic(expected = "read_buffer past the end of the buffer")]
+    fn read_buffer_rejects_a_read_past_the_end() {
+        let gpu = first_gpu();
+        let (counters, _, _) = gpu.structured_buffer(32, 4).unwrap();
+        let _ = gpu.read_buffer(&counters, 64);
     }
 }

@@ -112,6 +112,7 @@ impl PerformanceRunner {
             samples,
             cores,
             sensors: None,
+            gpu: None,
             bench: true,
         });
         Ok(id)

@@ -301,6 +301,7 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       tjmaxC: 89,
       stopC: 84,
       hypervisor: false,
+      gpus: [],
     }),
     preview(request: StartRequest): Plan {
       const total = presetSeconds(request);

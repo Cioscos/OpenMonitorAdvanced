@@ -867,6 +867,16 @@ export interface SystemInfo {
   /** The thermal stop threshold (DA5). */
   stopC: number;
   hypervisor: boolean;
+  /** The GPUs a test can target (DG13). */
+  gpus?: GpuChoice[];
+}
+
+/** A GPU the wizard offers, chosen by its stable device id. */
+export interface GpuChoice {
+  deviceId: string;
+  name: string;
+  integrated: boolean;
+  dedicatedBytes: number;
 }
 
 /** A computation error (`ComputeError`, flattened) with when it happened. */

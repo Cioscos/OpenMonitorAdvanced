@@ -39,6 +39,9 @@ pub enum GpuError {
     /// The GPU clock changed during every try of a timing, so there is no GPU time.
     TimingDisjoint,
     OutOfMemory,
+    /// The GPU's output differs from the CPU reference in the sample check of a phase
+    /// (plan DG5): a defect of the implementation or the driver, not of the GPU.
+    ReferenceInvalid,
 }
 
 /// Classifies a failed HRESULT; `removed_reason` is asked only for a lost device.
@@ -82,7 +85,8 @@ fn luid_to_u64(luid: LUID) -> u64 {
     ((luid.HighPart as u32 as u64) << 32) | luid.LowPart as u64
 }
 
-/// A D3D11 device (feature level 11_0) on one hardware adapter.
+/// A D3D11 device (feature level 11_0) on one hardware adapter. A clone shares the device.
+#[derive(Clone)]
 pub struct GpuDevice {
     adapter: IDXGIAdapter3,
     device: ID3D11Device,
@@ -206,6 +210,31 @@ impl GpuDevice {
         unsafe {
             self.context
                 .UpdateSubresource(buffer, 0, None, words.as_ptr().cast(), 0, 0)
+        }
+    }
+
+    /// Replaces element `index` of `buffer`, a DEFAULT structured buffer of this device with
+    /// 16-byte elements. D3D11 silently drops a partial update of a structured element, so
+    /// a whole element it is.
+    ///
+    /// # Panics
+    /// When the element is past the end of `buffer`.
+    pub fn write_element(&self, buffer: &ID3D11Buffer, index: u32, element: [u32; 4]) {
+        assert!(
+            (u64::from(index) + 1) * 16 <= u64::from(byte_width(buffer)),
+            "write_element past the end of the buffer"
+        );
+        let region = D3D11_BOX {
+            left: index * 16,
+            right: index * 16 + 16,
+            bottom: 1,
+            back: 1,
+            ..Default::default()
+        };
+        // SAFETY: the box covers 16 bytes inside the buffer (asserted), read from `element`.
+        unsafe {
+            self.context
+                .UpdateSubresource(buffer, 0, Some(&region), element.as_ptr().cast(), 0, 0)
         }
     }
 

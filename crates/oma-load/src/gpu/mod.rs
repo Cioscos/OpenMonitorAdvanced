@@ -2,7 +2,11 @@
 //! the shaders, the D3D11 device and the submissions exist only on Windows.
 
 #[cfg(windows)]
+pub mod compute;
+#[cfg(windows)]
 pub mod device;
+#[cfg(windows)]
+pub mod engine;
 pub mod pace;
 pub mod reference;
 #[cfg(windows)]
@@ -10,3 +14,5 @@ pub mod shaders;
 pub mod sizing;
 #[cfg(windows)]
 pub mod submit;
+#[cfg(all(test, windows))]
+mod tests;

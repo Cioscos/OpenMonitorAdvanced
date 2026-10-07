@@ -4,7 +4,7 @@
 //! plan it receives and exits when the pipe closes.
 //!
 //! Exit codes: 0 pipe closed, 1 arguments (or an invalid message), 2
-//! connection, 3 incompatible `Hello`.
+//! connection, 3 incompatible `Hello`, 4 the GPU of a GPU plan was lost.
 
 #![windows_subsystem = "windows"]
 

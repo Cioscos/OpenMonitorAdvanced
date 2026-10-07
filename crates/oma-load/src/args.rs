@@ -72,6 +72,10 @@ fn parse_inject(value: &str) -> Result<Inject, ArgsError> {
         "k8" => KernelId::K8,
         "k9" => KernelId::K9,
         "k10" => KernelId::K10,
+        "s1" => KernelId::S1,
+        "s2" => KernelId::S2,
+        "s4" => KernelId::S4,
+        "s6" => KernelId::S6,
         _ => return Err(bad()),
     };
     Ok(Inject { kernel, core })

@@ -1,5 +1,5 @@
 //! S3, the memory stream (plan DH5): a fixed set of 1 GiB of VRAM, half sources and half
-//! destinations, in pieces of `chunk_bytes`. The sources are filled once from the seed;
+//! destinations, in pieces of at most `chunk_bytes`. The sources are filled once from the seed;
 //! each submission copies whole pieces in turn, so in a phase every byte of the set is
 //! read and written. No data check (§5.3): the stress test looks at the bandwidth.
 
@@ -29,18 +29,23 @@ const GROUPS_X: u64 = 16_384;
 /// one piece (64 pieces of 512 MiB would take seconds on an integrated GPU).
 const CALIBRATION_STEPS: u32 = 64;
 
-/// The size of the set and its pieces (an even count): `STREAM_BYTES` capped by the VRAM
-/// `target`, in whole `chunk`s; with fewer than 2 chunks, 2 smaller pieces. `None` under
-/// 256 MiB.
+/// The size of the set and its count of pieces: `STREAM_BYTES` capped by the VRAM `target`,
+/// in the fewest even pieces of at most `chunk`, each rounded down to 4 KiB, so the set is
+/// `pieces` times the piece. `None` under 256 MiB.
 pub fn stream_set(target: u64, chunk: u64) -> Option<(u64, u32)> {
     let bytes = STREAM_BYTES.min(target);
-    let whole = bytes / chunk / 2 * 2;
-    let (set, pieces) = if whole >= 2 {
-        (whole * chunk, whole)
-    } else {
-        (((bytes / 2) & !4095) * 2, 2)
-    };
+    let pieces = bytes.div_ceil(chunk).next_multiple_of(2).max(2);
+    let set = ((bytes / pieces) & !4095) * pieces;
     (set >= MIN_SET).then_some((set, pieces as u32))
+}
+
+/// `vram_allocated`, and `vram_reduced` under [`STREAM_BYTES`].
+fn stream_notices(set: u64) -> Vec<(String, u64)> {
+    let mut notices = vec![("vram_allocated".to_owned(), set)];
+    if set < STREAM_BYTES {
+        notices.push(("vram_reduced".to_owned(), set));
+    }
+    notices
 }
 
 /// Copies done by a submission with calibration parameter `param`.
@@ -80,13 +85,10 @@ impl StreamLoad {
         Self::with_set(gpu, set, pieces, (ctx.seed ^ (ctx.seed >> 32)) as u32)
     }
 
-    /// A set of `set` bytes in `pieces` pieces (even, each at most 512 MiB).
+    /// A set of `set` bytes in `pieces` pieces of `set / pieces` bytes, as [`stream_set`]
+    /// gives them (an even count, each at most 512 MiB and a multiple of 4 KiB).
     fn with_set(gpu: &GpuDevice, set: u64, pieces: u32, seed: u32) -> Result<Self, GpuError> {
         let piece_bytes = set / u64::from(pieces);
-        let mut notices = vec![("vram_allocated".to_owned(), set)];
-        if set < STREAM_BYTES {
-            notices.push(("vram_reduced".to_owned(), set));
-        }
         Ok(StreamLoad {
             shader: gpu.compute_shader(S3_STREAM)?,
             constants: gpu.constant_buffer()?,
@@ -100,7 +102,7 @@ impl StreamLoad {
             next: 0,
             submitted: 0,
             checked: 0,
-            notices,
+            notices: stream_notices(set),
             gpu: gpu.clone(),
         })
     }
@@ -129,9 +131,11 @@ impl StreamLoad {
         let groups = u64::from(self.count).div_ceil(256);
         let (x, y) = (groups.min(GROUPS_X), groups.div_ceil(GROUPS_X));
         // SAFETY: `ctx` is this device's immediate context (asserted above), used only on
-        // this thread; resources of this device; the shader returns for threads past
-        // `count`, the elements of one piece; `uavs` outlives the call that reads its 2
-        // entries; the UAVs are unbound afterwards.
+        // this thread; resources of this device. Every piece's UAV spans `piece_bytes`, and
+        // `count` = `piece_bytes / 16` comes from the same value (`with_set`), so the shader,
+        // which returns for threads past `count`, stays inside both pieces. `uavs` outlives
+        // the call that reads its 2 entries. Only the UAVs are unbound afterwards, so the
+        // pieces can be bound elsewhere; shader and constant buffer are set by every load.
         unsafe {
             ctx.CSSetShader(&self.shader, None);
             ctx.CSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
@@ -224,18 +228,26 @@ mod tests {
     fn stream_set_is_1_gib_when_it_fits() {
         assert_eq!(stream_set(14 * GIB, 512 * MIB), Some((GIB, 2)));
         assert_eq!(stream_set(14 * GIB, 256 * MIB), Some((GIB, 4)));
-        // An odd count of whole chunks is rounded down to an even one.
-        assert_eq!(stream_set(14 * GIB, 300 * MIB), Some((600 * MIB, 2)));
+        // A chunk that does not divide 1 GiB: smaller pieces, still the whole set.
+        assert_eq!(stream_set(14 * GIB, 300 * MIB), Some((GIB, 4)));
+        assert_eq!(stream_notices(GIB), [("vram_allocated".to_owned(), GIB)]);
     }
 
     #[test]
     fn stream_set_is_capped_by_the_vram_target() {
-        assert_eq!(stream_set(700 * MIB, 256 * MIB), Some((512 * MIB, 2)));
-        // Fewer than 2 whole chunks: 2 pieces of half the target, in 4 KiB.
+        // The fewest even pieces of at most a chunk, each rounded down to 4 KiB.
+        assert_eq!(stream_set(700 * MIB, 256 * MIB), Some((700 * MIB, 4)));
         assert_eq!(stream_set(900 * MIB, 512 * MIB), Some((900 * MIB, 2)));
         assert_eq!(
             stream_set(900 * MIB + 12_345, 512 * MIB),
             Some((900 * MIB + 8192, 2))
+        );
+        assert_eq!(
+            stream_notices(700 * MIB),
+            [
+                ("vram_allocated".to_owned(), 700 * MIB),
+                ("vram_reduced".to_owned(), 700 * MIB),
+            ]
         );
     }
 
@@ -253,7 +265,8 @@ mod tests {
         assert_eq!(copies(1706), 26);
     }
 
-    /// A small set on the first adapter: never the real 1 GiB in a test.
+    /// A small set on the first adapter, never the real 1 GiB in a test: 2 pieces of
+    /// 128 MiB, 8 Mi elements, so each dispatch has 2 rows of groups (`GROUPS_X`).
     fn small_stream() -> (GpuDevice, Submitter, StreamLoad) {
         let adapter = oma_win::gpu::stress_adapters()
             .into_iter()
@@ -261,15 +274,15 @@ mod tests {
             .expect("no hardware GPU");
         let gpu = GpuDevice::open(adapter.luid).unwrap();
         let mut sub = Submitter::new(&gpu).unwrap();
-        let mut load = StreamLoad::with_set(&gpu, 256 * MIB, 4, 0x5EED).unwrap();
+        let mut load = StreamLoad::with_set(&gpu, 256 * MIB, 2, 0x5EED).unwrap();
         load.prepare(&mut sub, 5.0, &AtomicBool::new(false))
             .unwrap();
         (gpu, sub, load)
     }
 
-    /// The first 4096 words of `buffer`.
-    fn sample(gpu: &GpuDevice, buffer: &ID3D11Buffer) -> Vec<u8> {
-        gpu.read_buffer(buffer, 4096 * 4).unwrap()
+    /// The whole of `buffer`, `bytes` long.
+    fn read(gpu: &GpuDevice, buffer: &ID3D11Buffer, bytes: u64) -> Vec<u8> {
+        gpu.read_buffer(buffer, bytes as u32).unwrap()
     }
 
     #[test]
@@ -281,15 +294,21 @@ mod tests {
             load.submit(&mut sub).unwrap();
         }
         sub.finish().unwrap();
-        let pairs = load.pairs();
+        let (pairs, bytes) = (load.pairs(), load.piece_bytes);
+        // 4096 words at the head and at the tail, the tail in the second row of groups.
+        const WINDOW: usize = 4096 * 4;
         for pair in 0..pairs {
-            let src = sample(&gpu, &load.pieces[pair].0);
-            assert!(src.iter().any(|&b| b != 0), "source {pair} not filled");
-            assert_eq!(
-                src,
-                sample(&gpu, &load.pieces[pair + pairs].0),
-                "pair {pair}"
-            );
+            let src = read(&gpu, &load.pieces[pair].0, bytes);
+            let dst = read(&gpu, &load.pieces[pair + pairs].0, bytes);
+            let tail = src.len() - WINDOW;
+            for at in [0, tail] {
+                let window = &src[at..at + WINDOW];
+                assert!(
+                    window.iter().any(|&b| b != 0),
+                    "source {pair} at {at} not filled"
+                );
+                assert_eq!(window, &dst[at..at + WINDOW], "pair {pair} at {at}");
+            }
         }
         let check = load.check(&mut sub).unwrap();
         assert_eq!(check.checks, load.pieces.len() as u64);

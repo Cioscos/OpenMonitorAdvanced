@@ -205,6 +205,9 @@ struct Cursor {
     cores: Vec<CoreProgress>,
     memory_bytes: u64,
     sent_at: Instant,
+    /// Start of the `rate` window: restarted at each phase and gate, so that a rate never
+    /// mixes two kernels nor counts the pause and the reference.
+    rate_from: Instant,
     rate_iterations: u64,
     /// The work time of the fixed-work phase being run, set when its set ends.
     work_ms: Option<u64>,
@@ -370,6 +373,7 @@ impl Engine<'_, '_> {
                 .collect(),
             memory_bytes: 0,
             sent_at: now,
+            rate_from: now,
             rate_iterations: 0,
             work_ms: None,
         };
@@ -382,6 +386,7 @@ impl Engine<'_, '_> {
             cur.phase_start = Instant::now();
             cur.current_core = None;
             cur.work_ms = None;
+            self.restart_rate(&mut cur);
             self.progress(&mut cur);
             let (checks, errors) = (
                 self.checks.load(Ordering::Relaxed),
@@ -724,6 +729,7 @@ impl Engine<'_, '_> {
             }
             let opened = Instant::now();
             let _ = live.opened.set(opened);
+            self.restart_rate(cur);
             gate.set(true);
             self.publish(pr, &slots);
             if matches!(pr.spec.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10) {
@@ -920,12 +926,18 @@ impl Engine<'_, '_> {
         }
     }
 
+    fn restart_rate(&self, cur: &mut Cursor) {
+        cur.rate_from = Instant::now();
+        cur.rate_iterations = self.iterations.load(Ordering::Relaxed);
+    }
+
     fn progress(&self, cur: &mut Cursor) {
         let now = Instant::now();
         let iterations = self.iterations.load(Ordering::Relaxed);
-        let dt = (now - cur.sent_at).as_secs_f64();
+        let dt = (now - cur.rate_from).as_secs_f64();
         let rate = (dt > 0.0).then(|| (iterations - cur.rate_iterations) as f64 / dt);
         cur.sent_at = now;
+        cur.rate_from = now;
         cur.rate_iterations = iterations;
         let failed = lock(&self.failed_cores).clone();
         let cores = cur

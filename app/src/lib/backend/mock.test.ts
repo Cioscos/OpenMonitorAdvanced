@@ -584,3 +584,20 @@ test('mock_bench_runs_twenty_seconds_and_the_error_scenario_is_not_valid', () =>
     vi.useRealTimers();
   }
 });
+
+test('mock_bench_holds_the_needle_during_warm_ups_like_oma_core', () => {
+  vi.useFakeTimers();
+  try {
+    const bench = mockBench(null, () => false);
+    const seen: { rep: number; live: number | null }[] = [];
+    bench.subscribe((s) => s.step !== null && seen.push({ rep: s.steps[s.step].rep, live: s.livePoints }));
+    bench.start();
+    vi.advanceTimersByTime(19_000);
+    // The pause and the reference of a warm-up send rate 0: no needle.
+    expect(seen.some((s) => s.rep === 0)).toBe(true);
+    expect(seen.filter((s) => s.rep === 0).every((s) => s.live === null)).toBe(true);
+    expect(seen.some((s) => s.rep > 0 && s.live !== null)).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});

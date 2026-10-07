@@ -244,7 +244,8 @@ pub struct CoreProgress {
 }
 
 /// Process to app: periodic progress. `rate` is the iterations per second of all threads
-/// over the last second.
+/// since the previous `Progress`, the phase start or the gate, whichever is last: the first
+/// `Progress` of a phase and those of a pause or a reference carry 0.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Progress {
     pub phase: u32,

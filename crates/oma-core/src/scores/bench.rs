@@ -197,7 +197,12 @@ impl BenchController {
                     if *seg == SegmentState::Pending {
                         *seg = SegmentState::Running;
                     }
-                    self.live_points = p.rate.and_then(|r| self.live(i, r));
+                    // A phase-start Progress (under a second in) can still measure the
+                    // previous kernel, and a pause or a reference sends 0: the UI holds.
+                    self.live_points = p
+                        .rate
+                        .filter(|r| *r > 0.0 && p.phase_elapsed_ms >= 1000)
+                        .and_then(|r| self.live(i, r));
                 }
             }
             LoadMessage::PhaseDone(d) => self.phase_done(d),
@@ -539,9 +544,13 @@ mod tests {
     }
 
     fn progress(phase: u32, rate: Option<f64>) -> LoadMessage {
+        progress_at(phase, 1000, rate)
+    }
+
+    fn progress_at(phase: u32, phase_elapsed_ms: u64, rate: Option<f64>) -> LoadMessage {
         LoadMessage::Progress(Progress {
             phase,
-            phase_elapsed_ms: 0,
+            phase_elapsed_ms,
             elapsed_ms: 0,
             checks: 1,
             errors: 0,
@@ -657,6 +666,24 @@ mod tests {
         c.on_load(&progress(24, None), clock(3000));
         assert_eq!(c.status().live_points, None);
         assert_eq!(c.status().step, Some(24));
+    }
+
+    #[test]
+    fn phase_start_progress_with_the_previous_kernel_rate_holds_the_needle() {
+        let mut c = ctl();
+        c.on_load(&progress(0, Some(1e6)), clock(1000));
+        assert!(c.status().live_points.is_some());
+        // The first Progress of step 1 still measures step 0's iterations.
+        c.on_load(&progress_at(1, 0, Some(1e6)), clock(2000));
+        assert_eq!(c.status().live_points, None);
+        assert_eq!(c.status().step, Some(1));
+    }
+
+    #[test]
+    fn zero_rate_of_a_pause_holds_the_needle() {
+        let mut c = ctl();
+        c.on_load(&progress_at(0, 1500, Some(0.0)), clock(1000));
+        assert_eq!(c.status().live_points, None);
     }
 
     #[test]

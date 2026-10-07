@@ -1099,3 +1099,46 @@ fn a_worker_that_finishes_early_is_not_hung() {
     let w = d.work_ms.expect("work_ms");
     assert!(w >= 1_700, "work_ms follows the slow worker: {w}");
 }
+
+fn progresses(msgs: &[LoadMessage]) -> Vec<&Progress> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            LoadMessage::Progress(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_first_progress_of_a_phase_does_not_carry_the_previous_one() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let p = phase(KernelId::K2, Placement::AllLogical, 1);
+    let (_, msgs) = run_test(
+        &plan(vec![p.clone(), p]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    let first = progresses(&msgs)
+        .into_iter()
+        .find(|p| p.phase == 1)
+        .expect("a progress of phase 1");
+    assert!(first.rate.unwrap_or(0.0) == 0.0, "{:?}", first.rate);
+}
+
+#[test]
+fn the_rate_window_starts_at_the_gate() {
+    // A slow reference must not dilute the first rate of the phase.
+    let mut f = CountFactory::new(0..0);
+    f.ref_delay = Duration::from_millis(600);
+    let (_, msgs) = run_one(&f, phase(KernelId::K2, Placement::AllLogical, 3), 1);
+    let rates: Vec<f64> = progresses(&msgs)
+        .iter()
+        .filter_map(|p| p.rate.filter(|r| *r > 0.0))
+        .collect();
+    assert!(rates.len() >= 2, "{rates:?}");
+    assert!(rates[0] > 0.75 * rates[1], "{rates:?}");
+}

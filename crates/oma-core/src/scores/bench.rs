@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use oma_ipc::load::{FinishReason, Isa, LoadMessage, PhaseDone};
+use oma_ipc::load::{ErrorKind, FinishReason, Isa, LoadMessage, PhaseDone};
 use serde::Serialize;
 
 use super::file::{Device, KernelRate, ScoreFile, ScoreSample, Scores, FORMAT};
@@ -206,6 +206,9 @@ impl BenchController {
                 }
             }
             LoadMessage::PhaseDone(d) => self.phase_done(d),
+            // An invalid reference is our defect, not the CPU's (as in the stress test): the
+            // phase is skipped and its PhaseDone marks the step failed.
+            LoadMessage::Error(e) if e.kind == ErrorKind::ReferenceInvalid => {}
             LoadMessage::Error(e) => {
                 // A wrong result or a hung thread: the run is invalid either way.
                 if let Some(seg) = self.segments.get_mut(e.phase as usize) {
@@ -720,6 +723,35 @@ mod tests {
         let mut c = ctl();
         let a = c.on_load(&finished(FinishReason::FirstError), clock(100));
         assert!(!saved(&a).valid);
+    }
+
+    #[test]
+    fn reference_invalid_is_our_defect_not_a_compute_error() {
+        let mut c = ctl();
+        let a = c.on_load(
+            &LoadMessage::Error(ComputeError {
+                phase: 1,
+                kernel: oma_ipc::load::KernelId::K5,
+                isa: Isa::Avx2,
+                kind: ErrorKind::ReferenceInvalid,
+                logical: None,
+                core: None,
+                iteration: 0,
+                expected: 0,
+                actual: 0,
+                seed: 1,
+            }),
+            clock(1000),
+        );
+        assert!(a.is_empty(), "{a:?}");
+        assert_eq!(c.status().state, BenchState::Running);
+        // The skipped PhaseDone that follows marks the step failed.
+        let mut d = done(1, None);
+        if let LoadMessage::PhaseDone(p) = &mut d {
+            p.skipped = Some("reference_invalid".into());
+        }
+        c.on_load(&d, clock(1100));
+        assert_eq!(c.status().segments[1], SegmentState::Failed);
     }
 
     #[test]

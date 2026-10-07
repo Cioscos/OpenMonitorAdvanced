@@ -28,14 +28,16 @@ class BenchStore {
   /** The score scale is not calibrated yet (DB1). */
   provisional = $state.raw(false);
   readonly running = $derived(isBenchRunning(this.status));
-  /** The best single and the best multi core of the valid scores. */
+  /** Valid scores on the current scale: once calibrated, provisional ones are not comparable. */
+  readonly #comparable = $derived(this.scores.filter((s) => s.valid && (this.provisional || !s.provisional)));
+  /** The best single and the best multi core of the comparable scores. */
   readonly record: ScorePair = $derived.by(() => {
-    const valid = this.scores.filter((s) => s.valid);
+    const valid = this.#comparable;
     return { single: maxOf(valid.map((s) => s.single)), multi: maxOf(valid.map((s) => s.multi)) };
   });
-  /** The newest valid score. */
+  /** The newest comparable score. */
   readonly last: ScorePair = $derived.by(() => {
-    const s = this.scores.find((s) => s.valid);
+    const s = this.#comparable[0];
     return { single: s?.single ?? null, multi: s?.multi ?? null };
   });
   #backend: Backend | null = null;

@@ -47,3 +47,22 @@ test('record_ignores_invalid_scores', async () => {
   expect(benchStore.record).toEqual({ single: null, multi: null });
   expect(benchStore.last).toEqual({ single: null, multi: null });
 });
+
+test('provisional_scores_stay_out_of_record_and_last_once_calibrated', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.scoreFiles = [
+    makeScoreFile({ id: 'old', provisional: true, scores: { single: 9000, multi: 90000 } }),
+    makeScoreFile({ id: 'b', scores: { single: 1400, multi: 13000 } }),
+  ];
+  off = await benchStore.connect(backend);
+  expect(benchStore.record).toEqual({ single: 1400, multi: 13000 });
+  backend.scoreFiles = [backend.scoreFiles[0]];
+  await benchStore.refresh();
+  expect(benchStore.last).toEqual({ single: null, multi: null });
+  // While the scale itself is provisional, provisional scores are the only ones there are.
+  off();
+  backend.baselineProvisional = true;
+  off = await benchStore.connect(backend);
+  expect(benchStore.record).toEqual({ single: 9000, multi: 90000 });
+  expect(benchStore.last).toEqual({ single: 9000, multi: 90000 });
+});

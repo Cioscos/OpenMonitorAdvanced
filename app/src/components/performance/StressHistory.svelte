@@ -12,7 +12,7 @@
   // the same request again without the wizard; «Delete» asks first. The store keeps the list.
   let { backend, onOpen }: { backend: Backend; onOpen: (page: PerformancePage) => void } = $props();
 
-  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start'];
+  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start', 'device_lost', 'low_stability'];
   const MARKS = { ok: '✓', warn: '!', crit: '✕' } as const;
 
   let filter = $state<'all' | StressComponent>('all');
@@ -32,7 +32,7 @@
   const whenLong = (s: StressSessionSummary) => new Date(s.startedAt).toLocaleString(locale, { dateStyle: 'long', timeStyle: 'short' });
   /** «Unstable · core 2» cut around «core 2», which carries its term; any other verdict is left whole. */
   const verdictPieces = (s: StressSessionSummary): [string, string, string] => {
-    const title = verdictTitle({ verdict: verdictOf(s), params: s.params }, t);
+    const title = verdictTitle({ verdict: verdictOf(s), params: s.params }, t, locale);
     return verdictOf(s) === 'errors_core' && s.params.core !== undefined ? around(title, t('performance.core.label', { core: s.params.core })) : [title, '', ''];
   };
   /** Moves the focus to the element that appears, so the keyboard follows the confirmation. */
@@ -81,6 +81,7 @@
       { value: 'all', label: t('performance.history.all') },
       { value: 'cpu', label: t('performance.wizard.cpu') },
       { value: 'ram', label: t('performance.wizard.ram') },
+      { value: 'gpu', label: t('performance.wizard.gpu') },
     ]}
     value={filter}
     onChange={(next) => (filter = next as 'all' | StressComponent)}

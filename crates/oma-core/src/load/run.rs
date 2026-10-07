@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oma_ipc::load::{
-    CoreProgress, CoreState, ErrorKind, FinishReason, Isa, KernelId, LoadMessage, LoadMode,
-    Placement,
+    ComputeError, CoreProgress, CoreState, ErrorKind, FinishReason, Isa, KernelId, LoadMessage,
+    LoadMode, Placement,
 };
 use serde::Serialize;
 
@@ -17,6 +17,7 @@ use super::session::{
     CoreResult, ErrorRecord, Journal, OutcomeDetail, PhaseResult, Sample, Session, SessionEvent,
     Stats, FORMAT, MAX_ERRORS,
 };
+use super::stability::StabilityMeter;
 use super::thermal::{ThermalEvent, ThermalGuard};
 
 const SAMPLE_EVERY_MS: u64 = 5_000;
@@ -34,7 +35,11 @@ const TEMP_MISSING_MS: u64 = 10_000;
 pub(crate) const OVERRUN_MS: u64 = 120_000;
 /// `oma-load` exits with this code on an invalid command line or message (`EXIT_USAGE`).
 const LOAD_EXIT_USAGE: i32 = 1;
+/// `oma-load` exits with this code when the GPU was lost (`EXIT_DEVICE_LOST`).
+pub const LOAD_EXIT_DEVICE_LOST: i32 = 4;
 const INVALID_PLAN: &str = "performance.start.invalid_plan";
+const NO_GPU: &str = "performance.start.no_gpu";
+const GPU_ERROR: &str = "performance.start.gpu_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -117,6 +122,12 @@ pub struct RunStatus {
     pub stop_c: Option<f64>,
     pub power_w: Option<f64>,
     pub clock_mhz: Option<f64>,
+    /// GPU `ramp` and `alternate`: the current load level.
+    pub load_percent: Option<u8>,
+    /// GPU runs: the throughput stability so far, 0-1.
+    pub stability: Option<f64>,
+    /// GPU runs: the schema device id of the GPU under test, for the UI's chart.
+    pub gpu_device_id: Option<String>,
     pub checks: u64,
     pub errors: u64,
     pub whea_corrected: u64,
@@ -124,7 +135,8 @@ pub struct RunStatus {
     pub cores: Vec<CoreProgress>,
     pub current_core: Option<u32>,
     pub events: Vec<SessionEvent>,
-    /// `noService`, `tempMissing`, `wheaUnreadable`, `ramReduced`, `ramInsufficient`.
+    /// `noService`, `tempMissing`, `wheaUnreadable`, `ramReduced`, `ramInsufficient`,
+    /// `pcieReplay`, `vramReduced`.
     pub warnings: Vec<String>,
     pub outcome: Option<Outcome>,
 }
@@ -205,6 +217,15 @@ pub struct RunController {
     failed_to_start: Option<String>,
     whea_core: Option<u32>,
     end: End,
+    /// GPU runs only (DG7).
+    stability: Option<StabilityMeter>,
+    device_lost: Option<u32>,
+    /// A `Progress` arrived: the first phase began.
+    phase_seen: bool,
+    load_percent: Option<u8>,
+    /// The first PCIe replay count read (DG14), and whether a rise was reported.
+    pcie_base: Option<u32>,
+    pcie_warned: bool,
 }
 
 fn rfc3339(wall_ms: i64) -> String {
@@ -260,12 +281,61 @@ impl RunController {
             failed_to_start: None,
             whea_core: None,
             end: End::default(),
+            stability: None,
+            device_lost: None,
+            phase_seen: false,
+            load_percent: None,
+            pcie_base: None,
+            pcie_warned: false,
             config,
         };
-        if !c.config.service_available {
+        if c.is_gpu() {
+            // GPU temperatures arrive without the service (DG12).
+            c.stability = Some(StabilityMeter::new(c.session.objective));
+            c.guard = c
+                .config
+                .thermal_stop
+                .then(|| ThermalGuard::new(c.config.threshold_c));
+        } else if !c.config.service_available {
             c.warn("noService");
         }
         c
+    }
+
+    fn is_gpu(&self) -> bool {
+        self.session.component == Component::Gpu
+    }
+
+    /// An error with where it happened: the clock of its core, or the GPU's for a GPU run.
+    fn record(&self, e: &ComputeError) -> ErrorRecord {
+        let clock = match e.core {
+            Some(c) => self
+                .last_sample
+                .core_clock_mhz
+                .get(c as usize)
+                .copied()
+                .flatten(),
+            None if self.is_gpu() => self.last_sample.clock_mhz,
+            None => None,
+        };
+        ErrorRecord {
+            error: e.clone(),
+            at_ms: self.mono - self.start_mono,
+            temp_c: self.last_sample.temp_c,
+            clock_mhz: clock,
+        }
+    }
+
+    fn keep(&mut self, record: ErrorRecord) {
+        if self.session.errors.len() < MAX_ERRORS {
+            self.session.errors.push(record);
+        } else {
+            self.session.errors_dropped += 1;
+        }
+    }
+
+    fn thermal_armed(&self) -> bool {
+        self.config.thermal_stop && (self.config.service_available || self.is_gpu())
     }
 
     pub fn session(&self) -> &Session {
@@ -375,6 +445,7 @@ impl RunController {
     }
 
     fn compute_outcome(&mut self) -> Outcome {
+        self.session.stability = self.stability.as_ref().and_then(StabilityMeter::result);
         let s = &self.session;
         let all_skipped = !s.phases.is_empty() && s.phases.iter().all(|p| p.skipped.is_some());
         let facts = OutcomeFacts {
@@ -382,6 +453,7 @@ impl RunController {
             system_crash: false,
             app_closed: false,
             crashed: self.crashed,
+            device_lost: self.device_lost,
             hung: self.hung,
             errors: self.errors,
             error_cores: self.error_cores.clone(),
@@ -391,6 +463,7 @@ impl RunController {
             user_stop: self.user_stop,
             whea_corrected: self.whea_count(&[17, 19]),
             completed: self.completed,
+            stability: self.session.stability,
             nothing_ran: self.completed && (self.checks == 0 || all_skipped),
         };
         let (outcome, verdict) = decide(&facts);
@@ -496,6 +569,25 @@ impl RunController {
         match msg {
             LoadMessage::Hello(h) => self.session.load_version = Some(h.version.clone()),
             LoadMessage::Progress(p) => {
+                self.phase_seen = true;
+                self.load_percent = p.load_percent;
+                if let Some(m) = self.stability.as_mut() {
+                    // DG7: only the steady phases of the throughput kernels.
+                    let counts = self
+                        .session
+                        .plan
+                        .phases
+                        .get(p.phase as usize)
+                        .is_some_and(|ph| {
+                            ph.mode == LoadMode::Steady
+                                && matches!(ph.kernel, KernelId::S1 | KernelId::S2 | KernelId::S5)
+                        });
+                    let start = self.mono.saturating_sub(p.phase_elapsed_ms);
+                    m.phase_started(p.phase, counts, start);
+                    if let Some(r) = p.rate {
+                        m.rate(r, self.mono);
+                    }
+                }
                 self.phase = p.phase;
                 self.current_core = p.current_core;
                 self.checks = p.checks;
@@ -512,22 +604,34 @@ impl RunController {
                 self.hung = true;
                 self.event("hung", &[("phase", e.phase.to_string())]);
             }
+            LoadMessage::Error(e) if e.kind == ErrorKind::DeviceLost => {
+                // `actual` carries the `GetDeviceRemovedReason` HRESULT.
+                let code = e.actual as u32;
+                self.device_lost = Some(code);
+                // Kept for the result's driver code and load level, never counted as a
+                // mismatch: the verdict stays `device_lost`.
+                let record = self.record(e);
+                self.keep(record);
+                self.event(
+                    "device_lost",
+                    &[
+                        ("phase", e.phase.to_string()),
+                        ("code", format!("0x{code:08X}")),
+                    ],
+                );
+            }
             LoadMessage::Error(e) if e.kind == ErrorKind::ReferenceInvalid => {
                 // A defect of our own reference, never an error of a core.
-                self.event("reference_invalid", &[("phase", e.phase.to_string())]);
+                let code = if self.is_gpu() {
+                    "reference_invalid_gpu"
+                } else {
+                    "reference_invalid"
+                };
+                self.event(code, &[("phase", e.phase.to_string())]);
             }
             LoadMessage::Error(e) => {
                 self.errors += 1;
-                let clock = e
-                    .core
-                    .and_then(|c| self.last_sample.core_clock_mhz.get(c as usize).copied())
-                    .flatten();
-                let record = ErrorRecord {
-                    error: e.clone(),
-                    at_ms: self.mono - self.start_mono,
-                    temp_c: self.last_sample.temp_c,
-                    clock_mhz: clock,
-                };
+                let record = self.record(e);
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
                 self.coreless_errors |= core.is_none();
                 if let Some(core) = core {
@@ -535,16 +639,20 @@ impl RunController {
                     let c = self.set_core(core, CoreState::Failed);
                     c.first_error.get_or_insert_with(|| record.clone());
                 }
-                if self.session.errors.len() < MAX_ERRORS {
-                    self.session.errors.push(record);
-                } else {
-                    self.session.errors_dropped += 1;
-                }
+                self.keep(record);
             }
             LoadMessage::Notice(n) => {
                 match n.code.as_str() {
                     "ram_reduced" => self.warn("ramReduced"),
                     "ram_insufficient" => self.warn("ramInsufficient"),
+                    "vram_reduced" => self.warn("vramReduced"),
+                    "gpu_missing" if !self.phase_seen => {
+                        self.failed_to_start = Some(NO_GPU.into());
+                    }
+                    "gpu_error" if !self.phase_seen => {
+                        self.failed_to_start = Some(GPU_ERROR.into());
+                    }
+                    // Other codes (`vram_bits`, `artifact_tiles`...) are diary events only.
                     _ => {}
                 }
                 let mut params = vec![("phase", n.phase.to_string())];
@@ -585,7 +693,7 @@ impl RunController {
                     }
                     FinishReason::FirstError => {}
                     FinishReason::Failed => {
-                        if !self.hung {
+                        if !self.hung && self.device_lost.is_none() {
                             self.crashed = true;
                         }
                     }
@@ -617,7 +725,7 @@ impl RunController {
             return vec![];
         }
         self.tick(now);
-        if service_available != self.config.service_available {
+        if !self.is_gpu() && service_available != self.config.service_available {
             self.config.service_available = service_available;
             if service_available {
                 self.warnings.retain(|w| w != "noService");
@@ -629,6 +737,9 @@ impl RunController {
                 self.guard = None;
                 self.warn("noService");
             }
+        }
+        if let (Some(m), Some(on)) = (self.stability.as_mut(), sample.throttling) {
+            m.throttling(on, self.mono);
         }
         self.last_sample = sample.clone();
         self.sums[0].add(sample.temp_c);
@@ -815,6 +926,27 @@ impl RunController {
         Some(out)
     }
 
+    /// The NVIDIA PCIe replay count, at the start and every 5 s (DG14). The first value is
+    /// the baseline; a rise warns once. Never an error.
+    pub fn on_pcie_replay(&mut self, count: u32, now: Clock) -> Vec<Action> {
+        self.guarded(now, |s| {
+            if s.ended {
+                return vec![];
+            }
+            s.tick(now);
+            let base = *s.pcie_base.get_or_insert(count);
+            if count > base && !s.pcie_warned {
+                s.pcie_warned = true;
+                s.warn("pcieReplay");
+                s.event(
+                    "pcie_replay",
+                    &[("from", base.to_string()), ("to", count.to_string())],
+                );
+            }
+            vec![]
+        })
+    }
+
     pub fn on_user_stop(&mut self, now: Clock) -> Vec<Action> {
         self.guarded(now, |s| s.user_stop(now))
     }
@@ -840,6 +972,9 @@ impl RunController {
         // plan was refused, so it never ran.
         if code == Some(LOAD_EXIT_USAGE) {
             self.failed_to_start = Some(INVALID_PLAN.into());
+        } else if code == Some(LOAD_EXIT_DEVICE_LOST) {
+            // 0: the exit code carries no HRESULT.
+            self.device_lost.get_or_insert(0);
         } else if !(self.state == RunState::Stopping && code == Some(0)) {
             self.crashed = true;
             let code = code.map_or("-".into(), |c| c.to_string());
@@ -873,10 +1008,16 @@ impl RunController {
                 .collect(),
             temp_c: self.last_sample.temp_c,
             temp_max_c: self.sums[0].max,
-            stop_c: (self.config.thermal_stop && self.config.service_available)
-                .then_some(self.config.threshold_c),
+            stop_c: self.thermal_armed().then_some(self.config.threshold_c),
             power_w: self.last_sample.power_w,
             clock_mhz: self.last_sample.clock_mhz,
+            load_percent: self.load_percent,
+            stability: self
+                .stability
+                .as_ref()
+                .and_then(StabilityMeter::result)
+                .or(s.stability),
+            gpu_device_id: s.gpu_device_id.clone(),
             checks: self.checks,
             errors: self.errors,
             whea_corrected: self.whea_count(&[17, 19]),
@@ -946,11 +1087,13 @@ mod tests {
                 preset: Preset::Quick,
                 custom: None,
                 retry_core: None,
+                gpu: None,
             },
             plan: Plan {
                 seed: 1,
                 ram_bytes: 0,
                 phases: vec![phase(KernelId::K2), phase(KernelId::K5)],
+                gpu: None,
             },
             outcome: None,
             outcome_detail: None,
@@ -965,6 +1108,8 @@ mod tests {
             events: vec![],
             app_version: "0".into(),
             load_version: None,
+            stability: None,
+            gpu_device_id: None,
         }
     }
 
@@ -1003,6 +1148,7 @@ mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate: None,
+            load_percent: None,
         })
     }
 
@@ -1018,6 +1164,7 @@ mod tests {
             expected: 1,
             actual: 2,
             seed: 1,
+            load_percent: None,
         })
     }
 
@@ -1035,6 +1182,7 @@ mod tests {
             power_w: Some(100.0),
             clock_mhz: Some(4500.0),
             core_clock_mhz: vec![Some(4000.0), Some(4100.0), Some(4200.0), Some(4300.0)],
+            throttling: None,
         }
     }
 
@@ -1810,5 +1958,308 @@ mod tests {
         assert_eq!(c.status().warnings, ["tempMissing"]);
         c.on_sample(&sample(Some(60.0)), true, clock(11_000));
         assert!(c.status().warnings.is_empty());
+    }
+
+    fn gpu_phase(kernel: KernelId, mode: LoadMode) -> Phase {
+        Phase {
+            isa: Isa::Sse2,
+            mode,
+            duration_s: 120,
+            ..phase(kernel)
+        }
+    }
+
+    /// A GPU run without the service (GPU sensors do not need it, DG12).
+    fn gpu_ctl(objective: Objective) -> RunController {
+        let mut s = session();
+        s.component = Component::Gpu;
+        s.objective = objective;
+        s.plan.phases = vec![gpu_phase(KernelId::S1, LoadMode::Steady)];
+        s.plan.gpu = Some(oma_ipc::load::GpuTarget {
+            luid: 7,
+            integrated: false,
+        });
+        RunController::new(
+            s,
+            RunConfig {
+                threshold_c: 90.0,
+                thermal_stop: true,
+                service_available: false,
+                cores: vec![],
+                apic_to_core: BTreeMap::new(),
+                whea_after: None,
+                whea_baseline_missing: false,
+            },
+            clock(0),
+        )
+    }
+
+    fn gpu_progress(t: u64, rate: f64, load_percent: Option<u8>) -> LoadMessage {
+        LoadMessage::Progress(Progress {
+            phase: 0,
+            phase_elapsed_ms: t,
+            elapsed_ms: t,
+            checks: 10,
+            errors: 0,
+            current_core: None,
+            cores: vec![],
+            memory_bytes: 0,
+            rate: Some(rate),
+            load_percent,
+        })
+    }
+
+    fn gpu_error(kind: ErrorKind, actual: u64, load_percent: Option<u8>) -> LoadMessage {
+        LoadMessage::Error(ComputeError {
+            phase: 0,
+            kernel: KernelId::S1,
+            isa: Isa::Sse2,
+            kind,
+            logical: None,
+            core: None,
+            iteration: 4,
+            expected: 1,
+            actual,
+            seed: 1,
+            load_percent,
+        })
+    }
+
+    fn gpu_sample(temp: Option<f64>, throttling: Option<bool>) -> SensorSample {
+        SensorSample {
+            temp_c: temp,
+            power_w: Some(300.0),
+            clock_mhz: Some(2700.0),
+            core_clock_mhz: vec![],
+            throttling,
+        }
+    }
+
+    #[test]
+    fn device_lost_error_then_exit_4_is_device_lost() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        c.on_load(
+            &gpu_error(ErrorKind::DeviceLost, 0x887A_0006, None),
+            clock(2000),
+        );
+        let a = c.on_exit(Some(LOAD_EXIT_DEVICE_LOST), clock(2100));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::DeviceLost));
+        assert_eq!(verdict(&c), "device_lost");
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["code"], "0x887A0006");
+        assert!(c.session().events.iter().all(|e| e.code != "crashed"));
+
+        // A failed finish after the error is no crash either.
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        c.on_load(
+            &gpu_error(ErrorKind::DeviceLost, 0x887A_0005, None),
+            clock(2000),
+        );
+        let a = c.on_load(&finished(FinishReason::Failed), clock(2100));
+        assert!(has_finished(&settle(&mut c, a), Outcome::DeviceLost));
+    }
+
+    #[test]
+    fn device_lost_error_is_kept_with_the_gpu_clock() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, Some(55)), clock(1000));
+        c.on_sample(&gpu_sample(Some(71.0), None), false, clock(1500));
+        c.on_load(
+            &gpu_error(ErrorKind::DeviceLost, 0x887A_0006, Some(55)),
+            clock(2000),
+        );
+        let e = &c.session().errors[0];
+        assert_eq!(e.error.kind, ErrorKind::DeviceLost);
+        assert_eq!(e.error.actual, 0x887A_0006);
+        assert_eq!(e.error.load_percent, Some(55));
+        assert_eq!(e.clock_mhz, Some(2700.0));
+        assert_eq!(e.temp_c, Some(71.0));
+        // Not counted as a mismatch: the verdict stays `device_lost`.
+        assert_eq!(c.status().errors, 0);
+        let a = c.on_exit(Some(LOAD_EXIT_DEVICE_LOST), clock(2100));
+        assert!(has_finished(&settle(&mut c, a), Outcome::DeviceLost));
+    }
+
+    #[test]
+    fn gpu_mismatch_takes_the_gpu_clock() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        c.on_sample(&gpu_sample(Some(70.0), None), false, clock(1500));
+        c.on_load(&gpu_error(ErrorKind::Mismatch, 2, None), clock(2000));
+        assert_eq!(c.session().errors[0].clock_mhz, Some(2700.0));
+    }
+
+    #[test]
+    fn gpu_error_notice_fails_to_start() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&notice("gpu_error"), clock(100));
+        let a = c.on_load(&finished(FinishReason::Failed), clock(200));
+        assert!(has_finished(&settle(&mut c, a), Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.gpu_error");
+    }
+
+    #[test]
+    fn gpu_reference_invalid_has_its_own_event() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_error(ErrorKind::ReferenceInvalid, 0, None), clock(100));
+        assert!(c
+            .session()
+            .events
+            .iter()
+            .any(|e| e.code == "reference_invalid_gpu"));
+    }
+
+    #[test]
+    fn exit_4_alone_is_device_lost() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        let a = c.on_exit(Some(4), clock(2000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::DeviceLost));
+        assert!(c
+            .session()
+            .outcome_detail
+            .as_ref()
+            .unwrap()
+            .params
+            .is_empty());
+        assert!(c.session().events.iter().all(|e| e.code != "crashed"));
+    }
+
+    #[test]
+    fn gpu_missing_notice_fails_to_start() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&notice("gpu_missing"), clock(100));
+        let a = c.on_load(&finished(FinishReason::Failed), clock(200));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.no_gpu");
+
+        // After the first phase it is only an event.
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        c.on_load(&notice("gpu_missing"), clock(1100));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(1200));
+        assert!(has_finished(&settle(&mut c, a), Outcome::Passed));
+    }
+
+    #[test]
+    fn gpu_without_temperature_warns_and_continues() {
+        let mut c = gpu_ctl(Objective::Normal);
+        assert!(
+            c.status().warnings.is_empty(),
+            "never noService for the GPU"
+        );
+        assert_eq!(c.status().stop_c, Some(90.0));
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        for t in [1000, 6000, 11_500] {
+            assert!(c
+                .on_sample(&gpu_sample(None, None), false, clock(t))
+                .is_empty());
+        }
+        assert_eq!(c.status().warnings, ["tempMissing"]);
+        assert_eq!(c.status().state, RunState::Running);
+        // The thermal stop works without the service.
+        c.on_sample(&gpu_sample(Some(95.0), None), false, clock(12_000));
+        let a = c.on_sample(&gpu_sample(Some(96.0), None), false, clock(13_000));
+        assert_eq!(a, vec![Action::SendStop]);
+        assert!(!c.status().warnings.iter().any(|w| w == "noService"));
+    }
+
+    #[test]
+    fn completed_gpu_run_with_low_stability_is_low_stability() {
+        let mut c = gpu_ctl(Objective::Overclock);
+        // 60 s windows after the 30 s warm-up: 30-90, 90-150, 150-210, 210-270.
+        for s in 1..=270u64 {
+            let t = s * 1000;
+            let rate = if (150..210).contains(&s) { 90.0 } else { 100.0 };
+            c.on_load(&gpu_progress(t, rate, None), clock(t));
+            // A throttled window is dropped in overclock: not the slow one here.
+            c.on_sample(&gpu_sample(Some(70.0), Some(s == 100)), false, clock(t));
+        }
+        assert!((c.status().stability.unwrap() - 0.9).abs() < 1e-9);
+        let a = c.on_load(&finished(FinishReason::Completed), clock(270_500));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::LowStability));
+        assert_eq!(verdict(&c), "low_stability");
+        let s = c.session();
+        assert_eq!(
+            s.outcome_detail.as_ref().unwrap().params["stability"],
+            "90.0"
+        );
+        assert!((s.stability.unwrap() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pcie_replay_increase_warns_once() {
+        let mut c = gpu_ctl(Objective::Normal);
+        let replays = |c: &RunController| {
+            c.session()
+                .events
+                .iter()
+                .filter(|e| e.code == "pcie_replay")
+                .count()
+        };
+        c.on_pcie_replay(5, clock(0));
+        c.on_pcie_replay(5, clock(5000));
+        assert!(c.status().warnings.is_empty());
+        assert_eq!(replays(&c), 0);
+        c.on_pcie_replay(7, clock(10_000));
+        c.on_pcie_replay(9, clock(15_000));
+        assert_eq!(c.status().warnings, ["pcieReplay"]);
+        assert_eq!(replays(&c), 1);
+        // Only a warning: the run still passes.
+        c.on_load(&gpu_progress(16_000, 25.0, None), clock(16_000));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(17_000));
+        assert!(has_finished(&settle(&mut c, a), Outcome::Passed));
+    }
+
+    #[test]
+    fn status_carries_the_gpu_device_id_only_for_gpu_runs() {
+        let config = || RunConfig {
+            threshold_c: 90.0,
+            thermal_stop: true,
+            service_available: false,
+            cores: vec![],
+            apic_to_core: BTreeMap::new(),
+            whea_after: None,
+            whea_baseline_missing: false,
+        };
+        let mut gpu = session();
+        gpu.component = Component::Gpu;
+        gpu.gpu_device_id = Some("gpu/pci-0000:01:00.0".into());
+        let gpu = RunController::new(gpu, config(), clock(0));
+        assert_eq!(
+            gpu.status().gpu_device_id.as_deref(),
+            Some("gpu/pci-0000:01:00.0")
+        );
+        let cpu = RunController::new(session(), config(), clock(0));
+        assert_eq!(cpu.status().gpu_device_id, None);
+    }
+
+    #[test]
+    fn error_keeps_the_load_percent() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, Some(60)), clock(1000));
+        assert_eq!(c.status().load_percent, Some(60));
+        c.on_load(&gpu_error(ErrorKind::Mismatch, 2, Some(45)), clock(2000));
+        assert_eq!(c.session().errors[0].error.load_percent, Some(45));
+        let v = serde_json::to_value(&c.session().errors[0]).unwrap();
+        assert_eq!(v["load_percent"], 45);
+        assert_eq!(c.status().errors, 1);
+    }
+
+    #[test]
+    fn vram_reduced_notice_warns() {
+        let mut c = gpu_ctl(Objective::Overclock);
+        c.on_load(&notice("vram_reduced"), clock(1000));
+        c.on_load(&notice("vram_bits"), clock(1100));
+        assert_eq!(c.status().warnings, ["vramReduced"]);
+        assert!(c.session().events.iter().any(|e| e.code == "vram_bits"));
     }
 }

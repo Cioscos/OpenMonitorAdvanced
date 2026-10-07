@@ -112,6 +112,7 @@ impl PerformanceRunner {
             samples,
             cores,
             sensors: None,
+            gpu: None,
             bench: true,
         });
         Ok(id)
@@ -660,6 +661,7 @@ mod tests {
             expected: 1,
             actual: 2,
             seed: 1,
+            load_percent: None,
         });
         let rig = rig_with(
             "bench-invalid",

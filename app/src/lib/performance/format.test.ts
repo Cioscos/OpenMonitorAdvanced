@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
 import type { Phase } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, errorText, eventText, formatDuration, marked, phaseLabel, verdictTitle } from './format';
+import { cpuChartSensors, errorText, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -36,7 +36,15 @@ test('phase_label_names_the_kernel_size_and_set', () => {
   expect(phaseLabel(phase({}), t)).toBe('FFT piccole · core e cache · AVX2');
   expect(phaseLabel(phase({ kernel: 'k5', size: 'l3' }), t)).toBe('Interi esatti (NTT) · L3 · AVX2');
   expect(phaseLabel(phase({ kernel: 'k8', size: 'auto', isa: 'sse2' }), t)).toBe('Crittografia e compressione · SSE2');
+  // A GPU has no instruction set.
+  expect(phaseLabel(phase({ kernel: 's1', size: 'auto', isa: 'sse2' }), t)).toBe(t('glossary.mode.s1.name'));
   i18n.locale = 'en';
+});
+
+test('mode_term_maps_the_wire_mode_to_its_glossary_id', () => {
+  expect(modeTerm('pause_resume')).toBe('mode.pauseResume');
+  expect(modeTerm('ramp')).toBe('mode.ramp');
+  expect(t(`glossary.${modeTerm('pause_resume')}.name`)).not.toContain('glossary.');
 });
 
 test('marked_cuts_around_the_bracketed_term', () => {
@@ -48,6 +56,8 @@ test('shell_errors_are_translated_by_code', () => {
   expect(errorText('build:too_long', t)).toBe(t('performance.wizard.error.too_long'));
   expect(errorText('build:ram_budget', t)).toBe(t('performance.wizard.error.ram_budget'));
   expect(errorText('busy', t)).toBe(t('performance.wizard.busy'));
+  expect(errorText('build:no_gpu', t)).toBe(t('performance.wizard.error.no_gpu'));
+  expect(t('performance.wizard.error.no_gpu')).not.toBe('performance.wizard.error.no_gpu');
   // An unknown code and any other text stay as the shell wrote them.
   expect(errorText('build:something_new', t)).toBe('build:something_new');
   expect(errorText('oma-load.exe not found', t)).toBe('oma-load.exe not found');
@@ -68,6 +78,11 @@ test('event_text_counts_phases_from_one_and_reads_recovered_whea', () => {
   expect(terms('bugcheck')).toEqual([['bugcheck', 'BugCheck']]);
   expect(terms('kernelPower41')).toEqual([['kernelPower41', 'Kernel-Power 41']]);
   expect(ev('mystery')).toEqual([{ text: 'mystery', term: null }]);
+  // The GPU codes of the controller and of oma-load all have their words.
+  for (const code of ['device_lost', 'vram_words', 'reference_invalid_gpu', 'gpu_error']) expect(ev(code, { phase: '0' })[0].text).not.toBe(code);
+  expect(text('device_lost', { phase: '1', code: '0x887A0006' })).toBe('Fase 2: GPU azzerata dal driver (codice 0x887A0006)');
+  expect(terms('device_lost', { phase: '1', code: '0x887A0006' })).toEqual([['phase', 'Fase'], ['deviceLost', 'GPU azzerata']]);
+  expect(text('reference_invalid_gpu', { phase: '0' })).not.toContain('CPU');
   i18n.locale = 'en';
 });
 
@@ -78,6 +93,12 @@ test('verdict_title_translates_a_reason_key', () => {
   expect(verdictTitle({ verdict: 'failed_to_start', params: { reason: 'start failed' } }, t)).toBe(
     t('performance.outcome.failed_to_start', { reason: 'start failed' }),
   );
+});
+
+test('verdict_title_localizes_the_stability', () => {
+  const detail = { verdict: 'low_stability', params: { stability: '95.3' } };
+  expect(verdictTitle(detail, t, 'it')).toContain('95,3');
+  expect(verdictTitle(detail, t, 'en')).toContain('95.3');
 });
 
 test('verdict_title_reads_the_recovered_phase', () => {
@@ -92,4 +113,13 @@ test('chart_sensors_follow_da5', () => {
   const tdie = { ...SERVICE_MOCK_SCHEMA.sensors[0], id: 'cpu/0/temperature/tdie' };
   expect(cpuChartSensors({ ...SERVICE_MOCK_SCHEMA, sensors: [...SERVICE_MOCK_SCHEMA.sensors, tdie] })[0].id).toBe('cpu/0/temperature/tdie');
   expect(cpuChartSensors(null)).toEqual([]);
+});
+
+test('gpu chart sensors come from the status device, not from a guess', () => {
+  const first = MOCK_SCHEMA.sensors.filter((x) => x.deviceId.startsWith('gpu/'));
+  const other = first.map((x) => ({ ...x, id: x.id.replace('gpu/pci-0000:01:00.0', 'gpu/pci-0000:0c:00.0'), deviceId: 'gpu/pci-0000:0c:00.0' }));
+  const schema = { ...MOCK_SCHEMA, sensors: [...first, ...other] };
+  expect(gpuChartSensors(schema, 'gpu/pci-0000:0c:00.0').map((x) => x.id)).toEqual(['gpu/pci-0000:0c:00.0/temperature/core', 'gpu/pci-0000:0c:00.0/power/board']);
+  expect(gpuChartSensors(schema, 'gpu/pci-0000:01:00.0')[0].deviceId).toBe('gpu/pci-0000:01:00.0');
+  expect(gpuChartSensors(schema, null)).toEqual([]);
 });

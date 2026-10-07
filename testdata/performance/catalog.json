@@ -1,7 +1,15 @@
 {
   "components": [
     "cpu",
-    "ram"
+    "ram",
+    "gpu"
+  ],
+  "gpuKernels": [
+    "s1",
+    "s2",
+    "s4",
+    "s5",
+    "s6"
   ],
   "isa": [
     "avx512",
@@ -24,7 +32,10 @@
     "variable",
     "light",
     "coreCycle",
-    "allCore"
+    "allCore",
+    "ramp",
+    "alternate",
+    "pauseResume"
   ],
   "objectives": [
     "normal",
@@ -47,6 +58,16 @@
       "long": 7200,
       "night": 28800,
       "standard": 3600
+    },
+    "gpu.normal": {
+      "long": 1800,
+      "quick": 300,
+      "standard": 900
+    },
+    "gpu.overclock": {
+      "long": 3600,
+      "night": 7200,
+      "standard": 1800
     },
     "ram.normal": {
       "long": 3600,

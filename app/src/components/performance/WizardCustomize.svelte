@@ -8,7 +8,7 @@
   // «Personalizza» (spec M8 §3.4, DA12): the modes of the profile's plan with their minutes, the
   // instruction set, the threads and «stop at the first error». Every change edits `custom` in
   // place; the wizard previews the plan again with it.
-  let { custom = $bindable(), base, isa }: { custom: Custom; base: Plan; isa: Isa[] } = $props();
+  let { custom = $bindable(), base, isa, gpu = false }: { custom: Custom; base: Plan; isa: Isa[]; gpu?: boolean } = $props();
 
   /** The profile's seconds of each kernel, in plan order. */
   const kernels = $derived.by(() => {
@@ -66,6 +66,7 @@
     </ul>
   </fieldset>
 
+  {#if !gpu}
   <fieldset>
     <legend>{t('performance.custom.isa')}</legend>
     <div class="options">
@@ -84,6 +85,7 @@
     </div>
     <p class="hint">{hint[0]}<Term term="mode.allCore">{hint[1]}</Term>{hint[2]}</p>
   </fieldset>
+  {/if}
 
   <div class="flags">
     {#if hasCycle}

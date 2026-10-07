@@ -19,14 +19,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oma_core::engine::TickOutput;
 use oma_core::load::{
-    build_plan, core_order, cpu_stop_threshold, decide, ram_budget, read_sample,
-    resolve_cpu_sensors, Action, BuildError, BuildInput, Clock, Component, CpuSensorIds, Objective,
-    OutcomeDetail, OutcomeFacts, Preset, RunConfig, RunController, RunState, RunStatus,
-    SensorSample, Session, StartRequest, VerdictKey, WheaEvent, FORMAT,
+    build_plan, core_order, cpu_stop_threshold, decide, gpu_stop_threshold, ram_budget,
+    read_gpu_sample, read_sample, resolve_cpu_sensors, resolve_gpu_sensors, Action, BuildError,
+    BuildInput, Clock, Component, CpuSensorIds, GpuSensorIds, Objective, OutcomeDetail,
+    OutcomeFacts, Preset, RunConfig, RunController, RunState, RunStatus, SensorSample, Session,
+    StartRequest, VerdictKey, WheaEvent, FORMAT,
 };
 use oma_core::model::Schema;
 use oma_core::scores::BenchStatus;
-use oma_ipc::load::{Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology};
+use oma_ipc::load::{
+    GpuTarget, Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology,
+};
+use oma_win::gpu::StressAdapter;
 
 use super::host::{HostEvent, StartFailure};
 use super::store::{to_rfc3339, PerformanceStore};
@@ -45,6 +49,13 @@ const STATUS_EVERY: Duration = Duration::from_secs(1);
 pub(super) const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// Samples waiting for the thread; more are dropped, the sampler never waits.
 pub(super) const SAMPLE_QUEUE: usize = 4;
+/// How often a GPU test reads the PCIe replay counter (DG14).
+const PCIE_EVERY_MS: u64 = 5_000;
+
+/// Whether the PCIe replay counter is due, last read at `last` (mono ms).
+fn pcie_due(last: Option<u64>, now_ms: u64) -> bool {
+    last.is_none_or(|t| now_ms.saturating_sub(t) >= PCIE_EVERY_MS)
+}
 
 /// The helper as the runner drives it: [`super::host::LoadHost`], or a script in the tests.
 pub trait LoadLink {
@@ -104,6 +115,10 @@ pub trait Machine: Send + Sync {
     /// Polls the other processes' share of the whole CPU (0-1); each call is
     /// one poll, the first may give `None`. Made and used on the runner's thread.
     fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>>;
+    /// The hardware GPUs a test can target (DG13); read only when asked, never on a timer.
+    fn gpus(&self) -> Vec<StressAdapter>;
+    /// The GPU's PCIe replay counter; `None` when it cannot be read (DG14).
+    fn pcie_replay(&self, device_id: &str) -> Option<u32>;
 }
 
 /// This PC.
@@ -150,6 +165,14 @@ impl Machine for WinMachine {
                 Box::new(|| None)
             }
         }
+    }
+
+    fn gpus(&self) -> Vec<StressAdapter> {
+        oma_win::gpu::stress_adapters()
+    }
+
+    fn pcie_replay(&self, device_id: &str) -> Option<u32> {
+        oma_win::gpu::pcie_replay_count(device_id)
     }
 }
 
@@ -210,6 +233,7 @@ impl StartError {
             Self::Plan(BuildError::TooLong) => "too_long",
             Self::Plan(BuildError::UnknownCore(_)) => "unknown_core",
             Self::Plan(BuildError::RamBudget) => "ram_budget",
+            Self::Plan(BuildError::NoGpu) => "no_gpu",
         };
         format!("build:{code}")
     }
@@ -231,6 +255,23 @@ pub struct SystemInfo {
     /// The thermal stop threshold (DA5).
     pub stop_c: f64,
     pub hypervisor: bool,
+    pub gpus: Vec<GpuChoice>,
+}
+
+/// A GPU the wizard offers, chosen by its stable `device_id` (DG13).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuChoice {
+    pub device_id: String,
+    pub name: String,
+    pub integrated: bool,
+    pub dedicated_bytes: u64,
+}
+
+/// The sensor ids a test reads, resolved for one schema revision.
+pub(super) enum SensorIds {
+    Cpu(CpuSensorIds),
+    Gpu(GpuSensorIds),
 }
 
 /// Asks the thread to stop; `deadline` bounds the wait for the helper (DA16).
@@ -254,7 +295,9 @@ pub(super) struct Active {
     /// Physical cores, for the per-core clocks.
     pub(super) cores: usize,
     /// The schema revision the ids were resolved on.
-    pub(super) sensors: Option<(u64, CpuSensorIds)>,
+    pub(super) sensors: Option<(u64, SensorIds)>,
+    /// The GPU under test (its `device_id`), `None` for CPU and RAM tests.
+    pub(super) gpu: Option<String>,
     /// The CPU benchmark, not a stress test.
     pub(super) bench: bool,
 }
@@ -302,6 +345,9 @@ fn idle_status() -> RunStatus {
         stop_c: None,
         power_w: None,
         clock_mhz: None,
+        load_percent: None,
+        stability: None,
+        gpu_device_id: None,
         checks: 0,
         errors: 0,
         whea_corrected: 0,
@@ -402,6 +448,9 @@ fn verdict_text(lang: Lang, detail: &OutcomeDetail) -> String {
         .map(|(k, v)| {
             let text = if v.starts_with("performance.start.") {
                 t(lang, v, &[])
+            } else if k == "stability" && lang == Lang::It {
+                // A percent with a decimal point ("95.3"), as the UI shows it in Italian.
+                v.replace('.', ",")
             } else {
                 v.clone()
             };
@@ -465,9 +514,18 @@ impl PerformanceRunner {
         }
     }
 
-    /// The plan for `request` on this machine, with its topology.
-    fn plan(&self, request: &StartRequest, seed: u64) -> Result<(Topology, Plan), StartError> {
+    /// The plan for `request` on this machine, with its topology and, for a GPU test,
+    /// the GPU of `request.gpu` (its LUID changes at every boot, DG13).
+    fn plan(
+        &self,
+        request: &StartRequest,
+        seed: u64,
+    ) -> Result<(Topology, Plan, Option<StressAdapter>), StartError> {
         let m = &self.deps.machine;
+        let adapter = match (&request.component, &request.gpu) {
+            (Component::Gpu, Some(id)) => m.gpus().into_iter().find(|g| &g.device_id == id),
+            _ => None,
+        };
         let topology = m
             .topology()
             .map_err(|e| StartError::System(e.to_string()))?;
@@ -486,9 +544,14 @@ impl PerformanceRunner {
             ram_budget: ram_budget(available, perf.ram_share_percent),
             stop_override: perf.stop_on_first_error,
             seed,
+            // None for a GPU request gives `NoGpu`.
+            gpu: adapter.as_ref().map(|g| GpuTarget {
+                luid: g.luid,
+                integrated: g.integrated,
+            }),
         })
         .map_err(StartError::Plan)?;
-        Ok((topology, plan))
+        Ok((topology, plan, adapter))
     }
 
     /// The plan a start would run (the seed aside).
@@ -528,6 +591,16 @@ impl PerformanceRunner {
             tjmax_c,
             stop_c: cpu_stop_threshold(perf.cpu_stop_c, tjmax_c),
             hypervisor: topology.hypervisor,
+            gpus: m
+                .gpus()
+                .into_iter()
+                .map(|g| GpuChoice {
+                    device_id: g.device_id,
+                    name: g.name,
+                    integrated: g.integrated,
+                    dedicated_bytes: g.dedicated_bytes,
+                })
+                .collect(),
         }
     }
 
@@ -546,14 +619,20 @@ impl PerformanceRunner {
         let id = oma_win::overlay_pipe::random_uuid_v4()
             .map_err(|e| StartError::System(e.to_string()))?;
         let seed = seed_of(&id);
-        let (topology, plan) = self.plan(&request, seed)?;
+        let (topology, plan, adapter) = self.plan(&request, seed)?;
         let perf = self.deps.settings.snapshot().performance.clone();
-        let tjmax_c = resolve_cpu_sensors(&(self.deps.schema)(), 0).tjmax_c;
+        let gpu = adapter.is_some();
         let config = RunConfig {
-            threshold_c: cpu_stop_threshold(perf.cpu_stop_c, tjmax_c),
+            threshold_c: if gpu {
+                gpu_stop_threshold(perf.gpu_stop_c)
+            } else {
+                let tjmax_c = resolve_cpu_sensors(&(self.deps.schema)(), 0).tjmax_c;
+                cpu_stop_threshold(perf.cpu_stop_c, tjmax_c)
+            },
             thermal_stop: perf.thermal_stop,
-            service_available: (self.deps.service_available)(),
-            cores: core_order(&topology),
+            // GPU readings come without the service (DG12).
+            service_available: gpu || (self.deps.service_available)(),
+            cores: if gpu { vec![] } else { core_order(&topology) },
             apic_to_core: BTreeMap::new(),
             whea_after: None,
             whea_baseline_missing: false,
@@ -564,6 +643,9 @@ impl PerformanceRunner {
                 let total = self.deps.machine.memory().map_or(0, |(t, _)| t);
                 format!("{} GB RAM", (total + (1 << 29)) >> 30)
             }
+            Component::Gpu => adapter
+                .as_ref()
+                .map_or_else(String::new, |g| g.name.clone()),
         };
         let session = Session {
             format: FORMAT,
@@ -589,6 +671,8 @@ impl PerformanceRunner {
             events: vec![],
             app_version: self.deps.app_version.clone(),
             load_version: None,
+            stability: None,
+            gpu_device_id: adapter.as_ref().map(|g| g.device_id.clone()),
         };
         let zero = Clock {
             mono_ms: 0,
@@ -633,6 +717,7 @@ impl PerformanceRunner {
             samples,
             cores: core_count(&topology),
             sensors: None,
+            gpu: adapter.map(|g| g.device_id),
             bench: false,
         });
         Ok(id)
@@ -669,8 +754,8 @@ impl PerformanceRunner {
             .is_some_and(|a| a.running() && a.bench)
     }
 
-    /// The CPU reading of a sampler tick for the test in progress. Never
-    /// blocks: a busy runner skips the tick, a full queue drops the sample.
+    /// The CPU (or, for a GPU test, the GPU) reading of a sampler tick for the test in
+    /// progress. Never blocks: a busy runner skips the tick, a full queue drops the sample.
     pub fn on_tick(&self, out: &TickOutput, schema: &Schema) {
         let Ok(mut active) = self.active.try_lock() else {
             return;
@@ -682,13 +767,22 @@ impl PerformanceRunner {
             .as_ref()
             .is_none_or(|(rev, _)| *rev != schema.revision)
         {
-            a.sensors = Some((schema.revision, resolve_cpu_sensors(schema, a.cores)));
+            let ids = match &a.gpu {
+                Some(id) => SensorIds::Gpu(resolve_gpu_sensors(schema, id)),
+                None => SensorIds::Cpu(resolve_cpu_sensors(schema, a.cores)),
+            };
+            a.sensors = Some((schema.revision, ids));
         }
         let Some((_, ids)) = &a.sensors else { return };
-        let sample = read_sample(ids, &out.snapshot, &out.quality);
-        let _ = a
-            .samples
-            .try_send((sample, (self.deps.service_available)()));
+        let (sample, service) = match ids {
+            SensorIds::Cpu(ids) => (
+                read_sample(ids, &out.snapshot, &out.quality),
+                (self.deps.service_available)(),
+            ),
+            // The GPU readings never need the service (DG12).
+            SensorIds::Gpu(ids) => (read_gpu_sample(ids, &out.snapshot, &out.quality), true),
+        };
+        let _ = a.samples.try_send((sample, service));
     }
 
     /// Stops the test or benchmark in progress and waits for its thread
@@ -735,6 +829,8 @@ struct Driver<'a> {
     host: Box<dyn LoadLink>,
     killed: bool,
     done: bool,
+    /// When the PCIe replay counter was last read (mono ms); GPU tests only.
+    pcie_at: Option<u64>,
 }
 
 impl Worker {
@@ -810,6 +906,7 @@ impl Worker {
             host,
             killed: false,
             done: false,
+            pcie_at: None,
         };
         if let Err(err) = &whea_start {
             tracing::warn!(%err, "WHEA log unreadable");
@@ -899,6 +996,23 @@ impl Driver<'_> {
         }
     }
 
+    /// Reads the GPU's PCIe replay counter at the start and every 5 s (DG14), on this
+    /// thread: the sampler's tick never waits for NVML.
+    fn poll_pcie(&mut self) {
+        let Some(id) = self.ctl.session().gpu_device_id.clone() else {
+            return;
+        };
+        let now = self.worker.clock();
+        if self.done || !pcie_due(self.pcie_at, now.mono_ms) {
+            return;
+        }
+        self.pcie_at = Some(now.mono_ms);
+        if let Some(count) = self.worker.deps.machine.pcie_replay(&id) {
+            let a = self.ctl.on_pcie_replay(count, now);
+            self.exec(a);
+        }
+    }
+
     /// The 250 ms loop, until the controller's verdict; returns the final status.
     fn drive(&mut self, rx: &Receiver<HostEvent>) -> RunStatus {
         let mut exited: Option<(Option<i32>, Instant)> = None;
@@ -946,6 +1060,7 @@ impl Driver<'_> {
                 let a = self.ctl.on_sample(&sample, service, self.worker.clock());
                 self.exec(a);
             }
+            self.poll_pcie();
             if self.worker.control.stop.swap(false, Ordering::AcqRel) {
                 let a = self.ctl.on_user_stop(self.worker.clock());
                 self.exec(a);
@@ -995,6 +1110,7 @@ pub(crate) mod tests {
         assert_eq!(wire(BuildError::TooLong), "build:too_long");
         assert_eq!(wire(BuildError::UnknownCore(3)), "build:unknown_core");
         assert_eq!(wire(BuildError::RamBudget), "build:ram_budget");
+        assert_eq!(wire(BuildError::NoGpu), "build:no_gpu");
         assert_eq!(StartError::Busy.wire(), "busy");
         assert_eq!(StartError::System("no pipe".into()).wire(), "no pipe");
     }
@@ -1038,6 +1154,11 @@ pub(crate) mod tests {
         pub(crate) busy: Option<f64>,
         /// The first poll gives `None`, like the real PDH counter.
         pub(crate) busy_primes: bool,
+        pub(crate) gpus: Vec<oma_win::gpu::StressAdapter>,
+        /// The PCIe replay counts the polls give, in order; the last one repeats.
+        pub(crate) pcie: Arc<Mutex<Vec<u32>>>,
+        /// The device ids the PCIe replay counter was read for.
+        pub(crate) pcie_polls: Arc<Mutex<Vec<String>>>,
     }
 
     impl Machine for FakeMachine {
@@ -1071,6 +1192,18 @@ pub(crate) mod tests {
                     busy
                 }
             })
+        }
+        fn gpus(&self) -> Vec<oma_win::gpu::StressAdapter> {
+            self.gpus.clone()
+        }
+        fn pcie_replay(&self, device_id: &str) -> Option<u32> {
+            self.pcie_polls.lock().unwrap().push(device_id.to_owned());
+            let mut values = self.pcie.lock().unwrap();
+            match values.len() {
+                0 => None,
+                1 => Some(values[0]),
+                _ => Some(values.remove(0)),
+            }
         }
     }
 
@@ -1273,6 +1406,7 @@ pub(crate) mod tests {
             preset: Preset::Quick,
             custom: None,
             retry_core: None,
+            gpu: None,
         }
     }
 
@@ -1287,6 +1421,7 @@ pub(crate) mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate: None,
+            load_percent: None,
         })
     }
 
@@ -1402,6 +1537,7 @@ pub(crate) mod tests {
             expected: 1,
             actual: 2,
             seed: 1,
+            load_percent: None,
         });
         let rig = rig_with(
             "core2",
@@ -1620,6 +1756,12 @@ pub(crate) mod tests {
             fn busy_probe(&self, logical: u32) -> Box<dyn FnMut() -> Option<f64>> {
                 self.0.busy_probe(logical)
             }
+            fn gpus(&self) -> Vec<oma_win::gpu::StressAdapter> {
+                self.0.gpus()
+            }
+            fn pcie_replay(&self, device_id: &str) -> Option<u32> {
+                self.0.pcie_replay(device_id)
+            }
         }
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         let dir = TempDir::new("baseline");
@@ -1664,6 +1806,7 @@ pub(crate) mod tests {
             seed: 1,
             ram_bytes: 0,
             phases: vec![],
+            gpu: None,
         };
         let failure = plan_message(plan).unwrap_err();
         assert_eq!(failure.i18n_key(), "performance.start.invalid_plan");
@@ -1730,6 +1873,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn verdict_text_localizes_the_stability() {
+        let detail = OutcomeDetail {
+            verdict: "low_stability".into(),
+            params: [("stability".to_string(), "95.3".to_string())].into(),
+            phase: None,
+            kernel: None,
+            core: None,
+            temp_c: None,
+            clock_mhz: None,
+            at_ms: None,
+        };
+        assert!(verdict_text(Lang::It, &detail).contains("95,3"));
+        assert!(verdict_text(Lang::En, &detail).contains("95.3"));
+    }
+
+    #[test]
     fn stop_during_the_handshake_never_sends_the_plan() {
         let script = Script {
             on_stop: vec![finished(FinishReason::Stopped, 0)],
@@ -1748,5 +1907,257 @@ pub(crate) mod tests {
             only_session(&rig.runner).outcome,
             Some(Outcome::StoppedUser)
         );
+    }
+
+    const GPU_ID: &str = "gpu/pci-10de-2704";
+
+    fn gpu_machine() -> FakeMachine {
+        FakeMachine {
+            gpus: vec![
+                oma_win::gpu::StressAdapter {
+                    luid: 0x77,
+                    device_id: "gpu/0".into(),
+                    name: "Test iGPU".into(),
+                    vendor_id: 0x1002,
+                    integrated: true,
+                    dedicated_bytes: 512 << 20,
+                },
+                oma_win::gpu::StressAdapter {
+                    luid: 0xABCD,
+                    device_id: GPU_ID.into(),
+                    name: "Test RTX".into(),
+                    vendor_id: 0x10de,
+                    integrated: false,
+                    dedicated_bytes: 16 << 30,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn gpu_request(device: Option<&str>) -> StartRequest {
+        StartRequest {
+            component: Component::Gpu,
+            gpu: device.map(str::to_owned),
+            ..request()
+        }
+    }
+
+    fn gpu_schema() -> Schema {
+        use oma_core::model::{Label, Sensor, SensorKind, Source, Unit};
+        let sensor = |device: &str, kind, name: &str, unit| {
+            Sensor::new(device, kind, name, unit, Label::new(name), Source::Nvml)
+        };
+        Schema {
+            revision: 1,
+            devices: vec![],
+            sensors: vec![
+                sensor(GPU_ID, SensorKind::Temperature, "core", Unit::Celsius),
+                sensor(GPU_ID, SensorKind::Power, "board", Unit::Watt),
+                sensor(GPU_ID, SensorKind::Clock, "core", Unit::Megahertz),
+                sensor(GPU_ID, SensorKind::Flag, "throttle-power", Unit::Boolean),
+                // A CPU temperature the GPU test must not read.
+                sensor("cpu/0", SensorKind::Temperature, "tdie", Unit::Celsius),
+            ],
+        }
+    }
+
+    fn gpu_tick() -> TickOutput {
+        use oma_core::provider::Quality;
+        TickOutput {
+            snapshot: oma_core::model::Snapshot {
+                revision: 1,
+                seq: 0,
+                timestamp_ms: 0,
+                values: vec![Some(71.0), Some(250.0), Some(2600.0), Some(0.0), Some(40.0)],
+            },
+            schema: None,
+            quality: vec![Quality::Fresh; 5],
+            health: None,
+            entries: vec![],
+            monotonic_ms: 0,
+        }
+    }
+
+    fn running_script() -> Script {
+        Script {
+            on_run: vec![progress(0)],
+            on_stop: vec![finished(FinishReason::Stopped, 0)],
+            exit_after_stop: true,
+            ..Default::default()
+        }
+    }
+
+    /// Ticks until a GPU sample reaches the status.
+    fn feed_gpu_sample(runner: &PerformanceRunner) {
+        let until = Instant::now() + Duration::from_secs(3);
+        while runner.status().temp_c.is_none() {
+            assert!(Instant::now() < until, "no GPU sample arrived");
+            runner.on_tick(&gpu_tick(), &gpu_schema());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn system_lists_gpus() {
+        let rig = rig_on("sysgpu", scripted(Script::default()), gpu_machine());
+        let gpus = rig.runner.system().gpus;
+        assert_eq!(
+            gpus,
+            [
+                GpuChoice {
+                    device_id: "gpu/0".into(),
+                    name: "Test iGPU".into(),
+                    integrated: true,
+                    dedicated_bytes: 512 << 20,
+                },
+                GpuChoice {
+                    device_id: GPU_ID.into(),
+                    name: "Test RTX".into(),
+                    integrated: false,
+                    dedicated_bytes: 16 << 30,
+                },
+            ]
+        );
+        let json = serde_json::to_value(&gpus[1]).unwrap();
+        assert_eq!(json["deviceId"], GPU_ID);
+        assert_eq!(json["dedicatedBytes"], 16u64 << 30);
+    }
+
+    #[test]
+    fn gpu_request_resolves_luid_from_device_id() {
+        let rig = rig_on("gpuluid", scripted(Script::default()), gpu_machine());
+        let plan = rig.runner.preview(&gpu_request(Some(GPU_ID))).unwrap();
+        let target = plan.gpu.unwrap();
+        assert_eq!((target.luid, target.integrated), (0xABCD, false));
+        let plan = rig.runner.preview(&gpu_request(Some("gpu/0"))).unwrap();
+        assert_eq!(plan.gpu.unwrap().luid, 0x77);
+    }
+
+    #[test]
+    fn unknown_gpu_device_is_no_gpu() {
+        let rig = rig_on("nogpu", scripted(Script::default()), gpu_machine());
+        for request in [gpu_request(Some("gpu/pci-1002-0000")), gpu_request(None)] {
+            let err = rig.runner.preview(&request).unwrap_err();
+            assert_eq!(err.wire(), "build:no_gpu");
+            let err = rig.runner.start(request).unwrap_err();
+            assert_eq!(err.wire(), "build:no_gpu");
+        }
+        assert!(!rig.runner.is_running());
+    }
+
+    #[test]
+    fn gpu_start_uses_the_gpu_threshold() {
+        let rig = rig_on("gputhr", scripted(running_script()), gpu_machine());
+        rig.runner
+            .deps
+            .settings
+            .update_with(|s| s.performance.gpu_stop_c = 83);
+        rig.runner.start(gpu_request(Some(GPU_ID))).unwrap();
+        assert_eq!(rig.runner.status().stop_c, Some(83.0));
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn gpu_samples_come_from_gpu_sensors() {
+        let rig = rig_on("gpusample", scripted(running_script()), gpu_machine());
+        rig.runner.start(gpu_request(Some(GPU_ID))).unwrap();
+        wait_running(&rig.runner);
+        feed_gpu_sample(&rig.runner);
+        let st = rig.runner.status();
+        assert_eq!(st.temp_c, Some(71.0), "the GPU core, not the CPU");
+        assert_eq!(st.power_w, Some(250.0));
+        assert_eq!(st.clock_mhz, Some(2600.0));
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn gpu_test_never_warns_no_service() {
+        // The rig's service is never connected.
+        let rig = rig_on("gpunoservice", scripted(running_script()), gpu_machine());
+        rig.runner.start(gpu_request(Some(GPU_ID))).unwrap();
+        wait_running(&rig.runner);
+        feed_gpu_sample(&rig.runner);
+        let warnings = rig.runner.status().warnings;
+        assert!(!warnings.iter().any(|w| w == "noService"), "{warnings:?}");
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn pcie_replay_is_polled_every_five_seconds() {
+        assert!(pcie_due(None, 0));
+        assert!(!pcie_due(Some(0), 4_999));
+        assert!(pcie_due(Some(0), 5_000));
+        assert!(!pcie_due(Some(5_000), 9_999));
+        // About 6 s of test: a poll at the start and one at 5 s, the second higher.
+        let mut on_run: Vec<LoadMessage> = (0..120).map(|_| progress(0)).collect();
+        on_run.push(finished(FinishReason::Completed, 0));
+        let machine = gpu_machine();
+        *machine.pcie.lock().unwrap() = vec![10, 12];
+        let polls = Arc::clone(&machine.pcie_polls);
+        let rig = rig_on(
+            "pcie",
+            scripted(Script {
+                on_run,
+                exit_after_run: true,
+                spread: Some(Duration::from_millis(50)),
+                ..Default::default()
+            }),
+            machine,
+        );
+        rig.runner.start(gpu_request(Some(GPU_ID))).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while rig.runner.is_running() {
+            assert!(Instant::now() < until, "the runner did not finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(*polls.lock().unwrap(), [GPU_ID, GPU_ID]);
+        let s = only_session(&rig.runner);
+        assert!(
+            s.events.iter().any(|e| e.code == "pcie_replay"),
+            "{:?}",
+            s.events
+        );
+    }
+
+    #[test]
+    fn cpu_tests_never_read_the_pcie_counter() {
+        let machine = gpu_machine();
+        let polls = Arc::clone(&machine.pcie_polls);
+        let rig = rig_on(
+            "cpunopcie",
+            scripted(Script {
+                on_run: vec![progress(0), finished(FinishReason::Completed, 0)],
+                exit_after_run: true,
+                ..Default::default()
+            }),
+            machine,
+        );
+        rig.runner.start(request()).unwrap();
+        wait_idle(&rig.runner);
+        assert!(polls.lock().unwrap().is_empty());
+        assert_eq!(only_session(&rig.runner).gpu_device_id, None);
+    }
+
+    #[test]
+    fn gpu_session_records_the_device() {
+        let rig = rig_on(
+            "gpudevice",
+            scripted(Script {
+                on_run: vec![progress(0), finished(FinishReason::Completed, 0)],
+                exit_after_run: true,
+                ..Default::default()
+            }),
+            gpu_machine(),
+        );
+        rig.runner.start(gpu_request(Some(GPU_ID))).unwrap();
+        wait_idle(&rig.runner);
+        let s = only_session(&rig.runner);
+        assert_eq!(s.component, Component::Gpu);
+        assert_eq!(s.device, "Test RTX");
+        assert_eq!(s.gpu_device_id.as_deref(), Some(GPU_ID));
     }
 }

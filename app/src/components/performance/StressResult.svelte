@@ -2,7 +2,7 @@
   import type { Backend } from '../../lib/backend';
   import { DASH, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { around, errorText, verdictTitle } from '../../lib/performance/format';
+  import { around, errorText, hresultText, percentText, pieces, verdictTitle } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { ErrorRecord, Isa, KernelId, StartRequest, StressSession } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
@@ -15,7 +15,7 @@
   // digests (`expected`, `actual`, `seed`) lose precision in JS: they stay in the JSON export.
   let { backend, id, onOpen }: { backend: Backend; id: string; onOpen: (page: PerformancePage) => void } = $props();
 
-  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start'];
+  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start', 'device_lost', 'low_stability'];
 
   let session = $state.raw<StressSession | null>(null);
   let loading = $state<'loading' | 'ready' | 'missing' | 'error'>('loading');
@@ -51,7 +51,7 @@
   const locale = $derived(i18n.locale);
   const detail = $derived(session?.outcomeDetail ?? null);
   const verdict = $derived(detail?.verdict ?? session?.outcome ?? null);
-  const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t));
+  const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t, locale));
   const tone = $derived(verdict === 'passed' ? 'ok' : verdict && CRIT.includes(verdict) ? 'crit' : 'warn');
   /**
    * The error the verdict speaks of, only when the verdict is about errors: the first one of the
@@ -60,7 +60,9 @@
   const firstError = $derived<ErrorRecord | null>(
     verdict === 'errors' || verdict === 'errors_core'
       ? ((detail?.core != null ? session?.cores.find((c) => c.core === detail.core)?.firstError : null) ?? session?.errors[0] ?? null)
-      : null,
+      : verdict === 'device_lost'
+        ? (session?.errors.find((e) => e.kind === 'device_lost') ?? null)
+        : null,
   );
   /** Where and when: at that error, else where the test ended (the journal's place after a crash). */
   const facts = $derived.by(() => {
@@ -68,7 +70,8 @@
     const e = firstError;
     const phase = e?.phase ?? detail?.phase ?? null;
     if (phase === null) return null;
-    const isa: Isa | null = e?.isa ?? session.plan.phases[phase]?.isa ?? null;
+    // A GPU has no instruction set to show.
+    const isa: Isa | null = session.component === 'gpu' ? null : (e?.isa ?? session.plan.phases[phase]?.isa ?? null);
     const kernel: KernelId | null = e?.kernel ?? detail?.kernel ?? null;
     return {
       phase,
@@ -79,12 +82,18 @@
       clockMhz: e ? e.clockMhz : (detail?.clockMhz ?? null),
       tempC: e ? e.tempC : (detail?.tempC ?? null),
       iteration: e?.iteration ?? null,
+      loadPercent: e?.load_percent ?? null,
     };
   });
-  const kindText = $derived(firstError ? around(t(`performance.result.kind.${firstError.kind}`), t('glossary.reference.name')) : null);
+  const kindText = $derived(
+    firstError ? pieces(t(`performance.result.kind.${firstError.kind}`), firstError.kind === 'device_lost' ? [{ term: 'tdr', word: 'TDR' }] : [{ term: 'reference' }], t) : null,
+  );
+  /** The driver's code of a lost device; an exit without an error record gives none. */
+  const deviceLostCode = $derived(firstError?.kind === 'device_lost' ? t('performance.result.deviceLostCode', { code: hresultText(firstError.actual) }) : null);
+  const stabilityText = $derived(session?.stability == null ? null : t('performance.result.stability', { stability: percentText(session.stability, locale) }));
   const advice = $derived(verdict === 'errors_core' ? around(t('performance.advice.core'), t('glossary.curveOptimizer.name')) : null);
   /** «Retry only core N»: only when every error is on that one core. */
-  const retry = $derived(verdict === 'errors_core' && firstError?.core != null ? { core: firstError.core, kernel: firstError.kernel } : null);
+  const retry = $derived(verdict === 'errors_core' && session?.component !== 'gpu' && firstError?.core != null ? { core: firstError.core, kernel: firstError.kernel } : null);
 
   // The core grid only for a plan that tested cores one at a time, like the live page: in an all-core
   // phase every core works at once and none would read «tested».
@@ -125,7 +134,8 @@
   const started = $derived(session ? new Date(session.startedAt).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' }) : '');
 
   const maxAvg = (max: number | null, avg: number | null, format: (v: number | null, l: string) => string) =>
-    t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
+    // Nothing read (an iGPU without a power sensor): one dash.
+    max === null && avg === null ? format(null, locale) : t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
 
   async function start(request: StartRequest) {
     starting = true;
@@ -173,6 +183,9 @@
           {#if facts.core !== null}
             <div><dt><Term term="coreNumber">{t('performance.result.fact.core')}</Term></dt><dd>{facts.core}</dd></div>
           {/if}
+          {#if facts.loadPercent !== null}
+            <div><dt><Term term="loadLevel" /></dt><dd>{facts.loadPercent} %</dd></div>
+          {/if}
           {#if facts.atMs !== null}
             <div><dt>{t('performance.result.fact.time')}</dt><dd>{formatTapeCounter(facts.atMs)}</dd></div>
           {/if}
@@ -188,7 +201,13 @@
         </dl>
       {/if}
       {#if kindText}
-        <p>{kindText[0]}{#if kindText[1]}<Term term="reference">{kindText[1]}</Term>{/if}{kindText[2]}</p>
+        <p>{#each kindText as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</p>
+      {/if}
+      {#if deviceLostCode}
+        <p><Term term="deviceLost">{deviceLostCode}</Term></p>
+      {/if}
+      {#if stabilityText}
+        <p><Term term="stability">{stabilityText}</Term></p>
       {/if}
       {#if advice}
         <p>{advice[0]}{#if advice[1]}<Term term="curveOptimizer">{advice[1]}</Term>{/if}{advice[2]}</p>
@@ -220,7 +239,7 @@
           <div><dt><Term term="phase">{t('performance.result.phases')}</Term></dt><dd>{phaseCounts}</dd></div>
           <div><dt><Term term="check" /></dt><dd>{counter.format(checks)}</dd></div>
           <div><dt>{t('performance.result.fact.temp')}</dt><dd>{maxAvg(session.stats.tempMaxC, session.stats.tempAvgC, formatTemperature)}</dd></div>
-          <div><dt><Term term="packagePower" /></dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
+          <div><dt>{#if session.component === 'gpu'}{t('performance.run.power')}{:else}<Term term="packagePower" />{/if}</dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
           <div><dt><Term term="clock" /></dt><dd>{maxAvg(session.stats.clockMaxMhz, session.stats.clockAvgMhz, formatClock)}</dd></div>
           {#if whea}
             <div>
@@ -280,7 +299,7 @@
                 <tr>
                   <td>{formatTapeCounter(e.atMs)}</td>
                   <td>{e.phase + 1}</td>
-                  <td><Term term={`mode.${e.kernel}`} /> · <Term term={`isa.${e.isa}`} /></td>
+                  <td><Term term={`mode.${e.kernel}`} />{#if session.component !== 'gpu'} · <Term term={`isa.${e.isa}`} />{/if}</td>
                   <td>{e.core ?? DASH}</td>
                   <td>{t(`performance.result.kindShort.${e.kind}`)}</td>
                   <td>{formatClock(e.clockMhz, locale)}</td>

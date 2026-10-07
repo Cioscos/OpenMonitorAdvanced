@@ -290,9 +290,44 @@ impl StaticReads {
     }
 }
 
-/// Bus id string accepted by `nvmlDeviceGetHandleByPciBusId_v2`, e.g. "0000:01:00.0".
+/// Bus id string accepted by `nvmlDeviceGetHandleByPciBusId_v2`, e.g. "00000000:01:00.0".
 fn bus_id(pci: PciAddress) -> CString {
-    CString::new(pci.to_string()).expect("a PCI address has no NUL byte")
+    CString::new(format!(
+        "00000000:{:02x}:{:02x}.{:x}",
+        pci.bus, pci.device, pci.function
+    ))
+    .expect("a PCI address has no NUL byte")
+}
+
+/// The PCI address in a provider device id ("gpu/pci-0000:01:00.0").
+fn pci_from_device_id(device_id: &str) -> Option<PciAddress> {
+    let rest = device_id.strip_prefix("gpu/pci-0000:")?;
+    let (bus, rest) = rest.split_once(':')?;
+    let (device, function) = rest.split_once('.')?;
+    let hex = |s: &str| u32::from_str_radix(s, 16).ok();
+    Some(PciAddress {
+        bus: hex(bus)?,
+        device: hex(device)?,
+        function: hex(function)?,
+    })
+}
+
+/// The one NVML instance for `pcie_replay_count`, loaded on first use and never unloaded (D1).
+static REPLAY_NVML: std::sync::OnceLock<Option<std::sync::Mutex<NvmlLayer>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn pcie_replay_count(device_id: &str) -> Option<u32> {
+    let pci = pci_from_device_id(device_id)?;
+    let layer = REPLAY_NVML
+        .get_or_init(|| NvmlLayer::load().map(std::sync::Mutex::new))
+        .as_ref()?
+        .lock()
+        .ok()?;
+    let device = layer.api.handle_for(pci)?;
+    match call_u32(layer.api.pcie_replay, device) {
+        (SUCCESS, value) => Some(value),
+        _ => None,
+    }
 }
 
 fn pci_matches(info: &PciInfo, pci: PciAddress) -> bool {
@@ -325,6 +360,7 @@ struct Api {
     power_constraints: Option<U32PairFn>,
     power_default_limit: Option<U32Fn>,
     temperature_threshold: Option<U32ArgFn>,
+    pcie_replay: Option<U32Fn>,
 }
 
 fn call_u32(f: Option<U32Fn>, device: DeviceHandle) -> (Ret, u32) {
@@ -396,6 +432,7 @@ impl Api {
                 power_constraints: library.symbol(c"nvmlDeviceGetPowerManagementLimitConstraints"),
                 power_default_limit: library.symbol(c"nvmlDeviceGetPowerManagementDefaultLimit"),
                 temperature_threshold: library.symbol(c"nvmlDeviceGetTemperatureThreshold"),
+                pcie_replay: library.symbol(c"nvmlDeviceGetPcieReplayCounter"),
             })
         }
     }
@@ -854,7 +891,9 @@ mod tests {
             device: 0,
             function: 0,
         };
-        assert_eq!(bus_id(pci).to_str(), Ok("0000:01:00.0"));
+        assert_eq!(bus_id(pci).to_str(), Ok("00000000:01:00.0"));
+        assert_eq!(pci_from_device_id("gpu/pci-0000:01:00.0"), Some(pci));
+        assert_eq!(pci_from_device_id("gpu/ven-10de-dev-2704-0"), None);
         let info = PciInfo {
             bus: 1,
             device: 0,

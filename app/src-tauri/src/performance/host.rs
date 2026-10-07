@@ -442,6 +442,7 @@ mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate: Some(1.0),
+            load_percent: None,
         };
         let w = Cell::new(None);
         let ok = imp::forward(PipeEvent::Message(LoadMessage::Progress(p.clone())), &w);
@@ -491,6 +492,7 @@ mod tests {
                 iterations: None,
                 pause_before_ms: 0,
             }],
+            gpu: None,
         };
         host.send(&LoadMessage::Run(RunRequest { plan })).unwrap();
         loop {

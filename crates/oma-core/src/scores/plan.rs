@@ -64,6 +64,7 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
         seed,
         ram_bytes: 0,
         phases,
+        gpu: None,
     };
     (plan, steps)
 }

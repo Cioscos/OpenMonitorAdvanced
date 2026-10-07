@@ -1,6 +1,7 @@
 //! The pipe link to the app: connect, send our `Hello` and the full topology,
-//! then serve the app: `Run` starts the phase engine on its own thread, `Stop`
-//! raises its stop flag, and a closed pipe ends the process at once.
+//! then serve the app: `Run` starts the phase engine (the GPU one for a plan with a
+//! `gpu`) on its own thread, `Stop` raises its stop flag, and a closed pipe ends the
+//! process at once.
 //!
 //! The link ends the process: [`run`] returns the exit code.
 
@@ -17,6 +18,8 @@ pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_CONNECT: i32 = 2;
 /// The app speaks another load protocol version.
 pub const EXIT_INCOMPATIBLE: i32 = 3;
+/// The GPU of a GPU plan was removed or reset (plan DG2).
+pub const EXIT_DEVICE_LOST: i32 = 4;
 
 /// What to do with one received message.
 #[derive(Debug, PartialEq)]
@@ -189,8 +192,15 @@ fn start_engine(
                     }
                 }
             };
+            let mut exit_code = EXIT_OK;
             let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::engine::run(&plan, &topology, &out, &stop, inject)
+                if plan.gpu.is_some() {
+                    let end = crate::gpu::engine::run_gpu(&plan, &out, &stop, inject);
+                    exit_code = end.exit_code;
+                    end.finished
+                } else {
+                    crate::engine::run(&plan, &topology, &out, &stop, inject)
+                }
             }))
             .unwrap_or_else(|_| {
                 tracing::error!("the engine panicked");
@@ -202,6 +212,11 @@ fn start_engine(
             });
             tracing::info!(reason = ?finished.reason, "plan finished");
             out(LoadMessage::Finished(finished));
+            if exit_code != EXIT_OK {
+                // A lost GPU device cannot be used again: the process ends (DG2).
+                crate::log::flush();
+                std::process::exit(exit_code);
+            }
         })
 }
 
@@ -235,6 +250,7 @@ mod tests {
                 seed: 1,
                 ram_bytes: 0,
                 phases: vec![],
+                gpu: None,
             },
         });
         assert_eq!(route(empty), Route::Exit(EXIT_USAGE));

@@ -88,6 +88,15 @@ test('manual_threshold_starts_at_95_and_has_a_label', async () => {
   expect(await screen.findByLabelText(t('settings.performance.cpuStop'))).toBeTruthy();
 });
 
+test('gpu_stop_commit_sends_patch', async () => {
+  const { patches } = await setup();
+  const input = screen.getByLabelText(t('settings.performance.gpuStopC'));
+  expect((input as HTMLInputElement).value).toBe('90');
+  await fireEvent.input(input, { target: { value: '75' } });
+  await fireEvent.blur(input);
+  await waitFor(() => expect(patches).toEqual([{ performance: { gpuStopC: 75 } }]));
+});
+
 test('escape_cancels_the_thermal_confirmation', async () => {
   const { patches } = await setup();
   await fireEvent.click(screen.getByRole('switch', { name: t('settings.performance.thermalStop') }));

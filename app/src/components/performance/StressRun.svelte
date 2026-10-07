@@ -1,9 +1,9 @@
 <script lang="ts">
   import type { Backend } from '../../lib/backend';
-  import { formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
+  import { formatBytes, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import { around, cpuChartSensors, marked } from '../../lib/performance/format';
+  import { around, cpuChartSensors, gpuChartSensors, marked, modeTerm, pieces } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
   import type { PhaseInfo, RunWarning } from '../../lib/types';
@@ -21,7 +21,14 @@
 
   /** The chart's window (spec §3.5). */
   const CHART_SECONDS = 600;
-  const WARN_TERMS: Partial<Record<RunWarning, string>> = { noService: 'thermalStop', ramReduced: 'ramShare', ramInsufficient: 'ramShare' };
+  // The term each warning carries, on its name or on the given word.
+  const WARN_TERMS: Partial<Record<RunWarning, { term: string; word?: string }>> = {
+    noService: { term: 'thermalStop' },
+    ramReduced: { term: 'ramShare' },
+    ramInsufficient: { term: 'ramShare' },
+    pcieReplay: { term: 'pcieReplay', word: 'PCIe' },
+    vramReduced: { term: 'vram' },
+  };
   const PLACEMENT_TERM: Record<PhaseInfo['placement'], string | null> = { all_logical: 'mode.allCore', core_cycle: 'mode.coreCycle', one_per_core: null };
 
   const status = $derived(performanceStore.status);
@@ -44,11 +51,19 @@
     if (status?.state === 'stopping') return { tone: 'warn', text: t('performance.run.pill.stopping') };
     return status && status.errors > 0 ? { tone: 'crit', text: t('performance.run.pill.errors', { n: status.errors }) } : { tone: 'ok', text: t('performance.run.pill.ok') };
   });
-  const chartSensors = $derived(cpuChartSensors(store.schema));
+  const gpu = $derived(status?.component === 'gpu');
+  const chartSensors = $derived(gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : cpuChartSensors(store.schema));
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
   const clockLabel = $derived(around(t('performance.run.clock'), t('glossary.clock.name')));
+  const gpuClockLabel = $derived(around(t('performance.run.clock.gpu'), t('glossary.clock.name')));
   const onePerCore = $derived(marked(t('performance.wizard.onePerCore')));
+  const loadLevel = $derived(status?.loadPercent == null ? null : t('performance.result.loadLevel', { level: status.loadPercent }));
+  /** A warning's text; `vramReduced` names the size the check covers, from the diary's notice. */
+  const warningText = (warning: RunWarning) => {
+    const size = warning === 'vramReduced' ? status?.events.filter((e) => e.code === 'vram_reduced').at(-1)?.params.value : undefined;
+    return t(`performance.warn.${warning}`, { size: size === undefined ? '' : formatBytes(Number(size), locale) });
+  };
 
   // The test is over: its result is the page to see.
   $effect(() => {
@@ -65,7 +80,7 @@
 {:else if status}
   <div class="run">
     <header>
-      <h3>{t(`performance.objective.${status.objective}`)} · {t(status.component === 'cpu' ? 'performance.wizard.cpu' : 'performance.wizard.ram')}</h3>
+      <h3>{t(`performance.objective.${status.objective}`)} · {t(`performance.wizard.${status.component}`)}</h3>
       <span class="pill {pill.tone}">{pill.text}</span>
       <span class="time"><b>{formatTapeCounter(status.elapsedMs)}</b> / {formatTapeCounter(status.totalMs)}</span>
       <button type="button" class="stop" disabled={!active} onclick={stop}>{t('performance.run.stop')}</button>
@@ -83,8 +98,10 @@
     {#if phase}
       <p class="current">
         <Term term="phase" /> {t('performance.run.phaseOf', { n: status.phaseIndex + 1, total: status.phases.length })}:
-        <Term term={`mode.${phase.kernel}`} /> · <Term term={`isa.${phase.isa}`} /> · <Term term={`mode.${phase.mode}`} /> ·
-        {#if PLACEMENT_TERM[phase.placement]}<Term term={PLACEMENT_TERM[phase.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}
+        <Term term={`mode.${phase.kernel}`} />{#if !gpu} · <Term term={`isa.${phase.isa}`} />{/if} · <Term term={modeTerm(phase.mode)} />
+        {#if gpu}{#if loadLevel}{' · '}<Term term="loadLevel">{loadLevel}</Term>{/if}{:else}
+          {' · '}{#if PLACEMENT_TERM[phase.placement]}<Term term={PLACEMENT_TERM[phase.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}
+        {/if}
       </p>
     {/if}
 
@@ -94,18 +111,18 @@
         <div class="value"><AnimatedNumber value={status.tempC} format={(v) => formatTemperature(v, locale)} /></div>
         <div class="sub">
           {t('performance.run.max', { value: formatTemperature(status.tempMaxC, locale) })} · <Term term="thermalStop" />
-          {status.stopC === null ? t('performance.run.stopOff') : t('performance.run.stopAt', { temp: formatTemperature(status.stopC, locale) })}{#if system?.tjmaxC != null}
+          {status.stopC === null ? t('performance.run.stopOff') : t('performance.run.stopAt', { temp: formatTemperature(status.stopC, locale) })}{#if !gpu && system?.tjmaxC != null}
             {' · '}<Term term="tjmax" /> {formatTemperature(system.tjmaxC, locale)}{/if}
         </div>
       </div>
       <div class="tile">
-        <div class="label"><Term term="packagePower" /></div>
+        <div class="label">{#if gpu}{t('performance.run.power')}{:else}<Term term="packagePower" />{/if}</div>
         <div class="value"><AnimatedNumber value={status.powerW} format={(v) => formatPower(v, locale)} /></div>
       </div>
       <div class="tile">
-        <div class="label">{clockLabel[0]}{#if clockLabel[1]}<Term term="clock">{clockLabel[1]}</Term>{/if}{clockLabel[2]}</div>
+        <div class="label">{#if gpu}{gpuClockLabel[0]}{#if gpuClockLabel[1]}<Term term="clock">{gpuClockLabel[1]}</Term>{/if}{gpuClockLabel[2]}{:else}{clockLabel[0]}{#if clockLabel[1]}<Term term="clock">{clockLabel[1]}</Term>{/if}{clockLabel[2]}{/if}</div>
         <div class="value"><AnimatedNumber value={status.clockMhz} format={(v) => formatClock(v, locale)} /></div>
-        <div class="sub">{t('performance.run.clockSub')}</div>
+        {#if !gpu}<div class="sub">{t('performance.run.clockSub')}</div>{/if}
       </div>
       <div class="tile">
         <div class="label">{t('performance.run.errors')}</div>
@@ -124,15 +141,13 @@
     {#if status.warnings.length > 0}
       <div class="warnings">
         {#each status.warnings as warning (warning)}
-          {@const text = t(`performance.warn.${warning}`)}
-          {@const term = WARN_TERMS[warning]}
-          {@const parts = term ? around(text, t(`glossary.${term}.name`)) : [text, '', '']}
-          <p role="note" class="warn">{parts[0]}{#if parts[1] && term}<Term {term}>{parts[1]}</Term>{/if}{parts[2]}</p>
+          {@const found = WARN_TERMS[warning]}
+          <p role="note" class="warn">{#each pieces(warningText(warning), found ? [found] : [], t) as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</p>
         {/each}
       </div>
     {/if}
 
-    <div class="panels" class:two={phase?.placement === 'core_cycle'}>
+    <div class="panels" class:two={!gpu && phase?.placement === 'core_cycle'}>
       <section class="panel" aria-label={t('performance.run.chart')}>
         <p class="label">{t('performance.run.chart')}</p>
         {#if chartSensors.length > 0 && store.schema}
@@ -141,7 +156,7 @@
           <p class="muted">{t('performance.run.noChart')}</p>
         {/if}
       </section>
-      {#if phase?.placement === 'core_cycle'}
+      {#if !gpu && phase?.placement === 'core_cycle'}
         <section class="panel cores-panel">
           <p class="label"><Term term="mode.coreCycle" /> · <Term term="coreNumber" /></p>
           <CoreGrid cores={status.cores} current={status.currentCore} />

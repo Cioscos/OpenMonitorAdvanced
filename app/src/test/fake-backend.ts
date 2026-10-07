@@ -178,6 +178,9 @@ export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
     events: [],
     warnings: [],
     outcome: null,
+    loadPercent: null,
+    stability: null,
+    gpuDeviceId: null,
     ...over,
   };
 }
@@ -244,6 +247,7 @@ export function makeSystemInfo(over: Partial<SystemInfo> = {}): SystemInfo {
     tjmaxC: 89,
     stopC: 84,
     hypervisor: false,
+    gpus: [],
     ...over,
   };
 }

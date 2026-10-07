@@ -291,6 +291,7 @@ export interface PerformanceSettings {
   thermalStop: boolean;
   /** 60 to 110 °C, or null for Tjmax − 5 (95 without Tjmax). */
   cpuStopC: number | null;
+  gpuStopC: number;
   stopOnFirstError: boolean | null;
   /** 10 to 90. */
   ramSharePercent: number;
@@ -725,12 +726,12 @@ export interface BenchmarkEntry {
 // rest is camelCase. Values that are u64 in Rust (seeds, `expected`/`actual`) arrive as JSON
 // numbers and lose precision past 2^53: the UI only shows them.
 
-export type StressComponent = 'cpu' | 'ram';
+export type StressComponent = 'cpu' | 'ram' | 'gpu';
 export type Objective = 'normal' | 'overclock';
 export type Preset = 'quick' | 'standard' | 'long' | 'night';
 export type Isa = 'avx512' | 'avx2' | 'sse2';
-export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort';
-export type LoadMode = 'steady' | 'variable' | 'light';
+export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort' | 's1' | 's2' | 's4' | 's5' | 's6';
+export type LoadMode = 'steady' | 'variable' | 'light' | 'ramp' | 'alternate' | 'pause_resume';
 export type Placement = 'all_logical' | 'one_per_core' | 'core_cycle';
 export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto' | 'fixed';
 export type RamPattern = 'moving_inversions' | 'modulo20' | 'random' | 'address' | 'crc_copy';
@@ -745,9 +746,11 @@ export type Outcome =
   | 'stopped_user'
   | 'stopped_thermal'
   | 'suspended'
-  | 'failed_to_start';
+  | 'failed_to_start'
+  | 'device_lost'
+  | 'low_stability';
 export type RunState = 'idle' | 'starting' | 'running' | 'stopping' | 'finished';
-export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced' | 'ramInsufficient';
+export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced' | 'ramInsufficient' | 'pcieReplay' | 'vramReduced';
 
 /** One mode of «Personalizza»: `minutes` null keeps the profile's duration. */
 export interface ModeEdit {
@@ -773,6 +776,8 @@ export interface StartRequest {
   custom: Custom | null;
   /** «Retry only core N»: a plan with only the cycle on that core. */
   retryCore: { core: number; kernel: KernelId } | null;
+  /** The device id of the GPU to test (DG13), for the `gpu` component only. */
+  gpu?: string | null;
 }
 
 /** One phase of the plan (`oma-ipc::load::Phase`, snake_case). */
@@ -850,6 +855,12 @@ export interface RunStatus {
   events: SessionEvent[];
   warnings: RunWarning[];
   outcome: Outcome | null;
+  /** The GPU load level of `ramp` and `alternate` phases (DG10), else null. */
+  loadPercent: number | null;
+  /** GPU runs: the throughput stability so far, 0-1, or null before it is known (DG7). */
+  stability: number | null;
+  /** GPU runs: the schema device id of the GPU under test, else null. */
+  gpuDeviceId: string | null;
 }
 
 /** What the machine offers for a test (`performance_system`). */
@@ -866,6 +877,16 @@ export interface SystemInfo {
   /** The thermal stop threshold (DA5). */
   stopC: number;
   hypervisor: boolean;
+  /** The GPUs a test can target (DG13). */
+  gpus: GpuChoice[];
+}
+
+/** A GPU the wizard offers, chosen by its stable device id. */
+export interface GpuChoice {
+  deviceId: string;
+  name: string;
+  integrated: boolean;
+  dedicatedBytes: number;
 }
 
 /** A computation error (`ComputeError`, flattened) with when it happened. */
@@ -873,7 +894,7 @@ export interface ErrorRecord {
   phase: number;
   kernel: KernelId;
   isa: Isa;
-  kind: 'mismatch' | 'reference_disagreement' | 'reference_invalid' | 'hung';
+  kind: 'mismatch' | 'reference_disagreement' | 'reference_invalid' | 'hung' | 'device_lost';
   logical: number | null;
   core: number | null;
   iteration: number;
@@ -883,6 +904,8 @@ export interface ErrorRecord {
   atMs: number;
   tempC: number | null;
   clockMhz: number | null;
+  /** The GPU load level at the error (flattened from `ComputeError`, so snake_case), when it has one. */
+  load_percent?: number | null;
 }
 
 /** The verdict: a T3 key (`performance.outcome.<verdict>`) with its parameters, and where it happened. */
@@ -949,6 +972,10 @@ export interface StressSession {
   events: SessionEvent[];
   appVersion: string;
   loadVersion: string | null;
+  /** GPU runs: the throughput stability, 0-1 (DG7). */
+  stability?: number | null;
+  /** GPU runs: the schema device id of the GPU. */
+  gpuDeviceId?: string | null;
 }
 
 /** One entry of `performance_history`, newest first; `verdict` is a T3 key. Named apart from the benchmark `SessionSummary`. */

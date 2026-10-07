@@ -13,7 +13,7 @@ $script:SectionTitles = @{
     'Rust' = 'Rust crates'; 'JavaScript' = 'JavaScript packages'; '.NET' = '.NET packages'
     # Executables shipped unmodified next to the service (M7b: Intel PresentMon), with what they embed.
     'Programs' = 'Programs shipped with the service'
-    # Third-party source code adapted into our own crates (M8a1: OpenDCDiag in oma-load).
+    # Third-party source code adapted into our own crates (M8a1: OpenDCDiag, M8b1: memtest_vulkan, in oma-load).
     'Adapted' = 'Source code adapted into OpenMonitor Advanced'
     # Fonts bundled in the app for the CPU benchmark gauges (M8a2).
     'Fonts' = 'Fonts bundled in the app'

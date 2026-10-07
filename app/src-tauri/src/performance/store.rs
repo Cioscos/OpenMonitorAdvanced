@@ -474,6 +474,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         preset: Preset::Standard,
         custom: None,
         retry_core: None,
+        gpu: None,
     };
     Session {
         format: oma_core::load::FORMAT,
@@ -489,6 +490,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
             seed: 0,
             ram_bytes: 0,
             phases: vec![],
+            gpu: None,
         },
         outcome: None,
         outcome_detail: None,
@@ -503,6 +505,8 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         events: vec![],
         app_version: app_version.to_string(),
         load_version: None,
+        stability: None,
+        gpu_device_id: None,
     }
 }
 

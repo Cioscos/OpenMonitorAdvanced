@@ -131,3 +131,22 @@ test('repeat while a test runs says busy', async () => {
   await fireEvent.click(within(items()[1]).getByRole('button', { name: t('performance.history.repeat') }));
   expect((await screen.findByRole('alert')).textContent).toBe(t('performance.wizard.busy'));
 });
+
+test('history filters by GPU', async () => {
+  const backend = await connectSettings();
+  backend.performanceSystemInfo = makeSystemInfo();
+  backend.performanceSessions = [
+    summary({ id: 'g', component: 'gpu', outcome: 'low_stability', verdict: 'low_stability', params: { stability: '95.3' } }),
+    summary({ id: 'c' }),
+    summary({ id: 'l', component: 'gpu', outcome: 'device_lost', verdict: 'device_lost' }),
+  ];
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
+  await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(3));
+  await fireEvent.click(screen.getByRole('radio', { name: 'GPU' }));
+  const rows = items();
+  expect(rows).toHaveLength(2);
+  expect(rows[0].textContent).toContain(t('performance.outcome.low_stability', { stability: '95.3' }));
+  expect(rows[1].textContent).toContain(t('performance.outcome.device_lost'));
+  // Both read as problems.
+  expect(rows.every((row) => row.classList.contains('crit'))).toBe(true);
+});

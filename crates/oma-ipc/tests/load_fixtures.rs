@@ -13,6 +13,7 @@ use oma_ipc::{decode_payload_of, encode_frame_of};
 const NAMES: &[&str] = &[
     "hello",
     "run",
+    "run_gpu",
     "stop",
     "topology",
     "progress",
@@ -71,8 +72,42 @@ fn reference(name: &str) -> LoadMessage {
                         pause_before_ms: 0,
                     },
                 ],
+                gpu: None,
             },
         }),
+        "run_gpu" => {
+            let mut p = Phase {
+                kernel: KernelId::S5,
+                alt_kernel: Some(KernelId::S1),
+                isa: Isa::Sse2,
+                size: DataSize::Auto,
+                mode: LoadMode::Steady,
+                placement: Placement::AllLogical,
+                duration_s: 600,
+                per_core_s: None,
+                both_smt: false,
+                cores: None,
+                patterns: vec![],
+                stop_on_error: true,
+                iterations: None,
+                pause_before_ms: 0,
+            };
+            let first = p.clone();
+            p.kernel = KernelId::S1;
+            p.alt_kernel = None;
+            p.mode = LoadMode::Ramp;
+            LoadMessage::Run(RunRequest {
+                plan: Plan {
+                    seed: 0x1234_5678_9ABC_DEF0,
+                    ram_bytes: 0,
+                    phases: vec![first, p],
+                    gpu: Some(GpuTarget {
+                        luid: 0x17e99,
+                        integrated: false,
+                    }),
+                },
+            })
+        }
         "stop" => LoadMessage::Stop(StopRequest {}),
         "topology" => LoadMessage::Topology(Topology {
             logical: vec![
@@ -137,6 +172,7 @@ fn reference(name: &str) -> LoadMessage {
             ],
             memory_bytes: 1 << 30,
             rate: Some(2.5e9),
+            load_percent: Some(60),
         }),
         "error" => LoadMessage::Error(ComputeError {
             phase: 0,
@@ -149,6 +185,7 @@ fn reference(name: &str) -> LoadMessage {
             expected: 0xDEAD_BEEF,
             actual: 0xDEAD_BEEE,
             seed: 42,
+            load_percent: None,
         }),
         "notice" => LoadMessage::Notice(Notice {
             phase: 0,

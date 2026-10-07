@@ -578,6 +578,7 @@ mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate,
+            load_percent: None,
         })
     }
 
@@ -795,6 +796,7 @@ mod tests {
                 expected: 1,
                 actual: 2,
                 seed: 1,
+                load_percent: None,
             }),
             clock(2000),
         );
@@ -828,6 +830,7 @@ mod tests {
                 expected: 0,
                 actual: 0,
                 seed: 1,
+                load_percent: None,
             }),
             clock(1000),
         );

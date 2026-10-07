@@ -1,6 +1,6 @@
 import { formatBytes } from '../format';
 import type { Params, Translate } from '../i18n/index.svelte';
-import type { DataSize, KernelId, Phase, Schema, Sensor, SessionEvent } from '../types';
+import type { DataSize, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
 
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
@@ -20,9 +20,20 @@ export function sizeLabel(phase: Phase): string | null {
   return phase.size === (DEFAULT_SIZE[phase.kernel] ?? 'auto') ? null : SIZE_LABEL[phase.size];
 }
 
-/** «FFT piccole · core e cache · AVX2»: the kernel's name (T1), its size when not its own, and the set. */
+/** The GPU kernels (`s1`…`s6`), which have no instruction set. */
+export function isGpuKernel(kernel: KernelId): boolean {
+  return kernel.startsWith('s');
+}
+
+/** «FFT piccole · core e cache · AVX2»: the kernel's name (T1), its size when not its own, and the set (not for a GPU). */
 export function phaseLabel(phase: Phase, t: Translate): string {
-  return [t(`glossary.mode.${phase.kernel}.name`), sizeLabel(phase), t(`glossary.isa.${phase.isa}.name`)].filter(Boolean).join(' · ');
+  const isa = isGpuKernel(phase.kernel) ? null : t(`glossary.isa.${phase.isa}.name`);
+  return [t(`glossary.mode.${phase.kernel}.name`), sizeLabel(phase), isa].filter(Boolean).join(' · ');
+}
+
+/** The glossary term of a load mode: the wire's snake_case (`pause_resume`) is camelCase there (`mode.pauseResume`). */
+export function modeTerm(mode: LoadMode): string {
+  return `mode.${mode.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`;
 }
 
 /** A text whose `[term]` carries a tooltip, cut around it: `[before, term, after]` (no brackets: `[text, '', '']`). */
@@ -63,11 +74,19 @@ export function pieces(text: string, terms: { term: string; word?: string }[], t
 const EVENT_TERMS: Record<string, string[]> = {
   thermal_stop: ['thermalStop'],
   reference_invalid: ['phase', 'reference'],
+  reference_invalid_gpu: ['phase'],
   ram_reduced: ['phase', 'threads'],
   ram_insufficient: ['phase'],
   k9_needs_two_cores: ['phase', 'mode.k9'],
   whea: ['whea', 'apicId'],
   whea_unreadable: ['whea'],
+  vram_allocated: ['vram'],
+  vram_reduced: ['vram'],
+  vram_bits: ['vram'],
+  vram_words: ['vram'],
+  device_lost: ['phase', 'deviceLost'],
+  artifact_tiles: ['artifact'],
+  pcie_replay: ['pcieReplay'],
   bugcheck: ['bugcheck'],
   kernelPower41: ['kernelPower41'],
 };
@@ -83,7 +102,8 @@ export function eventText(event: SessionEvent, t: Translate, locale: string): Pi
   const p: Params = { ...event.params };
   if (recovered) p.id = recovered[1];
   if (p.phase !== undefined && Number.isFinite(Number(p.phase))) p.phase = Number(p.phase) + 1;
-  if (code === 'ram_reduced' && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if ((code === 'ram_reduced' || code === 'vram_allocated' || code === 'vram_reduced') && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if (code === 'vram_bits' && p.value !== undefined) p.value = `0x${Number(p.value).toString(16).toUpperCase()}`;
   const terms: { term: string; word?: string }[] = (EVENT_TERMS[code] ?? []).map((term) => ({ term }));
   if (code === 'whea') {
     const where = p.core === undefined ? 'apic' : p.apic === undefined ? 'core' : 'coreApic';
@@ -97,11 +117,13 @@ export function eventText(event: SessionEvent, t: Translate, locale: string): Pi
 
 /**
  * A verdict's title: the T3 text (`performance.outcome.<verdict>`) with its parameters; a
- * recovered `phase` (counted from 1) reads «during phase 3».
+ * recovered `phase` (counted from 1) reads «during phase 3», and the `stability` percent
+ * («95.3») is in the locale's format.
  */
-export function verdictTitle(detail: { verdict: string | null; params: Record<string, string> } | null, t: Translate): string {
+export function verdictTitle(detail: { verdict: string | null; params: Record<string, string> } | null, t: Translate, locale = 'en'): string {
   if (!detail?.verdict) return t('performance.result.unknown');
   const params: Params = { ...detail.params };
+  if (params.stability !== undefined && Number.isFinite(Number(params.stability))) params.stability = percentText(Number(params.stability) / 100, locale);
   if (params.phase !== undefined) params.phase = t('performance.result.phaseN', { n: params.phase });
   // A `failed_to_start` reason is a text, or the key of one (`performance.start.*`).
   if (typeof params.reason === 'string' && params.reason.startsWith('performance.start.')) params.reason = t(params.reason);
@@ -114,6 +136,35 @@ export function cpuChartSensors(schema: Schema | null): Sensor[] {
   const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
   const temperature = CPU_TEMPERATURES.map((id) => byId.get(id)).find(Boolean);
   return [temperature, byId.get('cpu/0/power/package')].filter((s): s is Sensor => s !== undefined);
+}
+
+/** DA5/DG12: the GPU temperature (core, else hotspot) and board power of a GPU device, as the chart's series; `deviceId` is the test's GPU (`RunStatus.gpuDeviceId`). */
+export function gpuChartSensors(schema: Schema | null, deviceId: string | null): Sensor[] {
+  const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
+  const device = deviceId;
+  if (device === null) return [];
+  const temperature = ['core', 'hotspot'].map((name) => byId.get(`${device}/temperature/${name}`)).find(Boolean);
+  return [temperature, byId.get(`${device}/power/board`)].filter((s): s is Sensor => s !== undefined);
+}
+
+/** The four device-lost HRESULTs the GPU engine reports (DG4), by name. */
+const HRESULT_NAMES: Record<number, string> = {
+  0x887a0005: 'DXGI_ERROR_DEVICE_REMOVED',
+  0x887a0006: 'DXGI_ERROR_DEVICE_HUNG',
+  0x887a0007: 'DXGI_ERROR_DEVICE_RESET',
+  0x887a0020: 'DXGI_ERROR_DRIVER_INTERNAL_ERROR',
+};
+
+/** «DXGI_ERROR_DEVICE_HUNG (0x887A0006)»; an HRESULT of no name is just the hex. */
+export function hresultText(code: number): string {
+  const hex = `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+  const name = HRESULT_NAMES[code >>> 0];
+  return name ? `${name} (${hex})` : hex;
+}
+
+/** A 0–1 ratio as a percent with one decimal, in the locale's format («95.3»). */
+export function percentText(ratio: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(ratio * 100);
 }
 
 /**

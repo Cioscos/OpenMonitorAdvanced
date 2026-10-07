@@ -86,7 +86,7 @@ const SHAPE: { [key: string]: Node } = {
     hotkeyBenchmark: 'nullable',
     editorBounds: 'nullable',
   },
-  performance: { thermalStop: 'leaf', cpuStopC: 'nullable', stopOnFirstError: 'nullable', ramSharePercent: 'leaf', riskNoticeSeen: 'leaf' },
+  performance: { thermalStop: 'leaf', cpuStopC: 'nullable', gpuStopC: 'leaf', stopOnFirstError: 'nullable', ramSharePercent: 'leaf', riskNoticeSeen: 'leaf' },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
 const READ_ONLY = ['version', 'migrations'];
@@ -164,6 +164,7 @@ function checkPerformance(p: Record<string, unknown>): void {
   if (p.stopOnFirstError !== null && typeof p.stopOnFirstError !== 'boolean') fail('performance.stopOnFirstError', 'settings.error.type');
   const ranges = [
     ['cpuStopC', 60, 110],
+    ['gpuStopC', 60, 110],
     ['ramSharePercent', 10, 90],
   ] as const;
   for (const [key, min, max] of ranges) {
@@ -394,7 +395,7 @@ export function defaultSettings(): Settings {
       hotkeyBenchmark: null,
       editorBounds: null,
     },
-    performance: { thermalStop: true, cpuStopC: null, stopOnFirstError: null, ramSharePercent: 70, riskNoticeSeen: false },
+    performance: { thermalStop: true, cpuStopC: null, gpuStopC: 90, stopOnFirstError: null, ramSharePercent: 70, riskNoticeSeen: false },
     migrations: { serviceV1: false, webviewV1: false },
   };
 }

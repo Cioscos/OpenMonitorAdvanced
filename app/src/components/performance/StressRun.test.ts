@@ -168,3 +168,55 @@ test('finishing_moves_to_the_result', async () => {
   expect(backend.performanceCalls).toContain('performanceSession:run-1');
   expect(screen.queryByRole('button', { name: t('performance.run.stop') })).toBeNull();
 });
+
+const GPU_PHASES: PhaseInfo[] = [
+  { kernel: 's5', mode: 'steady', placement: 'all_logical', durationS: 630, isa: 'sse2' },
+  { kernel: 's1', mode: 'ramp', placement: 'all_logical', durationS: 270, isa: 'sse2' },
+];
+const GPU_RUNNING = (over: Partial<RunStatus> = {}) => RUNNING({ component: 'gpu', phases: GPU_PHASES, phaseIndex: 1, currentCore: null, ...over });
+
+test('a pause and resume phase shows its glossary name', async () => {
+  await setup(GPU_RUNNING({ phases: [GPU_PHASES[0], { ...GPU_PHASES[1], mode: 'pause_resume' }] }));
+  expect(screen.getAllByText(t('glossary.mode.pauseResume.name')).length).toBeGreaterThan(0);
+  expect(document.body.textContent).not.toContain('mode.pause_resume');
+});
+
+test('gpu run hides the core grid', async () => {
+  // Even a phase that says «one core at a time» has no cores to show on a GPU.
+  await setup(GPU_RUNNING({ phases: [{ ...GPU_PHASES[0], placement: 'core_cycle' }, GPU_PHASES[1]], phaseIndex: 0, cores: [{ core: 0, state: 'testing' }] }));
+  expect(screen.queryByRole('list', { name: t('performance.run.cores') })).toBeNull();
+  expect(screen.getByRole('heading', { name: `${t('performance.objective.overclock')} · GPU` })).toBeTruthy();
+  // The tiles speak of the GPU: its clock, no Tjmax.
+  expect(tile(t('performance.run.clock.gpu')).textContent).toContain('4.85 GHz');
+  expect(tile(t('performance.run.temp')).textContent).not.toContain(t('glossary.tjmax.name'));
+});
+
+test('ramp shows the load level', async () => {
+  const { backend } = await setup(GPU_RUNNING({ loadPercent: 65 }));
+  const current = document.querySelector('.current')!;
+  expect(current.textContent).toContain(t('performance.result.loadLevel', { level: 65 }));
+  expect(current.querySelector('.term:last-child')?.textContent).toBe(t('performance.result.loadLevel', { level: 65 }));
+  // Phases without a level (null) show none.
+  backend.emitPerformanceStatus(GPU_RUNNING({ loadPercent: null }));
+  await waitFor(() => expect(document.querySelector('.current')?.textContent).not.toContain('65'));
+});
+
+test('gpu warnings carry their terms and the reduced size', async () => {
+  await setup(
+    GPU_RUNNING({
+      warnings: ['pcieReplay', 'vramReduced'],
+      events: [{ atMs: 5000, code: 'vram_reduced', params: { phase: '0', value: String(2 * 1024 ** 3) } }],
+    }),
+  );
+  const [pcie, vram] = [...document.querySelectorAll('.warnings p')];
+  expect(pcie.textContent).toBe(t('performance.warn.pcieReplay'));
+  expect(pcie.querySelector('.term')?.textContent).toBe('PCIe');
+  expect(vram.textContent).toBe(t('performance.warn.vramReduced', { size: '2.0 GB' }));
+  expect(vram.querySelector('.term')?.textContent).toBe('VRAM');
+});
+
+test('the GPU clock tile carries the clock term in every language', async () => {
+  i18n.locale = 'it';
+  await setup(GPU_RUNNING());
+  expect(tile(t('performance.run.clock.gpu')).querySelector('.label .term')?.textContent?.toLowerCase()).toBe(t('glossary.clock.name').toLowerCase());
+});

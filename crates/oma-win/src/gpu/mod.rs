@@ -23,7 +23,7 @@ pub use processes::{GpuProcess, GpuProcessTable};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use oma_core::merge;
 use oma_core::model::{Device, DeviceKind, Label, Sensor};
@@ -32,6 +32,78 @@ use oma_core::provider::{Inventory, Provider, ProviderError};
 use adapter::{Adapter, PciAddress};
 use field::GpuField;
 use layer::{GpuLayer, Readings};
+
+/// Stable device ids of `adapters`; the ordinal counts only the adapters without a PCI address.
+pub(crate) fn assign_device_ids(adapters: &[Adapter]) -> Vec<String> {
+    let mut ordinal = 0;
+    adapters
+        .iter()
+        .map(|adapter| {
+            let id = adapter.device_id(ordinal);
+            if adapter.pci.is_none() {
+                ordinal += 1;
+            }
+            id
+        })
+        .collect()
+}
+
+/// A hardware GPU the stress test can target.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StressAdapter {
+    pub luid: u64,
+    pub device_id: String,
+    pub name: String,
+    pub vendor_id: u32,
+    pub integrated: bool,
+    pub dedicated_bytes: u64,
+}
+
+/// PCI addresses every enumeration of this process has seen, by LUID: the provider records
+/// them, so a failed address query in [`stress_adapters`] still gives the schema's ids.
+static SEEN_PCI: LazyLock<Mutex<HashMap<u64, PciAddress>>> = LazyLock::new(Default::default);
+
+fn seen_pci() -> MutexGuard<'static, HashMap<u64, PciAddress>> {
+    SEEN_PCI.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The hardware GPUs in enumeration order, with the provider's device ids; empty on failure.
+pub fn stress_adapters() -> Vec<StressAdapter> {
+    match enumerate::enumerate() {
+        Ok(adapters) => stress_list(adapters, &mut seen_pci()),
+        Err(e) => {
+            tracing::warn!(error = %e, "GPU enumeration failed");
+            Vec::new()
+        }
+    }
+}
+
+fn stress_list(
+    mut adapters: Vec<Adapter>,
+    known: &mut HashMap<u64, PciAddress>,
+) -> Vec<StressAdapter> {
+    restore_pci(known, &mut adapters);
+    let ids = assign_device_ids(&adapters);
+    adapters
+        .into_iter()
+        .zip(ids)
+        .map(|(a, device_id)| StressAdapter {
+            luid: a.luid,
+            device_id,
+            name: a.name,
+            vendor_id: a.vendor_id,
+            integrated: a.integrated,
+            dedicated_bytes: a.dedicated_bytes,
+        })
+        .collect()
+}
+
+/// The NVML PCIe replay counter of the GPU `device_id`; `None` without NVML, without a PCI
+/// address in the id or for a GPU NVML does not know (non-NVIDIA).
+pub fn pcie_replay_count(device_id: &str) -> Option<u32> {
+    nvml::pcie_replay_count(device_id)
+}
 
 /// A GPU vendor library, in merge priority order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -325,6 +397,7 @@ impl Provider for GpuProvider {
         self.state = State::default();
         let mut adapters = (self.enumerate)()?;
         restore_pci(&mut self.known_pci, &mut adapters);
+        seen_pci().extend(adapters.iter().filter_map(|a| Some((a.luid, a.pci?))));
         let vendor_mask = self.switch.effective();
         self.load_vendors(vendor_mask);
         let count = adapters.len();
@@ -344,12 +417,8 @@ impl Provider for GpuProvider {
         let mut inventory = Inventory::default();
         let mut slots = Vec::new();
         let mut luids = Vec::new();
-        let mut ordinal = 0;
-        for (index, adapter) in adapters.iter().enumerate() {
-            let id = adapter.device_id(ordinal);
-            if adapter.pci.is_none() {
-                ordinal += 1;
-            }
+        let ids = assign_device_ids(&adapters);
+        for (index, (adapter, id)) in adapters.iter().zip(ids).enumerate() {
             tracing::debug!(
                 id,
                 luid = format_args!("{:#x}", adapter.luid),
@@ -491,6 +560,65 @@ mod tests {
     use oma_core::model::Source;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
+
+    fn stub_adapter(vendor_id: u32, device_id: u32, pci: Option<PciAddress>) -> Adapter {
+        Adapter {
+            luid: 1,
+            name: String::new(),
+            vendor_id,
+            device_id,
+            subsys_id: 0,
+            pci,
+            integrated: false,
+            dedicated_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn device_ids_match_the_provider() {
+        let pci = PciAddress {
+            bus: 1,
+            device: 0,
+            function: 0,
+        };
+        let adapters = [
+            stub_adapter(0x10de, 0x2704, Some(pci)),
+            stub_adapter(0x1002, 0x164e, None),
+            stub_adapter(0x1002, 0x164e, None),
+        ];
+        assert_eq!(
+            assign_device_ids(&adapters),
+            [
+                "gpu/pci-0000:01:00.0",
+                "gpu/ven-1002-dev-164e-0",
+                "gpu/ven-1002-dev-164e-1"
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn stress_adapters_lists_real_gpus() {
+        let list = stress_adapters();
+        assert!(!list.is_empty());
+        for a in &list {
+            assert_ne!(a.luid, 0);
+            assert!(!a.name.contains("Basic Render"), "{}", a.name);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn pcie_replay_counter_reads_on_nvidia() {
+        let Some(gpu) = stress_adapters()
+            .into_iter()
+            .find(|a| a.vendor_id == 0x10de)
+        else {
+            return;
+        };
+        assert!(pcie_replay_count(&gpu.device_id).is_some());
+        assert_eq!(pcie_replay_count("gpu/ven-10de-dev-2704-0"), None);
+    }
 
     /// Scripted behaviour of a fake layer, shared with the test.
     #[derive(Default)]
@@ -1348,6 +1476,17 @@ mod tests {
         let mut unknown = [virtual_adapter(0x1414)];
         restore_pci(&mut known, &mut unknown);
         assert_eq!(unknown[0].pci, None);
+    }
+
+    #[test]
+    fn stress_ids_survive_a_failed_pci_query() {
+        let mut known = HashMap::new();
+        let first = stress_list(vec![nvidia(), amd_igpu()], &mut known);
+        let mut failed = amd_igpu();
+        failed.pci = None;
+        let second = stress_list(vec![nvidia(), failed], &mut known);
+        assert_eq!(first, second);
+        assert!(second[1].device_id.starts_with("gpu/pci-"));
     }
 
     #[test]

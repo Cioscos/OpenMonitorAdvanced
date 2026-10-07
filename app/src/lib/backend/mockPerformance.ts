@@ -21,18 +21,22 @@ import type {
 // A fake stress test for `pnpm dev`: every test lasts 60 s on an 8-core CPU, whatever its preset.
 // `?perf=error` starts one at load that finds an error on core 2 during «one core at a time»;
 // `?perf=pass` starts one that passes. Without the parameter a test starts only from the UI, and
-// it passes.
+// it passes. `?perf=gpu` starts a GPU test that passes, `?perf=device_lost` one whose GPU resets
+// 85% in (DXGI_ERROR_DEVICE_HUNG, during a ramp) and `?perf=low_stability` one that ends at 95.3%.
 
 const CORES = 8;
 const ERROR_CORE = 2;
 const TEST_S = 60;
 const GIB = 1024 ** 3;
 
-type Scenario = 'pass' | 'error' | null;
+type Scenario = 'pass' | 'error' | 'gpu' | 'device_lost' | 'low_stability' | null;
+const SCENARIOS = ['pass', 'error', 'gpu', 'device_lost', 'low_stability'];
+const MOCK_GPU = 'gpu-mock-dedicated';
+const LOW_STABILITY = 0.9532;
 
 export function parsePerfScenario(search: string): Scenario {
   const value = new URLSearchParams(search).get('perf');
-  return value === 'pass' || value === 'error' ? value : null;
+  return SCENARIOS.includes(value ?? '') ? (value as Scenario) : null;
 }
 
 const presetSeconds = (r: StartRequest): number | undefined =>
@@ -61,6 +65,16 @@ function phasesFor(request: StartRequest, totalS: number): Phase[] {
       phase({ kernel: 'k10', duration_s: totalS / 2, isa: 'sse2', size: 'ram', patterns: [...catalog.patterns] as Phase['patterns'], stop_on_error: stop }),
     ];
   }
+  if (request.component === 'gpu') {
+    // Overclock also pauses and resumes; the ramp stays last, where the device-lost scenario fails.
+    const pause = stop ? Math.round(totalS * 0.15) : 0;
+    const main = Math.round(totalS * 0.7) - pause;
+    return [
+      phase({ kernel: 's5', alt_kernel: 's1', duration_s: main, isa: 'sse2', stop_on_error: stop }),
+      ...(pause ? [phase({ kernel: 's1', mode: 'pause_resume', duration_s: pause, isa: 'sse2', stop_on_error: stop })] : []),
+      phase({ kernel: 's1', mode: 'ramp', duration_s: totalS - main - pause, isa: 'sse2', stop_on_error: stop }),
+    ];
+  }
   const cycle = Math.round((totalS * 2) / 3);
   return [
     phase({ kernel: 'k1', duration_s: totalS / 4, stop_on_error: stop }),
@@ -87,6 +101,8 @@ function progress(phases: Phase[], elapsedMs: number) {
 
 /** The moment the error scenario fails: halfway through core 2's turn. */
 function errorAtMs(phases: Phase[]): number {
+  // A GPU test has no cores: its failure comes 85% in, inside the closing ramp.
+  if (phases[0]?.kernel.startsWith('s')) return phases.reduce((sum, p) => sum + p.duration_s * 1000, 0) * 0.85;
   let start = 0;
   for (const p of phases) {
     if (p.placement === 'core_cycle' && p.per_core_s) return start + (ERROR_CORE + 0.5) * p.per_core_s * 1000;
@@ -117,8 +133,34 @@ function coreStates(phases: Phase[], elapsedMs: number, failed: boolean, finishe
   return [];
 }
 
-function errorRecord(phases: Phase[]): ErrorRecord {
+/** The load level of a GPU `ramp` phase at `elapsedMs` (20% to 100% in steps of 5), else null. */
+function loadAt(phases: Phase[], elapsedMs: number): number | null {
+  const at = progress(phases, elapsedMs).index;
+  if (phases[at]?.mode !== 'ramp') return null;
+  const from = phases.slice(0, at).reduce((sum, p) => sum + p.duration_s * 1000, 0);
+  const share = Math.min(1, Math.max(0, (elapsedMs - from) / (phases[at].duration_s * 1000)));
+  return 20 + 5 * Math.min(16, Math.floor(share * 17));
+}
+
+function errorRecord(phases: Phase[], lost = false): ErrorRecord {
   const atMs = errorAtMs(phases);
+  if (lost) {
+    return {
+      phase: phases.findIndex((p) => p.mode === 'ramp'),
+      kernel: 's1',
+      isa: 'sse2',
+      kind: 'device_lost',
+      logical: null,
+      core: null,
+      iteration: 4_120,
+      expected: 0,
+      actual: 0x887a0006,
+      seed: 2_870_177_450,
+      atMs,
+      load_percent: loadAt(phases, atMs),
+      ...reading(atMs),
+    };
+  }
   return {
     phase: phases.findIndex((p) => p.placement === 'core_cycle'),
     kernel: 'k2',
@@ -136,10 +178,12 @@ function errorRecord(phases: Phase[]): ErrorRecord {
 }
 
 const VERDICT: Partial<Record<Outcome, string>> = { errors: 'errors_core' };
+const isGpu = (request: StartRequest) => request.component === 'gpu';
 
 function buildSession(id: string, startedAtMs: number, request: StartRequest, phases: Phase[], elapsedMs: number, outcome: Outcome): StressSession {
-  const failed = outcome === 'errors';
-  const error = failed ? errorRecord(phases) : null;
+  const lost = outcome === 'device_lost';
+  const failed = outcome === 'errors' || lost;
+  const error = failed ? errorRecord(phases, lost) : null;
   const samples = Array.from({ length: Math.floor(elapsedMs / 5000) + 1 }, (_, i) => ({ tMs: i * 5000, ...reading(i * 5000) }));
   const avg = (key: 'tempC' | 'powerW' | 'clockMhz') => Math.round(samples.reduce((sum, s) => sum + s[key], 0) / samples.length);
   const max = (key: 'tempC' | 'powerW' | 'clockMhz') => Math.max(...samples.map((s) => s[key]));
@@ -150,7 +194,7 @@ function buildSession(id: string, startedAtMs: number, request: StartRequest, ph
     startedAt: new Date(startedAtMs).toISOString(),
     endedAt: new Date(startedAtMs + elapsedMs).toISOString(),
     component: request.component,
-    device: request.component === 'cpu' ? 'Mock Ryzen 7 7800X3D' : '32 GB RAM',
+    device: request.component === 'cpu' ? 'Mock Ryzen 7 7800X3D' : isGpu(request) ? 'Mock GeForce RTX 4080' : '32 GB RAM',
     objective: request.objective,
     preset: request.preset,
     request,
@@ -158,7 +202,7 @@ function buildSession(id: string, startedAtMs: number, request: StartRequest, ph
     outcome,
     outcomeDetail: {
       verdict: VERDICT[outcome] ?? outcome,
-      params: failed ? { core: String(ERROR_CORE) } : {},
+      params: outcome === 'errors' ? { core: String(ERROR_CORE) } : outcome === 'low_stability' ? { stability: '95.3' } : {},
       phase: error?.phase ?? null,
       kernel: error?.kernel ?? null,
       core: error?.core ?? null,
@@ -181,7 +225,7 @@ function buildSession(id: string, startedAtMs: number, request: StartRequest, ph
         skipped: ran === 0 ? 'stopped' : null,
       };
     }),
-    cores: coreStates(phases, elapsedMs, failed, true).map((state, core) => ({ core, state, firstError: failed && core === ERROR_CORE ? error : null })),
+    cores: isGpu(request) ? [] : coreStates(phases, elapsedMs, failed, true).map((state, core) => ({ core, state, firstError: failed && core === ERROR_CORE ? error : null })),
     errors: error ? [error] : [],
     errorsDropped: 0,
     eventsDropped: 0,
@@ -198,6 +242,7 @@ function buildSession(id: string, startedAtMs: number, request: StartRequest, ph
     events: outcome === 'stopped_user' ? [{ atMs: elapsedMs, code: 'user_stop', params: {} }] : [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    ...(isGpu(request) ? { stability: outcome === 'low_stability' ? LOW_STABILITY : outcome === 'passed' ? 0.99 : null, gpuDeviceId: request.gpu ?? null } : {}),
   };
 }
 
@@ -249,13 +294,16 @@ const idle = (): RunStatus => ({
   events: [],
   warnings: [],
   outcome: null,
+  loadPercent: null,
+  stability: null,
+  gpuDeviceId: null,
 });
 
 export function mockPerformance(scenario: Scenario, serviceConnected: () => boolean) {
   const listeners = new Set<(status: RunStatus) => void>();
   let sessions = seeded();
   let status = idle();
-  let run: { id: string; request: StartRequest; phases: Phase[]; startedAtMs: number; fails: boolean; stopAtMs: number | null; timer: ReturnType<typeof setInterval> } | null = null;
+  let run: { id: string; request: StartRequest; phases: Phase[]; startedAtMs: number; fails: 'errors' | 'device_lost' | null; stopAtMs: number | null; timer: ReturnType<typeof setInterval> } | null = null;
 
   const publish = (next: RunStatus) => {
     status = next;
@@ -266,14 +314,14 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
     clearInterval(r.timer);
     run = null;
     sessions = [buildSession(r.id, r.startedAtMs, r.request, r.phases, elapsedMs, outcome), ...sessions];
-    publish({ ...status, state: 'finished', elapsedMs, outcome, errors: outcome === 'errors' ? 1 : 0, cores: coreStates(r.phases, elapsedMs, outcome === 'errors', true).map((state, core) => ({ core, state })), currentCore: null });
+    publish({ ...status, state: 'finished', elapsedMs, outcome, errors: outcome === 'errors' || outcome === 'device_lost' ? 1 : 0, cores: isGpu(r.request) ? [] : coreStates(r.phases, elapsedMs, outcome === 'errors', true).map((state, core) => ({ core, state })), currentCore: null, loadPercent: null, stability: r.request.component === 'gpu' && outcome === 'low_stability' ? LOW_STABILITY : status.stability });
   };
   const tick = () => {
     const r = run!;
     const elapsedMs = Math.min(Date.now() - r.startedAtMs, TEST_S * 1000);
-    if (r.fails && elapsedMs >= errorAtMs(r.phases)) return finish(errorAtMs(r.phases), 'errors');
+    if (r.fails && elapsedMs >= errorAtMs(r.phases)) return finish(errorAtMs(r.phases), r.fails);
     if (r.stopAtMs !== null && Date.now() >= r.stopAtMs) return finish(elapsedMs, 'stopped_user');
-    if (elapsedMs >= TEST_S * 1000) return finish(elapsedMs, 'passed');
+    if (elapsedMs >= TEST_S * 1000) return finish(elapsedMs, scenario === 'low_stability' && isGpu(r.request) ? 'low_stability' : 'passed');
     const at = progress(r.phases, elapsedMs);
     const now = reading(elapsedMs);
     publish({
@@ -284,8 +332,10 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       ...now,
       tempMaxC: Math.max(status.tempMaxC ?? 0, now.tempC),
       checks: Math.floor(elapsedMs / 100),
-      cores: coreStates(r.phases, elapsedMs, false, false).map((state, core) => ({ core, state })),
+      cores: isGpu(r.request) ? [] : coreStates(r.phases, elapsedMs, false, false).map((state, core) => ({ core, state })),
       currentCore: at.current,
+      loadPercent: loadAt(r.phases, elapsedMs),
+      stability: isGpu(r.request) && elapsedMs > 40_000 ? (scenario === 'low_stability' ? LOW_STABILITY : 0.99) : null,
     });
   };
 
@@ -301,6 +351,10 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       tjmaxC: 89,
       stopC: 84,
       hypervisor: false,
+      gpus: [
+        { deviceId: MOCK_GPU, name: 'Mock GeForce RTX 4080', integrated: false, dedicatedBytes: 16 * GIB },
+        { deviceId: 'gpu-mock-integrated', name: 'Mock Radeon Graphics', integrated: true, dedicatedBytes: 512 * 1024 ** 2 },
+      ],
     }),
     preview(request: StartRequest): Plan {
       const total = presetSeconds(request);
@@ -311,7 +365,7 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       if (run !== null) throw 'a stress test is already running';
       const id = crypto.randomUUID();
       const phases = phasesFor(request, TEST_S);
-      run = { id, request, phases, startedAtMs: Date.now(), fails: scenario === 'error', stopAtMs: null, timer: setInterval(tick, 1000) };
+      run = { id, request, phases, startedAtMs: Date.now(), fails: scenario === 'error' ? 'errors' : scenario === 'device_lost' && isGpu(request) ? 'device_lost' : null, stopAtMs: null, timer: setInterval(tick, 1000) };
       publish({
         ...idle(),
         state: 'starting',
@@ -322,8 +376,9 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
         totalMs: TEST_S * 1000,
         phases: phases.map(info),
         stopC: 84,
-        cores: coreStates(phases, 0, false, false).map((state, core) => ({ core, state })),
-        warnings: serviceConnected() ? [] : ['noService', 'tempMissing'],
+        gpuDeviceId: isGpu(request) ? (request.gpu ?? null) : null,
+        cores: isGpu(request) ? [] : coreStates(phases, 0, false, false).map((state, core) => ({ core, state })),
+        warnings: serviceConnected() || isGpu(request) ? [] : ['noService', 'tempMissing'],
       });
       return id;
     },
@@ -345,7 +400,10 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       return () => listeners.delete(cb);
     },
   };
-  if (scenario !== null) api.start({ component: 'cpu', objective: 'overclock', preset: 'standard', custom: null, retryCore: null });
+  if (scenario !== null) {
+    const gpu = scenario === 'gpu' || scenario === 'device_lost' || scenario === 'low_stability';
+    api.start({ component: gpu ? 'gpu' : 'cpu', objective: 'overclock', preset: 'standard', custom: null, retryCore: null, ...(gpu ? { gpu: MOCK_GPU } : {}) });
+  }
   return api;
 }
 

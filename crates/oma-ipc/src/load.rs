@@ -1,4 +1,4 @@
-//! App <-> `oma-load.exe` protocol (version 3): the messages the app and the stress-test
+//! App <-> `oma-load.exe` protocol (version 4): the messages the app and the stress-test
 //! helper exchange over the load pipe, framed with the generic framing of this crate.
 //!
 //! Same conventions as the service and overlay protocols: every field is always present on
@@ -12,7 +12,7 @@ use crate::overlay::check_len;
 use crate::IpcError;
 
 /// Load protocol version, sent in [`LoadHello::protocol_version`] by both sides.
-pub const LOAD_PROTOCOL_VERSION: u32 = 3;
+pub const LOAD_PROTOCOL_VERSION: u32 = 4;
 
 /// Prefix of the load pipe name; the app appends a random UUID v4.
 pub const LOAD_PIPE_PREFIX: &str = r"\\.\pipe\OpenMonitorAdvanced-Load-";
@@ -87,9 +87,20 @@ pub enum KernelId {
     Hash,
     Compress,
     Sort,
+    /// GPU loads (D3D11): FMA chains, integer hash, VRAM check, graphics load, artifact scan.
+    S1,
+    S2,
+    S4,
+    S5,
+    S6,
 }
 
 impl KernelId {
+    /// True for the loads that run on the GPU.
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Self::S1 | Self::S2 | Self::S4 | Self::S5 | Self::S6)
+    }
+
     /// True for the loads that only run as fixed-work benchmark phases.
     pub fn is_bench_only(self) -> bool {
         matches!(self, Self::Hash | Self::Compress | Self::Sort)
@@ -114,6 +125,19 @@ pub enum LoadMode {
     Steady,
     Variable,
     Light,
+    /// GPU only: load ramps from 20 to 100 %.
+    Ramp,
+    /// GPU only: full load and 15 % load alternate.
+    Alternate,
+    /// GPU only: full load, then a pause, repeated.
+    PauseResume,
+}
+
+impl LoadMode {
+    /// True for the modes only the GPU kernels run.
+    pub fn is_gpu_only(self) -> bool {
+        matches!(self, Self::Ramp | Self::Alternate | Self::PauseResume)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +174,8 @@ pub enum ErrorKind {
     ReferenceDisagreement,
     ReferenceInvalid,
     Hung,
+    /// The GPU was removed or reset; `actual` carries the device-removed HRESULT.
+    DeviceLost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +248,17 @@ pub struct Plan {
     pub seed: u64,
     pub ram_bytes: u64,
     pub phases: Vec<Phase>,
+    /// Target GPU of a GPU plan; a plan without it runs CPU kernels only.
+    #[serde(default)]
+    pub gpu: Option<GpuTarget>,
+}
+
+/// The adapter a GPU plan runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuTarget {
+    /// The adapter LUID (`HighPart << 32 | LowPart`), never 0.
+    pub luid: u64,
+    pub integrated: bool,
 }
 
 impl Plan {
@@ -257,6 +294,9 @@ pub struct Progress {
     pub cores: Vec<CoreProgress>,
     pub memory_bytes: u64,
     pub rate: Option<f64>,
+    /// GPU `ramp` and `alternate`: the current load level, 1-100.
+    #[serde(default)]
+    pub load_percent: Option<u8>,
 }
 
 /// Process to app: a computation error.
@@ -272,6 +312,9 @@ pub struct ComputeError {
     pub expected: u64,
     pub actual: u64,
     pub seed: u64,
+    /// GPU `ramp` and `alternate`: the load level when the error happened, 1-100.
+    #[serde(default)]
+    pub load_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,7 +382,32 @@ fn check_text(what: &str, s: &str) -> Result<(), IpcError> {
     }
 }
 
-fn check_phase(p: &Phase) -> Result<(), IpcError> {
+fn check_load_percent(v: Option<u8>) -> Result<(), IpcError> {
+    match v {
+        Some(n) if !(1..=100).contains(&n) => Err(IpcError::Decode(format!(
+            "load_percent {n} is out of 1-100"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn check_phase(p: &Phase, gpu: bool) -> Result<(), IpcError> {
+    let is_gpu = p.kernel.is_gpu();
+    if is_gpu != gpu || p.alt_kernel.is_some_and(|k| k.is_gpu() != gpu) {
+        return Err(IpcError::Decode(
+            "a plan with a gpu runs only GPU kernels, one without runs none".into(),
+        ));
+    }
+    if (p.mode.is_gpu_only() && !is_gpu)
+        || (is_gpu && matches!(p.mode, LoadMode::Variable | LoadMode::Light))
+    {
+        return Err(IpcError::Decode(
+            "ramp, alternate and pause_resume are GPU only; variable and light are CPU only".into(),
+        ));
+    }
+    if is_gpu && p.iterations.is_some() {
+        return Err(IpcError::Decode("GPU phases refuse iterations".into()));
+    }
     if p.duration_s == 0 {
         return Err(IpcError::Decode("duration_s is 0".into()));
     }
@@ -408,7 +476,11 @@ impl LoadMessage {
                 if plan.ram_bytes > MAX_RAM_BYTES {
                     return Err(IpcError::Decode("ram_bytes is over the maximum".into()));
                 }
-                plan.phases.iter().try_for_each(check_phase)?;
+                if plan.gpu.is_some_and(|g| g.luid == 0) {
+                    return Err(IpcError::Decode("gpu luid is 0".into()));
+                }
+                let gpu = plan.gpu.is_some();
+                plan.phases.iter().try_for_each(|p| check_phase(p, gpu))?;
                 if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
                     return Err(IpcError::Decode(
                         "the plan lasts more than the maximum".into(),
@@ -423,6 +495,7 @@ impl LoadMessage {
             }
             Self::Progress(p) => {
                 check_len("cores", p.cores.len(), MAX_LOGICAL)?;
+                check_load_percent(p.load_percent)?;
                 match p.rate {
                     Some(r) if !r.is_finite() || r < 0.0 => {
                         Err(IpcError::Decode("rate is not a finite non-negative".into()))
@@ -437,7 +510,8 @@ impl LoadMessage {
                     .as_deref()
                     .map_or(Ok(()), |s| check_text("skipped", s))
             }
-            Self::Stop(_) | Self::Error(_) | Self::Finished(_) => Ok(()),
+            Self::Error(e) => check_load_percent(e.load_percent),
+            Self::Stop(_) | Self::Finished(_) => Ok(()),
         }
     }
 }
@@ -489,6 +563,7 @@ mod tests {
                 seed: 7,
                 ram_bytes: 1 << 30,
                 phases,
+                gpu: None,
             },
         })
     }
@@ -507,6 +582,7 @@ mod tests {
             }],
             memory_bytes: 4096,
             rate: Some(1.5e6),
+            load_percent: None,
         }
     }
 
@@ -567,6 +643,7 @@ mod tests {
             expected: 1,
             actual: 2,
             seed: 3,
+            load_percent: Some(55),
         }));
         round_trip(LoadMessage::Notice(Notice {
             phase: 0,
@@ -891,7 +968,128 @@ mod tests {
     fn hello_compatibility() {
         assert!(load_compatible(&hello()));
         let mut h = hello();
-        h.protocol_version = 2;
+        h.protocol_version = 3;
         assert!(!load_compatible(&h));
+        h.protocol_version = 4;
+        assert!(load_compatible(&h));
+    }
+
+    fn gpu_phase() -> Phase {
+        let mut p = phase();
+        p.kernel = KernelId::S1;
+        p
+    }
+
+    fn gpu_plan(phases: Vec<Phase>) -> LoadMessage {
+        let mut m = plan(phases);
+        if let LoadMessage::Run(r) = &mut m {
+            r.plan.gpu = Some(GpuTarget {
+                luid: 0x17e99,
+                integrated: false,
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn gpu_kernels_and_modes_are_snake_case() {
+        assert_eq!(serde_json::to_value(KernelId::S4).unwrap(), "s4");
+        assert_eq!(
+            serde_json::to_value(LoadMode::PauseResume).unwrap(),
+            "pause_resume"
+        );
+        assert_eq!(serde_json::to_value(LoadMode::Ramp).unwrap(), "ramp");
+        assert_eq!(
+            serde_json::to_value(ErrorKind::DeviceLost).unwrap(),
+            "device_lost"
+        );
+        round_trip(gpu_plan(vec![gpu_phase()]));
+    }
+
+    #[test]
+    fn gpu_plan_needs_gpu_kernels() {
+        assert!(gpu_plan(vec![gpu_phase()]).validate().is_ok());
+        assert!(gpu_plan(vec![phase()]).validate().is_err());
+        assert!(plan(vec![gpu_phase()]).validate().is_err());
+    }
+
+    #[test]
+    fn gpu_alt_kernel_must_be_gpu() {
+        let mut p = gpu_phase();
+        p.kernel = KernelId::S5;
+        p.alt_kernel = Some(KernelId::S1);
+        assert!(gpu_plan(vec![p.clone()]).validate().is_ok());
+        p.alt_kernel = Some(KernelId::K5);
+        assert!(gpu_plan(vec![p]).validate().is_err());
+    }
+
+    #[test]
+    fn gpu_modes_only_on_gpu_kernels() {
+        for mode in [LoadMode::Ramp, LoadMode::Alternate, LoadMode::PauseResume] {
+            let mut g = gpu_phase();
+            g.mode = mode;
+            assert!(gpu_plan(vec![g]).validate().is_ok(), "{mode:?}");
+            let mut c = phase();
+            c.kernel = KernelId::K2;
+            c.mode = mode;
+            assert!(plan(vec![c]).validate().is_err(), "{mode:?}");
+        }
+        for mode in [LoadMode::Variable, LoadMode::Light] {
+            let mut g = gpu_phase();
+            g.mode = mode;
+            assert!(gpu_plan(vec![g]).validate().is_err(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn gpu_phases_refuse_iterations() {
+        let mut p = gpu_phase();
+        p.iterations = Some(10);
+        assert!(gpu_plan(vec![p]).validate().is_err());
+    }
+
+    #[test]
+    fn zero_luid_is_rejected() {
+        let mut m = gpu_plan(vec![gpu_phase()]);
+        if let LoadMessage::Run(r) = &mut m {
+            r.plan.gpu.as_mut().unwrap().luid = 0;
+        }
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn load_percent_out_of_range_is_rejected() {
+        for (v, ok) in [(0, false), (1, true), (100, true), (101, false)] {
+            let mut p = progress();
+            p.load_percent = Some(v);
+            assert_eq!(LoadMessage::Progress(p).validate().is_ok(), ok, "{v}");
+            let e = LoadMessage::Error(ComputeError {
+                phase: 0,
+                kernel: KernelId::S1,
+                isa: Isa::Sse2,
+                kind: ErrorKind::Mismatch,
+                logical: None,
+                core: None,
+                iteration: 1,
+                expected: 1,
+                actual: 2,
+                seed: 3,
+                load_percent: Some(v),
+            });
+            assert_eq!(e.validate().is_ok(), ok, "{v}");
+        }
+    }
+
+    #[test]
+    fn v3_run_without_gpu_still_decodes() {
+        let json = serde_json::json!({"seed": 1, "ram_bytes": 0, "phases": []});
+        let p: Plan = serde_json::from_value(json).unwrap();
+        assert_eq!(p.gpu, None);
+        let json = serde_json::json!({
+            "phase": 0, "phase_elapsed_ms": 1, "elapsed_ms": 1, "checks": 0, "errors": 0,
+            "current_core": null, "cores": [], "memory_bytes": 0, "rate": null
+        });
+        let pr: Progress = serde_json::from_value(json).unwrap();
+        assert_eq!(pr.load_percent, None);
     }
 }

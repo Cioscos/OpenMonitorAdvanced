@@ -82,6 +82,19 @@
         </div>
       {/snippet}
     </Field>
+    <Field id="performance-gpu-stop" labelFor="performance-gpu-stop-input" label={t('settings.performance.gpuStopC')} description={t('settings.performance.gpuStopC.hint')} error={errorOf('performance.gpuStopC')}>
+      {#snippet control()}
+        <NumberInput
+          id="performance-gpu-stop-input"
+          integer
+          value={current.gpuStopC}
+          unit="°C"
+          invalid={errorOf('performance.gpuStopC') !== null}
+          describedBy={errorOf('performance.gpuStopC') !== null ? 'performance-gpu-stop-error' : undefined}
+          onCommit={(gpuStopC) => send({ gpuStopC })}
+        />
+      {/snippet}
+    </Field>
   </Group>
 
   <Group id="performance-test" title={t('settings.performance.group.test')}>

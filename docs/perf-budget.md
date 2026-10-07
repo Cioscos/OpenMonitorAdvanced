@@ -330,6 +330,12 @@ pwsh scripts/measure-footprint.ps1
 
 At rest: expected core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included). Then, in the app the script launched, run the CPU benchmark by hand (check B11) and measure again with the CPU page open and the gauges moving: window < 200 MB. `oma-load.exe` is reported apart. The values go in this section after B11.
 
+## M8b1 — GPU stress test (spec M8 §11)
+
+Nothing changes at rest. `oma-load.exe` exists only while a test runs, and the `performance/` module of the app does no periodic work without a test. The GPU list is read only when the UI asks for it (`performance_system`), never in a timer. During a GPU test the load uses VRAM within the plan limit (DG6: 95 % of the budget minus 400 MiB on a dedicated GPU; on an integrated one at most 4 GiB and 25 % of the available RAM), a few MB of RAM, and about 1 % of one CPU core while it waits for the submissions with `sleep(1)` (spike, Q7).
+
+G14 (2026-10-07), development build, during the iGPU Quick test with the window open on the run page, read from the Windows counters over 20 s: app with its WebView2 processes 270 MB private and 1.4 % of the machine; `oma-load.exe` 37 MB private, 1 % of one core, 46 MB dedicated and 5 MB shared GPU memory. During the RTX 4080 overclock run S4 allocated 14.80 GB of VRAM (DG6). The window figure is not comparable with the budget: the development build loads unbundled modules and the WebView2 tools (M8a1, release, under a CPU test: 165.9 MB). The release measurement, at rest and during a GPU test with the window open, is owed with B11 of M8a2 at the end of M8.
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

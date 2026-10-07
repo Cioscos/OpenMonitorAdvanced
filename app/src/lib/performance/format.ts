@@ -68,6 +68,11 @@ const EVENT_TERMS: Record<string, string[]> = {
   k9_needs_two_cores: ['phase', 'mode.k9'],
   whea: ['whea', 'apicId'],
   whea_unreadable: ['whea'],
+  vram_allocated: ['vram'],
+  vram_reduced: ['vram'],
+  vram_bits: ['vram'],
+  artifact_tiles: ['artifact'],
+  pcie_replay: ['pcieReplay'],
   bugcheck: ['bugcheck'],
   kernelPower41: ['kernelPower41'],
 };
@@ -83,7 +88,8 @@ export function eventText(event: SessionEvent, t: Translate, locale: string): Pi
   const p: Params = { ...event.params };
   if (recovered) p.id = recovered[1];
   if (p.phase !== undefined && Number.isFinite(Number(p.phase))) p.phase = Number(p.phase) + 1;
-  if (code === 'ram_reduced' && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if ((code === 'ram_reduced' || code === 'vram_allocated' || code === 'vram_reduced') && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if (code === 'vram_bits' && p.value !== undefined) p.value = `0x${Number(p.value).toString(16).toUpperCase()}`;
   const terms: { term: string; word?: string }[] = (EVENT_TERMS[code] ?? []).map((term) => ({ term }));
   if (code === 'whea') {
     const where = p.core === undefined ? 'apic' : p.apic === undefined ? 'core' : 'coreApic';
@@ -114,6 +120,36 @@ export function cpuChartSensors(schema: Schema | null): Sensor[] {
   const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
   const temperature = CPU_TEMPERATURES.map((id) => byId.get(id)).find(Boolean);
   return [temperature, byId.get('cpu/0/power/package')].filter((s): s is Sensor => s !== undefined);
+}
+
+/** DA5/DG12: the GPU temperature (core, else hotspot) and board power of a GPU device, as the chart's series. */
+export function gpuChartSensors(schema: Schema | null, deviceId: string | null): Sensor[] {
+  const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
+  // Without a known device (a test started elsewhere) the first GPU that has a temperature.
+  const device = deviceId ?? schema?.sensors.find((s) => s.deviceId.startsWith('gpu/') && s.kind === 'temperature')?.deviceId ?? null;
+  if (device === null) return [];
+  const temperature = ['core', 'hotspot'].map((name) => byId.get(`${device}/temperature/${name}`)).find(Boolean);
+  return [temperature, byId.get(`${device}/power/board`)].filter((s): s is Sensor => s !== undefined);
+}
+
+/** The four device-lost HRESULTs the GPU engine reports (DG4), by name. */
+const HRESULT_NAMES: Record<number, string> = {
+  0x887a0005: 'DXGI_ERROR_DEVICE_REMOVED',
+  0x887a0006: 'DXGI_ERROR_DEVICE_HUNG',
+  0x887a0007: 'DXGI_ERROR_DEVICE_RESET',
+  0x887a0020: 'DXGI_ERROR_DRIVER_INTERNAL_ERROR',
+};
+
+/** «DXGI_ERROR_DEVICE_HUNG (0x887A0006)»; an HRESULT of no name is just the hex. */
+export function hresultText(code: number): string {
+  const hex = `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+  const name = HRESULT_NAMES[code >>> 0];
+  return name ? `${name} (${hex})` : hex;
+}
+
+/** A 0–1 ratio as a percent with one decimal, in the locale's format («95.3»). */
+export function percentText(ratio: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(ratio * 100);
 }
 
 /**

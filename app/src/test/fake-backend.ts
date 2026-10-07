@@ -178,6 +178,8 @@ export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
     events: [],
     warnings: [],
     outcome: null,
+    loadPercent: null,
+    stability: null,
     ...over,
   };
 }

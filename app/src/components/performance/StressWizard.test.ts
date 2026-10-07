@@ -415,7 +415,7 @@ test('integrated GPU summary warns about shared memory', async () => {
   await next();
   await next();
   await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
-  await screen.findByText(t('performance.warn.gpuShared'));
+  await screen.findByText((_, node) => node?.tagName === 'P' && node.textContent === t('performance.warn.gpuShared'));
   expect(screen.queryByText(t('performance.wizard.isaDetected'), { exact: false })).toBeNull();
   expect(document.querySelector('.isa')).toBeNull();
   expect(screen.queryByText(t('performance.warn.noService'), { exact: false })).toBeNull();
@@ -428,7 +428,7 @@ test('integrated GPU summary warns about shared memory', async () => {
   await next();
   await next();
   await waitFor(() => expect(lastPreview(backend).gpu).toBe('gpu-a'));
-  expect(screen.queryByText(t('performance.warn.gpuShared'))).toBeNull();
+  expect(screen.queryByText((_, node) => node?.textContent === t('performance.warn.gpuShared'))).toBeNull();
 });
 
 test('customize hides isa and threads for the GPU', async () => {
@@ -446,4 +446,36 @@ test('customize hides isa and threads for the GPU', async () => {
   expect(within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') })).toBeTruthy();
   expect(within(panel).queryByText(t('performance.custom.isa'))).toBeNull();
   expect(within(panel).queryByRole('radio')).toBeNull();
+});
+
+test('the GPU tile marks VRAM and shared system RAM with terms', async () => {
+  await gpuSetup();
+  const dedicated = radio('Fake RTX 4080').closest('label')!;
+  expect(dedicated.querySelector('.term')?.textContent).toBe('VRAM');
+  expect(dedicated.textContent).toContain(plain('performance.wizard.gpu.detail', { vram: '16.0 GB' }));
+  const shared = radio('Fake Radeon Graphics').closest('label')!;
+  expect(shared.querySelector('.term')?.textContent).toBe('RAM');
+  expect(shared.textContent).toContain(t('performance.wizard.gpu.integrated'));
+});
+
+test('the shared memory warning marks VRAM with a term', async () => {
+  await gpuSetup();
+  await fireEvent.click(radio('Fake Radeon Graphics'));
+  await next();
+  await next();
+  await next();
+  const warning = await screen.findByText((_, node) => node?.tagName === 'P' && node.textContent === t('performance.warn.gpuShared'));
+  expect(warning.querySelector('.term')?.textContent).toBe('VRAM');
+});
+
+test('the overclock hint of a GPU speaks of the GPU, not of Curve Optimizer', async () => {
+  await gpuSetup();
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  const hint = () => document.getElementById('wizard-overclock-hint')?.textContent;
+  expect(hint()).toBe(t('performance.objective.overclock.hint.gpu'));
+  await back();
+  await fireEvent.click(radio('CPU'));
+  await next();
+  expect(hint()).toBe(t('performance.objective.overclock.hint'));
 });

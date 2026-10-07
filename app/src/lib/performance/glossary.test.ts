@@ -1,7 +1,7 @@
 import { catalogs, type Locale } from '../i18n/index.svelte';
 import performanceSection from '../../components/settings/PerformanceSection.svelte?raw';
 import baseline from '../../../../crates/oma-core/src/scores/cpu-1-baseline.json';
-import { BENCH_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
+import { BENCH_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
 
 const LOCALES: Locale[] = ['en', 'it'];
 
@@ -11,8 +11,8 @@ function missing(keys: string[]): string[] {
 
 test('every_catalog_mode_isa_and_pattern_has_an_entry', () => {
   const terms = [...MODE_TERMS, ...ISA_TERMS, ...PATTERN_TERMS];
-  // testdata/performance/catalog.json: 9 kernels and 8 load modes, 3 instruction sets, 5 RAM patterns.
-  expect(terms).toHaveLength(25);
+  // testdata/performance/catalog.json: 9 CPU and 5 GPU kernels, 8 load modes, 3 instruction sets, 5 RAM patterns.
+  expect(terms).toHaveLength(30);
   expect(missing(terms.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
   expect(missing(TERMS.map((term) => `glossary.${term}`))).toEqual([]);
 });
@@ -36,4 +36,11 @@ test('every_bench_kernel_has_an_entry', () => {
   expect([...BENCH_TERMS].sort()).toEqual(Object.keys(baseline.single).map((id) => `bench.${id}`).sort());
   expect(TERMS).toEqual(expect.arrayContaining(SCORE_TERMS));
   expect(missing([...BENCH_TERMS, ...SCORE_TERMS].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
+});
+
+test('every_gpu_term_has_an_entry', () => {
+  // Table T2 of the M8b1 plan.
+  expect([...GPU_TERMS].sort()).toEqual(['artifact', 'deviceLost', 'loadLevel', 'pcieReplay', 'stability', 'tdr', 'vram']);
+  expect(TERMS).toEqual(expect.arrayContaining(GPU_TERMS));
+  expect(missing(GPU_TERMS.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

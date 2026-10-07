@@ -6,7 +6,7 @@
   import { around, errorText, formatDuration, marked, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
-  import type { Custom, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
+  import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
   import Term from '../common/Term.svelte';
   import RiskNotice from './RiskNotice.svelte';
   import WizardCustomize from './WizardCustomize.svelte';
@@ -148,7 +148,13 @@
   }
 
   const noService = $derived(around(t('performance.warn.noService'), t('glossary.thermalStop.name')));
-  const overclockHint = $derived(around(t('performance.objective.overclock.hint'), t('glossary.curveOptimizer.name')));
+  const overclockHint = $derived(
+    component === 'gpu' ? [t('performance.objective.overclock.hint.gpu'), '', ''] : around(t('performance.objective.overclock.hint'), t('glossary.curveOptimizer.name')),
+  );
+  const gpuShared = $derived(around(t('performance.warn.gpuShared'), t('glossary.vram.name')));
+  /** The GPU tile's detail with its memory word carrying the term: VRAM, or the RAM an integrated GPU shares. */
+  const gpuDetail = (g: GpuChoice) =>
+    g.integrated ? around(t('performance.wizard.gpu.integrated'), 'RAM') : around(t('performance.wizard.gpu.detail', { vram: formatBytes(g.dedicatedBytes, i18n.locale) }), t('glossary.vram.name'));
 
   const cpuDetail = $derived(system && marked(t('performance.wizard.cpu.detail', { cores: system.cores, threads: system.logical })));
   const onePerCore = $derived(marked(t('performance.wizard.onePerCore')));
@@ -199,10 +205,11 @@
           {#if !ramOk}<span class="reason" id="wizard-ram-low">{t('performance.wizard.ram.low')}</span>{/if}
         </label>
         {#each system.gpus as g, index (g.deviceId)}
+          {@const detail = gpuDetail(g)}
           <label class="tile" class:on={component === 'gpu' && gpuId === g.deviceId}>
             <input type="radio" name="wizard-component" aria-labelledby="wizard-gpu-{index}" checked={component === 'gpu' && gpuId === g.deviceId} onchange={() => choose(() => ((component = 'gpu'), (gpuId = g.deviceId)))} />
             <b id="wizard-gpu-{index}">{g.name}</b>
-            <span class="muted">{g.integrated ? t('performance.wizard.gpu.integrated') : t('performance.wizard.gpu.detail', { vram: formatBytes(g.dedicatedBytes, i18n.locale) })}</span>
+            <span class="muted">{detail[0]}{#if detail[1]}<Term term="vram">{detail[1]}</Term>{/if}{detail[2]}</span>
           </label>
         {:else}
           <label class="tile disabled">
@@ -257,7 +264,7 @@
     {#if system}
       <div class="warnings">
         {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
-        {#if gpu?.integrated}<p class="warn">{t('performance.warn.gpuShared')}</p>{/if}
+        {#if gpu?.integrated}<p class="warn">{gpuShared[0]}{#if gpuShared[1]}<Term term="vram">{gpuShared[1]}</Term>{/if}{gpuShared[2]}</p>{/if}
         {#if bestIsa && component !== 'gpu'}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
         {#if plan && plan.ram_bytes > 0}<p class="note"><Term term="ramShare" />: {formatBytes(plan.ram_bytes, i18n.locale)}</p>{/if}
         {#if system.hypervisor}<p class="warn"><Term term="vm" />: {t('performance.wizard.vm')}</p>{/if}

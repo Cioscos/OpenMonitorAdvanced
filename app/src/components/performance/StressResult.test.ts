@@ -177,3 +177,59 @@ test('crash_facts_come_from_the_journal_not_an_earlier_error', async () => {
   expect(screen.queryByText(t('glossary.iteration.name'), { selector: '.facts dt *' })).toBeNull();
   expect(document.querySelector('.verdict p')).toBeNull();
 });
+
+const GPU_REQUEST = { component: 'gpu' as const, objective: 'overclock' as const, preset: 'standard' as const, custom: null, retryCore: null, gpu: 'gpu/pci-0000:01:00.0' };
+const gpuSession = (over: Partial<StressSession>): StressSession =>
+  makeStressSession({ id: 'gpu', component: 'gpu', device: 'Fake RTX 4080', objective: 'overclock', request: GPU_REQUEST, ...over });
+
+test('device lost result shows the driver code', async () => {
+  const lost = error({ kind: 'device_lost', kernel: 's1', isa: 'sse2', phase: 0, core: null, logical: null, expected: 0, actual: 0x887a0006, load_percent: 65, clockMhz: 2850 });
+  await setup(
+    gpuSession({
+      outcome: 'device_lost',
+      outcomeDetail: { verdict: 'device_lost', params: {}, phase: 0, kernel: 's1', core: null, tempC: 70, clockMhz: 2850, atMs: 134_000 },
+      errors: [lost],
+    }),
+  );
+  expect(screen.getByRole('heading', { name: t('performance.outcome.device_lost') })).toBeTruthy();
+  const code = screen.getByText(t('performance.result.deviceLostCode', { code: 'DXGI_ERROR_DEVICE_HUNG (0x887A0006)' }));
+  expect(code.closest('.term')).toBeTruthy();
+  // The load level and the clock at that moment.
+  expect(fact(t('glossary.loadLevel.name'))).toBe('65 %');
+  expect(fact(t('glossary.clock.name'))).toBe('2.85 GHz');
+});
+
+test('device lost without an error has no driver code', async () => {
+  await setup(gpuSession({ outcome: 'device_lost', outcomeDetail: { verdict: 'device_lost', params: {}, phase: 0, kernel: 's1', core: null, tempC: null, clockMhz: null, atMs: 9000 } }));
+  expect(screen.getByRole('heading', { name: t('performance.outcome.device_lost') })).toBeTruthy();
+  expect(screen.queryByText(t('performance.result.deviceLostCode', { code: '' }), { exact: false })).toBeNull();
+});
+
+test('low stability result shows the percent', async () => {
+  await setup(
+    gpuSession({
+      outcome: 'low_stability',
+      outcomeDetail: { verdict: 'low_stability', params: { stability: '95.3' }, phase: null, kernel: null, core: null, tempC: null, clockMhz: null, atMs: null },
+      stability: 0.9532,
+    }),
+  );
+  expect(screen.getByRole('heading', { name: t('performance.outcome.low_stability', { stability: '95.3' }) })).toBeTruthy();
+  const line = screen.getByText(t('performance.result.stability', { stability: '95.3' }));
+  expect(line.closest('.term')).toBeTruthy();
+});
+
+test('gpu result has no retry-core action', async () => {
+  const first = error({ kernel: 's6', isa: 'sse2', phase: 0, core: 2 });
+  const { backend } = await setup(
+    gpuSession({
+      outcome: 'errors',
+      outcomeDetail: { verdict: 'errors_core', params: { core: '2' }, phase: 0, kernel: 's6', core: 2, tempC: 70, clockMhz: 2850, atMs: 134_000 },
+      cores: [{ core: 2, state: 'failed', firstError: first }],
+      errors: [first],
+    }),
+  );
+  expect(screen.queryByRole('button', { name: t('performance.result.retryCore', { core: 2 }) })).toBeNull();
+  // «Repeat» still sends the GPU request, device id included.
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.result.repeat') }));
+  await waitFor(() => expect(backend.performanceStartRequests).toEqual([GPU_REQUEST]));
+});

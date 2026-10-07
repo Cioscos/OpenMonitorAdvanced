@@ -746,9 +746,11 @@ export type Outcome =
   | 'stopped_user'
   | 'stopped_thermal'
   | 'suspended'
-  | 'failed_to_start';
+  | 'failed_to_start'
+  | 'device_lost'
+  | 'low_stability';
 export type RunState = 'idle' | 'starting' | 'running' | 'stopping' | 'finished';
-export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced' | 'ramInsufficient';
+export type RunWarning = 'noService' | 'tempMissing' | 'wheaUnreadable' | 'ramReduced' | 'ramInsufficient' | 'pcieReplay' | 'vramReduced';
 
 /** One mode of «Personalizza»: `minutes` null keeps the profile's duration. */
 export interface ModeEdit {
@@ -853,6 +855,10 @@ export interface RunStatus {
   events: SessionEvent[];
   warnings: RunWarning[];
   outcome: Outcome | null;
+  /** The GPU load level of `ramp` and `alternate` phases (DG10), else null. */
+  loadPercent: number | null;
+  /** GPU runs: the throughput stability so far, 0-1, or null before it is known (DG7). */
+  stability: number | null;
 }
 
 /** What the machine offers for a test (`performance_system`). */
@@ -886,7 +892,7 @@ export interface ErrorRecord {
   phase: number;
   kernel: KernelId;
   isa: Isa;
-  kind: 'mismatch' | 'reference_disagreement' | 'reference_invalid' | 'hung';
+  kind: 'mismatch' | 'reference_disagreement' | 'reference_invalid' | 'hung' | 'device_lost';
   logical: number | null;
   core: number | null;
   iteration: number;
@@ -896,6 +902,8 @@ export interface ErrorRecord {
   atMs: number;
   tempC: number | null;
   clockMhz: number | null;
+  /** The GPU load level at the error (flattened from `ComputeError`, so snake_case), when it has one. */
+  load_percent?: number | null;
 }
 
 /** The verdict: a T3 key (`performance.outcome.<verdict>`) with its parameters, and where it happened. */
@@ -962,6 +970,10 @@ export interface StressSession {
   events: SessionEvent[];
   appVersion: string;
   loadVersion: string | null;
+  /** GPU runs: the throughput stability, 0-1 (DG7). */
+  stability?: number | null;
+  /** GPU runs: the schema device id of the GPU. */
+  gpuDeviceId?: string | null;
 }
 
 /** One entry of `performance_history`, newest first; `verdict` is a T3 key. Named apart from the benchmark `SessionSummary`. */

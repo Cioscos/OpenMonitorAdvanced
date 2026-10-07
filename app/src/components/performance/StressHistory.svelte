@@ -12,7 +12,7 @@
   // the same request again without the wizard; «Delete» asks first. The store keeps the list.
   let { backend, onOpen }: { backend: Backend; onOpen: (page: PerformancePage) => void } = $props();
 
-  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start'];
+  const CRIT = ['errors', 'errors_core', 'crashed', 'hung', 'system_crash', 'failed_to_start', 'device_lost', 'low_stability'];
   const MARKS = { ok: '✓', warn: '!', crit: '✕' } as const;
 
   let filter = $state<'all' | StressComponent>('all');
@@ -81,6 +81,7 @@
       { value: 'all', label: t('performance.history.all') },
       { value: 'cpu', label: t('performance.wizard.cpu') },
       { value: 'ram', label: t('performance.wizard.ram') },
+      { value: 'gpu', label: t('performance.wizard.gpu') },
     ]}
     value={filter}
     onChange={(next) => (filter = next as 'all' | StressComponent)}

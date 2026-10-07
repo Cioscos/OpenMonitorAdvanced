@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8b1).
+Updated at the end of every milestone (last update: M8b2).
 
 ## Open: code
 
@@ -43,7 +43,7 @@ Updated at the end of every milestone (last update: M8b1).
 
 Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a1-stress-cpu-ram.md`, tasks A1-A26; the branch `feat/m8a1-stress-cpu` is not merged: it waits for the live checks below).
 
-- M8a2, the CPU benchmark (spec M8 §4.6), is implemented and merged into `main` on 2026-10-07 (c84be32; see "Open: CPU benchmark (M8a2)" below); M8b1 (GPU stress test) is implemented (see "Open: GPU stress test (M8b1)" below); M8b2 (GPU benchmark), M8c (disk) and M8d (leaderboard) follow the spec.
+- M8a2, the CPU benchmark (spec M8 §4.6), is implemented and merged into `main` on 2026-10-07 (c84be32; see "Open: CPU benchmark (M8a2)" below); M8b1 (GPU stress test) is implemented (see "Open: GPU stress test (M8b1)" below); M8b2 (GPU benchmark) is implemented on `feat/m8b2-gpu-bench`, not merged (see "Open: GPU benchmark (M8b2)" below); M8c (disk) and M8d (leaderboard) follow the spec.
 - The installer paths of the stress test (`oma-load.exe` installed and signed, removed by the uninstaller) were never run: NSIS compiles only at the final verification and the paths need a VM or Windows Sandbox, as for M7c/M7d.
 - Core numbering: «Core N» of the app is compared with Ryzen Master (C01 = core 0) and the BIOS Curve Optimizer only in check P11.
 - K1 uses 10 accumulators (FIRESTARTER 12/27), so AVX-512 is slightly latency-bound; K2 working set is 48·N against 16·N in DA9; block times of K1 (10/8/2.5 ms) to recheck live. `crates/oma-load/src/kernels/`; when the benchmark touches them.
@@ -70,11 +70,7 @@ Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-
 - Q8: tooltip dei termini della GPU a posto.
 - Q9: in sviluppo, durante Q2 con la finestra aperta, app e WebView2 a 270 MB privati e 1,4% della macchina, `oma-load` a 37 MB, 1% di un core e 46 MB di VRAM. Non confrontabile con il budget (la build di sviluppo carica i moduli non compilati e gli strumenti di WebView2; nella M8a1, in release, 165,9 MB): la misura con la build release, a riposo e durante un test della GPU, si fa insieme alla B11 della M8a2.
 
-**Rinviato alla M8b2 (DG1, DG15):**
-
-- Benchmark della GPU Calcolo e Grafica (spec §5.2), pagina di punteggio, contagiri e la voce «GPU» del gruppo Punteggio nella barra laterale.
-- **S3 (flusso di memoria):** nessun profilo del §5.4 lo usa; serve al benchmark per la banda. Il protocollo v4 non ha `s3`: arriverà con la versione del benchmark.
-- **Avviso «altro processo sulla GPU»:** lo chiede il §5.2 solo per il benchmark.
+**Rinviato alla M8b2 (DG1, DG15), chiuso:** benchmark della GPU Calcolo e Grafica, pagina di punteggio, contagiri e voce «GPU» nella barra laterale; S3 (flusso di memoria, protocollo v5); avviso «altro processo sulla GPU» (bandiera `busy_gpu`); impronta degli shader (`LoadHello.shader_digest`, calcolata da `build.rs`; la dipendenza dalla versione di `fxc.exe` resta, ora rilevabile).
 
 **Da riprendere (minori rinviati nelle revisioni, dal registro del branch):**
 
@@ -90,6 +86,25 @@ Voci aperte dopo le revisioni della M8b1 (piano `docs/superpowers/plans/2026-10-
 - **Personalizza:** i minuti di S1 si riscalano insieme per tutte e quattro le fasi S1 del giro di overclock: da confermare con l'utente alla prova.
 - **Percorsi dell'installer:** `oma-load.exe` con il codice della GPU e gli shader compilati non sono stati provati con un setup installato (VM o Windows Sandbox), come per la M8a.
 - **Build:** `oma-load` ora richiede il Windows SDK (`fxc.exe`, o la variabile `OMA_FXC`) per compilare gli shader; i runner `windows-latest` lo hanno, da confermare alla prima CI del branch.
+
+## Open: GPU benchmark (M8b2)
+
+Voci aperte dopo le revisioni della M8b2 (piano `docs/superpowers/plans/2026-10-07-m8b2-benchmark-gpu.md`, task H1-H11). Implementata su `feat/m8b2-gpu-bench`, non unita in `main`.
+
+- **H12, rimandata alla fine della M8, da fare con l'utente (insieme alla B11):** prove dal vivo R1-R11 e taratura della scala (`crates/oma-core/src/scores/gpu-1-baseline.json`, oggi `provisional: true` con i valori misurati sulla RTX 4080: FMA 47,18 TFLOPS, hash 17,58 TIOPS, banda 592,67 GB/s, riempimento 266,84, texture 506,83, sovrapposizione 267,01 Gpixel/s o Gtexel/s) con la build release e l'esempio `calibrate_gpu`; poi la misura dell'impronta con `scripts/measure-footprint.ps1` (vedi `docs/perf-budget.md`).
+- **Sovrapposizione al limite dei ROP:** sulla RTX 4080 riempimento e fusione RGBA8 girano entrambi al limite dei ROP (circa 267 Gpixel/s), quindi la sovrapposizione non è più lenta del riempimento (il test accetta ≤ riempimento × 1,05) e il punteggio Grafica pesa il limite dei ROP per due terzi. Se non convince: bersaglio RGBA16F per la sovrapposizione, con nuova taratura.
+- **Confronto dentro le finestre:** il dispatch di confronto di S1 e S2 sta dentro le finestre cronometrate (serve all'errore di calcolo, e la scala è tarata con lo stesso metodo): velocità un po' basse (< 1% sulla 4080, qualche punto percentuale sulla iGPU). Alternativa: confrontare un invio ogni N.
+- **`stream_set` (S3):** insieme = min(1 GiB, bersaglio) arrotondato a 4 KiB, ×2; pezzi = il numero pari più piccolo con pezzo ≤ chunk; `None` sotto i 256 MiB. Nessun nuovo tentativo con metà dimensione se l'allocazione fallisce (salta con `vram`/`gpu_error`); da guardare sulla iGPU in H12.
+- **Blocco silenzioso:** un blocco rilevato dall'orologio dell'app (pipe muta o fase troppo lunga) finisce `Failed("hung")` senza salvare, come la CPU; salva un punteggio non valido con la bandiera `hung` solo l'`Error{kind: hung}` di `oma-load`.
+- **Protocollo:** in `load.rs` `validate` i letterali 64 e 1..=30 potrebbero essere `MAX_RATES`/`MAX_WINDOWS`; `shader_digest` si controlla solo nella lunghezza (non 16 cifre esadecimali minuscole); la fixture `run_gpu_bench` non passa per `validate()` in `load_fixtures.rs`.
+- **Motore e shader:** `DIGEST_SHADERS` di `build.rs` va esteso se S4, S5 o S6 entrano nel benchmark; `window_end` dopo `submit_loop` solo con `Ok` (con `Err` si fida dell'autoguarigione del `window_begin` seguente); `wait_for` con sentinella pendente `{Frequency 0, Disjoint FALSE}` (preesistente).
+- **Carichi grafici (`bench_gfx.rs`):** `E_FAIL` scritto come costante magica; blend, raster, viewport e sampler restano legati dopo il disegno; riempimento e sovrapposizione a colore costante senza clear (la compressione del colore potrebbe gonfiare il riempimento su alcune GPU).
+- **S3:** nessun nuovo tentativo con allocazione dimezzata; shader e buffer costanti lasciati legati dopo il dispatch, un clone dell'UAV a ogni dispatch (innocui).
+- **Controller e UI:** l'ago dal vivo tiene la mediana del gruppo precedente se l'ultimo passo di un gruppo fallisce (stesso schema della CPU); il catch-all `_ => compute_error` nei tipi di errore andrebbe reso esaustivo, senza test di `ReferenceDisagreement`; `to_io` maschera `& 0xFFFF`, sbagliato per HRESULT non Win32; il pulsante «Avvia» disabilitato per una GPU mancante non ha `title` (lo spiega l'avviso sotto).
+- **App:** la quota «occupato» usa la tabella dei processi della GPU (prime 20 righe): se i nostri processi, `dwm` e 0/4 le riempiono tutte, un altro programma sfugge; il toast senza `device_id` darebbe `device:""` (oggi impossibile); `gpus()` si enumera sotto il mutex di `active`; il test dei sei secondi; `on_battery` letto due volte all'avvio.
+- **Test:** `bench_window_times_the_gpu` cronometra 20 invii S1 con `window_begin`/`window_end` direttamente (la fase del motore con `windows: 1` supera il tetto di 2 s dei test); il percorso del motore con le finestre è coperto solo da test con `Submit` finto fino alla prova R1. Sotto il carico di `cargo test --workspace` (compilazione in parallelo) `gpu::tests::pause_resume_stops_submitting_during_the_pause` e `gpu::tests::ramp_reports_the_load_level` di `oma-load` sono falliti una volta e passano da soli e in una seconda esecuzione completa: probabili test legati al tempo, da indagare.
+- **Percorsi dell'installer:** `oma-load.exe` con S3, i carichi grafici del benchmark e l'impronta degli shader non sono stati provati con un setup installato (VM o Windows Sandbox).
+- **Esportazione e condivisione (M8d):** come per la CPU, rinviate.
 
 ## Open: CPU benchmark (M8a2)
 

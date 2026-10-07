@@ -72,7 +72,7 @@ SMART data.
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
 - **Performance view.** A stress test for the CPU, the RAM and the GPU, with a guided wizard (normal check
   or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
-  of past sessions, and a CPU benchmark with a single-core and a multi-core score on gauges
+  of past sessions, and benchmarks for the CPU (a single-core and a multi-core score) and the GPU (a Compute and a Graphics score) on gauges
   (see [Performance view](#performance-view)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
@@ -197,7 +197,6 @@ from the tray. Technical terms have a plain-words tooltip.
   GPU reset by the driver, a speed that is not constant (below 97 %), thermal stop at the
   maximum GPU temperature you set (default 90 °C, Settings › Performance). The PCIe replay
   counter (NVIDIA only) is shown as a warning. It needs no administrator rights and no service.
-  The graphics benchmark comes later.
 - **CPU benchmark.** *Performance › Score › CPU* runs six workloads (integer: NTT, hash, compression,
   sort; floating point: FFT, matrix product) first on one core, then on every thread, in about 2
   minutes, with the same load process. The score is in points on a fixed scale, the same for every
@@ -206,6 +205,14 @@ from the tray. Technical terms have a plain-words tooltip.
   battery, thermally limited, with a busy system, in a virtual machine or without the service
   stays valid but carries a warning; a calculation error makes it invalid. Until the scale is
   calibrated the points are marked as provisional. Exporting and sharing come later.
+- **GPU benchmark.** *Performance › Score › GPU* measures one graphics card at a time with the same
+  load process, in two scores on a fixed scale (twice the points, twice the work in the same time):
+  Compute (floating-point and integer compute, memory bandwidth) and Graphics (pixel fill, texture
+  reads, overdraw). Each load is timed in one-second windows and the median of the windows counts, so
+  a short disturbance does not move the result; the page shows the speed of each load and the history.
+  A measurement on battery, with another program busy on the GPU, with reduced video memory (VRAM) or
+  thermally limited stays valid but carries a warning; a calculation error, a driver reset or a hang
+  makes it invalid. Until the scale is calibrated the points are marked as provisional.
 - **Admin rights** are not needed. Without the service the CPU test runs, with a warning, and
   without thermal stop.
 - **RAM limit.** The RAM test covers only the memory Windows gives the program (4 KB pages): it is

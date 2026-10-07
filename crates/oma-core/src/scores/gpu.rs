@@ -355,11 +355,11 @@ mod tests {
     fn gpu_baseline_parses_and_has_three_loads_per_group() {
         let b = gpu_baseline();
         assert_eq!(b.version, "gpu-1");
-        assert!(b.provisional);
+        assert!(!b.provisional);
         assert_eq!((b.compute.len(), b.graphics.len()), (3, 3));
         assert!(loads(BenchMode::Compute).all(|l| b.compute[&l.id] > 0.0));
         assert!(loads(BenchMode::Graphics).all(|l| b.graphics[&l.id] > 0.0));
-        assert_eq!(b.compute[&BenchKernel::Fma], 47.18);
+        assert_eq!(b.compute[&BenchKernel::Fma], 46.29);
         assert!(parse_gpu_baseline(&GPU_BASELINE_JSON.replace("\"gpu-1\"", "\"gpu-2\"")).is_err());
         assert!(parse_gpu_baseline(&GPU_BASELINE_JSON.replace("\"fill\"", "\"sort\"")).is_err());
     }
@@ -415,7 +415,7 @@ mod tests {
         let s = calibration_score();
         let c = gpu_calibration_from(&s).unwrap();
         assert_eq!((c.version.as_str(), c.provisional), ("gpu-1", false));
-        assert_eq!(c.compute[&BenchKernel::Fma], 47.18);
+        assert_eq!(c.compute[&BenchKernel::Fma], 46.29);
         assert_eq!((c.compute.len(), c.graphics.len()), (3, 3));
     }
 

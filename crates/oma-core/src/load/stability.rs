@@ -1,11 +1,12 @@
-//! Throughput stability of the GPU stress phases (plan DG7): the slowest 10 s window of a
-//! phase over its fastest, after a 30 s warm-up.
+//! Throughput stability of the GPU stress phases (plan DG7): the slowest 60 s window of a
+//! phase over its fastest, after a 30 s warm-up. A minute, like a 3DMark stress loop, so
+//! a few seconds of desktop work on the same GPU do not fail a healthy card.
 
 use std::collections::BTreeMap;
 
 use super::plan::Objective;
 
-pub const WINDOW_MS: u64 = 10_000;
+pub const WINDOW_MS: u64 = 60_000;
 pub const WARMUP_MS: u64 = 30_000;
 /// Below this a completed run is `low_stability` (DG8).
 pub const MIN_STABILITY: f64 = 0.97;
@@ -115,6 +116,14 @@ mod tests {
     use super::*;
 
     const S: u64 = 1_000;
+    /// The window and the warm-up in seconds.
+    const WS: u64 = WINDOW_MS / S;
+    const W0: u64 = WARMUP_MS / S;
+
+    /// The first second of window `n`.
+    fn win(n: u64) -> u64 {
+        W0 + n * WS
+    }
 
     /// One rate a second at `from_s..to_s` (seconds since the phase start at 0).
     fn feed(m: &mut StabilityMeter, from_s: u64, to_s: u64, rate: f64) {
@@ -130,55 +139,62 @@ mod tests {
     }
 
     #[test]
+    fn windows_last_a_minute_like_the_3dmark_loops() {
+        // Spec §5.4: worst / best like 3DMark, whose loops last about a minute; 10 s
+        // windows failed a healthy RTX 4080 with only the app window open (G14).
+        assert_eq!(WINDOW_MS, 60_000);
+    }
+
+    #[test]
     fn steady_rates_give_stability_one() {
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 0, 71, 25.0);
+        feed(&mut m, 0, win(2) + 1, 25.0);
         assert_eq!(m.result(), Some(1.0));
     }
 
     #[test]
     fn a_slow_window_lowers_stability() {
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 30, 50, 100.0);
-        feed(&mut m, 50, 60, 95.0);
+        feed(&mut m, win(0), win(2), 100.0);
+        feed(&mut m, win(2), win(3), 95.0);
         // Closes the third window; the open one never counts.
-        feed(&mut m, 60, 61, 10.0);
+        feed(&mut m, win(3), win(3) + 1, 10.0);
         assert!((m.result().unwrap() - 0.95).abs() < 1e-12);
     }
 
     #[test]
     fn zero_rate_stalls_lower_stability() {
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 30, 40, 100.0);
+        feed(&mut m, win(0), win(1), 100.0);
         // Half of the second window stalls: its mean is 50.
-        feed(&mut m, 40, 45, 100.0);
-        feed(&mut m, 45, 50, 0.0);
-        feed(&mut m, 50, 51, 100.0);
+        feed(&mut m, win(1), win(1) + WS / 2, 100.0);
+        feed(&mut m, win(1) + WS / 2, win(2), 0.0);
+        feed(&mut m, win(2), win(2) + 1, 100.0);
         assert!((m.result().unwrap() - 0.5).abs() < 1e-12);
         // Negative or non-finite rates are still ignored.
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 30, 50, 100.0);
-        m.rate(-1.0, 41 * S);
-        m.rate(f64::NAN, 42 * S);
-        feed(&mut m, 50, 51, 100.0);
+        feed(&mut m, win(0), win(2), 100.0);
+        m.rate(-1.0, (win(1) + 1) * S);
+        m.rate(f64::NAN, (win(1) + 2) * S);
+        feed(&mut m, win(2), win(2) + 1, 100.0);
         assert_eq!(m.result(), Some(1.0));
     }
 
     #[test]
     fn warmup_is_excluded_from_stability() {
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 0, 30, 10.0);
-        feed(&mut m, 30, 61, 100.0);
+        feed(&mut m, 0, W0, 10.0);
+        feed(&mut m, W0, win(2) + 1, 100.0);
         assert_eq!(m.result(), Some(1.0));
     }
 
     fn throttled_run(objective: Objective) -> Option<f64> {
         let mut m = meter(objective);
-        feed(&mut m, 30, 50, 100.0);
-        feed(&mut m, 50, 60, 80.0);
-        m.throttling(false, 45 * S);
-        m.throttling(true, 55 * S);
-        feed(&mut m, 60, 61, 100.0);
+        feed(&mut m, win(0), win(2), 100.0);
+        feed(&mut m, win(2), win(3), 80.0);
+        m.throttling(false, (win(1) + 5) * S);
+        m.throttling(true, (win(2) + 5) * S);
+        feed(&mut m, win(3), win(3) + 1, 100.0);
         m.result()
     }
 
@@ -196,10 +212,10 @@ mod tests {
     fn too_few_windows_give_no_stability() {
         assert_eq!(StabilityMeter::new(Objective::Normal).result(), None);
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 30, 40, 100.0);
-        feed(&mut m, 40, 41, 50.0);
+        feed(&mut m, win(0), win(1), 100.0);
+        feed(&mut m, win(1), win(1) + 1, 50.0);
         assert_eq!(m.result(), None, "one complete window");
-        feed(&mut m, 41, 51, 50.0);
+        feed(&mut m, win(1) + 1, win(2) + 1, 50.0);
         assert_eq!(m.result(), Some(0.5));
     }
 
@@ -207,22 +223,23 @@ mod tests {
     fn phases_that_do_not_count_are_ignored() {
         let mut m = StabilityMeter::new(Objective::Normal);
         m.phase_started(0, false, 0);
-        feed(&mut m, 30, 50, 100.0);
-        feed(&mut m, 50, 61, 10.0);
+        feed(&mut m, win(0), win(2), 100.0);
+        feed(&mut m, win(2), win(3) + 1, 10.0);
         assert_eq!(m.result(), None);
     }
 
     #[test]
     fn session_stability_is_the_worst_phase() {
         let mut m = meter(Objective::Normal);
-        feed(&mut m, 30, 40, 100.0);
-        feed(&mut m, 40, 50, 98.0);
+        feed(&mut m, win(0), win(1), 100.0);
+        feed(&mut m, win(1), win(2), 98.0);
         // A repeated start of the same phase changes nothing.
-        m.phase_started(0, true, 45 * S);
-        feed(&mut m, 50, 55, 1.0);
-        m.phase_started(1, true, 100 * S);
-        feed(&mut m, 130, 140, 100.0);
-        feed(&mut m, 140, 151, 90.0);
+        m.phase_started(0, true, (win(1) + 5) * S);
+        feed(&mut m, win(2), win(2) + 5, 1.0);
+        let p = win(3);
+        m.phase_started(1, true, p * S);
+        feed(&mut m, p + win(0), p + win(1), 100.0);
+        feed(&mut m, p + win(1), p + win(2) + 1, 90.0);
         assert!((m.result().unwrap() - 0.9).abs() < 1e-12);
     }
 }

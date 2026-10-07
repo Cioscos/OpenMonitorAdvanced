@@ -490,3 +490,14 @@ test('the overclock hint of a GPU speaks of the GPU, not of Curve Optimizer', as
   await next();
   expect(hint()).toBe(t('performance.objective.overclock.hint'));
 });
+
+test('a GPU summary asks to leave the PC idle for the stability', async () => {
+  const { backend } = await gpuSetup();
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
+  const note = await screen.findByText((_, node) => node?.tagName === 'P' && !!node.textContent?.includes(t('performance.wizard.gpuIdle')));
+  expect(note.querySelector('.term')?.textContent).toBe(t('glossary.stability.name'));
+});

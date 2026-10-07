@@ -266,3 +266,10 @@ test('low stability title is in the locale format', async () => {
   i18n.locale = 'it';
   expect(await screen.findByRole('heading', { name: t('performance.outcome.low_stability', { stability: '95,3' }) })).toBeTruthy();
 });
+
+test('a GPU result labels the board power, not the CPU package', async () => {
+  await setup(gpuSession({}));
+  const labels = [...document.querySelectorAll('dt')].map((d) => d.textContent);
+  expect(labels).toContain(t('performance.run.power'));
+  expect(labels).not.toContain(t('glossary.packagePower.name'));
+});

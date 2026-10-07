@@ -2174,15 +2174,16 @@ mod tests {
     #[test]
     fn completed_gpu_run_with_low_stability_is_low_stability() {
         let mut c = gpu_ctl(Objective::Overclock);
-        for s in 1..=70u64 {
+        // 60 s windows after the 30 s warm-up: 30-90, 90-150, 150-210, 210-270.
+        for s in 1..=270u64 {
             let t = s * 1000;
-            let rate = if (50..60).contains(&s) { 90.0 } else { 100.0 };
+            let rate = if (150..210).contains(&s) { 90.0 } else { 100.0 };
             c.on_load(&gpu_progress(t, rate, None), clock(t));
             // A throttled window is dropped in overclock: not the slow one here.
-            c.on_sample(&gpu_sample(Some(70.0), Some(s == 45)), false, clock(t));
+            c.on_sample(&gpu_sample(Some(70.0), Some(s == 100)), false, clock(t));
         }
         assert!((c.status().stability.unwrap() - 0.9).abs() < 1e-9);
-        let a = c.on_load(&finished(FinishReason::Completed), clock(70_500));
+        let a = c.on_load(&finished(FinishReason::Completed), clock(270_500));
         let a = settle(&mut c, a);
         assert!(has_finished(&a, Outcome::LowStability));
         assert_eq!(verdict(&c), "low_stability");

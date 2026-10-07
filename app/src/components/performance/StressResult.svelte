@@ -238,7 +238,7 @@
           <div><dt><Term term="phase">{t('performance.result.phases')}</Term></dt><dd>{phaseCounts}</dd></div>
           <div><dt><Term term="check" /></dt><dd>{counter.format(checks)}</dd></div>
           <div><dt>{t('performance.result.fact.temp')}</dt><dd>{maxAvg(session.stats.tempMaxC, session.stats.tempAvgC, formatTemperature)}</dd></div>
-          <div><dt><Term term="packagePower" /></dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
+          <div><dt>{#if session.component === 'gpu'}{t('performance.run.power')}{:else}<Term term="packagePower" />{/if}</dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
           <div><dt><Term term="clock" /></dt><dd>{maxAvg(session.stats.clockMaxMhz, session.stats.clockAvgMhz, formatClock)}</dd></div>
           {#if whea}
             <div>

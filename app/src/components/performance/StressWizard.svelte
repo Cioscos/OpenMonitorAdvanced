@@ -264,6 +264,7 @@
     {#if system}
       <div class="warnings">
         {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
+        {#if component === 'gpu'}<p class="note"><Term term="stability" />: {t('performance.wizard.gpuIdle')}</p>{/if}
         {#if gpu?.integrated}<p class="warn">{gpuShared[0]}{#if gpuShared[1]}<Term term="vram">{gpuShared[1]}</Term>{/if}{gpuShared[2]}</p>{/if}
         {#if bestIsa && component !== 'gpu'}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
         {#if plan && plan.ram_bytes > 0}<p class="note"><Term term="ramShare" />: {formatBytes(plan.ram_bytes, i18n.locale)}</p>{/if}

@@ -61,6 +61,12 @@ function phasesFor(request: StartRequest, totalS: number): Phase[] {
       phase({ kernel: 'k10', duration_s: totalS / 2, isa: 'sse2', size: 'ram', patterns: [...catalog.patterns] as Phase['patterns'], stop_on_error: stop }),
     ];
   }
+  if (request.component === 'gpu') {
+    return [
+      phase({ kernel: 's5', alt_kernel: 's1', duration_s: Math.round(totalS * 0.7), isa: 'sse2', stop_on_error: stop }),
+      phase({ kernel: 's1', mode: 'ramp', duration_s: totalS - Math.round(totalS * 0.7), isa: 'sse2', stop_on_error: stop }),
+    ];
+  }
   const cycle = Math.round((totalS * 2) / 3);
   return [
     phase({ kernel: 'k1', duration_s: totalS / 4, stop_on_error: stop }),
@@ -301,7 +307,10 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       tjmaxC: 89,
       stopC: 84,
       hypervisor: false,
-      gpus: [],
+      gpus: [
+        { deviceId: 'gpu-mock-dedicated', name: 'Mock GeForce RTX 4080', integrated: false, dedicatedBytes: 16 * GIB },
+        { deviceId: 'gpu-mock-integrated', name: 'Mock Radeon Graphics', integrated: true, dedicatedBytes: 512 * 1024 ** 2 },
+      ],
     }),
     preview(request: StartRequest): Plan {
       const total = presetSeconds(request);

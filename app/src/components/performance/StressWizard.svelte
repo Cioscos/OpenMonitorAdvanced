@@ -25,6 +25,8 @@
 
   let step = $state(0);
   let component = $state<StressComponent>('cpu');
+  /** The device id of the chosen GPU (DG13), kept by id so «Repeat» works after a restart. */
+  let gpuId = $state<string | null>(null);
   let objective = $state<Objective>('normal');
   let preset = $state<Preset>('standard');
   let custom = $state<Custom | null>(null);
@@ -41,7 +43,8 @@
   const ramOk = $derived((system?.ramBudget ?? 0) >= RAM_MIN);
   const presetSeconds = $derived((catalog.presets as Record<string, Partial<Record<Preset, number>>>)[`${component}.${objective}`] ?? {});
   const presets = $derived(PRESETS.filter((p) => presetSeconds[p] !== undefined));
-  const request = $derived<StartRequest>({ component, objective, preset, custom: custom && $state.snapshot(custom), retryCore: null });
+  const gpu = $derived(component === 'gpu' ? (system?.gpus.find((g) => g.deviceId === gpuId) ?? null) : null);
+  const request = $derived<StartRequest>({ component, objective, preset, custom: custom && $state.snapshot(custom), retryCore: null, gpu: component === 'gpu' ? gpuId : undefined });
   const total = $derived(plan?.phases.reduce((sum, p) => sum + p.duration_s, 0) ?? 0);
   /**
    * The summary's rows: with «Personalizza», every phase of the profile stays in place and those of an
@@ -56,10 +59,10 @@
     return base.phases.map((b) => (off.has(b.kernel) ? { p: b, off: true } : { p: plan!.phases[i]?.kernel === b.kernel ? plan!.phases[i++]! : b, off: false }));
   });
   const bestIsa = $derived((catalog.isa as Isa[]).find((i) => system?.isa.includes(i)) ?? null);
-  const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || ramOk) : true);
+  const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || (component === 'ram' ? ramOk : gpuId !== null)) : true);
   const canStart = $derived(plan !== null && !performanceStore.running && !starting);
   const choice = $derived([
-    t(component === 'cpu' ? 'performance.wizard.cpu' : 'performance.wizard.ram'),
+    component === 'gpu' ? (gpu?.name ?? t('performance.wizard.gpu')) : t(component === 'cpu' ? 'performance.wizard.cpu' : 'performance.wizard.ram'),
     t(`performance.objective.${objective}`),
     t(`performance.preset.${preset}`),
   ]);
@@ -195,8 +198,20 @@
           <span class="muted"><Term term="ramShare" />: {formatBytes(system.ramBudget, i18n.locale)}</span>
           {#if !ramOk}<span class="reason" id="wizard-ram-low">{t('performance.wizard.ram.low')}</span>{/if}
         </label>
+        {#each system.gpus as g, index (g.deviceId)}
+          <label class="tile" class:on={component === 'gpu' && gpuId === g.deviceId}>
+            <input type="radio" name="wizard-component" aria-labelledby="wizard-gpu-{index}" checked={component === 'gpu' && gpuId === g.deviceId} onchange={() => choose(() => ((component = 'gpu'), (gpuId = g.deviceId)))} />
+            <b id="wizard-gpu-{index}">{g.name}</b>
+            <span class="muted">{g.integrated ? t('performance.wizard.gpu.integrated') : t('performance.wizard.gpu.detail', { vram: formatBytes(g.dedicatedBytes, i18n.locale) })}</span>
+          </label>
+        {:else}
+          <label class="tile disabled">
+            <input type="radio" name="wizard-component" aria-labelledby="wizard-gpu-none" disabled />
+            <b id="wizard-gpu-none">{t('performance.wizard.gpu.none')}</b>
+          </label>
+        {/each}
       </div>
-      {#if !system.serviceConnected}{@render noServiceWarning()}{/if}
+      {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
     {/if}
   {:else if step === 1}
     <div class="tiles big" role="radiogroup" aria-label={t('performance.wizard.step.objective')}>
@@ -227,10 +242,10 @@
       <p class="total">{t('performance.wizard.total', { duration: formatDuration(total) })}</p>
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
         {#each rows as { p, off }, index (index)}
-          <li class:off style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
+          <li class:off class:gpu={component === 'gpu'} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
             <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
-            <span class="isa"><Term term={`isa.${p.isa}`} /></span>
-            <span class="load"><Term term={`mode.${p.mode}`} /> · {#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}</span>
+            {#if component !== 'gpu'}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
+            <span class="load"><Term term={`mode.${p.mode}`} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>
             <span class="dur">{off ? t('performance.wizard.excluded') : formatDuration(p.duration_s)}</span>
           </li>
         {/each}
@@ -241,8 +256,9 @@
 
     {#if system}
       <div class="warnings">
-        {#if !system.serviceConnected}{@render noServiceWarning()}{/if}
-        {#if bestIsa}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
+        {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
+        {#if gpu?.integrated}<p class="warn">{t('performance.warn.gpuShared')}</p>{/if}
+        {#if bestIsa && component !== 'gpu'}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
         {#if plan && plan.ram_bytes > 0}<p class="note"><Term term="ramShare" />: {formatBytes(plan.ram_bytes, i18n.locale)}</p>{/if}
         {#if system.hypervisor}<p class="warn"><Term term="vm" />: {t('performance.wizard.vm')}</p>{/if}
       </div>
@@ -252,7 +268,7 @@
       <button type="button" class="ghost" aria-expanded={customizing} disabled={base === null} onclick={toggleCustomize}>{t('performance.wizard.customize')}</button>
     </div>
     {#if customizing && custom && base && system}
-      <WizardCustomize bind:custom {base} isa={system.isa} />
+      <WizardCustomize bind:custom {base} isa={system.isa} gpu={component === 'gpu'} />
     {/if}
   {/if}
 
@@ -429,6 +445,9 @@
     font-size: 14px;
     border-bottom: 1px solid var(--border);
     box-shadow: inset 2px 0 0 var(--c);
+  }
+  .phases li.gpu {
+    grid-template-columns: minmax(0, 2.4fr) minmax(0, 2fr) 90px;
   }
   .load,
   .isa {

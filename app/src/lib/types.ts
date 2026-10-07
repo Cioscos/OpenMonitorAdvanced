@@ -726,12 +726,12 @@ export interface BenchmarkEntry {
 // rest is camelCase. Values that are u64 in Rust (seeds, `expected`/`actual`) arrive as JSON
 // numbers and lose precision past 2^53: the UI only shows them.
 
-export type StressComponent = 'cpu' | 'ram';
+export type StressComponent = 'cpu' | 'ram' | 'gpu';
 export type Objective = 'normal' | 'overclock';
 export type Preset = 'quick' | 'standard' | 'long' | 'night';
 export type Isa = 'avx512' | 'avx2' | 'sse2';
-export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort';
-export type LoadMode = 'steady' | 'variable' | 'light';
+export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort' | 's1' | 's2' | 's4' | 's5' | 's6';
+export type LoadMode = 'steady' | 'variable' | 'light' | 'ramp' | 'alternate' | 'pause_resume';
 export type Placement = 'all_logical' | 'one_per_core' | 'core_cycle';
 export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto' | 'fixed';
 export type RamPattern = 'moving_inversions' | 'modulo20' | 'random' | 'address' | 'crc_copy';
@@ -774,6 +774,8 @@ export interface StartRequest {
   custom: Custom | null;
   /** «Retry only core N»: a plan with only the cycle on that core. */
   retryCore: { core: number; kernel: KernelId } | null;
+  /** The device id of the GPU to test (DG13), for the `gpu` component only. */
+  gpu?: string | null;
 }
 
 /** One phase of the plan (`oma-ipc::load::Phase`, snake_case). */
@@ -868,7 +870,7 @@ export interface SystemInfo {
   stopC: number;
   hypervisor: boolean;
   /** The GPUs a test can target (DG13). */
-  gpus?: GpuChoice[];
+  gpus: GpuChoice[];
 }
 
 /** A GPU the wizard offers, chosen by its stable device id. */

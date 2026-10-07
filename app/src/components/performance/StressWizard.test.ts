@@ -349,3 +349,101 @@ test('each_step_moves_the_focus_to_its_title', async () => {
   await back();
   expect(document.activeElement?.textContent).toBe(t('performance.wizard.step.component'));
 });
+
+const GPUS = [
+  { deviceId: 'gpu-a', name: 'Fake RTX 4080', integrated: false, dedicatedBytes: 16 * 1024 * MIB },
+  { deviceId: 'gpu-b', name: 'Fake Radeon Graphics', integrated: true, dedicatedBytes: 512 * MIB },
+];
+const GPU_PLAN: Plan = {
+  seed: 1,
+  ram_bytes: 0,
+  phases: [
+    phase({ kernel: 's5', alt_kernel: 's1', duration_s: 630, isa: 'sse2' }),
+    phase({ kernel: 's1', mode: 'ramp', duration_s: 270, isa: 'sse2' }),
+  ],
+};
+
+async function gpuSetup(gpus = GPUS) {
+  const ctx = await setup({ system: { gpus }, settings: { performance: { riskNoticeSeen: true } } });
+  ctx.backend.performancePlan = structuredClone(GPU_PLAN);
+  return ctx;
+}
+
+test('lists one tile per GPU', async () => {
+  await gpuSetup();
+  const a = radio('Fake RTX 4080');
+  expect(a.closest('label')?.textContent).toContain(plain('performance.wizard.gpu.detail', { vram: '16.0 GB' }));
+  expect(radio('Fake Radeon Graphics').closest('label')?.textContent).toContain(t('performance.wizard.gpu.integrated'));
+});
+
+test('shows the no-GPU tile when none is available', async () => {
+  await gpuSetup([]);
+  const none = radio(t('performance.wizard.gpu.none'));
+  expect(none.disabled).toBe(true);
+});
+
+test('GPU choice sends its deviceId', async () => {
+  const { backend } = await gpuSetup();
+  await fireEvent.click(radio('Fake Radeon Graphics'));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(lastPreview(backend)).toMatchObject({ component: 'gpu', gpu: 'gpu-b' }));
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  await waitFor(() => expect(backend.performanceStartRequests.at(-1)).toMatchObject({ component: 'gpu', gpu: 'gpu-b' }));
+});
+
+test('GPU presets come from gpu.<objective>', async () => {
+  await gpuSetup();
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  await next();
+  expect(radio(preset('quick', '5 min'))).toBeTruthy();
+  expect(radio(preset('long', '30 min'))).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: preset('night', '8 h') })).toBeNull();
+  await back();
+  await fireEvent.click(radio(t('performance.objective.overclock')));
+  await next();
+  expect(radio(preset('night', '2 h'))).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: preset('quick', '5 min') })).toBeNull();
+});
+
+test('integrated GPU summary warns about shared memory', async () => {
+  const { backend } = await gpuSetup();
+  await fireEvent.click(radio('Fake Radeon Graphics'));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
+  await screen.findByText(t('performance.warn.gpuShared'));
+  expect(screen.queryByText(t('performance.wizard.isaDetected'), { exact: false })).toBeNull();
+  expect(document.querySelector('.isa')).toBeNull();
+  expect(screen.queryByText(t('performance.warn.noService'), { exact: false })).toBeNull();
+  // A dedicated GPU has no such warning.
+  await back();
+  await back();
+  await back();
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(lastPreview(backend).gpu).toBe('gpu-a'));
+  expect(screen.queryByText(t('performance.warn.gpuShared'))).toBeNull();
+});
+
+test('customize hides isa and threads for the GPU', async () => {
+  const { backend } = await gpuSetup();
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  await next();
+  await next();
+  await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
+  await screen.findByText(t('performance.wizard.total', { duration: '15 min' }));
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  const panel = screen.getByRole('region', { name: t('performance.wizard.customize') });
+  // S5 and S1 appear once each, with minutes and «stop at the first error».
+  expect(within(panel).getAllByRole('spinbutton')).toHaveLength(2);
+  expect(within(panel).getByRole('checkbox', { name: t('performance.custom.stopOnFirstError') })).toBeTruthy();
+  expect(within(panel).queryByText(t('performance.custom.isa'))).toBeNull();
+  expect(within(panel).queryByRole('radio')).toBeNull();
+});

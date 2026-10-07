@@ -244,6 +244,7 @@ export function makeSystemInfo(over: Partial<SystemInfo> = {}): SystemInfo {
     tjmaxC: 89,
     stopC: 84,
     hypervisor: false,
+    gpus: [],
     ...over,
   };
 }

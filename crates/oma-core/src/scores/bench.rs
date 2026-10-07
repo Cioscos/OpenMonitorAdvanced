@@ -9,7 +9,9 @@ use serde::Serialize;
 
 use super::file::{Device, KernelRate, ScoreFile, ScoreSample, Scores, FORMAT};
 use super::plan::{BenchMode, BenchStep, CAP_S, WARMUP_PAUSE_MS};
-use super::score::{median3, per_second_to_units, points, rate, scaling, Baseline, SCALE_POINTS};
+use super::score::{
+    median3, per_second_to_units, points, rate, rate_from_workers, scaling, Baseline, SCALE_POINTS,
+};
 use super::workloads::{BenchKernel, WORKLOADS};
 use crate::load::run::{OVERRUN_MS, SILENT_PIPE_MS};
 use crate::load::{Clock, SensorSample};
@@ -197,12 +199,10 @@ impl BenchController {
                     if *seg == SegmentState::Pending {
                         *seg = SegmentState::Running;
                     }
-                    // A phase-start Progress (under a second in) can still measure the
-                    // previous kernel, and a pause or a reference sends 0: the UI holds.
-                    self.live_points = p
-                        .rate
-                        .filter(|r| *r > 0.0 && p.phase_elapsed_ms >= 1000)
-                        .and_then(|r| self.live(i, r));
+                    // A pause, a reference or a phase start sends 0: the needle holds.
+                    if let Some(v) = p.rate.filter(|r| *r > 0.0).and_then(|r| self.live(i, r)) {
+                        self.live_points = Some(v);
+                    }
                 }
             }
             LoadMessage::PhaseDone(d) => self.phase_done(d),
@@ -236,12 +236,18 @@ impl BenchController {
     /// Needle: `1500 x rate / reference` of the kernel and mode of step `i` (DB6).
     fn live(&self, i: usize, rate: f64) -> Option<f64> {
         let s = self.steps.get(i)?;
+        let w = WORKLOADS.iter().find(|w| w.id == s.kernel)?;
+        self.live_units(i, per_second_to_units(w, rate))
+    }
+
+    /// Needle for a rate already in the workload's true units.
+    fn live_units(&self, i: usize, units: f64) -> Option<f64> {
+        let s = self.steps.get(i)?;
         let table = match s.mode {
             BenchMode::Single => &self.ctx.baseline.single,
             BenchMode::Multi => &self.ctx.baseline.multi,
         };
-        let w = WORKLOADS.iter().find(|w| w.id == s.kernel)?;
-        let v = SCALE_POINTS * per_second_to_units(w, rate) / table.get(&s.kernel)?;
+        let v = SCALE_POINTS * units / table.get(&s.kernel)?;
         v.is_finite().then_some(v)
     }
 
@@ -252,6 +258,9 @@ impl BenchController {
         };
         let w = WORKLOADS.iter().find(|w| w.id == step.kernel);
         let r = match (w, d.work_ms) {
+            (Some(w), _) if d.skipped.is_none() && !d.workers.is_empty() => {
+                rate_from_workers(w, &d.workers)
+            }
             (Some(w), Some(ms)) if d.skipped.is_none() => rate(w, d.checks, ms),
             _ => None,
         };
@@ -269,7 +278,9 @@ impl BenchController {
                 .push(r);
         }
         self.step = Some((i + 1).min(self.steps.len().saturating_sub(1)));
-        self.live_points = None;
+        if r.is_some() {
+            self.live_points = r.and_then(|r| self.live_units(i, r));
+        }
     }
 
     pub fn on_sample(&mut self, sample: &SensorSample, now: Clock) -> Vec<BenchAction> {
@@ -479,7 +490,9 @@ impl BenchController {
 mod tests {
     use super::*;
     use crate::scores::cpu_baseline;
-    use oma_ipc::load::{ComputeError, ErrorKind, Finished, LoadHello, PhaseDone, Progress};
+    use oma_ipc::load::{
+        ComputeError, ErrorKind, Finished, LoadHello, PhaseDone, Progress, WorkerDone,
+    };
 
     fn clock(t: u64) -> Clock {
         Clock {
@@ -668,26 +681,51 @@ mod tests {
         let v = c.status().live_points.unwrap();
         assert!((v - 750.0).abs() < 1e-9, "{v}");
         c.on_load(&progress(24, None), clock(3000));
-        assert_eq!(c.status().live_points, None);
         assert_eq!(c.status().step, Some(24));
     }
 
     #[test]
-    fn phase_start_progress_with_the_previous_kernel_rate_holds_the_needle() {
+    fn needle_ignores_zero_rate_progress() {
         let mut c = ctl();
-        c.on_load(&progress(0, Some(1e6)), clock(1000));
-        assert!(c.status().live_points.is_some());
-        // The first Progress of step 1 still measures step 0's iterations.
-        c.on_load(&progress_at(1, 0, Some(1e6)), clock(2000));
+        c.on_load(&progress_at(0, 1500, Some(0.0)), clock(1000));
         assert_eq!(c.status().live_points, None);
+        c.on_load(&progress(0, Some(1e6)), clock(2000));
+        let v = c.status().live_points.unwrap();
+        // A pause, a reference or a phase start (rate 0 or absent) leaves it alone.
+        c.on_load(&progress_at(1, 0, Some(0.0)), clock(3000));
+        c.on_load(&progress_at(1, 0, None), clock(3000));
+        assert_eq!(c.status().live_points, Some(v));
         assert_eq!(c.status().step, Some(1));
     }
 
     #[test]
-    fn zero_rate_of_a_pause_holds_the_needle() {
+    fn needle_holds_the_rep_rate_after_phase_done() {
         let mut c = ctl();
-        c.on_load(&progress_at(0, 1500, Some(0.0)), clock(1000));
-        assert_eq!(c.status().live_points, None);
+        // No Progress with a rate at all: the rep's own workers set the needle.
+        let mut d = done(0, Some(1000));
+        if let LoadMessage::PhaseDone(p) = &mut d {
+            p.workers = vec![
+                WorkerDone {
+                    logical: 0,
+                    iterations: 1000,
+                    work_ms: 1000,
+                },
+                WorkerDone {
+                    logical: 1,
+                    iterations: 1000,
+                    work_ms: 2000,
+                },
+            ];
+        }
+        c.on_load(&d, clock(1000));
+        let w = &WORKLOADS[0];
+        let want = SCALE_POINTS * per_second_to_units(w, 1500.0)
+            / cpu_baseline().single[&BenchKernel::Ntt];
+        let v = c.status().live_points.unwrap();
+        assert!((v - want).abs() < 1e-9, "{v} {want}");
+        // A zero-rate Progress of the pause does not take it away.
+        c.on_load(&progress_at(1, 0, Some(0.0)), clock(2000));
+        assert_eq!(c.status().live_points, Some(v));
     }
 
     #[test]

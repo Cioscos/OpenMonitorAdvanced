@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use oma_ipc::load::WorkerDone;
 use serde::{Deserialize, Serialize};
 
 use super::file::ScoreFile;
@@ -105,6 +106,19 @@ pub fn rate(w: &Workload, checks: u64, work_ms: u64) -> Option<f64> {
     (r.is_finite() && r > 0.0).then_some(r)
 }
 
+/// Rate of a fixed-work repetition in true units: the sum of the per-thread rates
+/// (iterations x 1000 / work_ms). Threads with no time or no iterations are skipped;
+/// `None` when none is left (DB12).
+pub fn rate_from_workers(w: &Workload, workers: &[WorkerDone]) -> Option<f64> {
+    let sum: f64 = workers
+        .iter()
+        .filter(|t| t.work_ms > 0 && t.iterations > 0)
+        .map(|t| t.iterations as f64 * 1000.0 / t.work_ms as f64)
+        .sum();
+    let r = per_second_to_units(w, sum);
+    (r.is_finite() && r > 0.0).then_some(r)
+}
+
 /// Median of the valid repetitions (1-3): the middle one, or the mean of the two.
 pub fn median3(v: &[f64]) -> Option<f64> {
     if !(1..=3).contains(&v.len()) || v.iter().any(|x| !x.is_finite()) {
@@ -169,6 +183,42 @@ mod tests {
         // 640 x 33 554 432 FLOP in 1 s = 21.47483648 GFLOP/s.
         let r = rate(gemm, 640, 1000).unwrap();
         assert!((r - 21.474_836_48).abs() < 1e-9, "{r}");
+    }
+
+    fn wd(iterations: u64, work_ms: u64) -> WorkerDone {
+        WorkerDone {
+            logical: 0,
+            iterations,
+            work_ms,
+        }
+    }
+
+    #[test]
+    fn multi_rate_sums_thread_rates() {
+        let ntt = &WORKLOADS[0];
+        let mut t: Vec<_> = (0..8).map(|_| wd(1000, 1000)).collect();
+        t.extend((0..16).map(|_| wd(1000, 2000)));
+        // 8 x 1000 + 16 x 500 = 16 000 it/s.
+        let want = per_second_to_units(ntt, 16_000.0);
+        assert!((rate_from_workers(ntt, &t).unwrap() - want).abs() < 1e-9);
+    }
+
+    #[test]
+    fn single_worker_rate_equals_checks_over_work_ms() {
+        let ntt = &WORKLOADS[0];
+        assert_eq!(
+            rate_from_workers(ntt, &[wd(900, 1000)]),
+            rate(ntt, 900, 1000)
+        );
+    }
+
+    #[test]
+    fn zero_time_workers_are_ignored() {
+        let ntt = &WORKLOADS[0];
+        let t = [wd(10, 0), wd(0, 100), wd(900, 1000)];
+        assert_eq!(rate_from_workers(ntt, &t), rate(ntt, 900, 1000));
+        assert_eq!(rate_from_workers(ntt, &[wd(10, 0), wd(0, 5)]), None);
+        assert_eq!(rate_from_workers(ntt, &[]), None);
     }
 
     #[test]

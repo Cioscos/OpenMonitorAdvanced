@@ -85,7 +85,23 @@ impl OtherCpu {
             return None;
         }
         let ids = self.query.array(self.pid).unwrap_or_default();
-        Some(others_share(&with_pids(cpu, &ids), ours, logical))
+        let rows = with_pids(cpu, &ids);
+        let share = others_share(&rows, ours, logical);
+        if share > 0.10 {
+            // The benchmark flags this (BUSY_LIMIT): name the heaviest rows for the log.
+            let mut top: Vec<_> = rows
+                .iter()
+                .filter(|r| r.cpu.is_finite() && r.name != "_Total" && r.name != "Idle")
+                .collect();
+            top.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+            let top: Vec<_> = top
+                .iter()
+                .take(6)
+                .map(|r| (r.name.as_str(), r.pid, r.cpu.round()))
+                .collect();
+            tracing::info!(share, ?top, "other programs above 10% of the CPU");
+        }
+        Some(share)
     }
 }
 

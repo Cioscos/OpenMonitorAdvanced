@@ -440,7 +440,7 @@ const GPU_LOADS: { id: GpuBenchKernel; unit: string; value: number; mode: 'compu
   { id: 'bandwidth', unit: 'GB/s', value: 592.67, mode: 'compute' },
   { id: 'fill', unit: 'Gpixel/s', value: 266.84, mode: 'graphics' },
   { id: 'texture', unit: 'Gtexel/s', value: 506.83, mode: 'graphics' },
-  { id: 'overdraw', unit: 'Gpixel/s', value: 267.01, mode: 'graphics' },
+  { id: 'overdraw', unit: 'Gpixel/s', value: 137.7, mode: 'graphics' },
 ];
 const GPU_STEPS: BenchStep[] = GPU_LOADS.map((l) => ({ kernel: l.id, mode: l.mode, rep: 1 }));
 const NO_GPU = { deviceId: null, vendorId: null, dedicatedBytes: null, integrated: null };

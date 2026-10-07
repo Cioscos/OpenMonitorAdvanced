@@ -1,10 +1,13 @@
 //! The graphics loads of the GPU benchmark (plan DH2): `fill`, `texture` and `overdraw`,
-//! drawn off screen on an RGBA8 render target of 1920x1080 with instanced quads as large
-//! as the target, so a submission of `n` instances covers exactly `n * 1920 * 1080` pixels.
+//! drawn off screen on a render target of 1920x1080 (RGBA8, RGBA16F for `overdraw`) with
+//! instanced quads as large as the target, so a submission of `n` instances covers exactly
+//! `n * 1920 * 1080` pixels.
 //! - **fill:** opaque quads of a constant color, no texture, no blending (Gpixel/s);
 //! - **texture:** opaque quads with [`TEXTURE_READS`] independent bilinear reads per pixel
 //!   from a 1024x1024 RGBA8 texture (Gtexel/s, texels = pixels x 8);
-//! - **overdraw:** quads of a constant color with alpha blending (Gpixel/s).
+//! - **overdraw:** quads of a constant color with alpha blending into an RGBA16F target
+//!   (Gpixel/s): on RGBA8 a GPU that blends at full rate runs it at the same ROP limit as
+//!   `fill` (user decision of 2026-10-07).
 //!
 //! The instances are calibrated to the submission target (DG4). No verification, as for
 //! S5: a lost device and a hung submission count. Every submission binds the pipeline
@@ -24,7 +27,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_WRAP, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_IMMUTABLE, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+};
 
 use super::device::{GpuDevice, GpuError};
 use super::engine::{GpuCheck, GpuWorkload};
@@ -101,6 +106,11 @@ impl BenchGfxLoad {
         let target_desc = D3D11_TEXTURE2D_DESC {
             Width: WIDTH,
             Height: HEIGHT,
+            Format: if kind == BenchGfxKind::Overdraw {
+                DXGI_FORMAT_R16G16B16A16_FLOAT
+            } else {
+                DXGI_FORMAT_R8G8B8A8_UNORM
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
             ..texture_desc
@@ -344,8 +354,7 @@ mod tests {
             fill / 1e9,
             overdraw / 1e9
         );
-        // A GPU that blends RGBA8 at full rate, with the 8 MB target in its cache (Ada),
-        // runs both at the ROP limit: 5% is the noise of two short windows.
-        assert!(overdraw <= fill * 1.05, "overdraw {overdraw} > fill {fill}");
+        // FP16 blending runs at half the ROP rate (RTX 4080: 138.7 against 275.7 Gpixel/s).
+        assert!(overdraw < fill, "overdraw {overdraw} >= fill {fill}");
     }
 }

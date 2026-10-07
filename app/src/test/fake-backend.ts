@@ -194,7 +194,7 @@ export function makeGpuScoreFile(deviceId: string, over: ScoreOver = {}): ScoreF
       kernelOf('bandwidth', 'GB/s', null, null, 592.67, 0.031),
       kernelOf('fill', 'Gpixel/s', null, null, 266.84, 0.004),
       kernelOf('texture', 'Gtexel/s', null, null, 506.83, 0.006),
-      kernelOf('overdraw', 'Gpixel/s', null, null, 267.01, 0.005),
+      kernelOf('overdraw', 'Gpixel/s', null, null, 137.7, 0.005),
     ],
     device: { model: 'Fake GeForce', cores: 0, logical: 0, deviceId, vendorId: 0x10de, dedicatedBytes: 16 * 1024 ** 3, integrated: false, ...device },
     scaling: null,

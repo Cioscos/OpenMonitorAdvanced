@@ -5,8 +5,9 @@
   import { t } from '../../lib/i18n/index.svelte';
   import { benchStore } from '../../lib/performance/bench.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
+  import type { GpuChoice } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
-  import CpuScore from './CpuScore.svelte';
+  import ScorePage from './ScorePage.svelte';
   import StressHistory from './StressHistory.svelte';
   import StressResult from './StressResult.svelte';
   import StressRun from './StressRun.svelte';
@@ -14,11 +15,19 @@
 
   // The Performance view (spec M8 §3.1): the sidebar with the «Score» and «Stress test» groups on
   // the left, the page on the right. The stores are connected only while the view is on screen.
-  // `score-cpu` is the CPU benchmark; `new` is the wizard, `run` the test under way,
+  // `score-cpu` is the CPU benchmark, `score-gpu:<deviceId>` a GPU's; `new` is the wizard, `run` the test under way,
   // `result:<id>` a saved session; `history` lists the saved ones.
   // `store` is the app's live store, for the run page's chart.
   let { backend, store, page = $bindable('new') }: { backend: Backend; store: LiveStore; page?: PerformancePage } = $props();
   const open = (next: PerformancePage) => (page = next);
+
+  /**
+   * The GPUs of the «Score» group: the `performance_system` reply the stress store reads once when
+   * the view opens (never in a timer); null until it comes, none when it failed.
+   */
+  let systemFailed = $state(false);
+  const gpus = $derived<GpuChoice[] | null>(performanceStore.system?.gpus ?? (systemFailed ? [] : null));
+  const gpuPage = (deviceId: string): PerformancePage => `score-gpu:${deviceId}`;
 
   onMount(() => {
     const offs: (() => void)[] = [];
@@ -30,11 +39,14 @@
     performanceStore
       .connect(backend)
       .then(keep)
-      .catch((error) => console.error('stress test status unavailable', error));
+      .catch((error) => {
+        console.error('stress test status unavailable', error);
+        if (!cancelled) systemFailed = true;
+      });
     benchStore
       .connect(backend)
       .then(keep)
-      .catch((error) => console.error('CPU benchmark status unavailable', error));
+      .catch((error) => console.error('benchmark status unavailable', error));
     return () => {
       cancelled = true;
       offs.forEach((off) => off());
@@ -52,14 +64,26 @@
   let benchWasRunning = false;
   $effect(() => {
     const running = benchStore.running;
-    if (running && !benchWasRunning) page = 'score-cpu';
+    const status = benchStore.status;
+    if (running && !benchWasRunning) page = status?.category === 'gpu' && status.deviceId ? gpuPage(status.deviceId) : 'score-cpu';
     benchWasRunning = running;
   });
 
-  const current = $derived(page === 'score-cpu' ? 'score' : page === 'run' || page === 'new' ? 'test' : 'history');
+  const current = $derived(page.startsWith('score-') ? page : page === 'run' || page === 'new' ? 'test' : 'history');
+  /** The GPU of a `score-gpu:` page, with its name and kind while it is in the system. */
+  const gpuTarget = $derived.by(() => {
+    if (!page.startsWith('score-gpu:')) return null;
+    const deviceId = page.slice('score-gpu:'.length);
+    const known = gpus?.find((g) => g.deviceId === deviceId);
+    return { category: 'gpu' as const, deviceId, name: known?.name, integrated: known?.integrated };
+  });
+  const liveOn = (deviceId: string) => benchStore.running && benchStore.status?.deviceId === deviceId;
+  const cpuLive = $derived(benchStore.running && benchStore.status?.category === 'cpu');
   const title = $derived(
     page === 'score-cpu'
       ? t('performance.score.title')
+      : gpuTarget
+      ? t('performance.score.gpu.title')
       : page === 'new'
       ? t('performance.nav.new')
       : page === 'run'
@@ -77,13 +101,26 @@
       <button
         type="button"
         class="entry"
-        class:on={current === 'score'}
-        class:live={benchStore.running}
-        aria-current={current === 'score' ? 'page' : undefined}
+        class:on={current === 'score-cpu'}
+        class:live={cpuLive}
+        aria-current={current === 'score-cpu' ? 'page' : undefined}
         onclick={() => (page = 'score-cpu')}
       >
-        {t('performance.nav.scoreCpu')}{#if benchStore.running}<span class="dot" aria-hidden="true"> ●</span>{/if}
+        {t('performance.nav.scoreCpu')}{#if cpuLive}<span class="dot" aria-hidden="true"> ●</span>{/if}
       </button>
+      {#each gpus ?? [] as g (g.deviceId)}
+        {@const live = liveOn(g.deviceId)}
+        <button
+          type="button"
+          class="entry"
+          class:on={current === gpuPage(g.deviceId)}
+          class:live
+          aria-current={current === gpuPage(g.deviceId) ? 'page' : undefined}
+          onclick={() => (page = gpuPage(g.deviceId))}
+        >
+          {g.name}{#if live}<span class="dot" aria-hidden="true"> ●</span>{/if}
+        </button>
+      {/each}
     </div>
     <p class="group" id="performance-group-stress">{t('performance.nav.stress')}</p>
     <div class="entries" role="group" aria-labelledby="performance-group-stress">
@@ -112,7 +149,10 @@
   <section class="content" aria-labelledby="performance-page-title">
     <h2 id="performance-page-title">{title}</h2>
     {#if page === 'score-cpu'}
-      <CpuScore />
+      <ScorePage target={{ category: 'cpu' }} />
+    {:else if gpuTarget}
+      <!-- Until the GPU list is read, a GPU page cannot tell a GPU that is gone from one not known yet. -->
+      {#if gpus !== null}{#key page}<ScorePage target={gpuTarget} />{/key}{/if}
     {:else if page === 'new'}
       <StressWizard {backend} onStarted={() => (page = 'run')} />
     {:else if page === 'run'}

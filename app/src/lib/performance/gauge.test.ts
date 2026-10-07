@@ -1,4 +1,4 @@
-import { angleFor, fullScale, smooth, ticks } from './gauge';
+import { angleFor, fullScale, gpuFullScale, smooth, ticks } from './gauge';
 
 test('angle_bounds', () => {
   expect(angleFor(0, 2000)).toBe(135);
@@ -50,4 +50,16 @@ test('smooth_converges_without_overshoot', () => {
   expect(smooth(0, 1000, 150)).toBeCloseTo(1000 * (1 - Math.exp(-1)), 6);
   expect(smooth(500, 0, 10_000)).toBeCloseTo(0, 6);
   expect(smooth(42, 1000, 0)).toBe(42);
+});
+
+test('gpu_full_scale_without_record_uses_the_estimate', () => {
+  expect(gpuFullScale([], false)).toBe(2000);
+  expect(gpuFullScale([], true)).toBe(25);
+  expect(gpuFullScale([0, Number.NaN], true)).toBe(25);
+});
+
+test('gpu_full_scale_follows_the_record', () => {
+  expect(gpuFullScale([150], false)).toBe(200);
+  expect(gpuFullScale([5.2], true)).toBe(10);
+  expect(gpuFullScale([1500], false)).toBe(2000);
 });

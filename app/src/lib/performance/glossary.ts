@@ -16,12 +16,19 @@ export const BENCH_TERMS: string[] = ['ntt', 'hash', 'compress', 'sort', 'fft', 
 /** The terms of the CPU score page (table T2 of the M8a2 plan). */
 export const SCORE_TERMS: string[] = ['benchPoints', 'singleCore', 'multiCore', 'scaling', 'referenceMark', 'warmup', 'median'];
 
+/** The six loads of the GPU benchmark (M8b2 DH2): `gpuBench.fma`, `gpuBench.fill`… */
+export const GPU_BENCH_TERMS: string[] = ['fma', 'int_hash', 'bandwidth', 'fill', 'texture', 'overdraw'].map((id) => `gpuBench.${id}`);
+
+/** The terms of the GPU score pages (table T2 of the M8b2 plan). */
+export const GPU_SCORE_TERMS: string[] = ['computeScore', 'graphicsScore', 'spread', 'tflops', 'gbps'];
+
 /** The terms of the GPU stress pages (table T2 of the M8b1 plan). */
 export const GPU_TERMS: string[] = ['tdr', 'vram', 'deviceLost', 'stability', 'pcieReplay', 'artifact', 'loadLevel'];
 
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [
   ...SCORE_TERMS,
+  ...GPU_SCORE_TERMS,
   ...GPU_TERMS,
   'fft',
   'ntt',

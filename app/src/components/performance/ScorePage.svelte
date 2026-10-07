@@ -1,19 +1,28 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { benchStore } from '../../lib/performance/bench.svelte';
+  import { benchStore, isBenchRunning, type ScoreTarget } from '../../lib/performance/bench.svelte';
   import { pieces } from '../../lib/performance/format';
-  import { fullScale } from '../../lib/performance/gauge';
+  import { fullScale, gpuFullScale } from '../../lib/performance/gauge';
   import { performanceStore } from '../../lib/performance/performance.svelte';
-  import type { BenchMode, CpuScoreFile, CpuScoreSummary } from '../../lib/types';
+  import type { BenchMode, ScoreFile, ScoreSummary } from '../../lib/types';
   import Term from '../common/Term.svelte';
   import Gauge from './Gauge.svelte';
 
-  // «Score › CPU» (M8a2, spec §3.3 and §4.6): two gauges with the live needle, the 48 phases as a
-  // bar, Start or Stop, the reference ▲ (in memory only, DB10), then the last measurement in
-  // detail and the saved ones. The benchmark and the stress test share one slot (DB8).
+  // «Score › CPU» (M8a2, spec §3.3 and §4.6) and «Score › <GPU>» (M8b2 DH12): two gauges with the
+  // live needle, the phases as a bar, Start or Stop, the reference ▲ (in memory only, DB10), then
+  // the last measurement in detail and the saved ones. Everything is the target's own: another
+  // target's status and scores never show here. One benchmark or stress test at a time (DB8).
+  // A GPU target without `name` is a GPU that is no longer in the system: its history only.
 
-  const MODES: BenchMode[] = ['single', 'multi'];
+  let { target }: { target: ScoreTarget & { name?: string; integrated?: boolean } } = $props();
+
+  const gpu = $derived(target.category === 'gpu');
+  const missing = $derived(target.category === 'gpu' && target.name === undefined);
+  const MODES = $derived<BenchMode[]>(gpu ? ['compute', 'graphics'] : ['single', 'multi']);
+  const TERM: Record<BenchMode, string> = { single: 'singleCore', multi: 'multiCore', compute: 'computeScore', graphics: 'graphicsScore' };
+  /** The invalid reasons (DH9): each is the message of a measurement that is not valid, never a warning. */
+  const REASONS = ['compute_error', 'device_lost', 'hung'];
 
   let reference = $state<'record' | 'last'>('record');
   let startError = $state<string | null>(null);
@@ -21,44 +30,51 @@
   let confirming = $state<string | null>(null);
 
   const locale = $derived(i18n.locale);
-  const status = $derived(benchStore.status);
-  const running = $derived(benchStore.running);
-  const latest = $derived<CpuScoreSummary | null>(benchStore.scores[0] ?? null);
+  const status = $derived(benchStore.statusFor(target));
+  const running = $derived(isBenchRunning(status));
+  const scores = $derived(benchStore.scoresFor(target));
+  const latest = $derived<ScoreSummary | null>(scores[0] ?? null);
   const step = $derived(status && status.step !== null ? (status.steps[status.step] ?? null) : null);
-  const ref = $derived(reference === 'record' ? benchStore.record : benchStore.last);
+  const record = $derived(benchStore.recordFor(target));
+  const ref = $derived(reference === 'record' ? record : benchStore.lastFor(target));
 
   const finite = (v: number | null | undefined): number | null => (v != null && Number.isFinite(v) ? v : null);
   // Between phases (and during the warm-up pause) the rate is missing: the needle holds the last
   // live value of the mode in progress instead of falling to 0. Forgotten when the run ends.
-  let held = $state<Record<BenchMode, number | null>>({ single: null, multi: null });
+  let held = $state<Partial<Record<BenchMode, number>>>({});
   $effect(() => {
     const live = running ? finite(status?.livePoints) : null;
     const mode = step?.mode;
     const run = running;
     untrack(() => {
-      if (!run) held = { single: null, multi: null };
+      if (!run) held = {};
       else if (mode && live !== null) held = { ...held, [mode]: live };
     });
   });
 
   /** The live needle while the mode runs, then its score; without a run, the last saved one. */
   function valueOf(mode: BenchMode): number | null {
-    if (running) return step?.mode === mode ? (finite(status!.livePoints) ?? held[mode]) : finite(status![mode]);
+    if (running) return step?.mode === mode ? (finite(status!.livePoints) ?? held[mode] ?? null) : finite(status![mode]);
     if (status?.state === 'done') return finite(status[mode]);
     return finite(latest?.[mode]);
   }
-  const values = $derived({ single: valueOf('single'), multi: valueOf('multi') });
+  const values = $derived(Object.fromEntries(MODES.map((m) => [m, valueOf(m)])) as Partial<Record<BenchMode, number | null>>);
 
-  // DB6: during a measurement the full scale only grows, so the peak of the run is kept.
-  let peak = $state({ single: 0, multi: 0 });
+  /** DB6, DH7: the CPU dial never drops below 1500 points; a GPU one starts from its estimate. */
+  const scaleOf = (mode: BenchMode) => {
+    const marks = [record[mode] ?? 0, ref[mode] ?? 0, values[mode] ?? 0];
+    return gpu ? gpuFullScale(marks, target.integrated ?? false) : fullScale(marks);
+  };
+  // During a measurement the full scale only grows: the largest one of the run is kept.
+  let heldScale = $state<Partial<Record<BenchMode, number>>>({});
   $effect(() => {
-    const { single, multi } = values;
-    const live = running;
+    const scales = MODES.map((m) => [m, scaleOf(m)] as const);
+    const run = running;
     untrack(() => {
-      peak = live ? { single: Math.max(peak.single, single ?? 0), multi: Math.max(peak.multi, multi ?? 0) } : { single: 0, multi: 0 };
+      heldScale = run ? Object.fromEntries(scales.map(([m, s]) => [m, Math.max(heldScale[m] ?? 0, s)])) : {};
     });
   });
-  const maxOf = (mode: BenchMode) => fullScale([benchStore.record[mode] ?? 0, ref[mode] ?? 0, values[mode] ?? 0, peak[mode]]);
+  const maxOf = (mode: BenchMode) => Math.max(heldScale[mode] ?? 0, scaleOf(mode));
 
   // A new status makes an earlier refusal stale.
   $effect(() => {
@@ -69,12 +85,16 @@
   /** The phase in words, cut around the terms it carries. */
   const phase = $derived.by(() => {
     if (!running || !step) return null;
+    if (gpu) {
+      const text = t('performance.score.gpu.phase', { kernel: t(`glossary.gpuBench.${step.kernel}.name`), group: t(`performance.score.${step.mode}`) });
+      return pieces(text, [{ term: `gpuBench.${step.kernel}` }, { term: TERM[step.mode] }], t);
+    }
     const text = t('performance.score.phase', {
       kernel: t(`glossary.bench.${step.kernel}.name`),
       mode: t(`performance.score.${step.mode}`),
       rep: step.rep === 0 ? t('performance.score.warmup') : t('performance.score.rep', { n: step.rep }),
     });
-    return pieces(text, [{ term: `bench.${step.kernel}` }, { term: step.mode === 'single' ? 'singleCore' : 'multiCore' }, { term: 'warmup' }], t);
+    return pieces(text, [{ term: `bench.${step.kernel}` }, { term: TERM[step.mode] }, { term: 'warmup' }], t);
   });
 
   /** Why the last run ended without a score, or why the shell refused the start. */
@@ -89,7 +109,7 @@
 
   // The measurement below the gauges: the one just saved, else the newest; loaded in full.
   const detailId = $derived(status?.state === 'done' && status.scoreId ? status.scoreId : (latest?.id ?? null));
-  let detail = $state.raw<CpuScoreFile | null>(null);
+  let detail = $state.raw<ScoreFile | null>(null);
   $effect(() => {
     const id = detailId;
     if (id === null) {
@@ -100,33 +120,47 @@
     benchStore
       .score(id)
       .then((file) => current && (detail = file))
-      .catch((error) => console.error('CPU score unavailable', error));
+      .catch((error) => console.error('score unavailable', error));
     return () => (current = false);
   });
   const shown = $derived(running ? null : detail);
-  const flagsOf = (flags: string[]) => flags.filter((f) => f !== 'compute_error');
-  const provisional = $derived(shown?.provisional ?? benchStore.provisional);
+  const flagsOf = (flags: string[]) => flags.filter((f) => !REASONS.includes(f));
+  const invalidText = (flags: string[]) =>
+    flags.includes('device_lost')
+      ? t('performance.score.invalid.device_lost')
+      : flags.includes('hung')
+        ? t('performance.score.invalid.hung')
+        : t('performance.score.invalid');
+  const provisional = $derived(shown?.provisional ?? benchStore.provisionalFor(target));
   const scaling = $derived(shown?.scaling != null ? pieces(t('performance.score.scaling', { pct: Math.round(shown.scaling * 100) }), [{ term: 'scaling' }], t) : null);
 
   const number = (v: number | null) =>
     v === null ? '–' : v.toLocaleString(locale, { maximumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0 });
+  const percent = (v: number | null) => (v === null ? '–' : v.toLocaleString(locale, { style: 'percent', maximumFractionDigits: 1 }));
   const when = (at: string) => new Date(at).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' });
-  const markOf = (s: CpuScoreSummary) =>
+  const markOf = (s: ScoreSummary) =>
     !s.valid
-      ? { tone: 'crit', mark: '✕', text: t('performance.score.invalid') }
+      ? { tone: 'crit', mark: '✕', text: invalidText(s.flags) }
       : flagsOf(s.flags).length
         ? { tone: 'warn', mark: '!', text: flagsOf(s.flags).map((f) => t(`performance.score.flag.${f}`)).join(' ') }
         : { tone: 'ok', mark: '✓', text: t('performance.history.mark.ok') };
   const focusOnMount = (node: HTMLElement) => node.focus();
 
+  const busy = $derived(performanceStore.running || benchStore.running);
+
   async function start() {
     startError = null;
     starting = true;
     try {
-      await benchStore.start();
+      await benchStore.start(target);
     } catch (error) {
       const text = String(error);
-      startError = text === 'busy' ? t('performance.score.error.busy') : t('performance.score.error.start', { reason: text });
+      startError =
+        text === 'busy'
+          ? t('performance.score.error.busy')
+          : text === 'build:no_gpu'
+            ? t('performance.score.gpu.missing')
+            : t('performance.score.error.start', { reason: text });
     } finally {
       starting = false;
     }
@@ -147,12 +181,13 @@
 </script>
 
 <div class="score">
-  <section class="cluster" aria-label={t('performance.score.title')}>
+  {#if gpu && target.name}<p class="device">{target.name}</p>{/if}
+  <section class="cluster" aria-label={t(gpu ? 'performance.score.gpu.title' : 'performance.score.title')}>
     <div class="gauges">
       {#each MODES as mode (mode)}
         <figure>
           <Gauge
-            value={values[mode]}
+            value={values[mode] ?? null}
             max={maxOf(mode)}
             reference={ref[mode]}
             label={t(`performance.score.${mode}`)}
@@ -160,7 +195,7 @@
             moving={running}
           />
           <figcaption>
-            <Term term={mode === 'single' ? 'singleCore' : 'multiCore'}>{t(`performance.score.${mode}`)}</Term>
+            <Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term>
             <span class="sub">
               {#if ref[mode] !== null}<span class="mark-value">▲ {ref[mode]}</span>{/if}
               <Term term="benchPoints" />
@@ -173,7 +208,8 @@
     {#if status && status.segments.length > 0 && (running || status.state !== 'done')}
       <ol class="segments" aria-hidden="true">
         {#each status.segments as segment, index (index)}
-          <li class={segment} class:multi={status.steps[index]?.mode === 'multi'}></li>
+          {@const own = status.steps[index]?.mode}
+          <li class={segment} class:second={own === MODES[1]} class:gap={index > 0 && own !== status.steps[index - 1]?.mode}></li>
         {/each}
       </ol>
     {/if}
@@ -190,12 +226,12 @@
         <button
           type="button"
           class="go"
-          disabled={performanceStore.running || starting}
-          title={performanceStore.running ? t('performance.score.error.busy') : undefined}
+          disabled={busy || starting || missing}
+          title={busy ? t('performance.score.error.busy') : undefined}
           onclick={start}>{t('performance.score.start')}</button
         >
       {/if}
-      <p class="duration">{t('performance.score.duration')}</p>
+      <p class="duration">{t(gpu ? 'performance.score.gpu.duration' : 'performance.score.duration')}</p>
       <span class="reference">
         <span id="score-reference-label"><Term term="referenceMark">{t('performance.score.reference')}</Term></span>
         <select aria-labelledby="score-reference-label" bind:value={reference}>
@@ -206,11 +242,12 @@
     </div>
   </section>
 
+  {#if missing}<p class="notice warn">{t('performance.score.gpu.missing')}</p>{/if}
   {#if message}<p class="notice crit" role="alert">{message}</p>{/if}
   {#if provisional}<p class="notice warn">{t('performance.score.provisional')}</p>{/if}
 
   {#if shown}
-    {#if !shown.valid}<p class="notice crit" role="alert">{t('performance.score.invalid')}</p>{/if}
+    {#if !shown.valid}<p class="notice crit" role="alert">{invalidText(shown.flags)}</p>{/if}
     {#if flagsOf(shown.flags).length}
       <ul class="flags">
         {#each flagsOf(shown.flags) as flag (flag)}<li class="notice warn">{t(`performance.score.flag.${flag}`)}</li>{/each}
@@ -221,50 +258,79 @@
     {/if}
 
     <section class="panel">
-      <h3>{t('performance.score.detail')} <span class="note">(<Term term="median" />)</span></h3>
-      <table aria-label={t('performance.score.detail')}>
-        <thead>
-          <tr>
-            <th scope="col">{t('performance.score.col.kernel')}</th>
-            <th scope="col" class="num"><Term term="singleCore">{t('performance.score.single')}</Term></th>
-            <th scope="col" class="num"><Term term="multiCore">{t('performance.score.multi')}</Term></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each shown.kernels as k (k.id)}
+      {#if gpu}
+        <h3>{t('performance.score.detail')}</h3>
+        <table aria-label={t('performance.score.detail')}>
+          <thead>
             <tr>
-              <th scope="row"><Term term={`bench.${k.id}`} /></th>
-              <td class="num">{number(k.single)} <span class="unit">{k.unit}</span></td>
-              <td class="num">{number(k.multi)} <span class="unit">{k.unit}</span></td>
+              <th scope="col">{t('performance.score.col.kernel')}</th>
+              <th scope="col" class="num">{t('performance.score.col.value')}</th>
+              <th scope="col" class="num"><Term term="spread">{t('performance.score.col.spread')}</Term></th>
             </tr>
-          {/each}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {#each shown.kernels as k (k.id)}
+              <tr>
+                <th scope="row"><Term term={`gpuBench.${k.id}`} /></th>
+                <td class="num"
+                  >{number(k.value)}
+                  <span class="unit"
+                    >{#if k.unit === 'TFLOPS' || k.unit === 'TIOPS'}<Term term="tflops">{k.unit}</Term>{:else if k.unit === 'GB/s'}<Term
+                        term="gbps">{k.unit}</Term
+                      >{:else}{k.unit}{/if}</span
+                  ></td
+                >
+                <td class="num">{percent(k.spread)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <h3>{t('performance.score.detail')} <span class="note">(<Term term="median" />)</span></h3>
+        <table aria-label={t('performance.score.detail')}>
+          <thead>
+            <tr>
+              <th scope="col">{t('performance.score.col.kernel')}</th>
+              <th scope="col" class="num"><Term term="singleCore">{t('performance.score.single')}</Term></th>
+              <th scope="col" class="num"><Term term="multiCore">{t('performance.score.multi')}</Term></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shown.kernels as k (k.id)}
+              <tr>
+                <th scope="row"><Term term={`bench.${k.id}`} /></th>
+                <td class="num">{number(k.single)} <span class="unit">{k.unit}</span></td>
+                <td class="num">{number(k.multi)} <span class="unit">{k.unit}</span></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     </section>
   {/if}
 
   <section class="panel">
     <h3 id="score-history-title">{t('performance.score.history')}</h3>
-    {#if benchStore.scores.length === 0}
+    {#if scores.length === 0}
       <p class="muted">{t('performance.score.history.empty')}</p>
     {:else}
       <table aria-labelledby="score-history-title">
         <thead>
           <tr>
             <th scope="col"><span class="visually-hidden">{t('performance.score.history')}</span></th>
-            <th scope="col" class="num"><Term term="singleCore">{t('performance.score.single')}</Term></th>
-            <th scope="col" class="num"><Term term="multiCore">{t('performance.score.multi')}</Term></th>
+            {#each MODES as mode (mode)}
+              <th scope="col" class="num"><Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term></th>
+            {/each}
             <th scope="col"></th>
             <th scope="col"></th>
           </tr>
         </thead>
         <tbody>
-          {#each benchStore.scores as s (s.id)}
+          {#each scores as s (s.id)}
             {@const mark = markOf(s)}
             <tr>
               <td>{when(s.at)}</td>
-              <td class="num">{s.single ?? '–'}</td>
-              <td class="num">{s.multi ?? '–'}</td>
+              {#each MODES as mode (mode)}<td class="num">{s[mode] ?? '–'}</td>{/each}
               <td><span class="mark {mark.tone}" role="img" aria-label={mark.text} title={mark.text}>{mark.mark}</span></td>
               <td class="buttons">
                 {#if confirming === s.id}
@@ -287,6 +353,12 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+  /* The GPU's name, right under the page title. */
+  .device {
+    margin: -12px 0 0;
+    font-size: 14px;
+    color: var(--text-muted);
   }
   /* The instrument cluster: the one loud element of the page. */
   .cluster {
@@ -331,7 +403,8 @@
     font-variant-numeric: tabular-nums;
     color: var(--text);
   }
-  /* 48 cells, single then multi: cyan for the single half, pink for the multi half. */
+  /* One cell per phase, the first mode then the second (single then multi, compute then
+     graphics): cyan for the first half, pink for the second, with a gap between the two. */
   .segments {
     display: flex;
     gap: 2px;
@@ -346,10 +419,10 @@
     background: var(--surface-2);
     border-radius: 2px;
   }
-  .segments li.multi {
+  .segments li.second {
     --on: var(--accent);
   }
-  .segments li.multi:nth-child(25) {
+  .segments li.gap {
     margin-left: 6px;
   }
   .segments li.done {

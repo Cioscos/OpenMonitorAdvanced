@@ -1,8 +1,16 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
-import type { CpuScoreFile } from '../../lib/types';
-import { FakeBackend, makeBenchStatus, makeRunStatus, makeScoreFile } from '../../test/fake-backend';
+import type { ScoreFile } from '../../lib/types';
+import {
+  FakeBackend,
+  makeBenchStatus,
+  makeGpuBenchStatus,
+  makeGpuScoreFile,
+  makeRunStatus,
+  makeScoreFile,
+  makeSystemInfo,
+} from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
 
@@ -15,7 +23,7 @@ afterEach(() => {
   disconnectSettings();
 });
 
-async function setup(scores: CpuScoreFile[] = [], provisional = false) {
+async function setup(scores: ScoreFile[] = [], provisional = false) {
   const backend: FakeBackend = await connectSettings();
   backend.scoreFiles = structuredClone(scores);
   backend.baselineProvisional = provisional;
@@ -24,8 +32,8 @@ async function setup(scores: CpuScoreFile[] = [], provisional = false) {
   await screen.findByRole('heading', { name: t('performance.score.title') });
   return backend;
 }
-const meter = (key: 'single' | 'multi') => screen.getByRole('meter', { name: t(`performance.score.${key}`) });
-const now = (key: 'single' | 'multi') => meter(key).getAttribute('aria-valuenow');
+const meter = (key: 'single' | 'multi' | 'compute' | 'graphics') => screen.getByRole('meter', { name: t(`performance.score.${key}`) });
+const now = (key: 'single' | 'multi' | 'compute' | 'graphics') => meter(key).getAttribute('aria-valuenow');
 const startButton = () => screen.getByRole('button', { name: t('performance.score.start') });
 
 test('start_runs_and_shows_both_scores', async () => {
@@ -170,4 +178,121 @@ test('table_headers_explain_single_and_multi_core', async () => {
       expect(th.querySelector('.term'), `${name} ${key}`).not.toBeNull();
     }
   }
+});
+
+const GPU = { deviceId: 'gpu-a', name: 'Fake GeForce RTX 4080', integrated: false, dedicatedBytes: 16 * 1024 ** 3 };
+
+async function setupGpu(scores: ScoreFile[] = [], gpus = [GPU], deviceId = GPU.deviceId) {
+  const backend: FakeBackend = await connectSettings();
+  backend.scoreFiles = structuredClone(scores);
+  backend.performanceSystemInfo = makeSystemInfo({ gpus });
+  render(PerformanceView, { backend, store: new LiveStore(), page: `score-gpu:${deviceId}` });
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceScores'));
+  await screen.findByRole('heading', { name: t('performance.score.gpu.title') });
+  return backend;
+}
+
+test('cpu page ignores gpu scores and status', async () => {
+  const backend = await setup([
+    makeGpuScoreFile('gpu-a', { id: 'g', at: '2026-10-08T12:00:00Z', scores: { compute: 7777, graphics: 8888 } }),
+    makeScoreFile({ id: 'c', at: '2026-10-07T12:00:00Z', scores: { single: 1400, multi: 11000 } }),
+  ]);
+  const rows = within(screen.getByRole('table', { name: t('performance.score.history') })).getAllByRole('row').slice(1);
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('1400');
+  // The newest score is a GPU one: the CPU page still shows its own.
+  await waitFor(() => expect(now('single')).toBe('1400'));
+  expect([...document.querySelectorAll('.mark-value')].map((m) => m.textContent?.trim())).toEqual(['▲ 1400', '▲ 11000']);
+  // A GPU benchmark under way moves nothing here, and the CPU start stays refused.
+  backend.emitBench(makeGpuBenchStatus('gpu-a', { livePoints: 5000 }));
+  // It brings its own page forward; the user comes back to the CPU.
+  await screen.findByRole('heading', { name: t('performance.score.gpu.title') });
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.nav.scoreCpu') }));
+  await waitFor(() => expect((startButton() as HTMLButtonElement).disabled).toBe(true));
+  expect(screen.queryByRole('button', { name: t('performance.score.stop') })).toBeNull();
+  expect(now('single')).toBe('1400');
+  expect(screen.queryByRole('meter', { name: t('performance.score.compute') })).toBeNull();
+});
+
+test('gpu page runs and shows compute and graphics', async () => {
+  const backend = await setupGpu();
+  expect(screen.getByText(GPU.name, { selector: '.device' })).toBeTruthy();
+  expect(screen.getByText(t('performance.score.gpu.duration'))).toBeTruthy();
+  await fireEvent.click(startButton());
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceGpuBenchStart:gpu-a'));
+  backend.emitBench(makeGpuBenchStatus('gpu-a', { livePoints: 812.4 }));
+  await waitFor(() => expect(now('compute')).toBe('812'));
+  expect(now('graphics')).toBeNull();
+  const phase = t('performance.score.gpu.phase', { kernel: t('glossary.gpuBench.fma.name'), group: t('performance.score.compute') });
+  expect(document.querySelector('.phase')?.textContent).toBe(phase);
+  // The sidebar dot is on this GPU's entry, not on the CPU's.
+  const entry = screen.getByRole('button', { name: new RegExp(GPU.name) });
+  expect(entry.textContent).toContain('●');
+  expect(screen.getByRole('button', { name: t('performance.nav.scoreCpu') }).textContent).not.toContain('●');
+  // A Graphics load moves the Graphics needle; Compute shows its score.
+  backend.emitBench(makeGpuBenchStatus('gpu-a', { step: 4, livePoints: 1300, compute: 1500 }));
+  await waitFor(() => expect(now('graphics')).toBe('1300'));
+  expect(now('compute')).toBe('1500');
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.score.stop') }));
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceBenchStop'));
+  backend.scoreFiles = [makeGpuScoreFile('gpu-a', { id: 'g1', scores: { compute: 1500, graphics: 1450 } })];
+  backend.emitBench(makeGpuBenchStatus('gpu-a', { state: 'done', step: null, compute: 1500, graphics: 1450, scoreId: 'g1' }));
+  await waitFor(() => expect(now('graphics')).toBe('1450'));
+  expect(now('compute')).toBe('1500');
+  await waitFor(() => expect(meter('compute').getAttribute('aria-valuemax')).toBe('2000'));
+  const history = await screen.findByRole('table', { name: t('performance.score.history') });
+  expect(within(history).getAllByRole('row')[1].textContent).toContain('1450');
+});
+
+test('gpu start without the gpu says it is missing', async () => {
+  const backend = await setupGpu();
+  backend.benchStartError = 'build:no_gpu';
+  await fireEvent.click(startButton());
+  expect((await screen.findByRole('alert')).textContent).toBe(t('performance.score.gpu.missing'));
+});
+
+test('gpu detail shows value and spread', async () => {
+  await setupGpu([makeGpuScoreFile('gpu-a')]);
+  const table = await screen.findByRole('table', { name: t('performance.score.detail') });
+  const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+  expect(headers).toEqual(expect.arrayContaining([t('performance.score.col.value'), t('performance.score.col.spread')]));
+  const fma = within(table).getByText(t('glossary.gpuBench.fma.name')).closest('tr')!;
+  expect(fma.textContent).toContain('47.2');
+  expect(fma.textContent).toContain('TFLOPS');
+  expect(fma.textContent).toContain('1.2%');
+  expect(fma.querySelectorAll('.term').length).toBeGreaterThanOrEqual(2);
+  const bandwidth = within(table).getByText(t('glossary.gpuBench.bandwidth.name')).closest('tr')!;
+  expect(bandwidth.textContent).toContain('593');
+  expect(bandwidth.textContent).toContain('GB/s');
+  const fill = within(table).getByText(t('glossary.gpuBench.fill.name')).closest('tr')!;
+  expect(fill.textContent).toContain('Gpixel/s');
+  // No CPU columns on a GPU page.
+  expect(headers.join(' ')).not.toContain(t('performance.score.single'));
+});
+
+test('gpu flags and invalid reasons show their text', async () => {
+  const flags = ['throttling', 'busy_gpu', 'battery', 'vram_reduced'];
+  await setupGpu([makeGpuScoreFile('gpu-a', { flags })]);
+  for (const flag of flags) expect(await screen.findByText(t(`performance.score.flag.${flag}`))).toBeTruthy();
+  for (const [flag, key] of [
+    ['device_lost', 'performance.score.invalid.device_lost'],
+    ['hung', 'performance.score.invalid.hung'],
+    ['compute_error', 'performance.score.invalid'],
+  ]) {
+    cleanup();
+    disconnectSettings();
+    await setupGpu([makeGpuScoreFile('gpu-a', { valid: false, flags: [flag], scores: { graphics: null } })]);
+    expect((await screen.findByRole('alert')).textContent).toBe(t(key));
+    // The reason is the message, not a warning too.
+    expect(screen.queryByText(t(`performance.score.flag.${flag}`))).toBeNull();
+  }
+});
+
+test('missing gpu page disables start', async () => {
+  await setupGpu([makeGpuScoreFile('gone', { id: 'old', scores: { compute: 321 } })], [GPU], 'gone');
+  expect(screen.getByText(t('performance.score.gpu.missing'))).toBeTruthy();
+  expect((startButton() as HTMLButtonElement).disabled).toBe(true);
+  const rows = within(screen.getByRole('table', { name: t('performance.score.history') })).getAllByRole('row').slice(1);
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('321');
 });

@@ -17,7 +17,7 @@
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus } from './lib/types';
-  import { openSettings, setSettingsOpener, type PerformancePage, type SettingsTarget, type View } from './lib/view';
+  import { openSettings, performancePageOf, setSettingsOpener, type PerformancePage, type SettingsTarget, type View } from './lib/view';
 
   let { backend = createBackend(), store = new LiveStore() }: { backend?: Backend; store?: LiveStore } = $props();
   // The first view is chosen once the settings and the tray's request are known (see `start`).
@@ -63,8 +63,9 @@
     const perf = target.performance;
     if (perf?.page === 'quit') askingQuit = true;
     // The tray's «Open the running test», a stress toast's result and a benchmark toast.
-    if (perf?.page === 'run' || perf?.page === 'score-cpu' || (perf?.page === 'result' && perf.sessionId)) {
-      performancePage = perf.page === 'result' ? `result:${perf.sessionId}` : perf.page;
+    const page = performancePageOf(perf);
+    if (page !== null) {
+      performancePage = page;
       showView('performance');
     }
   }

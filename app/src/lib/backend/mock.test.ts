@@ -601,3 +601,27 @@ test('mock_bench_holds_the_needle_during_warm_ups_like_oma_core', () => {
     vi.useRealTimers();
   }
 });
+
+test('mock_gpu_bench_runs_twelve_seconds_and_the_error_scenario_loses_the_device', () => {
+  vi.useFakeTimers();
+  try {
+    const gpus = [{ deviceId: 'gpu-x', name: 'Mock GPU', integrated: true, dedicatedBytes: 512 * 1024 ** 2 }];
+    for (const scenario of [null, 'error'] as const) {
+      const bench = mockBench(scenario, () => false, gpus);
+      expect(() => bench.startGpu('gone')).toThrow('build:no_gpu');
+      const id = bench.startGpu('gpu-x');
+      expect(() => bench.start()).toThrow('busy');
+      expect(bench.status()).toMatchObject({ category: 'gpu', deviceId: 'gpu-x' });
+      vi.advanceTimersByTime(12_500);
+      expect(bench.status()).toMatchObject({ state: 'done', scoreId: id });
+      const file = bench.score(id)!;
+      expect(file.valid).toBe(scenario === null);
+      expect(file.flags).toEqual(scenario === null ? [] : ['device_lost']);
+      expect(bench.scores()[0]).toMatchObject({ id, category: 'gpu', deviceId: 'gpu-x', graphics: scenario === null ? expect.any(Number) : null });
+      // An integrated GPU scores a few points, not the dedicated one's 1500.
+      expect(file.scores.compute).toBeLessThan(10);
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});

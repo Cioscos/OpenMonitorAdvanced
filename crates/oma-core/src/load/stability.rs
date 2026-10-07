@@ -66,8 +66,9 @@ impl StabilityMeter {
     }
 
     pub fn rate(&mut self, rate: f64, mono_ms: u64) {
-        // The first `Progress` of a phase carries 0.
-        if !(rate.is_finite() && rate > 0.0) {
+        // 0 is a real stall and counts; the first `Progress` of a phase, which carries 0
+        // too, falls in the warm-up.
+        if !(rate.is_finite() && rate >= 0.0) {
             return;
         }
         if let Some(w) = self.window(mono_ms) {
@@ -97,7 +98,8 @@ impl StabilityMeter {
         }
         let min = means.iter().copied().fold(f64::INFINITY, f64::min);
         let max = means.iter().copied().fold(0.0, f64::max);
-        Some(min / max)
+        // Every window stalled: no ratio (the run is hung anyway).
+        (max > 0.0).then(|| min / max)
     }
 
     /// The worst phase so far, the current one included; `None` without a phase with at
@@ -142,6 +144,24 @@ mod tests {
         // Closes the third window; the open one never counts.
         feed(&mut m, 60, 61, 10.0);
         assert!((m.result().unwrap() - 0.95).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zero_rate_stalls_lower_stability() {
+        let mut m = meter(Objective::Normal);
+        feed(&mut m, 30, 40, 100.0);
+        // Half of the second window stalls: its mean is 50.
+        feed(&mut m, 40, 45, 100.0);
+        feed(&mut m, 45, 50, 0.0);
+        feed(&mut m, 50, 51, 100.0);
+        assert!((m.result().unwrap() - 0.5).abs() < 1e-12);
+        // Negative or non-finite rates are still ignored.
+        let mut m = meter(Objective::Normal);
+        feed(&mut m, 30, 50, 100.0);
+        m.rate(-1.0, 41 * S);
+        m.rate(f64::NAN, 42 * S);
+        feed(&mut m, 50, 51, 100.0);
+        assert_eq!(m.result(), Some(1.0));
     }
 
     #[test]

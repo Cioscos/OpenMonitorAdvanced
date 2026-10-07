@@ -16,3 +16,5 @@ pub mod sizing;
 pub mod submit;
 #[cfg(all(test, windows))]
 mod tests;
+#[cfg(windows)]
+pub mod vram;

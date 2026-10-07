@@ -17,6 +17,7 @@ use super::device::{GpuDevice, GpuError};
 use super::pace::{self, Alternate};
 use super::sizing::{submit_target_ms, VramBudget};
 use super::submit::{Submit, Submitter};
+use super::vram::VramWorkload;
 use crate::args::Inject;
 use crate::link::{EXIT_DEVICE_LOST, EXIT_OK};
 use crate::rng::phase_seed;
@@ -87,10 +88,11 @@ pub struct Hooks<'h, D> {
     pub clock: &'h dyn Fn() -> Instant,
 }
 
-/// The load of `kernel`; S4, S5 and S6 come with G7 and G8.
+/// The load of `kernel`; S5 and S6 come with G8.
 pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadResult {
     match kernel {
         KernelId::S1 | KernelId::S2 => Ok(Some(Box::new(ComputeLoad::new(kernel, dev, ctx)?))),
+        KernelId::S4 => Ok(Some(Box::new(VramWorkload::new(dev, ctx)?))),
         _ => Ok(None),
     }
 }

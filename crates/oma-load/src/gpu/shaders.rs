@@ -13,6 +13,9 @@ pub const S2_HASH: &[u8] = cso!("s2_hash");
 /// Output against golden: constant buffer `{ elements, submission, 0, 0 }`, SRVs `t0`
 /// (output) and `t1` (golden), counters in `u0` (layout in `compare.hlsl`).
 pub const COMPARE: &[u8] = cso!("compare");
+/// S4, the VRAM check: 32-byte constant buffer, chunk in `u0` (raw), statistics in `u1`
+/// (layout in `s4_vram.hlsl`).
+pub const S4_VRAM: &[u8] = cso!("s4_vram");
 /// Writes [`PROBE_VALUE`] to word 0 of `u0`.
 pub const PROBE: &[u8] = cso!("probe");
 

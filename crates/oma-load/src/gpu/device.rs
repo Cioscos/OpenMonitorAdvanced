@@ -8,10 +8,13 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Buffer, ID3D11ComputeShader, ID3D11Device, ID3D11DeviceContext,
     ID3D11ShaderResourceView, ID3D11UnorderedAccessView, D3D11_BIND_CONSTANT_BUFFER,
     D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_UNORDERED_ACCESS, D3D11_BOX, D3D11_BUFFER_DESC,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, D3D11_SDK_VERSION, D3D11_USAGE_DEFAULT,
+    D3D11_BUFFER_UAV, D3D11_BUFFER_UAV_FLAG_RAW, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS,
+    D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, D3D11_SDK_VERSION, D3D11_UAV_DIMENSION_BUFFER,
+    D3D11_UNORDERED_ACCESS_VIEW_DESC, D3D11_UNORDERED_ACCESS_VIEW_DESC_0, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
@@ -186,8 +189,13 @@ impl GpuDevice {
 
     /// A 16-byte constant buffer, filled with [`GpuDevice::set_constants`].
     pub fn constant_buffer(&self) -> Result<ID3D11Buffer, GpuError> {
+        self.constant_buffer_of(16)
+    }
+
+    /// A constant buffer of `bytes` (a multiple of 16), filled with [`GpuDevice::write_words`].
+    pub fn constant_buffer_of(&self, bytes: u32) -> Result<ID3D11Buffer, GpuError> {
         self.buffer(&D3D11_BUFFER_DESC {
-            ByteWidth: 16,
+            ByteWidth: bytes,
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
             ..Default::default()
@@ -280,6 +288,41 @@ impl GpuDevice {
             uav.ok_or(GpuError::Create(E_FAIL))?,
             srv.ok_or(GpuError::Create(E_FAIL))?,
         ))
+    }
+
+    /// A buffer of `bytes` (a multiple of 4) with a raw UAV (`RWByteAddressBuffer`) over
+    /// all of it, without CPU access or initial data.
+    pub fn raw_buffer(
+        &self,
+        bytes: u32,
+    ) -> Result<(ID3D11Buffer, ID3D11UnorderedAccessView), GpuError> {
+        let buffer = self.buffer(&D3D11_BUFFER_DESC {
+            ByteWidth: bytes,
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_UNORDERED_ACCESS.0 as u32,
+            MiscFlags: D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS.0 as u32,
+            ..Default::default()
+        })?;
+        let desc = D3D11_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D11_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: bytes / 4,
+                    Flags: D3D11_BUFFER_UAV_FLAG_RAW.0 as u32,
+                },
+            },
+        };
+        let mut uav = None;
+        // SAFETY: a raw-view buffer of this device bound for unordered access; the
+        // description views its `bytes / 4` 32-bit words; live out pointer.
+        unsafe {
+            self.device
+                .CreateUnorderedAccessView(&buffer, Some(&desc), Some(&mut uav))
+        }
+        .map_err(|e| self.error(&e))?;
+        Ok((buffer, uav.ok_or(GpuError::Create(E_FAIL))?))
     }
 
     /// Copies the first `bytes` of `src` to the CPU. `Map` waits for the GPU without the

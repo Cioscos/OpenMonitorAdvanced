@@ -62,11 +62,12 @@ fn main() {
 }
 
 /// The GPU shaders: file name in `shaders/` (without `.hlsl`), entry point and profile.
-const SHADERS: [(&str, &str, &str); 4] = [
+const SHADERS: [(&str, &str, &str); 5] = [
     ("s1_fma", "main", "cs_5_0"),
     ("s2_hash", "main", "cs_5_0"),
     ("compare", "main", "cs_5_0"),
     ("probe", "main", "cs_5_0"),
+    ("s4_vram", "main", "cs_5_0"),
 ];
 
 fn compile_shaders() {

@@ -34,7 +34,7 @@ Successo: chi fa overclock o undervolt capisce in pochi clic se il sistema è st
 | D10 | **Requisito (importante per l'utente):** ogni termine tecnico delle pagine ha un tooltip in parole semplici, e ogni modalità spiega cosa fa e che tipo di test è. |
 | D11 | Se si chiude la finestra, il test continua: la tray lo segnala, il menu ha «Ferma il test» e alla fine arriva un toast con il verdetto. «Esci» chiede conferma e salva la sessione come interrotta. |
 | D12 | I carichi girano in un **processo ausiliario `oma-load.exe`** (approccio 1). Sono stati scartati i thread dentro l'app e il servizio. |
-| D13 | I punteggi di CPU e GPU sono in **punti** (per la CPU una scala fissa con il 7800X3D di taratura a 1500, §4.6; per la GPU la macchina base = 1000, da rivedere nella M8b), con le velocità vere di ogni carico in una tabella di dettaglio. I contagiri del **disco** sono in **MB/s**, e i punti del disco servono alla classifica. |
+| D13 | I punteggi di CPU e GPU sono in **punti** (per la CPU una scala fissa con il 7800X3D di taratura a 1500, §4.6; per la GPU una scala fissa con la RTX 4080 di taratura a 1500, §5.2), con le velocità vere di ogni carico in una tabella di dettaglio. I contagiri del **disco** sono in **MB/s**, e i punti del disco servono alla classifica. |
 | D14 | La classifica parte da una tabella di riferimento inclusa nell'app. La community la alimenta con **issue GitHub precompilate** dall'app. Un'Action valida e aggrega le issue e pubblica la tabella su GitHub Pages. L'app la **scarica da sola** (al massimo una volta al giorno, attivo di default, si può spegnere). |
 | D15 | Codice di terzi da adattare, non solo da studiare: **FIRESTARTER** (GPL-3.0-or-later), **OpenDCDiag** (Apache-2.0), **memtest_vulkan** (Zlib) (§12). |
 
@@ -186,9 +186,9 @@ Ogni piano ha il suo branch `feat/m8x-…`. La release la decide l'utente alla f
 
   I colori vengono dai token di `theme.css`.
 - **Font.** Orbitron per titolo ed etichette, Share Tech Mono per il display. Entrambi sono OFL e si includono nell'app come file locali: niente Google Fonts, la CSP non cambia.
-- **Scala.** Si sceglie prima della misura: il primo «numero tondo» della serie 1-2-2,5-5 × 10ⁿ sopra 1,1 × max(record, riferimento, stima). La stima è 1500 per la CPU (§4.6), il valore della macchina base per la GPU e il massimo teorico del tipo di bus per il disco. Durante la misura la scala può solo crescere.
+- **Scala.** Si sceglie prima della misura: il primo «numero tondo» della serie 1-2-2,5-5 × 10ⁿ sopra 1,1 × max(record, riferimento, stima). La stima è 1500 per la CPU (§4.6); per la GPU è 1500 su una scheda dedicata e 20 su una integrata, e vale solo finché non ci sono né record né riferimento (decisione del piano M8b2: con 1500 fisso una iGPU, che fa pochi punti, vedrebbe l'ago sempre a zero); per il disco è il massimo teorico del tipo di bus. Durante la misura la scala può solo crescere.
 - **Movimento.**
-  - **Durante la misura:** l'ago segue la velocità dal vivo del carico in corso. Per CPU e GPU la velocità è già trasformata in punti dal rapporto con la velocità di riferimento (la macchina base per la GPU); per il disco è in MB/s.
+  - **Durante la misura:** l'ago segue la velocità dal vivo del carico in corso. Per CPU e GPU la velocità è già trasformata in punti dal rapporto con la velocità di riferimento (la scala fissa, §4.6 e §5.2); per il disco è in MB/s.
   - **Alla fine:** l'ago si ferma sul risultato.
   - **Animazione:** una media esponenziale breve via `requestAnimationFrame`, solo mentre la pagina è visibile e l'ago non è fermo. Con `prefers-reduced-motion` l'ago salta al valore.
 
@@ -366,12 +366,12 @@ Il tooltip di K10 dice che lavora in modalità utente, cioè sulla memoria che W
 
 ### 5.2 Benchmark: Calcolo e Grafica
 
-- **Calcolo.** Media geometrica, contro la macchina base, di:
+- **Calcolo.** Media geometrica, contro le velocità di riferimento, di:
   - catene FMA in FP32 (TFLOPS);
   - hash su interi INT32 (TIOPS);
   - banda di memoria con copia float4 su almeno 1 GB (GB/s).
 - **Grafica.** Scena fuori schermo deterministica: riempimento (Gpixel/s), texture (Gtexel/s) e overdraw.
-- **Punteggio.** Macchina base: la RTX 4080 dell'autore = 1000. Versione `gpu-1`.
+- **Punteggio.** Scala fissa, come per la CPU (decisione dell'utente del 2026-10-07, che sostituisce «RTX 4080 = 1000»): punti = 1500 × media geometrica del rapporto fra la velocità misurata e quella di riferimento, separati per Calcolo e Grafica. Le velocità di riferimento si tarano una volta sulla RTX 4080 dell'autore con le impostazioni di fabbrica, che vale quindi 1500. Versione `gpu-1`.
 - **Svolgimento.** 3–5 s di riscaldamento, almeno 5 finestre da 1 s misurate con le timestamp query, poi mediana e dispersione.
 - **Avvisi:** throttling; un altro processo che usa la GPU (dalla tabella dei processi GPU esistente).
 
@@ -396,7 +396,7 @@ I valori in virgola mobile non si confrontano mai fra GPU diverse, perché i dri
 | Profilo | Durate | Scaletta | Supera se |
 |---|---|---|---|
 | GPU · Verifica normale | 5 · 15 · 30 min | S5 + S1, poi S7 | nessun device perso, verifiche superate, stabilità ≥ 97% (finestra peggiore / migliore del throughput, come lo stress test di 3DMark) |
-| GPU · Stabilità overclock | 30 min · 1 h · 2 h | un giro di S4, S2, S1 esatto, S6, S7, S8, S9 | zero discrepanze, zero device persi, nessun invio bloccato, stabilità ≥ 97% escluso il throttling |
+| GPU · Stabilità overclock | 30 min · 1 h · 2 h | un giro di S4, S3, S2, S1 esatto, S6, S7, S8, S9 (S3 aggiunto dall'utente il 2026-10-07) | zero discrepanze, zero device persi, nessun invio bloccato, stabilità ≥ 97% escluso il throttling |
 
 ### 5.5 Messaggi in più nel protocollo
 

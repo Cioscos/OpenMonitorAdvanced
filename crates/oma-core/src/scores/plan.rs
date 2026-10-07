@@ -16,6 +16,9 @@ pub const WARMUP_PAUSE_MS: u32 = 2000;
 pub enum BenchMode {
     Single,
     Multi,
+    // GPU benchmark groups.
+    Compute,
+    Graphics,
 }
 
 /// `rep` 0 is the warm-up, 1-3 the repetitions.
@@ -41,7 +44,9 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
                     mode: LoadMode::Steady,
                     placement: match mode {
                         BenchMode::Single => Placement::OnePerCore,
-                        BenchMode::Multi => Placement::AllLogical,
+                        BenchMode::Multi | BenchMode::Compute | BenchMode::Graphics => {
+                            Placement::AllLogical
+                        }
                     },
                     duration_s: CAP_S,
                     per_core_s: None,

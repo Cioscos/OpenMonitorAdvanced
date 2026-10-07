@@ -13,6 +13,11 @@ pub const FORMAT: u32 = 1;
 pub struct Scores {
     pub single: Option<u32>,
     pub multi: Option<u32>,
+    /// GPU groups (DH11); `null` in a CPU file, absent before M8b2.
+    #[serde(default)]
+    pub compute: Option<u32>,
+    #[serde(default)]
+    pub graphics: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,13 +27,28 @@ pub struct KernelRate {
     /// True units.
     pub single: Option<f64>,
     pub multi: Option<f64>,
+    /// GPU load: the median of the windows (true units) and its spread.
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub spread: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A CPU (`cores`, `logical`) or a GPU (`cores` and `logical` 0, and the GPU fields).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Device {
     pub model: String,
     pub cores: u32,
     pub logical: u32,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub vendor_id: Option<u32>,
+    #[serde(default)]
+    pub dedicated_bytes: Option<u64>,
+    #[serde(default)]
+    pub integrated: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,7 +70,11 @@ pub struct ScoreFile {
     pub category: String,
     pub score_version: String,
     pub provisional: bool,
-    pub isa: Isa,
+    /// `null` for a GPU score.
+    pub isa: Option<Isa>,
+    /// Shader bytecode digest of a GPU score (DH8).
+    #[serde(default)]
+    pub shader_digest: Option<String>,
     pub scores: Scores,
     pub kernels: Vec<KernelRate>,
     pub device: Device,
@@ -67,8 +91,12 @@ pub struct ScoreFile {
 pub struct ScoreSummary {
     pub id: String,
     pub at: String,
+    pub category: String,
     pub single: Option<u32>,
     pub multi: Option<u32>,
+    pub compute: Option<u32>,
+    pub graphics: Option<u32>,
+    pub device_id: Option<String>,
     pub valid: bool,
     pub flags: Vec<String>,
     pub provisional: bool,
@@ -91,8 +119,12 @@ pub fn summary(s: &ScoreFile) -> ScoreSummary {
     ScoreSummary {
         id: s.id.clone(),
         at: s.at.clone(),
+        category: s.category.clone(),
         single: s.scores.single,
         multi: s.scores.multi,
+        compute: s.scores.compute,
+        graphics: s.scores.graphics,
+        device_id: s.device.device_id.clone(),
         valid: s.valid,
         flags: s.flags.clone(),
         provisional: s.provisional,
@@ -116,21 +148,27 @@ mod tests {
             category: "cpu".into(),
             score_version: "cpu-1".into(),
             provisional: true,
-            isa: Isa::Avx512,
+            isa: Some(Isa::Avx512),
+            shader_digest: None,
             scores: Scores {
                 single: Some(1500),
                 multi: None,
+                compute: None,
+                graphics: None,
             },
             kernels: vec![KernelRate {
                 id: BenchKernel::Ntt,
                 unit: "Mop/s".into(),
                 single: Some(428.2),
                 multi: None,
+                value: None,
+                spread: None,
             }],
             device: Device {
                 model: "CPU".into(),
                 cores: 8,
                 logical: 16,
+                ..Device::default()
             },
             flags: vec!["battery".into()],
             valid: true,
@@ -173,6 +211,105 @@ mod tests {
         assert_eq!(
             (m.id.as_str(), m.single, m.multi),
             (s.id.as_str(), Some(1500), None)
+        );
+    }
+
+    /// A CPU score as M8a2 wrote it, before the GPU fields.
+    const M8A2_CPU: &str = r#"{"format":1,"id":"0b9c5a2e-1d3f-4a6b-8c7d-9e0f1a2b3c4d","at":"2026-10-07T10:00:00Z","category":"cpu","scoreVersion":"cpu-1","provisional":true,"isa":"avx512","scores":{"single":1500,"multi":18000},"kernels":[{"id":"ntt","unit":"Mop/s","single":428.2,"multi":5138.0}],"device":{"model":"AMD Ryzen 7 7800X3D","cores":8,"logical":16},"flags":[],"valid":true,"scaling":0.75,"samples":[{"tMs":5000,"tempC":60.0,"powerW":null,"clockMhz":5000.0}],"appVersion":"0.5.0","loadVersion":"0.5.0"}"#;
+
+    #[test]
+    fn cpu_score_files_from_m8a2_still_parse() {
+        let s = parse_score(M8A2_CPU.as_bytes()).unwrap();
+        assert_eq!(s.isa, Some(Isa::Avx512));
+        assert_eq!((s.scores.single, s.scores.multi), (Some(1500), Some(18000)));
+        assert_eq!((s.scores.compute, s.scores.graphics), (None, None));
+        assert_eq!((s.kernels[0].value, s.kernels[0].spread), (None, None));
+        assert_eq!(s.kernels[0].single, Some(428.2));
+        assert_eq!(s.device.device_id, None);
+        assert_eq!((s.device.vendor_id, s.device.integrated), (None, None));
+        assert_eq!(s.shader_digest, None);
+        let m = summary(&s);
+        assert_eq!(
+            (m.category.as_str(), m.compute, m.device_id),
+            ("cpu", None, None)
+        );
+    }
+
+    #[test]
+    fn cpu_score_writes_the_gpu_fields_as_null() {
+        let text = serde_json::to_string(&sample()).unwrap();
+        for key in [
+            "\"compute\":null",
+            "\"graphics\":null",
+            "\"value\":null",
+            "\"spread\":null",
+            "\"deviceId\":null",
+            "\"vendorId\":null",
+            "\"dedicatedBytes\":null",
+            "\"integrated\":null",
+            "\"shaderDigest\":null",
+            "\"isa\":\"avx512\"",
+        ] {
+            assert!(text.contains(key), "{key} in {text}");
+        }
+    }
+
+    #[test]
+    fn gpu_score_file_round_trips() {
+        let s = ScoreFile {
+            category: "gpu".into(),
+            score_version: "gpu-1".into(),
+            isa: None,
+            shader_digest: Some("0123456789abcdef".into()),
+            scores: Scores {
+                single: None,
+                multi: None,
+                compute: Some(1480),
+                graphics: Some(1520),
+            },
+            kernels: vec![KernelRate {
+                id: BenchKernel::Fma,
+                unit: "TFLOPS".into(),
+                single: None,
+                multi: None,
+                value: Some(47.18),
+                spread: Some(0.012),
+            }],
+            device: Device {
+                model: "NVIDIA GeForce RTX 4080".into(),
+                cores: 0,
+                logical: 0,
+                device_id: Some("gpu-pci-0100".into()),
+                vendor_id: Some(0x10de),
+                dedicated_bytes: Some(17_171_480_576),
+                integrated: Some(false),
+            },
+            scaling: None,
+            ..sample()
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        for key in [
+            "\"isa\":null",
+            "\"shaderDigest\":\"0123456789abcdef\"",
+            "\"compute\":1480",
+            "\"id\":\"fma\"",
+            "\"deviceId\":\"gpu-pci-0100\"",
+            "\"vendorId\":4318",
+            "\"dedicatedBytes\":17171480576",
+            "\"integrated\":false",
+        ] {
+            assert!(text.contains(key), "{key} in {text}");
+        }
+        assert_eq!(parse_score(text.as_bytes()).unwrap(), s);
+        let m = summary(&s);
+        assert_eq!(
+            (
+                m.category.as_str(),
+                m.compute,
+                m.graphics,
+                m.device_id.as_deref()
+            ),
+            ("gpu", Some(1480), Some(1520), Some("gpu-pci-0100"))
         );
     }
 }

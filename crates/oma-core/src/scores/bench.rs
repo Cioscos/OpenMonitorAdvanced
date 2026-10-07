@@ -243,10 +243,7 @@ impl BenchController {
     /// Needle for a rate already in the workload's true units.
     fn live_units(&self, i: usize, units: f64) -> Option<f64> {
         let s = self.steps.get(i)?;
-        let table = match s.mode {
-            BenchMode::Single => &self.ctx.baseline.single,
-            BenchMode::Multi => &self.ctx.baseline.multi,
-        };
+        let table = self.ctx.baseline.table(s.mode)?;
         let v = SCALE_POINTS * units / table.get(&s.kernel)?;
         v.is_finite().then_some(v)
     }
@@ -415,10 +412,13 @@ impl BenchController {
             category: "cpu".into(),
             score_version: b.version.clone(),
             provisional: b.provisional,
-            isa: self.ctx.isa,
+            isa: Some(self.ctx.isa),
+            shader_digest: None,
             scores: Scores {
                 single: points(&single, &b.single),
                 multi: points(&multi, &b.multi),
+                compute: None,
+                graphics: None,
             },
             kernels: WORKLOADS
                 .iter()
@@ -427,6 +427,8 @@ impl BenchController {
                     unit: w.unit.into(),
                     single: single.get(&w.id).copied(),
                     multi: multi.get(&w.id).copied(),
+                    value: None,
+                    spread: None,
                 })
                 .collect(),
             device: self.ctx.device.clone(),
@@ -466,11 +468,7 @@ impl BenchController {
         if !own.all(|(_, g)| matches!(g, SegmentState::Done | SegmentState::Failed)) {
             return None;
         }
-        let table = match mode {
-            BenchMode::Single => &self.ctx.baseline.single,
-            BenchMode::Multi => &self.ctx.baseline.multi,
-        };
-        points(&self.medians(mode), table)
+        points(&self.medians(mode), self.ctx.baseline.table(mode)?)
     }
 
     pub fn status(&self) -> BenchStatus {
@@ -530,6 +528,7 @@ mod tests {
                 model: "CPU".into(),
                 cores: 8,
                 logical: 16,
+                ..Device::default()
             },
             logical: 16,
             tjmax_c: Some(89.0),
@@ -634,6 +633,17 @@ mod tests {
         assert!(f.scaling.is_some());
         assert_eq!(f.kernels.len(), 6);
         assert_eq!(f.load_version.as_deref(), Some("9"));
+        // A CPU file writes `isa` and leaves the GPU fields null (DH11).
+        assert_eq!(f.isa, Some(Isa::Avx2));
+        assert_eq!((f.scores.compute, f.scores.graphics), (None, None));
+        assert!(f
+            .kernels
+            .iter()
+            .all(|k| k.value.is_none() && k.spread.is_none()));
+        assert_eq!(
+            (f.device.device_id.as_ref(), f.shader_digest.as_ref()),
+            (None, None)
+        );
         assert_eq!(
             a.last(),
             Some(&BenchAction::Finished(BenchEnd::Saved(f.id.clone())))

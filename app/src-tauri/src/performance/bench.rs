@@ -66,6 +66,7 @@ impl PerformanceRunner {
                 model: topology.brand.clone(),
                 cores: cores as u32,
                 logical,
+                ..Device::default()
             },
             logical,
             tjmax_c: resolve_cpu_sensors(&(deps.schema)(), 0).tjmax_c,
@@ -451,7 +452,7 @@ mod tests {
         assert!(s.scores.single.is_some() && s.scores.multi.is_some());
         assert_eq!(s.load_version.as_deref(), Some("9.9.9"));
         assert_eq!(s.device.model, "Test CPU");
-        assert_eq!(s.isa, Isa::Avx2);
+        assert_eq!(s.isa, Some(Isa::Avx2));
         // The busy poll at the start, and the missing service.
         assert!(
             s.flags.contains(&"busy_system".to_string()),

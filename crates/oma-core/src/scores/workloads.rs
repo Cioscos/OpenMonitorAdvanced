@@ -13,6 +13,13 @@ pub enum BenchKernel {
     Sort,
     Fft,
     Gemm,
+    // GPU benchmark loads (`super::gpu::GPU_LOADS`).
+    Fma,
+    IntHash,
+    Bandwidth,
+    Fill,
+    Texture,
+    Overdraw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

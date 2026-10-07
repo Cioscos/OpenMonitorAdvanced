@@ -444,12 +444,14 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
           return end({ state: 'done', segments: BENCH_STEPS.map(() => 'done'), single, multi, scoreId: id });
         }
         const target = BENCH_STEPS[step].mode === 'single' ? single : multi;
+        // Like oma-core, a new step has no rate until its first progress.
+        const fresh = step !== status!.step;
         publish({
           ...status!,
           state: status!.state === 'stopping' ? 'stopping' : 'running',
           step,
           segments: BENCH_STEPS.map((_, i) => (i < step ? 'done' : i === step ? 'running' : 'pending')),
-          livePoints: target * (0.9 + 0.2 * Math.random()),
+          livePoints: fresh ? null : target * (0.9 + 0.2 * Math.random()),
           single: singleDone ? single : null,
         });
       }, 250);

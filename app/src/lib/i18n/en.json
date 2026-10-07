@@ -1178,6 +1178,7 @@
   "performance.score.flag.no_sensors": "Service not running: the temperature was not checked during the measurement.",
   "performance.score.provisional": "Scale not calibrated yet: the points will change.",
   "performance.score.error.busy": "A stress test or a benchmark is already running.",
+  "performance.score.error.failed": "The benchmark stopped before the end: no measurement was saved.",
   "performance.score.error.start": "The benchmark did not start: {reason}. Try reinstalling the app.",
   "performance.score.phase": "{kernel} · {mode} · {rep}",
   "performance.score.warmup": "warm-up",

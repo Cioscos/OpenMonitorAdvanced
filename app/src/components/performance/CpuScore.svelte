@@ -28,9 +28,22 @@
   const ref = $derived(reference === 'record' ? benchStore.record : benchStore.last);
 
   const finite = (v: number | null | undefined): number | null => (v != null && Number.isFinite(v) ? v : null);
+  // Between phases (and during the warm-up pause) the rate is missing: the needle holds the last
+  // live value of the mode in progress instead of falling to 0. Forgotten when the run ends.
+  let held = $state<Record<BenchMode, number | null>>({ single: null, multi: null });
+  $effect(() => {
+    const live = running ? finite(status?.livePoints) : null;
+    const mode = step?.mode;
+    const run = running;
+    untrack(() => {
+      if (!run) held = { single: null, multi: null };
+      else if (mode && live !== null) held = { ...held, [mode]: live };
+    });
+  });
+
   /** The live needle while the mode runs, then its score; without a run, the last saved one. */
   function valueOf(mode: BenchMode): number | null {
-    if (running) return finite(step?.mode === mode ? status!.livePoints : status![mode]);
+    if (running) return step?.mode === mode ? (finite(status!.livePoints) ?? held[mode]) : finite(status![mode]);
     if (status?.state === 'done') return finite(status[mode]);
     return finite(latest?.[mode]);
   }
@@ -70,7 +83,8 @@
     const error = status?.state === 'failed' ? status.error : null;
     if (!error) return null;
     if (error.startsWith('performance.start.')) return t('performance.score.error.start', { reason: t(error) });
-    return t(error === 'hung' ? 'performance.outcome.hung' : 'performance.outcome.crashed');
+    // `exited`, `failed`, `crashed`, `hung`: the run ended early, which says nothing on the hardware.
+    return t('performance.score.error.failed');
   });
 
   // The measurement below the gauges: the one just saved, else the newest; loaded in full.

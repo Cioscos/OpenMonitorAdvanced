@@ -61,6 +61,10 @@ test('live_gauge_moves_with_status', async () => {
   expect(now('multi')).toBeNull();
   // The phase in words: the workload, the mode and the repetition.
   expect(screen.getByText(new RegExp(t('performance.score.rep', { n: 1 })))).toBeTruthy();
+  // Between phases the rate is missing: the needle holds its last value instead of falling to 0.
+  backend.emitBench(makeBenchStatus({ step: 2, livePoints: null }));
+  await waitFor(() => expect(screen.getByText(new RegExp(t('performance.score.rep', { n: 2 })))).toBeTruthy());
+  expect(now('single')).toBe('1234');
   // A value above the full scale raises it; it never drops back during the measurement.
   backend.emitBench(makeBenchStatus({ step: 2, livePoints: 5000 }));
   await waitFor(() => expect(meter('single').getAttribute('aria-valuemax')).toBe('10000'));
@@ -71,9 +75,13 @@ test('live_gauge_moves_with_status', async () => {
   backend.emitBench(makeBenchStatus({ step: 24, livePoints: 9000, single: 1500 }));
   await waitFor(() => expect(now('multi')).toBe('9000'));
   expect(now('single')).toBe('1500');
-  // A value that is not a number does not reach the gauge.
+  // A value that is not a number does not reach the gauge: the needle holds.
   backend.emitBench(makeBenchStatus({ step: 25, livePoints: NaN, single: 1500 }));
-  await waitFor(() => expect(now('multi')).toBeNull());
+  await waitFor(() => expect(screen.getByText(new RegExp(t('performance.score.rep', { n: 1 })))).toBeTruthy());
+  expect(now('multi')).toBe('9000');
+  // The run is over: the held needle goes; the done status shows the scores.
+  backend.emitBench(makeBenchStatus({ state: 'done', step: null, livePoints: null, single: 1500, multi: 12000, scoreId: 'x' }));
+  await waitFor(() => expect(now('multi')).toBe('12000'));
 });
 
 test('reference_menu_switches_between_record_and_last', async () => {
@@ -123,6 +131,11 @@ test('start_is_disabled_while_a_stress_test_runs', async () => {
   await waitFor(() =>
     expect(screen.getByRole('alert').textContent).toContain(t('performance.score.error.start', { reason: t('performance.start.missing') })),
   );
+  // A run that ended early is not a hardware verdict.
+  for (const error of ['exited', 'failed', 'crashed', 'hung']) {
+    backend.emitBench(makeBenchStatus({ state: 'failed', step: null, error }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(t('performance.score.error.failed')));
+  }
 });
 
 test('history_lists_and_deletes', async () => {

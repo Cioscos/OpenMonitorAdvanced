@@ -1178,6 +1178,7 @@
   "performance.score.flag.no_sensors": "Servizio non attivo: temperatura non controllata durante la misura.",
   "performance.score.provisional": "Scala non ancora tarata: i punti cambieranno.",
   "performance.score.error.busy": "È già in corso uno stress test o un benchmark.",
+  "performance.score.error.failed": "Il benchmark si è interrotto prima della fine: nessuna misura salvata.",
   "performance.score.error.start": "Il benchmark non è partito: {reason}. Prova a reinstallare l'app.",
   "performance.score.phase": "{kernel} · {mode} · {rep}",
   "performance.score.warmup": "riscaldamento",

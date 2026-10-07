@@ -1,6 +1,6 @@
 import { formatBytes } from '../format';
 import type { Params, Translate } from '../i18n/index.svelte';
-import type { DataSize, KernelId, Phase, Schema, Sensor, SessionEvent } from '../types';
+import type { DataSize, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
 
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
@@ -20,9 +20,20 @@ export function sizeLabel(phase: Phase): string | null {
   return phase.size === (DEFAULT_SIZE[phase.kernel] ?? 'auto') ? null : SIZE_LABEL[phase.size];
 }
 
-/** «FFT piccole · core e cache · AVX2»: the kernel's name (T1), its size when not its own, and the set. */
+/** The GPU kernels (`s1`…`s6`), which have no instruction set. */
+export function isGpuKernel(kernel: KernelId): boolean {
+  return kernel.startsWith('s');
+}
+
+/** «FFT piccole · core e cache · AVX2»: the kernel's name (T1), its size when not its own, and the set (not for a GPU). */
 export function phaseLabel(phase: Phase, t: Translate): string {
-  return [t(`glossary.mode.${phase.kernel}.name`), sizeLabel(phase), t(`glossary.isa.${phase.isa}.name`)].filter(Boolean).join(' · ');
+  const isa = isGpuKernel(phase.kernel) ? null : t(`glossary.isa.${phase.isa}.name`);
+  return [t(`glossary.mode.${phase.kernel}.name`), sizeLabel(phase), isa].filter(Boolean).join(' · ');
+}
+
+/** The glossary term of a load mode: the wire's snake_case (`pause_resume`) is camelCase there (`mode.pauseResume`). */
+export function modeTerm(mode: LoadMode): string {
+  return `mode.${mode.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`;
 }
 
 /** A text whose `[term]` carries a tooltip, cut around it: `[before, term, after]` (no brackets: `[text, '', '']`). */
@@ -63,6 +74,7 @@ export function pieces(text: string, terms: { term: string; word?: string }[], t
 const EVENT_TERMS: Record<string, string[]> = {
   thermal_stop: ['thermalStop'],
   reference_invalid: ['phase', 'reference'],
+  reference_invalid_gpu: ['phase'],
   ram_reduced: ['phase', 'threads'],
   ram_insufficient: ['phase'],
   k9_needs_two_cores: ['phase', 'mode.k9'],
@@ -71,6 +83,8 @@ const EVENT_TERMS: Record<string, string[]> = {
   vram_allocated: ['vram'],
   vram_reduced: ['vram'],
   vram_bits: ['vram'],
+  vram_words: ['vram'],
+  device_lost: ['phase', 'deviceLost'],
   artifact_tiles: ['artifact'],
   pcie_replay: ['pcieReplay'],
   bugcheck: ['bugcheck'],
@@ -103,11 +117,13 @@ export function eventText(event: SessionEvent, t: Translate, locale: string): Pi
 
 /**
  * A verdict's title: the T3 text (`performance.outcome.<verdict>`) with its parameters; a
- * recovered `phase` (counted from 1) reads «during phase 3».
+ * recovered `phase` (counted from 1) reads «during phase 3», and the `stability` percent
+ * («95.3») is in the locale's format.
  */
-export function verdictTitle(detail: { verdict: string | null; params: Record<string, string> } | null, t: Translate): string {
+export function verdictTitle(detail: { verdict: string | null; params: Record<string, string> } | null, t: Translate, locale = 'en'): string {
   if (!detail?.verdict) return t('performance.result.unknown');
   const params: Params = { ...detail.params };
+  if (params.stability !== undefined && Number.isFinite(Number(params.stability))) params.stability = percentText(Number(params.stability) / 100, locale);
   if (params.phase !== undefined) params.phase = t('performance.result.phaseN', { n: params.phase });
   // A `failed_to_start` reason is a text, or the key of one (`performance.start.*`).
   if (typeof params.reason === 'string' && params.reason.startsWith('performance.start.')) params.reason = t(params.reason);

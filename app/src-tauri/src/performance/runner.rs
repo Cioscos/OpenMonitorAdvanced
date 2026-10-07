@@ -448,6 +448,9 @@ fn verdict_text(lang: Lang, detail: &OutcomeDetail) -> String {
         .map(|(k, v)| {
             let text = if v.starts_with("performance.start.") {
                 t(lang, v, &[])
+            } else if k == "stability" && lang == Lang::It {
+                // A percent with a decimal point ("95.3"), as the UI shows it in Italian.
+                v.replace('.', ",")
             } else {
                 v.clone()
             };
@@ -1867,6 +1870,22 @@ pub(crate) mod tests {
             at_ms: None,
         };
         assert_eq!(verdict_text(Lang::En, &detail), "Not started: no phase ran");
+    }
+
+    #[test]
+    fn verdict_text_localizes_the_stability() {
+        let detail = OutcomeDetail {
+            verdict: "low_stability".into(),
+            params: [("stability".to_string(), "95.3".to_string())].into(),
+            phase: None,
+            kernel: None,
+            core: None,
+            temp_c: None,
+            clock_mhz: None,
+            at_ms: None,
+        };
+        assert!(verdict_text(Lang::It, &detail).contains("95,3"));
+        assert!(verdict_text(Lang::En, &detail).contains("95.3"));
     }
 
     #[test]

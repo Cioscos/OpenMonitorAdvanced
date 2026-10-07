@@ -841,6 +841,7 @@
   "performance.start.nothing_ran": "nessuna fase è stata eseguita",
   "performance.start.invalid_plan": "il piano del test non è valido",
   "performance.start.no_gpu": "nessuna GPU adatta",
+  "performance.start.gpu_error": "la GPU non si è potuta usare (errore di Direct3D)",
   "performance.outcome.passed": "Superato",
   "performance.outcome.marginal": "Superato con avvisi: errori corretti dall'hardware",
   "performance.outcome.errors": "Errori trovati",
@@ -1044,6 +1045,7 @@
   "performance.wizard.error.too_long": "il piano supera le 24 ore: riduci i minuti.",
   "performance.wizard.error.unknown_core": "il core scelto non esiste su questa CPU.",
   "performance.wizard.error.ram_budget": "la quota di RAM è sotto i 256 MiB: chiudi qualche programma o alza la quota nelle impostazioni.",
+  "performance.wizard.error.no_gpu": "nessuna GPU adatta: la GPU scelta non c'è più.",
   "performance.wizard.bothSmt": "entrambi i thread",
   "glossary.phase": "Una parte del test: un tipo di calcolo con un modo di carico, per un certo tempo. Le fasi si eseguono una dopo l'altra.",
   "glossary.phase.name": "Fase",
@@ -1082,6 +1084,7 @@
   "performance.event.thermal_stop": "Stop termico: temperatura a {temp} °C",
   "performance.event.hung": "Il test non risponde più",
   "performance.event.reference_invalid": "Fase {phase}: riferimento non valido, un difetto del programma e non della CPU",
+  "performance.event.reference_invalid_gpu": "Fase {phase}: il calcolo di riferimento della GPU non è valido, è un difetto del programma e non della GPU",
   "performance.event.k9_needs_two_cores": "Fase {phase} saltata: lo scambio fra core ha bisogno di almeno due core",
   "performance.event.ram_reduced": "Fase {phase}: memoria per thread ridotta a {value}",
   "performance.event.ram_insufficient": "Fase {phase} saltata: memoria libera insufficiente",
@@ -1262,7 +1265,10 @@
   "performance.event.vram_allocated": "Fase {phase}: VRAM in verifica, {value}",
   "performance.event.vram_reduced": "Fase {phase}: VRAM ridotta a {value}",
   "performance.event.vram_bits": "Fase {phase}: celle di VRAM sbagliate (bit {value})",
+  "performance.event.vram_words": "Fase {phase}: parole della VRAM sbagliate, {value}",
   "performance.event.artifact_tiles": "Fase {phase}: artefatto nell'immagine, {value} riquadri diversi dal primo",
   "performance.event.pcie_replay": "Replay PCIe: il contatore è salito da {from} a {to}",
-  "performance.event.gpu_missing": "Nessuna GPU adatta trovata"
+  "performance.event.gpu_missing": "Nessuna GPU adatta trovata",
+  "performance.event.device_lost": "Fase {phase}: GPU azzerata dal driver (codice {code})",
+  "performance.event.gpu_error": "La GPU non si è potuta usare (errore di Direct3D)"
 }

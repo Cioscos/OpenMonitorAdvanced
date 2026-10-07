@@ -3,7 +3,7 @@
   import type { Backend } from '../../lib/backend';
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { around, errorText, formatDuration, marked, sizeLabel } from '../../lib/performance/format';
+  import { around, errorText, formatDuration, marked, modeTerm, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
@@ -252,7 +252,7 @@
           <li class:off class:gpu={component === 'gpu'} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
             <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             {#if component !== 'gpu'}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
-            <span class="load"><Term term={`mode.${p.mode}`} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>
+            <span class="load"><Term term={modeTerm(p.mode)} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>
             <span class="dur">{off ? t('performance.wizard.excluded') : formatDuration(p.duration_s)}</span>
           </li>
         {/each}

@@ -183,14 +183,17 @@ const gpuSession = (over: Partial<StressSession>): StressSession =>
   makeStressSession({ id: 'gpu', component: 'gpu', device: 'Fake RTX 4080', objective: 'overclock', request: GPU_REQUEST, ...over });
 
 test('device lost result shows the driver code', async () => {
-  const lost = error({ kind: 'device_lost', kernel: 's1', isa: 'sse2', phase: 0, core: null, logical: null, expected: 0, actual: 0x887a0006, load_percent: 65, clockMhz: 2850 });
+  // As the RunController writes it: the error record (GPU clock, load level) and its event.
+  const lost = error({ kind: 'device_lost', kernel: 's1', isa: 'sse2', phase: 0, core: null, logical: null, iteration: 4, expected: 0, actual: 0x887a0006, load_percent: 65, clockMhz: 2850 });
   await setup(
     gpuSession({
       outcome: 'device_lost',
-      outcomeDetail: { verdict: 'device_lost', params: {}, phase: 0, kernel: 's1', core: null, tempC: 70, clockMhz: 2850, atMs: 134_000 },
+      outcomeDetail: { verdict: 'device_lost', params: { code: '0x887A0006' }, phase: 0, kernel: 's1', core: null, tempC: 70, clockMhz: 2850, atMs: 134_000 },
       errors: [lost],
+      events: [{ atMs: 134_000, code: 'device_lost', params: { phase: '0', code: '0x887A0006' } }],
     }),
   );
+  expect(screen.getByText(t('glossary.deviceLost.name'), { selector: '.log .term, .log .term *' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: t('performance.outcome.device_lost') })).toBeTruthy();
   const code = screen.getByText(t('performance.result.deviceLostCode', { code: 'DXGI_ERROR_DEVICE_HUNG (0x887A0006)' }));
   expect(code.closest('.term')).toBeTruthy();
@@ -245,4 +248,21 @@ test('a GPU result shows no instruction set', async () => {
   );
   expect(fact(t('glossary.phase.name'))).toContain(t('glossary.mode.s1.name'));
   expect(fact(t('glossary.phase.name'))).not.toContain(t('glossary.isa.sse2.name'));
+  // Nor does the errors table.
+  await fireEvent.click(screen.getByText(t('performance.result.errors', { n: 1 })));
+  const table = await screen.findByRole('table');
+  expect(table.textContent).not.toContain(t('glossary.isa.sse2.name'));
+});
+
+test('low stability title is in the locale format', async () => {
+  await setup(
+    gpuSession({
+      outcome: 'low_stability',
+      outcomeDetail: { verdict: 'low_stability', params: { stability: '95.3' }, phase: null, kernel: null, core: null, tempC: null, clockMhz: null, atMs: null },
+      stability: 0.9532,
+    }),
+  );
+  // The settings set the language at connection: switch after.
+  i18n.locale = 'it';
+  expect(await screen.findByRole('heading', { name: t('performance.outcome.low_stability', { stability: '95,3' }) })).toBeTruthy();
 });

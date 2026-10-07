@@ -66,9 +66,13 @@ function phasesFor(request: StartRequest, totalS: number): Phase[] {
     ];
   }
   if (request.component === 'gpu') {
+    // Overclock also pauses and resumes; the ramp stays last, where the device-lost scenario fails.
+    const pause = stop ? Math.round(totalS * 0.15) : 0;
+    const main = Math.round(totalS * 0.7) - pause;
     return [
-      phase({ kernel: 's5', alt_kernel: 's1', duration_s: Math.round(totalS * 0.7), isa: 'sse2', stop_on_error: stop }),
-      phase({ kernel: 's1', mode: 'ramp', duration_s: totalS - Math.round(totalS * 0.7), isa: 'sse2', stop_on_error: stop }),
+      phase({ kernel: 's5', alt_kernel: 's1', duration_s: main, isa: 'sse2', stop_on_error: stop }),
+      ...(pause ? [phase({ kernel: 's1', mode: 'pause_resume', duration_s: pause, isa: 'sse2', stop_on_error: stop })] : []),
+      phase({ kernel: 's1', mode: 'ramp', duration_s: totalS - main - pause, isa: 'sse2', stop_on_error: stop }),
     ];
   }
   const cycle = Math.round((totalS * 2) / 3);

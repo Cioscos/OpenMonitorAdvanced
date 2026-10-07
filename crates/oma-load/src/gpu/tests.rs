@@ -89,6 +89,8 @@ struct FakeLoad {
     log: Log,
     clock: Clock,
     prepare_err: Option<GpuError>,
+    /// Real time `prepare` takes.
+    prepare_time: Duration,
     /// Given by the `n`-th check (from 1).
     mismatch: Option<(u32, GpuMismatch)>,
     checks_done: u32,
@@ -100,6 +102,7 @@ struct FakeLoad {
 impl GpuWorkload for FakeLoad {
     fn prepare(&mut self, _: &mut dyn Submit, _: f64, stop: &AtomicBool) -> Result<(), GpuError> {
         push(&self.log, Ev::Prepare(self.kernel));
+        thread::sleep(self.prepare_time);
         if self.prepare_err == Some(GpuError::Stopped) {
             // A long preparation that looks at the stop every 10 ms.
             while !stop.load(Ordering::Relaxed) {
@@ -135,6 +138,7 @@ struct Setup {
     open_err: Option<GpuError>,
     supported: Vec<KernelId>,
     prepare_err: Option<(KernelId, GpuError)>,
+    prepare_time: Duration,
     mismatch: Option<(u32, GpuMismatch)>,
     inject: Option<Inject>,
     notices: Vec<(String, u64)>,
@@ -149,6 +153,7 @@ impl Default for Setup {
             open_err: None,
             supported: vec![KernelId::S1, KernelId::S2, KernelId::S5],
             prepare_err: None,
+            prepare_time: Duration::ZERO,
             mismatch: None,
             inject: None,
             notices: vec![],
@@ -190,6 +195,8 @@ fn plan(phases: Vec<Phase>) -> Plan {
 struct Ran {
     end: GpuRunEnd,
     msgs: Vec<LoadMessage>,
+    /// When each of `msgs` arrived, in real time.
+    arrived: Vec<Instant>,
     events: Vec<Ev>,
 }
 
@@ -255,7 +262,7 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
         speed: setup.speed,
     };
     let msgs = Mutex::new(Vec::new());
-    let out = |m: LoadMessage| msgs.lock().unwrap().push(m);
+    let out = |m: LoadMessage| msgs.lock().unwrap().push((Instant::now(), m));
     let open = |luid: u64| -> Result<((), Box<dyn Submit>), GpuError> {
         assert_eq!(luid, 0x1234);
         if let Some(e) = setup.open_err {
@@ -285,6 +292,7 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
                 .prepare_err
                 .filter(|&(k, _)| k == kernel)
                 .map(|(_, e)| e),
+            prepare_time: setup.prepare_time,
             mismatch: setup.mismatch.filter(|_| kernel == KernelId::S1),
             checks_done: 0,
             since_check: 0,
@@ -300,9 +308,11 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
     };
     let end = run_gpu_with(plan, &out, stop, setup.inject.clone(), &hooks);
     let events = log.lock().unwrap().clone();
+    let (arrived, msgs) = msgs.into_inner().unwrap().into_iter().unzip();
     Ran {
         end,
-        msgs: msgs.into_inner().unwrap(),
+        msgs,
+        arrived,
         events,
     }
 }
@@ -681,6 +691,58 @@ fn unknown_luid_sends_gpu_missing() {
     );
     assert_eq!(ran.end.finished.reason, FinishReason::Failed);
     assert_eq!(ran.end.exit_code, EXIT_OK);
+}
+
+#[test]
+fn unusable_gpu_sends_gpu_error() {
+    let ran = run(
+        &plan(vec![phase(KernelId::S1, LoadMode::Steady, 1)]),
+        &Setup {
+            open_err: Some(GpuError::Create(0x8000_4005_u32 as i32)),
+            ..Setup::default()
+        },
+    );
+    assert_eq!(
+        ran.msgs,
+        [LoadMessage::Notice(Notice {
+            phase: 0,
+            code: "gpu_error".into(),
+            value: None,
+        })]
+    );
+    assert_eq!(ran.end.finished.reason, FinishReason::Failed);
+    assert_eq!(ran.end.exit_code, EXIT_OK);
+}
+
+#[test]
+fn slow_prepare_still_sends_progress_every_second() {
+    let ran = run(
+        &plan(vec![phase(KernelId::S1, LoadMode::Steady, 1)]),
+        &Setup {
+            prepare_time: Duration::from_millis(2500),
+            ..Setup::default()
+        },
+    );
+    let times: Vec<Instant> = ran
+        .msgs
+        .iter()
+        .zip(&ran.arrived)
+        .filter(|(m, _)| matches!(m, LoadMessage::Progress(_)))
+        .map(|(_, t)| *t)
+        .collect();
+    assert!(times.len() >= 4, "{} progress messages", times.len());
+    for w in times.windows(2) {
+        let gap = w[1] - w[0];
+        assert!(gap <= Duration::from_secs(1), "{gap:?}");
+    }
+    // The calibration is not part of the rate.
+    assert!(ran
+        .progress(0)
+        .iter()
+        .skip(1)
+        .rev()
+        .skip(1)
+        .all(|p| p.rate.is_none()));
 }
 
 #[test]

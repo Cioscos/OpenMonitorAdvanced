@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oma_ipc::load::{
-    CoreProgress, CoreState, ErrorKind, FinishReason, Isa, KernelId, LoadMessage, LoadMode,
-    Placement,
+    ComputeError, CoreProgress, CoreState, ErrorKind, FinishReason, Isa, KernelId, LoadMessage,
+    LoadMode, Placement,
 };
 use serde::Serialize;
 
@@ -39,6 +39,7 @@ const LOAD_EXIT_USAGE: i32 = 1;
 pub const LOAD_EXIT_DEVICE_LOST: i32 = 4;
 const INVALID_PLAN: &str = "performance.start.invalid_plan";
 const NO_GPU: &str = "performance.start.no_gpu";
+const GPU_ERROR: &str = "performance.start.gpu_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -303,6 +304,34 @@ impl RunController {
 
     fn is_gpu(&self) -> bool {
         self.session.component == Component::Gpu
+    }
+
+    /// An error with where it happened: the clock of its core, or the GPU's for a GPU run.
+    fn record(&self, e: &ComputeError) -> ErrorRecord {
+        let clock = match e.core {
+            Some(c) => self
+                .last_sample
+                .core_clock_mhz
+                .get(c as usize)
+                .copied()
+                .flatten(),
+            None if self.is_gpu() => self.last_sample.clock_mhz,
+            None => None,
+        };
+        ErrorRecord {
+            error: e.clone(),
+            at_ms: self.mono - self.start_mono,
+            temp_c: self.last_sample.temp_c,
+            clock_mhz: clock,
+        }
+    }
+
+    fn keep(&mut self, record: ErrorRecord) {
+        if self.session.errors.len() < MAX_ERRORS {
+            self.session.errors.push(record);
+        } else {
+            self.session.errors_dropped += 1;
+        }
     }
 
     fn thermal_armed(&self) -> bool {
@@ -579,6 +608,10 @@ impl RunController {
                 // `actual` carries the `GetDeviceRemovedReason` HRESULT.
                 let code = e.actual as u32;
                 self.device_lost = Some(code);
+                // Kept for the result's driver code and load level, never counted as a
+                // mismatch: the verdict stays `device_lost`.
+                let record = self.record(e);
+                self.keep(record);
                 self.event(
                     "device_lost",
                     &[
@@ -589,20 +622,16 @@ impl RunController {
             }
             LoadMessage::Error(e) if e.kind == ErrorKind::ReferenceInvalid => {
                 // A defect of our own reference, never an error of a core.
-                self.event("reference_invalid", &[("phase", e.phase.to_string())]);
+                let code = if self.is_gpu() {
+                    "reference_invalid_gpu"
+                } else {
+                    "reference_invalid"
+                };
+                self.event(code, &[("phase", e.phase.to_string())]);
             }
             LoadMessage::Error(e) => {
                 self.errors += 1;
-                let clock = e
-                    .core
-                    .and_then(|c| self.last_sample.core_clock_mhz.get(c as usize).copied())
-                    .flatten();
-                let record = ErrorRecord {
-                    error: e.clone(),
-                    at_ms: self.mono - self.start_mono,
-                    temp_c: self.last_sample.temp_c,
-                    clock_mhz: clock,
-                };
+                let record = self.record(e);
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
                 self.coreless_errors |= core.is_none();
                 if let Some(core) = core {
@@ -610,11 +639,7 @@ impl RunController {
                     let c = self.set_core(core, CoreState::Failed);
                     c.first_error.get_or_insert_with(|| record.clone());
                 }
-                if self.session.errors.len() < MAX_ERRORS {
-                    self.session.errors.push(record);
-                } else {
-                    self.session.errors_dropped += 1;
-                }
+                self.keep(record);
             }
             LoadMessage::Notice(n) => {
                 match n.code.as_str() {
@@ -623,6 +648,9 @@ impl RunController {
                     "vram_reduced" => self.warn("vramReduced"),
                     "gpu_missing" if !self.phase_seen => {
                         self.failed_to_start = Some(NO_GPU.into());
+                    }
+                    "gpu_error" if !self.phase_seen => {
+                        self.failed_to_start = Some(GPU_ERROR.into());
                     }
                     // Other codes (`vram_bits`, `artifact_tiles`...) are diary events only.
                     _ => {}
@@ -2032,6 +2060,57 @@ mod tests {
         );
         let a = c.on_load(&finished(FinishReason::Failed), clock(2100));
         assert!(has_finished(&settle(&mut c, a), Outcome::DeviceLost));
+    }
+
+    #[test]
+    fn device_lost_error_is_kept_with_the_gpu_clock() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, Some(55)), clock(1000));
+        c.on_sample(&gpu_sample(Some(71.0), None), false, clock(1500));
+        c.on_load(
+            &gpu_error(ErrorKind::DeviceLost, 0x887A_0006, Some(55)),
+            clock(2000),
+        );
+        let e = &c.session().errors[0];
+        assert_eq!(e.error.kind, ErrorKind::DeviceLost);
+        assert_eq!(e.error.actual, 0x887A_0006);
+        assert_eq!(e.error.load_percent, Some(55));
+        assert_eq!(e.clock_mhz, Some(2700.0));
+        assert_eq!(e.temp_c, Some(71.0));
+        // Not counted as a mismatch: the verdict stays `device_lost`.
+        assert_eq!(c.status().errors, 0);
+        let a = c.on_exit(Some(LOAD_EXIT_DEVICE_LOST), clock(2100));
+        assert!(has_finished(&settle(&mut c, a), Outcome::DeviceLost));
+    }
+
+    #[test]
+    fn gpu_mismatch_takes_the_gpu_clock() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_progress(1000, 25.0, None), clock(1000));
+        c.on_sample(&gpu_sample(Some(70.0), None), false, clock(1500));
+        c.on_load(&gpu_error(ErrorKind::Mismatch, 2, None), clock(2000));
+        assert_eq!(c.session().errors[0].clock_mhz, Some(2700.0));
+    }
+
+    #[test]
+    fn gpu_error_notice_fails_to_start() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&notice("gpu_error"), clock(100));
+        let a = c.on_load(&finished(FinishReason::Failed), clock(200));
+        assert!(has_finished(&settle(&mut c, a), Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.gpu_error");
+    }
+
+    #[test]
+    fn gpu_reference_invalid_has_its_own_event() {
+        let mut c = gpu_ctl(Objective::Normal);
+        c.on_load(&gpu_error(ErrorKind::ReferenceInvalid, 0, None), clock(100));
+        assert!(c
+            .session()
+            .events
+            .iter()
+            .any(|e| e.code == "reference_invalid_gpu"));
     }
 
     #[test]

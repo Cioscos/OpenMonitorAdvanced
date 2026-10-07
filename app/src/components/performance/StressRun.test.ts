@@ -175,6 +175,12 @@ const GPU_PHASES: PhaseInfo[] = [
 ];
 const GPU_RUNNING = (over: Partial<RunStatus> = {}) => RUNNING({ component: 'gpu', phases: GPU_PHASES, phaseIndex: 1, currentCore: null, ...over });
 
+test('a pause and resume phase shows its glossary name', async () => {
+  await setup(GPU_RUNNING({ phases: [GPU_PHASES[0], { ...GPU_PHASES[1], mode: 'pause_resume' }] }));
+  expect(screen.getAllByText(t('glossary.mode.pauseResume.name')).length).toBeGreaterThan(0);
+  expect(document.body.textContent).not.toContain('mode.pause_resume');
+});
+
 test('gpu run hides the core grid', async () => {
   // Even a phase that says «one core at a time» has no cores to show on a GPU.
   await setup(GPU_RUNNING({ phases: [{ ...GPU_PHASES[0], placement: 'core_cycle' }, GPU_PHASES[1]], phaseIndex: 0, cores: [{ core: 0, state: 'testing' }] }));

@@ -841,6 +841,7 @@
   "performance.start.nothing_ran": "no phase ran",
   "performance.start.invalid_plan": "the test plan is not valid",
   "performance.start.no_gpu": "no suitable GPU",
+  "performance.start.gpu_error": "the GPU could not be used (Direct3D error)",
   "performance.outcome.passed": "Passed",
   "performance.outcome.marginal": "Passed with warnings: errors corrected by the hardware",
   "performance.outcome.errors": "Errors found",
@@ -1044,6 +1045,7 @@
   "performance.wizard.error.too_long": "the plan is longer than 24 hours: reduce the minutes.",
   "performance.wizard.error.unknown_core": "the chosen core does not exist on this CPU.",
   "performance.wizard.error.ram_budget": "the RAM share is under 256 MiB: close some programs or raise the share in the settings.",
+  "performance.wizard.error.no_gpu": "no suitable GPU: the chosen GPU is no longer there.",
   "performance.wizard.bothSmt": "both threads",
   "glossary.phase": "A part of the test: one kind of computation with one load mode, for a set time. The phases run one after another.",
   "glossary.phase.name": "Phase",
@@ -1082,6 +1084,7 @@
   "performance.event.thermal_stop": "Thermal stop: temperature at {temp} °C",
   "performance.event.hung": "The test stopped responding",
   "performance.event.reference_invalid": "Phase {phase}: invalid reference, a defect of the program and not of the CPU",
+  "performance.event.reference_invalid_gpu": "Phase {phase}: the GPU's reference computation is invalid, a defect of the program and not of the GPU",
   "performance.event.k9_needs_two_cores": "Phase {phase} skipped: the core-to-core exchange needs at least two cores",
   "performance.event.ram_reduced": "Phase {phase}: memory per thread reduced to {value}",
   "performance.event.ram_insufficient": "Phase {phase} skipped: not enough free memory",
@@ -1262,7 +1265,10 @@
   "performance.event.vram_allocated": "Phase {phase}: checking {value} of VRAM",
   "performance.event.vram_reduced": "Phase {phase}: VRAM reduced to {value}",
   "performance.event.vram_bits": "Phase {phase}: wrong VRAM cells (bits {value})",
+  "performance.event.vram_words": "Phase {phase}: wrong VRAM words, {value}",
   "performance.event.artifact_tiles": "Phase {phase}: artifact in the image, {value} tiles differ from the first",
   "performance.event.pcie_replay": "PCIe replay: the counter rose from {from} to {to}",
-  "performance.event.gpu_missing": "No suitable GPU found"
+  "performance.event.gpu_missing": "No suitable GPU found",
+  "performance.event.device_lost": "Phase {phase}: GPU reset by the driver (code {code})",
+  "performance.event.gpu_error": "The GPU could not be used (Direct3D error)"
 }

@@ -4,6 +4,7 @@
 //! `Progress`; a lost device or a hung submission ends the run.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,7 +87,7 @@ pub struct Hooks<'h, D> {
     /// The VRAM budget now (DG6), read at each phase start.
     pub budget: &'h dyn Fn(&D) -> VramBudget,
     pub workload: &'h dyn Fn(KernelId, &D, &PhaseCtx) -> WorkloadResult,
-    pub clock: &'h dyn Fn() -> Instant,
+    pub clock: &'h (dyn Fn() -> Instant + Sync),
 }
 
 /// The load of `kernel`.
@@ -214,6 +215,9 @@ pub fn run_gpu_with<D>(
 }
 
 const CHECK_EVERY: Duration = Duration::from_secs(1);
+/// The `Progress` interval while the loads are built and calibrated: the app takes 5 s of
+/// silence for a hung process.
+const HEARTBEAT: Duration = Duration::from_millis(900);
 /// The longest sleep of an idle stretch, so a stop is seen quickly.
 const IDLE_SLICE: Duration = Duration::from_millis(10);
 /// `Error` messages per phase; the mismatches after them are only counted.
@@ -327,7 +331,15 @@ impl<D> Run<'_, D> {
                 tracing::error!(kernel = ?f.kernel, "a GPU submission is hung");
                 self.error(f.kernel, ErrorKind::Hung, iteration, 0, 0);
             }
-            other => tracing::error!(error = ?other, "the GPU cannot be used"),
+            other => {
+                tracing::error!(error = ?other, "the GPU cannot be used");
+                // Only `open` gets here: a load's other errors skip its phase.
+                self.send(LoadMessage::Notice(Notice {
+                    phase: self.phase,
+                    code: "gpu_error".to_owned(),
+                    value: None,
+                }));
+            }
         }
         end
     }
@@ -378,9 +390,27 @@ impl<D> Run<'_, D> {
 
     fn run_phase(&mut self, dev: &D, sub: &mut dyn Submit, spec: &Phase) -> Result<End, Fatal> {
         let seed = phase_seed(self.plan.seed, self.phase);
+        let mut loads: Vec<(KernelId, Box<dyn GpuWorkload>)> = Vec::new();
+        // Building and calibrating can take seconds (S4 allocates GiBs of VRAM).
+        if let Some(end) = self.heartbeat(|| self.build(dev, sub, spec, seed, &mut loads))? {
+            return Ok(end);
+        }
+        // The calibration is not part of the rate.
+        self.restart_rate();
+        self.submit_loop(sub, spec, seed, &mut loads)
+    }
+
+    /// Creates and prepares the loads of `spec`; `Some` when the phase ends before submitting.
+    fn build(
+        &self,
+        dev: &D,
+        sub: &mut dyn Submit,
+        spec: &Phase,
+        seed: u64,
+        loads: &mut Vec<(KernelId, Box<dyn GpuWorkload>)>,
+    ) -> Result<Option<End>, Fatal> {
         let integrated = self.plan.gpu.is_some_and(|g| g.integrated);
         let budget = (self.hooks.budget)(dev);
-        let mut loads: Vec<(KernelId, Box<dyn GpuWorkload>)> = Vec::new();
         for kernel in std::iter::once(spec.kernel).chain(spec.alt_kernel) {
             let ctx = PhaseCtx {
                 seed,
@@ -390,22 +420,55 @@ impl<D> Run<'_, D> {
             };
             match (self.hooks.workload)(kernel, dev, &ctx) {
                 Ok(Some(load)) => loads.push((kernel, load)),
-                Ok(None) if loads.is_empty() => return Ok(End::Skipped("unsupported")),
+                Ok(None) if loads.is_empty() => return Ok(Some(End::Skipped("unsupported"))),
                 Ok(None) => {
                     tracing::info!(kernel = ?kernel, "no alt kernel: the main one runs alone")
                 }
-                Err(e) => return self.failed(kernel, e),
+                Err(e) => return self.failed(kernel, e).map(Some),
             }
         }
         let target_ms = submit_target_ms(integrated);
-        for (kernel, load) in &mut loads {
+        for (kernel, load) in loads.iter_mut() {
             if let Err(e) = load.prepare(sub, target_ms, self.stop) {
-                return self.failed(*kernel, e);
+                return self.failed(*kernel, e).map(Some);
             }
         }
-        // The calibration is not part of the rate.
-        self.restart_rate();
-        self.submit_loop(sub, spec, seed, &mut loads)
+        Ok(None)
+    }
+
+    /// Runs `f` while a thread sends a `Progress` without a rate every [`HEARTBEAT`].
+    fn heartbeat<R>(&self, f: impl FnOnce() -> R) -> R {
+        let (done, beat) = mpsc::channel::<()>();
+        let (out, clock) = (self.out, self.hooks.clock);
+        let (start, phase_start) = (self.start, self.phase_start);
+        let base = Progress {
+            phase: self.phase,
+            phase_elapsed_ms: 0,
+            elapsed_ms: 0,
+            checks: self.checks,
+            errors: self.errors,
+            current_core: None,
+            cores: Vec::new(),
+            memory_bytes: 0,
+            rate: None,
+            load_percent: None,
+        };
+        thread::scope(|s| {
+            s.spawn(move || {
+                // Ends when `done` is dropped, right after `f`.
+                while beat.recv_timeout(HEARTBEAT) == Err(RecvTimeoutError::Timeout) {
+                    let now = clock();
+                    out(LoadMessage::Progress(Progress {
+                        phase_elapsed_ms: ms(now - phase_start),
+                        elapsed_ms: ms(now - start),
+                        ..base.clone()
+                    }));
+                }
+            });
+            let result = f();
+            drop(done);
+            result
+        })
     }
 
     /// Submits until the phase ends, pacing by the mode (DG10) and checking once a second.

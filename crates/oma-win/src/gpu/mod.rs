@@ -23,7 +23,7 @@ pub use processes::{GpuProcess, GpuProcessTable};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use oma_core::merge;
 use oma_core::model::{Device, DeviceKind, Label, Sensor};
@@ -60,15 +60,30 @@ pub struct StressAdapter {
     pub dedicated_bytes: u64,
 }
 
+/// PCI addresses every enumeration of this process has seen, by LUID: the provider records
+/// them, so a failed address query in [`stress_adapters`] still gives the schema's ids.
+static SEEN_PCI: LazyLock<Mutex<HashMap<u64, PciAddress>>> = LazyLock::new(Default::default);
+
+fn seen_pci() -> MutexGuard<'static, HashMap<u64, PciAddress>> {
+    SEEN_PCI.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The hardware GPUs in enumeration order, with the provider's device ids; empty on failure.
 pub fn stress_adapters() -> Vec<StressAdapter> {
-    let adapters = match enumerate::enumerate() {
-        Ok(adapters) => adapters,
+    match enumerate::enumerate() {
+        Ok(adapters) => stress_list(adapters, &mut seen_pci()),
         Err(e) => {
             tracing::warn!(error = %e, "GPU enumeration failed");
-            return Vec::new();
+            Vec::new()
         }
-    };
+    }
+}
+
+fn stress_list(
+    mut adapters: Vec<Adapter>,
+    known: &mut HashMap<u64, PciAddress>,
+) -> Vec<StressAdapter> {
+    restore_pci(known, &mut adapters);
     let ids = assign_device_ids(&adapters);
     adapters
         .into_iter()
@@ -382,6 +397,7 @@ impl Provider for GpuProvider {
         self.state = State::default();
         let mut adapters = (self.enumerate)()?;
         restore_pci(&mut self.known_pci, &mut adapters);
+        seen_pci().extend(adapters.iter().filter_map(|a| Some((a.luid, a.pci?))));
         let vendor_mask = self.switch.effective();
         self.load_vendors(vendor_mask);
         let count = adapters.len();
@@ -1460,6 +1476,17 @@ mod tests {
         let mut unknown = [virtual_adapter(0x1414)];
         restore_pci(&mut known, &mut unknown);
         assert_eq!(unknown[0].pci, None);
+    }
+
+    #[test]
+    fn stress_ids_survive_a_failed_pci_query() {
+        let mut known = HashMap::new();
+        let first = stress_list(vec![nvidia(), amd_igpu()], &mut known);
+        let mut failed = amd_igpu();
+        failed.pci = None;
+        let second = stress_list(vec![nvidia(), failed], &mut known);
+        assert_eq!(first, second);
+        assert!(second[1].device_id.starts_with("gpu/pci-"));
     }
 
     #[test]

@@ -51,7 +51,7 @@
   const locale = $derived(i18n.locale);
   const detail = $derived(session?.outcomeDetail ?? null);
   const verdict = $derived(detail?.verdict ?? session?.outcome ?? null);
-  const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t));
+  const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t, locale));
   const tone = $derived(verdict === 'passed' ? 'ok' : verdict && CRIT.includes(verdict) ? 'crit' : 'warn');
   /**
    * The error the verdict speaks of, only when the verdict is about errors: the first one of the
@@ -298,7 +298,7 @@
                 <tr>
                   <td>{formatTapeCounter(e.atMs)}</td>
                   <td>{e.phase + 1}</td>
-                  <td><Term term={`mode.${e.kernel}`} /> · <Term term={`isa.${e.isa}`} /></td>
+                  <td><Term term={`mode.${e.kernel}`} />{#if session.component !== 'gpu'} · <Term term={`isa.${e.isa}`} />{/if}</td>
                   <td>{e.core ?? DASH}</td>
                   <td>{t(`performance.result.kindShort.${e.kind}`)}</td>
                   <td>{formatClock(e.clockMhz, locale)}</td>

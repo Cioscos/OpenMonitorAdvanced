@@ -369,6 +369,17 @@ async function gpuSetup(gpus = GPUS) {
   return ctx;
 }
 
+test('the GPU plan names every load mode by its glossary term', async () => {
+  const { backend } = await gpuSetup();
+  backend.performancePlan.phases.push(phase({ kernel: 's1', mode: 'pause_resume', duration_s: 120, isa: 'sse2' }));
+  await fireEvent.click(radio('Fake RTX 4080'));
+  await next();
+  await next();
+  await next();
+  await screen.findByText(t('glossary.mode.pauseResume.name'));
+  expect(document.body.textContent).not.toContain('mode.');
+});
+
 test('lists one tile per GPU', async () => {
   await gpuSetup();
   const a = radio('Fake RTX 4080');

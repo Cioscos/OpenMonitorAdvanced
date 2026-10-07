@@ -128,6 +128,7 @@ pub const RUST_KEYS: &[&str] = &[
     "performance.start.nothing_ran",
     "performance.start.invalid_plan",
     "performance.start.no_gpu",
+    "performance.start.gpu_error",
     "performance.outcome.passed",
     "performance.outcome.marginal",
     "performance.outcome.errors",

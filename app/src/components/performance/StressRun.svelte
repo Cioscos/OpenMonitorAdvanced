@@ -3,7 +3,7 @@
   import { formatBytes, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import { around, cpuChartSensors, gpuChartSensors, marked, pieces } from '../../lib/performance/format';
+  import { around, cpuChartSensors, gpuChartSensors, marked, modeTerm, pieces } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
   import type { PhaseInfo, RunWarning } from '../../lib/types';
@@ -98,7 +98,7 @@
     {#if phase}
       <p class="current">
         <Term term="phase" /> {t('performance.run.phaseOf', { n: status.phaseIndex + 1, total: status.phases.length })}:
-        <Term term={`mode.${phase.kernel}`} />{#if !gpu} · <Term term={`isa.${phase.isa}`} />{/if} · <Term term={`mode.${phase.mode}`} />
+        <Term term={`mode.${phase.kernel}`} />{#if !gpu} · <Term term={`isa.${phase.isa}`} />{/if} · <Term term={modeTerm(phase.mode)} />
         {#if gpu}{#if loadLevel}{' · '}<Term term="loadLevel">{loadLevel}</Term>{/if}{:else}
           {' · '}{#if PLACEMENT_TERM[phase.placement]}<Term term={PLACEMENT_TERM[phase.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}
         {/if}

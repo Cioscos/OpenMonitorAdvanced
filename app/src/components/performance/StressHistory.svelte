@@ -32,7 +32,7 @@
   const whenLong = (s: StressSessionSummary) => new Date(s.startedAt).toLocaleString(locale, { dateStyle: 'long', timeStyle: 'short' });
   /** «Unstable · core 2» cut around «core 2», which carries its term; any other verdict is left whole. */
   const verdictPieces = (s: StressSessionSummary): [string, string, string] => {
-    const title = verdictTitle({ verdict: verdictOf(s), params: s.params }, t);
+    const title = verdictTitle({ verdict: verdictOf(s), params: s.params }, t, locale);
     return verdictOf(s) === 'errors_core' && s.params.core !== undefined ? around(title, t('performance.core.label', { core: s.params.core })) : [title, '', ''];
   };
   /** Moves the focus to the element that appears, so the keyboard follows the confirmation. */

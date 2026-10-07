@@ -2,6 +2,8 @@
 //! the shaders, the D3D11 device and the submissions exist only on Windows.
 
 #[cfg(windows)]
+pub mod bench_gfx;
+#[cfg(windows)]
 pub mod compute;
 #[cfg(windows)]
 pub mod device;

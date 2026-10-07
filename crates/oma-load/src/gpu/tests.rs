@@ -1084,6 +1084,75 @@ fn bench_window_times_the_gpu() {
     assert!(load.check(&mut sub).unwrap().mismatches.is_empty());
     eprintln!("{}: {:.2} TFLOPS in {ms:.1} ms", adapter.name, rate / 1e12);
 }
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_bench_rates() {
+    use super::device::GpuDevice;
+    use super::engine::workload;
+    use super::sizing::{submit_target_ms, VramBudget};
+    use super::submit::Submitter;
+
+    // One window of each benchmark load on the first GPU, at most 2 s each, for the
+    // provisional references of `gpu-1-baseline.json` (DH1). The engine's phases need 5 s
+    // or more, so the window is driven by hand, after an untimed warm-up that brings the
+    // clocks up (a cold GPU measured S1 at a third of its rate).
+    const LOADS: [(KernelId, f64, &str); 6] = [
+        (KernelId::S1, 1e12, "TFLOPS"),
+        (KernelId::S2, 1e12, "TIOPS"),
+        (KernelId::S3, 1e9, "GB/s"),
+        (KernelId::Fill, 1e9, "Gpixel/s"),
+        (KernelId::Texture, 1e9, "Gtexel/s"),
+        (KernelId::Overdraw, 1e9, "Gpixel/s"),
+    ];
+    let adapter = oma_win::gpu::stress_adapters()
+        .into_iter()
+        .next()
+        .expect("no hardware GPU");
+    let gpu = GpuDevice::open(adapter.luid).unwrap();
+    let mut sub = Submitter::new(&gpu).unwrap();
+    let (budget, usage) = gpu.video_memory().unwrap();
+    let ctx = PhaseCtx {
+        seed: 7,
+        integrated: adapter.integrated,
+        inject: None,
+        budget: VramBudget {
+            budget,
+            usage,
+            available_ram: crate::sys::available_memory().unwrap_or(0),
+        },
+    };
+    println!("{}", adapter.name);
+    for (kernel, unit, name) in LOADS {
+        let t0 = Instant::now();
+        let mut load = workload(kernel, &gpu, &ctx).unwrap().expect("a load");
+        load.prepare(
+            &mut sub,
+            submit_target_ms(adapter.integrated),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        while t0.elapsed() < Duration::from_millis(1000) {
+            load.submit(&mut sub).unwrap();
+        }
+        sub.window_begin().unwrap();
+        let (w0, mut n) = (Instant::now(), 0u32);
+        while w0.elapsed() < Duration::from_millis(500) {
+            load.submit(&mut sub).unwrap();
+            n += 1;
+        }
+        let ms = sub.window_end().unwrap().expect("disjoint timestamps");
+        assert!(load.check(&mut sub).unwrap().mismatches.is_empty());
+        let rate = load.work_per_submission() * f64::from(n) * 1e3 / ms;
+        assert!(rate.is_finite() && rate > 0.0, "{kernel:?}: {rate}");
+        println!(
+            "{kernel:?}: {:.2} {name} ({n} submissions in {ms:.1} ms, {:?} in all)",
+            rate / unit,
+            t0.elapsed()
+        );
+        assert!(t0.elapsed() < Duration::from_secs(2), "{kernel:?}");
+    }
+}
 #[test]
 #[ignore = "requires real Windows hardware"]
 fn gpu_plan_runs_end_to_end() {

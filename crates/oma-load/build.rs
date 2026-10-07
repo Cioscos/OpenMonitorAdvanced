@@ -65,7 +65,7 @@ fn main() {
 
 /// The GPU shaders: output name (`$OUT_DIR/<name>.cso`), file in `shaders/` (without
 /// `.hlsl`), entry point and profile.
-const SHADERS: [(&str, &str, &str, &str); 9] = [
+const SHADERS: [(&str, &str, &str, &str); 11] = [
     ("s1_fma", "s1_fma", "main", "cs_5_0"),
     ("s2_hash", "s2_hash", "main", "cs_5_0"),
     ("s3_stream", "s3_stream", "main", "cs_5_0"),
@@ -75,10 +75,19 @@ const SHADERS: [(&str, &str, &str, &str); 9] = [
     ("scene_vs", "scene", "vs", "vs_5_0"),
     ("scene_ps", "scene", "ps", "ps_5_0"),
     ("tile_hash", "tile_hash", "main", "cs_5_0"),
+    ("bench_gfx_vs", "bench_gfx", "vs", "vs_5_0"),
+    ("bench_gfx_ps", "bench_gfx", "ps", "ps_5_0"),
 ];
 
-/// The shaders of the GPU benchmark, in the order of the digest (DH8).
-const DIGEST_SHADERS: &[&str] = &["s1_fma", "s2_hash", "s3_stream"];
+/// The shaders of the GPU benchmark, in the order of the digest (DH8): `bench_gfx` is its
+/// vertex then its pixel shader.
+const DIGEST_SHADERS: &[&str] = &[
+    "s1_fma",
+    "s2_hash",
+    "s3_stream",
+    "bench_gfx_vs",
+    "bench_gfx_ps",
+];
 
 /// FNV-1a, 64 bits.
 fn fnv1a64(bytes: &[u8]) -> u64 {

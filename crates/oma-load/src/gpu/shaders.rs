@@ -26,6 +26,10 @@ pub const SCENE_PS: &[u8] = cso!("scene_ps");
 /// S6, the tile hashes: constant buffer `{ mode, slot, width, height }`, render target
 /// `t0`, reference hashes `u0`, per-submission results `u1` (modes in `tile_hash.hlsl`).
 pub const TILE_HASH: &[u8] = cso!("tile_hash");
+/// The graphics loads of the GPU benchmark (`fill`, `texture`, `overdraw`): constant buffer
+/// `{ textured, 0, 0, 0 }`, texture `t0` and sampler `s0` (`bench_gfx.hlsl`).
+pub const BENCH_GFX_VS: &[u8] = cso!("bench_gfx_vs");
+pub const BENCH_GFX_PS: &[u8] = cso!("bench_gfx_ps");
 /// Writes [`PROBE_VALUE`] to word 0 of `u0`.
 pub const PROBE: &[u8] = cso!("probe");
 

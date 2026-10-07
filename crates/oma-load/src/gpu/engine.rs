@@ -17,6 +17,7 @@ use oma_ipc::load::{
     Phase, PhaseDone, Plan, Progress, GPU_BENCH_WARMUP_S,
 };
 
+use super::bench_gfx::{BenchGfxKind, BenchGfxLoad};
 use super::compute::ComputeLoad;
 use super::device::{GpuDevice, GpuError};
 use super::graphics::{GraphicsKind, GraphicsWorkload};
@@ -116,6 +117,15 @@ pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadRe
             GraphicsKind::Artifact,
             dev,
             ctx,
+        )?))),
+        KernelId::Fill => Ok(Some(Box::new(BenchGfxLoad::new(BenchGfxKind::Fill, dev)?))),
+        KernelId::Texture => Ok(Some(Box::new(BenchGfxLoad::new(
+            BenchGfxKind::Texture,
+            dev,
+        )?))),
+        KernelId::Overdraw => Ok(Some(Box::new(BenchGfxLoad::new(
+            BenchGfxKind::Overdraw,
+            dev,
         )?))),
         _ => Ok(None),
     }

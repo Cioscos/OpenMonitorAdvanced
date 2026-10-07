@@ -61,13 +61,17 @@ fn main() {
     res.compile().expect("compile the version resource");
 }
 
-/// The GPU shaders: file name in `shaders/` (without `.hlsl`), entry point and profile.
-const SHADERS: [(&str, &str, &str); 5] = [
-    ("s1_fma", "main", "cs_5_0"),
-    ("s2_hash", "main", "cs_5_0"),
-    ("compare", "main", "cs_5_0"),
-    ("probe", "main", "cs_5_0"),
-    ("s4_vram", "main", "cs_5_0"),
+/// The GPU shaders: output name (`$OUT_DIR/<name>.cso`), file in `shaders/` (without
+/// `.hlsl`), entry point and profile.
+const SHADERS: [(&str, &str, &str, &str); 8] = [
+    ("s1_fma", "s1_fma", "main", "cs_5_0"),
+    ("s2_hash", "s2_hash", "main", "cs_5_0"),
+    ("compare", "compare", "main", "cs_5_0"),
+    ("probe", "probe", "main", "cs_5_0"),
+    ("s4_vram", "s4_vram", "main", "cs_5_0"),
+    ("scene_vs", "scene", "vs", "vs_5_0"),
+    ("scene_ps", "scene", "ps", "ps_5_0"),
+    ("tile_hash", "tile_hash", "main", "cs_5_0"),
 ];
 
 fn compile_shaders() {
@@ -76,8 +80,8 @@ fn compile_shaders() {
         panic!("fxc.exe not found: install the Windows 10/11 SDK or set OMA_FXC")
     });
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
-    for (name, entry, profile) in SHADERS {
-        let src = format!("shaders/{name}.hlsl");
+    for (name, file, entry, profile) in SHADERS {
+        let src = format!("shaders/{file}.hlsl");
         println!("cargo:rerun-if-changed={src}");
         // /O3 and /Gis (IEEE strictness, so the mad chains are never reassociated) give the
         // same bytecode as D3DCompile with OPTIMIZATION_LEVEL3 | IEEE_STRICTNESS (spike).

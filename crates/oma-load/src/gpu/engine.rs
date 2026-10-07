@@ -14,6 +14,7 @@ use oma_ipc::load::{
 
 use super::compute::ComputeLoad;
 use super::device::{GpuDevice, GpuError};
+use super::graphics::{GraphicsKind, GraphicsWorkload};
 use super::pace::{self, Alternate};
 use super::sizing::{submit_target_ms, VramBudget};
 use super::submit::{Submit, Submitter};
@@ -88,11 +89,21 @@ pub struct Hooks<'h, D> {
     pub clock: &'h dyn Fn() -> Instant,
 }
 
-/// The load of `kernel`; S5 and S6 come with G8.
+/// The load of `kernel`.
 pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadResult {
     match kernel {
         KernelId::S1 | KernelId::S2 => Ok(Some(Box::new(ComputeLoad::new(kernel, dev, ctx)?))),
         KernelId::S4 => Ok(Some(Box::new(VramWorkload::new(dev, ctx)?))),
+        KernelId::S5 => Ok(Some(Box::new(GraphicsWorkload::new(
+            GraphicsKind::Fur,
+            dev,
+            ctx,
+        )?))),
+        KernelId::S6 => Ok(Some(Box::new(GraphicsWorkload::new(
+            GraphicsKind::Artifact,
+            dev,
+            ctx,
+        )?))),
         _ => Ok(None),
     }
 }

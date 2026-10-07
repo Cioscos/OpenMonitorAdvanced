@@ -7,6 +7,8 @@ pub mod compute;
 pub mod device;
 #[cfg(windows)]
 pub mod engine;
+#[cfg(windows)]
+pub mod graphics;
 pub mod pace;
 pub mod reference;
 #[cfg(windows)]

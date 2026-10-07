@@ -148,7 +148,8 @@ impl BenchGfxLoad {
             (None, None, None, None, None);
         // SAFETY: fxc output for vs_5_0/ps_5_0 without class linkage; complete
         // descriptions; the texture's initial data is `texels`, 1024 rows of 4096 bytes,
-        // alive for the call; resources of this device for the views; live out pointers.
+        // alive for the call; the render target is 1920x1080 in the format of `kind`;
+        // resources of this device for the views; live out pointers.
         unsafe {
             dev.CreateVertexShader(BENCH_GFX_VS, None, Some(&mut vs))
                 .map_err(failed)?;

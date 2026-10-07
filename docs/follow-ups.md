@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8a1).
+Updated at the end of every milestone (last update: M8a2).
 
 ## Open: code
 
@@ -59,7 +59,7 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 
 Voci aperte dopo le revisioni della M8a2 (piano `docs/superpowers/plans/2026-10-07-m8a2-benchmark-cpu.md`, task B1-B10; il branch `feat/m8a2-cpu-bench` aspetta le verifiche dal vivo B11).
 
-- **B11, da fare con l'utente:** la taratura della scala (`crates/oma-core/src/scores/cpu-1-baseline.json`, oggi `provisional: true`) sul Ryzen 7 7800X3D con il BIOS di fabbrica, il benchmark completo, le misure di `scripts/measure-footprint.ps1` a riposo e con la pagina CPU aperta (sezione M8a2 di `docs/perf-budget.md`, Step 2 del B10 non eseguito da un agente).
+- **B11, da fare con l'utente:** la taratura della scala (`crates/oma-core/src/scores/cpu-1-baseline.json`, oggi `provisional: true`) sul Ryzen 7 7800X3D con il BIOS di fabbrica, il benchmark completo, le misure di `scripts/measure-footprint.ps1` a riposo e con la pagina CPU aperta (sezione M8a2 di `docs/perf-budget.md`, la misura dei consumi a riposo con `scripts/measure-footprint.ps1` non l'ha fatta un agente).
 - **`calibrate_cpu` accetta file di punteggio non validi:** legge anche file non validi, con flag o di una versione diversa del punteggio. Va corretto o controllato prima della taratura B11. `app/src-tauri/src/performance/`.
 - **Test instabile:** `updates::tests` di `oma-app` fallisce a volte nell'esecuzione completa del workspace (`cargo test --workspace`) e passa da solo. `app/src-tauri/src/updates/`; da indagare.
 - **`others_share` conta il nostro WebView2 come CPU «altra»:** i processi della finestra dell'app possono far scattare il flag `busy_system` senza che l'utente abbia aperto altro. `crates/oma-win/`; da escludere i processi figli dell'app.

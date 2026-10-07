@@ -489,6 +489,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
             seed: 0,
             ram_bytes: 0,
             phases: vec![],
+            gpu: None,
         },
         outcome: None,
         outcome_detail: None,

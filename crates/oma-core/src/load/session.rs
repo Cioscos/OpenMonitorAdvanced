@@ -272,6 +272,7 @@ mod tests {
             expected: 1,
             actual: 2,
             seed: 9,
+            load_percent: None,
         };
         Session {
             format: FORMAT,
@@ -308,6 +309,7 @@ mod tests {
                     iterations: None,
                     pause_before_ms: 0,
                 }],
+                gpu: None,
             },
             outcome: Some(Outcome::Errors),
             outcome_detail: Some(OutcomeDetail {

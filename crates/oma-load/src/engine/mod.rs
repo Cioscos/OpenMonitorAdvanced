@@ -982,6 +982,7 @@ impl Engine<'_, '_> {
             cores,
             memory_bytes: cur.memory_bytes,
             rate,
+            load_percent: None,
         }));
     }
 
@@ -1007,6 +1008,7 @@ impl Engine<'_, '_> {
             expected,
             actual,
             seed: pr.seed,
+            load_percent: None,
         })
     }
 
@@ -1218,6 +1220,7 @@ impl Engine<'_, '_> {
                 expected: 0,
                 actual: 0,
                 seed: p.seed,
+                load_percent: None,
             }));
             (self.out)(LoadMessage::Finished(self.finish(FinishReason::Failed)));
             *closed = true;

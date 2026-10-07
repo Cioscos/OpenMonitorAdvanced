@@ -951,6 +951,7 @@ mod tests {
                 seed: 1,
                 ram_bytes: 0,
                 phases: vec![phase(KernelId::K2), phase(KernelId::K5)],
+                gpu: None,
             },
             outcome: None,
             outcome_detail: None,
@@ -1003,6 +1004,7 @@ mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate: None,
+            load_percent: None,
         })
     }
 
@@ -1018,6 +1020,7 @@ mod tests {
             expected: 1,
             actual: 2,
             seed: 1,
+            load_percent: None,
         })
     }
 

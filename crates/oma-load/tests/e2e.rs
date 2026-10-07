@@ -146,6 +146,7 @@ impl Session {
                     seed: 7,
                     ram_bytes: if ram { 256 << 20 } else { 0 },
                     phases,
+                    gpu: None,
                 },
             }))
             .unwrap();

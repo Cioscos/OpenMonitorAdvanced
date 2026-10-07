@@ -452,6 +452,7 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
         seed: input.seed,
         ram_bytes: input.ram_budget,
         phases,
+        gpu: None,
     };
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
         return Err(BuildError::TooLong);

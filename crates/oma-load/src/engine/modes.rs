@@ -22,7 +22,12 @@ const PAUSE_SPIN: Duration = Duration::from_millis(1);
 pub(crate) fn durations(mode: LoadMode, rng: &mut Xoshiro256ss) -> (Duration, Duration) {
     let (busy, pause) = match mode {
         LoadMode::Light => ((200, 2000), (50, 500)),
-        LoadMode::Steady | LoadMode::Variable => ((10, 500), (10, 500)),
+        // The GPU modes never reach the CPU engine; `validate` refuses them on CPU kernels.
+        LoadMode::Steady
+        | LoadMode::Variable
+        | LoadMode::Ramp
+        | LoadMode::Alternate
+        | LoadMode::PauseResume => ((10, 500), (10, 500)),
     };
     let mut pick =
         |(lo, hi): (u64, u64)| Duration::from_millis(lo + rng.next_u64() % (hi - lo + 1));

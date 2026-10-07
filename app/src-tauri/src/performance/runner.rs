@@ -1287,6 +1287,7 @@ pub(crate) mod tests {
             cores: vec![],
             memory_bytes: 0,
             rate: None,
+            load_percent: None,
         })
     }
 
@@ -1402,6 +1403,7 @@ pub(crate) mod tests {
             expected: 1,
             actual: 2,
             seed: 1,
+            load_percent: None,
         });
         let rig = rig_with(
             "core2",
@@ -1664,6 +1666,7 @@ pub(crate) mod tests {
             seed: 1,
             ram_bytes: 0,
             phases: vec![],
+            gpu: None,
         };
         let failure = plan_message(plan).unwrap_err();
         assert_eq!(failure.i18n_key(), "performance.start.invalid_plan");

@@ -73,6 +73,7 @@ fn plan(phases: Vec<Phase>) -> Plan {
         seed: 7,
         ram_bytes: 4 * MIB,
         phases,
+        gpu: None,
     }
 }
 

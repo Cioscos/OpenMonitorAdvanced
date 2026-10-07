@@ -32,6 +32,8 @@ pub const MIN_VRAM: u64 = 256 * MIB;
 pub const ROTATION: u64 = 0x2000;
 /// Bytes of one rotation group: chunks are rounded down to it.
 const GRAIN: u64 = ROTATION * 16;
+/// The smallest chunk a refused allocation is halved down to.
+const MIN_CHUNK: u64 = 64 * MIB;
 
 /// The address pattern: word `index` of the whole allocation in the round with `key`.
 /// memtest_vulkan's `test_value_by_index`, with the high half of a 64-bit index folded in
@@ -154,8 +156,8 @@ pub struct Allocation<A> {
 }
 
 /// Allocates `target` bytes in chunks of at most `chunk` (DG6). A failed allocation keeps
-/// what is there: `vram_reduced` when short of the target, `OutOfMemory` (the phase is
-/// skipped) under `min`. A lost device ends it; `stop` is looked at before each chunk.
+/// what is there, after halving the chunk down to 64 MiB: `vram_reduced` when short of the
+/// target, `OutOfMemory` (the phase is skipped) under `min`. A lost device ends it; `stop` is looked at before each chunk.
 pub fn allocate<A>(
     target: u64,
     chunk: u64,
@@ -164,7 +166,7 @@ pub fn allocate<A>(
     stop: &AtomicBool,
 ) -> Result<Allocation<A>, GpuError> {
     let target = target / GRAIN * GRAIN;
-    let chunk = chunk / GRAIN * GRAIN;
+    let mut chunk = chunk / GRAIN * GRAIN;
     let mut chunks = Vec::new();
     let mut allocated = 0;
     if target >= min {
@@ -175,7 +177,13 @@ pub fn allocate<A>(
             let bytes = chunk.min(target - allocated);
             match alloc(bytes) {
                 Ok(a) => chunks.push((a, bytes)),
-                Err(e @ (GpuError::Lost(_) | GpuError::Hung)) => return Err(e),
+                Err(e @ (GpuError::Lost(_) | GpuError::Hung | GpuError::Stopped)) => return Err(e),
+                // A smaller resource may still fit (an integrated GPU guarantees less).
+                Err(e) if bytes / 2 >= MIN_CHUNK => {
+                    tracing::info!(error = ?e, bytes, "VRAM chunk refused, trying half");
+                    chunk = bytes / 2 / GRAIN * GRAIN;
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(error = ?e, allocated, target, "VRAM allocation failed");
                     break;
@@ -373,7 +381,7 @@ impl GpuWorkload for VramWorkload {
         stop: &AtomicBool,
     ) -> Result<(), GpuError> {
         let gpu = self.gpu.clone();
-        // Chunks are at most 1 GiB (`chunk_bytes`), so the size fits a `u32`.
+        // Chunks are at most 512 MiB (`chunk_bytes`), so the size fits a `u32`.
         let allocation = allocate(
             self.target,
             self.chunk,
@@ -559,6 +567,40 @@ mod tests {
     }
 
     #[test]
+    fn failed_chunks_are_retried_at_half_size() {
+        let go = AtomicBool::new(false);
+        // Nothing over 128 MiB fits: 512 and 256 fail, then 128 MiB chunks to the end.
+        let mut tried = Vec::new();
+        let mut small = |bytes| {
+            tried.push(bytes);
+            if bytes > 128 * MIB {
+                Err(GpuError::Create(0x8007_0057_u32 as i32))
+            } else {
+                Ok(bytes)
+            }
+        };
+        let got = allocate(600 * MIB, 512 * MIB, MIN_VRAM, &mut small, &go).unwrap();
+        let sizes: Vec<u64> = got.chunks.iter().map(|c| c.1).collect();
+        assert_eq!(
+            sizes,
+            [128 * MIB, 128 * MIB, 128 * MIB, 128 * MIB, 88 * MIB]
+        );
+        assert_eq!(got.notices, [("vram_allocated".to_owned(), 600 * MIB)]);
+        assert_eq!(tried[..3], [512 * MIB, 256 * MIB, 128 * MIB]);
+        // The halving stops at 64 MiB, then it is a shortfall.
+        let mut tried = Vec::new();
+        let mut none = |bytes| -> Result<u64, GpuError> {
+            tried.push(bytes);
+            Err(GpuError::OutOfMemory)
+        };
+        assert_eq!(
+            allocate(GIB, 512 * MIB, MIN_VRAM, &mut none, &go).unwrap_err(),
+            GpuError::OutOfMemory
+        );
+        assert_eq!(tried, [512 * MIB, 256 * MIB, 128 * MIB, 64 * MIB]);
+    }
+
+    #[test]
     fn under_256_mib_skips_the_phase() {
         let go = AtomicBool::new(false);
         let mut never = |_| -> Result<u64, GpuError> { panic!("nothing to allocate") };
@@ -571,6 +613,33 @@ mod tests {
             allocate(GIB, 128 * MIB, MIN_VRAM, &mut fake(1), &go).unwrap_err(),
             GpuError::OutOfMemory
         );
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn every_adapter_allocates_one_chunk() {
+        // Allocation only, no dispatch; the buffer is released at once.
+        for adapter in oma_win::gpu::stress_adapters() {
+            let gpu = GpuDevice::open(adapter.luid).unwrap();
+            let chunk = chunk_bytes(gpu.dedicated_bytes());
+            let got = allocate(
+                chunk,
+                chunk,
+                MIN_CHUNK,
+                &mut |bytes| gpu.raw_buffer(bytes as u32),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let first = got.chunks[0].1;
+            println!(
+                "{}: dedicated {} MiB, chunk {} MiB, first allocation {} MiB",
+                adapter.name,
+                gpu.dedicated_bytes() / MIB,
+                chunk / MIB,
+                first / MIB
+            );
+            assert!(first >= MIN_CHUNK);
+        }
     }
 
     #[test]

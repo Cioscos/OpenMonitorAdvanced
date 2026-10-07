@@ -26,9 +26,10 @@ pub fn vram_target(budget: u64, integrated: bool, available_ram: u64) -> u64 {
 }
 
 /// Size of one VRAM allocation: a quarter of the dedicated VRAM, between 256 MiB and
-/// 1 GiB, rounded down to 4 KiB.
+/// 512 MiB, rounded down to 4 KiB. 512 MiB is 2^27 32-bit words, the most a raw buffer
+/// view may hold (`D3D11_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP`).
 pub fn chunk_bytes(dedicated: u64) -> u64 {
-    (dedicated / 4).clamp(256 * MIB, GIB) & !4095
+    (dedicated / 4).clamp(256 * MIB, 512 * MIB) & !4095
 }
 
 /// GPU time each submission is calibrated to (DG4).
@@ -64,13 +65,14 @@ mod tests {
     }
 
     #[test]
-    fn chunks_are_between_256_mib_and_1_gib() {
+    fn chunks_are_between_256_and_512_mib() {
         assert_eq!(chunk_bytes(512 * MIB), 256 * MIB);
-        assert_eq!(chunk_bytes(16 * GIB), GIB);
+        assert_eq!(chunk_bytes(16 * GIB), 512 * MIB);
         assert_eq!(chunk_bytes(2 * GIB), 512 * MIB);
+        assert_eq!(chunk_bytes(1536 * MIB), 384 * MIB);
         let odd = chunk_bytes(3 * GIB + 5);
         assert_eq!(odd % 4096, 0);
-        assert!((256 * MIB..=GIB).contains(&odd));
+        assert!((256 * MIB..=512 * MIB).contains(&odd));
     }
 
     #[test]

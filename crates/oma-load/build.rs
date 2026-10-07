@@ -28,18 +28,28 @@
 //! - writes `$OUT_DIR/k1_payload.rs`, the unrolled passes of K1 (A9, DA8), so no code is
 //!   generated at run time;
 //! - embeds the version resource of `oma-load.exe` (plan DP8), so the file properties show
-//!   the product and the `X.Y.Z` version like the app's.
+//!   the product and the `X.Y.Z` version like the app's;
+//! - compiles the HLSL shaders of the GPU stress test with `fxc.exe` into `$OUT_DIR/*.cso`
+//!   (M8b1, DG3), so every build carries the same bytecode and nothing needs
+//!   `d3dcompiler_47.dll` at run time.
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 include!("src/kernels/k1/groups.rs");
 
 fn main() {
+    // The shaders' `rerun-if-changed` lines replace Cargo's default (any file of the
+    // package), so the inputs of the K1 payload are listed too.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/kernels/k1/groups.rs");
     write_k1_payload();
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    compile_shaders();
     let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut res = tauri_winres::WindowsResource::new();
     res.set("ProductName", "OpenMonitor Advanced")
@@ -49,6 +59,64 @@ fn main() {
         .set("OriginalFilename", "oma-load.exe")
         .set("InternalName", "oma-load");
     res.compile().expect("compile the version resource");
+}
+
+/// The GPU shaders: file name in `shaders/` (without `.hlsl`), entry point and profile.
+const SHADERS: [(&str, &str, &str); 4] = [
+    ("s1_fma", "main", "cs_5_0"),
+    ("s2_hash", "main", "cs_5_0"),
+    ("compare", "main", "cs_5_0"),
+    ("probe", "main", "cs_5_0"),
+];
+
+fn compile_shaders() {
+    println!("cargo:rerun-if-env-changed=OMA_FXC");
+    let fxc = find_fxc().unwrap_or_else(|| {
+        panic!("fxc.exe not found: install the Windows 10/11 SDK or set OMA_FXC")
+    });
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    for (name, entry, profile) in SHADERS {
+        let src = format!("shaders/{name}.hlsl");
+        println!("cargo:rerun-if-changed={src}");
+        // /O3 and /Gis (IEEE strictness, so the mad chains are never reassociated) give the
+        // same bytecode as D3DCompile with OPTIMIZATION_LEVEL3 | IEEE_STRICTNESS (spike).
+        let result = Command::new(&fxc)
+            .args(["/nologo", "/O3", "/Gis", "/T", profile, "/E", entry, "/Fo"])
+            .arg(out.join(format!("{name}.cso")))
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|e| panic!("run {}: {e}", fxc.display()));
+        if !result.status.success() {
+            panic!(
+                "fxc failed on {src}:\n{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+/// `OMA_FXC`, else the highest `Windows Kits\10\bin\10.*\x64\fxc.exe`.
+fn find_fxc() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("OMA_FXC") {
+        return Some(PathBuf::from(path));
+    }
+    let bin = Path::new(&std::env::var_os("ProgramFiles(x86)")?).join(r"Windows Kits\10\bin");
+    std::fs::read_dir(bin)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let version: Vec<u32> = name
+                .strip_prefix("10.")?
+                .split('.')
+                .map(|part| part.parse().ok())
+                .collect::<Option<_>>()?;
+            let fxc = entry.path().join(r"x64\fxc.exe");
+            fxc.is_file().then_some((version, fxc))
+        })
+        .max()
+        .map(|(_, fxc)| fxc)
 }
 
 /// One instruction set of the generated passes.

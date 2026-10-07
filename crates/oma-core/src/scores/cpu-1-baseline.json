@@ -1,0 +1,20 @@
+{
+  "version": "cpu-1",
+  "provisional": true,
+  "single": {
+    "ntt": 428.2,
+    "hash": 1406.0,
+    "compress": 305.0,
+    "sort": 23.99,
+    "fft": 8.623,
+    "gemm": 21.39
+  },
+  "multi": {
+    "ntt": 5138.0,
+    "hash": 16870.0,
+    "compress": 3660.0,
+    "sort": 287.9,
+    "fft": 103.5,
+    "gemm": 256.6
+  }
+}

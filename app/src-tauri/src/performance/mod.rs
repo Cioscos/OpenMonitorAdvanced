@@ -1,5 +1,6 @@
-//! The Performance view (M8a1): stress tests run by `oma-load.exe`.
+//! The Performance view (M8a1, M8a2): stress tests and the CPU benchmark, run by `oma-load.exe`.
 
+pub mod bench;
 pub mod commands;
 pub mod host;
 pub mod runner;

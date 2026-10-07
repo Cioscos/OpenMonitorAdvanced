@@ -1,4 +1,7 @@
 import type {
+  BenchStatus,
+  CpuScoreFile,
+  CpuScoreSummary,
   AppInfo,
   ExportedReport,
   AutostartStatus,
@@ -188,6 +191,21 @@ export interface Backend {
   onPerformanceQuit(cb: () => void): Promise<Unsubscribe>;
   /** The answer «stop and quit»: the test ends (saved as stopped) and the app exits. */
   performanceQuitConfirmed(): Promise<void>;
+  /** Starts the CPU benchmark and replies with the score id; rejects with `busy` (a test or a benchmark runs) or the system's text. */
+  performanceBenchStart(): Promise<string>;
+  /** Stops the CPU benchmark; nothing is saved. */
+  performanceBenchStop(): Promise<void>;
+  /** The running or last benchmark, null before any. */
+  performanceBenchStatus(): Promise<BenchStatus | null>;
+  /** The saved CPU scores, newest first. */
+  performanceScores(): Promise<CpuScoreSummary[]>;
+  /** A saved CPU score, or null when it is gone; rejects for an id that is not a uuid. */
+  performanceScore(id: string): Promise<CpuScoreFile | null>;
+  performanceScoreDelete(id: string): Promise<void>;
+  /** Whether the score scale is still provisional (not calibrated). */
+  performanceBaseline(): Promise<{ provisional: boolean }>;
+  /** The benchmark status on every change and at most every 500 ms while it runs, only with the main window open. */
+  onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */
   benchmarkToggle(): Promise<void>;
   /** The saved benchmarks, newest first. */

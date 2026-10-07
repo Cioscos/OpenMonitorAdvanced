@@ -8,3 +8,4 @@
 *.ico binary
 *.icns binary
 *.msgpack binary
+*.ttf binary

@@ -18,6 +18,7 @@ pub mod roles;
 pub mod rules;
 pub mod sampler;
 pub mod sanitize;
+pub mod scores;
 pub mod settings;
 pub mod stats;
 pub mod updates;

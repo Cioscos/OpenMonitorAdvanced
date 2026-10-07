@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::System::Power::{
-    SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED, EXECUTION_STATE,
+    GetSystemPowerStatus, SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+    EXECUTION_STATE, SYSTEM_POWER_STATUS,
 };
 use windows::Win32::System::SystemInformation::GetTickCount64;
 
@@ -78,8 +79,34 @@ pub fn asleep_ms() -> u64 {
     ticks.saturating_sub(unbiased / 10_000)
 }
 
+/// `ACLineStatus`: 0 offline (on battery) is `Some(true)`, 1 online is
+/// `Some(false)`, 255 unknown or anything else is `None`.
+pub fn battery_from_line_status(status: u8) -> Option<bool> {
+    match status {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the PC runs on battery, or `None` when Windows cannot tell.
+pub fn on_battery() -> Option<bool> {
+    let mut status = SYSTEM_POWER_STATUS::default();
+    // SAFETY: `status` is a live, writable SYSTEM_POWER_STATUS for the call.
+    unsafe { GetSystemPowerStatus(&mut status) }.ok()?;
+    battery_from_line_status(status.ACLineStatus)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn battery_from_line_status_values() {
+        assert_eq!(super::battery_from_line_status(0), Some(true));
+        assert_eq!(super::battery_from_line_status(1), Some(false));
+        assert_eq!(super::battery_from_line_status(255), None);
+        assert_eq!(super::battery_from_line_status(2), None);
+    }
+
     use std::time::Duration;
 
     use super::*;

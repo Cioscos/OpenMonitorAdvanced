@@ -386,6 +386,13 @@ fn main() {
             performance::commands::performance_delete,
             performance::commands::performance_export,
             performance::commands::performance_quit_confirmed,
+            performance::commands::performance_bench_start,
+            performance::commands::performance_bench_stop,
+            performance::commands::performance_bench_status,
+            performance::commands::performance_scores,
+            performance::commands::performance_score,
+            performance::commands::performance_score_delete,
+            performance::commands::performance_baseline,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -464,7 +471,8 @@ fn main() {
                 let engine = engine.clone();
                 let svc = svc_status.clone();
                 let (open_handle, emit_handle) = (app.handle().clone(), app.handle().clone());
-                let state_tray = tray.clone();
+                let (visible_handle, bench_handle) = (app.handle().clone(), app.handle().clone());
+                let (state_tray, bench_tray) = (tray.clone(), tray.clone());
                 let runner = Arc::new(performance::runner::PerformanceRunner::new(
                     performance::runner::RunnerDeps {
                         store: Arc::new(performance::store::PerformanceStore::new(
@@ -488,6 +496,14 @@ fn main() {
                         window_open: Box::new(move || {
                             open_handle.get_webview_window(window::MAIN).is_some()
                         }),
+                        window_visible: Box::new(move || {
+                            visible_handle
+                                .get_webview_window(window::MAIN)
+                                .is_some_and(|w| {
+                                    w.is_visible().unwrap_or(false)
+                                        && !w.is_minimized().unwrap_or(false)
+                                })
+                        }),
                         emit: Box::new(move |status| {
                             let _ = emit_handle.emit_to(
                                 window::MAIN,
@@ -505,6 +521,24 @@ fn main() {
                                     .store(false, std::sync::atomic::Ordering::Relaxed);
                             }
                             state_tray.set_test(mark);
+                        }),
+                        emit_bench: Box::new(move |status| {
+                            let _ = bench_handle.emit_to(
+                                window::MAIN,
+                                performance::bench::EVENT_BENCH,
+                                status,
+                            );
+                        }),
+                        // The same dot, its own tooltip (DB9).
+                        on_bench: Box::new(move |status| {
+                            let mark = tray::TestMark::from_bench(status);
+                            if mark.is_none()
+                                || status.state == oma_core::scores::BenchState::Starting
+                            {
+                                CLOSE_TOAST_SHOWN
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            bench_tray.set_test(mark);
                         }),
                         app_version: app.package_info().version.to_string(),
                     },

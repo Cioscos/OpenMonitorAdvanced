@@ -47,7 +47,8 @@ pub(crate) fn pause_until(deadline: Instant, beat: &AtomicU64, quit: &AtomicBool
 }
 
 /// Runs `kernels` in `mode` until `quit`; `step(k, kernel)` runs and checks one iteration
-/// of `kernels[k]`. In `variable` the bursts take the kernels in turn.
+/// of `kernels[k]`. In `variable` the bursts take the kernels in turn. A fixed-work phase
+/// runs until `quit` too: `step` tells its counted steps from the filler ones.
 pub(crate) fn work(
     mode: LoadMode,
     seed: u64,

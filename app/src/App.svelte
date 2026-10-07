@@ -62,9 +62,9 @@
     if (target.settingsSection === 'about') openSettings({ section: 'about' });
     const perf = target.performance;
     if (perf?.page === 'quit') askingQuit = true;
-    // The tray's «Open the running test» and a stress toast's result.
-    if (perf?.page === 'run' || (perf?.page === 'result' && perf.sessionId)) {
-      performancePage = perf.page === 'run' ? 'run' : `result:${perf.sessionId}`;
+    // The tray's «Open the running test», a stress toast's result and a benchmark toast.
+    if (perf?.page === 'run' || perf?.page === 'score-cpu' || (perf?.page === 'result' && perf.sessionId)) {
+      performancePage = perf.page === 'result' ? `result:${perf.sessionId}` : perf.page;
       showView('performance');
     }
   }

@@ -72,7 +72,8 @@ SMART data.
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
 - **Performance view.** A stress test for the CPU and the RAM, with a guided wizard (normal check
   or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
-  of past sessions (see [Performance view](#performance-view)).
+  of past sessions, and a CPU benchmark with a single-core and a multi-core score on gauges
+  (see [Performance view](#performance-view)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
@@ -187,6 +188,14 @@ too hot. Each session ends with a verdict (passed, unstable with the core, stopp
 a system crash) and is kept in the history. Closing the window does not stop a test: it goes on
 from the tray. Technical terms have a plain-words tooltip.
 
+- **CPU benchmark.** *Performance › Score › CPU* runs six workloads (integer: NTT, hash, compression,
+  sort; floating point: FFT, matrix product) first on one core, then on every thread, in about 2
+  minutes, with the same load process. The score is in points on a fixed scale, the same for every
+  CPU (twice the points, twice the work in the same time); the page also shows the multi-core
+  scaling, the speed of each workload and the history of your measurements. A measurement on
+  battery, thermally limited, with a busy system, in a virtual machine or without the service
+  stays valid but carries a warning; a calculation error makes it invalid. Until the scale is
+  calibrated the points are marked as provisional. Exporting and sharing come later.
 - **Admin rights** are not needed. Without the service the CPU test runs, with a warning, and
   without thermal stop.
 - **RAM limit.** The RAM test covers only the memory Windows gives the program (4 KB pages): it is

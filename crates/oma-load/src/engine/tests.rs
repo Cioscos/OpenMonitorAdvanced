@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use oma_ipc::load::{
     CacheSizes, ComputeError, CoreState, DataSize, ErrorKind, FinishReason, Isa, LoadMode,
-    LogicalCpu, Phase, PhaseDone, Placement, Progress,
+    LogicalCpu, Phase, PhaseDone, Placement, Progress, WorkerDone,
 };
 
 use super::*;
@@ -63,6 +63,8 @@ fn phase(kernel: KernelId, placement: Placement, duration_s: u32) -> Phase {
         cores: None,
         patterns: vec![],
         stop_on_error: false,
+        iterations: None,
+        pause_before_ms: 0,
     }
 }
 
@@ -76,16 +78,22 @@ fn plan(phases: Vec<Phase>) -> Plan {
 
 /// A deterministic kernel: the reference digest after about 1 ms, or a wrong one.
 struct CountKernel {
+    delay: Duration,
     bad: bool,
+    /// Wrong digests after this many iterations.
+    bad_after: u64,
+    steps: u64,
     count: Arc<AtomicU64>,
 }
 
 impl Kernel for CountKernel {
     fn iterate(&mut self, beat: &AtomicU64) -> Check {
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(self.delay);
         beat.fetch_add(1, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
-        Check::Digest(if self.bad { REF ^ 0x10 } else { REF })
+        self.steps += 1;
+        let bad = self.bad || self.steps > self.bad_after;
+        Check::Digest(if bad { REF ^ 0x10 } else { REF })
     }
 }
 
@@ -94,6 +102,11 @@ struct CountFactory {
     created: AtomicU32,
     bad: Range<u32>,
     count: Arc<AtomicU64>,
+    ref_delay: Duration,
+    /// The worker created with this index takes 120 ms per step.
+    slow: u32,
+    /// The workers outside `slow` go wrong after this many iterations.
+    bad_after: u64,
 }
 
 impl CountFactory {
@@ -102,19 +115,31 @@ impl CountFactory {
             created: AtomicU32::new(0),
             bad,
             count: Arc::new(AtomicU64::new(0)),
+            ref_delay: Duration::ZERO,
+            slow: u32::MAX,
+            bad_after: u64::MAX,
         }
     }
 }
 
 impl KernelFactory for CountFactory {
     fn reference(&self, _: &WorkerCtx) -> Option<Result<Vec<u64>, RefFailure>> {
+        thread::sleep(self.ref_delay);
         Some(Ok(vec![REF]))
     }
 
     fn worker(&self, _: &WorkerCtx) -> Result<Box<dyn Kernel>, KernelError> {
         let n = self.created.fetch_add(1, Ordering::Relaxed);
+        let delay = if n == self.slow { 120 } else { 1 };
         Ok(Box::new(CountKernel {
+            delay: Duration::from_millis(delay),
             bad: self.bad.contains(&n),
+            bad_after: if n == self.slow {
+                u64::MAX
+            } else {
+                self.bad_after
+            },
+            steps: 0,
             count: Arc::clone(&self.count),
         }))
     }
@@ -960,4 +985,250 @@ fn cores_limit_all_logical_and_one_per_core() {
         assert_eq!(fin.reason, FinishReason::Completed);
         assert_eq!(f.created.load(Ordering::Relaxed), workers, "{placement:?}");
     }
+}
+
+fn fixed(iterations: u64, duration_s: u32) -> Phase {
+    let mut p = phase(KernelId::K2, Placement::AllLogical, duration_s);
+    p.iterations = Some(iterations);
+    p
+}
+
+fn run_one(f: &CountFactory, p: Phase, logical: u32) -> (Finished, Vec<LoadMessage>) {
+    let factory = |_: KernelId| Some(f as &dyn KernelFactory);
+    run_test(
+        &plan(vec![p]),
+        &topology(logical, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    )
+}
+
+#[test]
+fn fixed_work_phase_runs_exact_iterations_per_worker() {
+    let f = CountFactory::new(0..0);
+    let (fin, msgs) = run_one(&f, fixed(50, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs);
+    assert_eq!(d[0].checks, 100);
+    assert_eq!(d[0].skipped, None);
+    // The worker done first keeps loading until the other is done too.
+    assert!(f.count.load(Ordering::Relaxed) >= 100);
+    assert!(d[0].work_ms.is_some());
+}
+
+#[test]
+fn fixed_work_phase_stops_at_the_cap_and_reports_work_ms() {
+    let f = CountFactory::new(0..0);
+    let (fin, msgs) = run_one(&f, fixed(1_000_000, 1), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs)[0];
+    assert_eq!(d.skipped, None);
+    assert!(d.checks < 2_000_000);
+    let w = d.work_ms.expect("work_ms");
+    assert!((950..1400).contains(&w), "{w}");
+}
+
+#[test]
+fn work_ms_excludes_the_reference_and_the_pause() {
+    let mut f = CountFactory::new(0..0);
+    f.ref_delay = Duration::from_millis(300);
+    let mut p = fixed(20, 30);
+    p.pause_before_ms = 200;
+    let (_, msgs) = run_one(&f, p, 1);
+    let d = done(&msgs)[0];
+    assert!(d.duration_ms >= 500, "{}", d.duration_ms);
+    let w = d.work_ms.expect("work_ms");
+    assert!(w < d.duration_ms - 400, "work {w} of {}", d.duration_ms);
+}
+
+#[test]
+fn pause_is_not_a_hang() {
+    // The test sentinel calls a worker hung after 1 s without beats.
+    let f = CountFactory::new(0..0);
+    let mut p = fixed(5, 30);
+    p.pause_before_ms = 1_500;
+    let (fin, msgs) = run_one(&f, p, 1);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert!(done(&msgs)[0].duration_ms >= 1_500);
+    assert!(errors(&msgs).is_empty());
+}
+
+#[test]
+fn pause_reacts_to_a_stop() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let stop = AtomicBool::new(false);
+    let mut p = fixed(5, 30);
+    p.pause_before_ms = 10_000;
+    let started = Instant::now();
+    let (fin, _) = thread::scope(|s| {
+        s.spawn(|| {
+            thread::sleep(Duration::from_millis(200));
+            stop.store(true, Ordering::Relaxed);
+        });
+        run_test(
+            &plan(vec![p]),
+            &topology(1, 1),
+            &factory,
+            None,
+            &stop,
+            &no_hang,
+        )
+    });
+    assert_eq!(fin.reason, FinishReason::Stopped);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn timed_phase_has_no_workers() {
+    let f = CountFactory::new(0..0);
+    let (_, msgs) = run_one(&f, phase(KernelId::K2, Placement::AllLogical, 1), 1);
+    assert_eq!(done(&msgs)[0].work_ms, None);
+    assert!(done(&msgs)[0].workers.is_empty());
+}
+
+#[test]
+fn per_worker_times_with_a_slow_worker() {
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    let (fin, msgs) = run_one(&f, fixed(5, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let d = done(&msgs)[0];
+    let mut logical: Vec<u32> = d.workers.iter().map(|w| w.logical).collect();
+    logical.sort_unstable();
+    assert_eq!(logical, [0, 1]);
+    // Fast first: which slot got the slow kernel is a race.
+    let w = by_time(d);
+    assert_eq!((w[0].iterations, w[1].iterations), (5, 5));
+    assert!(w[1].work_ms > w[0].work_ms, "{w:?}");
+    assert!(w[1].work_ms >= 550, "{w:?}");
+    assert_eq!(
+        d.work_ms,
+        Some(w[1].work_ms),
+        "the phase time is the last thread's"
+    );
+}
+
+#[test]
+fn finished_worker_keeps_loading_until_all_done() {
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    let (fin, msgs) = run_one(&f, fixed(5, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    // ~600 ms of the slow worker: the fast one runs far more than its 5 steps.
+    let all = f.count.load(Ordering::Relaxed);
+    assert!(all > 50, "{all}");
+    assert_eq!(done(&msgs)[0].checks, 10, "filler steps are not checks");
+}
+
+#[test]
+fn capped_worker_reports_partial_iterations() {
+    // The slow worker needs 2.4 s for 20 steps; the cap is 1 s.
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    let (fin, msgs) = run_one(&f, fixed(20, 1), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    let w = by_time(done(&msgs)[0]);
+    assert_eq!(w[0].iterations, 20);
+    assert!((1..20).contains(&w[1].iterations), "{w:?}");
+    assert!((950..1400).contains(&w[1].work_ms), "{w:?}");
+    assert!(w[0].work_ms < w[1].work_ms, "{w:?}");
+}
+
+#[test]
+fn filler_error_is_still_an_error() {
+    // The fast worker goes wrong right after its 5 counted steps, in the filler.
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    f.bad_after = 5;
+    let mut p = fixed(5, 30);
+    p.stop_on_error = true;
+    let (fin, msgs) = run_one(&f, p, 2);
+    assert_eq!(fin.reason, FinishReason::FirstError);
+    let errs = errors(&msgs);
+    assert_eq!(errs[0].iteration, 6);
+    let d = done(&msgs)[0];
+    assert!(d.errors >= 1);
+    let w = by_time(d);
+    assert_eq!((Some(w[0].logical), w[0].iterations), (errs[0].logical, 5));
+    assert!(w[1].iterations < 5, "{w:?}");
+}
+
+/// The workers of `d`, the fastest first.
+fn by_time(d: &PhaseDone) -> Vec<WorkerDone> {
+    let mut w = d.workers.clone();
+    w.sort_by_key(|w| w.work_ms);
+    w
+}
+
+#[test]
+fn fixed_work_error_stops_the_phase() {
+    let f = CountFactory::new(0..u32::MAX);
+    let mut p = fixed(1_000, 30);
+    p.stop_on_error = true;
+    let started = Instant::now();
+    let (fin, msgs) = run_one(&f, p, 1);
+    assert_eq!(fin.reason, FinishReason::FirstError);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(done(&msgs)[0].checks < 1_000);
+}
+
+#[test]
+fn a_worker_that_finishes_early_is_not_hung() {
+    // The fast worker is done after ~15 ms; the slow one needs ~1.8 s, more than the 1 s
+    // the test sentinel waits for a beat.
+    let mut f = CountFactory::new(0..0);
+    f.slow = 1;
+    let (fin, msgs) = run_one(&f, fixed(15, 30), 2);
+    assert_eq!(fin.reason, FinishReason::Completed);
+    assert!(errors(&msgs).is_empty());
+    let d = done(&msgs)[0];
+    assert_eq!(d.checks, 30);
+    let w = d.work_ms.expect("work_ms");
+    assert!(w >= 1_700, "work_ms follows the slow worker: {w}");
+}
+
+fn progresses(msgs: &[LoadMessage]) -> Vec<&Progress> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            LoadMessage::Progress(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_first_progress_of_a_phase_does_not_carry_the_previous_one() {
+    let f = CountFactory::new(0..0);
+    let factory = |_: KernelId| Some(&f as &dyn KernelFactory);
+    let p = phase(KernelId::K2, Placement::AllLogical, 1);
+    let (_, msgs) = run_test(
+        &plan(vec![p.clone(), p]),
+        &topology(1, 1),
+        &factory,
+        None,
+        &AtomicBool::new(false),
+        &no_hang,
+    );
+    let first = progresses(&msgs)
+        .into_iter()
+        .find(|p| p.phase == 1)
+        .expect("a progress of phase 1");
+    assert!(first.rate.unwrap_or(0.0) == 0.0, "{:?}", first.rate);
+}
+
+#[test]
+fn the_rate_window_starts_at_the_gate() {
+    // A slow reference must not dilute the first rate of the phase.
+    let mut f = CountFactory::new(0..0);
+    f.ref_delay = Duration::from_millis(600);
+    let (_, msgs) = run_one(&f, phase(KernelId::K2, Placement::AllLogical, 3), 1);
+    let rates: Vec<f64> = progresses(&msgs)
+        .iter()
+        .filter_map(|p| p.rate.filter(|r| *r > 0.0))
+        .collect();
+    assert!(rates.len() >= 2, "{rates:?}");
+    assert!(rates[0] > 0.75 * rates[1], "{rates:?}");
 }

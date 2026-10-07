@@ -17,6 +17,8 @@ use crate::kernel::{
 use crate::rng::Xoshiro256ss;
 
 const BLOCK: usize = 64;
+/// DB2: the matrix order of `DataSize::Fixed`, the same on every machine.
+pub const FIXED_GEMM_N: usize = 256;
 
 /// Bytes of A, B and C together for an n×n problem: 3·8·n².
 fn footprint(n: usize) -> u64 {
@@ -264,6 +266,7 @@ impl K7 {
             return Err(KernelError::Unsupported);
         }
         let n = match ctx.size {
+            DataSize::Fixed => FIXED_GEMM_N,
             DataSize::L3 => n_l3(ctx),
             DataSize::Ram => n_ram(ctx)?,
             _ => n_for(ctx.budget.l2_thread),

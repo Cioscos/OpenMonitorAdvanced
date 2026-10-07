@@ -3,33 +3,41 @@
   import type { Backend } from '../../lib/backend';
   import type { LiveStore } from '../../lib/live.svelte';
   import { t } from '../../lib/i18n/index.svelte';
+  import { benchStore } from '../../lib/performance/bench.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
+  import CpuScore from './CpuScore.svelte';
   import StressHistory from './StressHistory.svelte';
   import StressResult from './StressResult.svelte';
   import StressRun from './StressRun.svelte';
   import StressWizard from './StressWizard.svelte';
 
-  // The Performance view (spec M8 §3.1): the sidebar with the «Stress test» group on the left, the
-  // page on the right. The store is connected only while the view is on screen. `new` is the
-  // wizard, `run` the test under way, `result:<id>` a saved session; `history` lists the saved ones.
+  // The Performance view (spec M8 §3.1): the sidebar with the «Score» and «Stress test» groups on
+  // the left, the page on the right. The stores are connected only while the view is on screen.
+  // `score-cpu` is the CPU benchmark; `new` is the wizard, `run` the test under way,
+  // `result:<id>` a saved session; `history` lists the saved ones.
   // `store` is the app's live store, for the run page's chart.
   let { backend, store, page = $bindable('new') }: { backend: Backend; store: LiveStore; page?: PerformancePage } = $props();
   const open = (next: PerformancePage) => (page = next);
 
   onMount(() => {
-    let off: (() => void) | undefined;
+    const offs: (() => void)[] = [];
     let cancelled = false;
+    const keep = (unsubscribe: () => void) => {
+      if (cancelled) unsubscribe();
+      else offs.push(unsubscribe);
+    };
     performanceStore
       .connect(backend)
-      .then((unsubscribe) => {
-        if (cancelled) unsubscribe();
-        else off = unsubscribe;
-      })
+      .then(keep)
       .catch((error) => console.error('stress test status unavailable', error));
+    benchStore
+      .connect(backend)
+      .then(keep)
+      .catch((error) => console.error('CPU benchmark status unavailable', error));
     return () => {
       cancelled = true;
-      off?.();
+      offs.forEach((off) => off());
     };
   });
 
@@ -41,10 +49,18 @@
     if (running && !wasRunning) page = 'run';
     wasRunning = running;
   });
+  let benchWasRunning = false;
+  $effect(() => {
+    const running = benchStore.running;
+    if (running && !benchWasRunning) page = 'score-cpu';
+    benchWasRunning = running;
+  });
 
-  const current = $derived(page === 'run' || page === 'new' ? 'test' : 'history');
+  const current = $derived(page === 'score-cpu' ? 'score' : page === 'run' || page === 'new' ? 'test' : 'history');
   const title = $derived(
-    page === 'new'
+    page === 'score-cpu'
+      ? t('performance.score.title')
+      : page === 'new'
       ? t('performance.nav.new')
       : page === 'run'
         ? t('performance.run.title')
@@ -56,6 +72,19 @@
 
 <div class="performance">
   <nav aria-label={t('view.performance')}>
+    <p class="group" id="performance-group-score">{t('performance.nav.score')}</p>
+    <div class="entries" role="group" aria-labelledby="performance-group-score">
+      <button
+        type="button"
+        class="entry"
+        class:on={current === 'score'}
+        class:live={benchStore.running}
+        aria-current={current === 'score' ? 'page' : undefined}
+        onclick={() => (page = 'score-cpu')}
+      >
+        {t('performance.nav.scoreCpu')}{#if benchStore.running}<span class="dot" aria-hidden="true"> ●</span>{/if}
+      </button>
+    </div>
     <p class="group" id="performance-group-stress">{t('performance.nav.stress')}</p>
     <div class="entries" role="group" aria-labelledby="performance-group-stress">
       <button
@@ -82,7 +111,9 @@
 
   <section class="content" aria-labelledby="performance-page-title">
     <h2 id="performance-page-title">{title}</h2>
-    {#if page === 'new'}
+    {#if page === 'score-cpu'}
+      <CpuScore />
+    {:else if page === 'new'}
       <StressWizard {backend} onStarted={() => (page = 'run')} />
     {:else if page === 'run'}
       <StressRun {backend} {store} onOpen={open} />
@@ -118,6 +149,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .entries + .group {
+    margin-top: 12px;
   }
   .entry {
     padding: 8px 12px;
@@ -180,6 +214,9 @@
     }
     .entry.on {
       border-bottom-color: var(--accent);
+    }
+    .entries + .group {
+      margin: 0 8px 0 12px;
     }
   }
 </style>

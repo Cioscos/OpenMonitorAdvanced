@@ -488,6 +488,8 @@ mod tests {
                 cores: Some(cores),
                 patterns: vec![],
                 stop_on_error: false,
+                iterations: None,
+                pause_before_ms: 0,
             }],
         };
         host.send(&LoadMessage::Run(RunRequest { plan })).unwrap();

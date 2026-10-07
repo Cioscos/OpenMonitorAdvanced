@@ -6,6 +6,7 @@ use std::time::Duration;
 use oma_core::csv::LocalTime;
 use oma_core::load::{RunStatus, Session, SessionSummary, StartRequest};
 use oma_core::sampler::unix_ms;
+use oma_core::scores::{cpu_baseline, BenchStatus, ScoreFile, ScoreSummary};
 use oma_ipc::load::Plan;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -59,10 +60,58 @@ pub fn performance_session(runner: Runner<'_>, id: String) -> Result<Option<Sess
 /// Deletes a saved session; not the one still running.
 #[tauri::command(async)]
 pub fn performance_delete(runner: Runner<'_>, id: String) -> Result<(), String> {
-    if runner.is_running() && runner.status().session_id == id {
+    if runner.stress_running() && runner.status().session_id == id {
         return Err("the session is still running".into());
     }
     runner.store().delete(&id).map_err(|e| e.to_string())
+}
+
+/// Starts the CPU benchmark; the score id, or `busy` (a test or a benchmark
+/// runs) or the text of a system error.
+#[tauri::command(async)]
+pub fn performance_bench_start(runner: Runner<'_>) -> Result<String, String> {
+    runner.start_bench().map_err(|e| e.wire())
+}
+
+/// Stops the benchmark; nothing is saved.
+#[tauri::command]
+pub fn performance_bench_stop(runner: Runner<'_>) {
+    runner.stop_bench();
+}
+
+/// The benchmark in progress or the last one; `null` before any.
+#[tauri::command]
+pub fn performance_bench_status(runner: Runner<'_>) -> Option<BenchStatus> {
+    runner.bench_status()
+}
+
+/// The saved scores, newest first.
+#[tauri::command(async)]
+pub fn performance_scores(runner: Runner<'_>) -> Vec<ScoreSummary> {
+    runner.store().list_scores()
+}
+
+#[tauri::command(async)]
+pub fn performance_score(runner: Runner<'_>, id: String) -> Result<Option<ScoreFile>, String> {
+    runner.store().load_score(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn performance_score_delete(runner: Runner<'_>, id: String) -> Result<(), String> {
+    runner.store().delete_score(&id).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct BaselineInfo {
+    /// The scale is not calibrated yet: the points will change.
+    provisional: bool,
+}
+
+#[tauri::command]
+pub fn performance_baseline() -> BaselineInfo {
+    BaselineInfo {
+        provisional: cpu_baseline().provisional,
+    }
 }
 
 /// `oma-stress-YYYYMMDD-HHMMSS.json`, from the session's start in local time.

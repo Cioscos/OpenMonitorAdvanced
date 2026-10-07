@@ -183,6 +183,8 @@ pub enum LaunchTarget {
     About,
     /// The result of this stress session (M8a1).
     Performance(String),
+    /// The CPU benchmark page (M8a2, DB9).
+    ScoreCpu,
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -200,6 +202,11 @@ pub fn launch_for_about() -> String {
     serde_json::json!({ "open": "about" }).to_string()
 }
 
+/// The launch string of a toast that opens the CPU benchmark page.
+pub fn launch_for_score_cpu() -> String {
+    serde_json::json!({ "open": "score-cpu" }).to_string()
+}
+
 /// The launch string of a toast that opens the result of a stress session.
 pub fn launch_for_performance(session_id: &str) -> String {
     serde_json::json!({ "performance": session_id }).to_string()
@@ -214,6 +221,7 @@ pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
         }
         Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
         Launch::Open(OpenLaunch { open }) if open == "about" => Some(LaunchTarget::About),
+        Launch::Open(OpenLaunch { open }) if open == "score-cpu" => Some(LaunchTarget::ScoreCpu),
         Launch::Performance(PerformanceLaunch { performance })
             if oma_core::load::is_session_id(&performance) =>
         {
@@ -253,6 +261,9 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
             LaunchTarget::About => crate::window::show_about(&handle),
             LaunchTarget::Performance(id) => {
                 crate::window::show_performance(&handle, crate::window::PerformanceNav::result(&id))
+            }
+            LaunchTarget::ScoreCpu => {
+                crate::window::show_performance(&handle, crate::window::PerformanceNav::score_cpu())
             }
         });
         if let Err(err) = result {
@@ -642,6 +653,10 @@ mod tests {
         );
         assert_eq!(launch_for_main(), r#"{"open":"main"}"#);
         assert_eq!(launch_target(&launch_for_main()), Some(LaunchTarget::Main));
+        assert_eq!(
+            launch_target(&launch_for_score_cpu()),
+            Some(LaunchTarget::ScoreCpu)
+        );
         assert_eq!(launch_for_about(), r#"{"open":"about"}"#);
         for unknown in [
             r#"{"open":"settings"}"#,

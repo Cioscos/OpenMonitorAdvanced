@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-bench-start"
+description = "Enables the performance_bench_start command without any pre-configured scope."
+commands.allow = ["performance_bench_start"]
+
+[[permission]]
+identifier = "deny-performance-bench-start"
+description = "Denies the performance_bench_start command without any pre-configured scope."
+commands.deny = ["performance_bench_start"]

@@ -14,9 +14,9 @@
 
 mod aes;
 mod clmul;
-mod lz;
-mod sha256;
-mod sort;
+pub(crate) mod lz;
+pub(crate) mod sha256;
+pub(crate) mod sort;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,7 +25,7 @@ use crate::kernels::k1::crc::{crc32c, crc32c_u64};
 use crate::rng::Xoshiro256ss;
 
 const BUF_BYTES: usize = 64 * 1024;
-const TEXT_BYTES: usize = 256 * 1024;
+pub(crate) const TEXT_BYTES: usize = 256 * 1024;
 const SORT_LEN: usize = 65_536;
 /// One CLMUL product in this many is checked against the software one.
 const CLMUL_CHECK_EVERY: usize = 64;
@@ -33,7 +33,7 @@ const KEY: [u8; 16] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ];
 
-fn mix(step: u64, r: u64) -> u64 {
+pub(crate) fn mix(step: u64, r: u64) -> u64 {
     let mut z = r ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -44,7 +44,7 @@ fn fold128(v: u128) -> u64 {
     mix(1, v as u64) ^ mix(2, (v >> 64) as u64)
 }
 
-fn fold_bytes(b: &[u8]) -> u64 {
+pub(crate) fn fold_bytes(b: &[u8]) -> u64 {
     b.chunks(8).enumerate().fold(0, |acc, (i, c)| {
         let mut w = [0u8; 8];
         w[..c.len()].copy_from_slice(c);
@@ -56,7 +56,7 @@ fn has_aes() -> bool {
     is_x86_feature_detected!("aes") && is_x86_feature_detected!("sse2")
 }
 
-fn has_sha() -> bool {
+pub(crate) fn has_sha() -> bool {
     is_x86_feature_detected!("sha")
         && is_x86_feature_detected!("ssse3")
         && is_x86_feature_detected!("sse4.1")
@@ -68,7 +68,7 @@ fn has_clmul() -> bool {
 
 /// 256 words of 4–10 lowercase letters, and `TEXT_BYTES` of them chosen by a walk where
 /// each word is followed by one of two words, so the text is compressible.
-fn make_text(rng: &mut Xoshiro256ss) -> Vec<u8> {
+pub(crate) fn make_text(rng: &mut Xoshiro256ss) -> Vec<u8> {
     let dict: Vec<Vec<u8>> = (0..256)
         .map(|_| {
             let n = 4 + (rng.next_u64() % 7) as usize;
@@ -216,7 +216,7 @@ pub(crate) struct K8Factory;
 
 /// The known vectors on this machine, for the paths it has (FIPS-197 C.1, SHA-256 "abc",
 /// CRC32C "123456789"); a failure is a defect of the code, not of a core.
-fn check_vectors() -> Result<(), String> {
+pub(crate) fn check_vectors() -> Result<(), String> {
     const PLAIN: [u8; 16] = [
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
         0xff,

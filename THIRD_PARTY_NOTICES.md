@@ -166,3 +166,16 @@ Corporation", licensed under the Apache License, Version 2.0; the full text is i
 `THIRD_PARTY_LICENSES.txt`, section "Source code adapted into OpenMonitor
 Advanced". The modifications are part of OpenMonitor Advanced,
 GPL-3.0-or-later. No OpenDCDiag binary is redistributed.
+
+## Orbitron and Share Tech Mono
+
+The gauges of the CPU benchmark use two fonts, bundled as local files in
+`app/src/assets/fonts/` (declared in `app/src/styles/fonts.css`, never loaded
+from Google Fonts): Orbitron (`Orbitron[wght].ttf`, "Copyright 2018 The Orbitron
+Project Authors", https://github.com/theleagueof/orbitron) and Share Tech Mono
+(`ShareTechMono-Regular.ttf`, "Copyright (c) 2012, Carrois Type Design, Ralph du
+Carrois"). Both come from https://github.com/google/fonts at commit
+`7085eb89a950e85db5b166b7a58d414544b4140c` (SHA-256 of the files in
+`fonts.css`) and are licensed under the SIL Open Font License, Version 1.1; the
+text is in `THIRD_PARTY_LICENSES.txt`, section "Fonts bundled in the app". The
+fonts are used unmodified.

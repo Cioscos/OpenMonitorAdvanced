@@ -318,6 +318,18 @@ VendorModules        : atiadlxx.dll, nvapi64.dll, nvml.dll
 
 Under load the window stays within budget (165.9 MB < 200 MB) and the app itself at 0.03% CPU; the CPU total is the load, as it should be. `oma-load.exe` takes 17 MB private. The rest measurement was not repeated: M8a1 adds no work without a test.
 
+## M8a2 — CPU benchmark (spec M8 §11)
+
+Not measured in this session (pending, as for M8a1): `scripts/measure-footprint.ps1` starts the release build of the app and opens its window, and the existing `target\release\oma-app.exe` predates M8a2 (built 2026-10-06 after the M8a1 merge); an agent does not drive the app or the user's desktop (live-check rule). M8a2 adds no idle work: the benchmark runs through the same `oma-load.exe` and the same `active` slot as the stress test, and the gauges draw only while the page is visible and the needle is moving.
+
+Command for the user (normal shell, repository root; close any `pnpm tauri dev` instance first; build the release app first with `cd app && pnpm tauri build --bundles nsis`, or at least `cargo build -p oma-app --release` after `pnpm build`):
+
+```powershell
+pwsh scripts/measure-footprint.ps1
+```
+
+At rest: expected core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included). Then, in the app the script launched, run the CPU benchmark by hand (check B11) and measure again with the CPU page open and the gauges moving: window < 200 MB. `oma-load.exe` is reported apart. The values go in this section after B11.
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

@@ -4,8 +4,8 @@
  */
 export type View = 'simple' | 'advanced' | 'settings' | 'performance';
 
-/** A page of the Performance view: a saved session's result is `result:<id>`. */
-export type PerformancePage = 'new' | 'run' | 'history' | `result:${string}`;
+/** A page of the Performance view: a saved session's result is `result:<id>`; `score-cpu` is the CPU benchmark. */
+export type PerformancePage = 'new' | 'run' | 'history' | 'score-cpu' | `result:${string}`;
 
 /** A place inside the settings screen: the rules, optionally with "New rule" filled in for a sensor. */
 export interface SettingsTarget {

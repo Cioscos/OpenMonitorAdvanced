@@ -51,6 +51,8 @@ fn reference(name: &str) -> LoadMessage {
                         cores: Some(vec![0, 2, 4]),
                         patterns: vec![],
                         stop_on_error: false,
+                        iterations: None,
+                        pause_before_ms: 0,
                     },
                     Phase {
                         kernel: KernelId::K10,
@@ -65,6 +67,8 @@ fn reference(name: &str) -> LoadMessage {
                         cores: None,
                         patterns: vec![RamPattern::MovingInversions, RamPattern::CrcCopy],
                         stop_on_error: true,
+                        iterations: None,
+                        pause_before_ms: 0,
                     },
                 ],
             },
@@ -157,6 +161,12 @@ fn reference(name: &str) -> LoadMessage {
             errors: 1,
             duration_ms: 60_000,
             skipped: Some("isa_unavailable".to_owned()),
+            work_ms: Some(59_000),
+            workers: vec![WorkerDone {
+                logical: 4,
+                iterations: 50,
+                work_ms: 58_500,
+            }],
         }),
         "finished" => LoadMessage::Finished(Finished {
             reason: FinishReason::Completed,

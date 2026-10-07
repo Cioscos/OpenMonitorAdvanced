@@ -1,0 +1,26 @@
+/*
+ * Local fonts of the CPU benchmark gauges (M8a2), never loaded from Google Fonts.
+ * Source: github.com/google/fonts at commit 7085eb89a950e85db5b166b7a58d414544b4140c
+ *   ofl/orbitron/Orbitron[wght].ttf
+ *     SHA-256 f42db2dd16e642258e35782916eceb1dcdbea06fb958d77ad71dc5963587e8fd
+ *   ofl/sharetechmono/ShareTechMono-Regular.ttf
+ *     SHA-256 9ceab1f87414829af259c0f537573ae03ef7dd3147c0b27a36a1a0beb6732677
+ * Both under the SIL Open Font License 1.1 (scripts/licenses/Orbitron-OFL.txt and
+ * scripts/licenses/ShareTechMono-OFL.txt).
+ */
+
+@font-face {
+  font-family: 'Orbitron';
+  src: url('../assets/fonts/Orbitron[wght].ttf') format('truetype');
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Share Tech Mono';
+  src: url('../assets/fonts/ShareTechMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

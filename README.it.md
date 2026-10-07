@@ -75,7 +75,8 @@ temperature, tensioni, ventole e dati SMART.
   unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
 - **Vista Prestazioni.** Uno stress test per CPU e RAM, con una procedura guidata (verifica
   normale o stabilità dell'overclock, da Rapido a Lungo), una pagina dal vivo, un risultato con
-  verdetto e la cronologia delle sessioni (vedi [Vista Prestazioni](#vista-prestazioni)).
+  verdetto e la cronologia delle sessioni, più un benchmark della CPU con un punteggio single core e uno
+  multi core su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -196,6 +197,15 @@ instabile con il core, fermato, interrotto da un crash del sistema) e resta nell
 Chiudere la finestra non ferma un test: continua dal tray. I termini tecnici hanno un tooltip in
 parole semplici.
 
+- **Benchmark della CPU.** *Prestazioni › Punteggio › CPU* esegue sei carichi (interi: NTT, hash,
+  compressione, ordinamento; virgola mobile: FFT, prodotto di matrici) prima su un core, poi su
+  tutti i thread, in circa 2 minuti, con lo stesso processo di carico. Il punteggio è in punti su
+  una scala fissa, uguale per tutte le CPU (il doppio dei punti, il doppio del lavoro nello stesso
+  tempo); la pagina mostra anche la scala multi core, la velocità di ogni carico e la cronologia
+  delle tue misure. Una misura a batteria, limitata dal calore, con il sistema occupato, in una
+  macchina virtuale o senza il servizio resta valida ma con un avviso; un errore di calcolo la
+  rende non valida. Finché la scala non è tarata i punti sono segnati come provvisori.
+  Esportazione e condivisione arriveranno dopo.
 - **Privilegi di amministratore** non servono. Senza il servizio il test della CPU parte, con un
   avviso, e senza stop termico.
 - **Limite della RAM.** Il test della RAM copre solo la memoria che Windows concede al programma

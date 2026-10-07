@@ -23,6 +23,8 @@ accepted = [
     # cssparser, selectors, dtoa-short, option-ext; LibreHardwareMonitorLib, BlackSharp.Core,
     # DiskInfoToolkit, RAMSPDToolkit-NDD. Sources of these packages are public and unmodified.
     "MPL-2.0",
+    # Fonts bundled in the app (Orbitron, Share Tech Mono); not a Rust, npm or NuGet licence.
+    "OFL-1.1",
 ]
 targets = ["x86_64-pc-windows-msvc"]
 ignore-dev-dependencies = true

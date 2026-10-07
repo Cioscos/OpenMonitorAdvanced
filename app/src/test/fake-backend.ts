@@ -1,6 +1,10 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
+  BenchStatus,
+  BenchStep,
+  CpuScoreFile,
+  CpuScoreSummary,
   AppInfo,
   ExportedReport,
   AutostartStatus,
@@ -85,6 +89,68 @@ export function makeOverlayStatus(over: Partial<OverlayStatus> = {}): OverlaySta
     ...over,
   };
 }
+
+/** The 48 steps of the CPU benchmark (six workloads, single then multi, warm-up and three repetitions). */
+export const BENCH_STEPS: BenchStep[] = (['single', 'multi'] as const).flatMap((mode) =>
+  (['ntt', 'hash', 'compress', 'sort', 'fft', 'gemm'] as const).flatMap((kernel) => [0, 1, 2, 3].map((rep) => ({ kernel, mode, rep }))),
+);
+
+/** A CPU benchmark status for tests: running its first step; override what matters. */
+export function makeBenchStatus(over: Partial<BenchStatus> = {}): BenchStatus {
+  return {
+    state: 'running',
+    step: 0,
+    steps: BENCH_STEPS,
+    segments: BENCH_STEPS.map((_, i) => (i === 0 ? 'running' : 'pending')),
+    livePoints: null,
+    single: null,
+    multi: null,
+    flags: [],
+    scoreId: null,
+    error: null,
+    ...over,
+  };
+}
+
+/** A saved CPU score for tests, valid and without flags; override what matters. */
+export function makeScoreFile(over: Partial<CpuScoreFile> = {}): CpuScoreFile {
+  return {
+    format: 1,
+    id: 'score-a',
+    at: '2026-10-07T10:00:00Z',
+    category: 'cpu',
+    scoreVersion: 'cpu-1',
+    provisional: false,
+    isa: 'avx512',
+    scores: { single: 1500, multi: 12000 },
+    kernels: [
+      { id: 'ntt', unit: 'Mop/s', single: 950.4, multi: 7600 },
+      { id: 'hash', unit: 'MB/s', single: 2100, multi: 16000 },
+      { id: 'compress', unit: 'MB/s', single: 410, multi: 3300 },
+      { id: 'sort', unit: 'Melem/s', single: 95.5, multi: 760 },
+      { id: 'fft', unit: 'GFLOP/s', single: 12.25, multi: 98 },
+      { id: 'gemm', unit: 'GFLOP/s', single: 60, multi: 470 },
+    ],
+    device: { model: 'Fake Ryzen', cores: 8, logical: 16 },
+    flags: [],
+    valid: true,
+    scaling: 0.5,
+    samples: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+    ...over,
+  };
+}
+
+export const scoreSummaryOf = (f: CpuScoreFile): CpuScoreSummary => ({
+  id: f.id,
+  at: f.at,
+  single: f.scores.single,
+  multi: f.scores.multi,
+  valid: f.valid,
+  flags: f.flags,
+  provisional: f.provisional,
+});
 
 /** A stress test run status for tests: idle, before any test; override what matters. */
 export function makeRunStatus(over: Partial<RunStatus> = {}): RunStatus {
@@ -735,6 +801,62 @@ export class FakeBackend implements Backend {
 
   async performanceQuitConfirmed(): Promise<void> {
     this.performanceQuitCalls++;
+  }
+
+  /** The CPU benchmark: what the reads return; calls go to `performanceCalls` too. */
+  benchStatusValue: BenchStatus | null = null;
+  /** Saved scores by id, newest first in insertion order. */
+  scoreFiles: CpuScoreFile[] = [];
+  baselineProvisional = false;
+  /** Set to reject `performanceBenchStart` with this text instead of starting. */
+  benchStartError: string | null = null;
+  readonly benchListeners = new Set<(status: BenchStatus) => void>();
+
+  async performanceBenchStart(): Promise<string> {
+    this.performanceCalls.push('performanceBenchStart');
+    if (this.benchStartError !== null) throw this.benchStartError;
+    return 'fake-score';
+  }
+
+  async performanceBenchStop(): Promise<void> {
+    this.performanceCalls.push('performanceBenchStop');
+  }
+
+  async performanceBenchStatus(): Promise<BenchStatus | null> {
+    this.performanceCalls.push('performanceBenchStatus');
+    return structuredClone(this.benchStatusValue);
+  }
+
+  async performanceScores(): Promise<CpuScoreSummary[]> {
+    this.performanceCalls.push('performanceScores');
+    return this.scoreFiles.map(scoreSummaryOf);
+  }
+
+  async performanceScore(id: string): Promise<CpuScoreFile | null> {
+    this.performanceCalls.push(`performanceScore:${id}`);
+    return structuredClone(this.scoreFiles.find((f) => f.id === id) ?? null);
+  }
+
+  async performanceScoreDelete(id: string): Promise<void> {
+    this.performanceCalls.push(`performanceScoreDelete:${id}`);
+    this.scoreFiles = this.scoreFiles.filter((f) => f.id !== id);
+  }
+
+  async performanceBaseline(): Promise<{ provisional: boolean }> {
+    this.performanceCalls.push('performanceBaseline');
+    return { provisional: this.baselineProvisional };
+  }
+
+  async onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe> {
+    this.performanceCalls.push('onPerformanceBench');
+    this.benchListeners.add(cb);
+    return () => this.benchListeners.delete(cb);
+  }
+
+  /** Replaces the status and notifies the listeners, like a `performance-bench` event. */
+  emitBench(status: BenchStatus): void {
+    this.benchStatusValue = status;
+    this.benchListeners.forEach((cb) => cb(structuredClone(status)));
   }
 
   async onOverlayEditorQuit(cb: () => void): Promise<Unsubscribe> {

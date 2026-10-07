@@ -8,6 +8,7 @@ use oma_core::load::{Component, Objective, RunState, RunStatus};
 use oma_core::model::{Schema, Snapshot, Unit};
 use oma_core::roles::{role_sensor, Role};
 use oma_core::rules::HealthReport;
+use oma_core::scores::{BenchState, BenchStatus};
 use oma_core::settings::{Language, Settings, ViewKind};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -85,15 +86,29 @@ pub fn test_menu(test: bool) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// The stress test in progress, as the tray shows it: the ids of the status
-/// (`cpu`, `normal`), translated when the tooltip is built.
+/// The stress test or CPU benchmark in progress, as the tray shows it: for a
+/// test the ids of the status (`cpu`, `normal`), translated when the tooltip
+/// is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TestMark {
-    pub component: String,
-    pub objective: String,
+pub enum TestMark {
+    Stress {
+        component: String,
+        objective: String,
+    },
+    /// The CPU benchmark (DB9).
+    Bench,
 }
 
 impl TestMark {
+    /// The mark for a benchmark `status`: only while it runs or stops.
+    pub fn from_bench(status: &BenchStatus) -> Option<Self> {
+        matches!(
+            status.state,
+            BenchState::Starting | BenchState::Running | BenchState::Stopping
+        )
+        .then_some(Self::Bench)
+    }
+
     /// The mark for `status`: none while idle or once finished.
     pub fn from_status(status: &RunStatus) -> Option<Self> {
         if matches!(status.state, RunState::Idle | RunState::Finished) {
@@ -107,20 +122,23 @@ impl TestMark {
             Objective::Normal => "normal",
             Objective::Overclock => "overclock",
         };
-        Some(Self {
+        Some(Self::Stress {
             component: component.to_owned(),
             objective: objective.to_owned(),
         })
     }
 
-    /// `Stress test in progress: CPU · Normal check`.
+    /// `Stress test in progress: CPU · Normal check`, or `CPU benchmark running`.
     fn text(&self, lang: Lang) -> String {
-        let component = t(lang, &format!("tray.tooltip.{}", self.component), &[]);
-        let objective = t(
-            lang,
-            &format!("performance.objective.{}", self.objective),
-            &[],
-        );
+        let Self::Stress {
+            component,
+            objective,
+        } = self
+        else {
+            return t(lang, "tray.benchRunning", &[]);
+        };
+        let component = t(lang, &format!("tray.tooltip.{component}"), &[]);
+        let objective = t(lang, &format!("performance.objective.{objective}"), &[]);
         t(
             lang,
             "tray.performance.tooltip",
@@ -709,7 +727,17 @@ pub fn build(app: &AppHandle) -> tauri::Result<Arc<Tray>> {
                     runner.stop();
                 }
             }
-            PERF_OPEN_ID => window::show_performance(app, PerformanceNav::run()),
+            PERF_OPEN_ID => {
+                let bench = app
+                    .try_state::<Arc<PerformanceRunner>>()
+                    .is_some_and(|runner| runner.bench_running());
+                let nav = if bench {
+                    PerformanceNav::score_cpu()
+                } else {
+                    PerformanceNav::run()
+                };
+                window::show_performance(app, nav);
+            }
             id => {
                 if let Some(item) = LogMenuItem::from_id(id) {
                     run_log_command(app, item);
@@ -1427,10 +1455,45 @@ mod tests {
     }
 
     fn mark() -> TestMark {
-        TestMark {
+        TestMark::Stress {
             component: "cpu".to_owned(),
             objective: "normal".to_owned(),
         }
+    }
+
+    #[test]
+    fn bench_mark_leads_the_tooltip_only_while_it_runs() {
+        let status = |state| BenchStatus {
+            state,
+            step: None,
+            steps: vec![],
+            segments: vec![],
+            live_points: None,
+            single: None,
+            multi: None,
+            flags: vec![],
+            score_id: None,
+            error: None,
+        };
+        for (state, on) in [
+            (BenchState::Starting, true),
+            (BenchState::Running, true),
+            (BenchState::Stopping, true),
+            (BenchState::Done, false),
+            (BenchState::Stopped, false),
+            (BenchState::Failed, false),
+        ] {
+            assert_eq!(
+                TestMark::from_bench(&status(state)).is_some(),
+                on,
+                "{state:?}"
+            );
+        }
+        assert_eq!(TestMark::Bench.text(Lang::En), "CPU benchmark running");
+        assert_eq!(
+            TestMark::Bench.text(Lang::It),
+            "Benchmark della CPU in corso"
+        );
     }
 
     #[test]

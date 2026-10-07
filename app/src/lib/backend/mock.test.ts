@@ -1,4 +1,5 @@
 import { catalogs } from '../i18n/index.svelte';
+import { mockBench } from './mockPerformance';
 import {
   MOCK_HISTORY_SECONDS,
   MOCK_SCHEMA,
@@ -560,4 +561,43 @@ describe('mock overlay editor', () => {
     await backend.overlayDeleteProfile(id);
     await expect(backend.overlayLoadProfile(id)).rejects.toMatchObject({ key: 'editor.error.notFound' });
   });
+});
+
+test('mock_bench_runs_twenty_seconds_and_the_error_scenario_is_not_valid', () => {
+  vi.useFakeTimers();
+  try {
+    for (const scenario of [null, 'error'] as const) {
+      const bench = mockBench(scenario, () => false);
+      const seen: string[] = [];
+      bench.subscribe((s) => seen.push(s.state));
+      const id = bench.start();
+      expect(() => bench.start()).toThrow();
+      vi.advanceTimersByTime(19_000);
+      expect(bench.status()?.state).toBe(scenario === 'error' ? 'done' : 'running');
+      vi.advanceTimersByTime(1_500);
+      expect(bench.status()).toMatchObject({ state: 'done', scoreId: id });
+      expect(bench.score(id)?.valid).toBe(scenario === null);
+      expect(bench.scores()[0].id).toBe(id);
+    }
+    expect(() => mockBench(null, () => true).start()).toThrow();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('mock_bench_holds_the_needle_during_warm_ups_like_oma_core', () => {
+  vi.useFakeTimers();
+  try {
+    const bench = mockBench(null, () => false);
+    const seen: { rep: number; live: number | null }[] = [];
+    bench.subscribe((s) => s.step !== null && seen.push({ rep: s.steps[s.step].rep, live: s.livePoints }));
+    bench.start();
+    vi.advanceTimersByTime(19_000);
+    // The pause and the reference of a warm-up send rate 0: no needle.
+    expect(seen.some((s) => s.rep === 0)).toBe(true);
+    expect(seen.filter((s) => s.rep === 0).every((s) => s.live === null)).toBe(true);
+    expect(seen.some((s) => s.rep > 0 && s.live !== null)).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
 });

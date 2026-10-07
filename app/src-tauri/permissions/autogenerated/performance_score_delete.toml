@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-score-delete"
+description = "Enables the performance_score_delete command without any pre-configured scope."
+commands.allow = ["performance_score_delete"]
+
+[[permission]]
+identifier = "deny-performance-score-delete"
+description = "Denies the performance_score_delete command without any pre-configured scope."
+commands.deny = ["performance_score_delete"]

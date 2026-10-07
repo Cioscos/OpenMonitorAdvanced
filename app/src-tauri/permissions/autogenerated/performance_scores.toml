@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-scores"
+description = "Enables the performance_scores command without any pre-configured scope."
+commands.allow = ["performance_scores"]
+
+[[permission]]
+identifier = "deny-performance-scores"
+description = "Denies the performance_scores command without any pre-configured scope."
+commands.deny = ["performance_scores"]

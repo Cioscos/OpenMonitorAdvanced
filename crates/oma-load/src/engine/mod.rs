@@ -19,7 +19,7 @@ mod sentinel;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,7 @@ use oma_core::load::KEEP_FREE_BYTES;
 use oma_ipc::load::{
     ComputeError, CoreProgress, CoreState, DataSize, ErrorKind, FinishReason, Finished, Isa,
     KernelId, LoadMessage, LoadMode, LogicalCpu, Notice, Phase, PhaseDone, Placement, Plan,
-    Progress, Topology,
+    Progress, Topology, WorkerDone,
 };
 
 use crate::args::Inject;
@@ -175,8 +175,11 @@ struct Engine<'e, 'f> {
 struct Slot {
     cpu: LogicalCpu,
     beat: AtomicU64,
+    /// Every step, the filler ones of a fixed-work phase too.
     iterations: AtomicU64,
     errors_sent: AtomicU32,
+    /// Fixed-work phases: ms from the gate opening to the worker's last counted iteration.
+    work_ms: OnceLock<u64>,
 }
 
 /// The running set, as the sentinel sees it; `generation` changes with every set.
@@ -203,7 +206,14 @@ struct Cursor {
     cores: Vec<CoreProgress>,
     memory_bytes: u64,
     sent_at: Instant,
+    /// Start of the `rate` window: restarted at each phase and gate, so that a rate never
+    /// mixes two kernels nor counts the pause and the reference.
+    rate_from: Instant,
     rate_iterations: u64,
+    /// The work time of the fixed-work phase being run and of each of its threads, set
+    /// when its set ends.
+    work_ms: Option<u64>,
+    workers: Vec<WorkerDone>,
 }
 
 impl Cursor {
@@ -248,6 +258,11 @@ struct Live {
     failed: AtomicBool,
     first_error: AtomicBool,
     inject_worker: Option<usize>,
+    /// When the gate opened, for the work time of a fixed-work phase.
+    opened: OnceLock<Instant>,
+    /// Workers that ran all their counted iterations.
+    finished: AtomicU32,
+    workers: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,7 +375,10 @@ impl Engine<'_, '_> {
                 .collect(),
             memory_bytes: 0,
             sent_at: now,
+            rate_from: now,
             rate_iterations: 0,
+            work_ms: None,
+            workers: Vec::new(),
         };
         for (index, spec) in self.plan.phases.iter().enumerate() {
             if self.stop.load(Ordering::Relaxed) {
@@ -370,6 +388,9 @@ impl Engine<'_, '_> {
             cur.phase = index;
             cur.phase_start = Instant::now();
             cur.current_core = None;
+            cur.work_ms = None;
+            cur.workers.clear();
+            self.restart_rate(&mut cur);
             self.progress(&mut cur);
             let (checks, errors) = (
                 self.checks.load(Ordering::Relaxed),
@@ -387,6 +408,14 @@ impl Engine<'_, '_> {
                 skipped: match end {
                     End::Skipped(reason) => Some(reason.to_owned()),
                     _ => None,
+                },
+                work_ms: cur
+                    .work_ms
+                    .take()
+                    .filter(|_| !matches!(end, End::Skipped(_))),
+                workers: match end {
+                    End::Skipped(_) => Vec::new(),
+                    _ => std::mem::take(&mut cur.workers),
                 },
             }));
             match end {
@@ -409,6 +438,17 @@ impl Engine<'_, '_> {
                     Some(f) => kernels.push((alt, f)),
                     None => tracing::info!(kernel = ?alt, "no alt kernel: the main one runs alone"),
                 }
+            }
+        }
+        if spec.pause_before_ms > 0 {
+            // No load threads exist yet and nothing is published: the sentinel has no beats.
+            let until = Instant::now() + Duration::from_millis(spec.pause_before_ms.into());
+            if let Err(end) = self.wait(cur, |t| {
+                let left = until.saturating_duration_since(Instant::now());
+                thread::sleep(t.min(left));
+                Instant::now() >= until
+            }) {
+                return end;
             }
         }
         let pr = PhaseRun {
@@ -644,6 +684,7 @@ impl Engine<'_, '_> {
                     beat: AtomicU64::new(0),
                     iterations: AtomicU64::new(0),
                     errors_sent: AtomicU32::new(0),
+                    work_ms: OnceLock::new(),
                 })
             })
             .collect();
@@ -652,6 +693,9 @@ impl Engine<'_, '_> {
             failed: AtomicBool::new(false),
             first_error: AtomicBool::new(false),
             inject_worker: self.inject_worker(kernels, cpus),
+            opened: OnceLock::new(),
+            finished: AtomicU32::new(0),
+            workers: cpus.len() as u32,
         };
         let gate = Gate::default();
         let (tx, rx) = mpsc::channel();
@@ -690,12 +734,42 @@ impl Engine<'_, '_> {
             if !fails.is_empty() {
                 return self.decide(pr, &fails, cpus, budget);
             }
+            let opened = Instant::now();
+            let _ = live.opened.set(opened);
+            self.restart_rate(cur);
             gate.set(true);
             self.publish(pr, &slots);
             if matches!(pr.spec.kernel, KernelId::K3 | KernelId::K4 | KernelId::K10) {
                 cur.memory_bytes = budget.ram_per_thread * cpus.len() as u64;
             }
+            // A fixed-work phase counts its cap from the gate: the reference and the pause
+            // do not eat into it.
+            let deadline = match pr.spec.iterations {
+                Some(_) => opened + Duration::from_secs(pr.spec.duration_s.into()),
+                None => deadline,
+            };
             let end = self.monitor(cur, pr, &live, deadline);
+            if let Some(n) = pr.spec.iterations {
+                // A worker not done (cap, stop, error) reports what it did until now (DB12).
+                let now = ms(opened.elapsed());
+                cur.workers = slots
+                    .iter()
+                    .map(|s| match s.work_ms.get() {
+                        Some(&work_ms) => WorkerDone {
+                            logical: s.cpu.index,
+                            iterations: n,
+                            work_ms,
+                        },
+                        None => WorkerDone {
+                            logical: s.cpu.index,
+                            iterations: s.iterations.load(Ordering::Relaxed).min(n),
+                            work_ms: now,
+                        },
+                    })
+                    .collect();
+                // The last thread's time, which is the time so far when one is not done.
+                cur.work_ms = cur.workers.iter().map(|w| w.work_ms).max();
+            }
             self.unpublish();
             cur.memory_bytes = 0;
             Attempt::End(end)
@@ -854,6 +928,10 @@ impl Engine<'_, '_> {
             if pr.spec.placement == Placement::CoreCycle && live.failed.load(Ordering::Relaxed) {
                 return End::CoreFailed;
             }
+            if pr.spec.iterations.is_some() && live.finished.load(Ordering::Acquire) == live.workers
+            {
+                return End::Done;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return End::Done;
@@ -868,12 +946,18 @@ impl Engine<'_, '_> {
         }
     }
 
+    fn restart_rate(&self, cur: &mut Cursor) {
+        cur.rate_from = Instant::now();
+        cur.rate_iterations = self.iterations.load(Ordering::Relaxed);
+    }
+
     fn progress(&self, cur: &mut Cursor) {
         let now = Instant::now();
         let iterations = self.iterations.load(Ordering::Relaxed);
-        let dt = (now - cur.sent_at).as_secs_f64();
+        let dt = (now - cur.rate_from).as_secs_f64();
         let rate = (dt > 0.0).then(|| (iterations - cur.rate_iterations) as f64 / dt);
         cur.sent_at = now;
+        cur.rate_from = now;
         cur.rate_iterations = iterations;
         let failed = lock(&self.failed_cores).clone();
         let cores = cur
@@ -981,7 +1065,9 @@ impl Engine<'_, '_> {
         }
     }
 
-    /// One iteration of `kernel` (the `k`-th of the phase) and its check.
+    /// One iteration of `kernel` (the `k`-th of the phase) and its check. In a fixed-work
+    /// phase the steps after the n-th are filler (DB12): checked like the others, an error
+    /// is an error, but they are not counted in `checks`; `Progress.rate` counts them.
     #[allow(clippy::too_many_arguments)]
     fn step(
         &self,
@@ -998,6 +1084,12 @@ impl Engine<'_, '_> {
         slot.beat.fetch_add(1, Ordering::Relaxed);
         let iteration = slot.iterations.fetch_add(1, Ordering::Relaxed) + 1;
         self.iterations.fetch_add(1, Ordering::Relaxed);
+        if pr.spec.iterations == Some(iteration) {
+            let at = live.opened.get().map_or(0, |o| ms(o.elapsed()));
+            let _ = slot.work_ms.set(at);
+            live.finished.fetch_add(1, Ordering::AcqRel);
+        }
+        let counted = pr.spec.iterations.is_none_or(|n| iteration <= n);
         let id = kernels[k].0;
         let check = match &self.inject {
             Some(inject)
@@ -1021,7 +1113,9 @@ impl Engine<'_, '_> {
             }
             _ => check,
         };
-        self.checks.fetch_add(1, Ordering::Relaxed);
+        if counted {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+        }
         let compare = |variant: u32, digest: u64| {
             // No reference: a self-checking kernel, which has nothing to match.
             let reference = refs[k].as_ref()?;

@@ -1,6 +1,11 @@
 import catalog from '../../../../testdata/performance/catalog.json';
 import type {
+  BenchKernel,
+  BenchStatus,
+  BenchStep,
   CoreState,
+  CpuScoreFile,
+  CpuScoreSummary,
   ErrorRecord,
   Outcome,
   Phase,
@@ -328,6 +333,7 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
       publish({ ...status, state: 'stopping' });
     },
     status: () => structuredClone(status),
+    running: () => run !== null,
     history: () => sessions.map(summary),
     session: (id: string) => structuredClone(sessions.find((s) => s.id === id) ?? null),
     remove(id: string) {
@@ -341,4 +347,131 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
   };
   if (scenario !== null) api.start({ component: 'cpu', objective: 'overclock', preset: 'standard', custom: null, retryCore: null });
   return api;
+}
+
+// A fake CPU benchmark for `pnpm dev`: 48 steps over 20 s on the same 8-core CPU, about 1500
+// single and 12 000 multi core points. `?bench=error` ends with a calculation error in the multi
+// half, so the score is saved as not valid.
+
+const BENCH_S = 20;
+const BENCH_KERNELS: { id: BenchKernel; unit: string; single: number; multi: number }[] = [
+  { id: 'ntt', unit: 'Mop/s', single: 428.2, multi: 5138 },
+  { id: 'hash', unit: 'MB/s', single: 1406, multi: 16870 },
+  { id: 'compress', unit: 'MB/s', single: 305, multi: 3660 },
+  { id: 'sort', unit: 'Melem/s', single: 23.99, multi: 287.9 },
+  { id: 'fft', unit: 'GFLOP/s', single: 8.623, multi: 103.5 },
+  { id: 'gemm', unit: 'GFLOP/s', single: 21.39, multi: 256.6 },
+];
+const BENCH_STEPS: BenchStep[] = (['single', 'multi'] as const).flatMap((mode) =>
+  BENCH_KERNELS.flatMap((k) => [0, 1, 2, 3].map((rep) => ({ kernel: k.id, mode, rep }))),
+);
+
+export function parseBenchScenario(search: string): 'error' | null {
+  return new URLSearchParams(search).get('bench') === 'error' ? 'error' : null;
+}
+
+const scoreSummary = (f: CpuScoreFile): CpuScoreSummary => ({
+  id: f.id,
+  at: f.at,
+  single: f.scores.single,
+  multi: f.scores.multi,
+  valid: f.valid,
+  flags: f.flags,
+  provisional: f.provisional,
+});
+
+function scoreFile(id: string, atMs: number, single: number, multi: number | null, valid: boolean): CpuScoreFile {
+  const speed = (v: number, f: number) => Math.round(v * f * 100) / 100;
+  return {
+    format: 1,
+    id,
+    at: new Date(atMs).toISOString(),
+    category: 'cpu',
+    scoreVersion: 'cpu-1',
+    provisional: true,
+    isa: 'avx512',
+    scores: { single, multi },
+    kernels: BENCH_KERNELS.map((k) => ({ id: k.id, unit: k.unit, single: speed(k.single, single / 1500), multi: multi === null ? null : speed(k.multi, multi / 12000) })),
+    device: { model: 'Mock Ryzen 7 7800X3D', cores: CORES, logical: CORES * 2 },
+    flags: valid ? [] : ['compute_error'],
+    valid,
+    scaling: multi === null ? null : multi / single / (CORES * 2),
+    samples: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+  };
+}
+
+export function mockBench(scenario: 'error' | null, stressRunning: () => boolean) {
+  const listeners = new Set<(status: BenchStatus) => void>();
+  const day = 24 * 3600 * 1000;
+  let scores: CpuScoreFile[] = [
+    scoreFile('5b0c3f7e-2d41-4e8a-9c6b-7a1e0f2d3c11', Date.now() - day, 1488, 11850, true),
+    scoreFile('c2e9a8d1-6f3b-4a70-b5d4-3e8f1a0c9b22', Date.now() - 4 * day, 1512, 12040, true),
+  ];
+  let status: BenchStatus | null = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const publish = (next: BenchStatus) => {
+    status = next;
+    listeners.forEach((cb) => cb(structuredClone(next)));
+  };
+  const end = (next: Partial<BenchStatus>) => {
+    clearInterval(timer!);
+    timer = null;
+    publish({ ...status!, step: null, livePoints: null, ...next });
+  };
+
+  return {
+    start(): string {
+      if (timer !== null || stressRunning()) throw 'busy';
+      const id = crypto.randomUUID();
+      const startedAtMs = Date.now();
+      const failAt = scenario === 'error' ? 30 : Infinity;
+      const single = 1500 + Math.round(Math.random() * 40 - 20);
+      const multi = 12000 + Math.round(Math.random() * 300 - 150);
+      publish({ state: 'starting', step: null, steps: BENCH_STEPS, segments: BENCH_STEPS.map(() => 'pending'), livePoints: null, single: null, multi: null, flags: [], scoreId: null, error: null });
+      timer = setInterval(() => {
+        const elapsed = Date.now() - startedAtMs;
+        const step = Math.min(BENCH_STEPS.length, Math.floor((elapsed / (BENCH_S * 1000)) * BENCH_STEPS.length));
+        const singleDone = step >= 24;
+        if (step >= failAt) {
+          scores = [scoreFile(id, startedAtMs, single, null, false), ...scores];
+          return end({ state: 'done', segments: BENCH_STEPS.map((_, i) => (i < failAt ? 'done' : i === failAt ? 'failed' : 'pending')), single, flags: ['compute_error'], scoreId: id });
+        }
+        if (step >= BENCH_STEPS.length) {
+          scores = [scoreFile(id, startedAtMs, single, multi, true), ...scores];
+          return end({ state: 'done', segments: BENCH_STEPS.map(() => 'done'), single, multi, scoreId: id });
+        }
+        const target = BENCH_STEPS[step].mode === 'single' ? single : multi;
+        // Like oma-core, a new step has no rate until its first progress, and a warm-up
+        // (its 2 s pause and reference send rate 0) none at all at this pace.
+        const fresh = step !== status!.step || BENCH_STEPS[step].rep === 0;
+        publish({
+          ...status!,
+          state: status!.state === 'stopping' ? 'stopping' : 'running',
+          step,
+          segments: BENCH_STEPS.map((_, i) => (i < step ? 'done' : i === step ? 'running' : 'pending')),
+          livePoints: fresh ? null : target * (0.9 + 0.2 * Math.random()),
+          single: singleDone ? single : null,
+        });
+      }, 250);
+      return id;
+    },
+    stop() {
+      if (timer === null || status?.state === 'stopping') return;
+      publish({ ...status!, state: 'stopping' });
+      setTimeout(() => timer !== null && end({ state: 'stopped' }), 500);
+    },
+    status: () => structuredClone(status),
+    scores: () => scores.map(scoreSummary),
+    score: (id: string) => structuredClone(scores.find((s) => s.id === id) ?? null),
+    remove(id: string) {
+      scores = scores.filter((s) => s.id !== id);
+    },
+    subscribe(cb: (status: BenchStatus) => void) {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+  };
 }

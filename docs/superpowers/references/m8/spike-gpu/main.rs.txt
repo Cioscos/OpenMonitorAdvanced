@@ -1,0 +1,856 @@
+//! Throwaway M8b spike (spec §5.6). Subcommands:
+//!   list | compile | exact <gpu> | frame <gpu> <n> | preempt <gpu> <secs> <target_ms>
+//!   burn <gpu> <secs> [spin]
+#![allow(clippy::missing_safety_doc)]
+
+use std::ffi::c_void;
+use std::time::{Duration, Instant};
+
+use windows::core::{Interface, PCSTR, PCWSTR};
+use windows::Win32::Foundation::{FILETIME, HMODULE};
+use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use windows::Win32::Graphics::Direct3D::*;
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::System::Threading::*;
+
+const FMA: &str = include_str!("../shaders/fma.hlsl");
+const HASH: &str = include_str!("../shaders/hash.hlsl");
+const TINY: &str = include_str!("../shaders/tiny.hlsl");
+const SCENE: &str = include_str!("../shaders/scene.hlsl");
+
+const THREADS: u32 = 1 << 20; // 4096 groups of 256
+const GROUPS: u32 = THREADS / 256;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |i: usize, d: &str| args.get(i).cloned().unwrap_or_else(|| d.to_string());
+    unsafe {
+        match args.get(1).map(String::as_str) {
+            Some("list") => list(),
+            Some("compile") => compile_bench(),
+            Some("exact") => exact(arg(2, "0").parse().unwrap()),
+            Some("frame") => frame(arg(2, "0").parse().unwrap(), arg(3, "5").parse().unwrap()),
+            Some("preempt") => preempt(
+                arg(2, "0").parse().unwrap(),
+                arg(3, "10").parse().unwrap(),
+                arg(4, "40").parse().unwrap(),
+            ),
+            Some("burn") => burn(
+                arg(2, "0").parse().unwrap(),
+                arg(3, "30").parse().unwrap(),
+                arg(4, "") == "spin",
+            ),
+            _ => eprintln!("usage: list|compile|exact|frame|preempt|burn"),
+        }
+    }
+}
+
+// ---------- adapters and device ----------
+
+unsafe fn adapters() -> Vec<IDXGIAdapter1> {
+    let f: IDXGIFactory6 = CreateDXGIFactory1().unwrap();
+    let mut v = Vec::new();
+    let mut i = 0;
+    while let Ok(a) =
+        f.EnumAdapterByGpuPreference::<IDXGIAdapter1>(i, DXGI_GPU_PREFERENCE_UNSPECIFIED)
+    {
+        i += 1;
+        let d = a.GetDesc1().unwrap();
+        if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            continue;
+        }
+        v.push(a);
+    }
+    v
+}
+
+fn name(d: &DXGI_ADAPTER_DESC1) -> String {
+    let n = d.Description.iter().position(|&c| c == 0).unwrap_or(128);
+    String::from_utf16_lossy(&d.Description[..n])
+}
+
+unsafe fn list() {
+    for (i, a) in adapters().iter().enumerate() {
+        let d = a.GetDesc1().unwrap();
+        let mut mi = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        let a3: IDXGIAdapter3 = a.cast().unwrap();
+        a3.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut mi)
+            .unwrap();
+        println!(
+            "[{i}] {} vendor={:04x} luid={:08x}:{:08x} dedicated={} MB budget={} MB usage={} MB",
+            name(&d),
+            d.VendorId,
+            d.AdapterLuid.HighPart,
+            d.AdapterLuid.LowPart,
+            d.DedicatedVideoMemory >> 20,
+            mi.Budget >> 20,
+            mi.CurrentUsage >> 20
+        );
+    }
+}
+
+struct Gpu {
+    dev: ID3D11Device,
+    ctx: ID3D11DeviceContext,
+    name: String,
+}
+
+unsafe fn gpu(index: usize) -> Gpu {
+    let a = adapters().into_iter().nth(index).expect("no such gpu");
+    let name = name(&a.GetDesc1().unwrap());
+    let mut dev = None;
+    let mut ctx = None;
+    D3D11CreateDevice(
+        &a,
+        D3D_DRIVER_TYPE_UNKNOWN,
+        HMODULE::default(),
+        D3D11_CREATE_DEVICE_FLAG(0),
+        Some(&[D3D_FEATURE_LEVEL_11_0]),
+        D3D11_SDK_VERSION,
+        Some(&mut dev),
+        None,
+        Some(&mut ctx),
+    )
+    .unwrap();
+    Gpu {
+        dev: dev.unwrap(),
+        ctx: ctx.unwrap(),
+        name,
+    }
+}
+
+unsafe fn compile(src: &str, entry: &str, target: &str) -> Vec<u8> {
+    let mut code = None;
+    let mut err = None;
+    let entry = format!("{entry}\0");
+    let target = format!("{target}\0");
+    // OPTIMIZATION_LEVEL3 | IEEE_STRICTNESS
+    let r = D3DCompile(
+        src.as_ptr() as *const c_void,
+        src.len(),
+        PCSTR::null(),
+        None,
+        None,
+        PCSTR(entry.as_ptr()),
+        PCSTR(target.as_ptr()),
+        (1 << 15) | (1 << 13),
+        0,
+        &mut code,
+        Some(&mut err),
+    );
+    if let Err(e) = r {
+        let b = err.unwrap();
+        let s = std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize());
+        panic!("compile {entry}: {e:?} {}", String::from_utf8_lossy(s));
+    }
+    let b = code.unwrap();
+    std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()).to_vec()
+}
+
+unsafe fn compile_bench() {
+    for (n, src, e, t) in [
+        ("fma", FMA, "main", "cs_5_0"),
+        ("hash", HASH, "main", "cs_5_0"),
+        ("tiny", TINY, "main", "cs_5_0"),
+        ("scene.vs", SCENE, "vs", "vs_5_0"),
+        ("scene.ps", SCENE, "ps", "ps_5_0"),
+    ] {
+        let t0 = Instant::now();
+        let b = compile(src, e, t);
+        println!(
+            "{n}: {:.1} ms, {} bytes",
+            t0.elapsed().as_secs_f64() * 1e3,
+            b.len()
+        );
+    }
+}
+
+// ---------- resources ----------
+
+unsafe fn cbuffer(g: &Gpu) -> ID3D11Buffer {
+    let d = D3D11_BUFFER_DESC {
+        ByteWidth: 16,
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+        ..Default::default()
+    };
+    let mut b = None;
+    g.dev.CreateBuffer(&d, None, Some(&mut b)).unwrap();
+    b.unwrap()
+}
+
+unsafe fn set_cb(g: &Gpu, b: &ID3D11Buffer, v: [u32; 4]) {
+    g.ctx
+        .UpdateSubresource(b, 0, None, v.as_ptr() as *const c_void, 0, 0);
+}
+
+unsafe fn uav_buffer(
+    g: &Gpu,
+    bytes: u32,
+    stride: u32,
+) -> (ID3D11Buffer, ID3D11UnorderedAccessView, ID3D11Buffer) {
+    let d = D3D11_BUFFER_DESC {
+        ByteWidth: bytes,
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_UNORDERED_ACCESS.0 as u32,
+        MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
+        StructureByteStride: stride,
+        ..Default::default()
+    };
+    let mut b = None;
+    g.dev.CreateBuffer(&d, None, Some(&mut b)).unwrap();
+    let b = b.unwrap();
+    let mut u = None;
+    g.dev
+        .CreateUnorderedAccessView(&b, None, Some(&mut u))
+        .unwrap();
+    let s = D3D11_BUFFER_DESC {
+        ByteWidth: bytes,
+        Usage: D3D11_USAGE_STAGING,
+        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+        ..Default::default()
+    };
+    let mut st = None;
+    g.dev.CreateBuffer(&s, None, Some(&mut st)).unwrap();
+    (b, u.unwrap(), st.unwrap())
+}
+
+unsafe fn readback(
+    g: &Gpu,
+    src: &ID3D11Resource,
+    staging: &ID3D11Resource,
+    bytes: usize,
+) -> Vec<u8> {
+    g.ctx.CopyResource(staging, src);
+    let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+    g.ctx
+        .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut m))
+        .unwrap();
+    let v = std::slice::from_raw_parts(m.pData as *const u8, bytes).to_vec();
+    g.ctx.Unmap(staging, 0);
+    v
+}
+
+fn fnv(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+unsafe fn query(g: &Gpu, q: D3D11_QUERY) -> ID3D11Query {
+    let mut r = None;
+    g.dev
+        .CreateQuery(
+            &D3D11_QUERY_DESC {
+                Query: q,
+                MiscFlags: 0,
+            },
+            Some(&mut r),
+        )
+        .unwrap();
+    r.unwrap()
+}
+
+/// Polls an event query; S_FALSE leaves the BOOL untouched, so it stays 0 until done.
+unsafe fn event_done(ctx: &ID3D11DeviceContext, q: &ID3D11Query) -> bool {
+    let mut done: i32 = 0;
+    ctx.GetData(q, Some(&mut done as *mut i32 as *mut c_void), 4, 0)
+        .unwrap();
+    done != 0
+}
+
+unsafe fn wait_event(ctx: &ID3D11DeviceContext, q: &ID3D11Query, spin: bool) {
+    let t0 = Instant::now();
+    while !event_done(ctx, q) {
+        if t0.elapsed() > Duration::from_secs(1) {
+            panic!("submission did not return within 1 s (hung)");
+        }
+        if spin {
+            std::hint::spin_loop();
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// GPU time of one call to `work`, from timestamp queries.
+unsafe fn gpu_ms(g: &Gpu, work: impl Fn()) -> f64 {
+    let dj = query(g, D3D11_QUERY_TIMESTAMP_DISJOINT);
+    let t0 = query(g, D3D11_QUERY_TIMESTAMP);
+    let t1 = query(g, D3D11_QUERY_TIMESTAMP);
+    g.ctx.Begin(&dj);
+    g.ctx.End(&t0);
+    work();
+    g.ctx.End(&t1);
+    g.ctx.End(&dj);
+    let mut d = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+    loop {
+        g.ctx
+            .GetData(
+                &dj,
+                Some(&mut d as *mut _ as *mut c_void),
+                size_of_val(&d) as u32,
+                0,
+            )
+            .unwrap();
+        if d.Frequency != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let get = |q: &ID3D11Query| {
+        let mut v: u64 = u64::MAX;
+        while v == u64::MAX {
+            g.ctx
+                .GetData(q, Some(&mut v as *mut u64 as *mut c_void), 8, 0)
+                .unwrap();
+        }
+        v
+    };
+    let (a, b) = (get(&t0), get(&t1));
+    if d.Disjoint.as_bool() {
+        eprintln!("  (disjoint timestamp)");
+    }
+    (b - a) as f64 * 1e3 / d.Frequency as f64
+}
+
+struct Kernel {
+    cs: ID3D11ComputeShader,
+    cb: ID3D11Buffer,
+    buf: ID3D11Buffer,
+    uav: ID3D11UnorderedAccessView,
+    staging: ID3D11Buffer,
+}
+
+unsafe fn kernel(g: &Gpu, src: &str) -> Kernel {
+    let bc = compile(src, "main", "cs_5_0");
+    let mut cs = None;
+    g.dev.CreateComputeShader(&bc, None, Some(&mut cs)).unwrap();
+    let (buf, uav, staging) = uav_buffer(g, THREADS * 16, 16);
+    Kernel {
+        cs: cs.unwrap(),
+        cb: cbuffer(g),
+        buf,
+        uav,
+        staging,
+    }
+}
+
+unsafe fn bind(g: &Gpu, k: &Kernel) {
+    g.ctx.CSSetShader(&k.cs, None);
+    g.ctx.CSSetConstantBuffers(0, Some(&[Some(k.cb.clone())]));
+    g.ctx
+        .CSSetUnorderedAccessViews(0, 1, Some(&Some(k.uav.clone())), None);
+}
+
+/// Picks `iters` so that one dispatch takes about `target_ms` of GPU time.
+unsafe fn calibrate(
+    g: &Gpu,
+    k: &Kernel,
+    params: impl Fn(u32) -> [u32; 4],
+    target_ms: f64,
+) -> (u32, f64) {
+    bind(g, k);
+    let mut iters = 64u32;
+    loop {
+        set_cb(g, &k.cb, params(iters));
+        let ms = gpu_ms(g, || g.ctx.Dispatch(GROUPS, 1, 1));
+        if ms > target_ms / 4.0 || iters > 1 << 24 {
+            let it = ((iters as f64) * target_ms / ms) as u32;
+            set_cb(g, &k.cb, params(it));
+            let ms = gpu_ms(g, || g.ctx.Dispatch(GROUPS, 1, 1));
+            return (it, ms);
+        }
+        iters *= 2;
+    }
+}
+
+const M_NEG1: u32 = 0xBF80_0000; // -1.0f32
+
+fn fma_params(iters: u32) -> [u32; 4] {
+    [iters, 0x5A5A, M_NEG1, 0]
+}
+fn hash_params(iters: u32) -> [u32; 4] {
+    [iters, 0x1234_5678, 0x9E37_79B1, 0]
+}
+
+// ---------- Q2: exactness against the CPU ----------
+
+fn cpu_fma(id: u32, seed: u32, iters: u32) -> [f32; 4] {
+    let b = ((id ^ seed) & 255) as f32;
+    let mut out = [0f32; 4];
+    for (l, o) in out.iter_mut().enumerate() {
+        let mut x = [0f32; 4];
+        for (j, xj) in x.iter_mut().enumerate() {
+            let x0 = b + l as f32 + 4.0 * j as f32;
+            let c = 1000.0 + l as f32 + 4.0 * j as f32;
+            let mut v = x0;
+            for _ in 0..iters * 4 {
+                v = v.mul_add(-1.0, c);
+            }
+            *xj = v;
+        }
+        *o = x[0] + x[1] * 2.0 + x[2] * 4.0 + x[3] * 8.0;
+    }
+    out
+}
+
+fn cpu_hash(id: u32, seed: u32, k: u32, iters: u32) -> [u32; 4] {
+    let h0 = [
+        id,
+        id ^ seed,
+        id.wrapping_mul(3).wrapping_add(1),
+        id.wrapping_add(seed),
+    ];
+    let mut hs = [
+        h0,
+        h0.map(|v| v ^ 0x9E37_79B9),
+        h0.map(|v| v.wrapping_add(0x85EB_CA6B)),
+        h0.map(|v| v.wrapping_mul(0xC2B2_AE35)),
+    ];
+    for _ in 0..iters {
+        for (c, h) in hs.iter_mut().enumerate() {
+            for (l, v) in h.iter_mut().enumerate() {
+                let mut x = v.wrapping_mul(k);
+                x ^= x >> 15;
+                x = x.rotate_left(13);
+                *v = x.wrapping_add((c * 4 + l + 1) as u32);
+            }
+        }
+    }
+    let mut o = [0u32; 4];
+    for l in 0..4 {
+        o[l] = hs[0][l] ^ hs[1][l] ^ hs[2][l] ^ hs[3][l];
+    }
+    o
+}
+
+unsafe fn exact(index: usize) {
+    let g = gpu(index);
+    println!("GPU: {}", g.name);
+    for (label, src) in [("fma", FMA), ("hash", HASH)] {
+        let k = kernel(&g, src);
+        let params = if label == "fma" {
+            fma_params
+        } else {
+            hash_params
+        };
+        let (iters, ms) = calibrate(&g, &k, params, 40.0);
+        // Throughput at the calibrated size.
+        let ops = if label == "fma" {
+            THREADS as f64 * iters as f64 * 4.0 * 16.0 * 2.0
+        } else {
+            THREADS as f64 * iters as f64 * 16.0 * 7.0
+        };
+        println!(
+            "{label}: iters={iters} gpu={ms:.2} ms -> {:.2} T(FL)OPS",
+            ops / ms / 1e9
+        );
+        // Exactness with a fixed small iteration count (CPU reference cost).
+        let it = 1000;
+        set_cb(&g, &k.cb, params(it));
+        g.ctx.Dispatch(GROUPS, 1, 1);
+        let data = readback(
+            &g,
+            &k.buf.cast().unwrap(),
+            &k.staging.cast().unwrap(),
+            (THREADS * 16) as usize,
+        );
+        let p = params(it);
+        let sample: Vec<u32> = (0..THREADS).step_by(97).collect();
+        let mut bad = 0;
+        for &id in &sample {
+            let off = id as usize * 16;
+            let w = |l: usize| {
+                u32::from_le_bytes(data[off + l * 4..off + l * 4 + 4].try_into().unwrap())
+            };
+            let gpu = [w(0), w(1), w(2), w(3)];
+            let cpu = if label == "fma" {
+                cpu_fma(id, p[1], it).map(f32::to_bits)
+            } else {
+                cpu_hash(id, p[1], p[2], it)
+            };
+            if gpu != cpu {
+                if bad < 3 {
+                    println!("  mismatch id={id}: gpu={gpu:08x?} cpu={cpu:08x?}");
+                }
+                bad += 1;
+            }
+        }
+        println!(
+            "  exactness: {bad}/{} sampled threads differ; digest of all {THREADS} outputs = {:016x}",
+            sample.len(),
+            fnv(&data)
+        );
+    }
+}
+
+// ---------- Q3: frame hash determinism ----------
+
+unsafe fn frame(index: usize, n: u32) {
+    for dev_round in 0..2 {
+        let g = gpu(index);
+        println!("GPU: {} (device #{dev_round})", g.name);
+        let (w, h) = (1920u32, 1080u32);
+        let vs = compile(SCENE, "vs", "vs_5_0");
+        let ps = compile(SCENE, "ps", "ps_5_0");
+        let (mut v, mut p) = (None, None);
+        g.dev.CreateVertexShader(&vs, None, Some(&mut v)).unwrap();
+        g.dev.CreatePixelShader(&ps, None, Some(&mut p)).unwrap();
+        // Procedural texture.
+        let texels: Vec<u32> = (0..256 * 256u32)
+            .map(|i| i.wrapping_mul(2654435761) | 0xFF00_0000)
+            .collect();
+        let td = D3D11_TEXTURE2D_DESC {
+            Width: 256,
+            Height: 256,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let init = D3D11_SUBRESOURCE_DATA {
+            pSysMem: texels.as_ptr() as *const c_void,
+            SysMemPitch: 1024,
+            SysMemSlicePitch: 0,
+        };
+        let mut tex = None;
+        g.dev
+            .CreateTexture2D(&td, Some(&init), Some(&mut tex))
+            .unwrap();
+        let mut srv = None;
+        g.dev
+            .CreateShaderResourceView(&tex.unwrap(), None, Some(&mut srv))
+            .unwrap();
+        let sd = D3D11_SAMPLER_DESC {
+            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+            AddressU: D3D11_TEXTURE_ADDRESS_WRAP,
+            AddressV: D3D11_TEXTURE_ADDRESS_WRAP,
+            AddressW: D3D11_TEXTURE_ADDRESS_WRAP,
+            MaxLOD: f32::MAX,
+            ..Default::default()
+        };
+        let mut smp = None;
+        g.dev.CreateSamplerState(&sd, Some(&mut smp)).unwrap();
+        let mut rtd = td;
+        rtd.Width = w;
+        rtd.Height = h;
+        rtd.Usage = D3D11_USAGE_DEFAULT;
+        rtd.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+        let mut rt = None;
+        g.dev.CreateTexture2D(&rtd, None, Some(&mut rt)).unwrap();
+        let rt = rt.unwrap();
+        let mut rtv = None;
+        g.dev
+            .CreateRenderTargetView(&rt, None, Some(&mut rtv))
+            .unwrap();
+        let mut std_ = rtd;
+        std_.Usage = D3D11_USAGE_STAGING;
+        std_.BindFlags = 0;
+        std_.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        let mut st = None;
+        g.dev.CreateTexture2D(&std_, None, Some(&mut st)).unwrap();
+        let st = st.unwrap();
+        let mut bd = D3D11_BLEND_DESC::default();
+        bd.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+            BlendEnable: true.into(),
+            SrcBlend: D3D11_BLEND_SRC_ALPHA,
+            DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+            BlendOp: D3D11_BLEND_OP_ADD,
+            SrcBlendAlpha: D3D11_BLEND_ONE,
+            DestBlendAlpha: D3D11_BLEND_ZERO,
+            BlendOpAlpha: D3D11_BLEND_OP_ADD,
+            RenderTargetWriteMask: 0xF,
+        };
+        let mut blend = None;
+        g.dev.CreateBlendState(&bd, Some(&mut blend)).unwrap();
+        let cb = cbuffer(&g);
+        let ctx = &g.ctx;
+        ctx.VSSetShader(v.as_ref(), None);
+        ctx.PSSetShader(p.as_ref(), None);
+        ctx.VSSetConstantBuffers(0, Some(&[Some(cb.clone())]));
+        ctx.PSSetConstantBuffers(0, Some(&[Some(cb.clone())]));
+        ctx.PSSetShaderResources(0, Some(&[srv.clone()]));
+        ctx.PSSetSamplers(0, Some(&[smp.clone()]));
+        ctx.OMSetBlendState(blend.as_ref(), None, 0xFFFF_FFFF);
+        ctx.OMSetRenderTargets(Some(&[rtv.clone()]), None);
+        ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
+            Width: w as f32,
+            Height: h as f32,
+            MaxDepth: 1.0,
+            ..Default::default()
+        }]));
+        ctx.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        let rd = D3D11_RASTERIZER_DESC {
+            FillMode: D3D11_FILL_SOLID,
+            CullMode: D3D11_CULL_NONE,
+            DepthClipEnable: true.into(),
+            ..Default::default()
+        };
+        let mut rs = None;
+        g.dev.CreateRasterizerState(&rd, Some(&mut rs)).unwrap();
+        ctx.RSSetState(rs.as_ref());
+        // Self-calibrate the instance count to about 40 ms per frame.
+        set_cb(&g, &cb, [0, 0, 8, 0]);
+        let mut instances = 16u32;
+        loop {
+            ctx.ClearRenderTargetView(rtv.as_ref().unwrap(), &[0.0, 0.0, 0.0, 1.0]);
+            let ms = gpu_ms(&g, || ctx.DrawInstanced(6, instances, 0, 0));
+            if ms > 10.0 || instances >= 1 << 20 {
+                instances = ((instances as f64) * 40.0 / ms) as u32;
+                println!("  calibrated: {instances} instances (~40 ms)");
+                break;
+            }
+            instances *= 2;
+        }
+        let mut hashes = Vec::new();
+        for i in 0..n {
+            ctx.ClearRenderTargetView(rtv.as_ref().unwrap(), &[0.0, 0.0, 0.0, 1.0]);
+            let ms = gpu_ms(&g, || ctx.DrawInstanced(6, instances, 0, 0));
+            ctx.CopyResource(&st, &rt);
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(&st, 0, D3D11_MAP_READ, 0, Some(&mut m)).unwrap();
+            let mut hh: u64 = 0xcbf29ce484222325;
+            let mut lit = 0u64;
+            for y in 0..h {
+                let row = std::slice::from_raw_parts(
+                    (m.pData as *const u8).add((y * m.RowPitch) as usize),
+                    (w * 4) as usize,
+                );
+                lit += row.chunks(4).filter(|p| p[0] | p[1] | p[2] != 0).count() as u64;
+                hh ^= fnv(row);
+                hh = hh.wrapping_mul(0x100000001b3);
+            }
+            ctx.Unmap(&st, 0);
+            if i < 3 {
+                println!(
+                    "  frame {i}: {ms:.2} ms, hash {hh:016x}, lit pixels {:.1}%",
+                    lit as f64 * 100.0 / (w * h) as f64
+                );
+            }
+            hashes.push(hh);
+        }
+        hashes.sort();
+        hashes.dedup();
+        println!("  {n} frames -> {} distinct hash(es)", hashes.len());
+    }
+}
+
+// ---------- Q1: preemption latency ----------
+
+unsafe fn preempt(index: usize, secs: u64, target_ms: f64) {
+    let probe = |label: &str, dur: Duration| {
+        let g = gpu(index);
+        let bc = compile(TINY, "main", "cs_5_0");
+        let mut cs = None;
+        g.dev.CreateComputeShader(&bc, None, Some(&mut cs)).unwrap();
+        let (_b, uav, _s) = uav_buffer(&g, 16, 4);
+        g.ctx.CSSetShader(cs.as_ref(), None);
+        g.ctx
+            .CSSetUnorderedAccessViews(0, 1, Some(&Some(uav)), None);
+        let q = query(&g, D3D11_QUERY_EVENT);
+        let mut lat = Vec::new();
+        let t_end = Instant::now() + dur;
+        while Instant::now() < t_end {
+            let t0 = Instant::now();
+            g.ctx.Dispatch(1, 1, 1);
+            g.ctx.End(&q);
+            g.ctx.Flush();
+            while !event_done(&g.ctx, &q) {
+                if t0.elapsed() > Duration::from_secs(2) {
+                    println!("  probe: >2 s!");
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            lat.push(t0.elapsed().as_secs_f64() * 1e3);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pc = |p: f64| lat[((lat.len() - 1) as f64 * p) as usize];
+        println!(
+            "  probe {label}: n={} p50={:.2} p95={:.2} p99={:.2} max={:.2} ms",
+            lat.len(),
+            pc(0.5),
+            pc(0.95),
+            pc(0.99),
+            lat[lat.len() - 1]
+        );
+    };
+    println!("GPU index {index}, target dispatch {target_ms} ms");
+    probe("idle", Duration::from_secs(3));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s2 = stop.clone();
+    let load = std::thread::spawn(move || {
+        let g = gpu(index);
+        let k = kernel(&g, FMA);
+        let (iters, ms) = calibrate(&g, &k, fma_params, target_ms);
+        println!("  load: iters={iters} dispatch={ms:.1} ms");
+        set_cb(&g, &k.cb, fma_params(iters));
+        let qs = [query(&g, D3D11_QUERY_EVENT), query(&g, D3D11_QUERY_EVENT)];
+        let mut n = 0usize;
+        while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+            g.ctx.Dispatch(GROUPS, 1, 1);
+            g.ctx.End(&qs[n % 2]);
+            g.ctx.Flush();
+            if n > 0 {
+                wait_event(&g.ctx, &qs[(n - 1) % 2], false);
+            }
+            n += 1;
+        }
+        wait_event(&g.ctx, &qs[(n - 1) % 2], false);
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    probe("under load", Duration::from_secs(secs));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    load.join().unwrap();
+}
+
+// ---------- Q5/Q6/Q7: sustained load with NVML and CPU cost ----------
+
+type NvmlFn1 = unsafe extern "C" fn() -> i32;
+type NvmlHandle = unsafe extern "C" fn(u32, *mut *mut c_void) -> i32;
+type NvmlU32 = unsafe extern "C" fn(*mut c_void, *mut u32) -> i32;
+type NvmlU32Arg = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> i32;
+
+struct Nvml {
+    dev: *mut c_void,
+    replay: Option<NvmlU32>,
+    power: NvmlU32,
+    clock: NvmlU32Arg,
+    temp: NvmlU32Arg,
+    reasons: Option<unsafe extern "C" fn(*mut c_void, *mut u64) -> i32>,
+}
+
+unsafe fn nvml() -> Option<Nvml> {
+    let lib = LoadLibraryExW(
+        PCWSTR(windows::core::w!("nvml.dll").0),
+        None,
+        LOAD_LIBRARY_SEARCH_SYSTEM32,
+    )
+    .ok()?;
+    let sym = |n: &str| {
+        let c = format!("{n}\0");
+        GetProcAddress(lib, PCSTR(c.as_ptr()))
+    };
+    let init: NvmlFn1 = std::mem::transmute(sym("nvmlInit_v2")?);
+    if init() != 0 {
+        return None;
+    }
+    let handle: NvmlHandle = std::mem::transmute(sym("nvmlDeviceGetHandleByIndex_v2")?);
+    let mut dev = std::ptr::null_mut();
+    if handle(0, &mut dev) != 0 {
+        return None;
+    }
+    Some(Nvml {
+        dev,
+        replay: sym("nvmlDeviceGetPcieReplayCounter").map(|f| std::mem::transmute(f)),
+        power: std::mem::transmute(sym("nvmlDeviceGetPowerUsage")?),
+        clock: std::mem::transmute(sym("nvmlDeviceGetClockInfo")?),
+        temp: std::mem::transmute(sym("nvmlDeviceGetTemperature")?),
+        reasons: sym("nvmlDeviceGetCurrentClocksEventReasons").map(|f| std::mem::transmute(f)),
+    })
+}
+
+fn ft(f: FILETIME) -> u64 {
+    ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
+}
+
+unsafe fn cpu_100ns() -> u64 {
+    let (mut c, mut e, mut k, mut u) = Default::default();
+    GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u).unwrap();
+    ft(k) + ft(u)
+}
+
+unsafe fn burn(index: usize, secs: u64, spin: bool) {
+    let exe = std::env::current_exe().unwrap();
+    println!("exe: {}", exe.file_name().unwrap().to_string_lossy());
+    let g = gpu(index);
+    println!(
+        "GPU: {} wait={}",
+        g.name,
+        if spin { "spin" } else { "sleep(1)" }
+    );
+    let nv = if g.name.contains("NVIDIA") {
+        nvml()
+    } else {
+        None
+    };
+    let k = kernel(&g, FMA);
+    let (iters, ms) = calibrate(&g, &k, fma_params, 40.0);
+    let flop_per = THREADS as f64 * iters as f64 * 128.0;
+    println!("iters={iters} dispatch={ms:.1} ms");
+    set_cb(&g, &k.cb, fma_params(iters));
+    let qs = [query(&g, D3D11_QUERY_EVENT), query(&g, D3D11_QUERY_EVENT)];
+    let read = |f: NvmlU32| {
+        let mut v = 0;
+        f(nv.as_ref().unwrap().dev, &mut v);
+        v
+    };
+    let read2 = |f: NvmlU32Arg, a: u32| {
+        let mut v = 0;
+        f(nv.as_ref().unwrap().dev, a, &mut v);
+        v
+    };
+    let replay0 = nv.as_ref().and_then(|n| n.replay).map(read);
+    let t_start = Instant::now();
+    let (mut t_win, mut cpu_win, mut n_win) = (Instant::now(), cpu_100ns(), 0u64);
+    let mut n = 0usize;
+    while t_start.elapsed() < Duration::from_secs(secs) {
+        g.ctx.Dispatch(GROUPS, 1, 1);
+        g.ctx.End(&qs[n % 2]);
+        g.ctx.Flush();
+        if n > 0 {
+            wait_event(&g.ctx, &qs[(n - 1) % 2], spin);
+        }
+        n += 1;
+        n_win += 1;
+        if t_win.elapsed() >= Duration::from_secs(1) {
+            let wall = t_win.elapsed().as_secs_f64();
+            let cpu = (cpu_100ns() - cpu_win) as f64 / 1e7;
+            let mut line = format!(
+                "t={:>3}s {:.1} TFLOPS cpu={:.1}% of one core",
+                t_start.elapsed().as_secs(),
+                n_win as f64 * flop_per / wall / 1e12,
+                cpu / wall * 100.0
+            );
+            if let Some(nv) = &nv {
+                line += &format!(
+                    " clk={} MHz pwr={:.0} W temp={} C",
+                    read2(nv.clock, 0),
+                    read(nv.power) as f64 / 1000.0,
+                    read2(nv.temp, 0)
+                );
+                if let Some(r) = nv.replay {
+                    line += &format!(" replay={}", read(r));
+                }
+                if let Some(r) = nv.reasons {
+                    let mut v = 0u64;
+                    r(nv.dev, &mut v);
+                    line += &format!(" reasons=0x{v:x}");
+                }
+            }
+            println!("{line}");
+            (t_win, cpu_win, n_win) = (Instant::now(), cpu_100ns(), 0);
+        }
+    }
+    wait_event(&g.ctx, &qs[(n - 1) % 2], spin);
+    if let (Some(r0), Some(nv)) = (replay0, &nv) {
+        println!(
+            "replay counter: start={r0} end={}",
+            read(nv.replay.unwrap())
+        );
+    }
+}

@@ -1,6 +1,6 @@
 # M8b — esiti dello spike della GPU (spec §5.6)
 
-Data: 2026-10-07. Macchina: Ryzen 7 7800X3D, RTX 4080 (driver NVIDIA attuale) e iGPU AMD Radeon (2 CU RDNA 2), Windows 11 26300. Codice da buttare (`spikes/m8b-gpu/`, fuori da git e dal workspace): D3D11 con `windows` 0.62, shader HLSL compilati con `D3DCompile`, NVML caricato da System32. Le misure si sono fatte con l'utente al PC, che ha confermato il desktop fluido durante il carico.
+Data: 2026-10-07. Macchina: Ryzen 7 7800X3D, RTX 4080 (driver NVIDIA attuale) e iGPU AMD Radeon (2 CU RDNA 2), Windows 11 26300. Codice da buttare, cancellato dopo lo spike (shader e programma restano in `spike-gpu/`, accanto a questo file, come riferimento per la M8b): D3D11 con `windows` 0.62, shader HLSL compilati con `D3DCompile`, NVML caricato da System32. Le misure si sono fatte con l'utente al PC, che ha confermato il desktop fluido durante il carico.
 
 ## Risposte
 

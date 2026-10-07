@@ -11,8 +11,8 @@ function missing(keys: string[]): string[] {
 
 test('every_catalog_mode_isa_and_pattern_has_an_entry', () => {
   const terms = [...MODE_TERMS, ...ISA_TERMS, ...PATTERN_TERMS];
-  // testdata/performance/catalog.json: 9 kernels and 5 load modes, 3 instruction sets, 5 RAM patterns.
-  expect(terms).toHaveLength(22);
+  // testdata/performance/catalog.json: 9 kernels and 8 load modes, 3 instruction sets, 5 RAM patterns.
+  expect(terms).toHaveLength(25);
   expect(missing(terms.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
   expect(missing(TERMS.map((term) => `glossary.${term}`))).toEqual([]);
 });

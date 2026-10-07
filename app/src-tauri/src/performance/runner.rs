@@ -210,6 +210,7 @@ impl StartError {
             Self::Plan(BuildError::TooLong) => "too_long",
             Self::Plan(BuildError::UnknownCore(_)) => "unknown_core",
             Self::Plan(BuildError::RamBudget) => "ram_budget",
+            Self::Plan(BuildError::NoGpu) => "no_gpu",
         };
         format!("build:{code}")
     }
@@ -486,6 +487,7 @@ impl PerformanceRunner {
             ram_budget: ram_budget(available, perf.ram_share_percent),
             stop_override: perf.stop_on_first_error,
             seed,
+            gpu: None,
         })
         .map_err(StartError::Plan)?;
         Ok((topology, plan))
@@ -564,6 +566,8 @@ impl PerformanceRunner {
                 let total = self.deps.machine.memory().map_or(0, |(t, _)| t);
                 format!("{} GB RAM", (total + (1 << 29)) >> 30)
             }
+            // TODO(G10): the GPU name; GPU requests are not startable until the runner learns them.
+            Component::Gpu => "GPU".to_owned(),
         };
         let session = Session {
             format: FORMAT,
@@ -995,6 +999,7 @@ pub(crate) mod tests {
         assert_eq!(wire(BuildError::TooLong), "build:too_long");
         assert_eq!(wire(BuildError::UnknownCore(3)), "build:unknown_core");
         assert_eq!(wire(BuildError::RamBudget), "build:ram_budget");
+        assert_eq!(wire(BuildError::NoGpu), "build:no_gpu");
         assert_eq!(StartError::Busy.wire(), "busy");
         assert_eq!(StartError::System("no pipe".into()).wire(), "no pipe");
     }
@@ -1273,6 +1278,7 @@ pub(crate) mod tests {
             preset: Preset::Quick,
             custom: None,
             retry_core: None,
+            gpu: None,
         }
     }
 

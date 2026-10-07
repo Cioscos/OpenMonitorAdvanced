@@ -946,6 +946,7 @@ mod tests {
                 preset: Preset::Quick,
                 custom: None,
                 retry_core: None,
+                gpu: None,
             },
             plan: Plan {
                 seed: 1,

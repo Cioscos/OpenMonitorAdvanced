@@ -474,6 +474,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         preset: Preset::Standard,
         custom: None,
         retry_core: None,
+        gpu: None,
     };
     Session {
         format: oma_core::load::FORMAT,

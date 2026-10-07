@@ -1,7 +1,7 @@
 //! Profiles (DA11), "Personalizza" (DA12), RAM quota (DA10) and the plan builder.
 
 use oma_ipc::load::{
-    DataSize, Isa, KernelId, LoadMode, Phase, Placement, Plan, RamPattern, Topology,
+    DataSize, GpuTarget, Isa, KernelId, LoadMode, Phase, Placement, Plan, RamPattern, Topology,
     MAX_PLAN_SECONDS,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ const RETRY_S: u32 = 120;
 pub enum Component {
     Cpu,
     Ram,
+    Gpu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +77,9 @@ pub struct StartRequest {
     pub preset: Preset,
     pub custom: Option<Custom>,
     pub retry_core: Option<RetryCore>,
+    /// The `device_id` of the GPU to test (DG13); the app resolves the LUID at start.
+    #[serde(default)]
+    pub gpu: Option<String>,
 }
 
 pub struct BuildInput<'a> {
@@ -87,6 +91,8 @@ pub struct BuildInput<'a> {
     /// `performance.stopOnFirstError`.
     pub stop_override: Option<bool>,
     pub seed: u64,
+    /// The resolved GPU for `Component::Gpu`.
+    pub gpu: Option<GpuTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -101,6 +107,8 @@ pub enum BuildError {
     UnknownCore(u32),
     #[error("the RAM share is below 256 MiB")]
     RamBudget,
+    #[error("no suitable GPU")]
+    NoGpu,
 }
 
 /// The preset durations in seconds (DA11).
@@ -109,6 +117,8 @@ pub fn presets(component: Component, objective: Objective) -> &'static [(Preset,
     match (component, objective) {
         (Component::Cpu, Objective::Normal) => &[(Quick, 300), (Standard, 1800), (Long, 3600)],
         (Component::Ram, Objective::Normal) => &[(Quick, 900), (Standard, 1800), (Long, 3600)],
+        (Component::Gpu, Objective::Normal) => &[(Quick, 300), (Standard, 900), (Long, 1800)],
+        (Component::Gpu, Objective::Overclock) => &[(Standard, 1800), (Long, 3600), (Night, 7200)],
         (_, Objective::Overclock) => &[(Standard, 3600), (Long, 7200), (Night, 28_800)],
     }
 }
@@ -257,6 +267,39 @@ fn ram_phases(isa: Isa, objective: Objective, duration: u32) -> Vec<Phase> {
     }
 }
 
+/// GPU profiles (DG9). The phase fields the GPU engine ignores keep the CPU defaults.
+fn gpu_phases(objective: Objective, duration: u32) -> Vec<Phase> {
+    use KernelId::*;
+    let gpu = |k, mode, d| {
+        let mut p = phase(k, Isa::Sse2, DataSize::Auto, d);
+        p.mode = mode;
+        p
+    };
+    let steady = LoadMode::Steady;
+    match objective {
+        Objective::Normal => {
+            let d = scale(&[70, 30], duration);
+            let mut load = gpu(S5, steady, d[0]);
+            load.alt_kernel = Some(S1);
+            vec![load, gpu(S1, LoadMode::Ramp, d[1])]
+        }
+        Objective::Overclock => {
+            let d = scale(&[20, 10, 10, 15, 20, 10, 15], duration);
+            let mut v = vec![
+                gpu(S4, steady, d[0]),
+                gpu(S2, steady, d[1]),
+                gpu(S1, steady, d[2]),
+                gpu(S6, steady, d[3]),
+                gpu(S1, LoadMode::Ramp, d[4]),
+                gpu(S1, LoadMode::Alternate, d[5]),
+                gpu(S1, LoadMode::PauseResume, d[6]),
+            ];
+            v.iter_mut().for_each(|p| p.stop_on_error = true);
+            v
+        }
+    }
+}
+
 /// One round of the overclock profile for `cores` and per-core time `t`; the all-core
 /// phases last `a` seconds each.
 fn oc_round(avx2: Isa, avx512: bool, cores: &[u32], t: u32, a: u32) -> Vec<Phase> {
@@ -381,8 +424,12 @@ fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> V
 /// engine cycles through the cores, wrapping, until `duration_s` has elapsed.
 pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     let req = input.request;
+    let is_gpu = req.component == Component::Gpu;
+    if is_gpu && input.gpu.is_none() {
+        return Err(BuildError::NoGpu);
+    }
     let cores = core_order(input.topology);
-    if cores.is_empty() {
+    if cores.is_empty() || (is_gpu && req.retry_core.is_some()) {
         return Err(BuildError::NoCores);
     }
     let has = |i: Isa| input.isa.contains(&i);
@@ -420,6 +467,7 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
             .map(|&(_, s)| s)
             .ok_or(BuildError::NoPhases)?;
         match (req.component, req.objective) {
+            (Component::Gpu, o) => gpu_phases(o, duration),
             (Component::Ram, o) => ram_phases(best, o, duration),
             (Component::Cpu, Objective::Normal) => cpu_normal(best, duration),
             (Component::Cpu, Objective::Overclock) => {
@@ -431,6 +479,18 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     let mut stop = input.stop_override;
     // A retry keeps its own fixed phases: "Personalizza" does not apply to it.
     if let Some(c) = req.custom.as_ref().filter(|_| req.retry_core.is_none()) {
+        // Instruction set and thread choice mean nothing to the GPU (DG9).
+        let gpu_custom;
+        let c = if is_gpu {
+            gpu_custom = Custom {
+                isa: None,
+                threads: ThreadChoice::AllLogical,
+                ..c.clone()
+            };
+            &gpu_custom
+        } else {
+            c
+        };
         phases = apply_custom(phases, c, &has);
         stop = c.stop_on_first_error.or(stop);
     }
@@ -450,9 +510,9 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     }
     let plan = Plan {
         seed: input.seed,
-        ram_bytes: input.ram_budget,
+        ram_bytes: if is_gpu { 0 } else { input.ram_budget },
         phases,
-        gpu: None,
+        gpu: if is_gpu { input.gpu } else { None },
     };
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
         return Err(BuildError::TooLong);
@@ -516,6 +576,7 @@ mod tests {
             preset: p,
             custom: None,
             retry_core: None,
+            gpu: None,
         }
     }
 
@@ -537,6 +598,7 @@ mod tests {
             ram_budget,
             stop_override,
             seed: 1,
+            gpu: None,
         })
     }
 
@@ -1077,5 +1139,165 @@ mod tests {
                 (K4, vec![], 540, true)
             ]
         );
+    }
+
+    fn gpu_target() -> GpuTarget {
+        GpuTarget {
+            luid: 0x1234,
+            integrated: false,
+        }
+    }
+
+    fn gpu_req(o: Objective, p: Preset) -> StartRequest {
+        StartRequest {
+            gpu: Some("gpu-0".into()),
+            ..req(Component::Gpu, o, p)
+        }
+    }
+
+    fn build_gpu(r: &StartRequest, gpu: Option<GpuTarget>) -> Result<Plan, BuildError> {
+        build_plan(&BuildInput {
+            request: r,
+            topology: &topo(4, true, 1, false),
+            isa: &ALL,
+            ram_budget: 8 * GIB,
+            stop_override: None,
+            seed: 1,
+            gpu,
+        })
+    }
+
+    fn ok_gpu(r: &StartRequest) -> Plan {
+        let plan = build_gpu(r, Some(gpu_target())).unwrap();
+        LoadMessage::Run(RunRequest { plan: plan.clone() })
+            .validate()
+            .unwrap();
+        plan
+    }
+
+    fn shape(p: &Plan) -> Vec<(KernelId, LoadMode, u32)> {
+        p.phases
+            .iter()
+            .map(|p| (p.kernel, p.mode, p.duration_s))
+            .collect()
+    }
+
+    #[test]
+    fn gpu_presets_match_the_spec() {
+        use Preset::*;
+        assert_eq!(
+            presets(Component::Gpu, Objective::Normal),
+            &[(Quick, 300), (Standard, 900), (Long, 1800)]
+        );
+        assert_eq!(
+            presets(Component::Gpu, Objective::Overclock),
+            &[(Standard, 1800), (Long, 3600), (Night, 7200)]
+        );
+    }
+
+    #[test]
+    fn gpu_normal_plan_is_s5_s1_then_ramp() {
+        use KernelId::*;
+        let plan = ok_gpu(&gpu_req(Objective::Normal, Preset::Standard));
+        assert_eq!(
+            shape(&plan),
+            [(S5, LoadMode::Steady, 630), (S1, LoadMode::Ramp, 270)]
+        );
+        assert_eq!(plan.phases[0].alt_kernel, Some(S1));
+        assert!(plan.phases.iter().all(|p| !p.stop_on_error));
+        assert_eq!(plan.gpu, Some(gpu_target()));
+        assert_eq!(plan.ram_bytes, 0);
+        let p = &plan.phases[0];
+        assert_eq!(
+            (p.isa, p.size, p.placement),
+            (Isa::Sse2, DataSize::Auto, Placement::AllLogical)
+        );
+        assert!(p.patterns.is_empty() && p.iterations.is_none() && p.pause_before_ms == 0);
+    }
+
+    #[test]
+    fn gpu_overclock_round_has_the_seven_phases() {
+        use KernelId::*;
+        use LoadMode::*;
+        let plan = ok_gpu(&gpu_req(Objective::Overclock, Preset::Standard));
+        assert_eq!(
+            shape(&plan),
+            [
+                (S4, Steady, 360),
+                (S2, Steady, 180),
+                (S1, Steady, 180),
+                (S6, Steady, 270),
+                (S1, Ramp, 360),
+                (S1, Alternate, 180),
+                (S1, PauseResume, 270),
+            ]
+        );
+        assert!(plan.phases.iter().all(|p| p.stop_on_error));
+    }
+
+    #[test]
+    fn gpu_phase_totals_equal_the_preset() {
+        for o in [Objective::Normal, Objective::Overclock] {
+            for &(p, secs) in presets(Component::Gpu, o) {
+                let plan = ok_gpu(&gpu_req(o, p));
+                assert_eq!(plan.total_seconds(), u64::from(secs), "{o:?} {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_without_target_is_no_gpu() {
+        let r = gpu_req(Objective::Normal, Preset::Quick);
+        assert_eq!(build_gpu(&r, None), Err(BuildError::NoGpu));
+    }
+
+    #[test]
+    fn gpu_custom_ignores_isa_and_threads() {
+        let mut r = gpu_req(Objective::Normal, Preset::Standard);
+        r.custom = Some(Custom {
+            isa: Some(Isa::Avx512),
+            threads: ThreadChoice::OnePerCore,
+            ..custom()
+        });
+        let plan = ok_gpu(&r);
+        assert!(plan
+            .phases
+            .iter()
+            .all(|p| p.isa == Isa::Sse2 && p.placement == Placement::AllLogical));
+    }
+
+    #[test]
+    fn gpu_custom_minutes_rescale_the_phase() {
+        let mut r = gpu_req(Objective::Overclock, Preset::Standard);
+        r.custom = Some(Custom {
+            modes: vec![ModeEdit {
+                kernel: KernelId::S4,
+                enabled: true,
+                minutes: Some(10),
+            }],
+            ..custom()
+        });
+        let plan = ok_gpu(&r);
+        assert_eq!(plan.phases[0].duration_s, 600);
+        assert_eq!(plan.total_seconds(), 600 + 1440);
+    }
+
+    #[test]
+    fn gpu_retry_core_is_refused() {
+        let mut r = gpu_req(Objective::Normal, Preset::Quick);
+        r.retry_core = Some(RetryCore {
+            core: 0,
+            kernel: KernelId::K2,
+        });
+        assert_eq!(build_gpu(&r, Some(gpu_target())), Err(BuildError::NoCores));
+    }
+
+    #[test]
+    fn cpu_plans_have_no_gpu() {
+        let t = topo(4, true, 1, false);
+        for c in [Component::Cpu, Component::Ram] {
+            let plan = ok(&req(c, Objective::Normal, Preset::Standard), &t, &ALL);
+            assert_eq!(plan.gpu, None);
+        }
     }
 }

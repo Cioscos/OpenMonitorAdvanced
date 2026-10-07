@@ -289,6 +289,7 @@ mod tests {
                 preset: Preset::Standard,
                 custom: None,
                 retry_core: None,
+                gpu: None,
             },
             plan: Plan {
                 seed: 1,

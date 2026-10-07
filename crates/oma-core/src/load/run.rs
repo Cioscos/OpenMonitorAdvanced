@@ -1085,6 +1085,7 @@ mod tests {
                 duration_ms: 1000,
                 skipped: None,
                 work_ms: None,
+                workers: vec![],
             }),
             clock(2000),
         );
@@ -1664,6 +1665,7 @@ mod tests {
             duration_ms: 1000,
             skipped: skipped.map(str::to_owned),
             work_ms: None,
+            workers: vec![],
         })
     }
 

@@ -161,7 +161,12 @@ fn reference(name: &str) -> LoadMessage {
             errors: 1,
             duration_ms: 60_000,
             skipped: Some("isa_unavailable".to_owned()),
-            work_ms: None,
+            work_ms: Some(59_000),
+            workers: vec![WorkerDone {
+                logical: 4,
+                iterations: 50,
+                work_ms: 58_500,
+            }],
         }),
         "finished" => LoadMessage::Finished(Finished {
             reason: FinishReason::Completed,

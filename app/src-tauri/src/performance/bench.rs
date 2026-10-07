@@ -407,6 +407,7 @@ mod tests {
                     duration_ms: 1000,
                     skipped: None,
                     work_ms: Some(1000),
+                    workers: vec![],
                 })
             })
             .collect()

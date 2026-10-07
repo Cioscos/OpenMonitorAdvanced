@@ -543,6 +543,7 @@ mod tests {
             duration_ms: 1000,
             skipped: None,
             work_ms,
+            workers: vec![],
         })
     }
 

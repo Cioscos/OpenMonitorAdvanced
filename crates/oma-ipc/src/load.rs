@@ -1,4 +1,4 @@
-//! App <-> `oma-load.exe` protocol (version 2): the messages the app and the stress-test
+//! App <-> `oma-load.exe` protocol (version 3): the messages the app and the stress-test
 //! helper exchange over the load pipe, framed with the generic framing of this crate.
 //!
 //! Same conventions as the service and overlay protocols: every field is always present on
@@ -12,7 +12,7 @@ use crate::overlay::check_len;
 use crate::IpcError;
 
 /// Load protocol version, sent in [`LoadHello::protocol_version`] by both sides.
-pub const LOAD_PROTOCOL_VERSION: u32 = 2;
+pub const LOAD_PROTOCOL_VERSION: u32 = 3;
 
 /// Prefix of the load pipe name; the app appends a random UUID v4.
 pub const LOAD_PIPE_PREFIX: &str = r"\\.\pipe\OpenMonitorAdvanced-Load-";
@@ -291,6 +291,19 @@ pub struct PhaseDone {
     /// Fixed-work phases: milliseconds from the gate opening to the last thread done.
     #[serde(default)]
     pub work_ms: Option<u64>,
+    /// Fixed-work phases: each thread's counted iterations and time (DB12); empty for the
+    /// timed and the skipped phases.
+    #[serde(default)]
+    pub workers: Vec<WorkerDone>,
+}
+
+/// One thread of a fixed-work phase: the iterations it counted and the milliseconds from
+/// the gate opening to its last one (or to the cap, a stop or an error).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerDone {
+    pub logical: u32,
+    pub iterations: u64,
+    pub work_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,10 +431,12 @@ impl LoadMessage {
                 }
             }
             Self::Notice(n) => check_text("code", &n.code),
-            Self::PhaseDone(d) => d
-                .skipped
-                .as_deref()
-                .map_or(Ok(()), |s| check_text("skipped", s)),
+            Self::PhaseDone(d) => {
+                check_len("workers", d.workers.len(), MAX_LOGICAL)?;
+                d.skipped
+                    .as_deref()
+                    .map_or(Ok(()), |s| check_text("skipped", s))
+            }
             Self::Stop(_) | Self::Error(_) | Self::Finished(_) => Ok(()),
         }
     }
@@ -565,6 +580,7 @@ mod tests {
             duration_ms: 1000,
             skipped: Some("isa".into()),
             work_ms: Some(900),
+            workers: vec![],
         }));
         round_trip(LoadMessage::Finished(Finished {
             reason: FinishReason::FirstError,
@@ -765,6 +781,51 @@ mod tests {
         assert_eq!(d.work_ms, None);
     }
 
+    fn phase_done(workers: Vec<WorkerDone>) -> PhaseDone {
+        PhaseDone {
+            phase: 0,
+            checks: 2,
+            errors: 0,
+            duration_ms: 5,
+            skipped: None,
+            work_ms: Some(4),
+            workers,
+        }
+    }
+
+    #[test]
+    fn phase_done_workers_round_trip() {
+        let w = WorkerDone {
+            logical: 3,
+            iterations: 1,
+            work_ms: 4,
+        };
+        round_trip(LoadMessage::PhaseDone(phase_done(vec![w.clone(), w])));
+    }
+
+    #[test]
+    fn phase_done_without_workers_parses() {
+        let json = serde_json::json!({
+            "phase": 0, "checks": 1, "errors": 0, "duration_ms": 5, "skipped": null,
+            "work_ms": null
+        });
+        let d: PhaseDone = serde_json::from_value(json).unwrap();
+        assert!(d.workers.is_empty());
+    }
+
+    #[test]
+    fn too_many_workers_are_rejected() {
+        let w = WorkerDone {
+            logical: 0,
+            iterations: 1,
+            work_ms: 1,
+        };
+        let ok = LoadMessage::PhaseDone(phase_done(vec![w.clone(); MAX_LOGICAL]));
+        assert!(ok.validate().is_ok());
+        let bad = LoadMessage::PhaseDone(phase_done(vec![w; MAX_LOGICAL + 1]));
+        assert!(bad.validate().is_err());
+    }
+
     #[test]
     fn long_text_is_rejected() {
         let long = "x".repeat(MAX_TEXT_BYTES + 1);
@@ -791,6 +852,7 @@ mod tests {
             duration_ms: 0,
             skipped: Some(long),
             work_ms: None,
+            workers: vec![],
         });
         assert!(done.validate().is_err());
     }
@@ -829,7 +891,7 @@ mod tests {
     fn hello_compatibility() {
         assert!(load_compatible(&hello()));
         let mut h = hello();
-        h.protocol_version = 3;
+        h.protocol_version = 2;
         assert!(!load_compatible(&h));
     }
 }

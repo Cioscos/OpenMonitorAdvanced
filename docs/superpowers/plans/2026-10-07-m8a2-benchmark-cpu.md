@@ -554,3 +554,79 @@ Le fa l'utente, un blocco alla volta (memoria «user admin shell»). Ogni benchm
 - [ ] **Step 2:** dopo Q1, commit `feat(core): calibrate the cpu-1 scale on the reference machine`.
 - [ ] **Step 3:** registrare gli esiti in `docs/follow-ups.md` e nella memoria del progetto (`m8a2-followups.md`), poi commit `docs: record the M8a2 live checks`.
 - [ ] **Step 4:** `superpowers:finishing-a-development-branch`: revisione dell'intero branch e merge in `main` in locale, senza push se l'utente non lo chiede.
+
+## Aggiunta del 2026-10-07: velocità per thread (decisione dell'utente)
+
+Dopo la revisione finale l'utente ha scelto la «soluzione C» per il multi core, che sostituisce la regola di DB5 «velocità = `checks` / `work_ms` dell'ultimo thread».
+
+**DB12.** Ogni thread ha un suo tempo:
+- un thread misura il tempo delle sue n iterazioni, dall'apertura del cancello;
+- dopo, continua a lavorare senza contare (lavoro di riempimento, verificato come le altre iterazioni) finché non hanno finito tutti, oppure fino al tetto, a uno stop o a un errore;
+- la velocità della ripetizione è Σ (iterazioni del thread / tempo del thread);
+- in single c'è un solo thread, quindi la velocità resta quella di prima;
+- `Progress.rate` conta anche le iterazioni di riempimento: è il lavoro della CPU intera a carico pieno;
+- il file del punteggio non cambia (`format: 1`): le velocità per thread non si salvano, e il dettaglio per core resta alla M8d.
+
+Con l'occasione si chiude la voce aperta della revisione finale sull'ago: a fine ripetizione l'ago prende la velocità di quella ripetizione, invece di tornare a vuoto.
+
+### Task B12: protocollo `load` v3 e tempi per thread nel motore
+
+**Files:**
+- Modify:
+  - `crates/oma-ipc/src/load.rs`, `crates/oma-ipc/tests/load_fixtures.rs`, `protocol/fixtures/load/*.msgpack` (rigenerate);
+  - `crates/oma-load/src/engine/mod.rs`, `modes.rs`, `tests.rs`;
+  - i costruttori di `PhaseDone` nel resto del workspace (valore neutro: `workers: vec![]`).
+
+**Interfaces:**
+- Produces:
+  - `LOAD_PROTOCOL_VERSION = 3`;
+  - `pub struct WorkerDone { pub logical: u32, pub iterations: u64, pub work_ms: u64 }`;
+  - `PhaseDone.workers: Vec<WorkerDone>`, con `#[serde(default)]` (le sessioni salvate prima lo leggono vuoto) e sempre scritto; vuoto per le fasi a tempo e per quelle saltate;
+  - `validate`: al massimo 1024 voci in `workers`.
+  - **Motore:**
+    - in una fase a lavoro fisso, ogni worker registra le iterazioni contate e il proprio `work_ms` quando arriva a n;
+    - poi continua con passi di riempimento, verificati ma non contati in `checks`;
+    - al tetto, a uno stop o a un errore, un worker che non ha finito riporta le iterazioni fatte e il tempo fino a lì;
+    - `PhaseDone.work_ms` resta il tempo dell'ultimo thread;
+    - `Progress.rate` conta tutti i passi, anche quelli di riempimento.
+
+- [ ] **Step 1: test che falliscono:**
+  - oma-ipc: `phase_done_workers_round_trip`, `phase_done_without_workers_parses`, `too_many_workers_are_rejected`;
+  - motore (factory finta, al massimo 2 thread):
+    - `per_worker_times_with_a_slow_worker`: il worker lento ha `work_ms` maggiore, ed entrambi hanno `iterations == n`;
+    - `finished_worker_keeps_loading_until_all_done`: il worker veloce fa più di n passi in tutto, e `checks == n × worker`;
+    - `capped_worker_reports_partial_iterations`;
+    - `filler_error_is_still_an_error`;
+    - `timed_phase_has_no_workers`.
+- [ ] **Step 2:** `cargo test -p oma-ipc load` e `cargo test -p oma-load --lib engine`. Atteso: FAIL.
+- [ ] **Step 3:** implementare, poi rigenerare le fixture con `OMA_WRITE_FIXTURES=1 cargo test -p oma-ipc --test load_fixtures -- --test-threads=1`.
+- [ ] **Step 4:** `cargo test --workspace` e clippy. Atteso: PASS.
+- [ ] **Step 5: commit** `feat(load): per-thread work time with filler load (protocol v3)`.
+
+### Task B13: velocità per thread nel punteggio e ago a fine ripetizione
+
+**Files:**
+- Modify:
+  - `crates/oma-core/src/scores/score.rs`, `bench.rs`;
+  - `app/src/lib/backend/mockPerformance.ts`, se serve;
+  - `CLAUDE.md` (protocollo `load` v3, DB12) e `README.md`/`README.it.md`, se descrivono il multi core.
+
+**Interfaces:**
+- Consumes: B12.
+- Produces:
+  - `pub fn rate_from_workers(w: &Workload, workers: &[WorkerDone]) -> Option<f64>`: `per_second_to_units(w, Σ iterations × 1000 / work_ms)`, che salta le voci con `work_ms == 0` o `iterations == 0`, e dà `None` se non ne resta nessuna;
+  - `BenchController`:
+    - usa `rate_from_workers` quando `workers` non è vuoto, altrimenti `rate(checks, work_ms)`;
+    - in `phase_done` mette `live_points` alla velocità della ripetizione appena finita, riscaldamento compreso, invece di `None`;
+    - accetta un `Progress` con `rate > 0` senza il limite di 1 s.
+
+- [ ] **Step 1: test che falliscono:**
+  - `multi_rate_sums_thread_rates`: 8 thread da 1000 iterazioni in 1000 ms e 16 da 1000 in 2000 ms danno 16 000 it/s, convertiti nell'unità del carico;
+  - `single_worker_rate_equals_checks_over_work_ms`;
+  - `zero_time_workers_are_ignored`;
+  - `needle_holds_the_rep_rate_after_phase_done`;
+  - `needle_ignores_zero_rate_progress`.
+- [ ] **Step 2:** `cargo test -p oma-core scores`. Atteso: FAIL.
+- [ ] **Step 3:** implementare.
+- [ ] **Step 4:** `cargo test --workspace`, clippy, `cd app && pnpm test && pnpm check`. Atteso: PASS.
+- [ ] **Step 5: commit** `feat(core): multi-core rate as the sum of per-thread rates; needle holds the rep rate`.

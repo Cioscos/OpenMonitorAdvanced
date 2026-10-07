@@ -339,6 +339,7 @@ Il tooltip di K10 dice che lavora in modalità utente, cioè sulla memoria che W
   Ciascuno verifica il proprio risultato.
 - **Single core.** Il carico gira su un thread fissato al primo core della classe `EfficiencyClass` più alta.
 - **Multi core.** Una copia indipendente del carico per ogni processore logico. Il **fattore di scala**, cioè multi diviso per (single × thread), compare sotto i contagiri.
+  - **Velocità per thread** (decisione dell'utente del 2026-10-07): ogni thread misura il tempo delle sue iterazioni, e la velocità multi è la somma delle velocità dei thread. Un thread che ha finito continua a lavorare, senza contare, finché non hanno finito tutti: così ogni velocità è misurata a CPU piena. Sulle CPU ibride i core veloci non restano fermi ad aspettare quelli lenti.
 - **Svolgimento.** Un giro di riscaldamento da scartare, poi 3 ripetizioni per carico, di cui si tiene la mediana. Fra un carico e l'altro ci sono 2 s di pausa. In tutto circa 2 minuti.
 - **Punteggio.** Media geometrica, sui sei carichi, del rapporto fra la velocità misurata e una velocità di riferimento fissa, × 1500. Single e multi sono separati, e non c'è un punteggio combinato.
   - **Scala fissa** (decisione dell'utente del 2026-10-07, che sostituisce la «macchina base = 1000»): le velocità di riferimento si tarano una volta sul Ryzen 7 7800X3D dell'autore con le impostazioni di fabbrica, che vale quindi 1500 in single e 1500 in multi. L'interfaccia non nomina la CPU di taratura e parla di «punti su una scala fissa».

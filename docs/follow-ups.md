@@ -57,9 +57,9 @@ Items left open by the M8a1 reviews (plan `docs/superpowers/plans/2026-10-06-m8a
 
 ## Open: CPU benchmark (M8a2)
 
-Voci aperte dopo le revisioni della M8a2 (piano `docs/superpowers/plans/2026-10-07-m8a2-benchmark-cpu.md`, task B1-B10; il branch `feat/m8a2-cpu-bench` aspetta le verifiche dal vivo B11).
+Voci aperte dopo le revisioni della M8a2 (piano `docs/superpowers/plans/2026-10-07-m8a2-benchmark-cpu.md`, task B1-B13, con la velocità multi per thread della DB12). Unita in `main` il 2026-10-07 senza le verifiche dal vivo: l'utente le ha rimandate alla fine degli sviluppi della M8.
 
-- **B11, da fare con l'utente:** la taratura della scala (`crates/oma-core/src/scores/cpu-1-baseline.json`, oggi `provisional: true`) sul Ryzen 7 7800X3D con il BIOS di fabbrica, il benchmark completo, le misure di `scripts/measure-footprint.ps1` a riposo e con la pagina CPU aperta (sezione M8a2 di `docs/perf-budget.md`, la misura dei consumi a riposo con `scripts/measure-footprint.ps1` non l'ha fatta un agente).
+- **B11, rimandata alla fine della M8, da fare con l'utente:** la taratura va fatta con la build release (`cargo build --release -p oma-load` e `pnpm tauri build`, poi `target\release\oma-app.exe`), perché in sviluppo `oma-load` ha `opt-level = 2` e la scala verrebbe sbagliata. Comprende la taratura della scala (`crates/oma-core/src/scores/cpu-1-baseline.json`, oggi `provisional: true`) sul Ryzen 7 7800X3D con il BIOS di fabbrica, il benchmark completo, le misure di `scripts/measure-footprint.ps1` a riposo e con la pagina CPU aperta (sezione M8a2 di `docs/perf-budget.md`, la misura dei consumi a riposo con `scripts/measure-footprint.ps1` non l'ha fatta un agente).
 - **Test instabile:** `updates::tests` di `oma-app` fallisce a volte nell'esecuzione completa del workspace (`cargo test --workspace`) e passa da solo. `app/src-tauri/src/updates/`; da indagare.
 - **`others_share` conta il nostro WebView2 come CPU «altra»:** i processi della finestra dell'app possono far scattare il flag `busy_system` senza che l'utente abbia aperto altro. `crates/oma-win/`; da escludere i processi figli dell'app.
 - **Esportazione e condivisione (M8d):** «Esporta JSON» e «Condividi su GitHub» (formato del §8.5 della spec) e il riferimento ▲ «modello della tabella» sono rinviati alla M8d; la M8a2 ha solo «Il mio record» e «L'ultima misura».

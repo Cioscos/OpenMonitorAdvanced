@@ -291,6 +291,7 @@ export interface PerformanceSettings {
   thermalStop: boolean;
   /** 60 to 110 °C, or null for Tjmax − 5 (95 without Tjmax). */
   cpuStopC: number | null;
+  gpuStopC: number;
   stopOnFirstError: boolean | null;
   /** 10 to 90. */
   ramSharePercent: number;

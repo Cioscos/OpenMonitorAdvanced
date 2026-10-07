@@ -142,6 +142,7 @@ const SCHEMA: &[(&str, Node)] = &[
         Node::Object(&[
             ("thermalStop", leaf()),
             ("cpuStopC", nullable()),
+            ("gpuStopC", leaf()),
             ("stopOnFirstError", nullable()),
             ("ramSharePercent", leaf()),
             ("riskNoticeSeen", leaf()),
@@ -1024,6 +1025,10 @@ mod tests {
             (
                 json!({"performance": {"cpuStopC": 59}}),
                 err("performance.cpuStopC", "settings.error.range"),
+            ),
+            (
+                json!({"performance": {"gpuStopC": 111}}),
+                err("performance.gpuStopC", "settings.error.range"),
             ),
             (
                 json!({"performance": {"ramSharePercent": 91}}),

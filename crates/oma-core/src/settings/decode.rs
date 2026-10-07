@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
 use super::overlay::{is_profile_id, normalize_exe, WindowBounds, CHART_FPS, MAX_GAMES, TEXT_HZ};
-use super::performance::{CPU_STOP_C, RAM_SHARE_PERCENT};
+use super::performance::{CPU_STOP_C, GPU_STOP_C, RAM_SHARE_PERCENT};
 use super::{
     Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, PerformanceSettings,
     Settings, TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
@@ -599,6 +599,26 @@ impl Reader {
                 }
             }
             Some(_) => self.push("performance.cpuStopC".into(), DiagnosticKind::WrongType),
+        }
+        match lookup(&section, "gpuStopC", false) {
+            None => {}
+            Some(Value::Number(n)) => {
+                match n
+                    .as_u64()
+                    .and_then(|x| u32::try_from(x).ok())
+                    .filter(|x| GPU_STOP_C.contains(x))
+                {
+                    Some(x) => p.gpu_stop_c = x,
+                    None => self.push(
+                        "performance.gpuStopC".into(),
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: p.gpu_stop_c.to_string(),
+                        },
+                    ),
+                }
+            }
+            Some(_) => self.push("performance.gpuStopC".into(), DiagnosticKind::WrongType),
         }
         match lookup(&section, "ramSharePercent", false) {
             None => {}
@@ -1575,6 +1595,32 @@ mod tests {
             decode(json!({"version": 1, "performance": {"cpuStopC": 59, "ramSharePercent": "x"}}));
         assert_eq!(d.settings.performance.cpu_stop_c, None);
         assert_eq!(d.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn gpu_stop_defaults_to_90() {
+        let d = decode(json!({"version": 1}));
+        assert_eq!(d.settings.performance.gpu_stop_c, 90);
+        assert!(d.diagnostics.is_empty());
+        let d = decode(json!({"version": 1, "performance": {"gpuStopC": 75}}));
+        assert_eq!(d.settings.performance.gpu_stop_c, 75);
+    }
+
+    #[test]
+    fn gpu_stop_out_of_range_falls_back_to_90() {
+        for (bad, text) in [(json!(120), "120"), (json!(59), "59"), (json!(-5), "-5")] {
+            let d = decode(json!({"version": 1, "performance": {"gpuStopC": bad}}));
+            assert_eq!(d.settings.performance.gpu_stop_c, 90);
+            assert_eq!(
+                d.diagnostics,
+                vec![corrected("performance.gpuStopC", text, "90")]
+            );
+        }
+        for bad in [json!("x"), json!(null)] {
+            let d = decode(json!({"version": 1, "performance": {"gpuStopC": bad}}));
+            assert_eq!(d.settings.performance.gpu_stop_c, 90);
+            assert_eq!(d.diagnostics.len(), 1);
+        }
     }
 
     #[test]

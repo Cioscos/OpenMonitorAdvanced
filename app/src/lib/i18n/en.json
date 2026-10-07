@@ -42,6 +42,8 @@
   "settings.performance.cpuStop.auto": "Automatic (Tjmax − 5 °C or 95 °C)",
   "settings.performance.cpuStop.set": "Set a value",
   "settings.performance.cpuStop.useAuto": "Automatic",
+  "settings.performance.gpuStopC": "Maximum GPU temperature",
+  "settings.performance.gpuStopC.hint": "The test stops if the GPU core exceeds this temperature for two readings in a row.",
   "settings.performance.firstError": "Stop at the first error",
   "settings.performance.firstError.hint": "Overrides what the test profile says.",
   "settings.performance.firstError.profile": "As the profile",

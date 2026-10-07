@@ -15,6 +15,8 @@ pub mod reference;
 pub mod shaders;
 pub mod sizing;
 #[cfg(windows)]
+pub mod stream;
+#[cfg(windows)]
 pub mod submit;
 #[cfg(all(test, windows))]
 mod tests;

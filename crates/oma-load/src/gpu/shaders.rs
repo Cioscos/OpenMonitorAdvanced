@@ -10,6 +10,9 @@ macro_rules! cso {
 pub const S1_FMA: &[u8] = cso!("s1_fma");
 /// S2, integer hash: constant buffer `reference::hash_params`, a `uint4` per thread.
 pub const S2_HASH: &[u8] = cso!("s2_hash");
+/// S3, the memory stream: constant buffer `{ count, fill, seed, 0 }`, source piece in `u0`
+/// and destination piece in `u1`, both raw (`s3_stream.hlsl`).
+pub const S3_STREAM: &[u8] = cso!("s3_stream");
 /// Output against golden: constant buffer `{ elements, submission, 0, 0 }`, SRVs `t0`
 /// (output) and `t1` (golden), counters in `u0` (layout in `compare.hlsl`).
 pub const COMPARE: &[u8] = cso!("compare");

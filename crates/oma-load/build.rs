@@ -65,9 +65,10 @@ fn main() {
 
 /// The GPU shaders: output name (`$OUT_DIR/<name>.cso`), file in `shaders/` (without
 /// `.hlsl`), entry point and profile.
-const SHADERS: [(&str, &str, &str, &str); 8] = [
+const SHADERS: [(&str, &str, &str, &str); 9] = [
     ("s1_fma", "s1_fma", "main", "cs_5_0"),
     ("s2_hash", "s2_hash", "main", "cs_5_0"),
+    ("s3_stream", "s3_stream", "main", "cs_5_0"),
     ("compare", "compare", "main", "cs_5_0"),
     ("probe", "probe", "main", "cs_5_0"),
     ("s4_vram", "s4_vram", "main", "cs_5_0"),
@@ -77,7 +78,7 @@ const SHADERS: [(&str, &str, &str, &str); 8] = [
 ];
 
 /// The shaders of the GPU benchmark, in the order of the digest (DH8).
-const DIGEST_SHADERS: &[&str] = &["s1_fma", "s2_hash"];
+const DIGEST_SHADERS: &[&str] = &["s1_fma", "s2_hash", "s3_stream"];
 
 /// FNV-1a, 64 bits.
 fn fnv1a64(bytes: &[u8]) -> u64 {

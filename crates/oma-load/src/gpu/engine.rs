@@ -22,6 +22,7 @@ use super::device::{GpuDevice, GpuError};
 use super::graphics::{GraphicsKind, GraphicsWorkload};
 use super::pace::{self, Alternate};
 use super::sizing::{submit_target_ms, VramBudget};
+use super::stream::StreamLoad;
 use super::submit::{Submit, Submitter};
 use super::vram::VramWorkload;
 use crate::args::Inject;
@@ -104,6 +105,7 @@ pub struct Hooks<'h, D> {
 pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadResult {
     match kernel {
         KernelId::S1 | KernelId::S2 => Ok(Some(Box::new(ComputeLoad::new(kernel, dev, ctx)?))),
+        KernelId::S3 => Ok(Some(Box::new(StreamLoad::new(dev, ctx)?))),
         KernelId::S4 => Ok(Some(Box::new(VramWorkload::new(dev, ctx)?))),
         KernelId::S5 => Ok(Some(Box::new(GraphicsWorkload::new(
             GraphicsKind::Fur,

@@ -226,8 +226,8 @@
         <thead>
           <tr>
             <th scope="col">{t('performance.score.col.kernel')}</th>
-            <th scope="col" class="num">{t('performance.score.single')}</th>
-            <th scope="col" class="num">{t('performance.score.multi')}</th>
+            <th scope="col" class="num"><Term term="singleCore">{t('performance.score.single')}</Term></th>
+            <th scope="col" class="num"><Term term="multiCore">{t('performance.score.multi')}</Term></th>
           </tr>
         </thead>
         <tbody>
@@ -252,8 +252,8 @@
         <thead>
           <tr>
             <th scope="col"><span class="visually-hidden">{t('performance.score.history')}</span></th>
-            <th scope="col" class="num">{t('performance.score.single')}</th>
-            <th scope="col" class="num">{t('performance.score.multi')}</th>
+            <th scope="col" class="num"><Term term="singleCore">{t('performance.score.single')}</Term></th>
+            <th scope="col" class="num"><Term term="multiCore">{t('performance.score.multi')}</Term></th>
             <th scope="col"></th>
             <th scope="col"></th>
           </tr>

@@ -160,3 +160,14 @@ test('empty_history_says_so', async () => {
   await setup();
   expect(screen.getByText(t('performance.score.history.empty'))).toBeTruthy();
 });
+
+test('table_headers_explain_single_and_multi_core', async () => {
+  await setup([makeScoreFile({ id: 'score-a' })]);
+  for (const name of [t('performance.score.detail'), t('performance.score.history')]) {
+    const headers = within(screen.getByRole('table', { name })).getAllByRole('columnheader');
+    for (const key of ['single', 'multi'] as const) {
+      const th = headers.find((h) => h.textContent?.includes(t(`performance.score.${key}`)))!;
+      expect(th.querySelector('.term'), `${name} ${key}`).not.toBeNull();
+    }
+  }
+});

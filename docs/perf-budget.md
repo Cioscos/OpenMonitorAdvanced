@@ -320,7 +320,7 @@ Under load the window stays within budget (165.9 MB < 200 MB) and the app itself
 
 ## M8a2 — CPU benchmark (spec M8 §11)
 
-Not measured in this session (pending, as for M8a1): `scripts/measure-footprint.ps1` starts the release build of the app and opens its window, and the existing `targetelease\oma-app.exe` predates M8a2 (built 2026-10-06 after the M8a1 merge); an agent does not drive the app or the user's desktop (live-check rule). M8a2 adds no idle work: the benchmark runs through the same `oma-load.exe` and the same `active` slot as the stress test, and the gauges draw only while the page is visible and the needle is moving.
+Not measured in this session (pending, as for M8a1): `scripts/measure-footprint.ps1` starts the release build of the app and opens its window, and the existing `target\release\oma-app.exe` predates M8a2 (built 2026-10-06 after the M8a1 merge); an agent does not drive the app or the user's desktop (live-check rule). M8a2 adds no idle work: the benchmark runs through the same `oma-load.exe` and the same `active` slot as the stress test, and the gauges draw only while the page is visible and the needle is moving.
 
 Command for the user (normal shell, repository root; close any `pnpm tauri dev` instance first; build the release app first with `cd app && pnpm tauri build --bundles nsis`, or at least `cargo build -p oma-app --release` after `pnpm build`):
 

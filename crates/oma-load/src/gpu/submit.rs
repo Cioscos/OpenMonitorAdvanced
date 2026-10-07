@@ -29,6 +29,12 @@ pub trait Submit {
     /// Runs `work` alone and returns its GPU time in milliseconds; `TimingDisjoint` when
     /// the GPU clock kept changing.
     fn gpu_ms(&mut self, work: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<f64, GpuError>;
+    /// Starts a measured window of a GPU benchmark phase (DH4): the submissions until
+    /// [`Submit::window_end`] are timed together, without stopping the queue.
+    fn window_begin(&mut self) -> Result<(), GpuError>;
+    /// Ends the window, waits for the GPU and gives its milliseconds; `None` when the
+    /// timestamps were disjoint.
+    fn window_end(&mut self) -> Result<Option<f64>, GpuError>;
 }
 
 pub struct Submitter {
@@ -41,6 +47,10 @@ pub struct Submitter {
     disjoint: ID3D11Query,
     start: ID3D11Query,
     end: ID3D11Query,
+    /// The queries of the measured windows, apart from those of `gpu_ms`.
+    window_disjoint: ID3D11Query,
+    window_start: ID3D11Query,
+    window_end: ID3D11Query,
 }
 
 impl Submitter {
@@ -62,6 +72,9 @@ impl Submitter {
             disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
             start: query(D3D11_QUERY_TIMESTAMP)?,
             end: query(D3D11_QUERY_TIMESTAMP)?,
+            window_disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
+            window_start: query(D3D11_QUERY_TIMESTAMP)?,
+            window_end: query(D3D11_QUERY_TIMESTAMP)?,
             in_flight: VecDeque::with_capacity(IN_FLIGHT),
             next: 0,
             context: gpu.context().clone(),
@@ -102,6 +115,22 @@ impl Submitter {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Waits for the disjoint query and the two timestamps of a timing, then gives its
+    /// milliseconds (`None` when disjoint).
+    fn read_timing(
+        &self,
+        disjoint: &ID3D11Query,
+        start: &ID3D11Query,
+        end: &ID3D11Query,
+    ) -> Result<Option<f64>, GpuError> {
+        let since = Instant::now();
+        let pending = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+        let clock = self.wait_for(disjoint, pending, since)?;
+        let start = self.wait_for(start, u64::MAX, since)?;
+        let end = self.wait_for(end, u64::MAX, since)?;
+        Ok(timing_ms(start, end, clock))
     }
 
     fn wait_oldest(&mut self) -> Result<(), GpuError> {
@@ -153,16 +182,31 @@ impl Submit for Submitter {
                 self.context.End(&self.disjoint);
                 self.context.Flush();
             }
-            let since = Instant::now();
-            let pending = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
-            let clock = self.wait_for(&self.disjoint, pending, since)?;
-            let start = self.wait_for(&self.start, u64::MAX, since)?;
-            let end = self.wait_for(&self.end, u64::MAX, since)?;
-            if let Some(ms) = timing_ms(start, end, clock) {
+            if let Some(ms) = self.read_timing(&self.disjoint, &self.start, &self.end)? {
                 return Ok(ms);
             }
         }
         Err(GpuError::TimingDisjoint)
+    }
+
+    fn window_begin(&mut self) -> Result<(), GpuError> {
+        // SAFETY: queries of this device; the window's disjoint query brackets its two
+        // timestamps, and `gpu_ms` (with its own queries) never runs inside a window.
+        unsafe {
+            self.context.Begin(&self.window_disjoint);
+            self.context.End(&self.window_start);
+        }
+        Ok(())
+    }
+
+    fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+        // SAFETY: as in `window_begin`.
+        unsafe {
+            self.context.End(&self.window_end);
+            self.context.End(&self.window_disjoint);
+            self.context.Flush();
+        }
+        self.read_timing(&self.window_disjoint, &self.window_start, &self.window_end)
     }
 }
 
@@ -222,6 +266,12 @@ mod tests {
             let param = 64u64 << self.calls;
             self.calls += 1;
             Ok(param as f64 * self.per_unit_ms)
+        }
+        fn window_begin(&mut self) -> Result<(), GpuError> {
+            Ok(())
+        }
+        fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+            Ok(None)
         }
     }
 

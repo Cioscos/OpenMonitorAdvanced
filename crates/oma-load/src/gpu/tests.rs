@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use oma_ipc::load::{
     ComputeError, DataSize, ErrorKind, FinishReason, GpuTarget, Isa, KernelId, LoadMessage,
-    LoadMode, Notice, Phase, PhaseDone, Placement, Plan, Progress,
+    LoadMode, Notice, Phase, PhaseDone, Placement, Plan, Progress, GPU_BENCH_WARMUP_S,
 };
 use windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext;
 
@@ -62,13 +62,24 @@ struct FakeSub {
     busy: Duration,
     fail_at: Option<(u64, GpuError)>,
     submitted: u64,
+    /// GPU milliseconds of one submission in a measured window.
+    window_ms: f64,
+    /// Window `n` (from 1) takes `n` times `window_ms` per submission.
+    growing: bool,
+    /// Windows (from 1) that give `bad_value` instead of their time.
+    bad_windows: Vec<u32>,
+    bad_value: Option<f64>,
+    windows_ended: u32,
+    /// `submitted` at the last `window_begin`.
+    window_from: u64,
+    window_open: bool,
 }
 
 impl Submit for FakeSub {
     fn submit(&mut self, _: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<(), GpuError> {
         self.submitted += 1;
         if let Some((n, e)) = self.fail_at {
-            if self.submitted >= n {
+            if self.submitted == n {
                 return Err(e);
             }
         }
@@ -81,6 +92,26 @@ impl Submit for FakeSub {
     }
     fn gpu_ms(&mut self, _: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<f64, GpuError> {
         Ok(1.0)
+    }
+    fn window_begin(&mut self) -> Result<(), GpuError> {
+        assert!(!self.window_open, "window_begin with a window open");
+        self.window_open = true;
+        self.window_from = self.submitted;
+        Ok(())
+    }
+    fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+        if !std::mem::take(&mut self.window_open) {
+            return Ok(None);
+        }
+        self.windows_ended += 1;
+        let n = self.windows_ended;
+        if self.bad_windows.contains(&n) {
+            return Ok(self.bad_value);
+        }
+        let scale = if self.growing { f64::from(n) } else { 1.0 };
+        Ok(Some(
+            (self.submitted - self.window_from) as f64 * self.window_ms * scale,
+        ))
     }
 }
 
@@ -97,6 +128,7 @@ struct FakeLoad {
     since_check: u64,
     /// Given by every check.
     notices: Vec<(String, u64)>,
+    work: f64,
 }
 
 impl GpuWorkload for FakeLoad {
@@ -129,6 +161,9 @@ impl GpuWorkload for FakeLoad {
             notices: self.notices.clone(),
         })
     }
+    fn work_per_submission(&self) -> f64 {
+        self.work
+    }
 }
 
 struct Setup {
@@ -142,6 +177,11 @@ struct Setup {
     mismatch: Option<(u32, GpuMismatch)>,
     inject: Option<Inject>,
     notices: Vec<(String, u64)>,
+    work: f64,
+    window_ms: f64,
+    growing: bool,
+    bad_windows: Vec<u32>,
+    bad_value: Option<f64>,
 }
 
 impl Default for Setup {
@@ -157,6 +197,11 @@ impl Default for Setup {
             mismatch: None,
             inject: None,
             notices: vec![],
+            work: 0.0,
+            window_ms: 10.0,
+            growing: false,
+            bad_windows: vec![],
+            bad_value: None,
         }
     }
 }
@@ -177,6 +222,7 @@ fn phase(kernel: KernelId, mode: LoadMode, duration_s: u32) -> Phase {
         stop_on_error: false,
         iterations: None,
         pause_before_ms: 0,
+        windows: None,
     }
 }
 
@@ -276,6 +322,13 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
                 busy: setup.busy,
                 fail_at: setup.fail_at,
                 submitted: 0,
+                window_ms: setup.window_ms,
+                growing: setup.growing,
+                bad_windows: setup.bad_windows.clone(),
+                bad_value: setup.bad_value,
+                windows_ended: 0,
+                window_from: 0,
+                window_open: false,
             }),
         ))
     };
@@ -297,6 +350,7 @@ fn run_with_stop(plan: &Plan, setup: &Setup, stop: &AtomicBool) -> Ran {
             checks_done: 0,
             since_check: 0,
             notices: setup.notices.clone(),
+            work: setup.work,
         })))
     };
     let now = || clock.now();
@@ -819,6 +873,286 @@ fn injected_fault_hits_s1() {
     assert!(ran.events.contains(&Ev::Ctx(KernelId::S1, Some(inject))));
 }
 
+/// A benchmark phase of S1 with `windows` measured windows, capped at `duration_s`.
+fn bench(windows: u8, duration_s: u32) -> Plan {
+    let mut p = phase(KernelId::S1, LoadMode::Steady, duration_s);
+    p.windows = Some(windows);
+    plan(vec![p])
+}
+
+/// 1e6 units per submission on a test clock 10 times faster: a window is 100 ms.
+fn bench_setup() -> Setup {
+    Setup {
+        speed: 10,
+        work: 1e6,
+        ..Setup::default()
+    }
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= b.abs() * 1e-9
+}
+
+fn all_close(rates: &[f64], expected: &[f64]) -> bool {
+    rates.len() == expected.len() && rates.iter().zip(expected).all(|(&r, &e)| close(r, e))
+}
+
+#[test]
+fn bench_phase_reports_its_windows() {
+    let ran = run(&bench(5, 30), &bench_setup());
+    assert_eq!(ran.end.finished.reason, FinishReason::Completed);
+    let done = ran.done();
+    assert_eq!(done[0].skipped, None);
+    // 1e6 units in 10 ms of GPU: 1e8 a second, whatever the submissions of the window.
+    assert!(all_close(&done[0].rates, &[1e8; 5]), "{:?}", done[0].rates);
+}
+
+#[test]
+fn warmup_windows_are_not_reported() {
+    // Window n takes n times longer: the reported ones are the 5 after the warm-up.
+    let ran = run(
+        &bench(5, 30),
+        &Setup {
+            growing: true,
+            ..bench_setup()
+        },
+    );
+    let expected: Vec<f64> = (GPU_BENCH_WARMUP_S + 1..=GPU_BENCH_WARMUP_S + 5)
+        .map(|n| 1e8 / f64::from(n))
+        .collect();
+    let rates = &ran.done()[0].rates;
+    assert!(all_close(rates, &expected), "{rates:?}");
+}
+
+#[test]
+fn bench_phase_ends_after_its_windows() {
+    let ran = run(&bench(5, 30), &bench_setup());
+    let d = ran.done()[0].duration_ms;
+    // 4 + 5 windows of about 1 s each, long before the 30 s cap.
+    assert!((8_000..15_000).contains(&d), "{d} ms");
+}
+
+#[test]
+fn bench_phase_stops_at_the_cap() {
+    let ran = run(
+        &bench(5, 12),
+        &Setup {
+            bad_windows: (1..1000).collect(),
+            ..bench_setup()
+        },
+    );
+    assert_eq!(ran.end.finished.reason, FinishReason::Completed);
+    let done = ran.done();
+    assert!(done[0].duration_ms >= 12_000, "{}", done[0].duration_ms);
+    assert_eq!(done[0].skipped, None);
+    assert!(done[0].rates.is_empty(), "{:?}", done[0].rates);
+}
+
+/// Window 2 gives `bad`: it is neither warm-up nor measured, so the reported windows are
+/// the 6th to the 10th.
+fn bad_window_is_skipped(bad: Option<f64>) {
+    let ran = run(
+        &bench(5, 30),
+        &Setup {
+            growing: true,
+            bad_windows: vec![2],
+            bad_value: bad,
+            ..bench_setup()
+        },
+    );
+    let rates = &ran.done()[0].rates;
+    let expected: Vec<f64> = (6..=10).map(|n| 1e8 / f64::from(n)).collect();
+    assert!(all_close(rates, &expected), "{rates:?}");
+    let progress: Vec<f64> = ran.progress(0).iter().filter_map(|p| p.rate).collect();
+    assert!(progress.iter().all(|r| r.is_finite()), "{progress:?}");
+}
+
+#[test]
+fn disjoint_window_is_not_reported() {
+    bad_window_is_skipped(None);
+}
+
+#[test]
+fn zero_ms_window_is_not_reported() {
+    bad_window_is_skipped(Some(0.0));
+}
+
+#[test]
+fn progress_rate_is_the_last_window_in_units() {
+    let ran = run(
+        &bench(5, 30),
+        &Setup {
+            growing: true,
+            ..bench_setup()
+        },
+    );
+    let p = ran.progress(0);
+    assert_eq!(p[0].rate, None, "before the first window");
+    // One Progress after every window, warm-up included, in units a second.
+    let rates: Vec<f64> = p.iter().filter_map(|p| p.rate).collect();
+    let expected: Vec<f64> = (1..=9).map(|n| 1e8 / f64::from(n)).collect();
+    assert!(all_close(&rates, &expected), "{rates:?}");
+}
+
+#[test]
+fn skipped_bench_phase_leaves_no_window_open() {
+    // The 3rd submission runs out of memory inside a window of the first phase: it is
+    // skipped, and the second phase opens its windows (the fake panics on a second open).
+    let mut first = phase(KernelId::S1, LoadMode::Steady, 30);
+    first.windows = Some(5);
+    let mut second = first.clone();
+    second.kernel = KernelId::S2;
+    let ran = run(
+        &plan(vec![first, second]),
+        &Setup {
+            fail_at: Some((3, GpuError::OutOfMemory)),
+            ..bench_setup()
+        },
+    );
+    let done = ran.done();
+    assert_eq!(done[0].skipped.as_deref(), Some("vram"));
+    assert!(done[0].rates.is_empty());
+    assert_eq!(done[1].skipped, None);
+    assert!(all_close(&done[1].rates, &[1e8; 5]), "{:?}", done[1].rates);
+    assert_eq!(ran.end.finished.reason, FinishReason::Completed);
+}
+
+#[test]
+fn bench_phase_without_work_is_unsupported() {
+    let ran = run(
+        &bench(5, 30),
+        &Setup {
+            work: 0.0,
+            ..bench_setup()
+        },
+    );
+    let done = ran.done();
+    assert_eq!(done[0].skipped.as_deref(), Some("unsupported"));
+    assert!(done[0].rates.is_empty());
+    assert!(ran.submits().is_empty());
+    assert_eq!(ran.end.finished.reason, FinishReason::Completed);
+}
+
+#[test]
+fn timed_phases_have_no_rates() {
+    let ran = run(
+        &plan(vec![phase(KernelId::S1, LoadMode::Steady, 2)]),
+        &Setup {
+            busy: Duration::from_millis(10),
+            work: 1e6,
+            ..Setup::default()
+        },
+    );
+    assert!(ran.done()[0].rates.is_empty());
+    // Submissions a second, not units: 10 ms submissions give at most ~100.
+    let rates: Vec<f64> = ran.progress(0).iter().filter_map(|p| p.rate).collect();
+    assert!(rates.iter().any(|&r| r > 0.0), "{rates:?}");
+    assert!(rates.iter().all(|&r| r <= 110.0), "{rates:?}");
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn bench_window_times_the_gpu() {
+    use super::compute::ComputeLoad;
+    use super::device::GpuDevice;
+    use super::submit::Submitter;
+
+    // One window of short S1 submissions on the first GPU, well under 2 s of GPU: the
+    // engine's warm-up alone would take 4 s, so the window is driven by hand.
+    let adapter = oma_win::gpu::stress_adapters()
+        .into_iter()
+        .next()
+        .expect("no hardware GPU");
+    let gpu = GpuDevice::open(adapter.luid).unwrap();
+    let mut sub = Submitter::new(&gpu).unwrap();
+    let ctx = PhaseCtx {
+        seed: 7,
+        integrated: adapter.integrated,
+        inject: None,
+        budget: Default::default(),
+    };
+    let mut load = ComputeLoad::new(KernelId::S1, &gpu, &ctx).unwrap();
+    load.prepare(&mut sub, 10.0, &AtomicBool::new(false))
+        .unwrap();
+    sub.window_begin().unwrap();
+    for _ in 0..20 {
+        load.submit(&mut sub).unwrap();
+    }
+    let ms = sub.window_end().unwrap().expect("disjoint timestamps");
+    let rate = 20.0 * load.work_per_submission() * 1e3 / ms;
+    assert!(rate.is_finite() && rate > 0.0, "{rate} FLOP/s in {ms} ms");
+    assert!(load.check(&mut sub).unwrap().mismatches.is_empty());
+    eprintln!("{}: {:.2} TFLOPS in {ms:.1} ms", adapter.name, rate / 1e12);
+}
+
+#[test]
+#[ignore = "requires real Windows hardware"]
+fn gpu_bench_rates() {
+    use super::device::GpuDevice;
+    use super::engine::workload;
+    use super::sizing::{submit_target_ms, VramBudget};
+    use super::submit::Submitter;
+
+    // One window of each benchmark load on the first GPU, at most 2 s each, for the
+    // provisional references of `gpu-1-baseline.json` (DH1). The engine's phases need 5 s
+    // or more, so the window is driven by hand, after an untimed warm-up that brings the
+    // clocks up (a cold GPU measured S1 at a third of its rate).
+    const LOADS: [(KernelId, f64, &str); 6] = [
+        (KernelId::S1, 1e12, "TFLOPS"),
+        (KernelId::S2, 1e12, "TIOPS"),
+        (KernelId::S3, 1e9, "GB/s"),
+        (KernelId::Fill, 1e9, "Gpixel/s"),
+        (KernelId::Texture, 1e9, "Gtexel/s"),
+        (KernelId::Overdraw, 1e9, "Gpixel/s"),
+    ];
+    let adapter = oma_win::gpu::stress_adapters()
+        .into_iter()
+        .next()
+        .expect("no hardware GPU");
+    let gpu = GpuDevice::open(adapter.luid).unwrap();
+    let mut sub = Submitter::new(&gpu).unwrap();
+    let (budget, usage) = gpu.video_memory().unwrap();
+    let ctx = PhaseCtx {
+        seed: 7,
+        integrated: adapter.integrated,
+        inject: None,
+        budget: VramBudget {
+            budget,
+            usage,
+            available_ram: crate::sys::available_memory().unwrap_or(0),
+        },
+    };
+    println!("{}", adapter.name);
+    for (kernel, unit, name) in LOADS {
+        let t0 = Instant::now();
+        let mut load = workload(kernel, &gpu, &ctx).unwrap().expect("a load");
+        load.prepare(
+            &mut sub,
+            submit_target_ms(adapter.integrated),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        while t0.elapsed() < Duration::from_millis(1000) {
+            load.submit(&mut sub).unwrap();
+        }
+        sub.window_begin().unwrap();
+        let (w0, mut n) = (Instant::now(), 0u32);
+        while w0.elapsed() < Duration::from_millis(500) {
+            load.submit(&mut sub).unwrap();
+            n += 1;
+        }
+        let ms = sub.window_end().unwrap().expect("disjoint timestamps");
+        assert!(load.check(&mut sub).unwrap().mismatches.is_empty());
+        let rate = load.work_per_submission() * f64::from(n) * 1e3 / ms;
+        assert!(rate.is_finite() && rate > 0.0, "{kernel:?}: {rate}");
+        println!(
+            "{kernel:?}: {:.2} {name} ({n} submissions in {ms:.1} ms, {:?} in all)",
+            rate / unit,
+            t0.elapsed()
+        );
+        assert!(t0.elapsed() < Duration::from_secs(2), "{kernel:?}");
+    }
+}
 #[test]
 #[ignore = "requires real Windows hardware"]
 fn gpu_plan_runs_end_to_end() {

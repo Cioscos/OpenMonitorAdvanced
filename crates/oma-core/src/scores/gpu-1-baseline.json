@@ -1,0 +1,14 @@
+{
+  "version": "gpu-1",
+  "provisional": true,
+  "compute": {
+    "fma": 47.18,
+    "int_hash": 17.58,
+    "bandwidth": 592.67
+  },
+  "graphics": {
+    "fill": 266.84,
+    "texture": 506.83,
+    "overdraw": 137.7
+  }
+}

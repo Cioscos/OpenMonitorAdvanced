@@ -1,4 +1,4 @@
-// Pure geometry and maths of the CPU benchmark gauges (M8a2). The dial sweeps 270 degrees
+// Pure geometry and maths of the CPU (M8a2) and GPU (M8b2) benchmark gauges. The dial sweeps 270 degrees
 // clockwise from 135 (bottom left) to 405 (bottom right), in SVG angles (0 = +x, y down).
 
 export const START_ANGLE = 135;
@@ -35,7 +35,25 @@ export function ticks(max: number): Tick[] {
  * values are ignored, as `f64::max` ignores NaN there.
  */
 export function fullScale(values: number[]): number {
-  const target = 1.1 * Math.max(SCALE_POINTS, ...values.filter(Number.isFinite));
+  return series(1.1 * Math.max(SCALE_POINTS, ...values.filter(Number.isFinite)));
+}
+
+/** The GPU score estimate without a record or a reference (M8b2 DH7). */
+const GPU_ESTIMATE = { dedicated: 1500, integrated: 20 };
+
+/**
+ * Full scale of a GPU dial (DH7): the series at or above 1.1 x max(values); without a finite
+ * positive value (no record, no reference, no needle) the base is the estimate, so a 5-point
+ * integrated GPU does not sit at the bottom of a 2000-point dial.
+ */
+export function gpuFullScale(values: number[], integrated: boolean): number {
+  const present = values.filter((v) => Number.isFinite(v) && v > 0);
+  const base = present.length ? Math.max(...present) : integrated ? GPU_ESTIMATE.integrated : GPU_ESTIMATE.dedicated;
+  return series(1.1 * base);
+}
+
+/** The first number of the 1-2-2.5-5 x 10^n series at or above `target` (from 1). */
+function series(target: number): number {
   for (let decade = 1; ; decade *= 10) {
     for (const step of [1, 2, 2.5, 5]) {
       if (step * decade >= target) return step * decade;

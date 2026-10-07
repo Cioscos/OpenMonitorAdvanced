@@ -1,12 +1,15 @@
 import catalog from '../../../../testdata/performance/catalog.json';
 import type {
   BenchKernel,
+  BenchSegment,
   BenchStatus,
   BenchStep,
   CoreState,
-  CpuScoreFile,
-  CpuScoreSummary,
+  ScoreFile,
+  ScoreSummary,
   ErrorRecord,
+  GpuBenchKernel,
+  GpuChoice,
   Outcome,
   Phase,
   Plan,
@@ -409,7 +412,9 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
 
 // A fake CPU benchmark for `pnpm dev`: 48 steps over 20 s on the same 8-core CPU, about 1500
 // single and 12 000 multi core points. `?bench=error` ends with a calculation error in the multi
-// half, so the score is saved as not valid.
+// half, so the score is saved as not valid. The GPU benchmark (M8b2) runs its six loads over
+// 12 s, about 1500 points a group on the dedicated GPU and 6 on the integrated one; with
+// `?bench=error` the GPU resets in the Graphics half (`device_lost`), so its score is not valid.
 
 const BENCH_S = 20;
 const BENCH_KERNELS: { id: BenchKernel; unit: string; single: number; multi: number }[] = [
@@ -428,17 +433,33 @@ export function parseBenchScenario(search: string): 'error' | null {
   return new URLSearchParams(search).get('bench') === 'error' ? 'error' : null;
 }
 
-const scoreSummary = (f: CpuScoreFile): CpuScoreSummary => ({
+const GPU_BENCH_S = 12;
+const GPU_LOADS: { id: GpuBenchKernel; unit: string; value: number; mode: 'compute' | 'graphics' }[] = [
+  { id: 'fma', unit: 'TFLOPS', value: 47.18, mode: 'compute' },
+  { id: 'int_hash', unit: 'TIOPS', value: 17.58, mode: 'compute' },
+  { id: 'bandwidth', unit: 'GB/s', value: 592.67, mode: 'compute' },
+  { id: 'fill', unit: 'Gpixel/s', value: 266.84, mode: 'graphics' },
+  { id: 'texture', unit: 'Gtexel/s', value: 506.83, mode: 'graphics' },
+  { id: 'overdraw', unit: 'Gpixel/s', value: 137.7, mode: 'graphics' },
+];
+const GPU_STEPS: BenchStep[] = GPU_LOADS.map((l) => ({ kernel: l.id, mode: l.mode, rep: 1 }));
+const NO_GPU = { deviceId: null, vendorId: null, dedicatedBytes: null, integrated: null };
+
+const scoreSummary = (f: ScoreFile): ScoreSummary => ({
   id: f.id,
   at: f.at,
+  category: f.category,
   single: f.scores.single,
   multi: f.scores.multi,
+  compute: f.scores.compute,
+  graphics: f.scores.graphics,
+  deviceId: f.device.deviceId,
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
 });
 
-function scoreFile(id: string, atMs: number, single: number, multi: number | null, valid: boolean): CpuScoreFile {
+function scoreFile(id: string, atMs: number, single: number, multi: number | null, valid: boolean): ScoreFile {
   const speed = (v: number, f: number) => Math.round(v * f * 100) / 100;
   return {
     format: 1,
@@ -448,9 +469,17 @@ function scoreFile(id: string, atMs: number, single: number, multi: number | nul
     scoreVersion: 'cpu-1',
     provisional: true,
     isa: 'avx512',
-    scores: { single, multi },
-    kernels: BENCH_KERNELS.map((k) => ({ id: k.id, unit: k.unit, single: speed(k.single, single / 1500), multi: multi === null ? null : speed(k.multi, multi / 12000) })),
-    device: { model: 'Mock Ryzen 7 7800X3D', cores: CORES, logical: CORES * 2 },
+    shaderDigest: null,
+    scores: { single, multi, compute: null, graphics: null },
+    kernels: BENCH_KERNELS.map((k) => ({
+      id: k.id,
+      unit: k.unit,
+      single: speed(k.single, single / 1500),
+      multi: multi === null ? null : speed(k.multi, multi / 12000),
+      value: null,
+      spread: null,
+    })),
+    device: { model: 'Mock Ryzen 7 7800X3D', cores: CORES, logical: CORES * 2, ...NO_GPU },
     flags: valid ? [] : ['compute_error'],
     valid,
     scaling: multi === null ? null : multi / single / (CORES * 2),
@@ -460,12 +489,52 @@ function scoreFile(id: string, atMs: number, single: number, multi: number | nul
   };
 }
 
-export function mockBench(scenario: 'error' | null, stressRunning: () => boolean) {
+/** A GPU score: `compute` and `graphics` points, the loads up to `done` (all six by default). */
+function gpuScoreFile(id: string, atMs: number, gpu: GpuChoice, compute: number | null, graphics: number | null, flags: string[], done = GPU_LOADS.length): ScoreFile {
+  const factor = (gpu.integrated ? 6 : 1500) / 1500;
+  return {
+    format: 1,
+    id,
+    at: new Date(atMs).toISOString(),
+    category: 'gpu',
+    scoreVersion: 'gpu-1',
+    provisional: true,
+    isa: null,
+    shaderDigest: '9e3779b97f4a7c15',
+    scores: { single: null, multi: null, compute, graphics },
+    kernels: GPU_LOADS.slice(0, done).map((l, i) => ({
+      id: l.id,
+      unit: l.unit,
+      single: null,
+      multi: null,
+      value: Math.round(l.value * factor * 100) / 100,
+      spread: 0.004 + 0.003 * i,
+    })),
+    device: {
+      model: gpu.name,
+      cores: 0,
+      logical: 0,
+      deviceId: gpu.deviceId,
+      vendorId: gpu.integrated ? 0x1002 : 0x10de,
+      dedicatedBytes: gpu.dedicatedBytes,
+      integrated: gpu.integrated,
+    },
+    flags,
+    valid: !flags.includes('device_lost'),
+    scaling: null,
+    samples: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+  };
+}
+
+export function mockBench(scenario: 'error' | null, stressRunning: () => boolean, gpus: GpuChoice[] = []) {
   const listeners = new Set<(status: BenchStatus) => void>();
   const day = 24 * 3600 * 1000;
-  let scores: CpuScoreFile[] = [
+  let scores: ScoreFile[] = [
     scoreFile('5b0c3f7e-2d41-4e8a-9c6b-7a1e0f2d3c11', Date.now() - day, 1488, 11850, true),
     scoreFile('c2e9a8d1-6f3b-4a70-b5d4-3e8f1a0c9b22', Date.now() - 4 * day, 1512, 12040, true),
+    ...(gpus[0] ? [gpuScoreFile('7d4e1f2a-3b5c-4d6e-8f70-1a2b3c4d5e66', Date.now() - 2 * day, gpus[0], 1496, 1512, ['busy_gpu'])] : []),
   ];
   let status: BenchStatus | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -488,7 +557,22 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
       const failAt = scenario === 'error' ? 30 : Infinity;
       const single = 1500 + Math.round(Math.random() * 40 - 20);
       const multi = 12000 + Math.round(Math.random() * 300 - 150);
-      publish({ state: 'starting', step: null, steps: BENCH_STEPS, segments: BENCH_STEPS.map(() => 'pending'), livePoints: null, single: null, multi: null, flags: [], scoreId: null, error: null });
+      publish({
+        category: 'cpu',
+        deviceId: null,
+        state: 'starting',
+        step: null,
+        steps: BENCH_STEPS,
+        segments: BENCH_STEPS.map(() => 'pending'),
+        livePoints: null,
+        single: null,
+        multi: null,
+        compute: null,
+        graphics: null,
+        flags: [],
+        scoreId: null,
+        error: null,
+      });
       timer = setInterval(() => {
         const elapsed = Date.now() - startedAtMs;
         const step = Math.min(BENCH_STEPS.length, Math.floor((elapsed / (BENCH_S * 1000)) * BENCH_STEPS.length));
@@ -512,6 +596,56 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
           segments: BENCH_STEPS.map((_, i) => (i < step ? 'done' : i === step ? 'running' : 'pending')),
           livePoints: fresh ? null : target * (0.9 + 0.2 * Math.random()),
           single: singleDone ? single : null,
+        });
+      }, 250);
+      return id;
+    },
+    startGpu(deviceId: string): string {
+      if (timer !== null || stressRunning()) throw 'busy';
+      const gpu = gpus.find((g) => g.deviceId === deviceId);
+      if (!gpu) throw 'build:no_gpu';
+      const id = crypto.randomUUID();
+      const startedAtMs = Date.now();
+      const failAt = scenario === 'error' ? 4 : Infinity;
+      const base = gpu.integrated ? 6 : 1500;
+      const compute = Math.round(base * (0.98 + 0.04 * Math.random()));
+      const graphics = Math.round(base * (0.98 + 0.04 * Math.random()));
+      const segments = (step: number, failed = false) =>
+        GPU_STEPS.map((_, i): BenchSegment => (i < step ? 'done' : i === step ? (failed ? 'failed' : 'running') : 'pending'));
+      publish({
+        category: 'gpu',
+        deviceId,
+        state: 'starting',
+        step: null,
+        steps: GPU_STEPS,
+        segments: segments(-1),
+        livePoints: null,
+        single: null,
+        multi: null,
+        compute: null,
+        graphics: null,
+        flags: [],
+        scoreId: null,
+        error: null,
+      });
+      timer = setInterval(() => {
+        const step = Math.min(GPU_STEPS.length, Math.floor((Date.now() - startedAtMs) / ((GPU_BENCH_S * 1000) / GPU_STEPS.length)));
+        const computeDone = step >= 3 ? compute : null;
+        if (step >= failAt) {
+          scores = [gpuScoreFile(id, startedAtMs, gpu, computeDone, null, ['device_lost'], failAt), ...scores];
+          return end({ state: 'done', segments: segments(failAt, true), compute: computeDone, flags: ['device_lost'], scoreId: id });
+        }
+        if (step >= GPU_STEPS.length) {
+          scores = [gpuScoreFile(id, startedAtMs, gpu, compute, graphics, []), ...scores];
+          return end({ state: 'done', segments: segments(GPU_STEPS.length), compute, graphics, scoreId: id });
+        }
+        publish({
+          ...status!,
+          state: status!.state === 'stopping' ? 'stopping' : 'running',
+          step,
+          segments: segments(step),
+          livePoints: (GPU_STEPS[step].mode === 'compute' ? compute : graphics) * (0.95 + 0.1 * Math.random()),
+          compute: computeDone,
         });
       }, 250);
       return id;

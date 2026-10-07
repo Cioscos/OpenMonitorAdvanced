@@ -7,6 +7,7 @@ use oma_ipc::load::WorkerDone;
 use serde::{Deserialize, Serialize};
 
 use super::file::ScoreFile;
+use super::plan::BenchMode;
 use super::workloads::{BenchKernel, Workload, WORKLOADS};
 
 pub const SCALE_POINTS: f64 = 1500.0;
@@ -23,7 +24,23 @@ pub struct Baseline {
 
 #[derive(Debug, thiserror::Error)]
 #[error("invalid baseline: {0}")]
-pub struct BaselineError(String);
+pub struct BaselineError(pub(super) String);
+
+impl Baseline {
+    /// The reference table of a CPU mode; `None` for the GPU groups.
+    pub(super) fn table(&self, mode: BenchMode) -> Option<&BTreeMap<BenchKernel, f64>> {
+        match mode {
+            BenchMode::Single => Some(&self.single),
+            BenchMode::Multi => Some(&self.multi),
+            BenchMode::Compute | BenchMode::Graphics => None,
+        }
+    }
+}
+
+/// 4 significant digits, as the calibrated baselines store them.
+pub(super) fn round4(x: f64) -> f64 {
+    format!("{x:.3e}").parse().unwrap_or(x)
+}
 
 const BASELINE_JSON: &str = include_str!("cpu-1-baseline.json");
 
@@ -68,7 +85,6 @@ pub fn calibration_from(score: &ScoreFile) -> Result<Baseline, BaselineError> {
             score.score_version
         )));
     }
-    let round4 = |x: f64| format!("{x:.3e}").parse().unwrap_or(x);
     let medians = |f: fn(&super::file::KernelRate) -> Option<f64>| {
         score
             .kernels
@@ -132,26 +148,36 @@ pub fn median3(v: &[f64]) -> Option<f64> {
     })
 }
 
-/// Geometric mean of `f(kernel)` over the six workloads; `None` if one is not positive.
-fn geomean(f: impl Fn(BenchKernel) -> Option<f64>) -> Option<f64> {
-    let mut sum = 0.0;
-    for w in &WORKLOADS {
-        let x = f(w.id)?;
+/// Geometric mean of the values; `None` if there is none or one is missing or not
+/// positive.
+pub(super) fn geomean(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
+    let (mut sum, mut n) = (0.0, 0u32);
+    for x in values {
+        let x = x?;
         if !x.is_finite() || x <= 0.0 {
             return None;
         }
         sum += x.ln();
+        n += 1;
     }
-    Some((sum / WORKLOADS.len() as f64).exp())
+    (n > 0).then(|| (sum / f64::from(n)).exp())
+}
+
+/// `round(1500 x g)`, `None` when it does not fit.
+pub(super) fn scale_points(g: f64) -> Option<u32> {
+    let p = (SCALE_POINTS * g).round();
+    (p.is_finite() && p <= f64::from(u32::MAX)).then_some(p as u32)
 }
 
 pub fn points(
     rates: &BTreeMap<BenchKernel, f64>,
     reference: &BTreeMap<BenchKernel, f64>,
 ) -> Option<u32> {
-    let g = geomean(|k| Some(*rates.get(&k)? / *reference.get(&k)?))?;
-    let p = (SCALE_POINTS * g).round();
-    (p.is_finite() && p <= f64::from(u32::MAX)).then_some(p as u32)
+    scale_points(geomean(
+        WORKLOADS
+            .iter()
+            .map(|w| Some(*rates.get(&w.id)? / *reference.get(&w.id)?)),
+    )?)
 }
 
 pub fn scaling(
@@ -162,7 +188,11 @@ pub fn scaling(
     if logical == 0 {
         return None;
     }
-    geomean(|k| Some(*multi.get(&k)? / (*single.get(&k)? * f64::from(logical))))
+    geomean(
+        WORKLOADS
+            .iter()
+            .map(|w| Some(*multi.get(&w.id)? / (*single.get(&w.id)? * f64::from(logical)))),
+    )
 }
 
 #[cfg(test)]
@@ -290,10 +320,13 @@ mod tests {
             category: "cpu".into(),
             score_version: SCORE_VERSION.into(),
             provisional: true,
-            isa: oma_ipc::load::Isa::Avx512,
+            isa: Some(oma_ipc::load::Isa::Avx512),
+            shader_digest: None,
             scores: Scores {
                 single: Some(1500),
                 multi: Some(1500),
+                compute: None,
+                graphics: None,
             },
             kernels: WORKLOADS
                 .iter()
@@ -302,12 +335,15 @@ mod tests {
                     unit: w.unit.into(),
                     single: Some(b.single[&w.id] * 1.000_04),
                     multi: Some(b.multi[&w.id]),
+                    value: None,
+                    spread: None,
                 })
                 .collect(),
             device: Device {
                 model: "AMD Ryzen 7 7800X3D".into(),
                 cores: 8,
                 logical: 16,
+                ..Device::default()
             },
             flags: vec![],
             valid: true,

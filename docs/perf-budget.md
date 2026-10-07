@@ -336,6 +336,10 @@ Nothing changes at rest. `oma-load.exe` exists only while a test runs, and the `
 
 G14 (2026-10-07), development build, during the iGPU Quick test with the window open on the run page, read from the Windows counters over 20 s: app with its WebView2 processes 270 MB private and 1.4 % of the machine; `oma-load.exe` 37 MB private, 1 % of one core, 46 MB dedicated and 5 MB shared GPU memory. During the RTX 4080 overclock run S4 allocated 14.80 GB of VRAM (DG6). The window figure is not comparable with the budget: the development build loads unbundled modules and the WebView2 tools (M8a1, release, under a CPU test: 165.9 MB). The release measurement, at rest and during a GPU test with the window open, is owed with B11 of M8a2 at the end of M8.
 
+## M8b2 — GPU benchmark (spec M8 §11)
+
+Not measured in this session (pending, as for M8a2 and M8b1): the footprint with the release build is taken together with check B11, once the M8 development is finished. Nothing changes at rest: the benchmark uses the same `oma-load.exe` as the stress test, which exists only while a measurement runs, and the app does no periodic work without one. During a measurement the load adds the S3 stream set (at most 1 GiB, or what fits in the VRAM budget) and the render targets of the graphics loads; the extra polling for "another process on the GPU" reuses the GPU process table already read by the app, with no new timer. To measure with the release build (`cargo build --release -p oma-load`, then `pnpm tauri build`, then `scripts/measure-footprint.ps1`): at rest, and during a GPU benchmark on the RTX 4080 and on the iGPU. Expected: core < 1% CPU, tray < 30 MB, window < 200 MB (WebView2 included).
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

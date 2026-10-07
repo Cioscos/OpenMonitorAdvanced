@@ -9,7 +9,7 @@
 //! The rest of the app sees a [`RunStatus`] copy, refreshed by the thread.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -30,7 +30,7 @@ use oma_core::scores::BenchStatus;
 use oma_ipc::load::{
     GpuTarget, Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology,
 };
-use oma_win::gpu::StressAdapter;
+use oma_win::gpu::{GpuProcess, GpuProcessTable, StressAdapter};
 
 use super::host::{HostEvent, StartFailure};
 use super::store::{to_rfc3339, PerformanceStore};
@@ -119,10 +119,40 @@ pub trait Machine: Send + Sync {
     fn gpus(&self) -> Vec<StressAdapter>;
     /// The GPU's PCIe replay counter; `None` when it cannot be read (DG14).
     fn pcie_replay(&self, device_id: &str) -> Option<u32>;
+    /// The largest share (0-1) of one engine of GPU `device_id` used by another
+    /// program (DH10); `None` when the process table is empty or stale.
+    fn gpu_busy_share(&self, device_id: &str) -> Option<f64>;
 }
 
-/// This PC.
-pub struct WinMachine;
+/// The other programs' share of a GPU from its process table rows (DH10): the
+/// largest `load_percent / 100`, leaving out PIDs 0 and 4, `dwm.exe` (the
+/// compositor, working for our window too) and `ours` (the app's process tree).
+pub(super) fn other_gpu_share(rows: &[GpuProcess], ours: &HashSet<u32>) -> Option<f64> {
+    if rows.is_empty() {
+        return None;
+    }
+    let share = rows
+        .iter()
+        .filter(|p| {
+            !matches!(p.pid, 0 | 4)
+                && !ours.contains(&p.pid)
+                && !p.name.eq_ignore_ascii_case("dwm.exe")
+        })
+        .filter_map(|p| p.load_percent)
+        .fold(0.0, f64::max);
+    Some(share / 100.0)
+}
+
+/// This PC; the GPU process table is the GPU provider's (DH10).
+pub struct WinMachine {
+    processes: GpuProcessTable,
+}
+
+impl WinMachine {
+    pub fn new(processes: GpuProcessTable) -> Self {
+        Self { processes }
+    }
+}
 
 impl Machine for WinMachine {
     fn topology(&self) -> io::Result<Topology> {
@@ -173,6 +203,16 @@ impl Machine for WinMachine {
 
     fn pcie_replay(&self, device_id: &str) -> Option<u32> {
         oma_win::gpu::pcie_replay_count(device_id)
+    }
+
+    /// Read only during the GPU benchmark, every 5 s: one Toolhelp snapshot each time.
+    fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
+        let me = std::process::id();
+        let ours = oma_win::process_tree::descendants(me).unwrap_or_else(|err| {
+            tracing::warn!(%err, "process tree unreadable: only the app itself is left out");
+            HashSet::from([me])
+        });
+        other_gpu_share(&self.processes.processes(device_id), &ours)
     }
 }
 
@@ -1159,6 +1199,10 @@ pub(crate) mod tests {
         pub(crate) pcie: Arc<Mutex<Vec<u32>>>,
         /// The device ids the PCIe replay counter was read for.
         pub(crate) pcie_polls: Arc<Mutex<Vec<String>>>,
+        /// What each read of the other processes' GPU share gives.
+        pub(crate) gpu_busy: Option<f64>,
+        /// The device ids the GPU share was read for.
+        pub(crate) gpu_busy_polls: Arc<Mutex<Vec<String>>>,
     }
 
     impl Machine for FakeMachine {
@@ -1204,6 +1248,13 @@ pub(crate) mod tests {
                 1 => Some(values[0]),
                 _ => Some(values.remove(0)),
             }
+        }
+        fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
+            self.gpu_busy_polls
+                .lock()
+                .unwrap()
+                .push(device_id.to_owned());
+            self.gpu_busy
         }
     }
 
@@ -1393,6 +1444,7 @@ pub(crate) mod tests {
                     protocol_version: oma_ipc::load::LOAD_PROTOCOL_VERSION,
                     version: "9.9.9".into(),
                     isa: vec![Isa::Avx2, Isa::Sse2],
+                    shader_digest: None,
                 },
                 topology: topology(),
             }) as Box<dyn LoadLink>)
@@ -1762,6 +1814,9 @@ pub(crate) mod tests {
             fn pcie_replay(&self, device_id: &str) -> Option<u32> {
                 self.0.pcie_replay(device_id)
             }
+            fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
+                self.0.gpu_busy_share(device_id)
+            }
         }
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         let dir = TempDir::new("baseline");
@@ -1833,6 +1888,7 @@ pub(crate) mod tests {
                     protocol_version: oma_ipc::load::LOAD_PROTOCOL_VERSION,
                     version: "9.9.9".into(),
                     isa: vec![],
+                    shader_digest: None,
                 },
                 topology(),
             )) as Box<dyn LoadLink>)
@@ -1909,9 +1965,9 @@ pub(crate) mod tests {
         );
     }
 
-    const GPU_ID: &str = "gpu/pci-10de-2704";
+    pub(crate) const GPU_ID: &str = "gpu/pci-10de-2704";
 
-    fn gpu_machine() -> FakeMachine {
+    pub(crate) fn gpu_machine() -> FakeMachine {
         FakeMachine {
             gpus: vec![
                 oma_win::gpu::StressAdapter {
@@ -1943,7 +1999,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn gpu_schema() -> Schema {
+    pub(crate) fn gpu_schema() -> Schema {
         use oma_core::model::{Label, Sensor, SensorKind, Source, Unit};
         let sensor = |device: &str, kind, name: &str, unit| {
             Sensor::new(device, kind, name, unit, Label::new(name), Source::Nvml)
@@ -1962,7 +2018,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn gpu_tick() -> TickOutput {
+    pub(crate) fn gpu_tick() -> TickOutput {
         use oma_core::provider::Quality;
         TickOutput {
             snapshot: oma_core::model::Snapshot {
@@ -2159,5 +2215,31 @@ pub(crate) mod tests {
         assert_eq!(s.component, Component::Gpu);
         assert_eq!(s.device, "Test RTX");
         assert_eq!(s.gpu_device_id.as_deref(), Some(GPU_ID));
+    }
+
+    #[test]
+    fn busy_share_excludes_our_tree_dwm_and_system() {
+        let row = |pid: u32, name: &str, load: Option<f64>| oma_win::gpu::GpuProcess {
+            pid,
+            name: name.into(),
+            load_percent: load,
+            engine: None,
+            dedicated_bytes: None,
+            shared_bytes: None,
+        };
+        let ours = std::collections::HashSet::from([100, 101]);
+        // An empty (or stale) table: nothing to say.
+        assert_eq!(other_gpu_share(&[], &ours), None);
+        let mine = [
+            row(0, "Idle", Some(90.0)),
+            row(4, "System", Some(80.0)),
+            row(100, "oma-app.exe", Some(70.0)),
+            row(101, "msedgewebview2.exe", Some(60.0)),
+            row(200, "DWM.EXE", Some(50.0)),
+        ];
+        assert_eq!(other_gpu_share(&mine, &ours), Some(0.0));
+        let mut rows = mine.to_vec();
+        rows.extend([row(300, "game.exe", Some(25.0)), row(301, "new.exe", None)]);
+        assert_eq!(other_gpu_share(&rows, &ours), Some(0.25));
     }
 }

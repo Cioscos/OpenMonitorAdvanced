@@ -26,10 +26,29 @@ const SAMPLE_STEPS: u32 = 1000;
 /// The submission after which the injected fault flips the golden (DA18).
 const INJECT_AT: u64 = 3;
 
+/// S1's FLOP per step and thread (DH2): 16 `mad` on `float4`, 2 FLOP per lane.
+const FMA_FLOP_PER_STEP: f64 = 128.0;
+/// S2's integer operations per step and thread (DH2), from `s2_hash.hlsl`: each `step4`
+/// does, per lane, `h * k` (1), `h >> 15` (1), `^=` (1), the rotate `(h << 13) | (h >> 19)`
+/// (3) and `+ add` (1), 7 in all; 4 lanes and 4 chains a step give 7 x 4 x 4 = 112. The
+/// loop counter is not counted.
+const HASH_OPS_PER_STEP: f64 = 112.0;
+
+/// The work of one submission of S1 (FLOP) or S2 (integer operations) with `steps`.
+fn submission_work(kernel: KernelId, steps: u32) -> f64 {
+    let per_step = match kernel {
+        KernelId::S1 => FMA_FLOP_PER_STEP,
+        KernelId::S2 => HASH_OPS_PER_STEP,
+        other => unreachable!("{other:?} is not a compute load"),
+    };
+    per_step * f64::from(steps) * f64::from(THREADS)
+}
+
 type Params = fn(u32, u32) -> [u32; 4];
 type Reference = fn(u32, u32, u32) -> [u32; 4];
 
 pub struct ComputeLoad {
+    id: KernelId,
     gpu: GpuDevice,
     params: Params,
     reference: Reference,
@@ -64,6 +83,7 @@ impl ComputeLoad {
         let (golden, _, golden_srv) = gpu.structured_buffer(THREADS * 16, 16)?;
         let (counters, counters_uav, _) = gpu.structured_buffer(32, 4)?;
         Ok(ComputeLoad {
+            id: kernel,
             params,
             reference,
             seed: (ctx.seed ^ (ctx.seed >> 32)) as u32,
@@ -224,6 +244,13 @@ impl GpuWorkload for ComputeLoad {
             notices: Vec::new(),
         })
     }
+
+    fn work_per_submission(&self) -> f64 {
+        // The window times the compare dispatch too (DH9 needs it), so the rate is a bit
+        // low: under 1% on a 40 ms submission of a fast dedicated GPU, a few % on an
+        // integrated one. The fixed scale (`gpu-1-baseline.json`) is calibrated the same way.
+        submission_work(self.id, self.steps)
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +258,18 @@ mod tests {
     use super::*;
     use crate::args::Inject;
     use crate::gpu::submit::Submitter;
+
+    #[test]
+    fn fma_work_counts_128_flop_per_step() {
+        assert_eq!(
+            submission_work(KernelId::S1, 1000),
+            128.0 * 1000.0 * 1048576.0
+        );
+        assert_eq!(
+            submission_work(KernelId::S2, 1000),
+            112.0 * 1000.0 * 1048576.0
+        );
+    }
 
     #[test]
     #[ignore = "requires real Windows hardware"]

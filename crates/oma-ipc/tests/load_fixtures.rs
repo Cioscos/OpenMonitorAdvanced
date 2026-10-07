@@ -14,6 +14,7 @@ const NAMES: &[&str] = &[
     "hello",
     "run",
     "run_gpu",
+    "run_gpu_bench",
     "stop",
     "topology",
     "progress",
@@ -32,6 +33,7 @@ fn reference(name: &str) -> LoadMessage {
         "hello" => LoadMessage::Hello(LoadHello {
             protocol_version: LOAD_PROTOCOL_VERSION,
             version: "0.6.0".to_owned(),
+            shader_digest: Some("0123456789abcdef".to_owned()),
             isa: vec![Isa::Avx512, Isa::Avx2, Isa::Sse2],
         }),
         "run" => LoadMessage::Run(RunRequest {
@@ -54,6 +56,7 @@ fn reference(name: &str) -> LoadMessage {
                         stop_on_error: false,
                         iterations: None,
                         pause_before_ms: 0,
+                        windows: None,
                     },
                     Phase {
                         kernel: KernelId::K10,
@@ -70,6 +73,7 @@ fn reference(name: &str) -> LoadMessage {
                         stop_on_error: true,
                         iterations: None,
                         pause_before_ms: 0,
+                        windows: None,
                     },
                 ],
                 gpu: None,
@@ -91,6 +95,7 @@ fn reference(name: &str) -> LoadMessage {
                 stop_on_error: true,
                 iterations: None,
                 pause_before_ms: 0,
+                windows: None,
             };
             let first = p.clone();
             p.kernel = KernelId::S1;
@@ -101,6 +106,46 @@ fn reference(name: &str) -> LoadMessage {
                     seed: 0x1234_5678_9ABC_DEF0,
                     ram_bytes: 0,
                     phases: vec![first, p],
+                    gpu: Some(GpuTarget {
+                        luid: 0x17e99,
+                        integrated: false,
+                    }),
+                },
+            })
+        }
+        "run_gpu_bench" => {
+            let phase = |kernel| Phase {
+                kernel,
+                alt_kernel: None,
+                isa: Isa::Sse2,
+                size: DataSize::Auto,
+                mode: LoadMode::Steady,
+                placement: Placement::AllLogical,
+                duration_s: 30,
+                per_core_s: None,
+                both_smt: false,
+                cores: None,
+                patterns: vec![],
+                stop_on_error: true,
+                iterations: None,
+                pause_before_ms: 0,
+                windows: Some(5),
+            };
+            LoadMessage::Run(RunRequest {
+                plan: Plan {
+                    seed: 0x1234_5678_9ABC_DEF0,
+                    ram_bytes: 0,
+                    phases: [
+                        KernelId::S1,
+                        KernelId::S2,
+                        KernelId::S3,
+                        KernelId::Fill,
+                        KernelId::Texture,
+                        KernelId::Overdraw,
+                    ]
+                    .into_iter()
+                    .map(phase)
+                    .collect(),
                     gpu: Some(GpuTarget {
                         luid: 0x17e99,
                         integrated: false,
@@ -204,6 +249,7 @@ fn reference(name: &str) -> LoadMessage {
                 iterations: 50,
                 work_ms: 58_500,
             }],
+            rates: vec![1.5e12, 1.25e12],
         }),
         "finished" => LoadMessage::Finished(Finished {
             reason: FinishReason::Completed,

@@ -75,8 +75,8 @@ temperature, tensioni, ventole e dati SMART.
   unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
 - **Vista Prestazioni.** Uno stress test per CPU, RAM e GPU, con una procedura guidata (verifica
   normale o stabilità dell'overclock, da Rapido a Lungo), una pagina dal vivo, un risultato con
-  verdetto e la cronologia delle sessioni, più un benchmark della CPU con un punteggio single core e uno
-  multi core su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
+  verdetto e la cronologia delle sessioni, più i benchmark della CPU (un punteggio single core e uno
+  multi core) e della GPU (un punteggio Calcolo e uno Grafica) su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -206,8 +206,7 @@ parole semplici.
   carico parziale. Il test finisce con un verdetto: errori, GPU azzerata dal driver, velocità non
   costante (sotto il 97 %), stop termico alla temperatura massima della GPU che imposti (90 °C di
   default, Impostazioni › Prestazioni). Il contatore dei replay PCIe (solo NVIDIA) compare come
-  avviso. Non servono i privilegi di amministratore né il servizio. Il benchmark grafico arriverà
-  dopo.
+  avviso. Non servono i privilegi di amministratore né il servizio.
 - **Benchmark della CPU.** *Prestazioni › Punteggio › CPU* esegue sei carichi (interi: NTT, hash,
   compressione, ordinamento; virgola mobile: FFT, prodotto di matrici) prima su un core, poi su
   tutti i thread, in circa 2 minuti, con lo stesso processo di carico. Il punteggio è in punti su
@@ -217,6 +216,15 @@ parole semplici.
   macchina virtuale o senza il servizio resta valida ma con un avviso; un errore di calcolo la
   rende non valida. Finché la scala non è tarata i punti sono segnati come provvisori.
   Esportazione e condivisione arriveranno dopo.
+- **Benchmark della GPU.** *Prestazioni › Punteggio › <nome della GPU>* (la barra laterale elenca ogni scheda per nome sotto Punteggio) misura una scheda grafica alla volta con
+  lo stesso processo di carico, in due punteggi su una scala fissa (il doppio dei punti, il doppio
+  del lavoro nello stesso tempo): Calcolo (calcolo in virgola mobile e intero, banda della memoria) e
+  Grafica (riempimento di pixel, letture di texture, sovrapposizione). Ogni carico è cronometrato in
+  finestre da un secondo e conta la mediana delle finestre, così un disturbo breve non sposta il
+  risultato; la pagina mostra la velocità di ogni carico e la cronologia. Una misura a batteria, con un
+  altro programma occupato sulla GPU, con la memoria video (VRAM) ridotta o limitata dal calore resta
+  valida ma con un avviso; un errore di calcolo, un azzeramento del driver o un blocco la rendono non
+  valida. Finché la scala non è tarata i punti sono segnati come provvisori.
 - **Privilegi di amministratore** non servono. Senza il servizio il test della CPU parte, con un
   avviso, e senza stop termico.
 - **Limite della RAM.** Il test della RAM copre solo la memoria che Windows concede al programma

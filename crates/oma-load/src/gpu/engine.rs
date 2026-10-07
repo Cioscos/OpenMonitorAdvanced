@@ -2,6 +2,10 @@
 //! phase builds its loads, calibrates them and submits until the phase ends, pacing the
 //! submissions by the load mode. Once a second it reads the loads' checks and sends
 //! `Progress`; a lost device or a hung submission ends the run.
+//!
+//! A phase with `windows` (GPU benchmark, DH4) submits as in `steady`, but every second is
+//! a window timed on the GPU: after the warm-up, each window's rate goes to
+//! `PhaseDone.rates`, and the phase ends with its windows or at `duration_s`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -10,14 +14,16 @@ use std::time::{Duration, Instant};
 
 use oma_ipc::load::{
     ComputeError, ErrorKind, FinishReason, Finished, KernelId, LoadMessage, LoadMode, Notice,
-    Phase, PhaseDone, Plan, Progress,
+    Phase, PhaseDone, Plan, Progress, GPU_BENCH_WARMUP_S,
 };
 
+use super::bench_gfx::{BenchGfxKind, BenchGfxLoad};
 use super::compute::ComputeLoad;
 use super::device::{GpuDevice, GpuError};
 use super::graphics::{GraphicsKind, GraphicsWorkload};
 use super::pace::{self, Alternate};
 use super::sizing::{submit_target_ms, VramBudget};
+use super::stream::StreamLoad;
 use super::submit::{Submit, Submitter};
 use super::vram::VramWorkload;
 use crate::args::Inject;
@@ -41,6 +47,12 @@ pub trait GpuWorkload {
     fn submit(&mut self, sub: &mut dyn Submit) -> Result<(), GpuError>;
     /// The verdicts of the submissions since the last check.
     fn check(&mut self, sub: &mut dyn Submit) -> Result<GpuCheck, GpuError>;
+    /// The work of one calibrated submission in base units (FLOP, operations, bytes,
+    /// pixels or texels) for the windows of a benchmark phase (DH4); 0 when the load has
+    /// no measure, which skips such a phase.
+    fn work_per_submission(&self) -> f64 {
+        0.0
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -94,6 +106,7 @@ pub struct Hooks<'h, D> {
 pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadResult {
     match kernel {
         KernelId::S1 | KernelId::S2 => Ok(Some(Box::new(ComputeLoad::new(kernel, dev, ctx)?))),
+        KernelId::S3 => Ok(Some(Box::new(StreamLoad::new(dev, ctx)?))),
         KernelId::S4 => Ok(Some(Box::new(VramWorkload::new(dev, ctx)?))),
         KernelId::S5 => Ok(Some(Box::new(GraphicsWorkload::new(
             GraphicsKind::Fur,
@@ -104,6 +117,15 @@ pub fn workload(kernel: KernelId, dev: &GpuDevice, ctx: &PhaseCtx) -> WorkloadRe
             GraphicsKind::Artifact,
             dev,
             ctx,
+        )?))),
+        KernelId::Fill => Ok(Some(Box::new(BenchGfxLoad::new(BenchGfxKind::Fill, dev)?))),
+        KernelId::Texture => Ok(Some(Box::new(BenchGfxLoad::new(
+            BenchGfxKind::Texture,
+            dev,
+        )?))),
+        KernelId::Overdraw => Ok(Some(Box::new(BenchGfxLoad::new(
+            BenchGfxKind::Overdraw,
+            dev,
         )?))),
         _ => Ok(None),
     }
@@ -166,6 +188,10 @@ pub fn run_gpu_with<D>(
         submissions: 0,
         rate_from: now,
         rate_count: 0,
+        bench: false,
+        window_rate: None,
+        valid_windows: 0,
+        rates: Vec::new(),
     };
     // `validate` refuses GPU kernels in a plan without a GPU.
     let luid = plan.gpu.map_or(0, |g| g.luid);
@@ -186,6 +212,10 @@ pub fn run_gpu_with<D>(
         run.level = None;
         run.errors_sent = 0;
         run.notices_sent = [0; PER_ERROR_NOTICES.len()];
+        run.bench = spec.windows.is_some();
+        run.window_rate = None;
+        run.valid_windows = 0;
+        run.rates.clear();
         run.restart_rate();
         run.progress();
         let (checks, errors) = (run.checks, run.errors);
@@ -193,6 +223,7 @@ pub fn run_gpu_with<D>(
             Ok(end) => end,
             Err(fatal) => return run.fatal(fatal),
         };
+        let rates = std::mem::take(&mut run.rates);
         run.send(LoadMessage::PhaseDone(PhaseDone {
             phase: run.phase,
             checks: run.checks - checks,
@@ -204,6 +235,10 @@ pub fn run_gpu_with<D>(
             },
             work_ms: None,
             workers: Vec::new(),
+            rates: match end {
+                End::Skipped(_) => Vec::new(),
+                _ => rates,
+            },
         }));
         match end {
             End::Stopped => return run.end(FinishReason::Stopped),
@@ -268,6 +303,14 @@ struct Run<'r, D> {
     submissions: u64,
     rate_from: Instant,
     rate_count: u64,
+    /// The phase has `windows`: `Progress.rate` is `window_rate`.
+    bench: bool,
+    /// The rate of the last timed window, warm-up included, in units a second.
+    window_rate: Option<f64>,
+    /// Windows with a rate in this phase.
+    valid_windows: u32,
+    /// The rates of the windows after the warm-up.
+    rates: Vec<f64>,
 }
 
 impl<D> Run<'_, D> {
@@ -367,11 +410,16 @@ impl<D> Run<'_, D> {
         self.rate_count = self.submissions;
     }
 
-    /// `Progress`, with `rate` = submissions per second since the last one (DG7).
+    /// `Progress`, with `rate` = submissions per second since the last one (DG7), or the
+    /// rate of the last window in a benchmark phase (DH4).
     fn progress(&mut self) {
         let now = self.now();
         let dt = (now - self.rate_from).as_secs_f64();
-        let rate = (dt > 0.0).then(|| (self.submissions - self.rate_count) as f64 / dt);
+        let rate = if self.bench {
+            self.window_rate
+        } else {
+            (dt > 0.0).then(|| (self.submissions - self.rate_count) as f64 / dt)
+        };
         self.rate_from = now;
         self.rate_count = self.submissions;
         self.send(LoadMessage::Progress(Progress {
@@ -395,9 +443,20 @@ impl<D> Run<'_, D> {
         if let Some(end) = self.heartbeat(|| self.build(dev, sub, spec, seed, &mut loads))? {
             return Ok(end);
         }
+        if spec.windows.is_some() && loads[0].1.work_per_submission() == 0.0 {
+            return Ok(End::Skipped("unsupported"));
+        }
         // The calibration is not part of the rate.
         self.restart_rate();
-        self.submit_loop(sub, spec, seed, &mut loads)
+        let end = self.submit_loop(sub, spec, seed, &mut loads);
+        if spec.windows.is_some() && end.is_ok() {
+            // A submission error that only skips the phase leaves its window open: close
+            // it (a no-op when already closed), so the next phase can open its own.
+            if let Err(e) = sub.window_end() {
+                tracing::warn!(error = ?e, "cannot close the benchmark window");
+            }
+        }
+        end
     }
 
     /// Creates and prepares the loads of `spec`; `Some` when the phase ends before submitting.
@@ -486,14 +545,33 @@ impl<D> Run<'_, D> {
         let mut checked_at = self.now();
         // The end of the pause after a partial-load submission.
         let mut idle_until: Option<Instant> = None;
+        // A benchmark phase (DH4): one load, steady, a window open from here.
+        let windows = spec.windows.map(usize::from);
+        let (bench_kernel, work) = (loads[0].0, loads[0].1.work_per_submission());
+        let mut window_from = self.submissions;
+        if windows.is_some() {
+            if let Err(e) = sub.window_begin() {
+                return self.failed(bench_kernel, e);
+            }
+        }
         loop {
             let now = self.now();
             let elapsed = ms(now - self.phase_start);
-            if self.stop.load(Ordering::Relaxed) {
-                return Ok(self.check(sub, spec, loads)?.unwrap_or(End::Stopped));
-            }
-            if elapsed >= phase_ms {
-                return Ok(self.check(sub, spec, loads)?.unwrap_or(End::Done));
+            let ending = if self.stop.load(Ordering::Relaxed) {
+                Some(End::Stopped)
+            } else if elapsed >= phase_ms {
+                Some(End::Done)
+            } else {
+                None
+            };
+            if let Some(ending) = ending {
+                // The open window is cut short: it does not count.
+                if windows.is_some() {
+                    if let Some(end) = self.close_window(sub, bench_kernel, None)? {
+                        return Ok(end);
+                    }
+                }
+                return Ok(self.check(sub, spec, loads)?.unwrap_or(ending));
             }
             // 0 is the idle part of `pause_resume`.
             let level = match spec.mode {
@@ -505,8 +583,25 @@ impl<D> Run<'_, D> {
             self.level = matches!(spec.mode, LoadMode::Ramp | LoadMode::Alternate).then_some(level);
             if now - checked_at >= CHECK_EVERY {
                 checked_at = now;
+                if let Some(wanted) = windows {
+                    let done = (self.submissions - window_from) as f64 * work;
+                    if let Some(end) = self.close_window(sub, bench_kernel, Some(done))? {
+                        return Ok(end);
+                    }
+                    if self.rates.len() == wanted {
+                        return Ok(self.check(sub, spec, loads)?.unwrap_or(End::Done));
+                    }
+                }
                 if let Some(end) = self.check(sub, spec, loads)? {
                     return Ok(end);
+                }
+                if windows.is_some() {
+                    // The check waited for the GPU: the next window starts after it.
+                    if let Err(e) = sub.window_begin() {
+                        return self.failed(bench_kernel, e);
+                    }
+                    window_from = self.submissions;
+                    checked_at = self.now();
                 }
             }
             if level == 0 || idle_until.is_some_and(|t| now < t && level < 100) {
@@ -542,6 +637,28 @@ impl<D> Run<'_, D> {
             }
             self.submissions += 1;
         }
+    }
+
+    /// Ends the window of a benchmark phase and, given the `work` it did, records its rate:
+    /// the first [`GPU_BENCH_WARMUP_S`] windows with a rate are the warm-up (DH4).
+    fn close_window(
+        &mut self,
+        sub: &mut dyn Submit,
+        kernel: KernelId,
+        work: Option<f64>,
+    ) -> Result<Option<End>, Fatal> {
+        let ms = match sub.window_end() {
+            Ok(ms) => ms,
+            Err(e) => return self.failed(kernel, e).map(Some),
+        };
+        if let Some(rate) = work.and_then(|work| window_rate(work, ms)) {
+            self.window_rate = Some(rate);
+            self.valid_windows += 1;
+            if self.valid_windows > GPU_BENCH_WARMUP_S {
+                self.rates.push(rate);
+            }
+        }
+        Ok(None)
     }
 
     /// Reads every load's checks, reports them and sends `Progress`. `FirstError` after a
@@ -590,4 +707,12 @@ impl<D> Run<'_, D> {
         self.progress();
         Ok(first_error.then_some(End::FirstError))
     }
+}
+
+/// Units a second of a window that did `work` in `ms` of GPU time; `None` for a disjoint
+/// window or one without GPU time, so no rate is ever `NaN` or infinite.
+fn window_rate(work: f64, ms: Option<f64>) -> Option<f64> {
+    ms.filter(|&ms| ms > 0.0)
+        .map(|ms| work * 1e3 / ms)
+        .filter(|rate| rate.is_finite())
 }

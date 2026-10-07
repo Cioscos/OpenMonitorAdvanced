@@ -157,6 +157,14 @@ struct OpenLaunch {
     open: String,
 }
 
+/// A clicked GPU benchmark toast: `{"open":"score-gpu","device":"<device id>"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScoreGpuLaunch {
+    open: String,
+    device: String,
+}
+
 /// A clicked stress test toast: `{"performance":"<session id>"}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +178,7 @@ enum Launch {
     Device(DeviceLaunch),
     Open(OpenLaunch),
     Performance(PerformanceLaunch),
+    ScoreGpu(ScoreGpuLaunch),
 }
 
 /// Where a clicked toast leads.
@@ -185,6 +194,8 @@ pub enum LaunchTarget {
     Performance(String),
     /// The CPU benchmark page (M8a2, DB9).
     ScoreCpu,
+    /// The benchmark page of this GPU (M8b2, DH12).
+    ScoreGpu(String),
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -207,6 +218,24 @@ pub fn launch_for_score_cpu() -> String {
     serde_json::json!({ "open": "score-cpu" }).to_string()
 }
 
+/// The launch string of a toast that opens the benchmark page of GPU `device_id`.
+pub fn launch_for_score_gpu(device_id: &str) -> String {
+    serde_json::json!({ "open": "score-gpu", "device": device_id }).to_string()
+}
+
+/// The shape of a GPU `device_id` (`gpu/pci-0000:01:00.0`, `gpu/ven-10de-dev-2704-0`):
+/// a toast's launch string comes from outside the app, so nothing else goes through.
+pub fn is_gpu_device_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.strip_prefix("gpu/").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'-'))
+                && !rest.contains("..")
+        })
+}
+
 /// The launch string of a toast that opens the result of a stress session.
 pub fn launch_for_performance(session_id: &str) -> String {
     serde_json::json!({ "performance": session_id }).to_string()
@@ -222,6 +251,11 @@ pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
         Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
         Launch::Open(OpenLaunch { open }) if open == "about" => Some(LaunchTarget::About),
         Launch::Open(OpenLaunch { open }) if open == "score-cpu" => Some(LaunchTarget::ScoreCpu),
+        Launch::ScoreGpu(ScoreGpuLaunch { open, device })
+            if open == "score-gpu" && is_gpu_device_id(&device) =>
+        {
+            Some(LaunchTarget::ScoreGpu(device))
+        }
         Launch::Performance(PerformanceLaunch { performance })
             if oma_core::load::is_session_id(&performance) =>
         {
@@ -265,6 +299,10 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
             LaunchTarget::ScoreCpu => {
                 crate::window::show_performance(&handle, crate::window::PerformanceNav::score_cpu())
             }
+            LaunchTarget::ScoreGpu(device) => crate::window::show_performance(
+                &handle,
+                crate::window::PerformanceNav::score_gpu(&device),
+            ),
         });
         if let Err(err) = result {
             tracing::warn!(%err, "cannot open the window for a toast");
@@ -664,6 +702,38 @@ mod tests {
             r#"{"close":"main"}"#,
         ] {
             assert_eq!(launch_target(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn launch_target_refuses_a_malformed_device() {
+        for id in ["gpu/pci-0000:01:00.0", "gpu/ven-10de-dev-2704-0", "gpu/0"] {
+            assert_eq!(
+                launch_target(&launch_for_score_gpu(id)),
+                Some(LaunchTarget::ScoreGpu(id.into())),
+                "{id}"
+            );
+        }
+        let long = format!(
+            r#"{{"open":"score-gpu","device":"gpu/{}"}}"#,
+            "a".repeat(80)
+        );
+        for bad in [
+            r#"{"open":"score-gpu"}"#,
+            r#"{"open":"score-gpu","device":""}"#,
+            r#"{"open":"score-gpu","device":"gpu/"}"#,
+            r#"{"open":"score-gpu","device":"cpu/0"}"#,
+            r#"{"open":"score-gpu","device":"gpu/../x"}"#,
+            r#"{"open":"score-gpu","device":"gpu/a b"}"#,
+            r#"{"open":"score-gpu","device":"gpu/a\"b"}"#,
+            r#"{"open":"score-gpu","device":"gpu/é"}"#,
+            r#"{"open":"score-gpu","device":42}"#,
+            r#"{"open":"score-gpu","device":"gpu/0","extra":1}"#,
+            r#"{"open":"score-cpu","device":"gpu/0"}"#,
+            r#"{"open":"main","device":"gpu/0"}"#,
+            long.as_str(),
+        ] {
+            assert_eq!(launch_target(bad), None, "{bad}");
         }
     }
 

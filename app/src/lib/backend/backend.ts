@@ -1,7 +1,7 @@
 import type {
   BenchStatus,
-  CpuScoreFile,
-  CpuScoreSummary,
+  ScoreFile,
+  ScoreSummary,
   AppInfo,
   ExportedReport,
   AutostartStatus,
@@ -193,17 +193,19 @@ export interface Backend {
   performanceQuitConfirmed(): Promise<void>;
   /** Starts the CPU benchmark and replies with the score id; rejects with `busy` (a test or a benchmark runs) or the system's text. */
   performanceBenchStart(): Promise<string>;
-  /** Stops the CPU benchmark; nothing is saved. */
+  /** Starts the benchmark of the GPU `deviceId`: the score id; rejects with `busy` or `build:no_gpu` (no such GPU). */
+  performanceGpuBenchStart(deviceId: string): Promise<string>;
+  /** Stops the benchmark (CPU or GPU); nothing is saved. */
   performanceBenchStop(): Promise<void>;
   /** The running or last benchmark, null before any. */
   performanceBenchStatus(): Promise<BenchStatus | null>;
-  /** The saved CPU scores, newest first. */
-  performanceScores(): Promise<CpuScoreSummary[]>;
-  /** A saved CPU score, or null when it is gone; rejects for an id that is not a uuid. */
-  performanceScore(id: string): Promise<CpuScoreFile | null>;
+  /** The saved CPU and GPU scores, newest first. */
+  performanceScores(): Promise<ScoreSummary[]>;
+  /** A saved score, or null when it is gone; rejects for an id that is not a uuid. */
+  performanceScore(id: string): Promise<ScoreFile | null>;
   performanceScoreDelete(id: string): Promise<void>;
-  /** Whether the score scale is still provisional (not calibrated). */
-  performanceBaseline(): Promise<{ provisional: boolean }>;
+  /** Whether the CPU and the GPU score scales are still provisional (not calibrated). */
+  performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean }>;
   /** The benchmark status on every change and at most every 500 ms while it runs, only with the main window open. */
   onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */

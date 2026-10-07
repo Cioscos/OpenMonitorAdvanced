@@ -29,6 +29,15 @@ pub trait Submit {
     /// Runs `work` alone and returns its GPU time in milliseconds; `TimingDisjoint` when
     /// the GPU clock kept changing.
     fn gpu_ms(&mut self, work: &mut dyn FnMut(&ID3D11DeviceContext)) -> Result<f64, GpuError>;
+    /// Starts a measured window of a GPU benchmark phase (DH4): the submissions until
+    /// [`Submit::window_end`] are timed together, without stopping the queue.
+    fn window_begin(&mut self) -> Result<(), GpuError>;
+    /// Ends the window, waits for the GPU and gives its milliseconds; `None` when the
+    /// timestamps were disjoint or no window is open (so a phase may always call it once
+    /// more, to be sure none is left open). At most one window is open: the next
+    /// `window_begin` closes one left open. The time includes everything submitted in the
+    /// window, the compare dispatch of S1 and S2 too (`ComputeLoad::work_per_submission`).
+    fn window_end(&mut self) -> Result<Option<f64>, GpuError>;
 }
 
 pub struct Submitter {
@@ -41,6 +50,12 @@ pub struct Submitter {
     disjoint: ID3D11Query,
     start: ID3D11Query,
     end: ID3D11Query,
+    /// The queries of the measured windows, apart from those of `gpu_ms`.
+    window_disjoint: ID3D11Query,
+    window_start: ID3D11Query,
+    window_end: ID3D11Query,
+    /// A window is open: `window_disjoint` is begun.
+    in_window: bool,
 }
 
 impl Submitter {
@@ -62,6 +77,10 @@ impl Submitter {
             disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
             start: query(D3D11_QUERY_TIMESTAMP)?,
             end: query(D3D11_QUERY_TIMESTAMP)?,
+            window_disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
+            window_start: query(D3D11_QUERY_TIMESTAMP)?,
+            window_end: query(D3D11_QUERY_TIMESTAMP)?,
+            in_window: false,
             in_flight: VecDeque::with_capacity(IN_FLIGHT),
             next: 0,
             context: gpu.context().clone(),
@@ -102,6 +121,22 @@ impl Submitter {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Waits for the disjoint query and the two timestamps of a timing, then gives its
+    /// milliseconds (`None` when disjoint).
+    fn read_timing(
+        &self,
+        disjoint: &ID3D11Query,
+        start: &ID3D11Query,
+        end: &ID3D11Query,
+    ) -> Result<Option<f64>, GpuError> {
+        let since = Instant::now();
+        let pending = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+        let clock = self.wait_for(disjoint, pending, since)?;
+        let start = self.wait_for(start, u64::MAX, since)?;
+        let end = self.wait_for(end, u64::MAX, since)?;
+        Ok(timing_ms(start, end, clock))
     }
 
     fn wait_oldest(&mut self) -> Result<(), GpuError> {
@@ -153,16 +188,46 @@ impl Submit for Submitter {
                 self.context.End(&self.disjoint);
                 self.context.Flush();
             }
-            let since = Instant::now();
-            let pending = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
-            let clock = self.wait_for(&self.disjoint, pending, since)?;
-            let start = self.wait_for(&self.start, u64::MAX, since)?;
-            let end = self.wait_for(&self.end, u64::MAX, since)?;
-            if let Some(ms) = timing_ms(start, end, clock) {
+            if let Some(ms) = self.read_timing(&self.disjoint, &self.start, &self.end)? {
                 return Ok(ms);
             }
         }
         Err(GpuError::TimingDisjoint)
+    }
+
+    fn window_begin(&mut self) -> Result<(), GpuError> {
+        // SAFETY: queries of this device. Invariant: at most one window is open; it is
+        // closed by `window_end`, or here when a phase left it open (an error that skipped
+        // the phase), so `Begin` never runs on a disjoint query already begun. The window's
+        // disjoint query brackets its two timestamps; `gpu_ms` (with its own queries)
+        // never runs inside a window. A `finish` or a buffer read inside a window (the
+        // checks, the debug-only fault injection of S1/S2) is sound: it only lengthens the
+        // GPU time of that window.
+        unsafe {
+            if self.in_window {
+                self.context.End(&self.window_end);
+                self.context.End(&self.window_disjoint);
+            }
+            self.context.Begin(&self.window_disjoint);
+            self.context.End(&self.window_start);
+        }
+        self.in_window = true;
+        Ok(())
+    }
+
+    fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+        if !self.in_window {
+            return Ok(None);
+        }
+        self.in_window = false;
+        // SAFETY: queries of this device; the window opened by `window_begin` is still
+        // open (`in_window`), so the disjoint query is begun and its `End` is paired.
+        unsafe {
+            self.context.End(&self.window_end);
+            self.context.End(&self.window_disjoint);
+            self.context.Flush();
+        }
+        self.read_timing(&self.window_disjoint, &self.window_start, &self.window_end)
     }
 }
 
@@ -222,6 +287,12 @@ mod tests {
             let param = 64u64 << self.calls;
             self.calls += 1;
             Ok(param as f64 * self.per_unit_ms)
+        }
+        fn window_begin(&mut self) -> Result<(), GpuError> {
+            Ok(())
+        }
+        fn window_end(&mut self) -> Result<Option<f64>, GpuError> {
+            Ok(None)
         }
     }
 

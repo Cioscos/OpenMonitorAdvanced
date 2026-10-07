@@ -512,7 +512,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const editorData = mockEditorData();
   let benchmarks = structuredClone(MOCK_BENCHMARKS);
   const perf = mockPerformance(parsePerfScenario(typeof location === 'undefined' ? '' : location.search), () => serviceStatus.state === 'connected');
-  const bench = mockBench(parseBenchScenario(typeof location === 'undefined' ? '' : location.search), () => perf.running());
+  const bench = mockBench(parseBenchScenario(typeof location === 'undefined' ? '' : location.search), () => perf.running(), perf.system().gpus);
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -677,12 +677,13 @@ export function createMockBackend(intervalMs = 1000): Backend {
     onPerformanceQuit: async () => () => {},
     performanceQuitConfirmed: async () => console.info('mock: stop and quit'),
     performanceBenchStart: async () => bench.start(),
+    performanceGpuBenchStart: async (deviceId) => bench.startGpu(deviceId),
     performanceBenchStop: async () => bench.stop(),
     performanceBenchStatus: async () => bench.status(),
     performanceScores: async () => bench.scores(),
     performanceScore: async (id) => bench.score(id),
     performanceScoreDelete: async (id) => bench.remove(id),
-    performanceBaseline: async () => ({ provisional: true }),
+    performanceBaseline: async () => ({ provisional: true, gpuProvisional: true }),
     onPerformanceBench: async (cb) => bench.subscribe(cb),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),
     benchmarkList: async () => structuredClone(benchmarks),

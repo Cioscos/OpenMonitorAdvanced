@@ -264,6 +264,7 @@ mod imp {
                     protocol_version: 0,
                     version: String::new(),
                     isa: Vec::new(),
+                    shader_digest: None,
                 },
                 topology: Topology {
                     logical: Vec::new(),
@@ -283,6 +284,7 @@ mod imp {
                 protocol_version: LOAD_PROTOCOL_VERSION,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 isa: Vec::new(),
+                shader_digest: None,
             });
             if let Err(e) = host.send(&ours) {
                 tracing::warn!(error = %e, "cannot send the hello to oma-load");
@@ -491,6 +493,7 @@ mod tests {
                 stop_on_error: false,
                 iterations: None,
                 pause_before_ms: 0,
+                windows: None,
             }],
             gpu: None,
         };

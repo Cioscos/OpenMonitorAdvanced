@@ -10,6 +10,9 @@ macro_rules! cso {
 pub const S1_FMA: &[u8] = cso!("s1_fma");
 /// S2, integer hash: constant buffer `reference::hash_params`, a `uint4` per thread.
 pub const S2_HASH: &[u8] = cso!("s2_hash");
+/// S3, the memory stream: constant buffer `{ count, fill, seed, 0 }`, source piece in `u0`
+/// and destination piece in `u1`, both raw (`s3_stream.hlsl`).
+pub const S3_STREAM: &[u8] = cso!("s3_stream");
 /// Output against golden: constant buffer `{ elements, submission, 0, 0 }`, SRVs `t0`
 /// (output) and `t1` (golden), counters in `u0` (layout in `compare.hlsl`).
 pub const COMPARE: &[u8] = cso!("compare");
@@ -23,6 +26,10 @@ pub const SCENE_PS: &[u8] = cso!("scene_ps");
 /// S6, the tile hashes: constant buffer `{ mode, slot, width, height }`, render target
 /// `t0`, reference hashes `u0`, per-submission results `u1` (modes in `tile_hash.hlsl`).
 pub const TILE_HASH: &[u8] = cso!("tile_hash");
+/// The graphics loads of the GPU benchmark (`fill`, `texture`, `overdraw`): constant buffer
+/// `{ textured, 0, 0, 0 }`, texture `t0` and sampler `s0` (`bench_gfx.hlsl`).
+pub const BENCH_GFX_VS: &[u8] = cso!("bench_gfx_vs");
+pub const BENCH_GFX_PS: &[u8] = cso!("bench_gfx_ps");
 /// Writes [`PROBE_VALUE`] to word 0 of `u0`.
 pub const PROBE: &[u8] = cso!("probe");
 

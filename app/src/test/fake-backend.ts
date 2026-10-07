@@ -1,10 +1,11 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
+  BenchKernel,
   BenchStatus,
   BenchStep,
-  CpuScoreFile,
-  CpuScoreSummary,
+  ScoreFile,
+  ScoreSummary,
   AppInfo,
   ExportedReport,
   AutostartStatus,
@@ -98,6 +99,8 @@ export const BENCH_STEPS: BenchStep[] = (['single', 'multi'] as const).flatMap((
 /** A CPU benchmark status for tests: running its first step; override what matters. */
 export function makeBenchStatus(over: Partial<BenchStatus> = {}): BenchStatus {
   return {
+    category: 'cpu',
+    deviceId: null,
     state: 'running',
     step: 0,
     steps: BENCH_STEPS,
@@ -105,6 +108,8 @@ export function makeBenchStatus(over: Partial<BenchStatus> = {}): BenchStatus {
     livePoints: null,
     single: null,
     multi: null,
+    compute: null,
+    graphics: null,
     flags: [],
     scoreId: null,
     error: null,
@@ -112,8 +117,38 @@ export function makeBenchStatus(over: Partial<BenchStatus> = {}): BenchStatus {
   };
 }
 
+/** The six steps of the GPU benchmark (M8b2 DH6): three Compute loads, then three Graphics ones. */
+export const GPU_BENCH_STEPS: BenchStep[] = [
+  ...(['fma', 'int_hash', 'bandwidth'] as const).map((kernel) => ({ kernel, mode: 'compute' as const, rep: 1 })),
+  ...(['fill', 'texture', 'overdraw'] as const).map((kernel) => ({ kernel, mode: 'graphics' as const, rep: 1 })),
+];
+
+/** A GPU benchmark status for tests: `deviceId` running its first load; override what matters. */
+export function makeGpuBenchStatus(deviceId: string, over: Partial<BenchStatus> = {}): BenchStatus {
+  return makeBenchStatus({
+    category: 'gpu',
+    deviceId,
+    steps: GPU_BENCH_STEPS,
+    segments: GPU_BENCH_STEPS.map((_, i) => (i === 0 ? 'running' : 'pending')),
+    ...over,
+  });
+}
+
 /** A saved CPU score for tests, valid and without flags; override what matters. */
-export function makeScoreFile(over: Partial<CpuScoreFile> = {}): CpuScoreFile {
+type ScoreOver = Partial<Omit<ScoreFile, 'scores' | 'device'>> & { scores?: Partial<ScoreFile['scores']>; device?: Partial<ScoreFile['device']> };
+const kernelOf = (id: BenchKernel, unit: string, single: number | null, multi: number | null, value: number | null = null, spread: number | null = null) => ({
+  id,
+  unit,
+  single,
+  multi,
+  value,
+  spread,
+});
+const NO_GPU_DEVICE = { deviceId: null, vendorId: null, dedicatedBytes: null, integrated: null };
+
+/** A saved CPU score for tests, valid and without flags; override what matters. */
+export function makeScoreFile(over: ScoreOver = {}): ScoreFile {
+  const { scores, device, ...rest } = over;
   return {
     format: 1,
     id: 'score-a',
@@ -122,31 +157,60 @@ export function makeScoreFile(over: Partial<CpuScoreFile> = {}): CpuScoreFile {
     scoreVersion: 'cpu-1',
     provisional: false,
     isa: 'avx512',
-    scores: { single: 1500, multi: 12000 },
+    shaderDigest: null,
+    scores: { single: 1500, multi: 12000, compute: null, graphics: null, ...scores },
     kernels: [
-      { id: 'ntt', unit: 'Mop/s', single: 950.4, multi: 7600 },
-      { id: 'hash', unit: 'MB/s', single: 2100, multi: 16000 },
-      { id: 'compress', unit: 'MB/s', single: 410, multi: 3300 },
-      { id: 'sort', unit: 'Melem/s', single: 95.5, multi: 760 },
-      { id: 'fft', unit: 'GFLOP/s', single: 12.25, multi: 98 },
-      { id: 'gemm', unit: 'GFLOP/s', single: 60, multi: 470 },
+      kernelOf('ntt', 'Mop/s', 950.4, 7600),
+      kernelOf('hash', 'MB/s', 2100, 16000),
+      kernelOf('compress', 'MB/s', 410, 3300),
+      kernelOf('sort', 'Melem/s', 95.5, 760),
+      kernelOf('fft', 'GFLOP/s', 12.25, 98),
+      kernelOf('gemm', 'GFLOP/s', 60, 470),
     ],
-    device: { model: 'Fake Ryzen', cores: 8, logical: 16 },
+    device: { model: 'Fake Ryzen', cores: 8, logical: 16, ...NO_GPU_DEVICE, ...device },
     flags: [],
     valid: true,
     scaling: 0.5,
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
-    ...over,
+    ...rest,
   };
 }
 
-export const scoreSummaryOf = (f: CpuScoreFile): CpuScoreSummary => ({
+/** A saved GPU score of `deviceId` for tests, valid and without flags; override what matters. */
+export function makeGpuScoreFile(deviceId: string, over: ScoreOver = {}): ScoreFile {
+  const { scores, device, ...rest } = over;
+  return makeScoreFile({
+    id: 'gpu-score-a',
+    category: 'gpu',
+    scoreVersion: 'gpu-1',
+    isa: null,
+    shaderDigest: '0123456789abcdef',
+    scores: { single: null, multi: null, compute: 1500, graphics: 1500, ...scores },
+    kernels: [
+      kernelOf('fma', 'TFLOPS', null, null, 47.18, 0.012),
+      kernelOf('int_hash', 'TIOPS', null, null, 17.58, 0.008),
+      kernelOf('bandwidth', 'GB/s', null, null, 592.67, 0.031),
+      kernelOf('fill', 'Gpixel/s', null, null, 266.84, 0.004),
+      kernelOf('texture', 'Gtexel/s', null, null, 506.83, 0.006),
+      kernelOf('overdraw', 'Gpixel/s', null, null, 137.7, 0.005),
+    ],
+    device: { model: 'Fake GeForce', cores: 0, logical: 0, deviceId, vendorId: 0x10de, dedicatedBytes: 16 * 1024 ** 3, integrated: false, ...device },
+    scaling: null,
+    ...rest,
+  });
+}
+
+export const scoreSummaryOf = (f: ScoreFile): ScoreSummary => ({
   id: f.id,
   at: f.at,
+  category: f.category,
   single: f.scores.single,
   multi: f.scores.multi,
+  compute: f.scores.compute,
+  graphics: f.scores.graphics,
+  deviceId: f.device.deviceId,
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
@@ -735,8 +799,12 @@ export class FakeBackend implements Backend {
   performanceStartError: string | null = null;
   readonly performanceStatusListeners = new Set<(status: RunStatus) => void>();
 
+  /** Set to reject `performanceSystem` with this text. */
+  performanceSystemError: string | null = null;
+
   async performanceSystem(): Promise<SystemInfo> {
     this.performanceCalls.push('performanceSystem');
+    if (this.performanceSystemError !== null) throw this.performanceSystemError;
     return structuredClone(this.performanceSystemInfo);
   }
 
@@ -810,8 +878,9 @@ export class FakeBackend implements Backend {
   /** The CPU benchmark: what the reads return; calls go to `performanceCalls` too. */
   benchStatusValue: BenchStatus | null = null;
   /** Saved scores by id, newest first in insertion order. */
-  scoreFiles: CpuScoreFile[] = [];
+  scoreFiles: ScoreFile[] = [];
   baselineProvisional = false;
+  baselineGpuProvisional = false;
   /** Set to reject `performanceBenchStart` with this text instead of starting. */
   benchStartError: string | null = null;
   readonly benchListeners = new Set<(status: BenchStatus) => void>();
@@ -820,6 +889,12 @@ export class FakeBackend implements Backend {
     this.performanceCalls.push('performanceBenchStart');
     if (this.benchStartError !== null) throw this.benchStartError;
     return 'fake-score';
+  }
+
+  async performanceGpuBenchStart(deviceId: string): Promise<string> {
+    this.performanceCalls.push(`performanceGpuBenchStart:${deviceId}`);
+    if (this.benchStartError !== null) throw this.benchStartError;
+    return 'fake-gpu-score';
   }
 
   async performanceBenchStop(): Promise<void> {
@@ -831,12 +906,12 @@ export class FakeBackend implements Backend {
     return structuredClone(this.benchStatusValue);
   }
 
-  async performanceScores(): Promise<CpuScoreSummary[]> {
+  async performanceScores(): Promise<ScoreSummary[]> {
     this.performanceCalls.push('performanceScores');
     return this.scoreFiles.map(scoreSummaryOf);
   }
 
-  async performanceScore(id: string): Promise<CpuScoreFile | null> {
+  async performanceScore(id: string): Promise<ScoreFile | null> {
     this.performanceCalls.push(`performanceScore:${id}`);
     return structuredClone(this.scoreFiles.find((f) => f.id === id) ?? null);
   }
@@ -846,9 +921,9 @@ export class FakeBackend implements Backend {
     this.scoreFiles = this.scoreFiles.filter((f) => f.id !== id);
   }
 
-  async performanceBaseline(): Promise<{ provisional: boolean }> {
+  async performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean }> {
     this.performanceCalls.push('performanceBaseline');
-    return { provisional: this.baselineProvisional };
+    return { provisional: this.baselineProvisional, gpuProvisional: this.baselineGpuProvisional };
   }
 
   async onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe> {

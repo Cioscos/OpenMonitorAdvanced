@@ -233,7 +233,7 @@ export interface NavigationTarget {
   /** The settings section to open, for the update toast. */
   settingsSection?: 'about';
   /** The Performance page the tray or a toast asked for; `quit` also asks «stop the test and quit?». */
-  performance?: { page: 'run' | 'result' | 'quit' | 'score-cpu'; sessionId?: string };
+  performance?: { page: 'run' | 'result' | 'quit' | 'score-cpu' | 'score-gpu'; sessionId?: string; deviceId?: string };
 }
 
 export interface ServiceModules {
@@ -730,7 +730,7 @@ export type StressComponent = 'cpu' | 'ram' | 'gpu';
 export type Objective = 'normal' | 'overclock';
 export type Preset = 'quick' | 'standard' | 'long' | 'night';
 export type Isa = 'avx512' | 'avx2' | 'sse2';
-export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort' | 's1' | 's2' | 's4' | 's5' | 's6';
+export type KernelId = 'k1' | 'k2' | 'k3' | 'k4' | 'k5' | 'k7' | 'k8' | 'k9' | 'k10' | 'hash' | 'compress' | 'sort' | 's1' | 's2' | 's3' | 's4' | 's5' | 's6' | 'fill' | 'texture' | 'overdraw';
 export type LoadMode = 'steady' | 'variable' | 'light' | 'ramp' | 'alternate' | 'pause_resume';
 export type Placement = 'all_logical' | 'one_per_core' | 'core_cycle';
 export type DataSize = 'l1' | 'l2' | 'l3' | 'ram' | 'auto' | 'fixed';
@@ -991,10 +991,14 @@ export interface StressSessionSummary {
   params: Record<string, string>;
 }
 
-// --- CPU benchmark (mirrors crates/oma-core/src/scores and app/src-tauri/src/performance/bench.rs; plan M8a2 B7) ---
+// --- CPU and GPU benchmark (mirrors crates/oma-core/src/scores and app/src-tauri/src/performance/bench.rs; plans M8a2 B7, M8b2 H10) ---
 
-export type BenchKernel = 'ntt' | 'hash' | 'compress' | 'sort' | 'fft' | 'gemm';
-export type BenchMode = 'single' | 'multi';
+export type BenchKernel = 'ntt' | 'hash' | 'compress' | 'sort' | 'fft' | 'gemm' | GpuBenchKernel;
+/** The six GPU loads (M8b2 DH2): the first three are Compute, the others Graphics. */
+export type GpuBenchKernel = 'fma' | 'int_hash' | 'bandwidth' | 'fill' | 'texture' | 'overdraw';
+/** `single`/`multi` for the CPU, `compute`/`graphics` for the GPU groups. */
+export type BenchMode = 'single' | 'multi' | 'compute' | 'graphics';
+export type ScoreCategory = 'cpu' | 'gpu';
 export type BenchState = 'starting' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed';
 export type BenchSegment = 'pending' | 'running' | 'done' | 'failed';
 
@@ -1011,6 +1015,9 @@ export interface BenchStep {
  * `performance.start.*` key.
  */
 export interface BenchStatus {
+  category: ScoreCategory;
+  /** The GPU's device id; null for the CPU. */
+  deviceId: string | null;
   state: BenchState;
   step: number | null;
   steps: BenchStep[];
@@ -1018,34 +1025,51 @@ export interface BenchStatus {
   livePoints: number | null;
   single: number | null;
   multi: number | null;
+  compute: number | null;
+  graphics: number | null;
   flags: string[];
   scoreId: string | null;
   error: string | null;
 }
 
 /** One entry of `performance_scores`, newest first. */
-export interface CpuScoreSummary {
+export interface ScoreSummary {
   id: string;
   at: string;
+  category: ScoreCategory;
   single: number | null;
   multi: number | null;
+  compute: number | null;
+  graphics: number | null;
+  deviceId: string | null;
   valid: boolean;
   flags: string[];
   provisional: boolean;
 }
 
 /** A saved score (`performance_score`): the speeds of each workload in its own unit. */
-export interface CpuScoreFile {
+export interface ScoreFile {
   format: number;
   id: string;
   at: string;
-  category: string;
+  category: ScoreCategory;
   scoreVersion: string;
   provisional: boolean;
-  isa: Isa;
-  scores: { single: number | null; multi: number | null };
-  kernels: { id: BenchKernel; unit: string; single: number | null; multi: number | null }[];
-  device: { model: string; cores: number; logical: number };
+  /** null for a GPU score. */
+  isa: Isa | null;
+  shaderDigest: string | null;
+  scores: { single: number | null; multi: number | null; compute: number | null; graphics: number | null };
+  /** A GPU load has `value` (the median of its windows, true units) and `spread`; a CPU one `single` and `multi`. */
+  kernels: { id: BenchKernel; unit: string; single: number | null; multi: number | null; value: number | null; spread: number | null }[];
+  device: {
+    model: string;
+    cores: number;
+    logical: number;
+    deviceId: string | null;
+    vendorId: number | null;
+    dedicatedBytes: number | null;
+    integrated: boolean | null;
+  };
   flags: string[];
   valid: boolean;
   scaling: number | null;

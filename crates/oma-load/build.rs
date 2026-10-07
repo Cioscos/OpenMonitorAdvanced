@@ -31,7 +31,9 @@
 //!   the product and the `X.Y.Z` version like the app's;
 //! - compiles the HLSL shaders of the GPU stress test with `fxc.exe` into `$OUT_DIR/*.cso`
 //!   (M8b1, DG3), so every build carries the same bytecode and nothing needs
-//!   `d3dcompiler_47.dll` at run time.
+//!   `d3dcompiler_47.dll` at run time;
+//! - exports `OMA_SHADER_DIGEST`, the FNV-1a 64 of the benchmark shaders' bytecode (M8b2,
+//!   DH8), since the bytecode depends on the version of `fxc.exe`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -63,16 +65,37 @@ fn main() {
 
 /// The GPU shaders: output name (`$OUT_DIR/<name>.cso`), file in `shaders/` (without
 /// `.hlsl`), entry point and profile.
-const SHADERS: [(&str, &str, &str, &str); 8] = [
+const SHADERS: [(&str, &str, &str, &str); 11] = [
     ("s1_fma", "s1_fma", "main", "cs_5_0"),
     ("s2_hash", "s2_hash", "main", "cs_5_0"),
+    ("s3_stream", "s3_stream", "main", "cs_5_0"),
     ("compare", "compare", "main", "cs_5_0"),
     ("probe", "probe", "main", "cs_5_0"),
     ("s4_vram", "s4_vram", "main", "cs_5_0"),
     ("scene_vs", "scene", "vs", "vs_5_0"),
     ("scene_ps", "scene", "ps", "ps_5_0"),
     ("tile_hash", "tile_hash", "main", "cs_5_0"),
+    ("bench_gfx_vs", "bench_gfx", "vs", "vs_5_0"),
+    ("bench_gfx_ps", "bench_gfx", "ps", "ps_5_0"),
 ];
+
+/// The shaders of the GPU benchmark, in the order of the digest (DH8): `bench_gfx` is its
+/// vertex then its pixel shader.
+const DIGEST_SHADERS: &[&str] = &[
+    "s1_fma",
+    "s2_hash",
+    "compare",
+    "s3_stream",
+    "bench_gfx_vs",
+    "bench_gfx_ps",
+];
+
+/// FNV-1a, 64 bits.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
 
 fn compile_shaders() {
     println!("cargo:rerun-if-env-changed=OMA_FXC");
@@ -99,6 +122,18 @@ fn compile_shaders() {
             );
         }
     }
+    // The published test vectors of FNV-1a 64.
+    assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+    let mut bytecode = Vec::new();
+    for name in DIGEST_SHADERS {
+        let cso = out.join(format!("{name}.cso"));
+        bytecode.extend(std::fs::read(&cso).unwrap_or_else(|e| panic!("read {cso:?}: {e}")));
+    }
+    println!(
+        "cargo:rustc-env=OMA_SHADER_DIGEST={:016x}",
+        fnv1a64(&bytecode)
+    );
 }
 
 /// `OMA_FXC`, else the highest `Windows Kits\10\bin\10.*\x64\fxc.exe`.

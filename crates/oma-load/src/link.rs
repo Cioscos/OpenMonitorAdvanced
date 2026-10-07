@@ -77,6 +77,8 @@ pub fn hello() -> LoadMessage {
         protocol_version: LOAD_PROTOCOL_VERSION,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         isa: detected_isa(),
+        // Set by `build.rs` on Windows, where the shaders are compiled (DH8).
+        shader_digest: option_env!("OMA_SHADER_DIGEST").map(str::to_owned),
     })
 }
 
@@ -230,7 +232,24 @@ mod tests {
             protocol_version: v,
             version: "0.5.0".into(),
             isa: vec![],
+            shader_digest: None,
         })
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn hello_carries_the_shader_digest() {
+        let LoadMessage::Hello(h) = hello() else {
+            unreachable!()
+        };
+        let digest = h.shader_digest.expect("a digest");
+        assert_eq!(digest.len(), 16, "{digest}");
+        assert!(
+            digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "{digest}"
+        );
     }
 
     #[test]

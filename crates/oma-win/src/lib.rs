@@ -24,6 +24,7 @@ pub mod pipe_io;
 pub mod power;
 pub mod private_pipe;
 pub mod proc_cpu;
+pub mod process_tree;
 pub mod qpc;
 pub mod shell_open;
 pub mod storage;

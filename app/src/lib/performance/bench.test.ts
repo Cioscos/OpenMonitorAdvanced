@@ -1,7 +1,9 @@
 import { MOCK_SCHEMA } from '../backend/mock';
-import { FakeBackend, makeBenchStatus, makeScoreFile } from '../../test/fake-backend';
+import { FakeBackend, makeBenchStatus, makeGpuBenchStatus, makeGpuScoreFile, makeScoreFile } from '../../test/fake-backend';
 import type { BenchStatus } from '../types';
-import { benchStore } from './bench.svelte';
+import { benchStore, type ScoreTarget } from './bench.svelte';
+
+const CPU: ScoreTarget = { category: 'cpu' };
 
 let off: (() => void) | undefined;
 afterEach(() => {
@@ -18,7 +20,7 @@ test('connect_subscribes_before_reading', async () => {
   expect(backend.performanceCalls.slice(1).sort()).toEqual(['performanceBaseline', 'performanceBenchStatus', 'performanceScores']);
   expect(benchStore.status?.scoreId).toBe('a');
   expect(benchStore.running).toBe(true);
-  expect(benchStore.provisional).toBe(true);
+  expect(benchStore.provisionalFor(CPU)).toBe(true);
   // An event that came before the read's reply is not overwritten by it.
   off();
   let resolve!: (status: BenchStatus | null) => void;
@@ -40,12 +42,12 @@ test('record_ignores_invalid_scores', async () => {
     makeScoreFile({ id: 'c', scores: { single: 1600, multi: null } }),
   ];
   off = await benchStore.connect(backend);
-  expect(benchStore.record).toEqual({ single: 1600, multi: 13000 });
-  expect(benchStore.last).toEqual({ single: 1400, multi: 13000 });
+  expect(benchStore.recordFor(CPU)).toMatchObject({ single: 1600, multi: 13000 });
+  expect(benchStore.lastFor(CPU)).toMatchObject({ single: 1400, multi: 13000 });
   backend.scoreFiles = [];
   await benchStore.refresh();
-  expect(benchStore.record).toEqual({ single: null, multi: null });
-  expect(benchStore.last).toEqual({ single: null, multi: null });
+  expect(benchStore.recordFor(CPU)).toMatchObject({ single: null, multi: null });
+  expect(benchStore.lastFor(CPU)).toMatchObject({ single: null, multi: null });
 });
 
 test('provisional_scores_stay_out_of_record_and_last_once_calibrated', async () => {
@@ -55,14 +57,51 @@ test('provisional_scores_stay_out_of_record_and_last_once_calibrated', async () 
     makeScoreFile({ id: 'b', scores: { single: 1400, multi: 13000 } }),
   ];
   off = await benchStore.connect(backend);
-  expect(benchStore.record).toEqual({ single: 1400, multi: 13000 });
+  expect(benchStore.recordFor(CPU)).toMatchObject({ single: 1400, multi: 13000 });
   backend.scoreFiles = [backend.scoreFiles[0]];
   await benchStore.refresh();
-  expect(benchStore.last).toEqual({ single: null, multi: null });
+  expect(benchStore.lastFor(CPU)).toMatchObject({ single: null, multi: null });
   // While the scale itself is provisional, provisional scores are the only ones there are.
   off();
   backend.baselineProvisional = true;
   off = await benchStore.connect(backend);
-  expect(benchStore.record).toEqual({ single: 9000, multi: 90000 });
-  expect(benchStore.last).toEqual({ single: 9000, multi: 90000 });
+  expect(benchStore.recordFor(CPU)).toMatchObject({ single: 9000, multi: 90000 });
+  expect(benchStore.lastFor(CPU)).toMatchObject({ single: 9000, multi: 90000 });
+});
+
+test('scores_and_record_are_per_target', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.baselineGpuProvisional = true;
+  backend.scoreFiles = [
+    makeGpuScoreFile('gpu-a', { id: 'ga2', provisional: true, scores: { compute: 1400, graphics: 1600 } }),
+    makeGpuScoreFile('gpu-b', { id: 'gb', provisional: true, scores: { compute: 9, graphics: 8 } }),
+    makeScoreFile({ id: 'c', scores: { single: 1500, multi: 12000 } }),
+    makeGpuScoreFile('gpu-a', { id: 'ga1', provisional: true, scores: { compute: 1500, graphics: 1450 } }),
+    makeGpuScoreFile('gpu-a', { id: 'bad', valid: false, flags: ['device_lost'], scores: { compute: 9000, graphics: null } }),
+  ];
+  off = await benchStore.connect(backend);
+  const A: ScoreTarget = { category: 'gpu', deviceId: 'gpu-a' };
+  const B: ScoreTarget = { category: 'gpu', deviceId: 'gpu-b' };
+  expect(benchStore.scoresFor(CPU).map((s) => s.id)).toEqual(['c']);
+  expect(benchStore.scoresFor(A).map((s) => s.id)).toEqual(['ga2', 'ga1', 'bad']);
+  expect(benchStore.scoresFor({ category: 'gpu', deviceId: 'gone' })).toEqual([]);
+  expect(benchStore.recordFor(A)).toMatchObject({ compute: 1500, graphics: 1600 });
+  expect(benchStore.lastFor(A)).toMatchObject({ compute: 1400, graphics: 1600 });
+  expect(benchStore.recordFor(B)).toMatchObject({ compute: 9, graphics: 8 });
+  expect(benchStore.recordFor(CPU)).toMatchObject({ single: 1500, multi: 12000, compute: null, graphics: null });
+  expect(benchStore.provisionalFor(CPU)).toBe(false);
+  expect(benchStore.provisionalFor(A)).toBe(true);
+  // The status belongs to the target it runs on only; `running` is any benchmark.
+  backend.emitBench(makeGpuBenchStatus('gpu-a'));
+  expect(benchStore.statusFor(A)?.deviceId).toBe('gpu-a');
+  expect(benchStore.statusFor(B)).toBeNull();
+  expect(benchStore.statusFor(CPU)).toBeNull();
+  expect(benchStore.running).toBe(true);
+  backend.emitBench(makeBenchStatus());
+  expect(benchStore.statusFor(CPU)?.category).toBe('cpu');
+  expect(benchStore.statusFor(A)).toBeNull();
+  // Start goes to the command of the target.
+  await benchStore.start(A);
+  await benchStore.start(CPU);
+  expect(backend.performanceCalls).toEqual(expect.arrayContaining(['performanceGpuBenchStart:gpu-a', 'performanceBenchStart']));
 });

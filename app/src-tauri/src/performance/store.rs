@@ -902,16 +902,20 @@ mod tests {
             category: "cpu".into(),
             score_version: "cpu-1".into(),
             provisional: true,
-            isa: oma_ipc::load::Isa::Avx2,
+            isa: Some(oma_ipc::load::Isa::Avx2),
+            shader_digest: None,
             scores: oma_core::scores::Scores {
                 single: Some(1500),
                 multi: Some(9000),
+                compute: None,
+                graphics: None,
             },
             kernels: vec![],
             device: oma_core::scores::Device {
                 model: "CPU".into(),
                 cores: 8,
                 logical: 16,
+                ..Default::default()
             },
             flags: vec![],
             valid: true,

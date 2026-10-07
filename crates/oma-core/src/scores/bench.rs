@@ -7,18 +7,18 @@ use std::collections::BTreeMap;
 use oma_ipc::load::{ErrorKind, FinishReason, Isa, LoadMessage, PhaseDone};
 use serde::Serialize;
 
-use super::file::{Device, KernelRate, ScoreFile, ScoreSample, Scores, FORMAT};
+use super::file::{Device, KernelRate, ScoreFile, Scores, FORMAT};
+use super::lifecycle::Lifecycle;
 use super::plan::{BenchMode, BenchStep, CAP_S, WARMUP_PAUSE_MS};
 use super::score::{
     median3, per_second_to_units, points, rate, rate_from_workers, scaling, Baseline, SCALE_POINTS,
 };
 use super::workloads::{BenchKernel, WORKLOADS};
+#[cfg(test)]
 use crate::load::run::{OVERRUN_MS, SILENT_PIPE_MS};
 use crate::load::{Clock, SensorSample};
 
-const SAMPLE_EVERY_MS: u64 = 5_000;
-const STOP_GRACE_MS: u64 = 3_000;
-const BUSY_LIMIT: f64 = 0.10;
+pub(super) const BUSY_LIMIT: f64 = 0.10;
 const HOT_WITHOUT_TJMAX_C: f64 = 93.0;
 const HOT_MARGIN_C: f64 = 2.0;
 /// Flags in the order they are saved.
@@ -86,6 +86,10 @@ pub struct BenchContext {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchStatus {
+    /// `"cpu"` or `"gpu"` (DH12).
+    pub category: String,
+    /// The GPU's `device_id`; `None` for the CPU.
+    pub device_id: Option<String>,
     pub state: BenchState,
     pub step: Option<usize>,
     pub steps: Vec<BenchStep>,
@@ -93,34 +97,32 @@ pub struct BenchStatus {
     pub live_points: Option<f64>,
     pub single: Option<u32>,
     pub multi: Option<u32>,
+    pub compute: Option<u32>,
+    pub graphics: Option<u32>,
     pub flags: Vec<String>,
     pub score_id: Option<String>,
     pub error: Option<String>,
 }
 
+/// True once every step of `mode` is over, and `mode` has at least one step.
+pub(super) fn group_over(steps: &[BenchStep], segments: &[SegmentState], mode: BenchMode) -> bool {
+    let mut own = steps
+        .iter()
+        .zip(segments)
+        .filter(|(s, _)| s.mode == mode)
+        .peekable();
+    own.peek().is_some() && own.all(|(_, g)| matches!(g, SegmentState::Done | SegmentState::Failed))
+}
+
 pub struct BenchController {
     steps: Vec<BenchStep>,
     ctx: BenchContext,
-    state: BenchState,
-    start_mono: u64,
-    mono: u64,
-    stop_deadline: Option<u64>,
-    /// The last helper message; a running benchmark silent for longer than
-    /// `SILENT_PIPE_MS` is hung, like a stress test.
-    last_msg: u64,
-    /// The plan's length at its caps: past it plus `OVERRUN_MS`, hung.
-    plan_ms: u64,
+    life: Lifecycle,
     segments: Vec<SegmentState>,
     step: Option<usize>,
     live_points: Option<f64>,
     /// Rates of the repetitions 1-3 (the warm-up never counts).
     reps: BTreeMap<(BenchMode, BenchKernel), Vec<f64>>,
-    flags: Vec<&'static str>,
-    samples: Vec<ScoreSample>,
-    last_sample_t: Option<u64>,
-    load_version: Option<String>,
-    score_id: Option<String>,
-    error: Option<String>,
 }
 
 impl BenchController {
@@ -135,63 +137,34 @@ impl BenchController {
         let mut c = Self {
             segments: vec![SegmentState::Pending; steps.len()],
             steps,
-            state: BenchState::Starting,
-            start_mono: now.mono_ms,
-            mono: now.mono_ms,
-            stop_deadline: None,
-            last_msg: now.mono_ms,
-            plan_ms,
+            life: Lifecycle::new(plan_ms, now),
             step: None,
             live_points: None,
             reps: BTreeMap::new(),
-            flags: vec![],
-            samples: vec![],
-            last_sample_t: None,
-            load_version: None,
-            score_id: None,
-            error: None,
             ctx,
         };
         if c.ctx.on_battery == Some(true) {
-            c.flag("battery");
+            c.life.flag("battery");
         }
         if c.ctx.hypervisor {
-            c.flag("virtual_machine");
+            c.life.flag("virtual_machine");
         }
         if !c.ctx.service_available {
-            c.flag("no_sensors");
+            c.life.flag("no_sensors");
         }
         c
     }
 
     pub fn is_finished(&self) -> bool {
-        matches!(
-            self.state,
-            BenchState::Done | BenchState::Stopped | BenchState::Failed
-        )
-    }
-
-    fn flag(&mut self, f: &'static str) {
-        if !self.flags.contains(&f) {
-            self.flags.push(f);
-        }
-    }
-
-    fn tick(&mut self, now: Clock) {
-        self.mono = now.mono_ms.max(self.mono);
+        self.life.is_finished()
     }
 
     pub fn on_load(&mut self, msg: &LoadMessage, now: Clock) -> Vec<BenchAction> {
-        if self.is_finished() {
+        if !self.life.on_message(now) {
             return vec![];
         }
-        self.tick(now);
-        self.last_msg = self.mono;
-        if self.state == BenchState::Starting {
-            self.state = BenchState::Running;
-        }
         match msg {
-            LoadMessage::Hello(h) => self.load_version = Some(h.version.clone()),
+            LoadMessage::Hello(h) => self.life.load_version = Some(h.version.clone()),
             LoadMessage::Progress(p) => {
                 let i = p.phase as usize;
                 if let Some(seg) = self.segments.get_mut(i) {
@@ -218,11 +191,11 @@ impl BenchController {
             }
             LoadMessage::Finished(f) => {
                 return match f.reason {
-                    _ if self.state == BenchState::Stopping => self.end_stopped(),
+                    _ if self.life.state == BenchState::Stopping => self.life.end_stopped(),
                     FinishReason::Completed => self.save(),
                     FinishReason::FirstError => self.save_invalid(),
-                    FinishReason::Stopped => self.end_stopped(),
-                    FinishReason::Failed => self.end_failed("failed"),
+                    FinishReason::Stopped => self.life.end_stopped(),
+                    FinishReason::Failed => self.life.end_failed("failed"),
                 };
             }
             LoadMessage::Notice(_)
@@ -243,10 +216,7 @@ impl BenchController {
     /// Needle for a rate already in the workload's true units.
     fn live_units(&self, i: usize, units: f64) -> Option<f64> {
         let s = self.steps.get(i)?;
-        let table = match s.mode {
-            BenchMode::Single => &self.ctx.baseline.single,
-            BenchMode::Multi => &self.ctx.baseline.multi,
-        };
+        let table = self.ctx.baseline.table(s.mode)?;
         let v = SCALE_POINTS * units / table.get(&s.kernel)?;
         v.is_finite().then_some(v)
     }
@@ -290,101 +260,45 @@ impl BenchController {
         if self.is_finished() {
             return vec![];
         }
-        self.tick(now);
         if let Some(t) = sample.temp_c {
             let hot = match self.ctx.tjmax_c {
                 Some(tj) => t >= tj - HOT_MARGIN_C,
                 None => t >= HOT_WITHOUT_TJMAX_C,
             };
             if hot {
-                self.flag("thermal_throttle");
+                self.life.flag("thermal_throttle");
             }
         }
-        let t = self.mono - self.start_mono;
-        if self.last_sample_t.is_none_or(|p| t - p >= SAMPLE_EVERY_MS) {
-            self.last_sample_t = Some(t);
-            self.samples.push(ScoreSample {
-                t_ms: t,
-                temp_c: sample.temp_c,
-                power_w: sample.power_w,
-                clock_mhz: sample.clock_mhz,
-            });
-        }
+        self.life.record(sample, now);
         vec![]
     }
 
     /// Share of the total CPU used by the other processes, 0-1.
     pub fn on_busy_share(&mut self, share: f64) {
         if !self.is_finished() && share > BUSY_LIMIT {
-            self.flag("busy_system");
+            self.life.flag("busy_system");
         }
     }
 
     pub fn on_battery(&mut self, on_battery: bool) {
         if !self.is_finished() && on_battery {
-            self.flag("battery");
+            self.life.flag("battery");
         }
     }
 
     pub fn on_user_stop(&mut self, now: Clock) -> Vec<BenchAction> {
-        if !matches!(self.state, BenchState::Starting | BenchState::Running) {
-            return vec![];
-        }
-        self.tick(now);
-        self.state = BenchState::Stopping;
-        self.stop_deadline = Some(self.mono + STOP_GRACE_MS);
-        vec![BenchAction::SendStop]
+        self.life.on_user_stop(now)
     }
 
     /// Kills a process that ignores our stop request, or that is hung: silent
     /// for more than `SILENT_PIPE_MS`, or running past its plan by `OVERRUN_MS`.
     /// Call it on every tick.
     pub fn on_clock(&mut self, now: Clock) -> Vec<BenchAction> {
-        if self.state == BenchState::Running {
-            self.tick(now);
-            let silent = self.mono - self.last_msg > SILENT_PIPE_MS;
-            let overrun = self.mono - self.start_mono > self.plan_ms + OVERRUN_MS;
-            if silent || overrun {
-                let mut out = vec![BenchAction::Kill];
-                out.extend(self.end_failed("hung"));
-                return out;
-            }
-        }
-        if self.state != BenchState::Stopping {
-            return vec![];
-        }
-        self.tick(now);
-        match self.stop_deadline {
-            Some(d) if self.mono >= d => {
-                let mut out = vec![BenchAction::Kill];
-                out.extend(self.end_stopped());
-                out
-            }
-            _ => vec![],
-        }
+        self.life.on_clock(now)
     }
 
     pub fn on_exit(&mut self, _code: Option<i32>, now: Clock) -> Vec<BenchAction> {
-        if self.is_finished() {
-            return vec![];
-        }
-        self.tick(now);
-        if self.state == BenchState::Stopping {
-            self.end_stopped()
-        } else {
-            self.end_failed("exited")
-        }
-    }
-
-    fn end_stopped(&mut self) -> Vec<BenchAction> {
-        self.state = BenchState::Stopped;
-        vec![BenchAction::Finished(BenchEnd::Stopped)]
-    }
-
-    fn end_failed(&mut self, why: &str) -> Vec<BenchAction> {
-        self.state = BenchState::Failed;
-        self.error = Some(why.into());
-        vec![BenchAction::Finished(BenchEnd::Failed(why.into()))]
+        self.life.on_exit(now)
     }
 
     /// Medians of the kernels of a mode that have a rate.
@@ -396,7 +310,7 @@ impl BenchController {
     }
 
     fn save_invalid(&mut self) -> Vec<BenchAction> {
-        self.flag("compute_error");
+        self.life.flag("compute_error");
         let mut out = vec![BenchAction::SendStop];
         out.extend(self.save());
         out
@@ -415,10 +329,13 @@ impl BenchController {
             category: "cpu".into(),
             score_version: b.version.clone(),
             provisional: b.provisional,
-            isa: self.ctx.isa,
+            isa: Some(self.ctx.isa),
+            shader_digest: None,
             scores: Scores {
                 single: points(&single, &b.single),
                 multi: points(&multi, &b.multi),
+                compute: None,
+                graphics: None,
             },
             kernels: WORKLOADS
                 .iter()
@@ -427,64 +344,45 @@ impl BenchController {
                     unit: w.unit.into(),
                     single: single.get(&w.id).copied(),
                     multi: multi.get(&w.id).copied(),
+                    value: None,
+                    spread: None,
                 })
                 .collect(),
             device: self.ctx.device.clone(),
-            flags: self.flag_names(),
-            valid: !self.flags.contains(&"compute_error"),
+            flags: self.life.flag_names(&FLAG_ORDER),
+            valid: !self.life.has_flag("compute_error"),
             scaling: scaling(&single, &multi, self.ctx.logical),
-            samples: self.samples.clone(),
+            samples: self.life.samples.clone(),
             app_version: self.ctx.app_version.clone(),
-            load_version: self.load_version.clone(),
+            load_version: self.life.load_version.clone(),
         };
-        self.state = BenchState::Done;
-        self.score_id = Some(file.id.clone());
-        let id = file.id.clone();
-        vec![
-            BenchAction::Save(Box::new(file)),
-            BenchAction::Finished(BenchEnd::Saved(id)),
-        ]
-    }
-
-    fn flag_names(&self) -> Vec<String> {
-        FLAG_ORDER
-            .iter()
-            .filter(|f| self.flags.contains(f))
-            .map(|f| f.to_string())
-            .collect()
+        self.life.end_saved(file)
     }
 
     /// Points of a mode once all its steps are over (DB6), else `None`.
     fn finished_points(&self, mode: BenchMode) -> Option<u32> {
-        let mut own = self
-            .steps
-            .iter()
-            .zip(&self.segments)
-            .filter(|(s, _)| s.mode == mode)
-            .peekable();
-        own.peek()?;
-        if !own.all(|(_, g)| matches!(g, SegmentState::Done | SegmentState::Failed)) {
+        if !group_over(&self.steps, &self.segments, mode) {
             return None;
         }
-        let table = match mode {
-            BenchMode::Single => &self.ctx.baseline.single,
-            BenchMode::Multi => &self.ctx.baseline.multi,
-        };
-        points(&self.medians(mode), table)
+        points(&self.medians(mode), self.ctx.baseline.table(mode)?)
     }
 
     pub fn status(&self) -> BenchStatus {
         BenchStatus {
-            state: self.state,
+            category: "cpu".into(),
+            device_id: None,
+            state: self.life.state,
             step: self.step,
             steps: self.steps.clone(),
             segments: self.segments.clone(),
             live_points: self.live_points,
             single: self.finished_points(BenchMode::Single),
             multi: self.finished_points(BenchMode::Multi),
-            flags: self.flag_names(),
-            score_id: self.score_id.clone(),
-            error: self.error.clone(),
+            compute: None,
+            graphics: None,
+            flags: self.life.flag_names(&FLAG_ORDER),
+            score_id: self.life.score_id.clone(),
+            error: self.life.error.clone(),
         }
     }
 }
@@ -530,6 +428,7 @@ mod tests {
                 model: "CPU".into(),
                 cores: 8,
                 logical: 16,
+                ..Device::default()
             },
             logical: 16,
             tjmax_c: Some(89.0),
@@ -560,6 +459,7 @@ mod tests {
             skipped: None,
             work_ms,
             workers: vec![],
+            rates: vec![],
         })
     }
 
@@ -615,6 +515,7 @@ mod tests {
                 protocol_version: 2,
                 version: "9".into(),
                 isa: vec![],
+                shader_digest: None,
             }),
             clock(10),
         );
@@ -632,6 +533,17 @@ mod tests {
         assert!(f.scaling.is_some());
         assert_eq!(f.kernels.len(), 6);
         assert_eq!(f.load_version.as_deref(), Some("9"));
+        // A CPU file writes `isa` and leaves the GPU fields null (DH11).
+        assert_eq!(f.isa, Some(Isa::Avx2));
+        assert_eq!((f.scores.compute, f.scores.graphics), (None, None));
+        assert!(f
+            .kernels
+            .iter()
+            .all(|k| k.value.is_none() && k.spread.is_none()));
+        assert_eq!(
+            (f.device.device_id.as_ref(), f.shader_digest.as_ref()),
+            (None, None)
+        );
         assert_eq!(
             a.last(),
             Some(&BenchAction::Finished(BenchEnd::Saved(f.id.clone())))

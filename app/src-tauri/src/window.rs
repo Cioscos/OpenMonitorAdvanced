@@ -63,6 +63,9 @@ pub enum PerformancePage {
     /// The CPU benchmark (M8a2): the one in progress, or the last scores.
     #[serde(rename = "score-cpu")]
     ScoreCpu,
+    /// The benchmark of one GPU (M8b2): its `deviceId` is in [`PerformanceNav`].
+    #[serde(rename = "score-gpu")]
+    ScoreGpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,6 +74,9 @@ pub struct PerformanceNav {
     pub page: PerformancePage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The GPU of a `score-gpu` page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 impl PerformanceNav {
@@ -78,6 +84,7 @@ impl PerformanceNav {
         Self {
             page: PerformancePage::Run,
             session_id: None,
+            device_id: None,
         }
     }
 
@@ -85,6 +92,7 @@ impl PerformanceNav {
         Self {
             page: PerformancePage::Quit,
             session_id: None,
+            device_id: None,
         }
     }
 
@@ -92,6 +100,15 @@ impl PerformanceNav {
         Self {
             page: PerformancePage::ScoreCpu,
             session_id: None,
+            device_id: None,
+        }
+    }
+
+    pub fn score_gpu(device_id: &str) -> Self {
+        Self {
+            page: PerformancePage::ScoreGpu,
+            session_id: None,
+            device_id: Some(device_id.to_owned()),
         }
     }
 
@@ -99,6 +116,7 @@ impl PerformanceNav {
         Self {
             page: PerformancePage::Result,
             session_id: Some(session_id.to_owned()),
+            device_id: None,
         }
     }
 }
@@ -612,6 +630,10 @@ mod tests {
                 "0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"
             )),
             r#"{"view":"simple","performance":{"page":"result","sessionId":"0b9f6c1e-7d2a-4c53-9a1e-3f5d8e2b7a10"}}"#
+        );
+        assert_eq!(
+            json(PerformanceNav::score_gpu("gpu/pci-0000:01:00.0")),
+            r#"{"view":"simple","performance":{"page":"score-gpu","deviceId":"gpu/pci-0000:01:00.0"}}"#
         );
     }
 

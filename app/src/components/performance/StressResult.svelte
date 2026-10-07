@@ -134,7 +134,8 @@
   const started = $derived(session ? new Date(session.startedAt).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' }) : '');
 
   const maxAvg = (max: number | null, avg: number | null, format: (v: number | null, l: string) => string) =>
-    t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
+    // Nothing read (an iGPU without a power sensor): one dash.
+    max === null && avg === null ? format(null, locale) : t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
 
   async function start(request: StartRequest) {
     starting = true;

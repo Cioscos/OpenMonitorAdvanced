@@ -273,3 +273,10 @@ test('a GPU result labels the board power, not the CPU package', async () => {
   expect(labels).toContain(t('performance.run.power'));
   expect(labels).not.toContain(t('glossary.packagePower.name'));
 });
+
+test('a fact without readings shows one dash, not max and average dashes', async () => {
+  const s = gpuSession({});
+  await setup({ ...s, stats: { ...s.stats, powerMaxW: null, powerAvgW: null } });
+  const dd = [...document.querySelectorAll('dt')].find((d) => d.textContent === t('performance.run.power'))!.nextElementSibling!;
+  expect(dd.textContent).toBe('—');
+});

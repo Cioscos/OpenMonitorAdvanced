@@ -11,8 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_FLAG_DELETE_ON_CLOSE,
+    FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+    GetVolumeInformationW, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_FLAG_DELETE_ON_CLOSE,
+    WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Diagnostics::Debug::{
     SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
@@ -232,6 +233,47 @@ fn can_create_file(dir: &Path) -> bool {
         .is_ok()
 }
 
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Whether a reparse tag leads somewhere else (R13): a junction or mount point, or a
+/// symbolic link. Cloud-file placeholders (OneDrive…) and other tags stay where they are.
+pub fn is_link_tag(tag: u32) -> bool {
+    matches!(tag, IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK)
+}
+
+/// The reparse tag of `path` as its parent folder lists it, without opening or following
+/// it; `None` when it is not a reparse point or cannot be read.
+fn reparse_tag(path: &Path) -> Option<u32> {
+    // A trailing separator would list the folder's content instead of the folder.
+    let text = path.as_os_str().to_string_lossy();
+    let path = Path::new(text.trim_end_matches(['\\', '/']));
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: valid NUL-terminated path (no wildcards: the caller checks); `data` is a live
+    // out-struct. The search handle is closed below on the success path.
+    let handle = unsafe { FindFirstFileW(&HSTRING::from(path.as_os_str()), &mut data) }.ok()?;
+    // SAFETY: `handle` is the search handle opened above, not used afterwards.
+    unsafe {
+        let _ = FindClose(handle);
+    }
+    (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(data.dwReserved0)
+}
+
+/// Whether `path` or a folder above it (the root aside) is a junction, mount point or
+/// symbolic link (R13). Read from the root down, from each parent's listing: no link is
+/// ever followed, and the walk stops at the first one. A path with wildcards counts as a link.
+pub fn has_link(path: &Path) -> bool {
+    if path.to_string_lossy().contains(['*', '?']) {
+        return true;
+    }
+    let mut chain: Vec<&Path> = path.ancestors().filter(|a| a.parent().is_some()).collect();
+    chain.reverse();
+    chain
+        .into_iter()
+        .any(|a| reparse_tag(a).is_some_and(is_link_tag))
+}
+
 /// Probes a candidate folder (DC6). Writes and deletes one tiny file (`oma-probe-*.tmp`): call
 /// only on a user choice or at test start, never while typing or on a timer.
 pub fn probe_folder(path: &Path) -> FolderProbe {
@@ -285,6 +327,45 @@ mod tests {
         assert!(!is_remote_path(r"C:\x"));
         assert!(!is_remote_path(r"\\?\C:\x"));
         assert!(probe_folder(Path::new("C:\\a\0b")).volume_root.is_none());
+    }
+
+    #[test]
+    fn only_junctions_mount_points_and_symlinks_are_links() {
+        assert!(is_link_tag(0xA000_0003), "junction or mount point");
+        assert!(is_link_tag(0xA000_000C), "symbolic link");
+        // Cloud-file placeholders (OneDrive), dedup and no tag at all stay.
+        for tag in [0x9000_001A, 0x9000_101A, 0x8000_0013, 0] {
+            assert!(!is_link_tag(tag), "{tag:#x}");
+        }
+        assert!(has_link(Path::new(r"C:\x\a*b")));
+        assert!(has_link(Path::new(r"C:\x\a?b")));
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn a_junction_in_the_path_is_a_link() {
+        let base = std::env::temp_dir().join(format!("oma-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (real, link) = (base.join("real"), base.join("link"));
+        std::fs::create_dir_all(real.join("inner")).unwrap();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "mklink /J failed");
+        assert!(!has_link(&real.join("inner")));
+        assert!(has_link(&link));
+        assert!(has_link(&link.join("inner")));
+        let mut trailing = link.into_os_string();
+        trailing.push("\\");
+        assert!(has_link(Path::new(&trailing)));
+        // Removing the junction removes the link, never the target.
+        std::fs::remove_dir(base.join("link")).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

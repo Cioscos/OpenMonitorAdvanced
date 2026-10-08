@@ -844,6 +844,7 @@
   "performance.start.no_gpu": "no suitable GPU",
   "performance.start.gpu_error": "the GPU could not be used (Direct3D error)",
   "performance.start.access_denied": "Windows blocked the write: Controlled folder access or the antivirus protects this folder. Choose another one.",
+  "performance.disk.error.link": "This folder leads to another disk (a link or a mount point): choose the folder on the real disk.",
   "performance.outcome.passed": "Passed",
   "performance.outcome.marginal": "Passed with warnings: errors corrected by the hardware",
   "performance.outcome.errors": "Errors found",

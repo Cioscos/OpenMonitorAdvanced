@@ -247,6 +247,7 @@ impl PerformanceRunner {
     pub fn start_disk_bench(&self, request: DiskBenchRequest) -> Result<String, StartError> {
         let active = self.free_slot()?;
         let target = self.disk_target(&request.folder, request.wake, DiskNeed::Bench)?;
+        self.remember_disk_folder(&target.folder);
         let deps = &self.deps;
         let id = oma_win::overlay_pipe::random_uuid_v4()
             .map_err(|e| StartError::System(e.to_string()))?;

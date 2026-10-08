@@ -196,7 +196,8 @@ fn check_id(id: &str) -> io::Result<()> {
 
 impl PerformanceStore {
     /// Atomic write, then the history is pruned to `KEEP_SESSIONS`. A disk test's
-    /// folder is left out: it may hold the user's name (DC10); the journal keeps it.
+    /// folder is left out, from the request and the plan: it may hold the user's name
+    /// (DC10); the journal keeps it.
     pub fn save(&self, session: &Session) -> io::Result<()> {
         let name = session_file_name(&session.started_at, &session.id);
         if !is_session_file_name(&name) {
@@ -206,8 +207,10 @@ impl PerformanceStore {
             ));
         }
         let mut value = serde_json::to_value(session).map_err(io::Error::other)?;
-        if let Some(folder) = value.pointer_mut("/request/disk/folder") {
-            *folder = serde_json::Value::String(String::new());
+        for at in ["/request/disk/folder", "/plan/disk/dir"] {
+            if let Some(folder) = value.pointer_mut(at) {
+                *folder = serde_json::Value::String(String::new());
+            }
         }
         let json = serde_json::to_vec(&value).map_err(io::Error::other)?;
         write_file(&self.dir().join(&name), &json)?;

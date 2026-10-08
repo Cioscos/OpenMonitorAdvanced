@@ -844,6 +844,7 @@
   "performance.start.no_gpu": "nessuna GPU adatta",
   "performance.start.gpu_error": "la GPU non si è potuta usare (errore di Direct3D)",
   "performance.start.access_denied": "Windows ha bloccato la scrittura: l'accesso controllato alle cartelle o l'antivirus proteggono questa cartella. Scegline un'altra.",
+  "performance.disk.error.link": "Questa cartella porta a un altro disco (collegamento o punto di montaggio): scegli la cartella sul disco vero.",
   "performance.outcome.passed": "Superato",
   "performance.outcome.marginal": "Superato con avvisi: errori corretti dall'hardware",
   "performance.outcome.errors": "Errori trovati",

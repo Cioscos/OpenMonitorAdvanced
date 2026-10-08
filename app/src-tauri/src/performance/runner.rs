@@ -145,6 +145,9 @@ pub trait Machine: Send + Sync {
     fn process_started_at(&self, pid: u32) -> Option<u64>;
     /// `%LOCALAPPDATA%\Temp`, the test folder on the system volume (DC6).
     fn local_temp_dir(&self) -> PathBuf;
+    /// Whether the folder or one above it is a junction, mount point or symbolic link
+    /// (R13), read from the parents' listings without following any.
+    fn has_link(&self, path: &Path) -> bool;
 }
 
 /// The other programs' share of a GPU from its process table rows (DH10): the
@@ -276,6 +279,10 @@ impl Machine for WinMachine {
         std::env::var_os("LOCALAPPDATA")
             .map_or_else(std::env::temp_dir, |d| PathBuf::from(d).join("Temp"))
     }
+
+    fn has_link(&self, path: &Path) -> bool {
+        oma_win::volumes::has_link(path)
+    }
 }
 
 /// The app and its descendants (WebView2, `oma-load`), from one Toolhelp snapshot.
@@ -319,7 +326,8 @@ pub enum StartError {
     Busy,
     Plan(BuildError),
     /// The disk target cannot be used (DC6): `remote`, `not_found`, `not_writable`,
-    /// `no_space` or `standby` (a spun-down HDD, without the user's consent).
+    /// `no_space`, `standby` (a spun-down HDD, without the user's consent) or `link`
+    /// (the folder leads to another place through a junction or a link, R13).
     Disk(&'static str),
     /// The topology, the session id or the thread could not be had.
     System(String),
@@ -725,27 +733,23 @@ impl PerformanceRunner {
             return;
         }
         let m = &self.deps.machine;
-        let (volumes, drives) = (m.volumes(), m.drives());
-        let local = |folder: &str| {
-            if !is_plain_disk_dir(folder) {
-                return None;
-            }
-            let root = root_of(folder)?;
-            let v = volumes
-                .iter()
-                .find(|v| v.root.eq_ignore_ascii_case(&root) && v.drive != DriveKind::Remote)?;
-            Some(self.volume_choice(v, &drives, folder.to_owned()))
-        };
         let sweep = |folder: &str| {
             orphans::sweep(Path::new(folder), |pid| m.process_started_at(pid));
         };
+        // A plain local folder that leads nowhere else (R13); the journal's is swept even
+        // on a sleeping HDD (a crash left files there), so its links are read there too.
         if let Some(folder) = &journal_folder {
-            if local(folder).is_some() {
+            let ok = self
+                .disk_volume(folder)
+                .and_then(|c| self.check_link(&c))
+                .is_ok();
+            if ok {
                 sweep(folder);
             }
         }
         if let Some(folder) = last.filter(|f| Some(f) != journal_folder.as_ref()) {
-            if local(&folder).is_some_and(|c| c.solid) {
+            // Solid state only: a rotational disk is never touched, not even for its links.
+            if self.disk_volume(&folder).is_ok_and(|c| c.solid) {
                 sweep(&folder);
             }
         }
@@ -816,7 +820,30 @@ impl PerformanceRunner {
         if v.drive == DriveKind::Remote {
             return Err(StartError::Disk("remote"));
         }
-        Ok(self.volume_choice(&v, &m.drives(), folder.to_owned()))
+        let c = self.volume_choice(&v, &m.drives(), folder.to_owned());
+        // The links are read from the folders' listings: not on a sleeping HDD before the
+        // user agrees to wake it (`disk_target` reads them then).
+        if !c.standby {
+            self.check_link(&c)?;
+        }
+        Ok(c)
+    }
+
+    /// `link` when the folder leads to another place (R13): the volume, the disk, its
+    /// standby and its sensors would all be another disk's.
+    fn check_link(&self, c: &VolumeChoice) -> Result<(), StartError> {
+        if self.deps.machine.has_link(Path::new(&c.folder)) {
+            return Err(StartError::Disk("link"));
+        }
+        Ok(())
+    }
+
+    /// `performance.diskFolder` (DC15), once the test is sure to start.
+    pub(super) fn remember_disk_folder(&self, folder: &str) {
+        let folder = folder.to_owned();
+        self.deps
+            .settings
+            .update_with(|s| s.performance.disk_folder = Some(folder));
     }
 
     /// Probes the folder (one tiny file, DC6) into `c`: free space, sync attributes.
@@ -850,8 +877,8 @@ impl PerformanceRunner {
     }
 
     /// The target of a disk test about to start (DC6, DC11): a spun-down HDD only with
-    /// `wake`, then the orphaned files of the folder go, then the probe and the space.
-    /// The folder is remembered in `performance.diskFolder` (DC15).
+    /// `wake`, then the links (R13), the orphaned files of the folder, the probe and
+    /// the space. The caller remembers the folder once its plan is built.
     pub(super) fn disk_target(
         &self,
         folder: &str,
@@ -861,6 +888,9 @@ impl PerformanceRunner {
         let mut c = self.disk_volume(folder)?;
         if c.standby && !wake {
             return Err(StartError::Disk("standby"));
+        }
+        if c.standby {
+            self.check_link(&c)?;
         }
         let m = &self.deps.machine;
         orphans::sweep(Path::new(&c.folder), |pid| m.process_started_at(pid));
@@ -874,10 +904,6 @@ impl PerformanceRunner {
         if !enough {
             return Err(StartError::Disk("no_space"));
         }
-        let folder = c.folder.clone();
-        self.deps
-            .settings
-            .update_with(|s| s.performance.disk_folder = Some(folder));
         Ok(c)
     }
 
@@ -1026,6 +1052,9 @@ impl PerformanceRunner {
             _ => None,
         };
         let (topology, plan, adapter) = self.plan(&request, seed, target.as_ref())?;
+        if let Some(c) = &target {
+            self.remember_disk_folder(&c.folder);
+        }
         let perf = self.deps.settings.snapshot().performance.clone();
         let gpu = adapter.is_some();
         let disk_id = target
@@ -1543,7 +1572,14 @@ pub(crate) mod tests {
         assert_eq!(wire(BuildError::NoGpu), "build:no_gpu");
         assert_eq!(wire(BuildError::NoDisk), "build:no_disk");
         assert_eq!(wire(BuildError::NoSpace), "build:no_space");
-        for code in ["remote", "not_found", "not_writable", "no_space", "standby"] {
+        for code in [
+            "remote",
+            "not_found",
+            "not_writable",
+            "no_space",
+            "standby",
+            "link",
+        ] {
             assert_eq!(StartError::Disk(code).wire(), format!("disk:{code}"));
         }
         assert_eq!(StartError::Busy.wire(), "busy");
@@ -1612,6 +1648,8 @@ pub(crate) mod tests {
         /// Live processes and their start times.
         pub(crate) started: Vec<(u32, u64)>,
         pub(crate) temp: PathBuf,
+        /// Every folder is behind a junction (R13).
+        pub(crate) linked: bool,
     }
 
     impl Machine for FakeMachine {
@@ -1706,6 +1744,9 @@ pub(crate) mod tests {
         }
         fn local_temp_dir(&self) -> PathBuf {
             self.temp.clone()
+        }
+        fn has_link(&self, _path: &Path) -> bool {
+            self.linked
         }
     }
 
@@ -2314,6 +2355,9 @@ pub(crate) mod tests {
             fn local_temp_dir(&self) -> PathBuf {
                 self.0.local_temp_dir()
             }
+            fn has_link(&self, path: &Path) -> bool {
+                self.0.has_link(path)
+            }
         }
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         let dir = TempDir::new("baseline");
@@ -2862,10 +2906,29 @@ pub(crate) mod tests {
         assert_eq!(d.kind, "nvme");
         assert_eq!(d.file_bytes, 8 * GIB);
         let target = s.plan.disk.unwrap();
-        assert_eq!(target.dir, folder.to_string_lossy());
         assert_eq!(target.reserve_bytes, 50 * GIB);
-        // The folder is not saved in the session (DC10).
+        // The folder is not saved in the session (DC10), neither in the request nor in the plan.
         assert_eq!(s.request.disk.unwrap().folder, "");
+        assert_eq!(target.dir, "");
+        let dir = rig._dir.0.join("stress");
+        let name = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let raw = std::fs::read_to_string(name).unwrap();
+        let unique = rig
+            ._dir
+            .0
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !raw.contains(&unique),
+            "the folder leaked into the file: {raw}"
+        );
     }
 
     #[test]
@@ -2878,8 +2941,10 @@ pub(crate) mod tests {
         let probes = Arc::clone(&machine.probes);
         let rig = rig_on("standby", scripted(passed_script()), machine);
         let folder = rig.disk_dir();
+        let orphan = plant_orphan(&folder);
         let err = rig.runner.start(disk_request(&folder, false)).unwrap_err();
         assert_eq!(err.wire(), "disk:standby");
+        assert!(orphan.exists(), "no sweep before the consent");
         let bench = super::super::bench::DiskBenchRequest {
             folder: folder.to_string_lossy().into_owned(),
             profile: oma_core::scores::DiskProfile::B1,
@@ -2898,8 +2963,13 @@ pub(crate) mod tests {
             "never probed while asleep"
         );
         assert!(rig.runner.store().list().is_empty());
+        assert_eq!(
+            rig.runner.deps.settings.snapshot().performance.disk_folder,
+            None
+        );
         // With consent the test starts.
         rig.runner.start(disk_request(&folder, true)).unwrap();
+        assert!(!orphan.exists());
         wait_idle(&rig.runner);
         assert_eq!(only_session(&rig.runner).outcome, Some(Outcome::Passed));
         assert_eq!(probes.lock().unwrap().len(), 1);
@@ -3172,5 +3242,75 @@ pub(crate) mod tests {
         rig.runner.start(disk_request(&folder, false)).unwrap();
         assert!(!orphan.exists());
         wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn preview_of_a_disk_request_never_probes() {
+        let machine = disk_machine();
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("diskpreview", scripted(Script::default()), machine);
+        let folder = rig.disk_dir();
+        let orphan = plant_orphan(&folder);
+        let plan = rig.runner.preview(&disk_request(&folder, false)).unwrap();
+        assert_eq!(plan.disk.unwrap().dir, folder.to_string_lossy());
+        assert!(probes.lock().unwrap().is_empty(), "the probe writes a file");
+        assert!(orphan.exists(), "a preview sweeps nothing");
+        assert_eq!(
+            rig.runner.deps.settings.snapshot().performance.disk_folder,
+            None
+        );
+    }
+
+    #[test]
+    fn a_linked_folder_is_refused() {
+        let machine = FakeMachine {
+            linked: true,
+            ..disk_machine()
+        };
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("disklink", scripted(passed_script()), machine);
+        let folder = rig.disk_dir();
+        let text = folder.to_string_lossy().into_owned();
+        let orphan = plant_orphan(&folder);
+        let wire = |r: Result<(), StartError>| r.unwrap_err().wire();
+        assert_eq!(wire(rig.runner.disk_probe(&text).map(drop)), "disk:link");
+        assert_eq!(
+            wire(rig.runner.preview(&disk_request(&folder, false)).map(drop)),
+            "disk:link"
+        );
+        assert_eq!(
+            wire(rig.runner.start(disk_request(&folder, false)).map(drop)),
+            "disk:link"
+        );
+        let bench = super::super::bench::DiskBenchRequest {
+            folder: text.clone(),
+            profile: oma_core::scores::DiskProfile::B1,
+            compressible: false,
+            wake: false,
+        };
+        assert_eq!(
+            wire(rig.runner.start_disk_bench(bench).map(drop)),
+            "disk:link"
+        );
+        assert!(probes.lock().unwrap().is_empty());
+        assert!(orphan.exists(), "nothing behind a link is swept");
+        // Nor at startup, from the journal or the last folder.
+        rig.runner
+            .store()
+            .write_journal(&oma_core::load::Journal {
+                format: 1,
+                session_id: "00000000-0000-4000-8000-000000000002".into(),
+                plan_summary: "disk".into(),
+                phase_index: 0,
+                kernel: None,
+                core: None,
+                updated_at: "2026-10-08T10:00:00Z".into(),
+                clean_end: false,
+                disk_folder: Some(text.clone()),
+            })
+            .unwrap();
+        rig.runner.remember_disk_folder(&text);
+        rig.runner.recover_now();
+        assert!(orphan.exists());
     }
 }

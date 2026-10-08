@@ -14,8 +14,10 @@
 //! with `Some(false)` and ends the run `Failed` with [`EXIT_IO`].
 
 use std::any::Any;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,6 +33,7 @@ use super::hist::Histogram;
 use super::offsets::{IoPicker, IoReq};
 use super::slc::SlcDetector;
 use super::stress::Stress;
+use super::verify::{self, Armed, Pass, PassSource};
 use crate::args::Inject;
 use crate::link::{EXIT_IO, EXIT_OK};
 use crate::rng::{phase_seed, Xoshiro256ss};
@@ -165,7 +168,7 @@ pub fn run_disk_with(
         plan,
         out,
         stop,
-        _inject: inject,
+        inject,
         hooks,
         start: now,
         phase: 0,
@@ -186,8 +189,8 @@ pub fn run_disk_with(
     }
     // Creating the file can wait for a disk to spin up.
     let opened = run.heartbeat(0, || (hooks.open)(target, None, target.file_bytes, false));
-    let file = match opened {
-        Ok(file) => file,
+    let file: Rc<dyn DataFileApi> = match opened {
+        Ok(file) => file.into(),
         Err(e) => return run.fatal(Fatal::from_open(e)),
     };
     run.notice("file_bytes", Some(file.bytes()));
@@ -196,7 +199,7 @@ pub fn run_disk_with(
             return run.end(FinishReason::Stopped);
         }
         run.phase = index as u32;
-        match run.run_phase(&*file, spec) {
+        match run.run_phase(&file, spec) {
             Ok(End::Stopped) => return run.end(FinishReason::Stopped),
             Ok(End::Done | End::Skipped) => {}
             Err(fatal) => return run.fatal(fatal),
@@ -214,6 +217,8 @@ const HEARTBEAT: Duration = Duration::from_millis(900);
 const SLICE: Duration = Duration::from_millis(2);
 /// The write-speed sampling of N2 (DC8).
 const SLC_SAMPLE: Duration = Duration::from_millis(500);
+/// The longest real sleep of a worker held back by its rate limit with nothing in flight.
+const THROTTLE_SLEEP: Duration = Duration::from_millis(1);
 /// The completion wait of a worker (DC3).
 const WAIT_MS: u32 = 100;
 /// The longest time (on the engine clock) a worker waits for its I/Os in flight after the
@@ -233,7 +238,7 @@ enum End {
 
 /// What ends a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fatal {
+pub enum Fatal {
     /// The volume is full (or would pass the reserve).
     Full,
     /// The folder refuses our files.
@@ -243,7 +248,7 @@ enum Fatal {
 }
 
 impl Fatal {
-    fn from_open(e: DiskError) -> Fatal {
+    pub fn from_open(e: DiskError) -> Fatal {
         match e {
             DiskError::Full => Fatal::Full,
             DiskError::AccessDenied => Fatal::Denied,
@@ -293,8 +298,8 @@ struct Run<'r> {
     plan: &'r Plan,
     out: &'r (dyn Fn(LoadMessage) + Sync),
     stop: &'r AtomicBool,
-    /// The fault injection of the verified loads (C6).
-    _inject: Option<Inject>,
+    /// The fault injection of the verified loads (DC9).
+    inject: Option<Inject>,
     hooks: &'r DiskHooks<'r>,
     start: Instant,
     phase: u32,
@@ -477,7 +482,7 @@ impl Run<'_> {
         }
     }
 
-    fn run_phase(&mut self, file: &dyn DataFileApi, spec: &Phase) -> Result<End, Fatal> {
+    fn run_phase(&mut self, file: &Rc<dyn DataFileApi>, spec: &Phase) -> Result<End, Fatal> {
         // `validate` gives every disk phase a job.
         let Some(job) = spec.disk.as_ref() else {
             return Ok(self.skip("unsupported"));
@@ -497,6 +502,13 @@ impl Run<'_> {
             return Ok(self.skip("unsupported"));
         }
         let seed = phase_seed(self.plan.seed, self.phase);
+        let duration = Duration::from_secs(spec.duration_s.into());
+        // The injected fault goes to the first block checked of the phase it names (DC9).
+        let armed: Armed = self
+            .inject
+            .as_ref()
+            .filter(|i| i.kernel == spec.kernel)
+            .map(|_| Arc::new(AtomicBool::new(true)));
         let ctx = LoadCtx {
             kernel: spec.kernel,
             job,
@@ -504,29 +516,46 @@ impl Run<'_> {
             seed,
             session: self.plan.seed,
             compressible: self.plan.disk.as_ref().is_some_and(|d| d.compressible),
+            armed: armed.clone(),
         };
-        let mut loads = Vec::with_capacity(usize::from(job.threads));
-        for t in 0..job.threads {
-            match worker_load(&ctx, t) {
-                Some(load) => loads.push(load),
+        let verified = matches!(
+            spec.kernel,
+            KernelId::V1 | KernelId::V2 | KernelId::V3 | KernelId::V4
+        );
+        let mut passes: Box<dyn PassSource + '_> = if verified {
+            let env = verify::VerifyEnv {
+                hooks: self.hooks,
+                target: self.plan.disk.as_ref().expect("checked by run_disk_with"),
+                main: Rc::clone(file),
+                session: ctx.session,
+                compressible: ctx.compressible,
+                seed,
+                armed,
+                duration,
+            };
+            match verify::source(spec.kernel, job, env) {
+                Some(source) => source,
                 None => return Ok(self.skip("unsupported")),
             }
-        }
-        if spec.pause_before_ms > 0 && !self.pause(spec.pause_before_ms) {
-            return Ok(End::Stopped);
-        }
-        let mut queues = Vec::with_capacity(loads.len());
-        for _ in 0..loads.len() {
-            match (self.hooks.queue)(file, job) {
-                Ok(q) => queues.push(q),
-                Err(DiskError::Full) => return Err(Fatal::Full),
-                Err(e) => {
-                    return Err(Fatal::Io {
-                        iteration: 0,
-                        code: code_of(e),
-                    })
+        } else {
+            let mut loads = Vec::with_capacity(usize::from(job.threads));
+            for t in 0..job.threads {
+                match worker_load(&ctx, t) {
+                    Some(load) => loads.push(load),
+                    None => return Ok(self.skip("unsupported")),
                 }
             }
+            // `disk_fill` writes the whole file: its duration does not cut it (a partial fill
+            // leaves regions that read back as zeros without touching the media).
+            Box::new(OnePass(Some(Pass {
+                file: Rc::clone(file),
+                job: job.clone(),
+                loads,
+                limit: (spec.kernel != KernelId::DiskFill).then_some(duration),
+            })))
+        };
+        if spec.pause_before_ms > 0 && !self.pause(spec.pause_before_ms) {
+            return Ok(End::Stopped);
         }
         let shared = Shared {
             phase: self.phase,
@@ -535,7 +564,11 @@ impl Run<'_> {
             clock: self.hooks.clock,
             out: self.out,
             halt: AtomicBool::new(false),
-            write_left: AtomicU64::new(job.write_cap_bytes.unwrap_or(u64::MAX)),
+            // The verified loads size their own writes.
+            write_left: AtomicU64::new(match job.write_cap_bytes {
+                Some(cap) if !verified => cap,
+                _ => u64::MAX,
+            }),
             fatal: Mutex::new(None),
             read_bytes: AtomicU64::new(0),
             write_bytes: AtomicU64::new(0),
@@ -546,53 +579,88 @@ impl Run<'_> {
         };
         // The phase clock starts at the first submissions, after the pause.
         let phase_start = self.now();
-        let duration = Duration::from_secs(spec.duration_s.into());
         // N2 only: the write speed every `SLC_SAMPLE`, to find the SLC cache cliff (DC8).
         let mut slc = (spec.kernel == KernelId::N2).then(SlcDetector::new);
         let mut sampled = (phase_start, 0u64);
-        let ends = thread::scope(|s| {
-            let handles: Vec<_> = queues
-                .into_iter()
-                .zip(loads)
-                .map(|(q, load)| {
-                    let shared = &shared;
-                    s.spawn(move || worker(shared, q, load))
-                })
-                .collect();
-            let mut meter = Meter {
-                at: phase_start,
-                read: 0,
-                written: 0,
-                ios: 0,
-            };
-            while !handles.iter().all(|h| h.is_finished()) {
-                thread::sleep(SLICE);
-                let now = self.now();
-                // `disk_fill` writes the whole file: its duration does not cut it (a partial fill
-                // leaves regions that read back as zeros without touching the media).
-                let timed_out = spec.kernel != KernelId::DiskFill && now - phase_start >= duration;
-                if self.stop.load(Ordering::Relaxed) || timed_out {
-                    shared.halt.store(true, Ordering::Relaxed);
+        let mut meter = Meter {
+            at: phase_start,
+            read: 0,
+            written: 0,
+            ios: 0,
+        };
+        let mut ends = Vec::new();
+        while !self.stop.load(Ordering::Relaxed) && !shared.has_fatal() {
+            // Opening a file or flushing can take long: the heartbeat keeps the app told.
+            let elapsed = self.now() - phase_start;
+            let next = self.heartbeat(self.phase, || passes.next(elapsed));
+            let pass = match next {
+                Ok(Some(pass)) => pass,
+                Ok(None) => break,
+                Err(fatal) => {
+                    shared.set_fatal(fatal);
+                    break;
                 }
-                if let Some(d) = slc.as_mut().filter(|_| now - sampled.0 >= SLC_SAMPLE) {
-                    let (_, w, _) = shared.counters();
-                    let bps = (w - sampled.1) as f64 / (now - sampled.0).as_secs_f64();
-                    sampled = (now, w);
-                    if let Some(at) = d.sample(bps, w, ms(now - phase_start)) {
-                        self.notice("slc_cliff", Some(at));
+            };
+            let mut queues = Vec::with_capacity(pass.loads.len());
+            for _ in 0..pass.loads.len() {
+                match (self.hooks.queue)(&*pass.file, &pass.job) {
+                    Ok(q) => queues.push(q),
+                    Err(e) => {
+                        shared.set_fatal(match e {
+                            DiskError::Full => Fatal::Full,
+                            e => Fatal::Io {
+                                iteration: 0,
+                                code: code_of(e),
+                            },
+                        });
+                        break;
                     }
                 }
-                if now - meter.at >= PROGRESS_EVERY {
-                    self.live_checks = shared.checks.load(Ordering::Relaxed);
-                    let (r, w, n) = shared.counters();
-                    self.progress(now - phase_start, Some((&mut meter, r, w, n)));
-                }
             }
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
-                .collect::<Vec<_>>()
-        });
+            if shared.has_fatal() {
+                break;
+            }
+            shared.halt.store(false, Ordering::Relaxed);
+            let pass_start = self.now();
+            let pass_ends = thread::scope(|s| {
+                let handles: Vec<_> = queues
+                    .into_iter()
+                    .zip(pass.loads)
+                    .map(|(q, load)| {
+                        let shared = &shared;
+                        s.spawn(move || worker(shared, q, load))
+                    })
+                    .collect();
+                while !handles.iter().all(|h| h.is_finished()) {
+                    thread::sleep(SLICE);
+                    let now = self.now();
+                    let timed_out = pass.limit.is_some_and(|l| now - pass_start >= l);
+                    if self.stop.load(Ordering::Relaxed) || timed_out {
+                        shared.halt.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(d) = slc.as_mut().filter(|_| now - sampled.0 >= SLC_SAMPLE) {
+                        let (_, w, _) = shared.counters();
+                        let bps = (w - sampled.1) as f64 / (now - sampled.0).as_secs_f64();
+                        sampled = (now, w);
+                        if let Some(at) = d.sample(bps, w, ms(now - phase_start)) {
+                            self.notice("slc_cliff", Some(at));
+                        }
+                    }
+                    if now - meter.at >= PROGRESS_EVERY {
+                        self.live_checks = shared.checks.load(Ordering::Relaxed);
+                        let (r, w, n) = shared.counters();
+                        self.progress(now - phase_start, Some((&mut meter, r, w, n)));
+                    }
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+                    .collect::<Vec<_>>()
+            });
+            ends.extend(pass_ends);
+        }
+        // The files close (and the system deletes them) here, before the totals.
+        drop(passes);
         let phase_errors = shared.errors.load(Ordering::Relaxed);
         let phase_checks = shared.checks.load(Ordering::Relaxed);
         self.errors += phase_errors;
@@ -624,6 +692,15 @@ impl Run<'_> {
         } else {
             End::Done
         })
+    }
+}
+
+/// A phase of one pass: the loads of the benchmark and of N1-N4.
+struct OnePass(Option<Pass>);
+
+impl PassSource for OnePass {
+    fn next(&mut self, _elapsed: Duration) -> Result<Option<Pass>, Fatal> {
+        Ok(self.0.take())
     }
 }
 
@@ -762,6 +839,8 @@ pub struct LoadCtx<'a> {
     /// The block session (`plan.seed`, DC3).
     pub session: u64,
     pub compressible: bool,
+    /// The injected fault of this phase's kernel, if any (DC9).
+    pub armed: Armed,
 }
 
 /// What one worker submits in a phase. `next` gives `None` when the worker's work is done;
@@ -771,6 +850,11 @@ pub trait WorkerLoad: Send {
     fn init(&mut self, _q: &mut dyn IoQueue) {}
     fn next(&mut self) -> Option<IoReq>;
     fn prepare(&mut self, _req: &IoReq, _buf: &mut [u8]) {}
+    /// How long the load wants to wait before its next I/O at `now` (a rate limit), `None`
+    /// to go on. Called before every `next`.
+    fn throttle(&mut self, _now: Instant) -> Option<Duration> {
+        None
+    }
     /// Verifies a read just completed (`buf` is the `req.len` bytes read): appends each bad
     /// 4 KiB block (its index and fault) to `faults` and returns the blocks checked.
     fn check_read(&mut self, _req: &IoReq, _buf: &[u8], _faults: &mut Vec<Fault>) -> u64 {
@@ -920,9 +1004,14 @@ fn worker(sh: &Shared<'_>, mut q: Box<dyn IoQueue>, mut load: Box<dyn WorkerLoad
     let mut halted_at: Option<Instant> = None;
     loop {
         let halted = sh.halt.load(Ordering::Relaxed);
+        let mut throttled = None;
         if !halted && !exhausted {
             while let Some(&slot) = w.idle.last() {
                 if sh.halt.load(Ordering::Relaxed) {
+                    break;
+                }
+                throttled = load.throttle((sh.clock)());
+                if throttled.is_some() {
                     break;
                 }
                 let Some(req) = load.next() else {
@@ -954,6 +1043,9 @@ fn worker(sh: &Shared<'_>, mut q: Box<dyn IoQueue>, mut load: Box<dyn WorkerLoad
         if w.in_flight == 0 {
             if halted || exhausted || sh.halt.load(Ordering::Relaxed) {
                 break;
+            }
+            if let Some(wait) = throttled {
+                thread::sleep(wait.min(THROTTLE_SLEEP));
             }
             continue;
         }

@@ -20,24 +20,24 @@ use super::file::DiskError;
 use super::offsets::IoReq;
 use crate::link::{EXIT_IO, EXIT_OK};
 
-const MIB: u64 = 1 << 20;
-const SEED: u64 = 0xD15C;
+pub(super) const MIB: u64 = 1 << 20;
+pub(super) const SEED: u64 = 0xD15C;
 
 #[derive(Clone, Copy)]
-struct Clock {
+pub(super) struct Clock {
     base: Instant,
     speed: u32,
 }
 
 impl Clock {
-    fn new(speed: u32) -> Self {
+    pub(super) fn new(speed: u32) -> Self {
         Self {
             base: Instant::now(),
             speed,
         }
     }
 
-    fn now(&self) -> Instant {
+    pub(super) fn now(&self) -> Instant {
         self.base + (Instant::now() - self.base) * self.speed
     }
 }
@@ -263,7 +263,7 @@ impl Ran {
     }
 }
 
-fn job(block: u32, seq: u32, random: u8, read: u8, queue: u16, threads: u16) -> DiskJob {
+pub(super) fn job(block: u32, seq: u32, random: u8, read: u8, queue: u16, threads: u16) -> DiskJob {
     DiskJob {
         block_bytes: block,
         seq_block_bytes: seq,
@@ -277,7 +277,7 @@ fn job(block: u32, seq: u32, random: u8, read: u8, queue: u16, threads: u16) -> 
     }
 }
 
-fn phase(kernel: KernelId, duration_s: u32, job: DiskJob) -> Phase {
+pub(super) fn phase(kernel: KernelId, duration_s: u32, job: DiskJob) -> Phase {
     Phase {
         kernel,
         alt_kernel: None,
@@ -298,7 +298,7 @@ fn phase(kernel: KernelId, duration_s: u32, job: DiskJob) -> Phase {
     }
 }
 
-fn plan(file_bytes: u64, phases: Vec<Phase>) -> Plan {
+pub(super) fn plan(file_bytes: u64, phases: Vec<Phase>) -> Plan {
     Plan {
         seed: SEED,
         ram_bytes: 0,

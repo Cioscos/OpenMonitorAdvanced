@@ -3,15 +3,17 @@
 //! every block read is verified against the same (DC9), so what an earlier pass or the fill
 //! wrote must read back as it was.
 
-use oma_core::disk_block::{check_block, write_block, BLOCK_BYTES};
+use oma_core::disk_block::{write_block, BLOCK_BYTES};
 
 use super::engine::{Fault, LoadCtx, WorkerLoad};
 use super::offsets::{IoPicker, IoReq};
+use super::verify::{check_armed, Armed};
 
 pub struct Stress {
     picker: IoPicker,
     session: u64,
     compressible: bool,
+    armed: Armed,
 }
 
 impl Stress {
@@ -20,6 +22,7 @@ impl Stress {
             picker: IoPicker::new(ctx.job, ctx.file_bytes, t, ctx.seed),
             session: ctx.session,
             compressible: ctx.compressible,
+            armed: ctx.armed.clone(),
         }
     }
 }
@@ -41,7 +44,7 @@ impl WorkerLoad for Stress {
         let mut checked = 0;
         for (i, block) in buf.chunks_exact(BLOCK_BYTES).enumerate() {
             let index = first + i as u64;
-            if let Err(fault) = check_block(block, self.session, index, 1) {
+            if let Err(fault) = check_armed(block, &self.armed, self.session, index, 1) {
                 faults.push((index, fault));
             }
             checked += 1;

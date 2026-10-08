@@ -76,6 +76,11 @@ fn parse_inject(value: &str) -> Result<Inject, ArgsError> {
         "s2" => KernelId::S2,
         "s4" => KernelId::S4,
         "s6" => KernelId::S6,
+        "n3" => KernelId::N3,
+        "v1" => KernelId::V1,
+        "v2" => KernelId::V2,
+        "v3" => KernelId::V3,
+        "v4" => KernelId::V4,
         _ => return Err(bad()),
     };
     Ok(Inject { kernel, core })
@@ -163,6 +168,29 @@ mod tests {
         );
         assert!(with("k6").is_err());
         assert!(with("k1:x").is_err());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn parse_inject_accepts_disk_kernels() {
+        for (arg, kernel) in [
+            ("n3", KernelId::N3),
+            ("v1", KernelId::V1),
+            ("v2", KernelId::V2),
+            ("v3", KernelId::V3),
+            ("v4", KernelId::V4),
+        ] {
+            let args = [
+                "--pipe".to_owned(),
+                name(),
+                "--inject-fault".to_owned(),
+                arg.to_owned(),
+            ];
+            assert_eq!(
+                parse_args(&args).unwrap().inject,
+                Some(Inject { kernel, core: None })
+            );
+        }
     }
 
     #[cfg(not(debug_assertions))]

@@ -14,3 +14,6 @@ pub mod slc;
 pub mod stress;
 #[cfg(test)]
 mod tests;
+pub mod verify;
+#[cfg(test)]
+mod verify_tests;

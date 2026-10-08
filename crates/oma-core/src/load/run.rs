@@ -255,6 +255,8 @@ pub struct RunController {
     disk_status: Option<DiskStatus>,
     /// The last sample hot enough to explain an SLC cliff (DC8).
     hot_at: Option<u64>,
+    /// Disk runs: when the current phase began, from the latest `Progress`.
+    phase_start: Option<u64>,
 }
 
 fn rfc3339(wall_ms: i64) -> String {
@@ -320,6 +322,7 @@ impl RunController {
             io_failed: false,
             disk_status: None,
             hot_at: None,
+            phase_start: None,
             config,
         };
         if c.is_disk() {
@@ -648,6 +651,7 @@ impl RunController {
                     }
                 }
                 self.phase = p.phase;
+                self.phase_start = Some(self.mono.saturating_sub(p.phase_elapsed_ms));
                 self.current_core = p.current_core;
                 self.checks = p.checks;
                 if let Some(d) = &p.disk {
@@ -1012,8 +1016,19 @@ impl RunController {
                     KernelId::DiskFill | KernelId::V1 | KernelId::V2 | KernelId::V3 | KernelId::V4
                 )
             });
-        let overrun = !soft
-            && self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS;
+        // Disk phases differ in length (a fill can run far past its time): each strict one
+        // is measured from its own start, not from the plan's.
+        let limit = match self.session.plan.phases.get(self.phase as usize) {
+            Some(p) if self.is_disk() => {
+                let from = self.phase_start.unwrap_or(self.start_mono);
+                self.mono.saturating_sub(from)
+                    > u64::from(p.duration_s) * 1000 + u64::from(p.pause_before_ms) + OVERRUN_MS
+            }
+            _ => {
+                self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS
+            }
+        };
+        let overrun = !soft && limit;
         if self.state == RunState::Running
             && (overrun || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
         {
@@ -2760,6 +2775,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(j.disk_folder.as_deref(), Some("D:\\oma"));
+    }
+
+    fn disk_two_phase_ctl(first: KernelId, second: KernelId) -> RunController {
+        let mut c = disk_ctl_with(false, first);
+        let mut p2 = c.session.plan.phases[0].clone();
+        p2.kernel = second;
+        c.session.plan.phases.push(p2);
+        c
+    }
+
+    fn disk_progress_in(phase: u32, in_phase: u64) -> LoadMessage {
+        let LoadMessage::Progress(mut p) = disk_progress(0, 0, 5, 0.0, 5.0) else {
+            unreachable!()
+        };
+        p.phase = phase;
+        p.phase_elapsed_ms = in_phase;
+        LoadMessage::Progress(p)
+    }
+
+    #[test]
+    fn a_strict_disk_phase_is_timed_from_its_own_start() {
+        // A fill 2000 s past its time, then an N1 phase (60 s) on time: not hung.
+        let fill_end = 60_000 + 2_000_000;
+        let mut c = disk_two_phase_ctl(KernelId::DiskFill, KernelId::N1);
+        c.on_load(&disk_progress_in(0, 1000), clock(1000));
+        c.on_load(&disk_progress_in(0, fill_end), clock(fill_end));
+        c.on_load(&disk_progress_in(1, 1000), clock(fill_end + 1000));
+        let t = fill_end + 30_000;
+        c.on_load(&disk_progress_in(1, 30_000), clock(t));
+        assert!(!c.on_clock(clock(t)).contains(&Action::Kill));
+        // The same phase overrunning its own duration is hung.
+        let t = fill_end + 60_000 + OVERRUN_MS + 5_000;
+        c.on_load(&disk_progress_in(1, t - fill_end), clock(t));
+        assert!(c.on_clock(clock(t)).contains(&Action::Kill));
+        assert!(c.hung);
     }
 
     #[test]

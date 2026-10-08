@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: sensor reads, statistics and session, reading the disk power states, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders, the CSV log commands, opening and choosing the log folder, suspending the log hotkeys while one is captured, checking for updates and opening the page of the available release, and exporting the anonymous sensor report and opening the folder of the last one; opening the overlay editor; the benchmark capture and its history (list, open the CSV or the folder, delete); the stress test (system facts, plan preview, start, stop, status, history, a session, delete, export, stop and quit); the CPU and GPU benchmarks (start, stop, status, the scores, a score, delete, whether the scales are provisional).",
+  "description": "Main window: sensor reads, statistics and session, reading the disk power states, the health report, rule status and built-in rules, event subscriptions, leaving GPU safe mode, the settings, the About page and opening its fixed folders, the CSV log commands, opening and choosing the log folder, suspending the log hotkeys while one is captured, checking for updates and opening the page of the available release, and exporting the anonymous sensor report and opening the folder of the last one; opening the overlay editor; the benchmark capture and its history (list, open the CSV or the folder, delete); the stress test (system facts, plan preview, start, stop, status, history, a session, delete, export, stop and quit); the CPU, GPU and disk benchmarks (start, stop, status, the scores, a score, delete, whether the scales are provisional); the disk test target (probe a folder, choose a folder).",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
@@ -65,6 +65,9 @@
     "allow-performance-quit-confirmed",
     "allow-performance-bench-start",
     "allow-performance-gpu-bench-start",
+    "allow-performance-disk-bench-start",
+    "allow-performance-disk-probe",
+    "allow-performance-disk-pick",
     "allow-performance-bench-stop",
     "allow-performance-bench-status",
     "allow-performance-scores",

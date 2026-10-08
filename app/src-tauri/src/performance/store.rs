@@ -14,9 +14,9 @@ use std::sync::Mutex;
 
 use oma_core::load::{
     decide, is_session_file_name, is_session_id, parse_journal, parse_session, prune,
-    session_file_name, summary, Component, FormatError, Journal, Objective, OutcomeDetail,
-    OutcomeFacts, Preset, Session, SessionEvent, SessionSummary, StartRequest, KEEP_SESSIONS,
-    MAX_ERRORS,
+    session_file_name, summary, Component, DiskStart, FormatError, Journal, Objective,
+    OutcomeDetail, OutcomeFacts, Preset, Session, SessionEvent, SessionSummary, StartRequest,
+    KEEP_SESSIONS, MAX_ERRORS,
 };
 use oma_core::scores::{parse_score, score_file_name, ScoreFile, ScoreSummary};
 use oma_ipc::load::Plan;
@@ -195,7 +195,9 @@ fn check_id(id: &str) -> io::Result<()> {
 }
 
 impl PerformanceStore {
-    /// Atomic write, then the history is pruned to `KEEP_SESSIONS`.
+    /// Atomic write, then the history is pruned to `KEEP_SESSIONS`. A disk test's
+    /// folder is left out, from the request and the plan: it may hold the user's name
+    /// (DC10); the journal keeps it.
     pub fn save(&self, session: &Session) -> io::Result<()> {
         let name = session_file_name(&session.started_at, &session.id);
         if !is_session_file_name(&name) {
@@ -204,7 +206,13 @@ impl PerformanceStore {
                 "session id or start time out of form",
             ));
         }
-        let json = serde_json::to_vec(session).map_err(io::Error::other)?;
+        let mut value = serde_json::to_value(session).map_err(io::Error::other)?;
+        for at in ["/request/disk/folder", "/plan/disk/dir"] {
+            if let Some(folder) = value.pointer_mut(at) {
+                *folder = serde_json::Value::String(String::new());
+            }
+        }
+        let json = serde_json::to_vec(&value).map_err(io::Error::other)?;
         write_file(&self.dir().join(&name), &json)?;
         self.prune_keeping(Some(&name));
         Ok(())
@@ -465,16 +473,26 @@ fn add_evidence(s: &mut Session, events: &[SystemEvent], started_ms: i64) {
     }
 }
 
-/// A session with only what the journal knows (no intermediate save was made).
+/// A session with only what the journal knows (no intermediate save was made); a
+/// journal with a disk folder was a disk test's.
 fn minimal_session(j: &Journal, app_version: &str) -> Session {
     // ponytail: the journal has no start time, so `updatedAt` stands in; it only names the file.
+    let disk = j.disk_folder.as_ref().map(|folder| DiskStart {
+        folder: folder.clone(),
+        wake: false,
+    });
     let request = StartRequest {
-        component: Component::Cpu,
+        component: if disk.is_some() {
+            Component::Disk
+        } else {
+            Component::Cpu
+        },
         objective: Objective::Normal,
         preset: Preset::Standard,
         custom: None,
         retry_core: None,
         gpu: None,
+        disk,
     };
     Session {
         format: oma_core::load::FORMAT,
@@ -491,6 +509,8 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
             ram_bytes: 0,
             phases: vec![],
             gpu: None,
+
+            disk: None,
         },
         outcome: None,
         outcome_detail: None,
@@ -507,6 +527,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         load_version: None,
         stability: None,
         gpu_device_id: None,
+        disk: None,
     }
 }
 
@@ -586,6 +607,7 @@ mod tests {
             core: None,
             updated_at: updated.into(),
             clean_end: false,
+            disk_folder: None,
         }
     }
 
@@ -725,6 +747,25 @@ mod tests {
         let sum = store.recover(boot, none, "1.0").unwrap();
         assert_eq!(sum.verdict.as_deref(), Some("crashed_app"));
         assert!(store.read_journal().is_none());
+    }
+
+    #[test]
+    fn a_disk_journal_recovers_a_disk_session_without_the_folder() {
+        let store = PerformanceStore::new(temp_dir("disk"));
+        let folder = r"C:\Users\Mario\AppData\Local\Temp".to_string();
+        store
+            .write_journal(&Journal {
+                disk_folder: Some(folder.clone()),
+                ..journal(ID, UPDATED)
+            })
+            .unwrap();
+        store.recover(0, none, "1.0").unwrap();
+        let s = store.load(ID).unwrap().unwrap();
+        assert_eq!(s.component, Component::Disk);
+        // The folder may hold the user's name: it is never saved (DC10).
+        assert_eq!(s.request.disk.as_ref().unwrap().folder, "");
+        let raw = fs::read_to_string(store.dir().join(&store.names()[0])).unwrap();
+        assert!(!raw.contains("Mario"), "{raw}");
     }
 
     #[test]
@@ -909,6 +950,7 @@ mod tests {
                 multi: Some(9000),
                 compute: None,
                 graphics: None,
+                ..Default::default()
             },
             kernels: vec![],
             device: oma_core::scores::Device {
@@ -923,6 +965,7 @@ mod tests {
             samples: vec![],
             app_version: "0.0.0".into(),
             load_version: None,
+            disk_profile: None,
         }
     }
 

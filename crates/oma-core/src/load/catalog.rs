@@ -17,6 +17,7 @@ pub fn catalog_json() -> Value {
         (Component::Cpu, "cpu"),
         (Component::Ram, "ram"),
         (Component::Gpu, "gpu"),
+        (Component::Disk, "disk"),
     ] {
         for (o, oname) in [
             (Objective::Normal, "normal"),
@@ -32,6 +33,7 @@ pub fn catalog_json() -> Value {
     json!({
         "kernels": ids(&[K1, K2, K3, K4, K5, K7, K8, K9, K10]),
         "gpuKernels": ids(&[S1, S2, S3, S4, S5, S6]),
+        "diskKernels": ids(&[DiskFill, N1, N2, N3, N4, V1, V2, V3, V4]),
         "isa": ids(&[Isa::Avx512, Isa::Avx2, Isa::Sse2]),
         "modes": ["steady", "variable", "light", "coreCycle", "allCore", "ramp", "alternate", "pauseResume"],
         "patterns": ids(&[
@@ -41,7 +43,7 @@ pub fn catalog_json() -> Value {
             RamPattern::Address,
             RamPattern::CrcCopy,
         ]),
-        "components": ["cpu", "ram", "gpu"],
+        "components": ["cpu", "ram", "gpu", "disk"],
         "objectives": ["normal", "overclock"],
         "presets": presets_json,
     })
@@ -64,6 +66,24 @@ mod tests {
         }
         let got: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn catalog_lists_disk_entries() {
+        let c = catalog_json();
+        assert!(c["components"].as_array().unwrap().contains(&json!("disk")));
+        assert_eq!(
+            c["diskKernels"],
+            json!(["disk_fill", "n1", "n2", "n3", "n4", "v1", "v2", "v3", "v4"])
+        );
+        assert_eq!(
+            c["presets"]["disk.normal"],
+            json!({"quick": 600, "standard": 1800, "long": 3600})
+        );
+        assert_eq!(
+            c["presets"]["disk.overclock"],
+            json!({"standard": 4200, "long": 11400})
+        );
     }
 
     #[test]

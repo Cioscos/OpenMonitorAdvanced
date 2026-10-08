@@ -2,6 +2,8 @@
 //! full scale and the score file (pure; no Windows code).
 
 mod bench;
+mod disk;
+mod disk_bench;
 mod file;
 mod gauge;
 mod gpu;
@@ -14,8 +16,13 @@ mod workloads;
 pub use bench::{
     BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, SegmentState,
 };
+pub use disk::{
+    disk_baseline, disk_bench_plan, disk_calibration_from, disk_points, disk_tests, DiskBaseline,
+    DiskProfile, DiskTest, B1_TESTS, B2_TESTS, DISK_BENCH_FILE, DISK_POINTS, DISK_SCORE_VERSION,
+};
+pub use disk_bench::{DiskBenchContext, DiskBenchController};
 pub use file::{
-    parse_score, score_file_name, summary, Device, KernelRate, ScoreFile, ScoreSample,
+    parse_score, score_file_name, summary, Device, DiskRate, KernelRate, ScoreFile, ScoreSample,
     ScoreSummary, Scores, FORMAT,
 };
 pub use gauge::full_scale;

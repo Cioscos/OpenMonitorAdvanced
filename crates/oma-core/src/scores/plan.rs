@@ -19,6 +19,9 @@ pub enum BenchMode {
     // GPU benchmark groups.
     Compute,
     Graphics,
+    // Disk benchmark directions.
+    Read,
+    Write,
 }
 
 /// `rep` 0 is the warm-up, 1-3 the repetitions.
@@ -44,9 +47,11 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
                     mode: LoadMode::Steady,
                     placement: match mode {
                         BenchMode::Single => Placement::OnePerCore,
-                        BenchMode::Multi | BenchMode::Compute | BenchMode::Graphics => {
-                            Placement::AllLogical
-                        }
+                        BenchMode::Multi
+                        | BenchMode::Compute
+                        | BenchMode::Graphics
+                        | BenchMode::Read
+                        | BenchMode::Write => Placement::AllLogical,
                     },
                     duration_s: CAP_S,
                     per_core_s: None,
@@ -57,6 +62,8 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
                     iterations: Some(w.iterations),
                     pause_before_ms: if rep == 0 { WARMUP_PAUSE_MS } else { 0 },
                     windows: None,
+
+                    disk: None,
                 });
                 steps.push(BenchStep {
                     kernel: w.id,
@@ -71,6 +78,8 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
         ram_bytes: 0,
         phases,
         gpu: None,
+
+        disk: None,
     };
     (plan, steps)
 }

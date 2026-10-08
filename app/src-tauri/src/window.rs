@@ -66,6 +66,9 @@ pub enum PerformancePage {
     /// The benchmark of one GPU (M8b2): its `deviceId` is in [`PerformanceNav`].
     #[serde(rename = "score-gpu")]
     ScoreGpu,
+    /// The disk benchmark (M8c, DC15).
+    #[serde(rename = "score-disk")]
+    ScoreDisk,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +102,14 @@ impl PerformanceNav {
     pub fn score_cpu() -> Self {
         Self {
             page: PerformancePage::ScoreCpu,
+            session_id: None,
+            device_id: None,
+        }
+    }
+
+    pub fn score_disk() -> Self {
+        Self {
+            page: PerformancePage::ScoreDisk,
             session_id: None,
             device_id: None,
         }
@@ -634,6 +645,10 @@ mod tests {
         assert_eq!(
             json(PerformanceNav::score_gpu("gpu/pci-0000:01:00.0")),
             r#"{"view":"simple","performance":{"page":"score-gpu","deviceId":"gpu/pci-0000:01:00.0"}}"#
+        );
+        assert_eq!(
+            json(PerformanceNav::score_disk()),
+            r#"{"view":"simple","performance":{"page":"score-disk"}}"#
         );
     }
 

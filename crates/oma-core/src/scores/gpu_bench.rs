@@ -247,6 +247,7 @@ impl GpuBenchController {
                 multi: None,
                 compute: gpu_points(&medians, BenchMode::Compute, b),
                 graphics: gpu_points(&medians, BenchMode::Graphics, b),
+                ..Scores::default()
             },
             kernels: GPU_LOADS
                 .iter()
@@ -259,6 +260,8 @@ impl GpuBenchController {
                         multi: None,
                         value: r.map(|r| r.0),
                         spread: r.map(|r| r.1),
+                        read: None,
+                        write: None,
                     }
                 })
                 .collect(),
@@ -275,6 +278,7 @@ impl GpuBenchController {
             samples: self.life.samples.clone(),
             app_version: self.ctx.app_version.clone(),
             load_version: self.life.load_version.clone(),
+            disk_profile: None,
         };
         self.life.end_saved(file)
     }
@@ -300,6 +304,11 @@ impl GpuBenchController {
             multi: None,
             compute: self.finished_points(BenchMode::Compute),
             graphics: self.finished_points(BenchMode::Graphics),
+            read_mbs: None,
+            write_mbs: None,
+            points: None,
+            live_read: None,
+            live_write: None,
             flags: self.life.flag_names(&FLAG_ORDER),
             score_id: self.life.score_id.clone(),
             error: self.life.error.clone(),
@@ -380,6 +389,8 @@ mod tests {
             work_ms: None,
             workers: vec![],
             rates,
+
+            disk: None,
         })
     }
 
@@ -409,6 +420,8 @@ mod tests {
             memory_bytes: 0,
             rate,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -433,6 +446,8 @@ mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         })
     }
 

@@ -70,9 +70,9 @@ SMART data.
   the reason in the deck.
 - **In-game overlay.** FPS, frame times, lows and sensors over a game, from a separate
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
-- **Performance view.** A stress test for the CPU, the RAM and the GPU, with a guided wizard (normal check
+- **Performance view.** A stress test for the CPU, the RAM, the GPU and the disks, with a guided wizard (normal check
   or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
-  of past sessions, and benchmarks for the CPU (a single-core and a multi-core score) and the GPU (a Compute and a Graphics score) on gauges
+  of past sessions, and benchmarks for the CPU (a single-core and a multi-core score), the GPU (a Compute and a Graphics score) and the disks (read and write) on gauges
   (see [Performance view](#performance-view)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
@@ -180,7 +180,7 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
 
 ## Performance view
 
-The Performance view runs a stress test on the CPU, the RAM or a GPU. The load comes from a separate
+The Performance view runs a stress test on the CPU, the RAM, a GPU or a disk. The load comes from a separate
 small process, `oma-load.exe`, installed next to the app; it is stopped when you stop the test or
 close the app. A wizard asks what to test, how long and with which thresholds; during the run the
 page shows clocks, temperature, power and errors, and a thermal stop ends the test if the CPU gets
@@ -213,6 +213,14 @@ from the tray. Technical terms have a plain-words tooltip.
   A measurement on battery, with another program busy on the GPU, with reduced video memory (VRAM) or
   thermally limited stays valid but carries a warning; a calculation error, a driver reset or a hang
   makes it invalid. Until the scale is calibrated the points are marked as provisional.
+- **Disk benchmark.** *Performance › Score › Disk* measures a volume and a folder you pick, in read and write MB/s on a fixed
+  scale: sequential 1 MiB at queue 8 and 1, random 4 KiB at queue 32 and 1 (an NVMe profile is in Customize), as in CrystalDiskMark.
+  It writes a test file of 1 GiB, takes the best of 3 measurements and writes at most 40 GiB per run. The page shows MB/s, IOPS and the mean and 99th percentile latency of each test.
+  A disk that may be asleep is not woken without asking; a measurement on battery or with a busy disk carries a warning.
+- **Disk stress test.** The wizard offers a normal check (mixed 70/30, sustained write that shows where the SLC cache ends, long read, random IOPS)
+  and a stability profile (fill and verify, random overwrites with a generation number, synchronous writes, and for removable drives a real-capacity
+  check in the style of h2testw). Every block is signed and verified on read; a data error is told apart as flipped bits, a misplaced or a stale block. The test file is deleted when the test ends, also after a crash.
+  The folder must be on the volume you picked (no junctions or links), the writes of the run are estimated before it starts, and a thermal stop uses the drive temperature.
 - **Admin rights** are not needed. Without the service the CPU test runs, with a warning, and
   without thermal stop.
 - **RAM limit.** The RAM test covers only the memory Windows gives the program (4 KB pages): it is
@@ -417,7 +425,7 @@ ends up in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Data model, sampling scheduler, per-source merge, history. No Windows code. |
 | `crates/oma-win` | Windows providers: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, disks, network |
 | `crates/oma-ipc` | Protocol types, MessagePack encoding and framing for talking to `oma-service` and to the overlay |
-| `crates/oma-load` | `oma-load.exe`, the stress-test load process (CPU, RAM and GPU kernels) |
+| `crates/oma-load` | `oma-load.exe`, the stress-test load process (CPU, RAM, GPU and disk kernels) |
 | `crates/oma-overlay` | `oma-overlay.exe`, the in-game overlay window (Direct2D, DirectWrite, DirectComposition) |
 | `app/src-tauri` | Tauri 2 shell (`oma-app`): commands, tray, window, safe mode, NSIS template and hooks |
 | `app/src` | Svelte 5 + TypeScript UI, English and Italian translations |

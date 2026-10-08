@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
-import type { Phase } from '../types';
+import type { ErrorRecord, Phase } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, errorText, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, verdictTitle } from './format';
+import { cpuChartSensors, dataErrorKind, diskChartSensors, errorText, formatOffset, isDiskKernel, kernelTerm, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, timedSeconds, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -122,4 +122,60 @@ test('gpu chart sensors come from the status device, not from a guess', () => {
   expect(gpuChartSensors(schema, 'gpu/pci-0000:0c:00.0').map((x) => x.id)).toEqual(['gpu/pci-0000:0c:00.0/temperature/core', 'gpu/pci-0000:0c:00.0/power/board']);
   expect(gpuChartSensors(schema, 'gpu/pci-0000:01:00.0')[0].deviceId).toBe('gpu/pci-0000:01:00.0');
   expect(gpuChartSensors(schema, null)).toEqual([]);
+});
+
+test('disk chart sensors are the drive temperature and the two speeds of the test disk', () => {
+  const sensor = (id: string, deviceId: string) => ({ ...MOCK_SCHEMA.sensors[0], id, deviceId });
+  const disk = (d: string) => [`${d}/temperature/composite`, `${d}/temperature/drive`, `${d}/throughput/read`, `${d}/throughput/write`, `${d}/data/host-written`].map((id) => sensor(id, d));
+  const schema = { ...MOCK_SCHEMA, sensors: [...disk('disk/a'), ...disk('disk/b')] };
+  // `temperature/drive` first, then the speeds; the other disk and the SMART counter stay out.
+  expect(diskChartSensors(schema, 'disk/b').map((x) => x.id)).toEqual(['disk/b/temperature/drive', 'disk/b/throughput/read', 'disk/b/throughput/write']);
+  // Without `drive`, the first other temperature.
+  const bare = { ...MOCK_SCHEMA, sensors: disk('disk/a').filter((x) => !x.id.endsWith('/drive')) };
+  expect(diskChartSensors(bare, 'disk/a')[0].id).toBe('disk/a/temperature/composite');
+  expect(diskChartSensors(schema, null)).toEqual([]);
+  expect(diskChartSensors(null, 'disk/a')).toEqual([]);
+});
+
+test('disk kernels and their glossary terms', () => {
+  expect(['disk_fill', 'n1', 'v4'].map((k) => isDiskKernel(k as never))).toEqual([true, true, true]);
+  expect(['k1', 's1', 'hash'].map((k) => isDiskKernel(k as never))).toEqual([false, false, false]);
+  expect(kernelTerm('disk_fill')).toBe('mode.diskFill');
+  expect(kernelTerm('n1')).toBe('mode.n1');
+});
+
+test('an error offset is the block index times 4096', () => {
+  expect(formatOffset(0)).toBe('0 KiB');
+  expect(formatOffset(3)).toBe('12 KiB');
+  expect(formatOffset(262_144)).toBe('1.0 GiB');
+  expect(formatOffset(512)).toBe('2 MiB');
+});
+
+test('errorText maps the disk plan refusals', () => {
+  expect(errorText('build:no_space', t, 'en')).toBe(t('performance.disk.error.no_space', { size: '1.0 GiB' }));
+  expect(errorText('build:no_disk', t)).toBe(t('performance.start.no_disk'));
+});
+
+test('every event the disk controller can emit has a text in both locales', () => {
+  const codes = ['file_bytes', 'disk_full', 'access_denied', 'disk_sector', 'slc_cliff', 'slc_steady', 'first_error_stop'];
+  for (const locale of ['en', 'it'] as const) {
+    i18n.locale = locale;
+    for (const code of codes) {
+      const [piece] = eventText({ atMs: 0, code, params: { phase: '0', value: '1048576' } }, t, locale);
+      expect(piece.text, `${locale} ${code}`).not.toBe(code);
+      expect(piece.text).not.toContain('{');
+    }
+  }
+  i18n.locale = 'en';
+});
+
+test('timedSeconds leaves out the disk fill, which ends when the file is written', () => {
+  const p = (kernel: string, duration_s: number) => ({ kernel, duration_s }) as Phase;
+  expect(timedSeconds([p('disk_fill', 1200), p('n1', 180), p('n2', 120)])).toBe(300);
+});
+
+test('one wrong bit is singular', () => {
+  const bits = (actual: number) => dataErrorKind({ kind: 'bit_flip', actual } as ErrorRecord, t);
+  expect(bits(1)).toBe(t('performance.result.error.bit_flip_one'));
+  expect(bits(3)).toBe(t('performance.result.error.bit_flip', { bits: 3 }));
 });

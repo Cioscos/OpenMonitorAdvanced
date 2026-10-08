@@ -96,6 +96,8 @@ pub fn gpu_bench_plan(target: GpuTarget, seed: u64) -> (Plan, Vec<BenchStep>) {
             iterations: None,
             pause_before_ms: 0,
             windows: Some(GPU_WINDOWS),
+
+            disk: None,
         })
         .collect();
     let steps = GPU_LOADS
@@ -111,6 +113,8 @@ pub fn gpu_bench_plan(target: GpuTarget, seed: u64) -> (Plan, Vec<BenchStep>) {
         ram_bytes: 0,
         phases,
         gpu: Some(target),
+
+        disk: None,
     };
     (plan, steps)
 }
@@ -129,7 +133,7 @@ impl GpuBaseline {
         match mode {
             BenchMode::Compute => Some(&self.compute),
             BenchMode::Graphics => Some(&self.graphics),
-            BenchMode::Single | BenchMode::Multi => None,
+            BenchMode::Single | BenchMode::Multi | BenchMode::Read | BenchMode::Write => None,
         }
     }
 }
@@ -380,6 +384,7 @@ mod tests {
                 multi: None,
                 compute: Some(1500),
                 graphics: Some(1500),
+                ..Scores::default()
             },
             kernels: GPU_LOADS
                 .iter()
@@ -390,6 +395,8 @@ mod tests {
                     multi: None,
                     value: Some(b.table(l.mode).unwrap()[&l.id] * 1.000_04),
                     spread: Some(0.01),
+                    read: None,
+                    write: None,
                 })
                 .collect(),
             device: Device {
@@ -400,6 +407,7 @@ mod tests {
                 vendor_id: Some(0x10de),
                 dedicated_bytes: Some(16 << 30),
                 integrated: Some(false),
+                kind: None,
             },
             flags: vec![],
             valid: true,
@@ -407,6 +415,7 @@ mod tests {
             samples: vec![],
             app_version: "0.6.0".into(),
             load_version: Some("0.6.0".into()),
+            disk_profile: None,
         }
     }
 

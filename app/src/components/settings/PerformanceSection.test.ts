@@ -104,3 +104,18 @@ test('escape_cancels_the_thermal_confirmation', async () => {
   expect(screen.queryByText(t('settings.performance.thermalStop.confirm'))).toBeNull();
   expect(patches).toEqual([]);
 });
+
+test('disk stop has auto and a number', async () => {
+  const { patches } = await setup();
+  // Automatic by default: the drive's own warning temperature, or 70 °C.
+  expect(screen.getByText(t('settings.performance.diskStopC.auto'))).toBeTruthy();
+  expect(screen.getByText(t('settings.performance.diskStopC.hint'))).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.diskStopC.set') }));
+  await waitFor(() => expect(patches).toEqual([{ performance: { diskStopC: 70 } }]));
+  const input = await screen.findByLabelText(t('settings.performance.diskStopC'));
+  await fireEvent.input(input, { target: { value: '65' } });
+  await fireEvent.blur(input);
+  await waitFor(() => expect(patches.at(-1)).toEqual({ performance: { diskStopC: 65 } }));
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.diskStopC.auto') }));
+  await waitFor(() => expect(patches.at(-1)).toEqual({ performance: { diskStopC: null } }));
+});

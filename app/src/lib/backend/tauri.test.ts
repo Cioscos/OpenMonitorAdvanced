@@ -120,6 +120,7 @@ test('overlay commands and event match the Rust shell', async () => {
 });
 
 const REQUEST: StartRequest = { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null };
+const DISK_REQUEST = { folder: 'D:/Tests', profile: 'b1' as const, compressible: false, wake: false };
 
 // Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs, performance/commands.rs and window.rs.
 test('editor and benchmark commands match the Rust shell', async () => {
@@ -150,6 +151,9 @@ test('editor and benchmark commands match the Rust shell', async () => {
     [() => backend.performanceDelete('x'), 'performance_delete', { id: 'x' }],
     [() => backend.performanceExport('x'), 'performance_export', { id: 'x' }],
     [() => backend.performanceBenchStart(), 'performance_bench_start'],
+    [() => backend.performanceDiskBenchStart(DISK_REQUEST), 'performance_disk_bench_start', { request: DISK_REQUEST }],
+    [() => backend.performanceDiskProbe('D:/Tests'), 'performance_disk_probe', { folder: 'D:/Tests' }],
+    [() => backend.performanceDiskPick(), 'performance_disk_pick'],
     [() => backend.performanceBenchStop(), 'performance_bench_stop'],
     [() => backend.performanceBenchStatus(), 'performance_bench_status'],
     [() => backend.performanceScores(), 'performance_scores'],

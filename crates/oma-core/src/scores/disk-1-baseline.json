@@ -1,0 +1,16 @@
+{
+  "version": "disk-1",
+  "provisional": false,
+  "read": {
+    "seq1m_q8t1": 7342.0,
+    "seq1m_q1t1": 4945.0,
+    "rnd4k_q32t1": 705.7,
+    "rnd4k_q1t1": 70.01
+  },
+  "write": {
+    "seq1m_q8t1": 6656.0,
+    "seq1m_q1t1": 5515.0,
+    "rnd4k_q32t1": 479.7,
+    "rnd4k_q1t1": 223.9
+  }
+}

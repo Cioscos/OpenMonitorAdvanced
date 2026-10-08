@@ -99,6 +99,8 @@ pub enum TestMark {
     Bench,
     /// The GPU benchmark (DH12).
     GpuBench,
+    /// The disk benchmark (DC15).
+    DiskBench,
 }
 
 /// The page of the benchmark in progress: its GPU's, or the CPU one (DH12).
@@ -108,6 +110,7 @@ fn bench_nav(status: Option<&BenchStatus>) -> PerformanceNav {
             .device_id
             .as_deref()
             .map_or_else(PerformanceNav::score_cpu, PerformanceNav::score_gpu),
+        Some(s) if s.category == "disk" => PerformanceNav::score_disk(),
         _ => PerformanceNav::score_cpu(),
     }
 }
@@ -119,10 +122,10 @@ impl TestMark {
             status.state,
             BenchState::Starting | BenchState::Running | BenchState::Stopping
         )
-        .then_some(if status.category == "gpu" {
-            Self::GpuBench
-        } else {
-            Self::Bench
+        .then_some(match status.category.as_str() {
+            "gpu" => Self::GpuBench,
+            "disk" => Self::DiskBench,
+            _ => Self::Bench,
         })
     }
 
@@ -135,6 +138,7 @@ impl TestMark {
             Component::Cpu => "cpu",
             Component::Ram => "ram",
             Component::Gpu => "gpu",
+            Component::Disk => "disk",
         };
         let objective = match status.objective {
             Objective::Normal => "normal",
@@ -155,9 +159,16 @@ impl TestMark {
             } => (component, objective),
             Self::Bench => return t(lang, "tray.benchRunning", &[]),
             Self::GpuBench => return t(lang, "tray.gpuBenchRunning", &[]),
+            Self::DiskBench => return t(lang, "tray.diskBenchRunning", &[]),
         };
+        // The disk names its objectives its own way (T4).
+        let scope = if component == "disk" { "disk." } else { "" };
+        let objective = t(
+            lang,
+            &format!("performance.objective.{scope}{objective}"),
+            &[],
+        );
         let component = t(lang, &format!("tray.tooltip.{component}"), &[]);
-        let objective = t(lang, &format!("performance.objective.{objective}"), &[]);
         t(
             lang,
             "tray.performance.tooltip",
@@ -1492,6 +1503,11 @@ mod tests {
             multi: None,
             compute: None,
             graphics: None,
+            read_mbs: None,
+            write_mbs: None,
+            points: None,
+            live_read: None,
+            live_write: None,
             flags: vec![],
             score_id: None,
             error: None,
@@ -1531,6 +1547,29 @@ mod tests {
             TestMark::Bench.text(Lang::It),
             "Benchmark della CPU in corso"
         );
+        let disk = BenchStatus {
+            category: "disk".into(),
+            device_id: Some("disk/0".into()),
+            ..status(BenchState::Running)
+        };
+        assert_eq!(TestMark::from_bench(&disk), Some(TestMark::DiskBench));
+        assert_eq!(bench_nav(Some(&disk)), PerformanceNav::score_disk());
+        assert_eq!(
+            TestMark::DiskBench.text(Lang::It),
+            "Benchmark del disco in corso"
+        );
+        assert_eq!(TestMark::DiskBench.text(Lang::En), "Disk benchmark running");
+        // The disk stress test names its objectives its own way (T4).
+        let stress = TestMark::Stress {
+            component: "disk".into(),
+            objective: "overclock".into(),
+        };
+        assert!(
+            stress.text(Lang::It).contains("Stabilità dei dati"),
+            "{}",
+            stress.text(Lang::It)
+        );
+        assert!(stress.text(Lang::It).contains("Disco"));
     }
 
     #[test]

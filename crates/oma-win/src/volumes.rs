@@ -1,0 +1,413 @@
+//! Volume list and target-folder probe for the disk benchmark and stress test (M8c). `volumes()`
+//! reads metadata only, so a sleeping HDD stays asleep. `probe_folder` writes and deletes one
+//! tiny file: call it only when the user picks or confirms a folder or a test starts, never
+//! while typing or on a timer.
+
+use std::fs::OpenOptions;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use windows::core::HSTRING;
+use windows::Win32::Storage::FileSystem::{
+    FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+    GetVolumeInformationW, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_FLAG_DELETE_ON_CLOSE,
+    WIN32_FIND_DATAW,
+};
+use windows::Win32::System::Diagnostics::Debug::{
+    SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
+};
+
+use crate::storage_ioctl::PhysicalDrive;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveKind {
+    Fixed,
+    Removable,
+    Remote,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// `X:\`.
+    pub root: String,
+    pub label: String,
+    pub fs: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub drive: DriveKind,
+    /// The physical disk; `None` for network or multi-disk volumes.
+    pub disk_index: Option<u32>,
+    pub system: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderProbe {
+    /// `X:\` of a local path with a drive letter.
+    pub volume_root: Option<String>,
+    pub remote: bool,
+    pub exists: bool,
+    pub writable: bool,
+    pub sync: bool,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
+const DRIVE_UNKNOWN: u32 = 0;
+const DRIVE_NO_ROOT_DIR: u32 = 1;
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
+const DRIVE_REMOTE: u32 = 4;
+const DRIVE_CDROM: u32 = 5;
+
+/// UNC (`\\server\x`, `\\?\UNC\server\x`); `\\?\C:\x` and `\\.\` are local.
+pub fn is_remote_path(path: &str) -> bool {
+    let p = path.replace('/', "\\");
+    if let Some(rest) = p.strip_prefix(r"\\?\").or_else(|| p.strip_prefix(r"\\.\")) {
+        return rest
+            .get(..4)
+            .is_some_and(|s| s.eq_ignore_ascii_case("UNC\\"));
+    }
+    p.starts_with(r"\\")
+}
+
+/// A path component named like a sync client folder (case-insensitive).
+pub fn is_sync_path(path: &str) -> bool {
+    path.split(['\\', '/']).any(|c| {
+        let c = c.to_lowercase();
+        c == "onedrive"
+            || c == "dropbox"
+            || c == "google drive"
+            || c.starts_with("onedrive - ")
+            || c.starts_with("dropbox (")
+    })
+}
+
+fn drive_kind(raw: u32) -> DriveKind {
+    match raw {
+        DRIVE_FIXED => DriveKind::Fixed,
+        DRIVE_REMOVABLE => DriveKind::Removable,
+        DRIVE_REMOTE => DriveKind::Remote,
+        _ => DriveKind::Other,
+    }
+}
+
+/// `(free to the caller, total)` bytes of the volume holding `path`; zeros on failure.
+fn free_total(path: &str) -> (u64, u64) {
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: valid NUL-terminated path; both out-pointers are live `u64`s; the third
+    // (total free) is optional.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            &HSTRING::from(path),
+            Some(&mut free),
+            Some(&mut total),
+            None,
+        )
+    };
+    if ok.is_ok() {
+        (free, total)
+    } else {
+        (0, 0)
+    }
+}
+
+fn utf16_text(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// `(label, file system)`; `None` when the volume has no media or cannot be read.
+fn volume_texts(root: &str) -> Option<(String, String)> {
+    let mut label = [0u16; 261];
+    let mut fs = [0u16; 261];
+    // SAFETY: valid NUL-terminated root; the buffers are live slices whose lengths the
+    // binding passes; the serial, max-component and flags out-pointers are absent.
+    unsafe {
+        GetVolumeInformationW(
+            &HSTRING::from(root),
+            Some(&mut label),
+            None,
+            None,
+            None,
+            Some(&mut fs),
+        )
+    }
+    .ok()?;
+    Some((utf16_text(&label), utf16_text(&fs)))
+}
+
+/// The mounted drive letters worth testing: no optical drives, no empty readers.
+pub fn volumes() -> Vec<VolumeInfo> {
+    let mut old = THREAD_ERROR_MODE(0);
+    // SAFETY: `old` is a live out-pointer; the mode is restored below on the same thread.
+    let changed = unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, Some(&mut old)) }.is_ok();
+    let out = list_volumes();
+    if changed {
+        // SAFETY: restores the mode saved above.
+        unsafe {
+            let _ = SetThreadErrorMode(old, None);
+        }
+    }
+    out
+}
+
+fn list_volumes() -> Vec<VolumeInfo> {
+    let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let system_root = format!("{}\\", system.trim_end_matches('\\')).to_lowercase();
+    // SAFETY: no arguments.
+    let mask = unsafe { GetLogicalDrives() };
+    let mut out = Vec::new();
+    for bit in 0..26u8 {
+        if mask & (1 << bit) == 0 {
+            continue;
+        }
+        let letter = (b'A' + bit) as char;
+        let root = format!("{letter}:\\");
+        // SAFETY: valid NUL-terminated root path.
+        let raw = unsafe { GetDriveTypeW(&HSTRING::from(root.as_str())) };
+        if matches!(raw, DRIVE_UNKNOWN | DRIVE_NO_ROOT_DIR | DRIVE_CDROM) {
+            continue;
+        }
+        let drive = drive_kind(raw);
+        if drive == DriveKind::Remote {
+            // A disconnected mapped drive blocks these calls for a long time: never ask.
+            out.push(VolumeInfo {
+                root,
+                label: String::new(),
+                fs: String::new(),
+                total_bytes: 0,
+                free_bytes: 0,
+                drive,
+                disk_index: None,
+                system: false,
+            });
+            continue;
+        }
+        let Some((label, fs)) = volume_texts(&root) else {
+            continue; // no media
+        };
+        let disk_index =
+            PhysicalDrive::open_path(&format!(r"\\.\{letter}:")).and_then(|d| d.disk_number());
+        let (free_bytes, total_bytes) = free_total(&root);
+        out.push(VolumeInfo {
+            system: root.to_lowercase() == system_root,
+            root,
+            label,
+            fs,
+            total_bytes,
+            free_bytes,
+            drive,
+            disk_index,
+        });
+    }
+    out
+}
+
+fn drive_letter_root(path: &str) -> Option<String> {
+    let b = path.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        .then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()))
+}
+
+/// Creates (and, by delete-on-close, removes) a probe file in `dir`.
+fn can_create_file(dir: &Path) -> bool {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "oma-probe-{:x}{:x}{n:x}.tmp",
+        std::process::id(),
+        nanos as u64
+    );
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(0x4000_0000 | 0x0001_0000) // GENERIC_WRITE | DELETE
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0)
+        .open(dir.join(name))
+        .is_ok()
+}
+
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Whether a reparse tag leads somewhere else (R13): a junction or mount point, or a
+/// symbolic link. Cloud-file placeholders (OneDrive…) and other tags stay where they are.
+pub fn is_link_tag(tag: u32) -> bool {
+    matches!(tag, IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK)
+}
+
+/// The reparse tag of `path` as its parent folder lists it, without opening or following
+/// it; `None` when it is not a reparse point or cannot be read.
+fn reparse_tag(path: &Path) -> Option<u32> {
+    // A trailing separator would list the folder's content instead of the folder.
+    let text = path.as_os_str().to_string_lossy();
+    let path = Path::new(text.trim_end_matches(['\\', '/']));
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: valid NUL-terminated path (no wildcards: the caller checks); `data` is a live
+    // out-struct. The search handle is closed below on the success path.
+    let handle = unsafe { FindFirstFileW(&HSTRING::from(path.as_os_str()), &mut data) }.ok()?;
+    // SAFETY: `handle` is the search handle opened above, not used afterwards.
+    unsafe {
+        let _ = FindClose(handle);
+    }
+    (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(data.dwReserved0)
+}
+
+/// Whether `path` or a folder above it (the root aside) is a junction, mount point or
+/// symbolic link (R13). Read from the root down, from each parent's listing: no link is
+/// ever followed, and the walk stops at the first one. A path with wildcards counts as a link.
+pub fn has_link(path: &Path) -> bool {
+    if path.to_string_lossy().contains(['*', '?']) {
+        return true;
+    }
+    let mut chain: Vec<&Path> = path.ancestors().filter(|a| a.parent().is_some()).collect();
+    chain.reverse();
+    chain
+        .into_iter()
+        .any(|a| reparse_tag(a).is_some_and(is_link_tag))
+}
+
+/// Probes a candidate folder (DC6). Writes and deletes one tiny file (`oma-probe-*.tmp`): call
+/// only on a user choice or at test start, never while typing or on a timer.
+pub fn probe_folder(path: &Path) -> FolderProbe {
+    let text = path.to_string_lossy();
+    let mut probe = FolderProbe {
+        volume_root: None,
+        remote: false,
+        exists: false,
+        writable: false,
+        sync: false,
+        free_bytes: 0,
+        total_bytes: 0,
+    };
+    if text.contains('\0') {
+        return probe; // reported as not found
+    }
+    let volume_root = drive_letter_root(text.strip_prefix(r"\\?\").unwrap_or(&text));
+    let remote = is_remote_path(&text)
+        || volume_root.as_deref().is_some_and(|r| {
+            // SAFETY: valid NUL-terminated root path.
+            unsafe { GetDriveTypeW(&HSTRING::from(r)) == DRIVE_REMOTE }
+        });
+    probe.volume_root = volume_root;
+    probe.remote = remote;
+    probe.sync = is_sync_path(&text);
+    if remote {
+        return probe;
+    }
+    probe.exists = path.is_dir();
+    if !probe.exists {
+        return probe;
+    }
+    probe.writable = can_create_file(path);
+    probe.sync = probe.sync
+        || path.ancestors().any(|a| {
+            std::fs::symlink_metadata(a)
+                .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 != 0)
+        });
+    (probe.free_bytes, probe.total_bytes) = free_total(&text);
+    probe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unc_and_remote_paths_are_remote() {
+        assert!(is_remote_path(r"\\server\x"));
+        assert!(is_remote_path(r"\\?\UNC\server\x"));
+        assert!(!is_remote_path(r"C:\x"));
+        assert!(!is_remote_path(r"\\?\C:\x"));
+        assert!(probe_folder(Path::new("C:\\a\0b")).volume_root.is_none());
+    }
+
+    #[test]
+    fn only_junctions_mount_points_and_symlinks_are_links() {
+        assert!(is_link_tag(0xA000_0003), "junction or mount point");
+        assert!(is_link_tag(0xA000_000C), "symbolic link");
+        // Cloud-file placeholders (OneDrive), dedup and no tag at all stay.
+        for tag in [0x9000_001A, 0x9000_101A, 0x8000_0013, 0] {
+            assert!(!is_link_tag(tag), "{tag:#x}");
+        }
+        assert!(has_link(Path::new(r"C:\x\a*b")));
+        assert!(has_link(Path::new(r"C:\x\a?b")));
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn a_junction_in_the_path_is_a_link() {
+        let base = std::env::temp_dir().join(format!("oma-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (real, link) = (base.join("real"), base.join("link"));
+        std::fs::create_dir_all(real.join("inner")).unwrap();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "mklink /J failed");
+        assert!(!has_link(&real.join("inner")));
+        assert!(has_link(&link));
+        assert!(has_link(&link.join("inner")));
+        let mut trailing = link.into_os_string();
+        trailing.push("\\");
+        assert!(has_link(Path::new(&trailing)));
+        // Removing the junction removes the link, never the target.
+        std::fs::remove_dir(base.join("link")).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn sync_paths_are_detected() {
+        assert!(is_sync_path(r"C:\Users\a\OneDrive\x"));
+        assert!(is_sync_path(r"D:\Dropbox"));
+        assert!(is_sync_path(r"C:\Users\a\Google Drive\y"));
+        assert!(!is_sync_path(r"C:\Users\a\drive\x"));
+        assert!(is_sync_path(r"C:\Users\a\OneDrive - Contoso\x"));
+        assert!(is_sync_path(r"C:\Users\a\Dropbox (Personal)\x"));
+        assert!(!is_sync_path(r"C:\onedriveX"));
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn system_volume_is_listed() {
+        let root = format!("{}\\", std::env::var("SystemDrive").unwrap());
+        let v = volumes();
+        let sys = v
+            .iter()
+            .find(|v| v.root.eq_ignore_ascii_case(&root))
+            .unwrap();
+        assert!(sys.system && sys.disk_index.is_some());
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn temp_folder_probes_writable() {
+        let dir = std::env::temp_dir();
+        let p = probe_folder(&dir);
+        assert!(p.exists && p.writable && !p.remote && p.free_bytes > 0);
+        let left = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("oma-probe-"));
+        assert!(!left);
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn missing_folder_probes_not_found() {
+        let p = probe_folder(&std::env::temp_dir().join("oma-no-such-dir-xyz"));
+        assert!(!p.exists && !p.writable && !p.remote);
+    }
+}

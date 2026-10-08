@@ -6,12 +6,15 @@ use std::time::Duration;
 use oma_core::csv::LocalTime;
 use oma_core::load::{RunStatus, Session, SessionSummary, StartRequest};
 use oma_core::sampler::unix_ms;
-use oma_core::scores::{cpu_baseline, gpu_baseline, BenchStatus, ScoreFile, ScoreSummary};
+use oma_core::scores::{
+    cpu_baseline, disk_baseline, gpu_baseline, BenchStatus, ScoreFile, ScoreSummary,
+};
 use oma_ipc::load::Plan;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use super::runner::{PerformanceRunner, SystemInfo};
+use super::bench::DiskBenchRequest;
+use super::runner::{PerformanceRunner, SystemInfo, VolumeChoice};
 use super::store::parse_rfc3339_ms;
 use crate::report::{documents_dir, local_now, write_report};
 use crate::window::{QuitSource, MAIN};
@@ -21,20 +24,77 @@ const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 type Runner<'a> = State<'a, Arc<PerformanceRunner>>;
 
-#[tauri::command(async)]
-pub fn performance_system(runner: Runner<'_>) -> SystemInfo {
-    runner.system()
+/// Runs `f` on the blocking pool: the volume list, the folder probe and the orphan
+/// sweep block on the disks (DC6, DC11).
+async fn blocking<T: Send + 'static>(
+    app: AppHandle,
+    f: impl FnOnce(&PerformanceRunner) -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || f(&app.state::<Arc<PerformanceRunner>>()))
+        .await
+        .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
-pub fn performance_preview(runner: Runner<'_>, request: StartRequest) -> Result<Plan, String> {
-    runner.preview(&request).map_err(|e| e.wire())
+#[tauri::command]
+pub async fn performance_system(app: AppHandle) -> Result<SystemInfo, String> {
+    blocking(app, PerformanceRunner::system).await
 }
 
-/// Starts a test; the session id, or why it cannot start.
-#[tauri::command(async)]
-pub fn performance_start(runner: Runner<'_>, request: StartRequest) -> Result<String, String> {
-    runner.start(request).map_err(|e| e.wire())
+/// The plan of `request`; a disk request reads its volume from metadata only.
+#[tauri::command]
+pub async fn performance_preview(app: AppHandle, request: StartRequest) -> Result<Plan, String> {
+    blocking(app, move |r| r.preview(&request).map_err(|e| e.wire())).await?
+}
+
+/// Starts a test; the session id, or why it cannot start (`busy`, `build:<code>`,
+/// `disk:<code>` for a disk target that cannot be used, DC6).
+#[tauri::command]
+pub async fn performance_start(app: AppHandle, request: StartRequest) -> Result<String, String> {
+    blocking(app, move |r| r.start(request).map_err(|e| e.wire())).await?
+}
+
+/// The volume of a folder the user picked or confirmed (DC6); `disk:remote`,
+/// `disk:not_found` or `disk:not_writable`. Writes one tiny probe file, except on a
+/// spun-down HDD (`standby`): call it on a choice, never while typing.
+#[tauri::command]
+pub async fn performance_disk_probe(
+    app: AppHandle,
+    folder: String,
+) -> Result<VolumeChoice, String> {
+    blocking(app, move |r| r.disk_probe(&folder).map_err(|e| e.wire())).await?
+}
+
+/// «Choose folder…»: the folder picker over the main window; `None` when cancelled.
+#[tauri::command]
+pub async fn performance_disk_pick(app: AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app.dialog().file();
+        if let Some(window) = app.get_webview_window(MAIN) {
+            dialog = dialog.set_parent(&window);
+        }
+        match dialog.blocking_pick_folder() {
+            None => Ok(None),
+            Some(path) => path
+                .into_path()
+                .map(|p| Some(p.to_string_lossy().into_owned()))
+                .map_err(|e| e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Starts the disk benchmark; the score id, or `busy`, `disk:<code>` (DC6) or the text
+/// of a system error.
+#[tauri::command]
+pub async fn performance_disk_bench_start(
+    app: AppHandle,
+    request: DiskBenchRequest,
+) -> Result<String, String> {
+    blocking(app, move |r| {
+        r.start_disk_bench(request).map_err(|e| e.wire())
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -118,6 +178,8 @@ pub struct BaselineInfo {
     provisional: bool,
     /// The same for the GPU scale.
     gpu_provisional: bool,
+    /// The same for the disk scale.
+    disk_provisional: bool,
 }
 
 #[tauri::command]
@@ -125,6 +187,7 @@ pub fn performance_baseline() -> BaselineInfo {
     BaselineInfo {
         provisional: cpu_baseline().provisional,
         gpu_provisional: gpu_baseline().provisional,
+        disk_provisional: disk_baseline().provisional,
     }
 }
 

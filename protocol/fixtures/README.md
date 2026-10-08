@@ -221,11 +221,11 @@ byte-for-byte and decode back to the reference messages.
 fixstr `"type"`), as expected for the `{"type": "hello", "body": {...}}`
 envelope.
 
-## `load/` (app <-> `oma-load.exe`, load protocol v5)
+## `load/` (app <-> `oma-load.exe`, load protocol v6)
 
 The stress-test helper protocol (`crates/oma-ipc/src/load.rs`) has its own fixtures in
-`protocol/fixtures/load/`: `hello`, `run`, `run_gpu`, `run_gpu_bench`, `stop`, `topology`, `progress`, `error`,
-`notice`, `phase_done` and `finished` (`.msgpack`, the payload without the length
+`protocol/fixtures/load/`: `hello`, `run`, `run_gpu`, `run_gpu_bench`, `run_disk`, `stop`, `topology`, `progress`, `error`,
+`notice`, `phase_done`, `phase_done_disk` and `finished` (`.msgpack`, the payload without the length
 prefix). Regenerate them only with `OMA_WRITE_FIXTURES=1`, single-threaded:
 
 ```powershell

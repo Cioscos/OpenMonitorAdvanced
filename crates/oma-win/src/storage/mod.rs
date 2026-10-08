@@ -9,15 +9,17 @@ use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Uni
 use oma_core::provider::{Inventory, Provider, ProviderError, Quality};
 use oma_ipc::DriveState;
 use windows::core::HSTRING;
-use windows::Win32::Storage::FileSystem::{BusTypeUsb, GetDiskFreeSpaceExW};
+use windows::Win32::Storage::FileSystem::{
+    BusTypeAta, BusTypeFileBackedVirtual, BusTypeNvme, BusTypeSata, BusTypeUsb, BusTypeVirtual,
+    GetDiskFreeSpaceExW,
+};
 
 use crate::memory::used_pct;
 use crate::pdh::{Counter, Query};
-pub use crate::storage_gate::DiskPower;
 use crate::storage_gate::{
-    disk_class, local_read, plan, power, Activity, DiskClass, LocalRead, Plan, ServiceDisk,
-    ServiceTemperature,
+    disk_class, local_read, plan, power, Activity, LocalRead, Plan, ServiceDisk, ServiceTemperature,
 };
+pub use crate::storage_gate::{DiskClass, DiskPower};
 use crate::storage_health::{
     bus_type, health_properties, health_sensors, next_health_refresh, read_health, DiskHealth,
     HealthRefresh, Stamp,
@@ -460,9 +462,72 @@ impl Provider for StorageProvider {
     }
 }
 
+/// Kind of a physical disk for the benchmark estimate and warnings (DC14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskKind {
+    Nvme,
+    SataSsd,
+    Hdd,
+    Usb,
+    Virtual,
+    Other,
+}
+
+/// Pure mapping from the storage bus type and the seek-penalty flag.
+pub fn disk_kind(bus: Option<i32>, seek_penalty: Option<bool>) -> DiskKind {
+    match bus {
+        Some(b) if b == BusTypeNvme.0 => DiskKind::Nvme,
+        Some(b) if b == BusTypeUsb.0 => DiskKind::Usb,
+        Some(b) if b == BusTypeVirtual.0 || b == BusTypeFileBackedVirtual.0 => DiskKind::Virtual,
+        _ if seek_penalty == Some(true) => DiskKind::Hdd,
+        Some(b) if (b == BusTypeAta.0 || b == BusTypeSata.0) && seek_penalty != Some(true) => {
+            DiskKind::SataSsd
+        }
+        _ => DiskKind::Other,
+    }
+}
+
+/// What disk `index` is, from two metadata queries (no data read, no SMART).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskTraits {
+    pub bus: Option<i32>,
+    pub class: DiskClass,
+    pub kind: DiskKind,
+}
+
+pub fn disk_traits(index: u32) -> DiskTraits {
+    let bus = bus_type(index);
+    let penalty = seek_penalty(index);
+    DiskTraits {
+        bus,
+        class: disk_class(bus, penalty),
+        kind: disk_kind(bus, penalty),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_kinds_follow_bus_and_seek_penalty() {
+        use DiskKind::*;
+        assert_eq!(disk_kind(Some(17), Some(false)), Nvme);
+        assert_eq!(disk_kind(Some(17), None), Nvme);
+        assert_eq!(disk_kind(Some(7), Some(true)), Usb);
+        assert_eq!(disk_kind(Some(14), None), Virtual);
+        assert_eq!(disk_kind(Some(15), Some(true)), Virtual);
+        assert_eq!(disk_kind(Some(3), Some(true)), Hdd);
+        assert_eq!(disk_kind(Some(11), Some(true)), Hdd);
+        assert_eq!(disk_kind(Some(3), Some(false)), SataSsd);
+        assert_eq!(disk_kind(Some(11), None), SataSsd);
+        assert_eq!(disk_kind(None, Some(true)), Hdd);
+        assert_eq!(disk_kind(None, Some(false)), Other);
+        assert_eq!(disk_kind(None, None), Other);
+        assert_eq!(disk_kind(Some(8), Some(false)), Other);
+        assert_eq!(serde_json::to_string(&SataSsd).unwrap(), "\"sata_ssd\"");
+    }
 
     #[test]
     fn parses_disk_with_one_volume() {

@@ -1,5 +1,7 @@
 import type {
   BenchStatus,
+  DiskBenchRequest,
+  VolumeChoice,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -195,6 +197,15 @@ export interface Backend {
   performanceBenchStart(): Promise<string>;
   /** Starts the benchmark of the GPU `deviceId`: the score id; rejects with `busy` or `build:no_gpu` (no such GPU). */
   performanceGpuBenchStart(deviceId: string): Promise<string>;
+  /**
+   * Starts the disk benchmark in `request.folder`: the score id; rejects with `busy`, `disk:standby`
+   * (a spun-down HDD: ask, then retry with `wake`), `disk:link`, `build:no_space`, `build:no_disk` or a text.
+   */
+  performanceDiskBenchStart(request: DiskBenchRequest): Promise<string>;
+  /** The volume of a folder the user picked (writes one tiny probe file); rejects with `disk:remote`, `disk:not_writable`, `disk:not_found`, `disk:no_space` or `disk:link`. */
+  performanceDiskProbe(folder: string): Promise<VolumeChoice>;
+  /** The folder picker over the main window: the folder, or null when cancelled. */
+  performanceDiskPick(): Promise<string | null>;
   /** Stops the benchmark (CPU or GPU); nothing is saved. */
   performanceBenchStop(): Promise<void>;
   /** The running or last benchmark, null before any. */
@@ -204,8 +215,8 @@ export interface Backend {
   /** A saved score, or null when it is gone; rejects for an id that is not a uuid. */
   performanceScore(id: string): Promise<ScoreFile | null>;
   performanceScoreDelete(id: string): Promise<void>;
-  /** Whether the CPU and the GPU score scales are still provisional (not calibrated). */
-  performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean }>;
+  /** Whether the CPU, GPU and disk score scales are still provisional (not calibrated). */
+  performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }>;
   /** The benchmark status on every change and at most every 500 ms while it runs, only with the main window open. */
   onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */

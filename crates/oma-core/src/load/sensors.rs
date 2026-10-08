@@ -23,6 +23,10 @@ pub struct SensorSample {
     pub throttling: Option<bool>,
     /// GPU only: the thermal throttle flag alone (the power one is normal under load).
     pub thermal_throttling: Option<bool>,
+    /// Disk only: read plus write throughput, B/s.
+    pub io_bps: Option<f64>,
+    /// Disk only: the SMART host-written counter, GiB.
+    pub host_written_gib: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -111,6 +115,7 @@ pub fn read_sample(ids: &CpuSensorIds, snapshot: &Snapshot, quality: &[Quality])
         core_clock_mhz: ids.core_clock.iter().map(|i| get(*i)).collect(),
         throttling: None,
         thermal_throttling: None,
+        ..Default::default()
     }
 }
 
@@ -133,6 +138,56 @@ pub fn read_gpu_sample(
         core_clock_mhz: vec![],
         throttling: (!flags.is_empty()).then(|| flags.iter().any(|v| *v >= 1.0)),
         thermal_throttling: get(ids.thermal).map(|v| v >= 1.0),
+        ..Default::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiskSensorIds {
+    pub temp: Option<usize>,
+    pub read: Option<usize>,
+    pub write: Option<usize>,
+    pub host_written: Option<usize>,
+}
+
+/// Indices of the disk `device_id`'s sensors (DC10). The drive's own temperature wins over
+/// any other temperature of the device.
+pub fn resolve_disk_sensors(schema: &Schema, device_id: &str) -> DiskSensorIds {
+    let find = |rest: &str| {
+        let id = format!("{device_id}/{rest}");
+        schema.sensors.iter().position(|s| s.id == id)
+    };
+    let prefix = format!("{device_id}/temperature/");
+    DiskSensorIds {
+        temp: find("temperature/drive").or_else(|| {
+            schema
+                .sensors
+                .iter()
+                .position(|s| s.id.starts_with(&prefix))
+        }),
+        read: find("throughput/read"),
+        write: find("throughput/write"),
+        host_written: find("data/host-written"),
+    }
+}
+
+/// Only `Fresh` and `Held` readings count; `io_bps` is whatever of read and write reads.
+pub fn read_disk_sample(
+    ids: &DiskSensorIds,
+    snapshot: &Snapshot,
+    quality: &[Quality],
+) -> SensorSample {
+    let get = |i: Option<usize>| value(snapshot, quality, i?);
+    let io = [get(ids.read), get(ids.write)];
+    SensorSample {
+        temp_c: get(ids.temp),
+        io_bps: io
+            .iter()
+            .any(Option::is_some)
+            .then(|| io.iter().flatten().sum()),
+        // The schema's counter is in bytes (the service scales SMART's units to bytes).
+        host_written_gib: get(ids.host_written).map(|b| b / (1u64 << 30) as f64),
+        ..Default::default()
     }
 }
 
@@ -250,6 +305,67 @@ mod tests {
             resolve_gpu_sensors(&s, "gpu/pci-0000:02:00.0"),
             GpuSensorIds::default()
         );
+    }
+
+    #[test]
+    fn resolve_disk_sensors_prefers_the_drive_temperature() {
+        const D: &str = "disk/nvme-0";
+        let mk = |names: &[(&str, SensorKind)]| Schema {
+            revision: 1,
+            devices: vec![],
+            sensors: names
+                .iter()
+                .map(|(n, k)| Sensor::new(D, *k, n, Unit::Celsius, Label::new(n), Source::Lhm))
+                .collect(),
+        };
+        let s = mk(&[
+            ("composite", SensorKind::Temperature),
+            ("drive", SensorKind::Temperature),
+            ("read", SensorKind::Throughput),
+            ("write", SensorKind::Throughput),
+            ("host-written", SensorKind::Data),
+        ]);
+        let ids = resolve_disk_sensors(&s, D);
+        assert_eq!(
+            ids,
+            DiskSensorIds {
+                temp: Some(1),
+                read: Some(2),
+                write: Some(3),
+                host_written: Some(4),
+            }
+        );
+        // Without «drive», the first other temperature; another device matches nothing.
+        let s2 = mk(&[("composite", SensorKind::Temperature)]);
+        assert_eq!(resolve_disk_sensors(&s2, D).temp, Some(0));
+        assert_eq!(
+            resolve_disk_sensors(&s, "disk/other"),
+            DiskSensorIds::default()
+        );
+        let r = read_disk_sample(
+            &ids,
+            &snap(vec![
+                Some(40.0),
+                Some(41.0),
+                Some(100.0),
+                Some(50.0),
+                Some(12.5 * (1u64 << 30) as f64),
+            ]),
+            &[Quality::Fresh; 5],
+        );
+        assert_eq!(
+            (r.temp_c, r.io_bps, r.host_written_gib),
+            (Some(41.0), Some(150.0), Some(12.5))
+        );
+        // A missing half still gives the other; neither gives None.
+        let r = read_disk_sample(
+            &ids,
+            &snap(vec![None, None, Some(100.0), None, None]),
+            &[Quality::Fresh; 5],
+        );
+        assert_eq!((r.io_bps, r.host_written_gib), (Some(100.0), None));
+        let r = read_disk_sample(&ids, &snap(vec![None; 5]), &[Quality::Fresh; 5]);
+        assert_eq!(r.io_bps, None);
     }
 
     #[test]

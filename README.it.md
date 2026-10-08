@@ -73,10 +73,10 @@ temperature, tensioni, ventole e dati SMART.
   quando cambiano le colonne: lingua, unità o sensori selezionati. *Impostazioni › Log CSV*
   imposta cartella, sensori, intervallo, limite di dimensione e scorciatoie. Un errore, come una
   unità USB rimossa, ferma la registrazione con una notifica e il motivo nel pannello.
-- **Vista Prestazioni.** Uno stress test per CPU, RAM e GPU, con una procedura guidata (verifica
+- **Vista Prestazioni.** Uno stress test per CPU, RAM, GPU e dischi, con una procedura guidata (verifica
   normale o stabilità dell'overclock, da Rapido a Lungo), una pagina dal vivo, un risultato con
   verdetto e la cronologia delle sessioni, più i benchmark della CPU (un punteggio single core e uno
-  multi core) e della GPU (un punteggio Calcolo e uno Grafica) su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
+  multi core) della GPU (un punteggio Calcolo e uno Grafica) e dei dischi (lettura e scrittura) su contagiri (vedi [Vista Prestazioni](#vista-prestazioni)).
 - **Supporto GPU** per NVIDIA, AMD e Intel, tramite Windows e le librerie installate con il driver
   grafico.
 - **Leggero.** Il monitor non deve falsare ciò che misura. Il budget è meno dell'1% di CPU a riposo, meno di
@@ -188,7 +188,7 @@ ventole e RGB, salute SMART/NVMe dei dischi. Usa
 
 ## Vista Prestazioni
 
-La vista Prestazioni esegue uno stress test della CPU, della RAM o di una GPU. Il carico viene da un piccolo
+La vista Prestazioni esegue uno stress test della CPU, della RAM, di una GPU o di un disco. Il carico viene da un piccolo
 processo a parte, `oma-load.exe`, installato accanto all'app; si ferma quando fermi il test o
 chiudi l'app. Una procedura guidata chiede cosa provare, per quanto tempo e con quali soglie;
 durante la prova la pagina mostra frequenze, temperatura, potenza ed errori, e uno stop termico
@@ -225,6 +225,17 @@ parole semplici.
   altro programma occupato sulla GPU, con la memoria video (VRAM) ridotta o limitata dal calore resta
   valida ma con un avviso; un errore di calcolo, un azzeramento del driver o un blocco la rendono non
   valida. Finché la scala non è tarata i punti sono segnati come provvisori.
+- **Benchmark del disco.** *Prestazioni › Punteggio › Disco* misura un volume e una cartella che scegli, in MB/s di lettura e di
+  scrittura su una scala fissa: sequenziale da 1 MiB con coda 8 e 1, casuale da 4 KiB con coda 32 e 1 (un profilo NVMe è in Personalizza),
+  come CrystalDiskMark. Scrive un file di prova da 1 GiB, tiene la migliore di 3 misure e scrive al massimo 40 GiB per esecuzione. La pagina
+  mostra MB/s, IOPS e latenza media e al 99° percentile di ogni prova. Un disco che potrebbe dormire non viene svegliato senza chiedere;
+  una misura a batteria o con il disco occupato porta un avviso.
+- **Stress test del disco.** La procedura guidata offre una verifica normale (misto 70/30, scrittura sostenuta che mostra dove finisce la
+  cache SLC, lettura prolungata, IOPS casuali) e un profilo di stabilità (riempi e verifica, sovrascritture casuali con numero di
+  generazione, scritture sincrone e, per le unità rimovibili, una verifica della capacità reale in stile h2testw). Ogni blocco è
+  firmato e verificato alla lettura; un errore dei dati si distingue in bit capovolti, blocco fuori posto o blocco vecchio. Il file di prova
+  si cancella a fine test, anche dopo un crash. La cartella deve stare sul volume scelto (niente giunzioni né collegamenti), le scritture
+  della sessione sono stimate prima dell'avvio e lo stop termico usa la temperatura dell'unità.
 - **Privilegi di amministratore** non servono. Senza il servizio il test della CPU parte, con un
   avviso, e senza stop termico.
 - **Limite della RAM.** Il test della RAM copre solo la memoria che Windows concede al programma
@@ -330,7 +341,7 @@ finisce in `target/release/bundle/nsis/`.
 | `crates/oma-core` | Modello dati, scheduler di campionamento, merge per fonte, storico. Niente codice Windows. |
 | `crates/oma-win` | Provider Windows: PDH, D3DKMT, DXGI, NVML, NVAPI, ADL, IGCL, dischi, rete |
 | `crates/oma-ipc` | Tipi del protocollo, codifica MessagePack e framing per parlare con `oma-service` |
-| `crates/oma-load` | `oma-load.exe`, il processo di carico dello stress test (kernel di CPU, RAM e GPU) |
+| `crates/oma-load` | `oma-load.exe`, il processo di carico dello stress test (kernel di CPU, RAM, GPU e disco) |
 | `app/src-tauri` | Shell Tauri 2 (`oma-app`): comandi, tray, finestra, modalità sicura, template e hook NSIS |
 | `app/src` | Interfaccia Svelte 5 + TypeScript, traduzioni italiana e inglese |
 | `service/` | `oma-service`, servizio Windows .NET 10 basato su LibreHardwareMonitorLib, con i suoi test |

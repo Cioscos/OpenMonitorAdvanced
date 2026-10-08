@@ -2,7 +2,19 @@
   "components": [
     "cpu",
     "ram",
-    "gpu"
+    "gpu",
+    "disk"
+  ],
+  "diskKernels": [
+    "disk_fill",
+    "n1",
+    "n2",
+    "n3",
+    "n4",
+    "v1",
+    "v2",
+    "v3",
+    "v4"
   ],
   "gpuKernels": [
     "s1",
@@ -59,6 +71,15 @@
       "long": 7200,
       "night": 28800,
       "standard": 3600
+    },
+    "disk.normal": {
+      "long": 3600,
+      "quick": 600,
+      "standard": 1800
+    },
+    "disk.overclock": {
+      "long": 11400,
+      "standard": 4200
     },
     "gpu.normal": {
       "long": 1800,

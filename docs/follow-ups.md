@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8b2).
+Updated at the end of every milestone (last update: M8c).
 
 ## Open: code
 
@@ -118,6 +118,40 @@ Voci aperte dopo le revisioni della M8b2 (piano `docs/superpowers/plans/2026-10-
 - **Test:** `bench_window_times_the_gpu` cronometra 20 invii S1 con `window_begin`/`window_end` direttamente (la fase del motore con `windows: 1` supera il tetto di 2 s dei test); il percorso del motore con le finestre è coperto solo da test con `Submit` finto fino alla prova R1. Sotto il carico di `cargo test --workspace` (compilazione in parallelo) `gpu::tests::pause_resume_stops_submitting_during_the_pause` e `gpu::tests::ramp_reports_the_load_level` di `oma-load` sono falliti una volta e passano da soli e in una seconda esecuzione completa: probabili test legati al tempo, da indagare.
 - **Percorsi dell'installer:** `oma-load.exe` con S3, i carichi grafici del benchmark e l'impronta degli shader non sono stati provati con un setup installato (VM o Windows Sandbox).
 - **Esportazione e condivisione (M8d):** come per la CPU, rinviate.
+
+## Open: disk benchmark and stress test (M8c)
+
+Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-08-m8c-disco.md`, task C1-C14). Implementata su `feat/m8c-disk`, non unita in `main`.
+
+- **Prove dal vivo D1-D13 (task C16), 2026-10-08:** superate D1-D3, D5-D8 e D10-D13, con l'utente e senza input sintetici; le correzioni trovate per strada sono nei commit da d9a81b1 a 4627668.
+  - D1: scala `disk-1` tarata sul Fanxiang S880 2TB NVMe (`provisional: false`). D2: tre esecuzioni a 995, 996 e 990 punti. D3: profilo NVMe su C: e sull'SK hynix P41 (F:), chiavetta USB SanDisk Extreme (avviso «Disco rimovibile», 31 punti) e HDD ST2000DM008 (6 punti; 109 MB/s perché il disco è pieno al 90%).
+  - D5: «Verifica normale» superata, «Nessun calo», 254 GiB in 6:36. D6: V1+V4 superate in 17 s, finiscono per completamento. D7: errore iniettato mostrato come bit sbagliati, «passeggero». D8: il toast del risultato apre il risultato, quello della chiusura nel tray apre il test in corso. D10: chiusura da Gestione attività dà «Instabile: il test si è chiuso (codice 1)», nessun file orfano. D11: «Fermato: temperatura a 62 °C» con il limite a 55 °C. D12: tooltip a posto.
+  - D13 (build release, `pnpm tauri build --no-bundle`, campioni ogni 5 s della memoria privata): finestra a riposo 140-144 MB, durante lo stress Rapido su F: 153-176 MB, dopo il test 158-172 MB; tray 22-24 MB; `oma-load` al massimo 12,9 MB. Dettagli in `docs/perf-budget.md`, sezione M8c.
+- **Picchi della finestra durante lo stress del disco (D13):** sette campioni isolati tra 203 e 258 MB, circa uno ogni 30-40 s (258 MB all'avvio del test); il campione dopo torna a circa 160 MB e a riposo non ci sono picchi, quindi non sembra una perdita. Nei benchmark di CPU e GPU non c'erano (un solo campione a 201,5 MB nella M8a2). Da misurare processo per processo (app, processi WebView2 renderer e GPU) per capire chi cresce; sospetti: grafico dal vivo e `AnimatedNumber` delle velocità nella pagina del test.
+- **D4 e D9 da fare su un altro PC:** D4 (HDD in standby: avviso e nessun risveglio) perché qui l'HDD resta inattivo ma non va mai in standby, anche con DISKIDLE a 60 s; D9 (cartella di rete o OneDrive) perché qui non ce ne sono.
+- **Altro dalle prove dal vivo:**
+  - le etichette dei contagiri si sovrappongono alle tacche (anche CPU e GPU);
+  - un toast vecchio cliccato dal Centro notifiche non fa niente (manca un attivatore COM);
+  - «Lettura 0 MiB» quando il test si ferma prima della lettura;
+  - l'offset «8,0 GiB» arrotondato;
+  - il contatore SMART dei byte scritti è in ritardo sui test brevi;
+  - la sessione D5 salvata prima di cff0cb2 tiene il valore SMART sbagliato (2^30 volte troppo grande);
+  - l'etichetta SMART è ripetuta nella riga del risultato.
+- **Temperatura massima del disco:** dopo la D11 rimettere «Temperatura massima del disco» su «Automatica» (impostazione dell'utente su questo PC).
+- **Percorsi dell'installer:** `oma-load.exe` con il codice del disco non è stato provato con un setup installato (VM o Windows Sandbox), come per le M8a e M8b.
+- **Volumi senza disco fisico (R14):** Storage Spaces e RAID sono accettati con l'avviso `performance.disk.warn.noDevice`: niente stop termico né controllo dello standby, quindi un HDD dietro uno spazio di archiviazione potrebbe svegliarsi senza consenso.
+- **Giunzioni (R13):** una cartella con una giunzione, un punto di montaggio o un link simbolico nel percorso è rifiutata (`disk:link`): chi ha un disco dati montato in una cartella sceglie il percorso della lettera. Ancora aperti: `reparse_tag` non blocca se l'elenco è negato; il controllo del diario guarda le cartelle superiori anche su un disco in standby; TOCTOU fra controllo e apertura; `'.. '` con spazio finale; un `OpenProcess` negato vale come processo sparito nella pulizia dei file orfani; `start_disk_bench` non chiama `recover()`.
+- **Sonda della cartella (R11):** `probe_folder` scrive e cancella un file minuscolo: su un HDD scelto dall'utente può svegliarlo con un solo accesso ai metadati.
+- **Cartella di prova (R5):** il file di prova è condiviso in lettura e scrittura (non in cancellazione) tra i thread della stessa sessione; un altro processo dello stesso utente potrebbe leggerlo o scriverlo durante il test.
+- **Errori dei dati (R4, R8):** `expected`/`actual` portano la quantità del tipo (bit, indice, generazione), non i checksum; un errore passeggero (riletto giusto) conta comunque per l'esito e ferma con «stop su errore» (compare come «passeggero»).
+- **Controllo di blocco (R9):** il controllo di fase troppo lunga vale solo per `disk_bench` e N1–N4; per `disk_fill`, V1 e V3 (tetti morbidi) e V2/V4 (verifica dopo la durata) resta il controllo di 5 s sulla pipe muta: una fase V bloccata con il ticker vivo si nota tardi. **R17:** per i dischi `RunController` segnala `hung` (e uccide `oma-load`) quando `read_bytes + written_bytes` di `Progress.disk` non cresce per 120 s, senza contare la pausa prima della fase (`pause_before_ms`); i battiti con `phase_elapsed` 0 non azzerano il conto.
+- **Riempimento (R7):** `disk_fill` ignora la durata e finisce per completamento: su una chiavetta lenta può superare i 900/1200 s nominali.
+- **Revisione finale M8c, non bloccanti:** la finestra `other_io` è diluita dal battito della pausa; gli errori di I/O durante lo svuotamento (drain) vanno persi.
+- **Motore:** il clock di fase include l'avvio dei thread; il tempo unito di V comprende le pause degli svuotamenti, quindi le velocità per fase sono sottostimate; tutti i test hanno `threads=1`; V2 può sovrapporre lo stesso blocco se la striscia è ≤ la coda; la generazione V2 è `u16` (overflow dopo 65535 scritture per blocco); gli errori della prima lettura si perdono se la rilettura fallisce; i byte riletti contano in `read_bytes`; nessun campione nella finestra 2-5 s e il rilevatore SLC non scatta; un secondo calo sovrascrive `slc`; blocco `extern` senza `unsafe` (edizione 2024); tick del motore a 2 ms (10-20 ms sarebbero più parsimoniosi).
+- **Stime e protocollo:** la stima delle scritture di V2 è un limite superiore (velocità per durata); `check_phase` non controlla i core e i pattern delle fasi del disco; `reserve_bytes` senza tetto superiore; `NoSpace` precede `NoCores` per le richieste del disco con `retry_core`; i file di punteggio di CPU e GPU scrivono anche le chiavi del disco a `null`.
+- **Interfaccia:** il mock di `pnpm dev` non ha un piano del disco (la procedura guidata del disco in modalità browser non mostra niente); `isDiskKernel` usa un'espressione regolare invece del catalogo; la finestra dello standby non ha focus trap (come le altre).
+- **Controller:** ogni `LoadMessage::Error` conta come `io_error` (il benchmark riceve solo quello); `io_bps` copre da `Progress` a `PhaseDone`.
+- **Esportazione e classifica (M8d):** rinviate.
 
 ## Open: CPU benchmark (M8a2)
 

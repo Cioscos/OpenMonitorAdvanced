@@ -497,6 +497,8 @@ pub(crate) mod test_support {
                 stop_on_first_error: Some(true),
                 ram_share_percent: 40,
                 risk_notice_seen: true,
+                disk_stop_c: Some(75),
+                disk_folder: Some("E:\\Tests".into()),
             },
             migrations: Migrations {
                 service_v1: true,
@@ -538,7 +540,8 @@ mod tests {
                         "blockedGames": [], "hotkeyToggle": null, "hotkeyNextProfile": null,
                         "hotkeyBenchmark": null, "editorBounds": null},
             "performance": {"thermalStop": true, "cpuStopC": null, "gpuStopC": 90,
-                            "stopOnFirstError": null, "ramSharePercent": 70, "riskNoticeSeen": false},
+                            "stopOnFirstError": null, "ramSharePercent": 70, "riskNoticeSeen": false, "diskStopC": null,
+                            "diskFolder": null},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

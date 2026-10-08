@@ -418,6 +418,8 @@ impl Engine<'_, '_> {
                     _ => std::mem::take(&mut cur.workers),
                 },
                 rates: vec![],
+
+                disk: None,
             }));
             match end {
                 End::Stopped => return self.finish(FinishReason::Stopped),
@@ -984,6 +986,8 @@ impl Engine<'_, '_> {
             memory_bytes: cur.memory_bytes,
             rate,
             load_percent: None,
+
+            disk: None,
         }));
     }
 
@@ -1010,6 +1014,8 @@ impl Engine<'_, '_> {
             actual,
             seed: pr.seed,
             load_percent: None,
+
+            transient: None,
         })
     }
 
@@ -1222,6 +1228,8 @@ impl Engine<'_, '_> {
                 actual: 0,
                 seed: p.seed,
                 load_percent: None,
+
+                transient: None,
             }));
             (self.out)(LoadMessage::Finished(self.finish(FinishReason::Failed)));
             *closed = true;

@@ -32,7 +32,7 @@ import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
 import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
-import { mockBench, mockPerformance, parseBenchScenario, parsePerfScenario } from './mockPerformance';
+import { MOCK_VOLUMES, mockBench, mockPerformance, parseBenchScenario, parseDiskScenario, parsePerfScenario } from './mockPerformance';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
@@ -512,7 +512,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
   const editorData = mockEditorData();
   let benchmarks = structuredClone(MOCK_BENCHMARKS);
   const perf = mockPerformance(parsePerfScenario(typeof location === 'undefined' ? '' : location.search), () => serviceStatus.state === 'connected');
-  const bench = mockBench(parseBenchScenario(typeof location === 'undefined' ? '' : location.search), () => perf.running(), perf.system().gpus);
+  const search = typeof location === 'undefined' ? '' : location.search;
+  const bench = mockBench(parseBenchScenario(search), () => perf.running(), perf.system().gpus, perf.system().volumes, parseDiskScenario(search));
   const cycle = mockHealthCycle();
   const healthListeners = new Set<(r: HealthReport) => void>();
   const clockListeners = new Set<(c: HealthClock) => void>();
@@ -678,12 +679,20 @@ export function createMockBackend(intervalMs = 1000): Backend {
     performanceQuitConfirmed: async () => console.info('mock: stop and quit'),
     performanceBenchStart: async () => bench.start(),
     performanceGpuBenchStart: async (deviceId) => bench.startGpu(deviceId),
+    performanceDiskBenchStart: async (request) => bench.startDisk(request),
+    performanceDiskProbe: async (folder) => {
+      if (folder.startsWith('\\')) throw 'disk:remote';
+      const volume = MOCK_VOLUMES.find((v) => folder.toUpperCase().startsWith(v.root.toUpperCase()));
+      if (!volume) throw 'disk:not_found';
+      return { ...volume, folder };
+    },
+    performanceDiskPick: async () => MOCK_VOLUMES[1].root + 'OMA tests',
     performanceBenchStop: async () => bench.stop(),
     performanceBenchStatus: async () => bench.status(),
     performanceScores: async () => bench.scores(),
     performanceScore: async (id) => bench.score(id),
     performanceScoreDelete: async (id) => bench.remove(id),
-    performanceBaseline: async () => ({ provisional: true, gpuProvisional: true }),
+    performanceBaseline: async () => ({ provisional: true, gpuProvisional: true, diskProvisional: true }),
     onPerformanceBench: async (cb) => bench.subscribe(cb),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),
     benchmarkList: async () => structuredClone(benchmarks),

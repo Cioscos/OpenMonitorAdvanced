@@ -204,8 +204,18 @@ pub fn factory(id: KernelId) -> Option<&'static dyn KernelFactory> {
         KernelId::Sort => Some(&crate::kernels::bench::BenchFactory(
             crate::kernels::bench::Kind::Sort,
         )),
-        // GPU kernels run in the GPU engine, not as CPU kernels.
-        KernelId::S1
+        // GPU and disk kernels run in their own engines, not as CPU kernels (disk: C4).
+        KernelId::DiskFill
+        | KernelId::DiskBench
+        | KernelId::N1
+        | KernelId::N2
+        | KernelId::N3
+        | KernelId::N4
+        | KernelId::V1
+        | KernelId::V2
+        | KernelId::V3
+        | KernelId::V4
+        | KernelId::S1
         | KernelId::S2
         | KernelId::S3
         | KernelId::S4

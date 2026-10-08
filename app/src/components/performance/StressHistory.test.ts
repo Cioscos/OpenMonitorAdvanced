@@ -150,3 +150,15 @@ test('history filters by GPU', async () => {
   // Both read as problems.
   expect(rows.every((row) => row.classList.contains('crit'))).toBe(true);
 });
+
+test('filter by disk', async () => {
+  const backend: FakeBackend = await connectSettings();
+  backend.performanceSystemInfo = makeSystemInfo();
+  backend.performanceSessions = [summary({ id: 'disk', component: 'disk', objective: 'overclock', preset: 'standard' }), summary({ id: 'cpu' })];
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
+  await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(2));
+  await fireEvent.click(screen.getByRole('radio', { name: t('performance.wizard.disk') }));
+  expect(items()).toHaveLength(1);
+  expect(items()[0].textContent).toContain(t('performance.wizard.disk'));
+  expect(items()[0].textContent).toContain(t('performance.objective.disk.overclock'));
+});

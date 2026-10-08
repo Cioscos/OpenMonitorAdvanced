@@ -4,6 +4,8 @@ import type {
   BenchKernel,
   BenchStatus,
   BenchStep,
+  DiskBenchRequest,
+  VolumeChoice,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -110,11 +112,35 @@ export function makeBenchStatus(over: Partial<BenchStatus> = {}): BenchStatus {
     multi: null,
     compute: null,
     graphics: null,
+    readMBs: null,
+    writeMBs: null,
+    points: null,
+    liveRead: null,
+    liveWrite: null,
     flags: [],
     scoreId: null,
     error: null,
     ...over,
   };
+}
+
+/** The disk benchmark's steps (M8c DC5), shortened to one test each way: the fill, then read and write. */
+export const DISK_BENCH_STEPS: BenchStep[] = [
+  { kernel: 'disk_fill', mode: 'write', rep: 0 },
+  { kernel: 'seq1m_q8t1', mode: 'read', rep: 0 },
+  { kernel: 'seq1m_q8t1', mode: 'read', rep: 1 },
+  { kernel: 'rnd4k_q1t1', mode: 'write', rep: 1 },
+];
+
+/** A disk benchmark status for tests: running its first step; override what matters. */
+export function makeDiskBenchStatus(deviceId: string | null, over: Partial<BenchStatus> = {}): BenchStatus {
+  return makeBenchStatus({
+    category: 'disk',
+    deviceId,
+    steps: DISK_BENCH_STEPS,
+    segments: DISK_BENCH_STEPS.map((_, i) => (i === 0 ? 'running' : 'pending')),
+    ...over,
+  });
 }
 
 /** The six steps of the GPU benchmark (M8b2 DH6): three Compute loads, then three Graphics ones. */
@@ -145,6 +171,7 @@ const kernelOf = (id: BenchKernel, unit: string, single: number | null, multi: n
   spread,
 });
 const NO_GPU_DEVICE = { deviceId: null, vendorId: null, dedicatedBytes: null, integrated: null };
+const NO_DISK_SCORES = { readMBs: null, writeMBs: null, points: null };
 
 /** A saved CPU score for tests, valid and without flags; override what matters. */
 export function makeScoreFile(over: ScoreOver = {}): ScoreFile {
@@ -158,7 +185,7 @@ export function makeScoreFile(over: ScoreOver = {}): ScoreFile {
     provisional: false,
     isa: 'avx512',
     shaderDigest: null,
-    scores: { single: 1500, multi: 12000, compute: null, graphics: null, ...scores },
+    scores: { single: 1500, multi: 12000, compute: null, graphics: null, ...NO_DISK_SCORES, ...scores },
     kernels: [
       kernelOf('ntt', 'Mop/s', 950.4, 7600),
       kernelOf('hash', 'MB/s', 2100, 16000),
@@ -202,6 +229,33 @@ export function makeGpuScoreFile(deviceId: string, over: ScoreOver = {}): ScoreF
   });
 }
 
+let diskScoreCount = 0;
+/**
+ * A saved disk score of `deviceId` for tests (profile B1, two tests); override what matters. The
+ * default id is new each time: the bench store keeps the previous test's scores until it reconnects,
+ * and an equal id would hide the new score's detail from the page.
+ */
+export function makeDiskScoreFile(deviceId: string | null, over: ScoreOver = {}): ScoreFile {
+  const { scores, device, ...rest } = over;
+  const rate = (mbs: number, iops: number, mean: number, p99: number) => ({ mbs, iops, meanLatUs: mean, p99LatUs: p99 });
+  const disk = (id: BenchKernel, read: ReturnType<typeof rate>, write: ReturnType<typeof rate>) => ({ ...kernelOf(id, 'MB/s', null, null), read, write });
+  return makeScoreFile({
+    id: `disk-score-${++diskScoreCount}`,
+    category: 'disk',
+    scoreVersion: 'disk-1',
+    isa: null,
+    scores: { single: null, multi: null, readMBs: 6900, writeMBs: 5800, points: 1012, ...scores },
+    kernels: [
+      disk('seq1m_q8t1', rate(6900, 6580, 1210, 2100), rate(5800, 5530, 1440, 2600)),
+      disk('rnd4k_q1t1', rate(76.5, 18700, 53, 91), rate(240.1, 58600, 16, 30)),
+    ],
+    device: { model: 'Fake NVMe SSD', cores: 0, logical: 0, deviceId, kind: 'nvme', ...device },
+    diskProfile: 'b1',
+    scaling: null,
+    ...rest,
+  });
+}
+
 export const scoreSummaryOf = (f: ScoreFile): ScoreSummary => ({
   id: f.id,
   at: f.at,
@@ -210,7 +264,12 @@ export const scoreSummaryOf = (f: ScoreFile): ScoreSummary => ({
   multi: f.scores.multi,
   compute: f.scores.compute,
   graphics: f.scores.graphics,
+  readMBs: f.scores.readMBs,
+  writeMBs: f.scores.writeMBs,
+  points: f.scores.points,
   deviceId: f.device.deviceId,
+  model: f.device.model || null,
+  diskProfile: f.diskProfile ?? null,
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
@@ -312,6 +371,28 @@ export function makeSystemInfo(over: Partial<SystemInfo> = {}): SystemInfo {
     stopC: 84,
     hypervisor: false,
     gpus: [],
+    volumes: [],
+    ...over,
+  };
+}
+
+/** A volume for tests: the NVMe system disk `C:`; override what matters. */
+export function makeVolume(over: Partial<VolumeChoice> = {}): VolumeChoice {
+  return {
+    root: 'C:\\',
+    label: 'Windows',
+    fs: 'NTFS',
+    totalBytes: 1000 * 1024 ** 3,
+    freeBytes: 400 * 1024 ** 3,
+    folder: 'C:\\Users\\me\\AppData\\Local\\Temp',
+    deviceId: 'disk-c',
+    model: 'Fake NVMe SSD',
+    kind: 'nvme',
+    removable: false,
+    system: true,
+    virtualDisk: false,
+    standby: false,
+    sync: false,
     ...over,
   };
 }
@@ -881,6 +962,13 @@ export class FakeBackend implements Backend {
   scoreFiles: ScoreFile[] = [];
   baselineProvisional = false;
   baselineGpuProvisional = false;
+  baselineDiskProvisional = false;
+  /** The disk benchmark: the requests it got, the reply of `performanceDiskPick`, the volume `performanceDiskProbe` answers with, or its error. */
+  diskStartRequests: DiskBenchRequest[] = [];
+  diskStartErrors: string[] = [];
+  diskPickResult: string | null = null;
+  diskProbeResult: VolumeChoice | string = makeVolume();
+  diskProbeCalls: string[] = [];
   /** Set to reject `performanceBenchStart` with this text instead of starting. */
   benchStartError: string | null = null;
   readonly benchListeners = new Set<(status: BenchStatus) => void>();
@@ -895,6 +983,26 @@ export class FakeBackend implements Backend {
     this.performanceCalls.push(`performanceGpuBenchStart:${deviceId}`);
     if (this.benchStartError !== null) throw this.benchStartError;
     return 'fake-gpu-score';
+  }
+
+  async performanceDiskBenchStart(request: DiskBenchRequest): Promise<string> {
+    this.performanceCalls.push('performanceDiskBenchStart');
+    this.diskStartRequests.push(structuredClone(request));
+    const error = this.diskStartErrors.shift() ?? this.benchStartError;
+    if (error) throw error;
+    return 'fake-disk-score';
+  }
+
+  async performanceDiskProbe(folder: string): Promise<VolumeChoice> {
+    this.performanceCalls.push('performanceDiskProbe');
+    this.diskProbeCalls.push(folder);
+    if (typeof this.diskProbeResult === 'string') throw this.diskProbeResult;
+    return structuredClone(this.diskProbeResult);
+  }
+
+  async performanceDiskPick(): Promise<string | null> {
+    this.performanceCalls.push('performanceDiskPick');
+    return this.diskPickResult;
   }
 
   async performanceBenchStop(): Promise<void> {
@@ -921,9 +1029,9 @@ export class FakeBackend implements Backend {
     this.scoreFiles = this.scoreFiles.filter((f) => f.id !== id);
   }
 
-  async performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean }> {
+  async performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }> {
     this.performanceCalls.push('performanceBaseline');
-    return { provisional: this.baselineProvisional, gpuProvisional: this.baselineGpuProvisional };
+    return { provisional: this.baselineProvisional, gpuProvisional: this.baselineGpuProvisional, diskProvisional: this.baselineDiskProvisional };
   }
 
   async onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe> {

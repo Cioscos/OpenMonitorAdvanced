@@ -1,14 +1,14 @@
 <script lang="ts">
   import catalog from '../../../../testdata/performance/catalog.json';
   import { t } from '../../lib/i18n/index.svelte';
-  import { marked } from '../../lib/performance/format';
+  import { kernelTerm, marked } from '../../lib/performance/format';
   import type { Custom, Isa, KernelId, Plan } from '../../lib/types';
   import Term from '../common/Term.svelte';
 
   // «Personalizza» (spec M8 §3.4, DA12): the modes of the profile's plan with their minutes, the
   // instruction set, the threads and «stop at the first error». Every change edits `custom` in
   // place; the wizard previews the plan again with it.
-  let { custom = $bindable(), base, isa, gpu = false }: { custom: Custom; base: Plan; isa: Isa[]; gpu?: boolean } = $props();
+  let { custom = $bindable(), base, isa, gpu = false, disk = false }: { custom: Custom; base: Plan; isa: Isa[]; gpu?: boolean; disk?: boolean } = $props();
 
   /** The profile's seconds of each kernel, in plan order. */
   const kernels = $derived.by(() => {
@@ -46,7 +46,7 @@
         <li class:off={!edit.enabled}>
           <label class="check">
             <input type="checkbox" bind:checked={edit.enabled} />
-            <Term term={`mode.${edit.kernel}`} />
+            <Term term={kernelTerm(edit.kernel)} />
           </label>
           <span class="minutes">
             <input
@@ -55,7 +55,7 @@
               max={MAX_MINUTES}
               step="1"
               disabled={!edit.enabled}
-              aria-label={t('performance.custom.minutesOf', { name: t(`glossary.mode.${edit.kernel}.name`) })}
+              aria-label={t('performance.custom.minutesOf', { name: t(`glossary.${kernelTerm(edit.kernel)}.name`) })}
               value={edit.minutes ?? profileMinutes(edit.kernel)}
               onchange={(e) => setMinutes(e.currentTarget, edit.kernel)}
             />
@@ -66,7 +66,7 @@
     </ul>
   </fieldset>
 
-  {#if !gpu}
+  {#if !gpu && !disk}
   <fieldset>
     <legend>{t('performance.custom.isa')}</legend>
     <div class="options">
@@ -88,6 +88,9 @@
   {/if}
 
   <div class="flags">
+    {#if disk}
+      <label class="check"><input type="checkbox" bind:checked={custom.compressible} /><Term term="compressible">{t('performance.custom.compressible')}</Term></label>
+    {/if}
     {#if hasCycle}
       <label class="check"><input type="checkbox" bind:checked={custom.bothSmt} />{t('performance.custom.bothSmt')} (<Term term="smt" />)</label>
     {/if}

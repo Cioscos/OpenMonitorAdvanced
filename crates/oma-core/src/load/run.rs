@@ -13,6 +13,7 @@ use serde::Serialize;
 use super::outcome::{decide, Outcome, OutcomeFacts};
 use super::plan::{Component, Objective, Preset};
 use super::sensors::SensorSample;
+use super::session::SlcResult;
 use super::session::{
     CoreResult, ErrorRecord, Journal, OutcomeDetail, PhaseResult, Sample, Session, SessionEvent,
     Stats, FORMAT, MAX_ERRORS,
@@ -31,15 +32,24 @@ const STATUS_EVENTS: usize = 200;
 const MAX_EVENTS: usize = 1_000;
 const FINAL_POLL_MS: u64 = 2_000;
 const TEMP_MISSING_MS: u64 = 10_000;
+/// A disk run whose byte counters stand still this long is hung (R17).
+const STALL_MS: u64 = 120_000;
 /// How long a run may outlast its plan before it counts as hung.
 pub(crate) const OVERRUN_MS: u64 = 120_000;
 /// `oma-load` exits with this code on an invalid command line or message (`EXIT_USAGE`).
 const LOAD_EXIT_USAGE: i32 = 1;
 /// `oma-load` exits with this code when the GPU was lost (`EXIT_DEVICE_LOST`).
 pub const LOAD_EXIT_DEVICE_LOST: i32 = 4;
+/// `oma-load` exits with this code after a persistent I/O error (`EXIT_IO`).
+pub const LOAD_EXIT_IO: i32 = 5;
+/// How far before an `slc_cliff` notice a hot sample still makes it a thermal suspect (DC8).
+const SLC_HOT_WINDOW_MS: u64 = 10_000;
+/// A sample this close to the stop threshold counts as hot (DC8).
+const SLC_HOT_MARGIN_C: f64 = 5.0;
 const INVALID_PLAN: &str = "performance.start.invalid_plan";
 const NO_GPU: &str = "performance.start.no_gpu";
 const GPU_ERROR: &str = "performance.start.gpu_error";
+const ACCESS_DENIED: &str = "performance.start.access_denied";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -105,6 +115,18 @@ pub struct PhaseInfo {
     pub isa: Isa,
 }
 
+/// Disk runs: the latest throughput and the bytes moved so far.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskStatus {
+    /// The schema device id of the disk under test, for the UI's chart; empty if unknown.
+    pub device_id: String,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    pub written_bytes: u64,
+    pub read_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStatus {
@@ -128,6 +150,8 @@ pub struct RunStatus {
     pub stability: Option<f64>,
     /// GPU runs: the schema device id of the GPU under test, for the UI's chart.
     pub gpu_device_id: Option<String>,
+    /// Disk runs only.
+    pub disk: Option<DiskStatus>,
     pub checks: u64,
     pub errors: u64,
     pub whea_corrected: u64,
@@ -136,7 +160,7 @@ pub struct RunStatus {
     pub current_core: Option<u32>,
     pub events: Vec<SessionEvent>,
     /// `noService`, `tempMissing`, `wheaUnreadable`, `ramReduced`, `ramInsufficient`,
-    /// `pcieReplay`, `vramReduced`.
+    /// `pcieReplay`, `vramReduced`, `smartMissing` (disk).
     pub warnings: Vec<String>,
     pub outcome: Option<Outcome>,
 }
@@ -146,6 +170,8 @@ pub struct RunStatus {
 enum StopCause {
     User,
     Thermal(f64),
+    /// A disk data error on a phase that stops on the first error.
+    FirstError,
 }
 
 /// Where the session stood when it ended; `compute_outcome` reads it.
@@ -200,6 +226,8 @@ pub struct RunController {
     last_save_ms: u64,
     next_whea_ms: u64,
     started: bool,
+    /// A message other than `Hello` came: the plan was accepted and ran.
+    ran: bool,
     /// Set at the end; the final verdict waits for the last WHEA poll.
     ended: bool,
     final_deadline: Option<u64>,
@@ -226,6 +254,18 @@ pub struct RunController {
     /// The first PCIe replay count read (DG14), and whether a rise was reported.
     pcie_base: Option<u32>,
     pcie_warned: bool,
+    // Disk runs.
+    disk_full: bool,
+    /// The persistent I/O error that ends the process with `LOAD_EXIT_IO`.
+    io_failed: bool,
+    disk_status: Option<DiskStatus>,
+    /// The last sample hot enough to explain an SLC cliff (DC8).
+    hot_at: Option<u64>,
+    /// Disk runs: when the current phase began, from the latest `Progress`.
+    phase_start: Option<u64>,
+    /// Disk runs (R17): the last `read + written` total and when it last grew.
+    stall_bytes: u64,
+    stall_since: Option<u64>,
 }
 
 fn rfc3339(wall_ms: i64) -> String {
@@ -266,6 +306,7 @@ impl RunController {
             last_save_ms: now.mono_ms,
             next_whea_ms: now.mono_ms + WHEA_EVERY_MS,
             started: false,
+            ran: false,
             ended: false,
             final_deadline: None,
             temp_since: None,
@@ -287,9 +328,22 @@ impl RunController {
             load_percent: None,
             pcie_base: None,
             pcie_warned: false,
+            disk_full: false,
+            io_failed: false,
+            disk_status: None,
+            hot_at: None,
+            phase_start: None,
+            stall_bytes: 0,
+            stall_since: None,
             config,
         };
-        if c.is_gpu() {
+        if c.is_disk() {
+            // Drive temperatures come from the app's own sensors, like the GPU's.
+            c.guard = c
+                .config
+                .thermal_stop
+                .then(|| ThermalGuard::new(c.config.threshold_c));
+        } else if c.is_gpu() {
             // GPU temperatures arrive without the service (DG12).
             c.stability = Some(StabilityMeter::new(c.session.objective));
             c.guard = c
@@ -304,6 +358,10 @@ impl RunController {
 
     fn is_gpu(&self) -> bool {
         self.session.component == Component::Gpu
+    }
+
+    fn is_disk(&self) -> bool {
+        self.session.component == Component::Disk
     }
 
     /// An error with where it happened: the clock of its core, or the GPU's for a GPU run.
@@ -335,7 +393,8 @@ impl RunController {
     }
 
     fn thermal_armed(&self) -> bool {
-        self.config.thermal_stop && (self.config.service_available || self.is_gpu())
+        self.config.thermal_stop
+            && (self.config.service_available || self.is_gpu() || self.is_disk())
     }
 
     pub fn session(&self) -> &Session {
@@ -419,6 +478,7 @@ impl RunController {
             core: self.current_core,
             updated_at: rfc3339(now.wall_ms),
             clean_end: false,
+            disk_folder: self.session.request.disk.as_ref().map(|d| d.folder.clone()),
         }
     }
 
@@ -432,6 +492,7 @@ impl RunController {
                 self.thermal_stop = Some(t);
                 self.event("thermal_stop", &[("temp", format!("{t:.0}"))]);
             }
+            StopCause::FirstError => self.event("first_error_stop", &[]),
         }
         self.state = RunState::Stopping;
         self.stop_deadline = Some(self.mono + STOP_GRACE_MS);
@@ -458,13 +519,16 @@ impl RunController {
             errors: self.errors,
             error_cores: self.error_cores.clone(),
             coreless_errors: self.coreless_errors,
+            disk_full: self.disk_full,
             thermal_stop: self.thermal_stop,
             suspended: self.suspended,
             user_stop: self.user_stop,
             whea_corrected: self.whea_count(&[17, 19]),
             completed: self.completed,
             stability: self.session.stability,
-            nothing_ran: self.completed && (self.checks == 0 || all_skipped),
+            // A disk benchmark writes without verifying: bytes moved count as running.
+            nothing_ran: self.completed
+                && (all_skipped || (self.checks == 0 && !self.moved_bytes())),
         };
         let (outcome, verdict) = decide(&facts);
         let e = self.end;
@@ -496,6 +560,13 @@ impl RunController {
             at_ms: Some(e.at_ms),
         });
         outcome
+    }
+
+    fn moved_bytes(&self) -> bool {
+        self.session
+            .disk
+            .as_ref()
+            .is_some_and(|d| d.read_bytes + d.written_bytes > 0)
     }
 
     fn update_stats(&mut self) {
@@ -565,6 +636,7 @@ impl RunController {
         if self.state == RunState::Starting {
             self.state = RunState::Running;
         }
+        self.ran |= !matches!(msg, LoadMessage::Hello(_));
         let mut out = vec![];
         match msg {
             LoadMessage::Hello(h) => self.session.load_version = Some(h.version.clone()),
@@ -591,9 +663,37 @@ impl RunController {
                         m.rate(r, self.mono);
                     }
                 }
+                // The base is fixed at the first sighting of a phase: heartbeats during an
+                // open or a flush report `phase_elapsed_ms` 0 and must not move it.
+                if self.phase_start.is_none() || p.phase != self.phase {
+                    self.phase_start = Some(self.mono.saturating_sub(p.phase_elapsed_ms));
+                }
                 self.phase = p.phase;
                 self.current_core = p.current_core;
                 self.checks = p.checks;
+                if let Some(d) = &p.disk {
+                    self.disk_status = Some(DiskStatus {
+                        device_id: self
+                            .session
+                            .disk
+                            .as_ref()
+                            .map(|s| s.device_id.clone())
+                            .unwrap_or_default(),
+                        read_bps: d.read_bps,
+                        write_bps: d.write_bps,
+                        written_bytes: d.written_bytes,
+                        read_bytes: d.read_bytes,
+                    });
+                    let total = d.read_bytes.saturating_add(d.written_bytes);
+                    if self.stall_since.is_none() || total > self.stall_bytes {
+                        self.stall_since = Some(self.mono);
+                    }
+                    self.stall_bytes = total;
+                    if let Some(s) = self.session.disk.as_mut() {
+                        s.read_bytes = d.read_bytes;
+                        s.written_bytes = d.written_bytes;
+                    }
+                }
                 // oma-load caps its `Error` messages but counts every error.
                 self.errors = self.errors.max(p.errors);
                 for c in &p.cores {
@@ -634,6 +734,7 @@ impl RunController {
             }
             LoadMessage::Error(e) => {
                 self.errors += 1;
+                self.io_failed |= e.kind == ErrorKind::IoError && e.transient != Some(true);
                 let record = self.record(e);
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
                 self.coreless_errors |= core.is_none();
@@ -643,6 +744,19 @@ impl RunController {
                     c.first_error.get_or_insert_with(|| record.clone());
                 }
                 self.keep(record);
+                // `oma-load` goes on after a data error: stopping is our job (R8).
+                if self.is_disk()
+                    && self.state != RunState::Stopping
+                    && !self.io_failed
+                    && self
+                        .session
+                        .plan
+                        .phases
+                        .get(e.phase as usize)
+                        .is_some_and(|p| p.stop_on_error)
+                {
+                    out.extend(self.begin_stop(StopCause::FirstError));
+                }
             }
             LoadMessage::Notice(n) => {
                 match n.code.as_str() {
@@ -654,6 +768,28 @@ impl RunController {
                     }
                     "gpu_error" if !self.phase_seen => {
                         self.failed_to_start = Some(GPU_ERROR.into());
+                    }
+                    "disk_full" => self.disk_full = true,
+                    "access_denied" if !self.phase_seen => {
+                        self.failed_to_start = Some(ACCESS_DENIED.into());
+                    }
+                    "slc_cliff" => {
+                        let suspect = self
+                            .hot_at
+                            .is_some_and(|t| self.mono.saturating_sub(t) <= SLC_HOT_WINDOW_MS);
+                        if let Some(d) = self.session.disk.as_mut() {
+                            d.slc = Some(SlcResult {
+                                cache_bytes: n.value.unwrap_or(0),
+                                steady_bps: None,
+                                thermal_suspect: suspect,
+                            });
+                        }
+                    }
+                    "slc_steady" => {
+                        let slc = self.session.disk.as_mut().and_then(|d| d.slc.as_mut());
+                        if let (Some(slc), Some(v)) = (slc, n.value) {
+                            slc.steady_bps = Some(v as f64);
+                        }
                     }
                     // Other codes (`vram_bits`, `artifact_tiles`...) are diary events only.
                     _ => {}
@@ -696,7 +832,9 @@ impl RunController {
                     }
                     FinishReason::FirstError => {}
                     FinishReason::Failed => {
-                        if !self.hung && self.device_lost.is_none() {
+                        // A full disk and an I/O error are named by their own facts.
+                        let named = self.disk_full || self.io_failed;
+                        if !self.hung && self.device_lost.is_none() && !named {
                             self.crashed = true;
                         }
                     }
@@ -728,7 +866,7 @@ impl RunController {
             return vec![];
         }
         self.tick(now);
-        if !self.is_gpu() && service_available != self.config.service_available {
+        if !self.is_gpu() && !self.is_disk() && service_available != self.config.service_available {
             self.config.service_available = service_available;
             if service_available {
                 self.warnings.retain(|w| w != "noService");
@@ -743,6 +881,9 @@ impl RunController {
         }
         if let (Some(m), Some(on)) = (self.stability.as_mut(), sample.throttling) {
             m.throttling(on, self.mono);
+        }
+        if self.is_disk() {
+            self.disk_sample(sample);
         }
         self.last_sample = sample.clone();
         self.sums[0].add(sample.temp_c);
@@ -783,6 +924,28 @@ impl RunController {
                 self.begin_stop(StopCause::Thermal(t))
             }
             _ => vec![],
+        }
+    }
+
+    /// The SMART counter before and after, and the heat that may explain an SLC cliff.
+    fn disk_sample(&mut self, sample: &SensorSample) {
+        if sample
+            .temp_c
+            .is_some_and(|t| t >= self.config.threshold_c - SLC_HOT_MARGIN_C)
+        {
+            self.hot_at = Some(self.mono);
+        }
+        let Some(d) = self.session.disk.as_mut() else {
+            return;
+        };
+        match sample.host_written_gib {
+            Some(g) => {
+                d.host_written_before_gib.get_or_insert(g);
+                d.host_written_after_gib = Some(g);
+                self.warnings.retain(|w| w != "smartMissing");
+            }
+            None if d.host_written_before_gib.is_none() => self.warn("smartMissing"),
+            None => {}
         }
     }
 
@@ -868,10 +1031,47 @@ impl RunController {
             return out;
         }
         let mut out = vec![];
-        let overrun =
-            self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS;
+        // Strict phases (R9) must end by their nominal time. A fill (R7) and the V loads
+        // end on completion or after a final verify, so only the silent pipe flags them.
+        let soft = self
+            .session
+            .plan
+            .phases
+            .get(self.phase as usize)
+            .is_some_and(|p| {
+                matches!(
+                    p.kernel,
+                    KernelId::DiskFill | KernelId::V1 | KernelId::V2 | KernelId::V3 | KernelId::V4
+                )
+            });
+        // Disk phases differ in length (a fill can run far past its time): each strict one
+        // is measured from its own start, not from the plan's.
+        let limit = match self.session.plan.phases.get(self.phase as usize) {
+            Some(p) if self.is_disk() => {
+                let from = self.phase_start.unwrap_or(self.start_mono);
+                self.mono.saturating_sub(from)
+                    > u64::from(p.duration_s) * 1000 + u64::from(p.pause_before_ms) + OVERRUN_MS
+            }
+            _ => {
+                self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS
+            }
+        };
+        let overrun = !soft && limit;
+        // R17: the soft phases skip the overrun check, so a disk that stops moving bytes is
+        // caught here. The pause before a phase does not count.
+        let stalled = self.is_disk()
+            && self.stall_since.is_some_and(|since| {
+                let pause_end = self.phase_start.unwrap_or(0)
+                    + self
+                        .session
+                        .plan
+                        .phases
+                        .get(self.phase as usize)
+                        .map_or(0, |p| u64::from(p.pause_before_ms));
+                self.mono.saturating_sub(since.max(pause_end)) > STALL_MS
+            });
         if self.state == RunState::Running
-            && (overrun || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
+            && (overrun || stalled || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
         {
             self.hung = true;
             self.event("hung", &[]);
@@ -972,12 +1172,17 @@ impl RunController {
         }
         self.tick(now);
         // A clean exit after our own stop request is not a crash; a usage exit means the
-        // plan was refused, so it never ran.
-        if code == Some(LOAD_EXIT_USAGE) {
+        // plan was refused, so it never ran. Once it ran, 1 is a kill (Task Manager's code).
+        if code == Some(LOAD_EXIT_USAGE) && !self.ran {
             self.failed_to_start = Some(INVALID_PLAN.into());
         } else if code == Some(LOAD_EXIT_DEVICE_LOST) {
             // 0: the exit code carries no HRESULT.
             self.device_lost.get_or_insert(0);
+        } else if code == Some(LOAD_EXIT_IO) {
+            // The `io_error` is the cause; keep it counted if its message was lost.
+            self.errors = self.errors.max(1);
+            self.coreless_errors = true;
+            self.io_failed = true;
         } else if !(self.state == RunState::Stopping && code == Some(0)) {
             self.crashed = true;
             let code = code.map_or("-".into(), |c| c.to_string());
@@ -995,7 +1200,15 @@ impl RunController {
             objective: s.objective,
             preset: s.preset,
             elapsed_ms: self.mono - self.start_mono,
-            total_ms: s.plan.total_seconds() * 1000,
+            // The disk fill ends when the file is written, not on time (R7): its 1200 s are a
+            // bound, so the shown total is the timed phases only.
+            total_ms: s
+                .plan
+                .phases
+                .iter()
+                .filter(|p| p.kernel != KernelId::DiskFill)
+                .map(|p| u64::from(p.duration_s) * 1000)
+                .sum(),
             phase_index: self.phase,
             phases: s
                 .plan
@@ -1021,6 +1234,7 @@ impl RunController {
                 .and_then(StabilityMeter::result)
                 .or(s.stability),
             gpu_device_id: s.gpu_device_id.clone(),
+            disk: self.disk_status.clone(),
             checks: self.checks,
             errors: self.errors,
             whea_corrected: self.whea_count(&[17, 19]),
@@ -1072,6 +1286,8 @@ mod tests {
             iterations: None,
             pause_before_ms: 0,
             windows: None,
+
+            disk: None,
         }
     }
 
@@ -1092,12 +1308,15 @@ mod tests {
                 custom: None,
                 retry_core: None,
                 gpu: None,
+                disk: None,
             },
             plan: Plan {
                 seed: 1,
                 ram_bytes: 0,
                 phases: vec![phase(KernelId::K2), phase(KernelId::K5)],
                 gpu: None,
+
+                disk: None,
             },
             outcome: None,
             outcome_detail: None,
@@ -1114,6 +1333,7 @@ mod tests {
             load_version: None,
             stability: None,
             gpu_device_id: None,
+            disk: None,
         }
     }
 
@@ -1153,6 +1373,8 @@ mod tests {
             memory_bytes: 0,
             rate: None,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -1169,6 +1391,8 @@ mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         })
     }
 
@@ -1188,6 +1412,7 @@ mod tests {
             core_clock_mhz: vec![Some(4000.0), Some(4100.0), Some(4200.0), Some(4300.0)],
             throttling: None,
             thermal_throttling: None,
+            ..Default::default()
         }
     }
 
@@ -1241,6 +1466,8 @@ mod tests {
                 work_ms: None,
                 workers: vec![],
                 rates: vec![],
+
+                disk: None,
             }),
             clock(2000),
         );
@@ -1822,6 +2049,8 @@ mod tests {
             work_ms: None,
             workers: vec![],
             rates: vec![],
+
+            disk: None,
         })
     }
 
@@ -1895,6 +2124,16 @@ mod tests {
         let a = settle(&mut c, a);
         assert_eq!(a[0], Action::Kill);
         assert!(has_finished(&a, Outcome::Hung));
+    }
+
+    #[test]
+    fn exit_one_after_the_plan_ran_is_a_crash() {
+        // Task Manager's «End task» exits with 1, the same code as a refused plan.
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(500));
+        let a = c.on_exit(Some(1), clock(1000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::Crashed), "{a:?}");
     }
 
     #[test]
@@ -2018,6 +2257,8 @@ mod tests {
             memory_bytes: 0,
             rate: Some(rate),
             load_percent,
+
+            disk: None,
         })
     }
 
@@ -2034,6 +2275,8 @@ mod tests {
             actual,
             seed: 1,
             load_percent,
+
+            transient: None,
         })
     }
 
@@ -2045,6 +2288,7 @@ mod tests {
             core_clock_mhz: vec![],
             throttling,
             thermal_throttling: None,
+            ..Default::default()
         }
     }
 
@@ -2285,5 +2529,474 @@ mod tests {
         c.on_load(&notice("vram_bits"), clock(1100));
         assert_eq!(c.status().warnings, ["vramReduced"]);
         assert!(c.session().events.iter().any(|e| e.code == "vram_bits"));
+    }
+
+    // ---- Disk (M8c) ----
+
+    #[test]
+    fn disk_fill_is_not_in_the_shown_total() {
+        assert_eq!(
+            disk_ctl_with(false, KernelId::DiskFill).status().total_ms,
+            0
+        );
+        assert!(disk_ctl(false).status().total_ms > 0);
+    }
+
+    fn disk_ctl(thermal: bool) -> RunController {
+        disk_ctl_with(thermal, KernelId::N2)
+    }
+
+    fn disk_ctl_with(thermal: bool, kernel: KernelId) -> RunController {
+        let mut s = session();
+        s.component = Component::Disk;
+        s.request.component = Component::Disk;
+        s.request.disk = Some(crate::load::plan::DiskStart {
+            folder: "D:\\oma".into(),
+            wake: false,
+        });
+        s.plan.phases = vec![Phase {
+            isa: Isa::Sse2,
+            stop_on_error: true,
+            disk: Some(oma_ipc::load::DiskJob {
+                block_bytes: 4096,
+                seq_block_bytes: 1 << 20,
+                random_percent: 0,
+                read_percent: 0,
+                queue: 4,
+                threads: 1,
+                write_cap_bytes: None,
+                cycles: None,
+                rate_limit_bps: None,
+            }),
+            ..phase(kernel)
+        }];
+        s.plan.disk = Some(oma_ipc::load::DiskTarget {
+            dir: "D:\\oma".into(),
+            file_bytes: 1 << 30,
+            compressible: false,
+            reserve_bytes: 1 << 30,
+        });
+        s.disk = Some(crate::load::session::DiskSession {
+            device_id: "disk/nvme-0".into(),
+            volume: "D:".into(),
+            ..Default::default()
+        });
+        RunController::new(
+            s,
+            RunConfig {
+                threshold_c: 70.0,
+                thermal_stop: thermal,
+                service_available: false,
+                cores: vec![],
+                apic_to_core: BTreeMap::new(),
+                whea_after: None,
+                whea_baseline_missing: false,
+            },
+            clock(0),
+        )
+    }
+
+    fn disk_progress(t: u64, read: u64, written: u64, rbps: f64, wbps: f64) -> LoadMessage {
+        LoadMessage::Progress(Progress {
+            phase: 0,
+            phase_elapsed_ms: t,
+            elapsed_ms: t,
+            checks: 10,
+            errors: 0,
+            current_core: None,
+            cores: vec![],
+            memory_bytes: 0,
+            rate: None,
+            load_percent: None,
+            disk: Some(oma_ipc::load::DiskProgress {
+                read_bps: rbps,
+                write_bps: wbps,
+                read_bytes: read,
+                written_bytes: written,
+                iops: 1.0,
+            }),
+        })
+    }
+
+    fn disk_error(kind: ErrorKind, transient: Option<bool>) -> LoadMessage {
+        LoadMessage::Error(ComputeError {
+            phase: 0,
+            kernel: KernelId::N2,
+            isa: Isa::Sse2,
+            kind,
+            logical: None,
+            core: None,
+            iteration: 9,
+            expected: 1,
+            actual: 2,
+            seed: 1,
+            load_percent: None,
+            transient,
+        })
+    }
+
+    fn disk_notice(code: &str, value: Option<u64>) -> LoadMessage {
+        LoadMessage::Notice(Notice {
+            phase: 0,
+            code: code.into(),
+            value,
+        })
+    }
+
+    fn disk_sample(temp: Option<f64>, host: Option<f64>) -> SensorSample {
+        SensorSample {
+            temp_c: temp,
+            io_bps: Some(1e6),
+            host_written_gib: host,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn disk_full_notice_is_stopped_disk_full() {
+        let mut c = disk_ctl(true);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        c.on_load(&disk_notice("disk_full", None), clock(2000));
+        let a = c.on_load(&finished(FinishReason::Failed), clock(2100));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::StoppedDiskFull));
+        assert_eq!(verdict(&c), "stopped_disk_full");
+        assert!(c.session().events.iter().all(|e| e.code != "crashed"));
+        // No warning about the service for a disk run.
+        assert!(!c.status().warnings.contains(&"noService".to_string()));
+    }
+
+    #[test]
+    fn exit_5_after_io_error_is_errors_not_crashed() {
+        for finish_first in [false, true] {
+            let mut c = disk_ctl(true);
+            c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+            c.on_load(&disk_error(ErrorKind::IoError, Some(false)), clock(2000));
+            let a = if finish_first {
+                c.on_load(&finished(FinishReason::Failed), clock(2100))
+            } else {
+                c.on_exit(Some(LOAD_EXIT_IO), clock(2100))
+            };
+            let a = settle(&mut c, a);
+            assert!(has_finished(&a, Outcome::Errors), "{finish_first}");
+            assert_eq!(verdict(&c), "errors");
+            assert_eq!(c.status().errors, 1);
+            assert!(c.session().events.iter().all(|e| e.code != "crashed"));
+        }
+        // Exit 5 with no message counted still ends as an error.
+        let mut c = disk_ctl(true);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        let a = c.on_exit(Some(LOAD_EXIT_IO), clock(2000));
+        assert!(has_finished(&settle(&mut c, a), Outcome::Errors));
+    }
+
+    #[test]
+    fn data_errors_are_coreless_errors() {
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        for k in [
+            ErrorKind::BitFlip,
+            ErrorKind::Misplaced,
+            ErrorKind::Stale,
+            ErrorKind::Zeros,
+        ] {
+            c.on_load(&disk_error(k, None), clock(1500));
+        }
+        let s = c.session();
+        assert_eq!(s.errors.len(), 4);
+        assert!(s.cores.is_empty());
+        assert_eq!(c.status().errors, 4);
+        let a = c.on_load(&finished(FinishReason::Stopped), clock(2000));
+        assert!(has_finished(&settle(&mut c, a), Outcome::Errors));
+        assert_eq!(verdict(&c), "errors");
+    }
+
+    #[test]
+    fn a_data_error_stops_the_run_when_the_phase_says_so() {
+        // oma-load keeps going after a data error: `stop_on_error` is ours (R8).
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        let a = c.on_load(&disk_error(ErrorKind::Stale, Some(true)), clock(1500));
+        assert!(a.contains(&Action::SendStop), "{a:?}");
+        assert_eq!(c.status().state, RunState::Stopping);
+        let a = c.on_load(&finished(FinishReason::Stopped), clock(1600));
+        assert!(has_finished(&settle(&mut c, a), Outcome::Errors));
+        // Once only.
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_error(ErrorKind::Zeros, None), clock(1000));
+        let a = c.on_load(&disk_error(ErrorKind::Zeros, None), clock(1100));
+        assert!(!a.contains(&Action::SendStop));
+    }
+
+    #[test]
+    fn access_denied_before_the_first_phase_fails_to_start() {
+        let mut c = disk_ctl(true);
+        c.on_load(&disk_notice("access_denied", None), clock(500));
+        let a = c.on_load(&finished(FinishReason::Failed), clock(600));
+        assert!(has_finished(&settle(&mut c, a), Outcome::FailedToStart));
+        let d = c.session().outcome_detail.as_ref().unwrap();
+        assert_eq!(d.params["reason"], "performance.start.access_denied");
+    }
+
+    #[test]
+    fn disk_thermal_stop_works_without_the_service() {
+        let mut c = disk_ctl(true);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        assert!(c
+            .on_sample(&disk_sample(Some(75.0), Some(1.0)), false, clock(1000))
+            .is_empty());
+        let a = c.on_sample(&disk_sample(Some(76.0), Some(1.0)), false, clock(2000));
+        assert!(a.contains(&Action::SendStop), "{a:?}");
+        assert_eq!(c.status().stop_c, Some(70.0));
+        let a = c.on_load(&finished(FinishReason::Stopped), clock(2500));
+        assert!(has_finished(&settle(&mut c, a), Outcome::StoppedThermal));
+        // Off when the user turned the guard off.
+        let mut c = disk_ctl(false);
+        c.on_sample(&disk_sample(Some(95.0), None), false, clock(1000));
+        assert!(c
+            .on_sample(&disk_sample(Some(95.0), None), false, clock(2000))
+            .iter()
+            .all(|a| *a != Action::SendStop));
+    }
+
+    #[test]
+    fn missing_host_written_warns_smart_missing() {
+        let mut c = disk_ctl(false);
+        c.on_sample(&disk_sample(Some(40.0), None), false, clock(1000));
+        assert!(c.status().warnings.contains(&"smartMissing".to_string()));
+        // It reads later: the warning goes.
+        c.on_sample(&disk_sample(Some(40.0), Some(3.0)), false, clock(2000));
+        assert!(!c.status().warnings.contains(&"smartMissing".to_string()));
+        // A later gap does not bring it back.
+        c.on_sample(&disk_sample(Some(40.0), None), false, clock(3000));
+        assert!(!c.status().warnings.contains(&"smartMissing".to_string()));
+    }
+
+    #[test]
+    fn slc_cliff_after_a_hot_sample_is_thermal_suspect() {
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        // 65 = threshold 70 - 5, 8 s before the notice.
+        c.on_sample(&disk_sample(Some(65.0), None), false, clock(20_000));
+        c.on_load(&disk_notice("slc_cliff", Some(4 << 30)), clock(28_000));
+        c.on_load(&disk_notice("slc_steady", Some(600_000_000)), clock(60_000));
+        let slc = c.session().disk.as_ref().unwrap().slc.clone().unwrap();
+        assert_eq!(slc.cache_bytes, 4 << 30);
+        assert_eq!(slc.steady_bps, Some(600_000_000.0));
+        assert!(slc.thermal_suspect);
+    }
+
+    #[test]
+    fn slc_cliff_when_cool_is_not() {
+        // Cool sample, and a hot one more than 10 s before the notice.
+        let mut c = disk_ctl(false);
+        c.on_sample(&disk_sample(Some(69.0), None), false, clock(1000));
+        c.on_sample(&disk_sample(Some(64.0), None), false, clock(15_000));
+        c.on_load(&disk_notice("slc_cliff", Some(1)), clock(20_000));
+        let slc = c.session().disk.as_ref().unwrap().slc.clone().unwrap();
+        assert!(!slc.thermal_suspect);
+        // A steady notice without a cliff records nothing.
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_notice("slc_steady", Some(5)), clock(1000));
+        assert!(c.session().disk.as_ref().unwrap().slc.is_none());
+    }
+
+    #[test]
+    fn disk_bytes_and_smart_delta_reach_the_session() {
+        let mut c = disk_ctl(false);
+        c.on_sample(&disk_sample(Some(40.0), None), false, clock(500));
+        c.on_sample(&disk_sample(Some(40.0), Some(100.0)), false, clock(1000));
+        c.on_load(&disk_progress(1000, 10, 20, 1.0, 2.0), clock(1000));
+        c.on_sample(&disk_sample(Some(40.0), Some(101.5)), false, clock(2000));
+        c.on_load(&disk_progress(2000, 30, 70, 1.0, 2.0), clock(2000));
+        c.on_sample(&disk_sample(Some(40.0), Some(103.0)), false, clock(3000));
+        c.on_sample(&disk_sample(Some(40.0), None), false, clock(4000));
+        let d = c.session().disk.clone().unwrap();
+        assert_eq!((d.read_bytes, d.written_bytes), (30, 70));
+        assert_eq!(d.host_written_before_gib, Some(100.0));
+        assert_eq!(d.host_written_after_gib, Some(103.0));
+    }
+
+    #[test]
+    fn disk_status_carries_the_rates() {
+        let mut c = disk_ctl(false);
+        assert_eq!(c.status().disk, None);
+        c.on_load(&disk_progress(1000, 30, 70, 1.5e9, 2.5e9), clock(1000));
+        let d = c.status().disk.unwrap();
+        assert_eq!(
+            (d.read_bps, d.write_bps, d.read_bytes, d.written_bytes),
+            (1.5e9, 2.5e9, 30, 70)
+        );
+        assert_eq!(d.device_id, "disk/nvme-0");
+        // A CPU run has none.
+        assert_eq!(ctl(false, true).status().disk, None);
+    }
+
+    #[test]
+    fn the_journal_names_the_disk_folder() {
+        let mut c = disk_ctl(false);
+        let a = c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        let j = a
+            .iter()
+            .find_map(|a| match a {
+                Action::WriteJournal(j) => Some(j.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(j.disk_folder.as_deref(), Some("D:\\oma"));
+    }
+
+    fn disk_two_phase_ctl(first: KernelId, second: KernelId) -> RunController {
+        let mut c = disk_ctl_with(false, first);
+        let mut p2 = c.session.plan.phases[0].clone();
+        p2.kernel = second;
+        c.session.plan.phases.push(p2);
+        c
+    }
+
+    fn disk_progress_in(phase: u32, in_phase: u64) -> LoadMessage {
+        let LoadMessage::Progress(mut p) = disk_progress(0, 0, 5, 0.0, 5.0) else {
+            unreachable!()
+        };
+        p.phase = phase;
+        p.phase_elapsed_ms = in_phase;
+        LoadMessage::Progress(p)
+    }
+
+    /// Like `disk_progress_in`, with bytes that keep growing so the stall clock stays quiet.
+    fn disk_progress_moving(phase: u32, in_phase: u64, at: u64) -> LoadMessage {
+        let LoadMessage::Progress(mut p) = disk_progress(0, 0, 5 + at, 0.0, 5.0) else {
+            unreachable!()
+        };
+        p.phase = phase;
+        p.phase_elapsed_ms = in_phase;
+        LoadMessage::Progress(p)
+    }
+
+    #[test]
+    fn a_strict_disk_phase_is_timed_from_its_own_start() {
+        // A fill 2000 s past its time, then an N1 phase (60 s) on time: not hung.
+        let fill_end = 60_000 + 2_000_000;
+        let mut c = disk_two_phase_ctl(KernelId::DiskFill, KernelId::N1);
+        c.on_load(&disk_progress_in(0, 1000), clock(1000));
+        c.on_load(&disk_progress_in(0, fill_end), clock(fill_end));
+        c.on_load(&disk_progress_in(1, 1000), clock(fill_end + 1000));
+        let t = fill_end + 30_000;
+        c.on_load(&disk_progress_in(1, 30_000), clock(t));
+        assert!(!c.on_clock(clock(t)).contains(&Action::Kill));
+        // The same phase overrunning its own duration is hung.
+        let t = fill_end + 60_000 + OVERRUN_MS + 5_000;
+        c.on_load(&disk_progress_in(1, t - fill_end), clock(t));
+        assert!(c.on_clock(clock(t)).contains(&Action::Kill));
+        assert!(c.hung);
+    }
+
+    #[test]
+    fn heartbeats_do_not_reset_a_strict_phase_clock() {
+        let mut c = disk_ctl_with(false, KernelId::N2);
+        c.on_load(&disk_progress_in(0, 1000), clock(1000));
+        // Stuck in an open or a flush: only `phase_elapsed_ms = 0` heartbeats arrive.
+        let mut t = 1000;
+        while t + 900 <= 60_000 + OVERRUN_MS {
+            t += 900;
+            c.on_load(&disk_progress_moving(0, 0, t), clock(t));
+            assert!(!c.on_clock(clock(t)).contains(&Action::Kill), "{t}");
+        }
+        t += 5_000;
+        c.on_load(&disk_progress_moving(0, 0, t), clock(t));
+        assert!(c.on_clock(clock(t)).contains(&Action::Kill));
+        assert!(c.hung);
+    }
+
+    #[test]
+    fn only_soft_disk_phases_may_outlast_their_nominal_duration() {
+        // R9: a strict phase whose Progress ticker is alive is still hung past its time.
+        let late = 60 * 1000 + OVERRUN_MS + 50_000;
+        for (kernel, hung) in [
+            (KernelId::N2, true),
+            (KernelId::DiskBench, true),
+            (KernelId::DiskFill, false),
+            (KernelId::V1, false),
+            (KernelId::V4, false),
+        ] {
+            let mut c = disk_ctl_with(false, kernel);
+            c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+            c.on_load(
+                &disk_progress(late - 100, 0, 6, 0.0, 5.0),
+                clock(late - 100),
+            );
+            let a = c.on_clock(clock(late));
+            assert_eq!(a.contains(&Action::Kill), hung, "{kernel:?}");
+            assert_eq!(c.hung, hung, "{kernel:?}");
+        }
+    }
+
+    #[test]
+    fn a_transient_io_error_stops_a_stop_on_error_phase() {
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        let a = c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1500));
+        assert!(a.contains(&Action::SendStop), "{a:?}");
+        // A transient io_error, then a bit flip: the first one already stopped.
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1000));
+        assert_eq!(c.status().state, RunState::Stopping);
+        let a = c.on_load(&disk_error(ErrorKind::BitFlip, None), clock(1100));
+        assert!(!a.contains(&Action::SendStop));
+    }
+
+    #[test]
+    fn a_transient_io_error_does_not_hide_a_later_crash() {
+        let mut c = disk_ctl_with(false, KernelId::N2);
+        c.session.plan.phases[0].stop_on_error = false;
+        c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1000));
+        assert!(!c.io_failed);
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_error(ErrorKind::IoError, Some(false)), clock(1000));
+        assert!(c.io_failed);
+    }
+
+    fn feed_stall(c: &mut RunController, from: u64, to: u64, step: u64, grow: u64) -> bool {
+        let mut t = from;
+        let mut written = 5;
+        while t <= to {
+            written += grow;
+            c.on_load(&disk_progress(t, 0, written, 0.0, 5.0), clock(t));
+            if c.on_clock(clock(t)).contains(&Action::Kill) {
+                return true;
+            }
+            t += step;
+        }
+        false
+    }
+
+    #[test]
+    fn frozen_disk_bytes_for_120_s_are_hung() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        assert!(!feed_stall(&mut c, 1000, 120_000, 2000, 0));
+        assert!(feed_stall(&mut c, 122_000, 130_000, 2000, 0));
+        assert!(c.hung);
+    }
+
+    #[test]
+    fn slow_disk_progress_is_not_hung() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        // One byte every 2 s keeps the clock alive.
+        assert!(!feed_stall(&mut c, 1000, 400_000, 2000, 1));
+    }
+
+    #[test]
+    fn the_pause_before_a_phase_does_not_count_as_a_stall() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        c.session.plan.phases[0].pause_before_ms = 5000;
+        // Heartbeats from the pause (phase_elapsed 0), bytes frozen.
+        let mut t = 1000;
+        while t <= 124_000 {
+            c.on_load(&disk_progress_in(0, 0), clock(t));
+            assert!(!c.on_clock(clock(t)).contains(&Action::Kill), "{t}");
+            t += 1000;
+        }
+        c.on_load(&disk_progress_in(0, 0), clock(127_000));
+        assert!(c.on_clock(clock(127_000)).contains(&Action::Kill));
     }
 }

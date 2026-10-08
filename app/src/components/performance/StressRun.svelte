@@ -3,7 +3,8 @@
   import { formatBytes, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import { around, cpuChartSensors, gpuChartSensors, marked, modeTerm, pieces } from '../../lib/performance/format';
+  import { formatBytes as formatDiskBytes, formatMbs } from '../../lib/performance/disk';
+  import { around, cpuChartSensors, diskChartSensors, gpuChartSensors, kernelTerm, marked, modeTerm, pieces } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
   import type { PhaseInfo, RunWarning } from '../../lib/types';
@@ -28,6 +29,7 @@
     ramInsufficient: { term: 'ramShare' },
     pcieReplay: { term: 'pcieReplay', word: 'PCIe' },
     vramReduced: { term: 'vram' },
+    smartMissing: { term: 'dataUnitsWritten', word: 'SMART' },
   };
   const PLACEMENT_TERM: Record<PhaseInfo['placement'], string | null> = { all_logical: 'mode.allCore', core_cycle: 'mode.coreCycle', one_per_core: null };
 
@@ -52,7 +54,10 @@
     return status && status.errors > 0 ? { tone: 'crit', text: t('performance.run.pill.errors', { n: status.errors }) } : { tone: 'ok', text: t('performance.run.pill.ok') };
   });
   const gpu = $derived(status?.component === 'gpu');
-  const chartSensors = $derived(gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : cpuChartSensors(store.schema));
+  const disk = $derived(status?.component === 'disk');
+  const chartSensors = $derived(
+    gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : disk ? diskChartSensors(store.schema, status?.disk?.deviceId || performanceStore.diskDeviceId) : cpuChartSensors(store.schema),
+  );
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
   const clockLabel = $derived(around(t('performance.run.clock'), t('glossary.clock.name')));
@@ -80,7 +85,7 @@
 {:else if status}
   <div class="run">
     <header>
-      <h3>{t(`performance.objective.${status.objective}`)} · {t(`performance.wizard.${status.component}`)}</h3>
+      <h3>{t(disk ? `performance.objective.disk.${status.objective}` : `performance.objective.${status.objective}`)} · {t(`performance.wizard.${status.component}`)}</h3>
       <span class="pill {pill.tone}">{pill.text}</span>
       <span class="time"><b>{formatTapeCounter(status.elapsedMs)}</b> / {formatTapeCounter(status.totalMs)}</span>
       <button type="button" class="stop" disabled={!active} onclick={stop}>{t('performance.run.stop')}</button>
@@ -90,7 +95,7 @@
       {#each tape as segment, index (index)}
         <li style:flex-grow={segment.phase.durationS} style:--p={segment.done} class:now={index === status.phaseIndex} aria-current={index === status.phaseIndex ? 'step' : undefined}>
           <span class="bar"></span>
-          <span class="name"><Term term={`mode.${segment.phase.kernel}`} /></span>
+          <span class="name"><Term term={kernelTerm(segment.phase.kernel)} /></span>
           <span class="visually-hidden">{t(`performance.run.phase.${index < status.phaseIndex ? 'done' : index === status.phaseIndex ? 'now' : 'todo'}`)}</span>
         </li>
       {/each}
@@ -98,8 +103,8 @@
     {#if phase}
       <p class="current">
         <Term term="phase" /> {t('performance.run.phaseOf', { n: status.phaseIndex + 1, total: status.phases.length })}:
-        <Term term={`mode.${phase.kernel}`} />{#if !gpu} · <Term term={`isa.${phase.isa}`} />{/if} · <Term term={modeTerm(phase.mode)} />
-        {#if gpu}{#if loadLevel}{' · '}<Term term="loadLevel">{loadLevel}</Term>{/if}{:else}
+        <Term term={kernelTerm(phase.kernel)} />{#if !gpu && !disk} · <Term term={`isa.${phase.isa}`} />{/if}{#if !disk} · <Term term={modeTerm(phase.mode)} />{/if}
+        {#if disk}{:else if gpu}{#if loadLevel}{' · '}<Term term="loadLevel">{loadLevel}</Term>{/if}{:else}
           {' · '}{#if PLACEMENT_TERM[phase.placement]}<Term term={PLACEMENT_TERM[phase.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}
         {/if}
       </p>
@@ -111,10 +116,34 @@
         <div class="value"><AnimatedNumber value={status.tempC} format={(v) => formatTemperature(v, locale)} /></div>
         <div class="sub">
           {t('performance.run.max', { value: formatTemperature(status.tempMaxC, locale) })} · <Term term="thermalStop" />
-          {status.stopC === null ? t('performance.run.stopOff') : t('performance.run.stopAt', { temp: formatTemperature(status.stopC, locale) })}{#if !gpu && system?.tjmaxC != null}
+          {status.stopC === null ? t('performance.run.stopOff') : t('performance.run.stopAt', { temp: formatTemperature(status.stopC, locale) })}{#if !gpu && !disk && system?.tjmaxC != null}
             {' · '}<Term term="tjmax" /> {formatTemperature(system.tjmaxC, locale)}{/if}
         </div>
       </div>
+      {#if disk}
+        <div class="tile">
+          <div class="label"><Term term="mbs">{t('performance.run.diskRead')}</Term></div>
+          <div class="value"><AnimatedNumber value={status.disk?.readBps ?? null} format={(v) => formatMbs(v, locale)} /></div>
+          <div class="sub">{formatDiskBytes(status.disk?.readBytes ?? 0, locale)}</div>
+        </div>
+        <div class="tile">
+          <div class="label"><Term term="mbs">{t('performance.run.diskWrite')}</Term></div>
+          <div class="value"><AnimatedNumber value={status.disk?.writeBps ?? null} format={(v) => formatMbs(v, locale)} /></div>
+        </div>
+        <div class="tile">
+          <div class="label"><Term term="dataUnitsWritten">{t('performance.run.diskWritten')}</Term></div>
+          <div class="value">{formatDiskBytes(status.disk?.writtenBytes ?? 0, locale)}</div>
+        </div>
+        <div class="tile">
+          <div class="label"><Term term="check">{t('performance.run.blocks')}</Term></div>
+          <div class="value">{counter.format(status.checks)}</div>
+        </div>
+        <div class="tile">
+          <div class="label">{t('performance.run.errors')}</div>
+          <div class="value" class:ok={status.errors === 0} class:crit={status.errors > 0}>{counter.format(status.errors)}</div>
+          <div class="sub"><Term term="dataError" /></div>
+        </div>
+      {:else}
       <div class="tile">
         <div class="label">{#if gpu}{t('performance.run.power')}{:else}<Term term="packagePower" />{/if}</div>
         <div class="value"><AnimatedNumber value={status.powerW} format={(v) => formatPower(v, locale)} /></div>
@@ -136,6 +165,7 @@
         </div>
         <div class="sub">{t('performance.run.wheaSub', { corrected: status.wheaCorrected, fatal: status.wheaFatal })}</div>
       </div>
+      {/if}
     </div>
 
     {#if status.warnings.length > 0}
@@ -147,7 +177,7 @@
       </div>
     {/if}
 
-    <div class="panels" class:two={!gpu && phase?.placement === 'core_cycle'}>
+    <div class="panels" class:two={!gpu && !disk && phase?.placement === 'core_cycle'}>
       <section class="panel" aria-label={t('performance.run.chart')}>
         <p class="label">{t('performance.run.chart')}</p>
         {#if chartSensors.length > 0 && store.schema}
@@ -156,7 +186,7 @@
           <p class="muted">{t('performance.run.noChart')}</p>
         {/if}
       </section>
-      {#if !gpu && phase?.placement === 'core_cycle'}
+      {#if !gpu && !disk && phase?.placement === 'core_cycle'}
         <section class="panel cores-panel">
           <p class="label"><Term term="mode.coreCycle" /> · <Term term="coreNumber" /></p>
           <CoreGrid cores={status.cores} current={status.currentCore} />

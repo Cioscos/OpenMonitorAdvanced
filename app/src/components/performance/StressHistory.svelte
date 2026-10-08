@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Backend } from '../../lib/backend';
+  import { repeatRequest } from '../../lib/performance/disk';
   import { around, errorText, formatDuration, verdictTitle } from '../../lib/performance/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
@@ -62,7 +63,13 @@
         message = t('performance.history.missing');
         return;
       }
-      const result = await performanceStore.start(session.request);
+      // A disk test finds its folder again from its volume: the saved session keeps none.
+      const request = repeatRequest(session, performanceStore.system?.volumes ?? []);
+      if (request === null) {
+        message = t('performance.wizard.startError', { reason: t('performance.start.no_disk') });
+        return;
+      }
+      const result = await performanceStore.start(request, session.disk?.deviceId ?? null);
       if (result.ok) onOpen('run');
       else message = t(`performance.wizard.${result.reason}`);
     } catch (error) {
@@ -82,6 +89,7 @@
       { value: 'cpu', label: t('performance.wizard.cpu') },
       { value: 'ram', label: t('performance.wizard.ram') },
       { value: 'gpu', label: t('performance.wizard.gpu') },
+      { value: 'disk', label: t('performance.wizard.disk') },
     ]}
     value={filter}
     onChange={(next) => (filter = next as 'all' | StressComponent)}
@@ -105,7 +113,7 @@
           <button type="button" class="open" onclick={() => onOpen(`result:${s.id}`)}>
             <span class="when">{when(s)}</span>
             <span class="what">
-              {t(`performance.wizard.${s.component}`)} · {t(`performance.objective.${s.objective}`)} · {t(`performance.preset.${s.preset}`)} · {formatDuration(s.durationMs / 1000)}
+              {t(`performance.wizard.${s.component}`)} · {t(s.component === 'disk' ? `performance.objective.disk.${s.objective}` : `performance.objective.${s.objective}`)} · {t(`performance.preset.${s.preset}`)} · {formatDuration(s.durationMs / 1000)}
             </span>
           </button>
           <p class="verdict">

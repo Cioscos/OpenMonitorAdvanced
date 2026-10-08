@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use super::log::{canonical_hotkey, is_absolute_folder, EVERY_TICKS, MAX_FILE_MB, MAX_LOG_SENSORS};
 use super::overlay::{is_profile_id, normalize_exe, WindowBounds, CHART_FPS, MAX_GAMES, TEXT_HZ};
-use super::performance::{CPU_STOP_C, GPU_STOP_C, RAM_SHARE_PERCENT};
+use super::performance::{CPU_STOP_C, DISK_FOLDER_MAX, DISK_STOP_C, GPU_STOP_C, RAM_SHARE_PERCENT};
 use super::{
     Attach, ChartFps, DefaultView, Language, LogSettings, OverlaySettings, PerformanceSettings,
     Settings, TemperatureUnit, ThroughputUnit, ViewKind, INTERVAL_VALUES, WINDOW_VALUES,
@@ -599,6 +599,40 @@ impl Reader {
                 }
             }
             Some(_) => self.push("performance.cpuStopC".into(), DiagnosticKind::WrongType),
+        }
+        match lookup(&section, "diskStopC", true) {
+            None => {}
+            Some(Value::Number(n)) => {
+                match n
+                    .as_u64()
+                    .and_then(|x| u32::try_from(x).ok())
+                    .filter(|x| DISK_STOP_C.contains(x))
+                {
+                    Some(x) => p.disk_stop_c = Some(x),
+                    None => self.push(
+                        "performance.diskStopC".into(),
+                        DiagnosticKind::Corrected {
+                            from: n.to_string(),
+                            to: "null".into(),
+                        },
+                    ),
+                }
+            }
+            Some(_) => self.push("performance.diskStopC".into(), DiagnosticKind::WrongType),
+        }
+        match lookup(&section, "diskFolder", true) {
+            None => {}
+            Some(Value::String(text)) if text.len() <= DISK_FOLDER_MAX => {
+                p.disk_folder = Some(text.clone());
+            }
+            Some(Value::String(text)) => self.push(
+                "performance.diskFolder".into(),
+                DiagnosticKind::Corrected {
+                    from: format!("{} bytes", text.len()),
+                    to: "null".into(),
+                },
+            ),
+            Some(_) => self.push("performance.diskFolder".into(), DiagnosticKind::WrongType),
         }
         match lookup(&section, "gpuStopC", false) {
             None => {}
@@ -1581,6 +1615,27 @@ mod tests {
         let d = decode(encode(&want));
         assert_eq!(d.settings.performance, want.performance);
         assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+    }
+
+    #[test]
+    fn disk_stop_out_of_range_falls_back() {
+        let d = decode(json!({"version": 1, "performance": {"diskStopC": 91}}));
+        assert_eq!(d.settings.performance.disk_stop_c, None);
+        assert_eq!(
+            d.diagnostics,
+            vec![corrected("performance.diskStopC", "91", "null")]
+        );
+        let d = decode(json!({"version": 1, "performance": {"diskStopC": 39}}));
+        assert_eq!(d.settings.performance.disk_stop_c, None);
+        let d =
+            decode(json!({"version": 1, "performance": {"diskStopC": 40, "diskFolder": "D:\\t"}}));
+        assert_eq!(d.settings.performance.disk_stop_c, Some(40));
+        assert_eq!(d.settings.performance.disk_folder.as_deref(), Some("D:\\t"));
+        let long = "x".repeat(1025);
+        let d = decode(json!({"version": 1, "performance": {"diskFolder": long}}));
+        assert_eq!(d.settings.performance.disk_folder, None);
+        assert_eq!(d.diagnostics.len(), 1);
+        assert_eq!(d.diagnostics[0].path, "performance.diskFolder");
     }
 
     #[test]

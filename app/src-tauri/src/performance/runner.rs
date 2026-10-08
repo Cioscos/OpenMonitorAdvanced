@@ -11,6 +11,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, Once, PoisonError};
@@ -19,20 +20,28 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oma_core::engine::TickOutput;
 use oma_core::load::{
-    build_plan, core_order, cpu_stop_threshold, decide, gpu_stop_threshold, ram_budget,
-    read_gpu_sample, read_sample, resolve_cpu_sensors, resolve_gpu_sensors, Action, BuildError,
-    BuildInput, Clock, Component, CpuSensorIds, GpuSensorIds, Objective, OutcomeDetail,
-    OutcomeFacts, Preset, RunConfig, RunController, RunState, RunStatus, SensorSample, Session,
-    StartRequest, VerdictKey, WheaEvent, FORMAT,
+    build_plan, core_order, cpu_stop_threshold, decide, disk_reserve, disk_stop_threshold,
+    gpu_stop_threshold, ram_budget, read_disk_sample, read_gpu_sample, read_sample,
+    resolve_cpu_sensors, resolve_disk_sensors, resolve_gpu_sensors, stress_file_bytes, Action,
+    BuildError, BuildInput, Clock, Component, CpuSensorIds, DiskPlanInput, DiskSensorIds,
+    DiskSession, GpuSensorIds, Objective, OutcomeDetail, OutcomeFacts, Preset, RunConfig,
+    RunController, RunState, RunStatus, SensorSample, Session, StartRequest, VerdictKey, WheaEvent,
+    FORMAT,
 };
 use oma_core::model::Schema;
-use oma_core::scores::BenchStatus;
+use oma_core::scores::{BenchStatus, DISK_BENCH_FILE};
 use oma_ipc::load::{
-    GpuTarget, Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest, Topology,
+    is_plain_disk_dir, GpuTarget, Isa, LoadHello, LoadMessage, Plan, RunRequest, StopRequest,
+    Topology,
 };
 use oma_win::gpu::{GpuProcess, GpuProcessTable, StressAdapter};
+use oma_win::storage::{
+    DiskClass, DiskKind, DiskPower, DiskStateTable, DiskTraits, DriveEntry, DriveIdTable,
+};
+use oma_win::volumes::{is_remote_path, DriveKind, FolderProbe, VolumeInfo};
 
 use super::host::{HostEvent, StartFailure};
+use super::orphans;
 use super::store::{to_rfc3339, PerformanceStore};
 use crate::i18n::{t, Lang};
 use crate::notifier::{launch_for_performance, ToastSink};
@@ -122,6 +131,23 @@ pub trait Machine: Send + Sync {
     /// The largest share (0-1) of one engine of GPU `device_id` used by another
     /// program (DH10); `None` when the process table is empty or stale.
     fn gpu_busy_share(&self, device_id: &str) -> Option<f64>;
+    /// The local volumes, from metadata only: a sleeping HDD stays asleep (DC6). Read
+    /// only when asked, never on a timer.
+    fn volumes(&self) -> Vec<VolumeInfo>;
+    /// Writes and deletes one tiny file: only at a pick, a confirm or a start (DC6).
+    fn probe_folder(&self, path: &Path) -> FolderProbe;
+    fn disk_traits(&self, index: u32) -> DiskTraits;
+    /// The identified disks: device id and model by disk index.
+    fn drives(&self) -> Vec<DriveEntry>;
+    /// Disk `device_id`'s power state as the storage provider last saw it.
+    fn disk_power(&self, device_id: &str) -> Option<DiskPower>;
+    /// The start time (FILETIME) of process `pid`; `None` when it is gone.
+    fn process_started_at(&self, pid: u32) -> Option<u64>;
+    /// `%LOCALAPPDATA%\Temp`, the test folder on the system volume (DC6).
+    fn local_temp_dir(&self) -> PathBuf;
+    /// Whether the folder or one above it is a junction, mount point or symbolic link
+    /// (R13), read from the parents' listings without following any.
+    fn has_link(&self, path: &Path) -> bool;
 }
 
 /// The other programs' share of a GPU from its process table rows (DH10): the
@@ -143,14 +169,25 @@ pub(super) fn other_gpu_share(rows: &[GpuProcess], ours: &HashSet<u32>) -> Optio
     Some(share / 100.0)
 }
 
-/// This PC; the GPU process table is the GPU provider's (DH10).
+/// This PC; the GPU process table is the GPU provider's (DH10), the drive and disk
+/// state tables the storage provider's (DC6).
 pub struct WinMachine {
     processes: GpuProcessTable,
+    drives: DriveIdTable,
+    disk_states: DiskStateTable,
 }
 
 impl WinMachine {
-    pub fn new(processes: GpuProcessTable) -> Self {
-        Self { processes }
+    pub fn new(
+        processes: GpuProcessTable,
+        drives: DriveIdTable,
+        disk_states: DiskStateTable,
+    ) -> Self {
+        Self {
+            processes,
+            drives,
+            disk_states,
+        }
     }
 }
 
@@ -210,6 +247,42 @@ impl Machine for WinMachine {
     fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
         other_gpu_share(&self.processes.processes(device_id), &our_tree())
     }
+
+    fn volumes(&self) -> Vec<VolumeInfo> {
+        oma_win::volumes::volumes()
+    }
+
+    fn probe_folder(&self, path: &Path) -> FolderProbe {
+        oma_win::volumes::probe_folder(path)
+    }
+
+    fn disk_traits(&self, index: u32) -> DiskTraits {
+        oma_win::storage::disk_traits(index)
+    }
+
+    fn drives(&self) -> Vec<DriveEntry> {
+        self.drives.get().drives
+    }
+
+    fn disk_power(&self, device_id: &str) -> Option<DiskPower> {
+        let (_, states) = self.disk_states.get();
+        states
+            .into_iter()
+            .find_map(|(id, power)| (id == device_id).then_some(power))
+    }
+
+    fn process_started_at(&self, pid: u32) -> Option<u64> {
+        oma_win::process_tree::process_started_at(pid)
+    }
+
+    fn local_temp_dir(&self) -> PathBuf {
+        std::env::var_os("LOCALAPPDATA")
+            .map_or_else(std::env::temp_dir, |d| PathBuf::from(d).join("Temp"))
+    }
+
+    fn has_link(&self, path: &Path) -> bool {
+        oma_win::volumes::has_link(path)
+    }
 }
 
 /// The app and its descendants (WebView2, `oma-load`), from one Toolhelp snapshot.
@@ -252,6 +325,10 @@ pub enum StartError {
     /// A stress test or a benchmark is already running.
     Busy,
     Plan(BuildError),
+    /// The disk target cannot be used (DC6): `remote`, `not_found`, `not_writable`,
+    /// `no_space`, `standby` (a spun-down HDD, without the user's consent) or `link`
+    /// (the folder leads to another place through a junction or a link, R13).
+    Disk(&'static str),
     /// The topology, the session id or the thread could not be had.
     System(String),
 }
@@ -261,6 +338,7 @@ impl std::fmt::Display for StartError {
         match self {
             Self::Busy => write!(f, "a test is already running"),
             Self::Plan(e) => write!(f, "{e}"),
+            Self::Disk(code) => write!(f, "disk target: {code}"),
             Self::System(e) => write!(f, "{e}"),
         }
     }
@@ -273,12 +351,15 @@ impl StartError {
         let code = match self {
             Self::Busy => return "busy".into(),
             Self::System(e) => return e.clone(),
+            Self::Disk(code) => return format!("disk:{code}"),
             Self::Plan(BuildError::NoCores) => "no_cores",
             Self::Plan(BuildError::NoPhases) => "no_phases",
             Self::Plan(BuildError::TooLong) => "too_long",
             Self::Plan(BuildError::UnknownCore(_)) => "unknown_core",
             Self::Plan(BuildError::RamBudget) => "ram_budget",
             Self::Plan(BuildError::NoGpu) => "no_gpu",
+            Self::Plan(BuildError::NoDisk) => "no_disk",
+            Self::Plan(BuildError::NoSpace) => "no_space",
         };
         format!("build:{code}")
     }
@@ -301,6 +382,75 @@ pub struct SystemInfo {
     pub stop_c: f64,
     pub hypervisor: bool,
     pub gpus: Vec<GpuChoice>,
+    /// The local volumes a disk test can target (DC6); network drives are left out.
+    pub volumes: Vec<VolumeChoice>,
+}
+
+/// A volume the disk pages offer, with the folder a test would use (DC6): on the
+/// system volume `%LOCALAPPDATA%\Temp`, elsewhere the root.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeChoice {
+    /// `X:\`.
+    pub root: String,
+    pub label: String,
+    pub fs: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub folder: String,
+    /// The physical disk, from the drive table; `None` for a multi-disk volume.
+    pub device_id: Option<String>,
+    pub model: Option<String>,
+    pub kind: DiskKind,
+    /// A removable drive or a USB disk: a warning (DC6).
+    pub removable: bool,
+    pub system: bool,
+    /// A virtual disk (bus 14 or 15): a warning.
+    pub virtual_disk: bool,
+    /// A spun-down HDD: the test asks before waking it.
+    pub standby: bool,
+    /// The folder is synced to the cloud: a warning. From the path alone in the list,
+    /// with the folders' attributes too after a probe.
+    pub sync: bool,
+    /// The disk's class (the startup sweep skips rotational disks, DC11).
+    #[serde(skip)]
+    pub(super) solid: bool,
+}
+
+/// `X:\` of a plain `X:\...` folder.
+fn root_of(folder: &str) -> Option<String> {
+    let b = folder.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        .then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()))
+}
+
+/// The DC13 name of a disk kind (`nvme`, `sata_ssd`…).
+pub(super) fn kind_name(kind: DiskKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// The drive's warning temperature (WCTEMP), the `tempWarningC` property of its device.
+fn wctemp(schema: &Schema, device_id: &str) -> Option<f64> {
+    schema
+        .devices
+        .iter()
+        .find(|d| d.id == device_id)?
+        .properties
+        .get("tempWarningC")?
+        .parse()
+        .ok()
+}
+
+/// What a disk target must leave free for the test file (DC6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiskNeed {
+    /// The benchmark's 1 GiB file.
+    Bench,
+    /// At least 1 GiB for the stress file.
+    Stress,
 }
 
 /// A GPU the wizard offers, chosen by its stable `device_id` (DG13).
@@ -317,6 +467,7 @@ pub struct GpuChoice {
 pub(super) enum SensorIds {
     Cpu(CpuSensorIds),
     Gpu(GpuSensorIds),
+    Disk(DiskSensorIds),
 }
 
 /// Asks the thread to stop; `deadline` bounds the wait for the helper (DA16).
@@ -343,6 +494,8 @@ pub(super) struct Active {
     pub(super) sensors: Option<(u64, SensorIds)>,
     /// The GPU under test (its `device_id`), `None` for CPU and RAM tests.
     pub(super) gpu: Option<String>,
+    /// The disk under test (its `device_id`, empty for a multi-disk volume).
+    pub(super) disk: Option<String>,
     /// The CPU benchmark, not a stress test.
     pub(super) bench: bool,
 }
@@ -393,6 +546,7 @@ fn idle_status() -> RunStatus {
         load_percent: None,
         stability: None,
         gpu_device_id: None,
+        disk: None,
         checks: 0,
         errors: 0,
         whea_corrected: 0,
@@ -544,6 +698,12 @@ impl PerformanceRunner {
     fn recover_now(&self) {
         let store = &self.deps.store;
         store.prune_now();
+        // Read before `recover` removes the journal.
+        let journal_folder = store
+            .read_journal()
+            .and_then(Result::ok)
+            .and_then(|j| j.disk_folder);
+        self.sweep_at_startup(journal_folder);
         let recovered = store.recover(
             oma_win::power::boot_time_unix_ms(),
             oma_win::eventlog::crash_evidence,
@@ -559,12 +719,208 @@ impl PerformanceRunner {
         }
     }
 
+    /// The orphaned test files at startup (DC11): the folder of the journal a crash left,
+    /// and the last disk folder only on a solid-state disk, so an HDD is never woken.
+    fn sweep_at_startup(&self, journal_folder: Option<String>) {
+        let last = self
+            .deps
+            .settings
+            .snapshot()
+            .performance
+            .disk_folder
+            .clone();
+        if journal_folder.is_none() && last.is_none() {
+            return;
+        }
+        let m = &self.deps.machine;
+        let sweep = |folder: &str| {
+            orphans::sweep(Path::new(folder), |pid| m.process_started_at(pid));
+        };
+        // A plain local folder that leads nowhere else (R13); the journal's is swept even
+        // on a sleeping HDD (a crash left files there), so its links are read there too.
+        if let Some(folder) = &journal_folder {
+            let ok = self
+                .disk_volume(folder)
+                .and_then(|c| self.check_link(&c))
+                .is_ok();
+            if ok {
+                sweep(folder);
+            }
+        }
+        if let Some(folder) = last.filter(|f| Some(f) != journal_folder.as_ref()) {
+            // Solid state only: a rotational disk is never touched, not even for its links.
+            if self.disk_volume(&folder).is_ok_and(|c| c.solid) {
+                sweep(&folder);
+            }
+        }
+    }
+
+    /// The choice for volume `v` with `folder`, from metadata only (no disk I/O).
+    fn volume_choice(&self, v: &VolumeInfo, drives: &[DriveEntry], folder: String) -> VolumeChoice {
+        let m = &self.deps.machine;
+        let drive = v
+            .disk_index
+            .and_then(|i| drives.iter().find(|d| d.index == i));
+        let traits = v.disk_index.map(|i| m.disk_traits(i));
+        let kind = traits.map_or(DiskKind::Other, |t| t.kind);
+        let device_id = drive.map(|d| d.device_id.clone());
+        let rotational = traits.is_none_or(|t| t.class == DiskClass::RotationalOrUnknown);
+        let standby = rotational
+            && device_id
+                .as_deref()
+                .and_then(|id| m.disk_power(id))
+                .is_some_and(|p| p == DiskPower::Standby);
+        VolumeChoice {
+            root: v.root.clone(),
+            label: v.label.clone(),
+            fs: v.fs.clone(),
+            total_bytes: v.total_bytes,
+            free_bytes: v.free_bytes,
+            sync: oma_win::volumes::is_sync_path(&folder),
+            folder,
+            device_id,
+            model: drive.and_then(|d| d.model.clone()),
+            kind,
+            removable: v.drive == DriveKind::Removable || kind == DiskKind::Usb,
+            system: v.system,
+            virtual_disk: kind == DiskKind::Virtual,
+            standby,
+            solid: !rotational,
+        }
+    }
+
+    /// The test folder of a volume (DC6): `%LOCALAPPDATA%\Temp` on the system one, else the root.
+    fn default_folder(&self, v: &VolumeInfo) -> String {
+        if v.system {
+            self.deps
+                .machine
+                .local_temp_dir()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            v.root.clone()
+        }
+    }
+
+    /// The volume of a folder from the UI, from metadata only: a network folder is
+    /// `remote`, anything but a plain local `X:\...` folder `not_found`.
+    fn disk_volume(&self, folder: &str) -> Result<VolumeChoice, StartError> {
+        if is_remote_path(folder) {
+            return Err(StartError::Disk("remote"));
+        }
+        let root = root_of(folder)
+            .filter(|_| is_plain_disk_dir(folder))
+            .ok_or(StartError::Disk("not_found"))?;
+        let m = &self.deps.machine;
+        let v = m
+            .volumes()
+            .into_iter()
+            .find(|v| v.root.eq_ignore_ascii_case(&root))
+            .ok_or(StartError::Disk("not_found"))?;
+        if v.drive == DriveKind::Remote {
+            return Err(StartError::Disk("remote"));
+        }
+        let c = self.volume_choice(&v, &m.drives(), folder.to_owned());
+        // The links are read from the folders' listings: not on a sleeping HDD before the
+        // user agrees to wake it (`disk_target` reads them then).
+        if !c.standby {
+            self.check_link(&c)?;
+        }
+        Ok(c)
+    }
+
+    /// `link` when the folder leads to another place (R13): the volume, the disk, its
+    /// standby and its sensors would all be another disk's.
+    fn check_link(&self, c: &VolumeChoice) -> Result<(), StartError> {
+        if self.deps.machine.has_link(Path::new(&c.folder)) {
+            return Err(StartError::Disk("link"));
+        }
+        Ok(())
+    }
+
+    /// `performance.diskFolder` (DC15), once the test is sure to start.
+    pub(super) fn remember_disk_folder(&self, folder: &str) {
+        let folder = folder.to_owned();
+        self.deps
+            .settings
+            .update_with(|s| s.performance.disk_folder = Some(folder));
+    }
+
+    /// Probes the folder (one tiny file, DC6) into `c`: free space, sync attributes.
+    fn probe_into(&self, c: &mut VolumeChoice) -> Result<(), StartError> {
+        let p = self.deps.machine.probe_folder(Path::new(&c.folder));
+        if p.remote {
+            return Err(StartError::Disk("remote"));
+        }
+        if !p.exists {
+            return Err(StartError::Disk("not_found"));
+        }
+        if !p.writable {
+            return Err(StartError::Disk("not_writable"));
+        }
+        c.free_bytes = p.free_bytes;
+        if p.total_bytes > 0 {
+            c.total_bytes = p.total_bytes;
+        }
+        c.sync |= p.sync;
+        Ok(())
+    }
+
+    /// `performance_disk_probe`: the volume of a folder the user picked or confirmed. A
+    /// spun-down HDD is not probed (the probe file would wake it): it shows `standby`.
+    pub fn disk_probe(&self, folder: &str) -> Result<VolumeChoice, StartError> {
+        let mut c = self.disk_volume(folder)?;
+        if !c.standby {
+            self.probe_into(&mut c)?;
+        }
+        Ok(c)
+    }
+
+    /// The target of a disk test about to start (DC6, DC11): a spun-down HDD only with
+    /// `wake`, then the links (R13), the orphaned files of the folder, the probe and
+    /// the space. The caller remembers the folder once its plan is built.
+    pub(super) fn disk_target(
+        &self,
+        folder: &str,
+        wake: bool,
+        need: DiskNeed,
+    ) -> Result<VolumeChoice, StartError> {
+        let mut c = self.disk_volume(folder)?;
+        if c.standby && !wake {
+            return Err(StartError::Disk("standby"));
+        }
+        if c.standby {
+            self.check_link(&c)?;
+        }
+        let m = &self.deps.machine;
+        orphans::sweep(Path::new(&c.folder), |pid| m.process_started_at(pid));
+        self.probe_into(&mut c)?;
+        let enough = match need {
+            DiskNeed::Bench => {
+                c.free_bytes.saturating_sub(disk_reserve(c.total_bytes)) >= DISK_BENCH_FILE
+            }
+            DiskNeed::Stress => stress_file_bytes(c.free_bytes, c.total_bytes).is_some(),
+        };
+        if !enough {
+            return Err(StartError::Disk("no_space"));
+        }
+        Ok(c)
+    }
+
+    /// The disk's stop threshold (DC10): `diskStopC`, else its WCTEMP, else 70 °C.
+    pub(super) fn disk_threshold(&self, device_id: &str) -> f64 {
+        let setting = self.deps.settings.snapshot().performance.disk_stop_c;
+        disk_stop_threshold(setting, wctemp(&(self.deps.schema)(), device_id))
+    }
+
     /// The plan for `request` on this machine, with its topology and, for a GPU test,
-    /// the GPU of `request.gpu` (its LUID changes at every boot, DG13).
+    /// the GPU of `request.gpu` (its LUID changes at every boot, DG13); a disk test
+    /// gets its volume in `disk`.
     fn plan(
         &self,
         request: &StartRequest,
         seed: u64,
+        disk: Option<&VolumeChoice>,
     ) -> Result<(Topology, Plan, Option<StressAdapter>), StartError> {
         let m = &self.deps.machine;
         let adapter = match (&request.component, &request.gpu) {
@@ -594,14 +950,28 @@ impl PerformanceRunner {
                 luid: g.luid,
                 integrated: g.integrated,
             }),
+            // None for a disk request gives `NoDisk`.
+            disk: disk
+                .filter(|_| request.component == Component::Disk)
+                .map(|c| DiskPlanInput {
+                    dir: c.folder.clone(),
+                    free_bytes: c.free_bytes,
+                    volume_bytes: c.total_bytes,
+                    removable: c.removable,
+                }),
         })
         .map_err(StartError::Plan)?;
         Ok((topology, plan, adapter))
     }
 
-    /// The plan a start would run (the seed aside).
+    /// The plan a start would run (the seed aside). A disk request reads its volume
+    /// from metadata only: no probe, no sweep, a spun-down HDD stays asleep.
     pub fn preview(&self, request: &StartRequest) -> Result<Plan, StartError> {
-        Ok(self.plan(request, 0)?.1)
+        let disk = match (&request.component, &request.disk) {
+            (Component::Disk, Some(d)) => Some(self.disk_volume(&d.folder)?),
+            _ => None,
+        };
+        Ok(self.plan(request, 0, disk.as_ref())?.1)
     }
 
     pub fn system(&self) -> SystemInfo {
@@ -646,6 +1016,17 @@ impl PerformanceRunner {
                     dedicated_bytes: g.dedicated_bytes,
                 })
                 .collect(),
+            volumes: {
+                let drives = m.drives();
+                m.volumes()
+                    .into_iter()
+                    .filter(|v| v.drive != DriveKind::Remote)
+                    .map(|v| {
+                        let folder = self.default_folder(&v);
+                        self.volume_choice(&v, &drives, folder)
+                    })
+                    .collect()
+            },
         }
     }
 
@@ -664,20 +1045,38 @@ impl PerformanceRunner {
         let id = oma_win::overlay_pipe::random_uuid_v4()
             .map_err(|e| StartError::System(e.to_string()))?;
         let seed = seed_of(&id);
-        let (topology, plan, adapter) = self.plan(&request, seed)?;
+        let target = match (&request.component, &request.disk) {
+            (Component::Disk, Some(d)) => {
+                Some(self.disk_target(&d.folder, d.wake, DiskNeed::Stress)?)
+            }
+            _ => None,
+        };
+        let (topology, plan, adapter) = self.plan(&request, seed, target.as_ref())?;
+        if let Some(c) = &target {
+            self.remember_disk_folder(&c.folder);
+        }
         let perf = self.deps.settings.snapshot().performance.clone();
         let gpu = adapter.is_some();
+        let disk_id = target
+            .as_ref()
+            .map(|c| c.device_id.clone().unwrap_or_default());
         let config = RunConfig {
-            threshold_c: if gpu {
+            threshold_c: if let Some(id) = &disk_id {
+                self.disk_threshold(id)
+            } else if gpu {
                 gpu_stop_threshold(perf.gpu_stop_c)
             } else {
                 let tjmax_c = resolve_cpu_sensors(&(self.deps.schema)(), 0).tjmax_c;
                 cpu_stop_threshold(perf.cpu_stop_c, tjmax_c)
             },
             thermal_stop: perf.thermal_stop,
-            // GPU readings come without the service (DG12).
-            service_available: gpu || (self.deps.service_available)(),
-            cores: if gpu { vec![] } else { core_order(&topology) },
+            // GPU and disk readings come without the service (DG12, DC10).
+            service_available: gpu || disk_id.is_some() || (self.deps.service_available)(),
+            cores: if gpu || disk_id.is_some() {
+                vec![]
+            } else {
+                core_order(&topology)
+            },
             apic_to_core: BTreeMap::new(),
             whea_after: None,
             whea_baseline_missing: false,
@@ -691,7 +1090,17 @@ impl PerformanceRunner {
             Component::Gpu => adapter
                 .as_ref()
                 .map_or_else(String::new, |g| g.name.clone()),
+            Component::Disk => target.as_ref().map_or_else(String::new, |c| {
+                c.model.clone().unwrap_or_else(|| c.root.clone())
+            }),
         };
+        let disk = target.as_ref().map(|c| DiskSession {
+            device_id: c.device_id.clone().unwrap_or_default(),
+            volume: c.root.trim_end_matches('\\').to_owned(),
+            kind: kind_name(c.kind),
+            file_bytes: plan.disk.as_ref().map_or(0, |d| d.file_bytes),
+            ..Default::default()
+        });
         let session = Session {
             format: FORMAT,
             id: id.clone(),
@@ -718,6 +1127,7 @@ impl PerformanceRunner {
             load_version: None,
             stability: None,
             gpu_device_id: adapter.as_ref().map(|g| g.device_id.clone()),
+            disk,
         };
         let zero = Clock {
             mono_ms: 0,
@@ -763,6 +1173,7 @@ impl PerformanceRunner {
             cores: core_count(&topology),
             sensors: None,
             gpu: adapter.map(|g| g.device_id),
+            disk: disk_id,
             bench: false,
         });
         Ok(id)
@@ -799,7 +1210,7 @@ impl PerformanceRunner {
             .is_some_and(|a| a.running() && a.bench)
     }
 
-    /// The CPU (or, for a GPU test, the GPU) reading of a sampler tick for the test in
+    /// The CPU (or, for a GPU or disk test, the GPU or disk) reading of a sampler tick for the test in
     /// progress. Never blocks: a busy runner skips the tick, a full queue drops the sample.
     pub fn on_tick(&self, out: &TickOutput, schema: &Schema) {
         let Ok(mut active) = self.active.try_lock() else {
@@ -812,9 +1223,10 @@ impl PerformanceRunner {
             .as_ref()
             .is_none_or(|(rev, _)| *rev != schema.revision)
         {
-            let ids = match &a.gpu {
-                Some(id) => SensorIds::Gpu(resolve_gpu_sensors(schema, id)),
-                None => SensorIds::Cpu(resolve_cpu_sensors(schema, a.cores)),
+            let ids = match (&a.gpu, &a.disk) {
+                (Some(id), _) => SensorIds::Gpu(resolve_gpu_sensors(schema, id)),
+                (None, Some(id)) => SensorIds::Disk(resolve_disk_sensors(schema, id)),
+                (None, None) => SensorIds::Cpu(resolve_cpu_sensors(schema, a.cores)),
             };
             a.sensors = Some((schema.revision, ids));
         }
@@ -826,6 +1238,8 @@ impl PerformanceRunner {
             ),
             // The GPU readings never need the service (DG12).
             SensorIds::Gpu(ids) => (read_gpu_sample(ids, &out.snapshot, &out.quality), true),
+            // Nor do the disk's (DC10).
+            SensorIds::Disk(ids) => (read_disk_sample(ids, &out.snapshot, &out.quality), true),
         };
         let _ = a.samples.try_send((sample, service));
     }
@@ -1156,6 +1570,18 @@ pub(crate) mod tests {
         assert_eq!(wire(BuildError::UnknownCore(3)), "build:unknown_core");
         assert_eq!(wire(BuildError::RamBudget), "build:ram_budget");
         assert_eq!(wire(BuildError::NoGpu), "build:no_gpu");
+        assert_eq!(wire(BuildError::NoDisk), "build:no_disk");
+        assert_eq!(wire(BuildError::NoSpace), "build:no_space");
+        for code in [
+            "remote",
+            "not_found",
+            "not_writable",
+            "no_space",
+            "standby",
+            "link",
+        ] {
+            assert_eq!(StartError::Disk(code).wire(), format!("disk:{code}"));
+        }
         assert_eq!(StartError::Busy.wire(), "busy");
         assert_eq!(StartError::System("no pipe".into()).wire(), "no pipe");
     }
@@ -1208,6 +1634,22 @@ pub(crate) mod tests {
         pub(crate) gpu_busy: Option<f64>,
         /// The device ids the GPU share was read for.
         pub(crate) gpu_busy_polls: Arc<Mutex<Vec<String>>>,
+        pub(crate) volumes: Vec<oma_win::volumes::VolumeInfo>,
+        /// What every probe gives; `None`: the folder exists and is writable, with its
+        /// volume's space.
+        pub(crate) probe: Option<FolderProbe>,
+        /// The folders probed.
+        pub(crate) probes: Arc<Mutex<Vec<PathBuf>>>,
+        /// Every disk's traits; `None`: an NVMe disk.
+        pub(crate) traits: Option<DiskTraits>,
+        pub(crate) drives: Vec<DriveEntry>,
+        /// Every disk's power state.
+        pub(crate) power: Option<DiskPower>,
+        /// Live processes and their start times.
+        pub(crate) started: Vec<(u32, u64)>,
+        pub(crate) temp: PathBuf,
+        /// Every folder is behind a junction (R13).
+        pub(crate) linked: bool,
     }
 
     impl Machine for FakeMachine {
@@ -1260,6 +1702,51 @@ pub(crate) mod tests {
                 .unwrap()
                 .push(device_id.to_owned());
             self.gpu_busy
+        }
+        fn volumes(&self) -> Vec<oma_win::volumes::VolumeInfo> {
+            self.volumes.clone()
+        }
+        fn probe_folder(&self, path: &Path) -> FolderProbe {
+            self.probes.lock().unwrap().push(path.to_owned());
+            if let Some(p) = &self.probe {
+                return p.clone();
+            }
+            let root = root_of(&path.to_string_lossy());
+            let v = self.volumes.iter().find(|v| Some(&v.root) == root.as_ref());
+            FolderProbe {
+                volume_root: root.clone(),
+                remote: v.is_some_and(|v| v.drive == DriveKind::Remote),
+                exists: true,
+                writable: true,
+                sync: false,
+                free_bytes: v.map_or(0, |v| v.free_bytes),
+                total_bytes: v.map_or(0, |v| v.total_bytes),
+            }
+        }
+        fn disk_traits(&self, _index: u32) -> DiskTraits {
+            self.traits.unwrap_or(DiskTraits {
+                bus: Some(17),
+                class: DiskClass::NonRotational,
+                kind: DiskKind::Nvme,
+            })
+        }
+        fn drives(&self) -> Vec<DriveEntry> {
+            self.drives.clone()
+        }
+        fn disk_power(&self, _device_id: &str) -> Option<DiskPower> {
+            self.power
+        }
+        fn process_started_at(&self, pid: u32) -> Option<u64> {
+            self.started
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map(|(_, t)| *t)
+        }
+        fn local_temp_dir(&self) -> PathBuf {
+            self.temp.clone()
+        }
+        fn has_link(&self, _path: &Path) -> bool {
+            self.linked
         }
     }
 
@@ -1361,6 +1848,15 @@ pub(crate) mod tests {
         _dir: TempDir,
     }
 
+    impl Rig {
+        /// The disk tests' folder, inside the store's (removed with it).
+        pub(crate) fn disk_dir(&self) -> PathBuf {
+            let dir = self._dir.0.join("disk");
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+    }
+
     /// A test's store folder, removed when the test ends.
     struct TempDir(std::path::PathBuf);
 
@@ -1388,6 +1884,21 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn rig_on(name: &str, launcher: Launcher, machine: FakeMachine) -> Rig {
+        let schema = Schema {
+            revision: 1,
+            devices: vec![],
+            sensors: vec![],
+        };
+        rig_schema(name, launcher, machine, schema)
+    }
+
+    /// A rig whose engine has `schema` (WCTEMP, Tjmax).
+    pub(crate) fn rig_schema(
+        name: &str,
+        launcher: Launcher,
+        machine: FakeMachine,
+        schema: Schema,
+    ) -> Rig {
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         settings.update_with(|s| s.general.language = Language::En);
         let toasts = Toasts::default();
@@ -1405,11 +1916,7 @@ pub(crate) mod tests {
             machine: Box::new(machine),
             launcher,
             toaster: Box::new(toasts.clone()),
-            schema: Box::new(|| Schema {
-                revision: 1,
-                devices: vec![],
-                sensors: vec![],
-            }),
+            schema: Box::new(move || schema.clone()),
             service_available: Box::new(|| false),
             window_open: Box::new(move || w.load(Ordering::SeqCst)),
             window_visible: Box::new(move || v.load(Ordering::SeqCst)),
@@ -1464,6 +1971,7 @@ pub(crate) mod tests {
             custom: None,
             retry_core: None,
             gpu: None,
+            disk: None,
         }
     }
 
@@ -1479,6 +1987,8 @@ pub(crate) mod tests {
             memory_bytes: 0,
             rate: None,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -1595,6 +2105,8 @@ pub(crate) mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = rig_with(
             "core2",
@@ -1822,6 +2334,30 @@ pub(crate) mod tests {
             fn gpu_busy_share(&self, device_id: &str) -> Option<f64> {
                 self.0.gpu_busy_share(device_id)
             }
+            fn volumes(&self) -> Vec<oma_win::volumes::VolumeInfo> {
+                self.0.volumes()
+            }
+            fn probe_folder(&self, path: &Path) -> FolderProbe {
+                self.0.probe_folder(path)
+            }
+            fn disk_traits(&self, index: u32) -> DiskTraits {
+                self.0.disk_traits(index)
+            }
+            fn drives(&self) -> Vec<DriveEntry> {
+                self.0.drives()
+            }
+            fn disk_power(&self, device_id: &str) -> Option<DiskPower> {
+                self.0.disk_power(device_id)
+            }
+            fn process_started_at(&self, pid: u32) -> Option<u64> {
+                self.0.process_started_at(pid)
+            }
+            fn local_temp_dir(&self) -> PathBuf {
+                self.0.local_temp_dir()
+            }
+            fn has_link(&self, path: &Path) -> bool {
+                self.0.has_link(path)
+            }
         }
         let settings = Arc::new(SettingsStore::open(None, FakeFs::new()));
         let dir = TempDir::new("baseline");
@@ -1867,6 +2403,8 @@ pub(crate) mod tests {
             ram_bytes: 0,
             phases: vec![],
             gpu: None,
+
+            disk: None,
         };
         let failure = plan_message(plan).unwrap_err();
         assert_eq!(failure.i18n_key(), "performance.start.invalid_plan");
@@ -2246,5 +2784,539 @@ pub(crate) mod tests {
         let mut rows = mine.to_vec();
         rows.extend([row(300, "game.exe", Some(25.0)), row(301, "new.exe", None)]);
         assert_eq!(other_gpu_share(&rows, &ours), Some(0.25));
+    }
+
+    // ---- Disk (M8c) ----
+
+    pub(crate) const DISK_ID: &str = "disk/test-0";
+    const GIB: u64 = 1 << 30;
+
+    /// The root of the temporary folder, where every disk test of the rig lives.
+    pub(crate) fn temp_root() -> String {
+        root_of(&std::env::temp_dir().to_string_lossy()).unwrap()
+    }
+
+    pub(crate) fn volume(root: &str, free: u64, drive: DriveKind) -> oma_win::volumes::VolumeInfo {
+        oma_win::volumes::VolumeInfo {
+            root: root.into(),
+            label: "Data".into(),
+            fs: "NTFS".into(),
+            total_bytes: 1000 * GIB,
+            free_bytes: free,
+            drive,
+            disk_index: Some(0),
+            system: false,
+        }
+    }
+
+    /// An NVMe disk holding the temporary folder's volume, 500 GiB free.
+    pub(crate) fn disk_machine() -> FakeMachine {
+        FakeMachine {
+            volumes: vec![
+                volume(&temp_root(), 500 * GIB, DriveKind::Fixed),
+                oma_win::volumes::VolumeInfo {
+                    disk_index: None,
+                    ..volume("Z:\\", 0, DriveKind::Remote)
+                },
+            ],
+            drives: vec![DriveEntry::new(
+                0,
+                DISK_ID.into(),
+                Some("Test NVMe".into()),
+                Some("SN1".into()),
+            )],
+            temp: PathBuf::from(r"C:\Users\t\AppData\Local\Temp"),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn hdd() -> DiskTraits {
+        DiskTraits {
+            bus: Some(11),
+            class: DiskClass::RotationalOrUnknown,
+            kind: DiskKind::Hdd,
+        }
+    }
+
+    fn disk_request(folder: &Path, wake: bool) -> StartRequest {
+        StartRequest {
+            component: Component::Disk,
+            disk: Some(oma_core::load::DiskStart {
+                folder: folder.to_string_lossy().into_owned(),
+                wake,
+            }),
+            ..request()
+        }
+    }
+
+    fn passed_script() -> Script {
+        Script {
+            on_run: vec![progress(0), finished(FinishReason::Completed, 0)],
+            exit_after_run: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn system_lists_volumes() {
+        let mut machine = disk_machine();
+        machine.volumes[0].system = true;
+        machine.volumes.push(oma_win::volumes::VolumeInfo {
+            drive: DriveKind::Removable,
+            ..volume("E:\\", GIB, DriveKind::Removable)
+        });
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("sysvol", scripted(Script::default()), machine);
+        let volumes = rig.runner.system().volumes;
+        // The network drive is left out.
+        assert_eq!(volumes.len(), 2, "{volumes:?}");
+        let sys = &volumes[0];
+        assert_eq!(sys.folder, r"C:\Users\t\AppData\Local\Temp");
+        assert_eq!(sys.device_id.as_deref(), Some(DISK_ID));
+        assert_eq!(sys.model.as_deref(), Some("Test NVMe"));
+        assert_eq!(
+            (sys.kind, sys.removable, sys.standby),
+            (DiskKind::Nvme, false, false)
+        );
+        let usb = &volumes[1];
+        assert_eq!(usb.folder, "E:\\");
+        assert!(usb.removable);
+        let json = serde_json::to_value(sys).unwrap();
+        assert_eq!(json["deviceId"], DISK_ID);
+        assert_eq!(json["kind"], "nvme");
+        assert_eq!(json["totalBytes"], 1000 * GIB);
+        assert!(json.get("solid").is_none());
+        // Listing never probes (the probe writes a file).
+        assert!(probes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disk_stress_runs_and_saves_the_disk_session() {
+        let rig = rig_on("diskrun", scripted(passed_script()), disk_machine());
+        let folder = rig.disk_dir();
+        let id = rig.runner.start(disk_request(&folder, false)).unwrap();
+        wait_idle(&rig.runner);
+        let s = only_session(&rig.runner);
+        assert_eq!(s.id, id);
+        assert_eq!(s.component, Component::Disk);
+        assert_eq!(s.device, "Test NVMe");
+        let d = s.disk.unwrap();
+        assert_eq!(d.device_id, DISK_ID);
+        assert_eq!(d.volume, temp_root().trim_end_matches('\\'));
+        assert_eq!(d.kind, "nvme");
+        assert_eq!(d.file_bytes, 8 * GIB);
+        let target = s.plan.disk.unwrap();
+        assert_eq!(target.reserve_bytes, 50 * GIB);
+        // The folder is not saved in the session (DC10), neither in the request nor in the plan.
+        assert_eq!(s.request.disk.unwrap().folder, "");
+        assert_eq!(target.dir, "");
+        let dir = rig._dir.0.join("stress");
+        let name = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let raw = std::fs::read_to_string(name).unwrap();
+        let unique = rig
+            ._dir
+            .0
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !raw.contains(&unique),
+            "the folder leaked into the file: {raw}"
+        );
+    }
+
+    #[test]
+    fn standby_hdd_needs_consent() {
+        let machine = FakeMachine {
+            traits: Some(hdd()),
+            power: Some(DiskPower::Standby),
+            ..disk_machine()
+        };
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("standby", scripted(passed_script()), machine);
+        let folder = rig.disk_dir();
+        let orphan = plant_orphan(&folder);
+        let err = rig.runner.start(disk_request(&folder, false)).unwrap_err();
+        assert_eq!(err.wire(), "disk:standby");
+        assert!(orphan.exists(), "no sweep before the consent");
+        let bench = super::super::bench::DiskBenchRequest {
+            folder: folder.to_string_lossy().into_owned(),
+            profile: oma_core::scores::DiskProfile::B1,
+            compressible: false,
+            wake: false,
+        };
+        assert_eq!(
+            rig.runner.start_disk_bench(bench).unwrap_err().wire(),
+            "disk:standby"
+        );
+        // The pick shows the standby without writing the probe file.
+        let c = rig.runner.disk_probe(&folder.to_string_lossy()).unwrap();
+        assert!(c.standby);
+        assert!(
+            probes.lock().unwrap().is_empty(),
+            "never probed while asleep"
+        );
+        assert!(rig.runner.store().list().is_empty());
+        assert_eq!(
+            rig.runner.deps.settings.snapshot().performance.disk_folder,
+            None
+        );
+        // With consent the test starts.
+        rig.runner.start(disk_request(&folder, true)).unwrap();
+        assert!(!orphan.exists());
+        wait_idle(&rig.runner);
+        assert_eq!(only_session(&rig.runner).outcome, Some(Outcome::Passed));
+        assert_eq!(probes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_folder_is_refused() {
+        let rig = rig_on("remote", scripted(passed_script()), disk_machine());
+        for folder in [r"\\server\share\x", r"\\?\UNC\server\share", r"Z:\x"] {
+            let err = rig
+                .runner
+                .start(disk_request(Path::new(folder), false))
+                .unwrap_err();
+            assert_eq!(err.wire(), "disk:remote", "{folder}");
+            assert_eq!(
+                rig.runner.disk_probe(folder).unwrap_err().wire(),
+                "disk:remote"
+            );
+        }
+        // Relative, `..` and too long: not a folder a test can use.
+        let long = format!("{}{}", temp_root(), "a".repeat(1100));
+        for folder in ["relative\\x", r"C:\a\..\b", &long] {
+            let err = rig.runner.disk_probe(folder).unwrap_err();
+            assert_eq!(err.wire(), "disk:not_found", "{folder}");
+        }
+        // A folder the probe cannot write into.
+        let machine = FakeMachine {
+            probe: Some(FolderProbe {
+                volume_root: Some(temp_root()),
+                remote: false,
+                exists: true,
+                writable: false,
+                sync: false,
+                free_bytes: 500 * GIB,
+                total_bytes: 1000 * GIB,
+            }),
+            ..disk_machine()
+        };
+        let rig2 = rig_on("notwritable", scripted(passed_script()), machine);
+        let folder = rig2.disk_dir();
+        let err = rig2.runner.start(disk_request(&folder, false)).unwrap_err();
+        assert_eq!(err.wire(), "disk:not_writable");
+        assert!(!rig.runner.is_running() && !rig2.runner.is_running());
+        assert!(rig2.runner.store().list().is_empty());
+    }
+
+    #[test]
+    fn too_little_space_is_no_space() {
+        // 1 TB volume: a 50 GiB reserve, and 50.5 GiB free leaves half a GiB.
+        let mut machine = disk_machine();
+        machine.volumes[0].free_bytes = 50 * GIB + GIB / 2;
+        let rig = rig_on("nospace", scripted(passed_script()), machine);
+        let folder = rig.disk_dir();
+        let err = rig.runner.start(disk_request(&folder, false)).unwrap_err();
+        assert_eq!(err.wire(), "disk:no_space");
+        let bench = super::super::bench::DiskBenchRequest {
+            folder: folder.to_string_lossy().into_owned(),
+            profile: oma_core::scores::DiskProfile::B1,
+            compressible: false,
+            wake: false,
+        };
+        assert_eq!(
+            rig.runner.start_disk_bench(bench).unwrap_err().wire(),
+            "disk:no_space"
+        );
+        assert!(!rig.runner.is_running());
+        // Nothing remembered either.
+        assert_eq!(
+            rig.runner.deps.settings.snapshot().performance.disk_folder,
+            None
+        );
+    }
+
+    #[test]
+    fn disk_start_writes_the_folder_to_settings_and_journal() {
+        let rig = rig_on("diskfolder", scripted(running_script()), disk_machine());
+        let folder = rig.disk_dir();
+        let text = folder.to_string_lossy().into_owned();
+        rig.runner.start(disk_request(&folder, false)).unwrap();
+        assert_eq!(
+            rig.runner
+                .deps
+                .settings
+                .snapshot()
+                .performance
+                .disk_folder
+                .as_deref(),
+            Some(text.as_str())
+        );
+        wait_running(&rig.runner);
+        let until = Instant::now() + Duration::from_secs(3);
+        let journal = loop {
+            if let Some(Ok(j)) = rig.runner.store().read_journal() {
+                break j;
+            }
+            assert!(Instant::now() < until, "no journal");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(journal.disk_folder.as_deref(), Some(text.as_str()));
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+    }
+
+    fn disk_schema(warning: Option<&str>) -> Schema {
+        use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
+        let sensor = |kind, name: &str, unit| {
+            Sensor::new(DISK_ID, kind, name, unit, Label::new(name), Source::Lhm)
+        };
+        Schema {
+            revision: 1,
+            devices: vec![Device {
+                id: DISK_ID.into(),
+                kind: DeviceKind::Storage,
+                name: "Test NVMe".into(),
+                vendor: None,
+                properties: warning
+                    .map(|w| [("tempWarningC".to_owned(), w.to_owned())].into())
+                    .unwrap_or_default(),
+            }],
+            sensors: vec![
+                sensor(SensorKind::Temperature, "drive", Unit::Celsius),
+                sensor(SensorKind::Throughput, "read", Unit::BytesPerSecond),
+                sensor(SensorKind::Throughput, "write", Unit::BytesPerSecond),
+                sensor(SensorKind::Data, "host-written", Unit::Bytes),
+                // A CPU temperature the disk test must not read.
+                Sensor::new(
+                    "cpu/0",
+                    SensorKind::Temperature,
+                    "tdie",
+                    Unit::Celsius,
+                    Label::new("tdie"),
+                    Source::Lhm,
+                ),
+            ],
+        }
+    }
+
+    pub(crate) fn disk_tick() -> TickOutput {
+        use oma_core::provider::Quality;
+        TickOutput {
+            snapshot: oma_core::model::Snapshot {
+                revision: 1,
+                seq: 0,
+                timestamp_ms: 0,
+                values: vec![
+                    Some(48.0),
+                    Some(3e9),
+                    Some(1e9),
+                    Some(100.0 * (1u64 << 30) as f64),
+                    Some(90.0),
+                ],
+            },
+            schema: None,
+            quality: vec![Quality::Fresh; 5],
+            health: None,
+            entries: vec![],
+            monotonic_ms: 0,
+        }
+    }
+
+    #[test]
+    fn disk_samples_come_from_disk_sensors() {
+        let rig = rig_on("disksample", scripted(running_script()), disk_machine());
+        let folder = rig.disk_dir();
+        rig.runner.start(disk_request(&folder, false)).unwrap();
+        wait_running(&rig.runner);
+        let schema = disk_schema(None);
+        let until = Instant::now() + Duration::from_secs(3);
+        while rig.runner.status().temp_c.is_none() {
+            assert!(Instant::now() < until, "no disk sample arrived");
+            rig.runner.on_tick(&disk_tick(), &schema);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let st = rig.runner.status();
+        assert_eq!(st.temp_c, Some(48.0), "the drive, not the CPU");
+        // The service is not connected, and the disk test does not need it.
+        assert!(
+            !st.warnings.iter().any(|w| w == "noService"),
+            "{:?}",
+            st.warnings
+        );
+        assert!(
+            !st.warnings.iter().any(|w| w == "smartMissing"),
+            "{:?}",
+            st.warnings
+        );
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+        let d = only_session(&rig.runner).disk.unwrap();
+        assert_eq!(d.host_written_before_gib, Some(100.0));
+    }
+
+    #[test]
+    fn disk_threshold_uses_wctemp() {
+        let rig = rig_schema(
+            "diskthr",
+            scripted(running_script()),
+            disk_machine(),
+            disk_schema(Some("65")),
+        );
+        let folder = rig.disk_dir();
+        rig.runner.start(disk_request(&folder, false)).unwrap();
+        assert_eq!(rig.runner.status().stop_c, Some(65.0));
+        rig.runner.stop();
+        wait_idle(&rig.runner);
+        rig.runner
+            .deps
+            .settings
+            .update_with(|s| s.performance.disk_stop_c = Some(60));
+        assert_eq!(rig.runner.disk_threshold(DISK_ID), 60.0);
+        // Without the setting and without WCTEMP: 70 °C.
+        let rig = rig_on("diskthr70", scripted(Script::default()), disk_machine());
+        assert_eq!(rig.runner.disk_threshold(DISK_ID), 70.0);
+    }
+
+    /// An orphan of a dead run in `dir`: the data file and its sidecar.
+    fn plant_orphan(dir: &Path) -> PathBuf {
+        let prefix = "oma-test-00000000000000aa";
+        let data = dir.join(format!("{prefix}.bin"));
+        std::fs::write(&data, b"x").unwrap();
+        std::fs::write(
+            dir.join(format!("{prefix}.oma-test.json")),
+            format!(r#"{{"format":1,"pid":9,"startedAt":5,"prefix":"{prefix}"}}"#),
+        )
+        .unwrap();
+        data
+    }
+
+    #[test]
+    fn recover_sweeps_the_journal_folder_and_skips_an_hdd_last_folder() {
+        for (traits, last_swept) in [(Some(hdd()), false), (None, true)] {
+            let machine = FakeMachine {
+                traits,
+                ..disk_machine()
+            };
+            let rig = rig_on("recoversweep", scripted(Script::default()), machine);
+            let journal_dir = rig.disk_dir().join("journal");
+            let last_dir = rig.disk_dir().join("last");
+            std::fs::create_dir_all(&journal_dir).unwrap();
+            std::fs::create_dir_all(&last_dir).unwrap();
+            let (in_journal, in_last) = (plant_orphan(&journal_dir), plant_orphan(&last_dir));
+            let id = "00000000-0000-4000-8000-000000000001";
+            rig.runner
+                .store()
+                .write_journal(&oma_core::load::Journal {
+                    format: 1,
+                    session_id: id.into(),
+                    plan_summary: "disk".into(),
+                    phase_index: 0,
+                    kernel: None,
+                    core: None,
+                    updated_at: "2026-10-08T10:00:00Z".into(),
+                    clean_end: false,
+                    disk_folder: Some(journal_dir.to_string_lossy().into_owned()),
+                })
+                .unwrap();
+            let last = last_dir.to_string_lossy().into_owned();
+            rig.runner
+                .deps
+                .settings
+                .update_with(|s| s.performance.disk_folder = Some(last));
+            rig.runner.recover_now();
+            assert!(!in_journal.exists(), "the journal folder is always swept");
+            assert_eq!(!in_last.exists(), last_swept, "{traits:?}");
+            // The journal became a disk session.
+            let s = rig.runner.store().load(id).unwrap().unwrap();
+            assert_eq!(s.component, Component::Disk);
+        }
+    }
+
+    #[test]
+    fn disk_start_sweeps_the_target_folder() {
+        let rig = rig_on("disksweep", scripted(passed_script()), disk_machine());
+        let folder = rig.disk_dir();
+        let orphan = plant_orphan(&folder);
+        rig.runner.start(disk_request(&folder, false)).unwrap();
+        assert!(!orphan.exists());
+        wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn preview_of_a_disk_request_never_probes() {
+        let machine = disk_machine();
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("diskpreview", scripted(Script::default()), machine);
+        let folder = rig.disk_dir();
+        let orphan = plant_orphan(&folder);
+        let plan = rig.runner.preview(&disk_request(&folder, false)).unwrap();
+        assert_eq!(plan.disk.unwrap().dir, folder.to_string_lossy());
+        assert!(probes.lock().unwrap().is_empty(), "the probe writes a file");
+        assert!(orphan.exists(), "a preview sweeps nothing");
+        assert_eq!(
+            rig.runner.deps.settings.snapshot().performance.disk_folder,
+            None
+        );
+    }
+
+    #[test]
+    fn a_linked_folder_is_refused() {
+        let machine = FakeMachine {
+            linked: true,
+            ..disk_machine()
+        };
+        let probes = Arc::clone(&machine.probes);
+        let rig = rig_on("disklink", scripted(passed_script()), machine);
+        let folder = rig.disk_dir();
+        let text = folder.to_string_lossy().into_owned();
+        let orphan = plant_orphan(&folder);
+        let wire = |r: Result<(), StartError>| r.unwrap_err().wire();
+        assert_eq!(wire(rig.runner.disk_probe(&text).map(drop)), "disk:link");
+        assert_eq!(
+            wire(rig.runner.preview(&disk_request(&folder, false)).map(drop)),
+            "disk:link"
+        );
+        assert_eq!(
+            wire(rig.runner.start(disk_request(&folder, false)).map(drop)),
+            "disk:link"
+        );
+        let bench = super::super::bench::DiskBenchRequest {
+            folder: text.clone(),
+            profile: oma_core::scores::DiskProfile::B1,
+            compressible: false,
+            wake: false,
+        };
+        assert_eq!(
+            wire(rig.runner.start_disk_bench(bench).map(drop)),
+            "disk:link"
+        );
+        assert!(probes.lock().unwrap().is_empty());
+        assert!(orphan.exists(), "nothing behind a link is swept");
+        // Nor at startup, from the journal or the last folder.
+        rig.runner
+            .store()
+            .write_journal(&oma_core::load::Journal {
+                format: 1,
+                session_id: "00000000-0000-4000-8000-000000000002".into(),
+                plan_summary: "disk".into(),
+                phase_index: 0,
+                kernel: None,
+                core: None,
+                updated_at: "2026-10-08T10:00:00Z".into(),
+                clean_end: false,
+                disk_folder: Some(text.clone()),
+            })
+            .unwrap();
+        rig.runner.remember_disk_folder(&text);
+        rig.runner.recover_now();
+        assert!(orphan.exists());
     }
 }

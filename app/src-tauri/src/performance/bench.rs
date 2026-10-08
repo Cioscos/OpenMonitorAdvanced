@@ -1,9 +1,9 @@
-//! The CPU (M8a2) and GPU (M8b2) benchmarks on the runner's `oma-perf-runner`
+//! The CPU (M8a2), GPU (M8b2) and disk (M8c) benchmarks on the runner's `oma-perf-runner`
 //! thread: the plan of `bench_plan` or `gpu_bench_plan`, the helper and the pure
 //! `BenchController` or `GpuBenchController`, fed every 250 ms with the helper's
 //! messages and the sampler's CPU or GPU readings, and every 5 s with the battery
 //! and the other processes' CPU or GPU share (DB7, DH9, DH10). They share the
-//! runner's `active` slot with the stress test (DB8, DH12): one job at a time,
+//! runner's `active` slot with the stress test (DB8, DH12, DC15): one job at a time,
 //! the same stop and shutdown. A stopped benchmark saves nothing (DB9).
 
 use std::sync::atomic::Ordering;
@@ -13,20 +13,21 @@ use std::time::{Duration, Instant};
 
 use oma_core::load::{resolve_cpu_sensors, BuildError, Clock, SensorSample};
 use oma_core::scores::{
-    bench_plan, cpu_baseline, gpu_baseline, gpu_bench_plan, BenchAction, BenchContext,
-    BenchController, BenchEnd, BenchState, BenchStatus, Device, GpuBenchContext,
-    GpuBenchController, ScoreFile,
+    bench_plan, cpu_baseline, disk_baseline, disk_bench_plan, gpu_baseline, gpu_bench_plan,
+    BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, Device,
+    DiskBenchContext, DiskBenchController, DiskProfile, GpuBenchContext, GpuBenchController,
+    ScoreFile,
 };
 use oma_ipc::load::{GpuTarget, Isa, LoadMessage, Plan, StopRequest};
 
 use super::host::{HostEvent, StartFailure};
 use super::runner::{
-    clock_at, core_count, lock, plan_message, seed_of, unix_now_ms, Active, Control, LoadLink,
-    PerformanceRunner, RunnerDeps, StartError, EXIT_GRACE, SAMPLE_QUEUE, TICK,
+    clock_at, core_count, kind_name, lock, plan_message, seed_of, unix_now_ms, Active, Control,
+    DiskNeed, LoadLink, PerformanceRunner, RunnerDeps, StartError, EXIT_GRACE, SAMPLE_QUEUE, TICK,
 };
 use super::store::to_rfc3339;
 use crate::i18n::t;
-use crate::notifier::{launch_for_score_cpu, launch_for_score_gpu};
+use crate::notifier::{launch_for_score_cpu, launch_for_score_disk, launch_for_score_gpu};
 use crate::tray::language_for;
 
 /// Emitted to the main window on every state change and twice a second during
@@ -50,8 +51,9 @@ trait Ctl: Send {
     fn status(&self) -> BenchStatus;
 }
 
+/// `$busy` feeds the other processes' share; the disk benchmark has none (DC12).
 macro_rules! impl_ctl {
-    ($t:ty, $busy:ident) => {
+    ($t:ty $(, $busy:ident)?) => {
         impl Ctl for $t {
             fn on_load(&mut self, msg: &LoadMessage, now: Clock) -> Vec<BenchAction> {
                 <$t>::on_load(self, msg, now)
@@ -59,8 +61,8 @@ macro_rules! impl_ctl {
             fn on_sample(&mut self, sample: &SensorSample, now: Clock) -> Vec<BenchAction> {
                 <$t>::on_sample(self, sample, now)
             }
-            fn on_busy(&mut self, share: f64) {
-                <$t>::$busy(self, share);
+            fn on_busy(&mut self, _share: f64) {
+                $(<$t>::$busy(self, _share);)?
             }
             fn on_battery(&mut self, on_battery: bool) {
                 <$t>::on_battery(self, on_battery);
@@ -83,6 +85,7 @@ macro_rules! impl_ctl {
 
 impl_ctl!(BenchController, on_busy_share);
 impl_ctl!(GpuBenchController, on_busy_gpu);
+impl_ctl!(DiskBenchController);
 
 /// Whose share of the machine the 5 s poll reads.
 enum Busy {
@@ -90,6 +93,21 @@ enum Busy {
     Cpu(u32),
     /// The GPU of this `device_id`.
     Gpu(String),
+    /// Nothing: the disk benchmark compares the drive's own throughput (DC12).
+    None,
+}
+
+/// What the disk pages send to start the benchmark.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskBenchRequest {
+    pub folder: String,
+    pub profile: DiskProfile,
+    #[serde(default)]
+    pub compressible: bool,
+    /// The user agreed to wake a spun-down HDD (DC6).
+    #[serde(default)]
+    pub wake: bool,
 }
 
 /// A benchmark ready to start.
@@ -102,6 +120,8 @@ struct BenchJob {
     cores: usize,
     /// The GPU under test: the sampler reads its sensors.
     gpu: Option<String>,
+    /// The disk under test: the sampler reads its sensors.
+    disk: Option<String>,
     /// The controller's clock origin, also the thread's.
     epoch: Instant,
 }
@@ -164,6 +184,7 @@ impl PerformanceRunner {
                 busy: Busy::Cpu(logical),
                 cores,
                 gpu: None,
+                disk: None,
                 epoch,
             },
         )
@@ -214,6 +235,60 @@ impl PerformanceRunner {
                 busy: Busy::Gpu(adapter.device_id.clone()),
                 cores: 0,
                 gpu: Some(adapter.device_id),
+                disk: None,
+                epoch,
+            },
+        )
+    }
+
+    /// Starts the disk benchmark in `request.folder` (DC5, DC6): its score id, or `Busy`,
+    /// `disk:<code>` for a target that cannot be used (a spun-down HDD without `wake` is
+    /// `disk:standby`). The folder's orphaned test files go first (DC11).
+    pub fn start_disk_bench(&self, request: DiskBenchRequest) -> Result<String, StartError> {
+        let active = self.free_slot()?;
+        let target = self.disk_target(&request.folder, request.wake, DiskNeed::Bench)?;
+        self.remember_disk_folder(&target.folder);
+        let deps = &self.deps;
+        let id = oma_win::overlay_pipe::random_uuid_v4()
+            .map_err(|e| StartError::System(e.to_string()))?;
+        let (plan, steps) = disk_bench_plan(
+            target.folder.clone(),
+            target.total_bytes,
+            request.compressible,
+            request.profile,
+            seed_of(&id),
+        );
+        let device_id = target.device_id.clone().unwrap_or_default();
+        let ctx = DiskBenchContext {
+            id: id.clone(),
+            at: to_rfc3339(unix_now_ms()),
+            device: Device {
+                model: target.model.clone().unwrap_or_else(|| target.root.clone()),
+                kind: Some(kind_name(target.kind)),
+                ..Device::default()
+            },
+            device_id: device_id.clone(),
+            profile: request.profile,
+            compressible: request.compressible,
+            virtual_disk: target.virtual_disk,
+            removable: target.removable,
+            threshold_c: self.disk_threshold(&device_id),
+            on_battery: deps.machine.on_battery(),
+            baseline: disk_baseline(),
+            app_version: deps.app_version.clone(),
+        };
+        let epoch = Instant::now();
+        let ctl = DiskBenchController::new(steps, ctx, clock_at(epoch, deps.machine.as_ref()));
+        self.spawn_bench(
+            active,
+            BenchJob {
+                id,
+                ctl: Box::new(ctl),
+                plan,
+                busy: Busy::None,
+                cores: 0,
+                gpu: None,
+                disk: Some(device_id),
                 epoch,
             },
         )
@@ -231,6 +306,7 @@ impl PerformanceRunner {
             busy,
             cores,
             gpu,
+            disk,
             epoch,
         } = job;
         // Set before the thread runs, so a later status from it is never overwritten.
@@ -269,6 +345,7 @@ impl PerformanceRunner {
             cores,
             sensors: None,
             gpu,
+            disk,
             bench: true,
         });
         Ok(id)
@@ -355,6 +432,7 @@ impl BenchWorker {
                 let deps = Arc::clone(&self.deps);
                 Box::new(move || deps.machine.gpu_busy_share(&device_id))
             }
+            Busy::None => Box::new(|| None),
         }
     }
 
@@ -524,6 +602,23 @@ impl BenchWorker {
         };
         let lang = language_for(self.deps.settings.snapshot().general.language);
         let points = |p: Option<u32>| p.map_or_else(|| "\u{2013}".to_owned(), |p| p.to_string());
+        if file.category == "disk" {
+            let mbs =
+                |v: Option<f64>| v.map_or_else(|| "\u{2013}".to_owned(), |v| format!("{v:.0}"));
+            let body = if file.valid {
+                let (read, write) = (mbs(file.scores.read_mbs), mbs(file.scores.write_mbs));
+                t(
+                    lang,
+                    "performance.toast.diskBenchDone",
+                    &[("read", read.as_str()), ("write", write.as_str())],
+                )
+            } else {
+                t(lang, "performance.toast.diskBenchInvalid", &[])
+            };
+            let title = t(lang, "performance.score.disk.title", &[]);
+            self.deps.toaster.show(title, body, launch_for_score_disk());
+            return;
+        }
         let gpu = file.category == "gpu";
         let body = match (gpu, file.valid) {
             (false, true) => {
@@ -599,6 +694,8 @@ mod tests {
                     work_ms: Some(1000),
                     workers: vec![],
                     rates: vec![],
+
+                    disk: None,
                 })
             })
             .collect()
@@ -853,6 +950,8 @@ mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = rig_with(
             "bench-invalid",
@@ -891,6 +990,8 @@ mod tests {
                     work_ms: None,
                     workers: vec![],
                     rates: vec![2e12; 5],
+
+                    disk: None,
                 })
             })
             .collect()
@@ -1092,6 +1193,8 @@ mod tests {
             actual: 0x887A_0005,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = gpu_rig(
             "gpu-bench-lost",
@@ -1111,6 +1214,167 @@ mod tests {
         assert_eq!(
             rig.toasts.0.lock().unwrap()[0].1,
             "GPU benchmark not valid."
+        );
+    }
+
+    // ---- Disk (M8c) ----
+
+    use super::super::bench::DiskBenchRequest;
+    use super::super::runner::tests::{disk_machine, DISK_ID};
+    use crate::notifier::launch_for_score_disk;
+    use oma_core::scores::{disk_bench_plan, BenchMode, DiskProfile};
+    use oma_ipc::load::{DiskPhaseStats, IoStats};
+
+    fn io(bytes: u64) -> IoStats {
+        IoStats {
+            bytes,
+            ios: bytes / 4096,
+            elapsed_us: if bytes == 0 { 0 } else { 1_000_000 },
+            mean_lat_us: 50.0,
+            p99_lat_us: 200.0,
+        }
+    }
+
+    /// One `PhaseDone` per step of the B1 plan, 1 GB/s in either direction.
+    fn disk_run() -> Script {
+        let (_, steps) = disk_bench_plan("C:\\t".into(), 1 << 40, false, DiskProfile::B1, 1);
+        let mut on_run = vec![progress(0)];
+        on_run.extend(steps.iter().enumerate().map(|(i, s)| {
+            let read = s.mode == BenchMode::Read;
+            LoadMessage::PhaseDone(PhaseDone {
+                phase: i as u32,
+                checks: 0,
+                errors: 0,
+                duration_ms: 5000,
+                skipped: None,
+                work_ms: None,
+                workers: vec![],
+                rates: vec![],
+                disk: Some(DiskPhaseStats {
+                    read: io(if read { 1_000_000_000 } else { 0 }),
+                    write: io(if read { 0 } else { 1_000_000_000 }),
+                }),
+            })
+        }));
+        on_run.push(finished(FinishReason::Completed, 0));
+        Script {
+            on_run,
+            exit_after_run: true,
+            ..Default::default()
+        }
+    }
+
+    fn disk_bench(rig: &Rig) -> DiskBenchRequest {
+        DiskBenchRequest {
+            folder: rig.disk_dir().to_string_lossy().into_owned(),
+            profile: DiskProfile::B1,
+            compressible: false,
+            wake: false,
+        }
+    }
+
+    #[test]
+    fn disk_bench_runs_to_a_saved_score() {
+        let script = disk_run();
+        let received = script.received.clone();
+        let rig = rig_on("disk-bench-saved", scripted(script), disk_machine());
+        let request = disk_bench(&rig);
+        let folder = request.folder.clone();
+        let id = rig.runner.start_disk_bench(request).unwrap();
+        wait_idle(&rig.runner);
+        assert_eq!(*received.lock().unwrap(), ["run"]);
+        let s = rig.runner.store().load_score(&id).unwrap().unwrap();
+        assert_eq!(s.category, "disk");
+        assert!(s.valid, "{:?}", s.flags);
+        assert_eq!(s.scores.read_mbs, Some(1000.0));
+        assert_eq!(s.scores.write_mbs, Some(1000.0));
+        assert!(s.scores.points.is_some());
+        assert_eq!(s.device.model, "Test NVMe");
+        assert_eq!(s.device.device_id.as_deref(), Some(DISK_ID));
+        assert_eq!(s.device.kind.as_deref(), Some("nvme"));
+        assert_eq!(s.disk_profile, Some(DiskProfile::B1));
+        let st = rig.runner.bench_status().unwrap();
+        assert_eq!((st.category.as_str(), st.state), ("disk", BenchState::Done));
+        assert_eq!(st.device_id.as_deref(), Some(DISK_ID));
+        assert!(!rig.bench_mark.load(Ordering::SeqCst));
+        // The folder is remembered for the next test and the startup sweep (DC15).
+        let perf = rig.runner.deps.settings.snapshot().performance.clone();
+        assert_eq!(perf.disk_folder.as_deref(), Some(folder.as_str()));
+        assert!(rig.runner.store().list().is_empty(), "no stress session");
+        // The window is visible: no toast.
+        assert!(rig.toasts.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disk_bench_while_stress_runs_is_busy() {
+        let (launcher, release) = blocked();
+        let rig = rig_on("disk-bench-busy", launcher, disk_machine());
+        rig.runner.start(request()).unwrap();
+        let err = rig.runner.start_disk_bench(disk_bench(&rig)).unwrap_err();
+        assert!(matches!(err, StartError::Busy));
+        release.send(()).unwrap();
+        wait_idle(&rig.runner);
+        assert!(rig.runner.bench_status().is_none());
+        // And a stress test while the disk benchmark runs.
+        let (launcher, release) = blocked();
+        let rig = rig_on("disk-bench-first", launcher, disk_machine());
+        rig.runner.start_disk_bench(disk_bench(&rig)).unwrap();
+        assert!(rig.runner.bench_running());
+        assert!(matches!(rig.runner.start(request()), Err(StartError::Busy)));
+        assert!(matches!(rig.runner.start_bench(), Err(StartError::Busy)));
+        release.send(()).unwrap();
+        wait_idle(&rig.runner);
+    }
+
+    #[test]
+    fn disk_bench_toast_opens_the_disk_page() {
+        let rig = rig_on("disk-bench-toast", scripted(disk_run()), disk_machine());
+        rig.visible.store(false, Ordering::SeqCst);
+        rig.runner.start_disk_bench(disk_bench(&rig)).unwrap();
+        wait_idle(&rig.runner);
+        let (title, body, launch) = rig.toasts.0.lock().unwrap()[0].clone();
+        assert_eq!(title, "Disk Benchmark");
+        assert_eq!(
+            body,
+            "Disk benchmark finished: 1000 MB/s read, 1000 MB/s write."
+        );
+        assert_eq!(launch, launch_for_score_disk());
+        assert_eq!(launch_target(&launch), Some(LaunchTarget::ScoreDisk));
+    }
+
+    #[test]
+    fn invalid_disk_bench_toasts_not_valid() {
+        let error = LoadMessage::Error(oma_ipc::load::ComputeError {
+            phase: 1,
+            kernel: oma_ipc::load::KernelId::DiskBench,
+            isa: Isa::Sse2,
+            kind: oma_ipc::load::ErrorKind::IoError,
+            logical: None,
+            core: None,
+            iteration: 0,
+            expected: 0,
+            actual: 23,
+            seed: 1,
+            load_percent: None,
+            transient: Some(false),
+        });
+        let rig = rig_on(
+            "disk-bench-invalid",
+            scripted(Script {
+                on_run: vec![progress(0), error, finished(FinishReason::Failed, 1)],
+                exit_after_run: true,
+                ..Default::default()
+            }),
+            disk_machine(),
+        );
+        rig.visible.store(false, Ordering::SeqCst);
+        let id = rig.runner.start_disk_bench(disk_bench(&rig)).unwrap();
+        wait_idle(&rig.runner);
+        let s = rig.runner.store().load_score(&id).unwrap().unwrap();
+        assert!(!s.valid);
+        assert_eq!(
+            rig.toasts.0.lock().unwrap()[0].1,
+            "Disk benchmark not valid."
         );
     }
 }

@@ -196,6 +196,10 @@ pub enum LaunchTarget {
     ScoreCpu,
     /// The benchmark page of this GPU (M8b2, DH12).
     ScoreGpu(String),
+    /// The disk benchmark page (M8c, DC15).
+    ScoreDisk,
+    /// The test under way, stress or benchmark (the toast of a window closed during it).
+    Run,
 }
 
 /// The launch string of a toast about `device_id`; the toast XML escapes it.
@@ -216,6 +220,16 @@ pub fn launch_for_about() -> String {
 /// The launch string of a toast that opens the CPU benchmark page.
 pub fn launch_for_score_cpu() -> String {
     serde_json::json!({ "open": "score-cpu" }).to_string()
+}
+
+/// The launch string of a toast that opens the test under way.
+pub fn launch_for_run() -> String {
+    serde_json::json!({ "open": "run" }).to_string()
+}
+
+/// The launch string of a toast that opens the disk benchmark page.
+pub fn launch_for_score_disk() -> String {
+    serde_json::json!({ "open": "score-disk" }).to_string()
 }
 
 /// The launch string of a toast that opens the benchmark page of GPU `device_id`.
@@ -251,6 +265,8 @@ pub fn launch_target(launch: &str) -> Option<LaunchTarget> {
         Launch::Open(OpenLaunch { open }) if open == "main" => Some(LaunchTarget::Main),
         Launch::Open(OpenLaunch { open }) if open == "about" => Some(LaunchTarget::About),
         Launch::Open(OpenLaunch { open }) if open == "score-cpu" => Some(LaunchTarget::ScoreCpu),
+        Launch::Open(OpenLaunch { open }) if open == "score-disk" => Some(LaunchTarget::ScoreDisk),
+        Launch::Open(OpenLaunch { open }) if open == "run" => Some(LaunchTarget::Run),
         Launch::ScoreGpu(ScoreGpuLaunch { open, device })
             if open == "score-gpu" && is_gpu_device_id(&device) =>
         {
@@ -288,6 +304,7 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
             tracing::warn!("toast activation with an unknown payload: ignored");
             return;
         };
+        tracing::info!(?target, "toast clicked");
         let handle = app.clone();
         let result = app.run_on_main_thread(move || match target {
             LaunchTarget::Device(device) => crate::window::show_device(&handle, &device),
@@ -303,6 +320,14 @@ pub fn system_toaster(app: &tauri::AppHandle) -> SystemToaster {
                 &handle,
                 crate::window::PerformanceNav::score_gpu(&device),
             ),
+            LaunchTarget::ScoreDisk => crate::window::show_performance(
+                &handle,
+                crate::window::PerformanceNav::score_disk(),
+            ),
+            // The Performance view opens a running benchmark's page by itself.
+            LaunchTarget::Run => {
+                crate::window::show_performance(&handle, crate::window::PerformanceNav::run())
+            }
         });
         if let Err(err) = result {
             tracing::warn!(%err, "cannot open the window for a toast");
@@ -694,6 +719,17 @@ mod tests {
         assert_eq!(
             launch_target(&launch_for_score_cpu()),
             Some(LaunchTarget::ScoreCpu)
+        );
+        assert_eq!(launch_for_run(), r#"{"open":"run"}"#);
+        assert_eq!(launch_target(&launch_for_run()), Some(LaunchTarget::Run));
+        assert_eq!(launch_for_score_disk(), r#"{"open":"score-disk"}"#);
+        assert_eq!(
+            launch_target(&launch_for_score_disk()),
+            Some(LaunchTarget::ScoreDisk)
+        );
+        assert_eq!(
+            launch_target(r#"{"open":"score-disk","device":"disk/0"}"#),
+            None
         );
         assert_eq!(launch_for_about(), r#"{"open":"about"}"#);
         for unknown in [

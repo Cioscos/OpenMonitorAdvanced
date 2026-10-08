@@ -238,6 +238,9 @@ fn main() {
         oma_win::svc::ServiceStatusTable::default(),
     );
     let disk_states = DiskStateTable::default();
+    // The disk tests read the drive and power tables too (DC6).
+    #[cfg(windows)]
+    let (perf_drives, perf_disk_states) = (svc_drives.clone(), disk_states.clone());
 
     // Opened before anything reads a preference, so the tray, the sampler and
     // the UI commands all see the same settings from the first moment. The
@@ -297,7 +300,10 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(
             |app, args, _cwd| match second_launch(&args) {
                 SecondLaunch::Quit => window::quit(app, window::QuitSource::Flag),
-                SecondLaunch::ShowWindow => window::show_main(app),
+                SecondLaunch::ShowWindow => {
+                    tracing::info!(?args, "second launch: showing the window");
+                    window::show_main(app)
+                }
                 SecondLaunch::Nothing => {}
             },
         ))
@@ -388,6 +394,9 @@ fn main() {
             performance::commands::performance_quit_confirmed,
             performance::commands::performance_bench_start,
             performance::commands::performance_gpu_bench_start,
+            performance::commands::performance_disk_bench_start,
+            performance::commands::performance_disk_probe,
+            performance::commands::performance_disk_pick,
             performance::commands::performance_bench_stop,
             performance::commands::performance_bench_status,
             performance::commands::performance_scores,
@@ -482,6 +491,8 @@ fn main() {
                         settings: store.clone(),
                         machine: Box::new(performance::runner::WinMachine::new(
                             app.state::<GpuProcessState>().0.clone(),
+                            perf_drives,
+                            perf_disk_states,
                         )),
                         launcher: performance::runner::load_host_launcher(),
                         toaster: Box::new(toaster.clone()),
@@ -710,7 +721,7 @@ fn main() {
                     app.state::<Arc<notifier::SystemToaster>>().show(
                         tray_icon::PRODUCT_NAME.to_owned(),
                         i18n::t(lang, "performance.closeToTray", &[]),
-                        notifier::launch_for_main(),
+                        notifier::launch_for_run(),
                     );
                 }
             }

@@ -182,6 +182,21 @@ the zlib License; the full text is in `THIRD_PARTY_LICENSES.txt`, section "Sourc
 code adapted into OpenMonitor Advanced". The modifications are part of
 OpenMonitor Advanced, GPL-3.0-or-later. No memtest_vulkan binary is redistributed.
 
+## CrystalDiskMark, DiskSpd and f3 (ideas and methods only)
+
+The disk benchmark and stress test of M8c take published ideas and methods from
+CrystalDiskMark (MIT; the sequential and random 4 KiB test set, queue depths,
+the 1 GiB test file, a warm-up pass and the best of three measurements, MB/s as
+10^6 bytes per second), DiskSpd (MIT; unbuffered overlapped I/O with one
+completion port per thread, random and sequential mixes with a read percentage)
+and f3 / h2testw (GPL-3.0 and freeware; filling the free space with files whose
+content depends on their position and reading everything back to find fake
+capacity). No source code of these projects is copied or adapted, and none of
+their binaries is redistributed. The signed block format, the checks and all
+the code are original to OpenMonitor Advanced, GPL-3.0-or-later. The block hash
+is xxh3 from the `twox-hash` crate, listed with its licence in
+`THIRD_PARTY_LICENSES.txt`.
+
 ## Orbitron and Share Tech Mono
 
 The gauges of the CPU benchmark use two fonts, bundled as local files in

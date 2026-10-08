@@ -137,6 +137,8 @@ impl Session {
             iterations: None,
             pause_before_ms: 0,
             windows: None,
+
+            disk: None,
         }
     }
 
@@ -149,6 +151,8 @@ impl Session {
                     ram_bytes: if ram { 256 << 20 } else { 0 },
                     phases,
                     gpu: None,
+
+                    disk: None,
                 },
             }))
             .unwrap();

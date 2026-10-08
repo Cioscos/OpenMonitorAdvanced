@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod commands;
 pub mod host;
+pub mod orphans;
 pub mod runner;
 pub mod store;
 

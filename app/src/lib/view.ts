@@ -8,13 +8,13 @@ import type { NavigationTarget } from './types';
 
 /**
  * A page of the Performance view: a saved session's result is `result:<id>`; `score-cpu` is the
- * CPU benchmark, `score-gpu:<deviceId>` the one of a GPU.
+ * CPU benchmark, `score-gpu:<deviceId>` the one of a GPU and `score-disk` the disk one.
  */
-export type PerformancePage = 'new' | 'run' | 'history' | 'score-cpu' | `score-gpu:${string}` | `result:${string}`;
+export type PerformancePage = 'new' | 'run' | 'history' | 'score-cpu' | 'score-disk' | `score-gpu:${string}` | `result:${string}`;
 
 /** The page a tray item or a toast asks for (`NavigationTarget.performance`), or null for none. */
 export function performancePageOf(perf: NavigationTarget['performance']): PerformancePage | null {
-  if (perf?.page === 'run' || perf?.page === 'score-cpu') return perf.page;
+  if (perf?.page === 'run' || perf?.page === 'score-cpu' || perf?.page === 'score-disk') return perf.page;
   if (perf?.page === 'result' && perf.sessionId) return `result:${perf.sessionId}`;
   if (perf?.page === 'score-gpu' && perf.deviceId) return `score-gpu:${perf.deviceId}`;
   return null;

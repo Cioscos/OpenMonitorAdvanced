@@ -2,7 +2,8 @@
   import type { Backend } from '../../lib/backend';
   import { DASH, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { around, errorText, hresultText, percentText, pieces, verdictTitle } from '../../lib/performance/format';
+  import { formatBytes as formatDiskBytes, formatMbs, repeatRequest } from '../../lib/performance/disk';
+  import { around, dataErrorKind, dataErrorLine, errorText, hresultText, kernelTerm, percentText, pieces, verdictTitle } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { ErrorRecord, Isa, KernelId, StartRequest, StressSession } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
@@ -49,6 +50,7 @@
   });
 
   const locale = $derived(i18n.locale);
+  const disk = $derived(session?.component === 'disk');
   const detail = $derived(session?.outcomeDetail ?? null);
   const verdict = $derived(detail?.verdict ?? session?.outcome ?? null);
   const title = $derived(verdictTitle(detail ?? { verdict, params: {} }, t, locale));
@@ -71,7 +73,7 @@
     const phase = e?.phase ?? detail?.phase ?? null;
     if (phase === null) return null;
     // A GPU has no instruction set to show.
-    const isa: Isa | null = session.component === 'gpu' ? null : (e?.isa ?? session.plan.phases[phase]?.isa ?? null);
+    const isa: Isa | null = session.component === 'gpu' || disk ? null : (e?.isa ?? session.plan.phases[phase]?.isa ?? null);
     const kernel: KernelId | null = e?.kernel ?? detail?.kernel ?? null;
     return {
       phase,
@@ -81,12 +83,14 @@
       atMs: e ? e.atMs : (detail?.atMs ?? null),
       clockMhz: e ? e.clockMhz : (detail?.clockMhz ?? null),
       tempC: e ? e.tempC : (detail?.tempC ?? null),
-      iteration: e?.iteration ?? null,
+      iteration: disk ? null : (e?.iteration ?? null),
       loadPercent: e?.load_percent ?? null,
     };
   });
+  /** A disk data error in one line, its kind carrying the «data error» term. */
+  const dataErrorPieces = $derived(firstError && disk && firstError.kind !== 'device_lost' ? pieces(dataErrorLine(firstError, t, locale), [{ term: 'dataError', word: dataErrorKind(firstError, t) }], t) : null);
   const kindText = $derived(
-    firstError ? pieces(t(`performance.result.kind.${firstError.kind}`), firstError.kind === 'device_lost' ? [{ term: 'tdr', word: 'TDR' }] : [{ term: 'reference' }], t) : null,
+    firstError && !disk ? pieces(t(`performance.result.kind.${firstError.kind}`), firstError.kind === 'device_lost' ? [{ term: 'tdr', word: 'TDR' }] : [{ term: 'reference' }], t) : null,
   );
   /** The driver's code of a lost device; an exit without an error record gives none. */
   const deviceLostCode = $derived(firstError?.kind === 'device_lost' ? t('performance.result.deviceLostCode', { code: hresultText(firstError.actual) }) : null);
@@ -97,6 +101,17 @@
 
   // The core grid only for a plan that tested cores one at a time, like the live page: in an all-core
   // phase every core works at once and none would read «tested».
+  /** The sustained write ran: its SLC cache fall, or that there was none (DC8). */
+  const slcRan = $derived(disk && !!session?.phases.some((p) => p.kernel === 'n2' && (p.outcome === 'passed' || p.outcome === 'errors')));
+  const slc = $derived(session?.disk?.slc ?? null);
+  const slcPieces = $derived(slc ? pieces(t('performance.result.slc', { size: formatDiskBytes(slc.cacheBytes, locale), speed: formatMbs(slc.steadyBps, locale) }), [{ term: 'slcCache' }], t) : null);
+  /** The SMART counter's difference over the test, GiB to bytes; null when either reading is missing. */
+  const smartBytes = $derived.by(() => {
+    const d = session?.disk;
+    return d && d.hostWrittenBeforeGib != null && d.hostWrittenAfterGib != null ? Math.max(0, d.hostWrittenAfterGib - d.hostWrittenBeforeGib) * 1024 ** 3 : null;
+  });
+  const smartPieces = $derived(smartBytes === null ? null : pieces(t('performance.result.smartWritten', { size: formatDiskBytes(smartBytes, locale) }), [{ term: 'dataUnitsWritten', word: 'SMART' }], t));
+
   const showCores = $derived(!!session?.cores.length && session.plan.phases.some((p) => p.placement === 'core_cycle'));
 
   const totalMs = $derived(session?.plan.phases.reduce((sum, p) => sum + p.duration_s * 1000, 0) ?? 0);
@@ -115,7 +130,7 @@
   const counter = $derived(new Intl.NumberFormat(locale));
   const whea = $derived.by(() => {
     const w = session?.whea;
-    if (!w) return null;
+    if (!w || disk) return null;
     const by = (ids: string[]) => ids.reduce((sum, i) => sum + (w.byId[i] ?? 0), 0);
     // The live `whea` events name the core of each APIC (the session's topology at the time).
     const coreOf = new Map<string, string>();
@@ -137,11 +152,17 @@
     // Nothing read (an iGPU without a power sensor): one dash.
     max === null && avg === null ? format(null, locale) : t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
 
-  async function start(request: StartRequest) {
+  async function start(saved: StartRequest) {
     starting = true;
     actionError = null;
     try {
-      const result = await performanceStore.start(request);
+      // A disk test finds its folder again from its volume: the saved session keeps none.
+      const request = saved === session!.request ? repeatRequest(session!, performanceStore.system?.volumes ?? []) : saved;
+      if (request === null) {
+        actionError = t('performance.wizard.startError', { reason: t('performance.start.no_disk') });
+        return;
+      }
+      const result = await performanceStore.start(request, session!.disk?.deviceId ?? null);
       if (result.ok) onOpen('run');
       else actionError = t(`performance.wizard.${result.reason}`);
     } catch (error) {
@@ -177,7 +198,7 @@
           <div>
             <dt><Term term="phase" /></dt>
             <dd>
-              {facts.phase + 1}{#if facts.kernel}{' · '}<Term term={`mode.${facts.kernel}`} />{/if}{#if facts.isa}{' · '}<Term term={`isa.${facts.isa}`} />{/if}
+              {facts.phase + 1}{#if facts.kernel}{' · '}<Term term={kernelTerm(facts.kernel)} />{/if}{#if facts.isa}{' · '}<Term term={`isa.${facts.isa}`} />{/if}
             </dd>
           </div>
           {#if facts.core !== null}
@@ -203,6 +224,9 @@
       {#if kindText}
         <p>{#each kindText as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</p>
       {/if}
+      {#if dataErrorPieces}
+        <p>{#each dataErrorPieces as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</p>
+      {/if}
       {#if deviceLostCode}
         <p><Term term="deviceLost">{deviceLostCode}</Term></p>
       {/if}
@@ -213,6 +237,17 @@
         <p>{advice[0]}{#if advice[1]}<Term term="curveOptimizer">{advice[1]}</Term>{/if}{advice[2]}</p>
       {/if}
     </section>
+
+    {#if disk && (slcPieces || slcRan)}
+      <section class="panel">
+        {#if slcPieces}
+          <p>{#each slcPieces as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</p>
+          {#if slc?.thermalSuspect}<p class="muted">{t('performance.result.slcThermal')}</p>{/if}
+        {:else}
+          <p class="muted">{t('performance.result.slcNone')}</p>
+        {/if}
+      </section>
+    {/if}
 
     <div class="actions">
       {#if retry}
@@ -239,8 +274,19 @@
           <div><dt><Term term="phase">{t('performance.result.phases')}</Term></dt><dd>{phaseCounts}</dd></div>
           <div><dt><Term term="check" /></dt><dd>{counter.format(checks)}</dd></div>
           <div><dt>{t('performance.result.fact.temp')}</dt><dd>{maxAvg(session.stats.tempMaxC, session.stats.tempAvgC, formatTemperature)}</dd></div>
+          {#if disk && session.disk}
+            <div><dt>{t('performance.run.diskRead')}</dt><dd>{formatDiskBytes(session.disk.readBytes, locale)}</dd></div>
+            <div><dt>{t('performance.run.diskWritten')}</dt><dd>{formatDiskBytes(session.disk.writtenBytes, locale)}</dd></div>
+            {#if smartPieces}
+              <div>
+                <dt><Term term="dataUnitsWritten" /></dt>
+                <dd>{#each smartPieces as piece, index (index)}{#if piece.term}<Term term={piece.term}>{piece.text}</Term>{:else}{piece.text}{/if}{/each}</dd>
+              </div>
+            {/if}
+          {:else}
           <div><dt>{#if session.component === 'gpu'}{t('performance.run.power')}{:else}<Term term="packagePower" />{/if}</dt><dd>{maxAvg(session.stats.powerMaxW, session.stats.powerAvgW, formatPower)}</dd></div>
           <div><dt><Term term="clock" /></dt><dd>{maxAvg(session.stats.clockMaxMhz, session.stats.clockAvgMhz, formatClock)}</dd></div>
+          {/if}
           {#if whea}
             <div>
               <dt><Term term="whea" /></dt>
@@ -288,9 +334,9 @@
                 <th>{t('performance.result.fact.time')}</th>
                 <th><Term term="phase" /></th>
                 <th>{t('performance.result.col.mode')}</th>
-                <th><Term term="coreNumber">{t('performance.result.fact.core')}</Term></th>
+                {#if !disk}<th><Term term="coreNumber">{t('performance.result.fact.core')}</Term></th>{/if}
                 <th>{t('performance.result.col.result')}</th>
-                <th><Term term="clock" /></th>
+                {#if !disk}<th><Term term="clock" /></th>{/if}
                 <th>{t('performance.result.fact.temp')}</th>
               </tr>
             </thead>
@@ -299,10 +345,14 @@
                 <tr>
                   <td>{formatTapeCounter(e.atMs)}</td>
                   <td>{e.phase + 1}</td>
-                  <td><Term term={`mode.${e.kernel}`} />{#if session.component !== 'gpu'} · <Term term={`isa.${e.isa}`} />{/if}</td>
+                  <td><Term term={kernelTerm(e.kernel)} />{#if session.component !== 'gpu' && !disk} · <Term term={`isa.${e.isa}`} />{/if}</td>
+                  {#if disk}
+                    <td>{dataErrorLine(e, t, locale)}</td>
+                  {:else}
                   <td>{e.core ?? DASH}</td>
                   <td>{t(`performance.result.kindShort.${e.kind}`)}</td>
                   <td>{formatClock(e.clockMhz, locale)}</td>
+                  {/if}
                   <td>{formatTemperature(e.tempC, locale)}</td>
                 </tr>
               {/each}

@@ -18,6 +18,11 @@ class PerformanceStore {
   system = $state.raw<SystemInfo | null>(null);
   /** Saved sessions, newest first; kept across reconnections until a newer list arrives. */
   history = $state.raw<StressSessionSummary[]>([]);
+  /**
+   * The schema device id of the disk under test, for the live chart: the status does not carry it.
+   * Set by `start`; unknown for a test started elsewhere.
+   */
+  diskDeviceId = $state<string | null>(null);
   readonly running = $derived(isRunning(this.status));
   #backend: Backend | null = null;
   #starting = false;
@@ -81,13 +86,15 @@ class PerformanceStore {
    * Starts a test. Refused without asking the shell while not connected, or while a test runs or a
    * start is in flight (`busy`); rejects with the shell's own reason (text) when it refuses.
    */
-  async start(request: StartRequest): Promise<StartResult> {
+  async start(request: StartRequest, diskDeviceId: string | null = null): Promise<StartResult> {
     const backend = this.#backend;
     if (backend === null) return { ok: false, reason: 'notConnected' };
     if (this.running || this.#starting) return { ok: false, reason: 'busy' };
     this.#starting = true;
     try {
-      return { ok: true, id: await backend.performanceStart(request) };
+      const id = await backend.performanceStart(request);
+      this.diskDeviceId = request.component === 'disk' ? diskDeviceId : null;
+      return { ok: true, id };
     } finally {
       this.#starting = false;
     }

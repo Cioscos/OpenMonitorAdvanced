@@ -5,6 +5,7 @@ import { LiveStore } from '../../lib/live.svelte';
 import type { PhaseInfo, RunStatus, Schema } from '../../lib/types';
 import { FakeBackend, makeRunStatus, makeStressSession, makeSystemInfo } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
+import { performanceStore } from '../../lib/performance/performance.svelte';
 import { FakeUplot } from '../../test/uplot-stub';
 import PerformanceView from './PerformanceView.svelte';
 
@@ -38,6 +39,7 @@ beforeEach(() => {
   i18n.locale = 'en';
 });
 afterEach(() => {
+  performanceStore.diskDeviceId = null;
   cleanup();
   disconnectSettings();
 });
@@ -219,4 +221,51 @@ test('the GPU clock tile carries the clock term in every language', async () => 
   i18n.locale = 'it';
   await setup(GPU_RUNNING());
   expect(tile(t('performance.run.clock.gpu')).querySelector('.label .term')?.textContent?.toLowerCase()).toBe(t('glossary.clock.name').toLowerCase());
+});
+
+// --- Disk (M8c) ---
+
+const DISK_PHASES: PhaseInfo[] = [
+  { kernel: 'disk_fill', mode: 'steady', placement: 'all_logical', durationS: 1200, isa: 'sse2' },
+  { kernel: 'n1', mode: 'steady', placement: 'all_logical', durationS: 540, isa: 'sse2' },
+];
+const DISK_RUNNING = (over: Partial<RunStatus> = {}) =>
+  RUNNING({
+    component: 'disk',
+    objective: 'normal',
+    phases: DISK_PHASES,
+    phaseIndex: 1,
+    tempC: 47,
+    stopC: 70,
+    checks: 123_456,
+    disk: { readBps: 3_200_000_000, writeBps: 1_500_000_000, writtenBytes: 12 * 1024 ** 3, readBytes: 30 * 1024 ** 3 },
+    ...over,
+  });
+const sensor = (id: string, deviceId: string) => ({ ...MOCK_SCHEMA.sensors[0], id, deviceId });
+const DISK_SCHEMA: Schema = {
+  ...MOCK_SCHEMA,
+  sensors: ['temperature/drive', 'throughput/read', 'throughput/write'].map((name) => sensor(`disk/a/${name}`, 'disk/a')),
+};
+
+test('disk run shows rates written and blocks without the core grid', async () => {
+  performanceStore.diskDeviceId = 'disk/a';
+  const { backend } = await setup(DISK_RUNNING({ cores: [{ core: 0, state: 'testing' }], currentCore: 0 }), DISK_SCHEMA);
+  expect(screen.getByRole('heading', { name: `${t('performance.objective.disk.normal')} · ${t('performance.wizard.disk')}` })).toBeTruthy();
+  // Temperature with its stop threshold; no Tjmax, power, clock or WHEA.
+  expect(tile(t('performance.run.temp')).textContent).toContain('70');
+  expect(tile(t('performance.run.diskRead')).textContent).toContain('3,200 MB/s');
+  expect(tile(t('performance.run.diskWrite')).textContent).toContain('1,500 MB/s');
+  expect(tile(t('performance.run.diskWritten')).textContent).toContain('12.0 GiB');
+  const blocks = tile(t('performance.run.blocks'));
+  expect(blocks.textContent).toContain('123,456');
+  expect(blocks.querySelector('.term')).toBeTruthy();
+  expect(tile(t('performance.run.errors')).textContent).toContain('0');
+  expect(document.querySelectorAll('.tile')).toHaveLength(6);
+  expect(screen.queryByRole('list', { name: t('performance.run.cores') })).toBeNull();
+  expect(document.querySelector('.current')?.textContent).not.toContain(t('glossary.isa.sse2.name'));
+  // The chart follows the test disk: its temperature and its two speeds.
+  await waitFor(() => expect(backend.historyCalls[0]?.ids).toEqual(['disk/a/temperature/drive', 'disk/a/throughput/read', 'disk/a/throughput/write']));
+  // The SMART warning carries its term.
+  backend.emitPerformanceStatus(DISK_RUNNING({ warnings: ['smartMissing'] }));
+  await screen.findByText(t('performance.warn.smartMissing'));
 });

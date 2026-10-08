@@ -1,4 +1,6 @@
-import { benchWrites, diskFullScale, formatBytes, formatLatency, GIB } from './disk';
+import fixture from '../../../../testdata/performance/disk-writes.json';
+import type { Plan } from '../types';
+import { benchWrites, estimatedWrites, diskFullScale, formatBytes, formatLatency, GIB } from './disk';
 
 test('disk_full_scale_from_the_kind', () => {
   expect(diskFullScale([], 'nvme')).toBe(10000);
@@ -38,4 +40,21 @@ test('format_latency', () => {
   expect(formatLatency(8.2)).toBe('8.2 µs');
   expect(formatLatency(1210)).toBe('1.21 ms');
   expect(formatLatency(25000)).toBe('25 ms');
+});
+
+test('estimated_writes_matches_the_rust_formula', () => {
+  expect(fixture.cases.length).toBeGreaterThan(3);
+  for (const c of fixture.cases) {
+    const plan: Plan = {
+      seed: 1,
+      ram_bytes: 0,
+      disk: { dir: 'C:\t', file_bytes: c.fileBytes, compressible: false, reserve_bytes: GIB },
+      phases: c.phases.map((p) => ({
+        kernel: p.kernel,
+        duration_s: p.durationS,
+        disk: { write_cap_bytes: p.writeCapBytes, cycles: p.cycles, rate_limit_bps: p.rateLimitBps },
+      })) as unknown as Plan['phases'],
+    };
+    expect(estimatedWrites(plan), c.label).toBe(c.expectedBytes);
+  }
 });

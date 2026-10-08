@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import type { ErrorRecord, StressSession } from '../../lib/types';
-import { FakeBackend, makeStressSession, makeSystemInfo } from '../../test/fake-backend';
+import { performanceStore } from '../../lib/performance/performance.svelte';
+import { FakeBackend, makeStressSession, makeSystemInfo, makeVolume } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
 
@@ -279,4 +280,107 @@ test('a fact without readings shows one dash, not max and average dashes', async
   await setup({ ...s, stats: { ...s.stats, powerMaxW: null, powerAvgW: null } });
   const dd = [...document.querySelectorAll('dt')].find((d) => d.textContent === t('performance.run.power'))!.nextElementSibling!;
   expect(dd.textContent).toBe('—');
+});
+
+// --- Disk (M8c) ---
+
+const GIB = 1024 ** 3;
+const diskError = (over: Partial<ErrorRecord> = {}): ErrorRecord => ({
+  phase: 1,
+  kernel: 'v1',
+  isa: 'sse2',
+  kind: 'bit_flip',
+  logical: null,
+  core: null,
+  iteration: 3,
+  expected: 0,
+  actual: 5,
+  seed: 3,
+  atMs: 90_000,
+  tempC: 52,
+  clockMhz: null,
+  transient: true,
+  ...over,
+});
+const diskPhase = (kernel: 'disk_fill' | 'n2' | 'v1') => ({ ...makeStressSession().plan.phases[0], kernel, isa: 'sse2' as const });
+
+/** A data stability test that found a flipped bit that read right the second time, and a misplaced block that stayed wrong. */
+const DISK = (over: Partial<StressSession> = {}): StressSession =>
+  makeStressSession({
+    id: 'disk',
+    component: 'disk',
+    device: 'Fake NVMe SSD',
+    objective: 'overclock',
+    request: { component: 'disk', objective: 'overclock', preset: 'standard', custom: null, retryCore: null, disk: { folder: '', wake: false } },
+    plan: { seed: 1, ram_bytes: 0, disk: { dir: '', file_bytes: 8 * GIB, compressible: false, reserve_bytes: GIB }, phases: [diskPhase('disk_fill'), diskPhase('v1')] },
+    outcome: 'errors',
+    outcomeDetail: { verdict: 'errors', params: {}, phase: 1, kernel: 'v1', core: null, tempC: 52, clockMhz: null, atMs: 90_000 },
+    errors: [diskError(), diskError({ kind: 'misplaced', iteration: 262_144, expected: 7, actual: 9, transient: false, atMs: 95_000 }), diskError({ kind: 'io_error', iteration: 0, actual: 23, transient: null })],
+    disk: { deviceId: 'disk/a', volume: 'C:', kind: 'nvme', fileBytes: 8 * GIB, readBytes: 40 * GIB, writtenBytes: 24 * GIB, hostWrittenBeforeGib: 1000, hostWrittenAfterGib: 1012.5, slc: null },
+    ...over,
+  });
+
+test('disk errors show kind offset and transient', async () => {
+  await setup(DISK());
+  expect(screen.getByRole('heading', { name: t('performance.outcome.errors') })).toBeTruthy();
+  // The first error: its kind and its place in the file (block 3 x 4096 bytes), and that a re-read was right.
+  const lead = t('performance.result.dataErrorAt', { kind: t('performance.result.error.bit_flip', { bits: 5 }), offset: '12 KiB' });
+  const sentences = [...document.querySelectorAll('.verdict p')].map((p) => p.textContent);
+  expect(sentences).toContain(`${lead} · ${t('performance.result.transient')}`);
+  expect([...document.querySelectorAll('.verdict p .term')].map((e) => e.textContent)).toEqual([t('performance.result.error.bit_flip', { bits: 5 })]);
+  // No core, no instruction set, no retry of a core.
+  expect(screen.queryByText(t('performance.result.fact.core'))).toBeNull();
+  expect(screen.queryByRole('button', { name: /core/i })).toBeNull();
+  await fireEvent.click(screen.getByText(t('performance.result.errors', { n: 3 })));
+  await screen.findByRole('table');
+  const rows = [...document.querySelectorAll('tbody tr')].map((r) => r.textContent ?? '');
+  expect(rows).toHaveLength(3);
+  expect(rows[0]).toContain(t('performance.result.error.bit_flip', { bits: 5 }));
+  expect(rows[0]).toContain(t('performance.result.transient'));
+  // Block 262 144 is 1 GiB in.
+  expect(rows[1]).toContain(t('performance.result.error.misplaced'));
+  expect(rows[1]).toContain('1.0 GiB');
+  expect(rows[1]).toContain(t('performance.result.persistent'));
+  // A read or write error shows the Win32 code; whether a re-read helps is not known.
+  expect(rows[2]).toContain(t('performance.result.error.io_error', { code: 23 }));
+  expect(rows[2]).not.toContain(t('performance.result.persistent'));
+  expect(rows[2]).not.toContain(t('performance.result.transient'));
+});
+
+test('slc result and thermal suspect', async () => {
+  const slc = { cacheBytes: 60 * GIB, steadyBps: 400_000_000, thermalSuspect: true };
+  await setup(DISK({ id: 'slc', outcome: 'passed', outcomeDetail: { verdict: 'passed', params: {}, phase: 1, kernel: 'n2', core: null, tempC: 52, clockMhz: null, atMs: 1 }, errors: [], plan: { ...DISK().plan, phases: [diskPhase('disk_fill'), diskPhase('n2')] }, disk: { ...DISK().disk!, slc } }));
+  const line = screen.getByText((_, node) => node?.tagName === 'P' && !!node.textContent?.startsWith(t('performance.result.slc', { size: '60.0 GiB', speed: '400 MB/s' })));
+  expect(line.querySelector('.term')?.textContent).toBe(t('glossary.slcCache.name'));
+  expect(screen.getByText(t('performance.result.slcThermal'))).toBeTruthy();
+});
+
+test('no slc fall is said when the sustained write ran without one', async () => {
+  await setup(DISK({ id: 'no-slc', outcome: 'passed', errors: [], phases: [{ index: 1, kernel: 'n2', outcome: 'passed', durationMs: 1, checks: 1, errors: 0, skipped: null }], plan: { ...DISK().plan, phases: [diskPhase('disk_fill'), diskPhase('n2')] } }));
+  expect(screen.getByText(t('performance.result.slcNone'))).toBeTruthy();
+  expect(screen.queryByText(t('performance.result.slcThermal'))).toBeNull();
+});
+
+test('smart written is shown', async () => {
+  await setup(DISK({ id: 'smart' }));
+  const line = screen.getByText((_, node) => node?.tagName === 'DD' && node.textContent === t('performance.result.smartWritten', { size: '12.5 GiB' }));
+  expect(line.querySelector('.term')?.textContent).toBe('SMART');
+  cleanup();
+  // Without the counter, nothing is claimed.
+  await setup(DISK({ id: 'smart-none', disk: { ...DISK().disk!, hostWrittenBeforeGib: null } }));
+  expect(screen.queryByText(t('performance.result.smartWritten', { size: '12.5 GiB' }))).toBeNull();
+});
+
+test('stopped_disk_full verdict', async () => {
+  await setup(DISK({ id: 'full', outcome: 'stopped_disk_full', outcomeDetail: { verdict: 'stopped_disk_full', params: {}, phase: 1, kernel: 'v1', core: null, tempC: 50, clockMhz: null, atMs: 60_000 }, errors: [] }));
+  const heading = screen.getByRole('heading', { name: t('performance.outcome.stopped_disk_full') });
+  expect(heading.closest('.verdict')?.classList.contains('warn')).toBe(true);
+});
+
+test('repeating a disk test finds the folder of its volume again', async () => {
+  const { backend } = await setup(DISK({ id: 'again' }));
+  performanceStore.system = makeSystemInfo({ volumes: [makeVolume({ root: 'C:\\', folder: 'C:\\Users\\me\\Temp' })] });
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.result.repeat') }));
+  await waitFor(() => expect(backend.performanceStartRequests).toHaveLength(1));
+  expect(backend.performanceStartRequests[0]).toMatchObject({ component: 'disk', disk: { folder: 'C:\\Users\\me\\Temp', wake: false } });
 });

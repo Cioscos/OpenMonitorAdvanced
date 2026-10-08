@@ -3,11 +3,13 @@
   import type { Backend } from '../../lib/backend';
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { around, errorText, formatDuration, marked, modeTerm, sizeLabel } from '../../lib/performance/format';
+  import { diskErrorText, estimatedWrites, formatBytes as formatDiskBytes } from '../../lib/performance/disk';
+  import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
-  import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent } from '../../lib/types';
+  import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent, VolumeChoice } from '../../lib/types';
   import Term from '../common/Term.svelte';
+  import DiskTarget from './DiskTarget.svelte';
   import RiskNotice from './RiskNotice.svelte';
   import WizardCustomize from './WizardCustomize.svelte';
 
@@ -36,15 +38,32 @@
   let base = $state.raw<Plan | null>(null);
   let previewError = $state<string | null>(null);
   let asking = $state(false);
+  /** A spun-down HDD: the shell refused to start until the user agrees to wake it (M8c DC6). */
+  let standbyAsking = $state(false);
+  /** The volume the user chose for a disk test; the system one until then. */
+  let picked = $state<VolumeChoice | null>(null);
   let starting = $state(false);
   let startError = $state<string | null>(null);
 
   const system = $derived(performanceStore.system);
+  const volumes = $derived(system?.volumes ?? []);
+  const volume = $derived(volumes.find((v) => v.root === picked?.root) ?? picked ?? volumes.find((v) => v.system) ?? volumes[0] ?? null);
   const ramOk = $derived((system?.ramBudget ?? 0) >= RAM_MIN);
   const presetSeconds = $derived((catalog.presets as Record<string, Partial<Record<Preset, number>>>)[`${component}.${objective}`] ?? {});
   const presets = $derived(PRESETS.filter((p) => presetSeconds[p] !== undefined));
   const gpu = $derived(component === 'gpu' ? (system?.gpus.find((g) => g.deviceId === gpuId) ?? null) : null);
-  const request = $derived<StartRequest>({ component, objective, preset, custom: custom && $state.snapshot(custom), retryCore: null, gpu: component === 'gpu' ? gpuId : undefined });
+  const disk = $derived(component === 'disk');
+  const request = $derived<StartRequest>({
+    component,
+    objective,
+    preset,
+    custom: custom && $state.snapshot(custom),
+    retryCore: null,
+    gpu: component === 'gpu' ? gpuId : undefined,
+    disk: disk && volume ? { folder: volume.folder, wake: false } : undefined,
+  });
+  /** What the disk test writes at most (DC7), from the preview's own plan. */
+  const writes = $derived(disk && plan ? estimatedWrites(plan) : 0);
   const total = $derived(plan?.phases.reduce((sum, p) => sum + p.duration_s, 0) ?? 0);
   /**
    * The summary's rows: with «Personalizza», every phase of the profile stays in place and those of an
@@ -59,11 +78,11 @@
     return base.phases.map((b) => (off.has(b.kernel) ? { p: b, off: true } : { p: plan!.phases[i]?.kernel === b.kernel ? plan!.phases[i++]! : b, off: false }));
   });
   const bestIsa = $derived((catalog.isa as Isa[]).find((i) => system?.isa.includes(i)) ?? null);
-  const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || (component === 'ram' ? ramOk : gpuId !== null)) : true);
+  const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || (component === 'ram' ? ramOk : disk ? volume !== null : gpuId !== null)) : true);
   const canStart = $derived(plan !== null && !performanceStore.running && !starting);
   const choice = $derived([
     component === 'gpu' ? (gpu?.name ?? t('performance.wizard.gpu')) : t(component === 'cpu' ? 'performance.wizard.cpu' : 'performance.wizard.ram'),
-    t(`performance.objective.${objective}`),
+    t(disk ? `performance.objective.disk.${objective}` : `performance.objective.${objective}`),
     t(`performance.preset.${preset}`),
   ]);
 
@@ -98,7 +117,7 @@
           .catch((error) => {
             if (id !== generation) return;
             plan = null;
-            previewError = errorText(error, t);
+            previewError = diskErrorText(error, t, i18n.locale) ?? errorText(error, t);
           }),
       next.custom ? DEBOUNCE_MS : 0,
     );
@@ -114,6 +133,7 @@
         threads: 'allLogical',
         bothSmt: false,
         stopOnFirstError: null,
+        ...(disk ? { compressible: false } : {}),
       };
     }
     customizing = !customizing;
@@ -133,15 +153,18 @@
     await start();
   }
 
-  async function start() {
+  async function start(wake = false) {
     starting = true;
     startError = null;
+    standbyAsking = false;
     try {
-      const result = await performanceStore.start(request);
+      const sent = wake && request.disk ? { ...request, disk: { ...request.disk, wake } } : request;
+      const result = await performanceStore.start(sent, disk ? (volume?.deviceId ?? null) : null);
       if (result.ok) onStarted();
       else startError = t(`performance.wizard.${result.reason}`);
     } catch (error) {
-      startError = t('performance.wizard.startError', { reason: errorText(error, t) });
+      if (disk && String(error) === 'disk:standby') standbyAsking = true;
+      else startError = t('performance.wizard.startError', { reason: diskErrorText(error, t, i18n.locale) ?? errorText(error, t) });
     } finally {
       starting = false;
     }
@@ -204,6 +227,11 @@
           <span class="muted"><Term term="ramShare" />: {formatBytes(system.ramBudget, i18n.locale)}</span>
           {#if !ramOk}<span class="reason" id="wizard-ram-low">{t('performance.wizard.ram.low')}</span>{/if}
         </label>
+        <label class="tile" class:on={disk} class:disabled={volumes.length === 0}>
+          <input type="radio" name="wizard-component" aria-labelledby="wizard-disk" disabled={volumes.length === 0} checked={disk} onchange={() => choose(() => (component = 'disk'))} />
+          <b id="wizard-disk">{t(volumes.length === 0 ? 'performance.wizard.disk.none' : 'performance.wizard.disk')}</b>
+          {#if volume}<span class="muted">{t('performance.wizard.disk.detail', { kind: t(`performance.disk.kind.${volume.kind}`), free: formatDiskBytes(volume.freeBytes, i18n.locale) })}</span>{/if}
+        </label>
         {#each system.gpus as g, index (g.deviceId)}
           {@const detail = gpuDetail(g)}
           <label class="tile" class:on={component === 'gpu' && gpuId === g.deviceId}>
@@ -218,19 +246,21 @@
           </label>
         {/each}
       </div>
-      {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
+      {#if disk}
+        <DiskTarget {backend} {volumes} value={volume} onChange={(v) => choose(() => (picked = v))} />
+      {:else if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
     {/if}
   {:else if step === 1}
     <div class="tiles big" role="radiogroup" aria-label={t('performance.wizard.step.objective')}>
       <label class="tile" class:on={objective === 'normal'}>
         <input type="radio" name="wizard-objective" aria-labelledby="wizard-normal" aria-describedby="wizard-normal-hint" checked={objective === 'normal'} onchange={() => choose(() => (objective = 'normal'))} />
-        <b id="wizard-normal">{t('performance.objective.normal')}</b>
-        <span class="muted" id="wizard-normal-hint">{t('performance.objective.normal.hint')}</span>
+        <b id="wizard-normal">{t(disk ? 'performance.objective.disk.normal' : 'performance.objective.normal')}</b>
+        <span class="muted" id="wizard-normal-hint">{t(disk ? 'performance.objective.disk.normal.detail' : 'performance.objective.normal.hint')}</span>
       </label>
       <label class="tile" class:on={objective === 'overclock'}>
         <input type="radio" name="wizard-objective" aria-labelledby="wizard-overclock" aria-describedby="wizard-overclock-hint" checked={objective === 'overclock'} onchange={() => choose(() => (objective = 'overclock'))} />
-        <b id="wizard-overclock">{t('performance.objective.overclock')}</b>
-        <span class="muted" id="wizard-overclock-hint">{overclockHint[0]}{#if overclockHint[1]}<Term term="curveOptimizer">{overclockHint[1]}</Term>{/if}{overclockHint[2]}</span>
+        <b id="wizard-overclock">{t(disk ? 'performance.objective.disk.overclock' : 'performance.objective.overclock')}</b>
+        <span class="muted" id="wizard-overclock-hint">{#if disk}{t('performance.objective.disk.overclock.detail')}{:else}{overclockHint[0]}{#if overclockHint[1]}<Term term="curveOptimizer">{overclockHint[1]}</Term>{/if}{overclockHint[2]}{/if}</span>
       </label>
     </div>
   {:else if step === 2}
@@ -249,10 +279,10 @@
       <p class="total">{t('performance.wizard.total', { duration: formatDuration(total) })}</p>
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
         {#each rows as { p, off }, index (index)}
-          <li class:off class:gpu={component === 'gpu'} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
-            <span class="name"><Term term={`mode.${p.kernel}`} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
-            {#if component !== 'gpu'}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
-            <span class="load"><Term term={modeTerm(p.mode)} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>
+          <li class:off class:gpu={component === 'gpu'} class:disk style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
+            <span class="name"><Term term={kernelTerm(p.kernel)} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
+            {#if component !== 'gpu' && !disk}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
+            {#if !disk}<span class="load"><Term term={modeTerm(p.mode)} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>{/if}
             <span class="dur">{off ? t('performance.wizard.excluded') : formatDuration(p.duration_s)}</span>
           </li>
         {/each}
@@ -261,12 +291,17 @@
       <p class="error" role="alert">{t('performance.wizard.previewError', { reason: previewError })}</p>
     {/if}
 
+    {#if disk}
+      <DiskTarget {backend} {volumes} value={volume} onChange={() => {}} disabled asking={standbyAsking} onWake={() => start(true)} onCancelWake={() => (standbyAsking = false)} />
+    {/if}
+
     {#if system}
       <div class="warnings">
-        {#if component !== 'gpu' && !system.serviceConnected}{@render noServiceWarning()}{/if}
+        {#if component !== 'gpu' && !disk && !system.serviceConnected}{@render noServiceWarning()}{/if}
+        {#if disk && plan}<p class="note">{t('performance.disk.writes', { size: formatDiskBytes(writes, i18n.locale) })}</p>{/if}
         {#if component === 'gpu'}<p class="note"><Term term="stability" />: {t('performance.wizard.gpuIdle')}</p>{/if}
         {#if gpu?.integrated}<p class="warn">{gpuShared[0]}{#if gpuShared[1]}<Term term="vram">{gpuShared[1]}</Term>{/if}{gpuShared[2]}</p>{/if}
-        {#if bestIsa && component !== 'gpu'}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
+        {#if bestIsa && component !== 'gpu' && !disk}<p class="note">{t('performance.wizard.isaDetected')} <Term term={`isa.${bestIsa}`} /></p>{/if}
         {#if plan && plan.ram_bytes > 0}<p class="note"><Term term="ramShare" />: {formatBytes(plan.ram_bytes, i18n.locale)}</p>{/if}
         {#if system.hypervisor}<p class="warn"><Term term="vm" />: {t('performance.wizard.vm')}</p>{/if}
       </div>
@@ -276,7 +311,7 @@
       <button type="button" class="ghost" aria-expanded={customizing} disabled={base === null} onclick={toggleCustomize}>{t('performance.wizard.customize')}</button>
     </div>
     {#if customizing && custom && base && system}
-      <WizardCustomize bind:custom {base} isa={system.isa} gpu={component === 'gpu'} />
+      <WizardCustomize bind:custom {base} isa={system.isa} gpu={component === 'gpu'} {disk} />
     {/if}
   {/if}
 
@@ -460,6 +495,9 @@
   .load,
   .isa {
     color: var(--text-muted);
+  }
+  .phases li.disk {
+    grid-template-columns: minmax(0, 1fr) 90px;
   }
   .phases li.off {
     box-shadow: none;

@@ -3,7 +3,8 @@ import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { performanceStore } from '../../lib/performance/performance.svelte';
 import type { Phase, Plan, SettingsPatch, StartRequest, SystemInfo } from '../../lib/types';
-import { makeRunStatus, makeSystemInfo, type FakeBackend } from '../../test/fake-backend';
+import { formatBytes as formatDiskBytes } from '../../lib/performance/disk';
+import { makeRunStatus, makeSystemInfo, makeVolume, type FakeBackend } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
 import StressWizard from './StressWizard.svelte';
@@ -500,4 +501,127 @@ test('a GPU summary asks to leave the PC idle for the stability', async () => {
   await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
   const note = await screen.findByText((_, node) => node?.tagName === 'P' && !!node.textContent?.includes(t('performance.wizard.gpuIdle')));
   expect(note.querySelector('.term')?.textContent).toBe(t('glossary.stability.name'));
+});
+
+// --- Disk (M8c) ---
+
+const GIB = 1024 ** 3;
+const diskPhase = (kernel: Phase['kernel'], duration_s: number, write_cap_bytes: number | null) =>
+  phase({ kernel, duration_s, isa: 'sse2', stop_on_error: false, disk: { block_bytes: 4096, seq_block_bytes: 1048576, random_percent: 0, read_percent: 50, queue: 4, threads: 1, write_cap_bytes, cycles: null, rate_limit_bps: null } });
+/** The fixture's «standard normal» plan: 8 GiB of preparation, then N1 200, N3 (reads), N2 50 and N4 50 GiB of writes: 308 GiB. */
+const DISK_PLAN: Plan = {
+  seed: 1,
+  ram_bytes: 0,
+  disk: { dir: 'C:\\Temp', file_bytes: 8 * GIB, compressible: false, reserve_bytes: GIB },
+  phases: [diskPhase('disk_fill', 1200, null), diskPhase('n1', 540, 200 * GIB), diskPhase('n3', 450, null), diskPhase('n2', 360, 50 * GIB), diskPhase('n4', 450, 50 * GIB)],
+};
+const VOLUMES = [
+  makeVolume(),
+  makeVolume({ root: 'E:\\', label: 'Stick', folder: 'E:\\Temp', deviceId: 'disk-e', model: 'Fake Stick', kind: 'usb', removable: true, system: false }),
+];
+
+async function diskSetup(over: Parameters<typeof setup>[0] = {}) {
+  const ctx = await setup({ ...over, system: { volumes: VOLUMES, ...over.system }, settings: { performance: { riskNoticeSeen: true } } });
+  ctx.backend.performancePlan = structuredClone(DISK_PLAN);
+  return ctx;
+}
+const diskTile = () => radio(t('performance.wizard.disk'));
+async function toDiskSummary(backend: FakeBackend) {
+  await fireEvent.click(diskTile());
+  await next();
+  await next();
+  await next();
+  await screen.findByRole('heading', { name: t('performance.wizard.step.summary') });
+  await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
+  await screen.findByText(t('performance.wizard.total', { duration: '50 min' }));
+}
+
+test('disk tile shows the volume picker', async () => {
+  await diskSetup();
+  expect(screen.queryByRole('combobox', { name: t('performance.disk.volume') })).toBeNull();
+  expect(diskTile().closest('label')?.textContent).toContain(plain('performance.wizard.disk.detail', { kind: t('performance.disk.kind.nvme'), free: formatDiskBytes(400 * GIB) }));
+  await fireEvent.click(diskTile());
+  const picker = screen.getByRole('combobox', { name: t('performance.disk.volume') }) as HTMLSelectElement;
+  // The system volume is the default.
+  expect(picker.value).toBe('C:\\');
+  expect(picker.options).toHaveLength(2);
+});
+
+test('the disk tile is off without a volume', async () => {
+  await diskSetup({ system: { volumes: [] } });
+  expect(radio(t('performance.wizard.disk.none')).disabled).toBe(true);
+});
+
+test('disk objectives use the disk texts', async () => {
+  await diskSetup();
+  await fireEvent.click(diskTile());
+  await next();
+  expect(radio(t('performance.objective.disk.normal'))).toBeTruthy();
+  expect(radio(t('performance.objective.disk.overclock'))).toBeTruthy();
+  expect(screen.getByText(t('performance.objective.disk.normal.detail'))).toBeTruthy();
+  expect(screen.getByText(t('performance.objective.disk.overclock.detail'))).toBeTruthy();
+  expect(screen.queryByText(t('performance.objective.overclock.hint'))).toBeNull();
+  // The disk presets come from `disk.<objective>`: no quick one for the data stability.
+  await fireEvent.click(radio(t('performance.objective.disk.overclock')));
+  await next();
+  expect(radio(preset('standard', '1 h 10 min'))).toBeTruthy();
+  expect(radio(preset('long', '3 h 10 min'))).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: preset('quick', '10 min') })).toBeNull();
+});
+
+test('summary shows the estimated writes', async () => {
+  const { backend } = await diskSetup();
+  await toDiskSummary(backend);
+  expect(lastPreview(backend)).toMatchObject({ component: 'disk', disk: { folder: VOLUMES[0].folder, wake: false } });
+  expect(screen.getByText(t('performance.disk.writes', { size: formatDiskBytes(308 * GIB) }))).toBeTruthy();
+  // The phases carry their glossary terms, with no instruction set, thread or service lines.
+  expect(screen.getByText(t('glossary.mode.diskFill.name'))).toBeTruthy();
+  expect(screen.getByText(t('glossary.mode.n2.name'))).toBeTruthy();
+  expect(document.querySelector('.isa')).toBeNull();
+  expect(screen.queryByText(t('performance.wizard.isaDetected'), { exact: false })).toBeNull();
+  expect(document.body.textContent).not.toContain('mode.');
+});
+
+test('customize offers compressible for the disk only', async () => {
+  const { backend } = await diskSetup();
+  await toDiskSummary(backend);
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  const panel = screen.getByRole('region', { name: t('performance.wizard.customize') });
+  const box = within(panel).getByRole('checkbox', { name: t('performance.custom.compressible') });
+  expect(within(panel).queryByText(t('performance.custom.isa'))).toBeNull();
+  expect(within(panel).queryByRole('radio')).toBeNull();
+  await fireEvent.click(box);
+  await waitFor(() => expect(lastPreview(backend).custom).toMatchObject({ compressible: true }));
+  cleanup();
+  // The CPU has no such option.
+  const cpu = await setup();
+  await toSummary(cpu.backend);
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.customize') }));
+  expect(screen.queryByRole('checkbox', { name: t('performance.custom.compressible') })).toBeNull();
+});
+
+test('standby disk asks for consent', async () => {
+  const { backend } = await diskSetup();
+  await toDiskSummary(backend);
+  backend.performanceStartError = 'disk:standby';
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.wizard.start') }));
+  const dialog = await screen.findByRole('alertdialog');
+  expect(dialog.textContent).toContain(t('performance.disk.standby.title'));
+  expect(backend.performanceStartRequests).toHaveLength(0);
+  backend.performanceStartError = null;
+  await fireEvent.click(within(dialog).getByRole('button', { name: t('performance.disk.standby.confirm') }));
+  await waitFor(() => expect(backend.performanceStartRequests.at(-1)).toMatchObject({ component: 'disk', disk: { folder: VOLUMES[0].folder, wake: true } }));
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+});
+
+test('a disk summary names a refused folder in words', async () => {
+  const { backend } = await diskSetup();
+  backend.performancePreview = async () => {
+    throw 'disk:not_writable';
+  };
+  await fireEvent.click(diskTile());
+  await next();
+  await next();
+  await next();
+  await screen.findByText(t('performance.wizard.previewError', { reason: t('performance.disk.error.not_writable') }));
 });

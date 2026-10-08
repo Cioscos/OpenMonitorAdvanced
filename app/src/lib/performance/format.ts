@@ -1,6 +1,7 @@
 import { formatBytes } from '../format';
 import type { Params, Translate } from '../i18n/index.svelte';
-import type { DataSize, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
+import type { DataSize, DiskErrorKind, ErrorRecord, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
+import { formatBytes as formatDiskBytes } from './disk';
 
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
@@ -177,4 +178,43 @@ export function errorText(error: unknown, t: Translate): string {
   if (!text.startsWith('build:')) return text;
   const key = `performance.wizard.error.${text.slice('build:'.length)}`;
   return t(key) === key ? text : t(key);
+}
+
+/** The disk stress kernels (`disk_fill`, N1-N4, V1-V4). */
+export function isDiskKernel(kernel: KernelId): boolean {
+  return kernel === 'disk_fill' || /^[nv][1-4]$/.test(kernel);
+}
+
+/** The glossary term of a kernel: its id, with the wire's snake_case in camelCase (`disk_fill` is `mode.diskFill`). */
+export function kernelTerm(kernel: KernelId): string {
+  return `mode.${kernel.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`;
+}
+
+/**
+ * M8c DC10: the test disk's temperature (`temperature/drive`, else the first other one) and its read
+ * and write speeds, as the chart's series; `deviceId` is the disk the test runs on.
+ */
+export function diskChartSensors(schema: Schema | null, deviceId: string | null): Sensor[] {
+  if (deviceId === null || !schema) return [];
+  const own = schema.sensors.filter((s) => s.deviceId === deviceId);
+  const temperature = own.find((s) => s.id === `${deviceId}/temperature/drive`) ?? own.find((s) => s.id.startsWith(`${deviceId}/temperature/`));
+  return [temperature, ...['read', 'write'].map((name) => own.find((s) => s.id === `${deviceId}/throughput/${name}`))].filter((s): s is Sensor => s !== undefined);
+}
+
+/** Where a disk error is in the file: its 4 KiB block index (for V3, the file's index times 262 144 plus the block) times 4096. */
+export function formatOffset(index: number, locale = 'en'): string {
+  const bytes = index * 4096;
+  return bytes < 1024 ** 2 ? `${(bytes / 1024).toLocaleString(locale)} KiB` : formatDiskBytes(bytes, locale);
+}
+
+/** A disk data error in words: `bit_flip` says how many bits (`actual`), `io_error` the Win32 code (`actual`). */
+export function dataErrorKind(error: ErrorRecord, t: Translate): string {
+  const kind = error.kind as DiskErrorKind;
+  return t(`performance.result.error.${kind}`, { bits: error.actual, code: error.actual });
+}
+
+/** «3 wrong bits at 12 KiB in the file · transient…»: the whole line of a disk data error; `transient` null says nothing about a re-read. */
+export function dataErrorLine(error: ErrorRecord, t: Translate, locale = 'en'): string {
+  const where = t('performance.result.dataErrorAt', { kind: dataErrorKind(error, t), offset: formatOffset(error.iteration, locale) });
+  return error.transient == null ? where : `${where} · ${t(error.transient ? 'performance.result.transient' : 'performance.result.persistent')}`;
 }

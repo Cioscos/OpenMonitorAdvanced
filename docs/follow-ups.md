@@ -121,7 +121,7 @@ Voci aperte dopo le revisioni della M8b2 (piano `docs/superpowers/plans/2026-10-
 
 ## Open: disk benchmark and stress test (M8c)
 
-Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-08-m8c-disco.md`, task C1-C14). Implementata su `feat/m8c-disk`, non unita in `main`.
+Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-08-m8c-disco.md`, task C1-C14). Completata e unita in `main` il 2026-10-08 (13211bf), non pubblicata.
 
 - **Prove dal vivo D1-D13 (task C16), 2026-10-08:** superate D1-D3, D5-D8 e D10-D13, con l'utente e senza input sintetici; le correzioni trovate per strada sono nei commit da d9a81b1 a 4627668.
   - D1: scala `disk-1` tarata sul Fanxiang S880 2TB NVMe (`provisional: false`). D2: tre esecuzioni a 995, 996 e 990 punti. D3: profilo NVMe su C: e sull'SK hynix P41 (F:), chiavetta USB SanDisk Extreme (avviso «Disco rimovibile», 31 punti) e HDD ST2000DM008 (6 punti; 109 MB/s perché il disco è pieno al 90%).

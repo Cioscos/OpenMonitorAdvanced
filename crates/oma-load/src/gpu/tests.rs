@@ -223,6 +223,8 @@ fn phase(kernel: KernelId, mode: LoadMode, duration_s: u32) -> Phase {
         iterations: None,
         pause_before_ms: 0,
         windows: None,
+
+        disk: None,
     }
 }
 
@@ -235,6 +237,8 @@ fn plan(phases: Vec<Phase>) -> Plan {
             luid: 0x1234,
             integrated: false,
         }),
+
+        disk: None,
     }
 }
 
@@ -613,6 +617,8 @@ fn mismatch_becomes_an_error_with_iteration() {
             actual: 0xAB,
             seed: phase_seed(7, 0),
             load_percent: None,
+
+            transient: None,
         }]
     );
     assert_eq!(ran.done()[0].errors, 1);

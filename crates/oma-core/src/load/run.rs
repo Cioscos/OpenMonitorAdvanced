@@ -1072,6 +1072,8 @@ mod tests {
             iterations: None,
             pause_before_ms: 0,
             windows: None,
+
+            disk: None,
         }
     }
 
@@ -1098,6 +1100,8 @@ mod tests {
                 ram_bytes: 0,
                 phases: vec![phase(KernelId::K2), phase(KernelId::K5)],
                 gpu: None,
+
+                disk: None,
             },
             outcome: None,
             outcome_detail: None,
@@ -1153,6 +1157,8 @@ mod tests {
             memory_bytes: 0,
             rate: None,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -1169,6 +1175,8 @@ mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         })
     }
 
@@ -1241,6 +1249,8 @@ mod tests {
                 work_ms: None,
                 workers: vec![],
                 rates: vec![],
+
+                disk: None,
             }),
             clock(2000),
         );
@@ -1822,6 +1832,8 @@ mod tests {
             work_ms: None,
             workers: vec![],
             rates: vec![],
+
+            disk: None,
         })
     }
 
@@ -2018,6 +2030,8 @@ mod tests {
             memory_bytes: 0,
             rate: Some(rate),
             load_percent,
+
+            disk: None,
         })
     }
 
@@ -2034,6 +2048,8 @@ mod tests {
             actual,
             seed: 1,
             load_percent,
+
+            transient: None,
         })
     }
 

@@ -599,6 +599,8 @@ mod tests {
                     work_ms: Some(1000),
                     workers: vec![],
                     rates: vec![],
+
+                    disk: None,
                 })
             })
             .collect()
@@ -853,6 +855,8 @@ mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = rig_with(
             "bench-invalid",
@@ -891,6 +895,8 @@ mod tests {
                     work_ms: None,
                     workers: vec![],
                     rates: vec![2e12; 5],
+
+                    disk: None,
                 })
             })
             .collect()
@@ -1092,6 +1098,8 @@ mod tests {
             actual: 0x887A_0005,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = gpu_rig(
             "gpu-bench-lost",

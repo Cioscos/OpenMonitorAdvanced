@@ -66,6 +66,8 @@ fn phase(kernel: KernelId, placement: Placement, duration_s: u32) -> Phase {
         iterations: None,
         pause_before_ms: 0,
         windows: None,
+
+        disk: None,
     }
 }
 
@@ -75,6 +77,8 @@ fn plan(phases: Vec<Phase>) -> Plan {
         ram_bytes: 4 * MIB,
         phases,
         gpu: None,
+
+        disk: None,
     }
 }
 

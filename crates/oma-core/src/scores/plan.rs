@@ -57,6 +57,8 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
                     iterations: Some(w.iterations),
                     pause_before_ms: if rep == 0 { WARMUP_PAUSE_MS } else { 0 },
                     windows: None,
+
+                    disk: None,
                 });
                 steps.push(BenchStep {
                     kernel: w.id,
@@ -71,6 +73,8 @@ pub fn bench_plan(topology: &Topology, isa: Isa, seed: u64) -> (Plan, Vec<BenchS
         ram_bytes: 0,
         phases,
         gpu: None,
+
+        disk: None,
     };
     (plan, steps)
 }

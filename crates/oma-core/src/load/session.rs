@@ -280,6 +280,8 @@ mod tests {
             actual: 2,
             seed: 9,
             load_percent: None,
+
+            transient: None,
         };
         Session {
             format: FORMAT,
@@ -317,8 +319,12 @@ mod tests {
                     iterations: None,
                     pause_before_ms: 0,
                     windows: None,
+
+                    disk: None,
                 }],
                 gpu: None,
+
+                disk: None,
             },
             outcome: Some(Outcome::Errors),
             outcome_detail: Some(OutcomeDetail {

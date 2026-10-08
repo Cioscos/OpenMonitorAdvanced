@@ -460,6 +460,8 @@ mod tests {
             work_ms,
             workers: vec![],
             rates: vec![],
+
+            disk: None,
         })
     }
 
@@ -479,6 +481,8 @@ mod tests {
             memory_bytes: 0,
             rate,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -709,6 +713,8 @@ mod tests {
                 actual: 2,
                 seed: 1,
                 load_percent: None,
+
+                transient: None,
             }),
             clock(2000),
         );
@@ -743,6 +749,8 @@ mod tests {
                 actual: 0,
                 seed: 1,
                 load_percent: None,
+
+                transient: None,
             }),
             clock(1000),
         );

@@ -15,12 +15,14 @@ const NAMES: &[&str] = &[
     "run",
     "run_gpu",
     "run_gpu_bench",
+    "run_disk",
     "stop",
     "topology",
     "progress",
     "error",
     "notice",
     "phase_done",
+    "phase_done_disk",
     "finished",
 ];
 
@@ -57,6 +59,7 @@ fn reference(name: &str) -> LoadMessage {
                         iterations: None,
                         pause_before_ms: 0,
                         windows: None,
+                        disk: None,
                     },
                     Phase {
                         kernel: KernelId::K10,
@@ -74,9 +77,11 @@ fn reference(name: &str) -> LoadMessage {
                         iterations: None,
                         pause_before_ms: 0,
                         windows: None,
+                        disk: None,
                     },
                 ],
                 gpu: None,
+                disk: None,
             },
         }),
         "run_gpu" => {
@@ -96,6 +101,7 @@ fn reference(name: &str) -> LoadMessage {
                 iterations: None,
                 pause_before_ms: 0,
                 windows: None,
+                disk: None,
             };
             let first = p.clone();
             p.kernel = KernelId::S1;
@@ -110,6 +116,7 @@ fn reference(name: &str) -> LoadMessage {
                         luid: 0x17e99,
                         integrated: false,
                     }),
+                    disk: None,
                 },
             })
         }
@@ -130,6 +137,7 @@ fn reference(name: &str) -> LoadMessage {
                 iterations: None,
                 pause_before_ms: 0,
                 windows: Some(5),
+                disk: None,
             };
             LoadMessage::Run(RunRequest {
                 plan: Plan {
@@ -149,6 +157,64 @@ fn reference(name: &str) -> LoadMessage {
                     gpu: Some(GpuTarget {
                         luid: 0x17e99,
                         integrated: false,
+                    }),
+                    disk: None,
+                },
+            })
+        }
+        "run_disk" => {
+            let phase = |kernel, duration_s, job: DiskJob| Phase {
+                kernel,
+                alt_kernel: None,
+                isa: Isa::Sse2,
+                size: DataSize::Auto,
+                mode: LoadMode::Steady,
+                placement: Placement::AllLogical,
+                duration_s,
+                per_core_s: None,
+                both_smt: false,
+                cores: None,
+                patterns: vec![],
+                stop_on_error: true,
+                iterations: None,
+                pause_before_ms: if kernel == KernelId::DiskBench {
+                    5000
+                } else {
+                    0
+                },
+                windows: None,
+                disk: Some(job),
+            };
+            let job =
+                |block_bytes, seq_block_bytes, random_percent, read_percent, queue, threads| {
+                    DiskJob {
+                        block_bytes,
+                        seq_block_bytes,
+                        random_percent,
+                        read_percent,
+                        queue,
+                        threads,
+                        write_cap_bytes: (read_percent == 0).then_some(4 << 30),
+                        cycles: None,
+                        rate_limit_bps: None,
+                    }
+                };
+            LoadMessage::Run(RunRequest {
+                plan: Plan {
+                    seed: 0x1234_5678_9ABC_DEF0,
+                    ram_bytes: 0,
+                    phases: vec![
+                        phase(KernelId::DiskFill, 900, job(4096, 1 << 20, 0, 0, 4, 1)),
+                        phase(KernelId::DiskBench, 5, job(4096, 1 << 20, 0, 100, 8, 1)),
+                        phase(KernelId::DiskBench, 5, job(4096, 1 << 20, 100, 100, 32, 1)),
+                        phase(KernelId::DiskBench, 5, job(4096, 1 << 20, 100, 0, 1, 1)),
+                    ],
+                    gpu: None,
+                    disk: Some(DiskTarget {
+                        dir: r"C:\Users\test\AppData\Local\Temp".to_owned(),
+                        file_bytes: 1 << 30,
+                        compressible: false,
+                        reserve_bytes: 1 << 30,
                     }),
                 },
             })
@@ -218,6 +284,7 @@ fn reference(name: &str) -> LoadMessage {
             memory_bytes: 1 << 30,
             rate: Some(2.5e9),
             load_percent: Some(60),
+            disk: None,
         }),
         "error" => LoadMessage::Error(ComputeError {
             phase: 0,
@@ -231,6 +298,7 @@ fn reference(name: &str) -> LoadMessage {
             actual: 0xDEAD_BEEE,
             seed: 42,
             load_percent: None,
+            transient: None,
         }),
         "notice" => LoadMessage::Notice(Notice {
             phase: 0,
@@ -250,7 +318,31 @@ fn reference(name: &str) -> LoadMessage {
                 work_ms: 58_500,
             }],
             rates: vec![1.5e12, 1.25e12],
+            disk: None,
         }),
+        "phase_done_disk" => {
+            let io = |scale: u64| IoStats {
+                bytes: 3_000_000_000 * scale,
+                ios: 2_861 * scale,
+                elapsed_us: 5_000_000,
+                mean_lat_us: 1_250.5 * scale as f64,
+                p99_lat_us: 4_100.25 * scale as f64,
+            };
+            LoadMessage::PhaseDone(PhaseDone {
+                phase: 1,
+                checks: 2_861,
+                errors: 0,
+                duration_ms: 10_000,
+                skipped: None,
+                work_ms: None,
+                workers: vec![],
+                rates: vec![],
+                disk: Some(DiskPhaseStats {
+                    read: io(1),
+                    write: io(2),
+                }),
+            })
+        }
         "finished" => LoadMessage::Finished(Finished {
             reason: FinishReason::Completed,
             checks: 9_000_000,

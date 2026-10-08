@@ -270,6 +270,8 @@ mod tests {
                 ram_bytes: 0,
                 phases: vec![],
                 gpu: None,
+
+                disk: None,
             },
         });
         assert_eq!(route(empty), Route::Exit(EXIT_USAGE));

@@ -1,4 +1,4 @@
-//! App <-> `oma-load.exe` protocol (version 4): the messages the app and the stress-test
+//! App <-> `oma-load.exe` protocol (version 6): the messages the app and the stress-test
 //! helper exchange over the load pipe, framed with the generic framing of this crate.
 //!
 //! Same conventions as the service and overlay protocols: every field is always present on
@@ -12,7 +12,7 @@ use crate::overlay::check_len;
 use crate::IpcError;
 
 /// Load protocol version, sent in [`LoadHello::protocol_version`] by both sides.
-pub const LOAD_PROTOCOL_VERSION: u32 = 5;
+pub const LOAD_PROTOCOL_VERSION: u32 = 6;
 
 /// Warm-up of a GPU benchmark phase, in seconds: the first windows are not reported.
 pub const GPU_BENCH_WARMUP_S: u32 = 4;
@@ -34,6 +34,10 @@ pub const MAX_ITERATIONS: u64 = 1_000_000_000;
 pub const MAX_PAUSE_MS: u32 = 10_000;
 /// Maximum [`Plan::ram_bytes`].
 pub const MAX_RAM_BYTES: u64 = 1 << 40;
+/// Maximum [`DiskTarget::file_bytes`] and [`DiskJob::write_cap_bytes`].
+pub const MAX_DISK_BYTES: u64 = 1 << 40;
+/// Maximum length of [`DiskTarget::dir`], in bytes.
+pub const MAX_DISK_DIR_BYTES: usize = 1024;
 
 /// Handshake, sent by both sides. The app sends an empty `isa`; the process lists the
 /// instruction sets it can run.
@@ -104,9 +108,38 @@ pub enum KernelId {
     Fill,
     Texture,
     Overdraw,
+    /// Disk loads: the benchmark fill and measured phases, then the stress test's
+    /// integrity patterns (N1-N4) and verified workloads (V1-V4).
+    DiskFill,
+    DiskBench,
+    N1,
+    N2,
+    N3,
+    N4,
+    V1,
+    V2,
+    V3,
+    V4,
 }
 
 impl KernelId {
+    /// True for the loads that run on a disk.
+    pub fn is_disk(self) -> bool {
+        matches!(
+            self,
+            Self::DiskFill
+                | Self::DiskBench
+                | Self::N1
+                | Self::N2
+                | Self::N3
+                | Self::N4
+                | Self::V1
+                | Self::V2
+                | Self::V3
+                | Self::V4
+        )
+    }
+
     /// True for the loads that run on the GPU.
     pub fn is_gpu(self) -> bool {
         matches!(
@@ -203,6 +236,13 @@ pub enum ErrorKind {
     Hung,
     /// The GPU was removed or reset; `actual` carries the device-removed HRESULT.
     DeviceLost,
+    /// Disk data errors: a flipped bit, a block that belongs elsewhere, an old block, a
+    /// block of zeros, or an I/O failure (`actual` carries the Win32 code).
+    BitFlip,
+    Misplaced,
+    Stale,
+    Zeros,
+    IoError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +311,36 @@ pub struct Phase {
     /// GPU benchmark: the measured 1 s windows after the warm-up.
     #[serde(default)]
     pub windows: Option<u8>,
+    /// Disk phases: what to do on the disk. Required by the disk kernels, refused by the others.
+    #[serde(default)]
+    pub disk: Option<DiskJob>,
+}
+
+/// The I/O of a disk phase. Each I/O is random with probability `random_percent` (a block
+/// of `block_bytes` at a random aligned offset); otherwise it is sequential (a block of
+/// `seq_block_bytes` at the thread cursor). `read_percent` picks read or write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskJob {
+    pub block_bytes: u32,
+    pub seq_block_bytes: u32,
+    pub random_percent: u8,
+    pub read_percent: u8,
+    pub queue: u16,
+    pub threads: u16,
+    pub write_cap_bytes: Option<u64>,
+    pub cycles: Option<u32>,
+    pub rate_limit_bps: Option<u64>,
+}
+
+/// Where a disk plan runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskTarget {
+    /// Absolute folder (`X:\...`); the test file lives in it.
+    pub dir: String,
+    pub file_bytes: u64,
+    pub compressible: bool,
+    /// Free space to leave on the volume.
+    pub reserve_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +351,9 @@ pub struct Plan {
     /// Target GPU of a GPU plan; a plan without it runs CPU kernels only.
     #[serde(default)]
     pub gpu: Option<GpuTarget>,
+    /// Target of a disk plan; a plan with it has only disk kernels, and no `gpu`.
+    #[serde(default)]
+    pub disk: Option<DiskTarget>,
 }
 
 /// The adapter a GPU plan runs on.
@@ -327,6 +400,18 @@ pub struct Progress {
     /// GPU `ramp` and `alternate`: the current load level, 1-100.
     #[serde(default)]
     pub load_percent: Option<u8>,
+    /// Disk phases: throughput and operations since the previous `Progress`.
+    #[serde(default)]
+    pub disk: Option<DiskProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiskProgress {
+    pub read_bps: f64,
+    pub write_bps: f64,
+    pub read_bytes: u64,
+    pub written_bytes: u64,
+    pub iops: f64,
 }
 
 /// Process to app: a computation error.
@@ -345,6 +430,9 @@ pub struct ComputeError {
     /// GPU `ramp` and `alternate`: the load level when the error happened, 1-100.
     #[serde(default)]
     pub load_percent: Option<u8>,
+    /// Disk data errors: `Some(true)` when the re-read came back right.
+    #[serde(default)]
+    pub transient: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +460,25 @@ pub struct PhaseDone {
     /// (FLOP, operations, bytes, pixels or texels); empty for the other phases.
     #[serde(default)]
     pub rates: Vec<f64>,
+    /// Disk phases: the totals and latencies of reads and writes.
+    #[serde(default)]
+    pub disk: Option<DiskPhaseStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiskPhaseStats {
+    pub read: IoStats,
+    pub write: IoStats,
+}
+
+/// One direction of a disk phase.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IoStats {
+    pub bytes: u64,
+    pub ios: u64,
+    pub elapsed_us: u64,
+    pub mean_lat_us: f64,
+    pub p99_lat_us: f64,
 }
 
 /// One thread of a fixed-work phase: the iterations it counted and the milliseconds from
@@ -425,12 +532,105 @@ fn check_load_percent(v: Option<u8>) -> Result<(), IpcError> {
     }
 }
 
-fn check_phase(p: &Phase, gpu: bool) -> Result<(), IpcError> {
+/// What a plan runs on; the kernels of a phase must belong to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Cpu,
+    Gpu,
+    Disk,
+}
+
+impl Target {
+    fn runs(self, k: KernelId) -> bool {
+        match self {
+            Self::Cpu => !k.is_gpu() && !k.is_disk(),
+            Self::Gpu => k.is_gpu(),
+            Self::Disk => k.is_disk(),
+        }
+    }
+}
+
+fn is_pow2_block(n: u32) -> bool {
+    (4096..=8 << 20).contains(&n) && n.is_power_of_two()
+}
+
+fn check_disk_phase(p: &Phase) -> Result<(), IpcError> {
+    let bad = |m: &str| Err(IpcError::Decode(m.into()));
+    let Some(j) = &p.disk else {
+        return bad("disk kernels need a disk job");
+    };
+    if p.alt_kernel.is_some() || p.windows.is_some() || p.iterations.is_some() {
+        return bad("disk phases refuse alt_kernel, windows and iterations");
+    }
+    if p.mode != LoadMode::Steady {
+        return bad("disk phases are steady");
+    }
+    if !is_pow2_block(j.block_bytes) || !is_pow2_block(j.seq_block_bytes) {
+        return bad("disk blocks are powers of 2 from 4 KiB to 8 MiB");
+    }
+    if j.random_percent > 100 || j.read_percent > 100 {
+        return bad("random_percent and read_percent are at most 100");
+    }
+    if !(1..=64).contains(&j.queue) || !(1..=32).contains(&j.threads) {
+        return bad("queue is 1-64 and threads 1-32");
+    }
+    if j.write_cap_bytes.is_some_and(|b| b > MAX_DISK_BYTES) {
+        return bad("write_cap_bytes is over the maximum");
+    }
+    if j.cycles.is_some_and(|c| !(1..=100).contains(&c)) {
+        return bad("cycles is out of 1-100");
+    }
+    if j.rate_limit_bps.is_some_and(|r| r < 1 << 20) {
+        return bad("rate_limit_bps is under 1 MiB/s");
+    }
+    Ok(())
+}
+
+fn check_disk_target(t: &DiskTarget) -> Result<(), IpcError> {
+    let bad = |m: &str| Err(IpcError::Decode(m.into()));
+    let b = t.dir.as_bytes();
+    // Plain `X:\...` only: no relative, UNC or `\\?\` paths, no `..` components.
+    if b.len() > MAX_DISK_DIR_BYTES
+        || b.len() < 3
+        || !b[0].is_ascii_alphabetic()
+        || &b[1..3] != b":\\"
+        || t.dir.chars().any(char::is_control)
+        || t.dir.split(['\\', '/']).any(|c| c == "..")
+    {
+        return bad(r"dir is not a plain absolute X:\ path");
+    }
+    if !(64 << 20..=MAX_DISK_BYTES).contains(&t.file_bytes) || t.file_bytes % (8 << 20) != 0 {
+        return bad("file_bytes is out of 64 MiB-1 TiB or not a multiple of 8 MiB");
+    }
+    if t.reserve_bytes < 1 << 30 {
+        return bad("reserve_bytes is under 1 GiB");
+    }
+    Ok(())
+}
+
+fn check_phase(p: &Phase, target: Target) -> Result<(), IpcError> {
     let is_gpu = p.kernel.is_gpu();
-    if is_gpu != gpu || p.alt_kernel.is_some_and(|k| k.is_gpu() != gpu) {
+    if !target.runs(p.kernel) || p.alt_kernel.is_some_and(|k| !target.runs(k)) {
         return Err(IpcError::Decode(
-            "a plan with a gpu runs only GPU kernels, one without runs none".into(),
+            "the kernels of a phase must match the target of the plan".into(),
         ));
+    }
+    if p.disk.is_some() != p.kernel.is_disk() {
+        return Err(IpcError::Decode(
+            "a disk job goes with the disk kernels only".into(),
+        ));
+    }
+    if target == Target::Disk {
+        if p.duration_s == 0 {
+            return Err(IpcError::Decode("duration_s is 0".into()));
+        }
+        if p.pause_before_ms > MAX_PAUSE_MS {
+            return Err(IpcError::Decode(format!(
+                "pause_before_ms {} is over {MAX_PAUSE_MS}",
+                p.pause_before_ms
+            )));
+        }
+        return check_disk_phase(p);
     }
     if (p.mode.is_gpu_only() && !is_gpu)
         || (is_gpu && matches!(p.mode, LoadMode::Variable | LoadMode::Light))
@@ -541,8 +741,22 @@ impl LoadMessage {
                 if plan.gpu.is_some_and(|g| g.luid == 0) {
                     return Err(IpcError::Decode("gpu luid is 0".into()));
                 }
-                let gpu = plan.gpu.is_some();
-                plan.phases.iter().try_for_each(|p| check_phase(p, gpu))?;
+                let target = match (&plan.gpu, &plan.disk) {
+                    (Some(_), Some(_)) => {
+                        return Err(IpcError::Decode(
+                            "a plan has a gpu or a disk, not both".into(),
+                        ))
+                    }
+                    (Some(_), None) => Target::Gpu,
+                    (None, Some(d)) => {
+                        check_disk_target(d)?;
+                        Target::Disk
+                    }
+                    (None, None) => Target::Cpu,
+                };
+                plan.phases
+                    .iter()
+                    .try_for_each(|p| check_phase(p, target))?;
                 if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
                     return Err(IpcError::Decode(
                         "the plan lasts more than the maximum".into(),
@@ -558,6 +772,16 @@ impl LoadMessage {
             Self::Progress(p) => {
                 check_len("cores", p.cores.len(), MAX_LOGICAL)?;
                 check_load_percent(p.load_percent)?;
+                if let Some(d) = &p.disk {
+                    if [d.read_bps, d.write_bps, d.iops]
+                        .iter()
+                        .any(|v| !v.is_finite() || *v < 0.0)
+                    {
+                        return Err(IpcError::Decode(
+                            "disk progress must be finite and non-negative".into(),
+                        ));
+                    }
+                }
                 match p.rate {
                     Some(r) if !r.is_finite() || r < 0.0 => {
                         Err(IpcError::Decode("rate is not a finite non-negative".into()))
@@ -573,6 +797,17 @@ impl LoadMessage {
                     return Err(IpcError::Decode(
                         "rates must be finite and non-negative".into(),
                     ));
+                }
+                if let Some(s) = &d.disk {
+                    if [&s.read, &s.write].iter().any(|io| {
+                        [io.mean_lat_us, io.p99_lat_us]
+                            .iter()
+                            .any(|v| !v.is_finite() || *v < 0.0)
+                    }) {
+                        return Err(IpcError::Decode(
+                            "disk latencies must be finite and non-negative".into(),
+                        ));
+                    }
                 }
                 d.skipped
                     .as_deref()
@@ -623,6 +858,7 @@ mod tests {
             iterations: None,
             pause_before_ms: 0,
             windows: None,
+            disk: None,
         }
     }
 
@@ -633,6 +869,7 @@ mod tests {
                 ram_bytes: 1 << 30,
                 phases,
                 gpu: None,
+                disk: None,
             },
         })
     }
@@ -652,6 +889,7 @@ mod tests {
             memory_bytes: 4096,
             rate: Some(1.5e6),
             load_percent: None,
+            disk: None,
         }
     }
 
@@ -714,6 +952,7 @@ mod tests {
             actual: 2,
             seed: 3,
             load_percent: Some(55),
+            transient: None,
         }));
         round_trip(LoadMessage::Notice(Notice {
             phase: 0,
@@ -729,6 +968,7 @@ mod tests {
             work_ms: Some(900),
             workers: vec![],
             rates: vec![],
+            disk: None,
         }));
         round_trip(LoadMessage::Finished(Finished {
             reason: FinishReason::FirstError,
@@ -939,6 +1179,7 @@ mod tests {
             work_ms: Some(4),
             workers,
             rates: vec![],
+            disk: None,
         }
     }
 
@@ -1003,6 +1244,7 @@ mod tests {
             work_ms: None,
             workers: vec![],
             rates: vec![],
+            disk: None,
         });
         assert!(done.validate().is_err());
     }
@@ -1044,6 +1286,8 @@ mod tests {
         h.protocol_version = 4;
         assert!(!load_compatible(&h));
         h.protocol_version = 5;
+        assert!(!load_compatible(&h));
+        h.protocol_version = 6;
         assert!(load_compatible(&h));
     }
 
@@ -1148,6 +1392,7 @@ mod tests {
                 actual: 2,
                 seed: 3,
                 load_percent: Some(v),
+                transient: None,
             });
             assert_eq!(e.validate().is_ok(), ok, "{v}");
         }
@@ -1216,6 +1461,7 @@ mod tests {
             work_ms: None,
             workers: vec![],
             rates: vec![1.5e9, 2.5e9],
+            disk: None,
         }));
         let mut h = hello();
         h.shader_digest = Some("0123456789abcdef".into());
@@ -1284,6 +1530,7 @@ mod tests {
                 work_ms: None,
                 workers: vec![],
                 rates,
+                disk: None,
             })
         };
         assert!(done(vec![0.0, 1.0e12]).validate().is_ok());
@@ -1311,5 +1558,306 @@ mod tests {
         let json = serde_json::json!({"protocol_version": 4, "version": "x", "isa": []});
         let h: LoadHello = serde_json::from_value(json).unwrap();
         assert_eq!(h.shader_digest, None);
+    }
+
+    fn disk_target() -> DiskTarget {
+        DiskTarget {
+            dir: r"C:\Users\x\AppData\Local\Temp".into(),
+            file_bytes: 1 << 30,
+            compressible: false,
+            reserve_bytes: 1 << 30,
+        }
+    }
+
+    fn disk_job() -> DiskJob {
+        DiskJob {
+            block_bytes: 4096,
+            seq_block_bytes: 1 << 20,
+            random_percent: 100,
+            read_percent: 50,
+            queue: 32,
+            threads: 1,
+            write_cap_bytes: Some(1 << 30),
+            cycles: None,
+            rate_limit_bps: None,
+        }
+    }
+
+    fn disk_phase() -> Phase {
+        let mut p = phase();
+        p.kernel = KernelId::DiskBench;
+        p.duration_s = 5;
+        p.disk = Some(disk_job());
+        p
+    }
+
+    fn disk_plan_of(target: DiskTarget, phases: Vec<Phase>) -> LoadMessage {
+        let mut m = plan(phases);
+        if let LoadMessage::Run(r) = &mut m {
+            r.plan.disk = Some(target);
+        }
+        m
+    }
+
+    fn disk_valid(p: Phase) -> bool {
+        disk_plan_of(disk_target(), vec![p]).validate().is_ok()
+    }
+
+    fn job_valid(f: impl FnOnce(&mut DiskJob)) -> bool {
+        let mut p = disk_phase();
+        f(p.disk.as_mut().unwrap());
+        disk_valid(p)
+    }
+
+    #[test]
+    fn disk_kernels_are_snake_case() {
+        assert_eq!(
+            serde_json::to_value(KernelId::DiskFill).unwrap(),
+            "disk_fill"
+        );
+        assert_eq!(
+            serde_json::to_value(KernelId::DiskBench).unwrap(),
+            "disk_bench"
+        );
+        assert_eq!(serde_json::to_value(KernelId::V4).unwrap(), "v4");
+        assert_eq!(serde_json::to_value(KernelId::N1).unwrap(), "n1");
+        assert_eq!(
+            serde_json::to_value(ErrorKind::BitFlip).unwrap(),
+            "bit_flip"
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorKind::IoError).unwrap(),
+            "io_error"
+        );
+        for k in [
+            KernelId::DiskFill,
+            KernelId::DiskBench,
+            KernelId::N1,
+            KernelId::N2,
+            KernelId::N3,
+            KernelId::N4,
+            KernelId::V1,
+            KernelId::V2,
+            KernelId::V3,
+            KernelId::V4,
+        ] {
+            assert!(k.is_disk() && !k.is_gpu() && !k.is_bench_only(), "{k:?}");
+        }
+        assert!(!KernelId::S1.is_disk() && !KernelId::K1.is_disk());
+    }
+
+    #[test]
+    fn disk_plan_round_trips() {
+        round_trip(disk_plan_of(disk_target(), vec![disk_phase()]));
+        assert!(disk_valid(disk_phase()));
+        let mut fill = disk_phase();
+        fill.kernel = KernelId::DiskFill;
+        assert!(disk_valid(fill));
+        round_trip(LoadMessage::Progress(Progress {
+            disk: Some(DiskProgress {
+                read_bps: 1.5e9,
+                write_bps: 0.0,
+                read_bytes: 7,
+                written_bytes: 8,
+                iops: 2.5e5,
+            }),
+            ..progress()
+        }));
+        let io = IoStats {
+            bytes: 1 << 30,
+            ios: 262_144,
+            elapsed_us: 1_000_000,
+            mean_lat_us: 12.5,
+            p99_lat_us: 80.0,
+        };
+        round_trip(LoadMessage::PhaseDone(PhaseDone {
+            disk: Some(DiskPhaseStats {
+                read: io.clone(),
+                write: io,
+            }),
+            ..phase_done(vec![])
+        }));
+        round_trip(LoadMessage::Error(ComputeError {
+            phase: 1,
+            kernel: KernelId::N1,
+            isa: Isa::Sse2,
+            kind: ErrorKind::BitFlip,
+            logical: None,
+            core: None,
+            iteration: 9,
+            expected: 1,
+            actual: 2,
+            seed: 3,
+            load_percent: None,
+            transient: Some(true),
+        }));
+    }
+
+    #[test]
+    fn disk_and_gpu_targets_exclude_each_other() {
+        let mut m = disk_plan_of(disk_target(), vec![disk_phase()]);
+        if let LoadMessage::Run(r) = &mut m {
+            r.plan.gpu = Some(GpuTarget {
+                luid: 1,
+                integrated: false,
+            });
+        }
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn disk_kernels_need_the_disk_target_and_a_job() {
+        assert!(plan(vec![disk_phase()]).validate().is_err());
+        assert!(gpu_plan(vec![disk_phase()]).validate().is_err());
+        assert!(disk_plan_of(disk_target(), vec![phase()])
+            .validate()
+            .is_err());
+        assert!(disk_plan_of(disk_target(), vec![gpu_phase()])
+            .validate()
+            .is_err());
+        let mut nojob = disk_phase();
+        nojob.disk = None;
+        assert!(!disk_valid(nojob));
+        let mut cpu = phase();
+        cpu.disk = Some(disk_job());
+        assert!(plan(vec![cpu]).validate().is_err());
+    }
+
+    #[test]
+    fn disk_phase_refuses_windows_iterations_alt_kernel_and_non_steady() {
+        let mut p = disk_phase();
+        p.windows = Some(5);
+        assert!(!disk_valid(p));
+        let mut p = disk_phase();
+        p.iterations = Some(10);
+        assert!(!disk_valid(p));
+        let mut p = disk_phase();
+        p.alt_kernel = Some(KernelId::DiskFill);
+        assert!(!disk_valid(p));
+        for mode in [LoadMode::Variable, LoadMode::Light, LoadMode::Ramp] {
+            let mut p = disk_phase();
+            p.mode = mode;
+            assert!(!disk_valid(p), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn disk_job_ranges_are_checked() {
+        assert!(job_valid(|_| {}));
+        assert!(job_valid(|j| j.block_bytes = 8 << 20));
+        assert!(!job_valid(|j| j.block_bytes = 2048));
+        assert!(!job_valid(|j| j.block_bytes = 3 * 4096));
+        assert!(!job_valid(|j| j.block_bytes = 16 << 20));
+        assert!(!job_valid(|j| j.seq_block_bytes = 3 * 4096));
+        assert!(!job_valid(|j| j.queue = 0));
+        assert!(job_valid(|j| j.queue = 64));
+        assert!(!job_valid(|j| j.queue = 65));
+        assert!(!job_valid(|j| j.threads = 0));
+        assert!(job_valid(|j| j.threads = 32));
+        assert!(!job_valid(|j| j.threads = 33));
+        assert!(job_valid(|j| j.read_percent = 100));
+        assert!(!job_valid(|j| j.read_percent = 101));
+        assert!(!job_valid(|j| j.random_percent = 101));
+        assert!(!job_valid(|j| j.cycles = Some(0)));
+        assert!(job_valid(|j| j.cycles = Some(100)));
+        assert!(!job_valid(|j| j.cycles = Some(101)));
+        assert!(job_valid(|j| j.rate_limit_bps = Some(1 << 20)));
+        assert!(!job_valid(|j| j.rate_limit_bps = Some(1000)));
+    }
+
+    #[test]
+    fn disk_dir_must_be_a_plain_absolute_path() {
+        let dir_valid = |dir: &str| {
+            let mut t = disk_target();
+            t.dir = dir.into();
+            disk_plan_of(t, vec![disk_phase()]).validate().is_ok()
+        };
+        for bad in [
+            r"relative\dir",
+            r"C:\a\..\b",
+            "C:/a/../b",
+            r"\\server\share",
+            r"\\?\C:\x",
+            "C:rel",
+            "",
+        ] {
+            assert!(!dir_valid(bad), "{bad}");
+        }
+        assert!(!dir_valid(&format!(r"C:\{}", "x".repeat(1022))));
+        assert!(dir_valid(r"C:\Users\x\AppData\Local\Temp"));
+        assert!(dir_valid(r"D:\"));
+    }
+
+    #[test]
+    fn disk_sizes_are_bounded() {
+        let target_valid = |f: &dyn Fn(&mut DiskTarget)| {
+            let mut t = disk_target();
+            f(&mut t);
+            disk_plan_of(t, vec![disk_phase()]).validate().is_ok()
+        };
+        assert!(target_valid(&|t| t.file_bytes = 64 << 20));
+        assert!(target_valid(&|t| t.file_bytes = 1 << 40));
+        assert!(!target_valid(&|t| t.file_bytes = 1 << 20));
+        assert!(!target_valid(&|t| t.file_bytes = (1 << 40) + (8 << 20)));
+        assert!(!target_valid(&|t| t.file_bytes = (100 << 20) + 1));
+        assert!(!target_valid(&|t| t.reserve_bytes = (1 << 30) - 1));
+        assert!(!job_valid(|j| j.write_cap_bytes = Some(MAX_DISK_BYTES + 1)));
+        assert!(job_valid(|j| j.write_cap_bytes = Some(MAX_DISK_BYTES)));
+    }
+
+    #[test]
+    fn disk_progress_must_be_finite() {
+        let with = |f: &dyn Fn(&mut DiskProgress)| {
+            let mut d = DiskProgress {
+                read_bps: 1.0,
+                write_bps: 2.0,
+                read_bytes: 0,
+                written_bytes: 0,
+                iops: 3.0,
+            };
+            f(&mut d);
+            let mut p = progress();
+            p.disk = Some(d);
+            LoadMessage::Progress(p).validate().is_ok()
+        };
+        assert!(with(&|_| {}));
+        assert!(!with(&|d| d.read_bps = f64::NAN));
+        assert!(!with(&|d| d.write_bps = -1.0));
+        assert!(!with(&|d| d.iops = f64::INFINITY));
+    }
+
+    #[test]
+    fn v5_messages_still_decode() {
+        let json = serde_json::json!({"seed": 1, "ram_bytes": 0, "phases": [], "gpu": null});
+        let pl: Plan = serde_json::from_value(json).unwrap();
+        assert_eq!(pl.disk, None);
+        let json = serde_json::json!({
+            "kernel": "s1", "alt_kernel": null, "isa": "sse2", "size": "auto",
+            "mode": "steady", "placement": "all_logical", "duration_s": 5,
+            "per_core_s": null, "both_smt": false, "cores": null, "patterns": [],
+            "stop_on_error": true, "windows": null
+        });
+        let ph: Phase = serde_json::from_value(json).unwrap();
+        assert_eq!(ph.disk, None);
+        let json = serde_json::json!({
+            "phase": 0, "phase_elapsed_ms": 1, "elapsed_ms": 1, "checks": 0, "errors": 0,
+            "current_core": null, "cores": [], "memory_bytes": 0, "rate": null,
+            "load_percent": null
+        });
+        let pr: Progress = serde_json::from_value(json).unwrap();
+        assert_eq!(pr.disk, None);
+        let json = serde_json::json!({
+            "phase": 0, "kernel": "k1", "isa": "sse2", "kind": "mismatch", "logical": null,
+            "core": null, "iteration": 1, "expected": 1, "actual": 2, "seed": 3,
+            "load_percent": null
+        });
+        let e: ComputeError = serde_json::from_value(json).unwrap();
+        assert_eq!(e.transient, None);
+        let json = serde_json::json!({
+            "phase": 0, "checks": 0, "errors": 0, "duration_ms": 1, "skipped": null,
+            "work_ms": null, "workers": [], "rates": []
+        });
+        let d: PhaseDone = serde_json::from_value(json).unwrap();
+        assert_eq!(d.disk, None);
     }
 }

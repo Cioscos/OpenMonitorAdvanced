@@ -239,6 +239,8 @@ pub fn run_gpu_with<D>(
                 End::Skipped(_) => Vec::new(),
                 _ => rates,
             },
+
+            disk: None,
         }));
         match end {
             End::Stopped => return run.end(FinishReason::Stopped),
@@ -347,6 +349,8 @@ impl<D> Run<'_, D> {
             actual,
             seed: phase_seed(self.plan.seed, self.phase),
             load_percent: self.level,
+
+            transient: None,
         }));
     }
 
@@ -433,6 +437,8 @@ impl<D> Run<'_, D> {
             memory_bytes: 0,
             rate,
             load_percent: self.level,
+
+            disk: None,
         }));
     }
 
@@ -511,6 +517,8 @@ impl<D> Run<'_, D> {
             memory_bytes: 0,
             rate: None,
             load_percent: None,
+
+            disk: None,
         };
         thread::scope(|s| {
             s.spawn(move || {

@@ -1479,6 +1479,8 @@ pub(crate) mod tests {
             memory_bytes: 0,
             rate: None,
             load_percent: None,
+
+            disk: None,
         })
     }
 
@@ -1595,6 +1597,8 @@ pub(crate) mod tests {
             actual: 2,
             seed: 1,
             load_percent: None,
+
+            transient: None,
         });
         let rig = rig_with(
             "core2",
@@ -1867,6 +1871,8 @@ pub(crate) mod tests {
             ram_bytes: 0,
             phases: vec![],
             gpu: None,
+
+            disk: None,
         };
         let failure = plan_message(plan).unwrap_err();
         assert_eq!(failure.i18n_key(), "performance.start.invalid_plan");

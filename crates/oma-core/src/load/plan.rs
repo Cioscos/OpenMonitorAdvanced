@@ -185,6 +185,8 @@ fn phase(kernel: KernelId, isa: Isa, size: DataSize, duration_s: u32) -> Phase {
         iterations: None,
         pause_before_ms: 0,
         windows: None,
+
+        disk: None,
     }
 }
 
@@ -515,6 +517,8 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
         ram_bytes: if is_gpu { 0 } else { input.ram_budget },
         phases,
         gpu: if is_gpu { input.gpu } else { None },
+
+        disk: None,
     };
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
         return Err(BuildError::TooLong);

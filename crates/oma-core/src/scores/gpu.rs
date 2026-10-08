@@ -96,6 +96,8 @@ pub fn gpu_bench_plan(target: GpuTarget, seed: u64) -> (Plan, Vec<BenchStep>) {
             iterations: None,
             pause_before_ms: 0,
             windows: Some(GPU_WINDOWS),
+
+            disk: None,
         })
         .collect();
     let steps = GPU_LOADS
@@ -111,6 +113,8 @@ pub fn gpu_bench_plan(target: GpuTarget, seed: u64) -> (Plan, Vec<BenchStep>) {
         ram_bytes: 0,
         phases,
         gpu: Some(target),
+
+        disk: None,
     };
     (plan, steps)
 }

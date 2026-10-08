@@ -97,20 +97,20 @@ Codici d'errore (corpo `{"error":"…"}`):
 
 ## Moderazione
 
-Gli invii entrano da soli e l'autore interviene dopo, a mano, con `wrangler` dalla cartella `scores-worker/`. Non c'è un pannello web. Sono comandi che toccano il database vero: li esegue solo l'autore, mai un agente o la CI.
+Gli invii entrano da soli e l'autore interviene dopo, a mano, con `pnpm exec wrangler` dalla cartella `scores-worker/`. Non c'è un pannello web. Sono comandi che toccano il database vero: li esegue solo l'autore, mai un agente o la CI.
 
 ```powershell
 # ultimi invii di un modello (la chiave è il nome normalizzato, in minuscolo)
-wrangler d1 execute oma-scores --remote --command "SELECT submission, day, board, value, overclock, flags FROM entries WHERE model_key = 'amd ryzen 7 7800x3d 8-core processor' ORDER BY id DESC LIMIT 20"
+pnpm exec wrangler d1 execute oma-scores --remote --command "SELECT submission, day, board, value, overclock, flags FROM entries WHERE model_key = 'amd ryzen 7 7800x3d 8-core processor' ORDER BY id DESC LIMIT 20"
 
 # cancellare un invio intero (tutte le sue righe)
-wrangler d1 execute oma-scores --remote --command "DELETE FROM entries WHERE submission = '<uuid>'"
+pnpm exec wrangler d1 execute oma-scores --remote --command "DELETE FROM entries WHERE submission = '<uuid>'"
 
 # nascondere un modello dalla tabella pubblica
-wrangler d1 execute oma-scores --remote --command "INSERT OR IGNORE INTO hidden_models (model_key) VALUES ('<chiave in minuscolo>')"
+pnpm exec wrangler d1 execute oma-scores --remote --command "INSERT OR IGNORE INTO hidden_models (model_key) VALUES ('<chiave in minuscolo>')"
 
 # togliere l'esclusione
-wrangler d1 execute oma-scores --remote --command "DELETE FROM hidden_models WHERE model_key = '<chiave in minuscolo>'"
+pnpm exec wrangler d1 execute oma-scores --remote --command "DELETE FROM hidden_models WHERE model_key = '<chiave in minuscolo>'"
 
 # ricalcolare la tabella senza aspettare il cron (stesso SQL del cron)
 pnpm recompute
@@ -125,7 +125,7 @@ Non è un parere legale: descrive che cosa fa il sistema.
 - **Titolare del trattamento:** l'autore del progetto (Cioscos). Contatto: le issue del repository `github.com/Cioscos/OpenMonitorAdvanced`.
 - **Quali dati:** quelli dell'invio descritto sopra: punteggi, versione dei punteggi e dell'app, nome normalizzato del modello di CPU, GPU o disco, build di Windows, RAM in GB, avvisi, indicazione di overclock e il giorno dell'invio (mai l'ora). Nessun account, nessun identificativo dell'installazione, nessun nome utente o del computer, nessun numero di serie, e **nessun indirizzo IP salvato** né nel database né nelle risposte. I log del Worker sono spenti (`[observability] enabled = false`).
 - **Finalità:** costruire la classifica pubblica, cioè le mediane per modello.
-- **Base giuridica:** il consenso, dato inviando i punteggi dopo averne visto l'anteprima nell'app (l'invio non parte mai da solo). Per l'indirizzo IP, che Cloudflare vede e che il rate limit usa contro gli abusi senza salvarlo, il legittimo interesse.
+- **Base giuridica:** il consenso, dato inviando i punteggi dopo averne visto l'anteprima nell'app (l'invio non parte mai da solo). Per l'indirizzo IP, che Cloudflare vede e che il rate limit usa contro gli abusi senza salvarlo nel database, il legittimo interesse. I contatori del rate limit, che hanno l'IP come chiave, vivono solo nella memoria di Cloudflare per la finestra di 60 secondi; la finalità è la protezione dagli abusi.
 - **Conservazione:** 24 mesi, poi la riga si cancella. Nella tabella pubblica compaiono solo mediane di almeno 3 invii.
 - **Responsabile del trattamento:** Cloudflare, Inc., che esegue il Worker e il database; vale il suo accordo sul trattamento dei dati (DPA) incluso nei termini del servizio, e i dati di D1 stanno in UE (giurisdizione `eu`). Certificazione EU-U.S. Data Privacy Framework di Cloudflare: **da verificare** (la pagina `https://www.dataprivacyframework.gov/list` non si è potuta leggere al momento della stesura).
 - **Diritti:** poiché un invio è anonimo, l'autore non può riconoscerlo come tuo, quindi non può cancellarlo, correggerlo o fartelo avere su richiesta (art. 11 del GDPR: non è tenuto a identificarti solo per questo). Se un invio è palesemente sbagliato o abusivo, si può segnalare nelle issue indicando il modello e il giorno: l'autore può nascondere il modello o cancellare gli invii che riconosce come abusivi.
@@ -136,11 +136,13 @@ Non è un parere legale: descrive che cosa fa il sistema.
 Lo fa l'utente a mano, dalla cartella `scores-worker/`. Nessun token Cloudflare sta nei segreti di GitHub e la CI esegue solo i test.
 
 1. `pnpm install --frozen-lockfile`.
-2. `wrangler login` (apre il browser per l'accesso).
-3. `wrangler d1 create oma-scores --jurisdiction eu` crea il database nella giurisdizione UE e stampa il `database_id`.
+2. `pnpm exec wrangler login` (apre il browser per l'accesso).
+3. `pnpm exec wrangler d1 create oma-scores --jurisdiction eu` crea il database nella giurisdizione UE e stampa il `database_id`.
 4. In `wrangler.toml` sostituisci i due segnaposto, segnati da un commento `# OMA:`: il sottodominio di `routes` (`scores.example.invalid`) e il `database_id` (`00000000-0000-0000-0000-000000000000`).
-5. `wrangler d1 migrations apply oma-scores --remote` crea le tabelle.
-6. `wrangler deploy` (o `pnpm run deploy`) pubblica il Worker.
+5. `pnpm exec wrangler d1 migrations apply oma-scores --remote` crea le tabelle.
+6. `pnpm run deploy` (cioè `pnpm exec wrangler deploy`) pubblica il Worker.
 7. L'URL scelto va messo anche nella costante dell'app (M8d2).
 
-**Ripiego per il rate limit:** se il binding `SUBMIT_LIMIT` non funziona nel piano gratuito, si crea nel pannello di Cloudflare una regola di rate limit della zona su `POST /v1/submit`, per IP, con lo stesso limite (5 al minuto o il minimo consentito dal piano); poi si toglie `[[ratelimits]]` da `wrangler.toml` e si ripubblica con `wrangler deploy`. Il codice non cambia: senza il binding il Worker salta il controllo e lascia la regola della zona.
+**Righe dell'autore:** `crates/oma-core/src/scores/reference-scores.json` viene incluso nel Worker al momento del deploy. Dopo `pnpm author-table` bisogna quindi ripubblicare (`pnpm run deploy`), altrimenti il server continua a usare le righe vecchie.
+
+**Ripiego per il rate limit:** se il binding `SUBMIT_LIMIT` non funziona nel piano gratuito, si crea nel pannello di Cloudflare una regola di rate limit della zona su `POST /v1/submit`, per IP, con lo stesso limite (5 al minuto o il minimo consentito dal piano); poi si toglie `[[ratelimits]]` da `wrangler.toml` e si ripubblica con `pnpm run deploy`. Il codice non cambia: senza il binding il Worker salta il controllo e lascia la regola della zona. Con la regola della zona Cloudflare registra negli eventi di sicurezza del pannello (Security Events) l'indirizzo IP delle richieste che la attivano: in quel caso l'informativa qui sotto va aggiornata e deve dirlo, con il tempo di conservazione di quel registro nel pannello (**da verificare**, non è stato controllato).

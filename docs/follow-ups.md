@@ -168,9 +168,16 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
 - **Note di revisione rinviate:**
   - (a) `plausible()` normalizza ogni riga pubblicata a ogni invio: con una tabella grande pesa sulla CPU del Worker; precalcolare la chiave all'aggregazione o tenere una cache per `etag`.
   - (b) l'`ETag` ha la risoluzione del secondo UTC: due ricalcoli nello stesso secondo danno lo stesso `etag`.
-  - (c) un `NULL` in `hidden_models` farebbe pubblicare una tabella vuota (`NOT IN` con `NULL`); preferire `NOT EXISTS` o `NOT NULL` sulla colonna.
   - (d) `scripts/recompute.ts`: `spawnSync` con argomenti e `shell: true` dà l'avviso DEP0190 su Node 24.
   - (e) `\s` e `toLowerCase` di JavaScript e Rust possono differire sui nomi di modello non ASCII: da allineare nella M8d2 con le fixture comuni.
+- **Dopo il primo cron:** controllare in «Cron Events» del pannello di Cloudflare che l'aggregazione sia girata (i log sono spenti, quindi non resta altra traccia).
+- **Note per la M8d2 (parità con l'app):**
+  - `normalizeModel` non è idempotente: `((R)R)` diventa `(R)` al primo giro e vuoto al secondo; l'app deve applicarla una volta sola, come il server;
+  - `1e999` è `bad_value` in JavaScript ma un errore di lettura in `serde_json`: il corpo non arriva al server, ma le fixture non devono dare per scontato lo stesso codice;
+  - `MODEL_MAX` conta unità UTF-16, non caratteri Unicode: Rust deve contare allo stesso modo;
+  - nelle righe della tabella il nome della classifica sta nel campo `category`;
+  - `MIN(model)` sceglie la grafia più piccola in ordine lessicale: da cambiare con la grafia più frequente;
+  - l'interfaccia della M8d2 deve mostrare i nomi dei modelli come testo semplice (mai HTML).
 - **Informativa:** la certificazione Data Privacy Framework di Cloudflare è «da verificare» in `docs/benchmark-scoring.md` (la pagina dell'elenco non si legge in automatico).
 
 ## Open: CPU benchmark (M8a2)

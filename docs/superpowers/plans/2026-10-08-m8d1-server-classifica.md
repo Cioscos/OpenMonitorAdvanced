@@ -374,12 +374,12 @@ Le esegue il controller con l'utente. I comandi su Cloudflare li lancia l'utente
 - [ ] **Step 2: database e indirizzo.**
   - L'utente esegue `pnpm exec wrangler login` e `pnpm exec wrangler d1 create oma-scores --jurisdiction eu`.
   - L'utente sceglie il sottodominio. Il controller mette l'id e il sottodominio in `wrangler.toml` e fa il commit `chore(scores-worker): set the database id and domain`.
-  - L'utente esegue `pnpm exec wrangler d1 migrations apply oma-scores --remote` e `pnpm deploy`.
+  - L'utente esegue `pnpm exec wrangler d1 migrations apply oma-scores --remote` e `pnpm run deploy`. Controlla che l'elenco dei binding stampato da `pnpm exec wrangler deploy` comprenda `SUBMIT_LIMIT`.
 - [ ] **Step 3: prove con `curl`:**
-  - `GET` → 200 con la tabella vuota e `ETag`; di nuovo con `If-None-Match` → 304;
+  - `GET` → 200 con la tabella vuota e `ETag`; di nuovo con `If-None-Match` → 304; il `GET` con `curl` semplice e con `curl --compressed` (con la compressione l'`ETag` diventa debole e il 304 deve funzionare lo stesso);
   - `POST` dell'invio valido della CPU di `submissions.json`, con il modello `OMA Test CPU` → 201;
   - `POST` di un invio non valido → 400 con il codice;
-  - 6 `POST` di fila → almeno un 429. Se non arriva, il binding non funziona nel piano gratuito: si aggiunge la regola di rate limit della zona (`docs/benchmark-scoring.md`) e lo si scrive nei follow-up.
+  - circa 12 `POST` di fila con corpi non validi (`{}`) → almeno un 429 (il rate limit viene prima della lettura del JSON, e invii validi sporcherebbero il conteggio `n: 3` del passo 4). Se non arriva, il binding non funziona nel piano gratuito: si aggiunge la regola di rate limit della zona (`docs/benchmark-scoring.md`) e lo si scrive nei follow-up.
 - [ ] **Step 4: aggregazione e moderazione:**
   - 3 invii in tutto per `OMA Test CPU`, poi `pnpm recompute`: il `GET` mostra la riga con `n: 3`;
   - `hidden_models` con la chiave di prova e `pnpm recompute`: la riga sparisce;

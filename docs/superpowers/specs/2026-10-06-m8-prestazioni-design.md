@@ -35,7 +35,7 @@ Successo: chi fa overclock o undervolt capisce in pochi clic se il sistema è st
 | D11 | Se si chiude la finestra, il test continua: la tray lo segnala, il menu ha «Ferma il test» e alla fine arriva un toast con il verdetto. «Esci» chiede conferma e salva la sessione come interrotta. |
 | D12 | I carichi girano in un **processo ausiliario `oma-load.exe`** (approccio 1). Sono stati scartati i thread dentro l'app e il servizio. |
 | D13 | I punteggi di CPU e GPU sono in **punti** (per la CPU una scala fissa con il 7800X3D di taratura a 1500, §4.6; per la GPU una scala fissa con la RTX 4080 di taratura a 1500, §5.2), con le velocità vere di ogni carico in una tabella di dettaglio. I contagiri del **disco** sono in **MB/s**, e i punti del disco servono alla classifica. |
-| D14 | La classifica parte da una tabella di riferimento inclusa nell'app. La community la alimenta con **issue GitHub precompilate** dall'app. Un'Action valida e aggrega le issue e pubblica la tabella su GitHub Pages. L'app la **scarica da sola** (al massimo una volta al giorno, attivo di default, si può spegnere). |
+| D14 | La classifica parte da una tabella di riferimento inclusa nell'app. La community la alimenta con **issue GitHub precompilate** dall'app. Un'Action valida e aggrega le issue e pubblica la tabella su GitHub Pages. L'app la **scarica da sola** (al massimo una volta al giorno, attivo di default, si può spegnere). **Rivista nel §7.6:** al posto di issue, Action e Pages, un invio anonimo a un Cloudflare Worker. |
 | D15 | Codice di terzi da adattare, non solo da studiare: **FIRESTARTER** (GPL-3.0-or-later), **OpenDCDiag** (Apache-2.0), **memtest_vulkan** (Zlib) (§12). |
 
 ### 1.2 Scomposizione in piani
@@ -45,7 +45,7 @@ Successo: chi fa overclock o undervolt capisce in pochi clic se il sistema è st
 | **M8a** | Fondamenta: vista Prestazioni, `oma-load.exe` e protocollo, cronologia, diario dei crash, WHEA, stop termico, tray, tooltip, impostazioni. Stress di CPU e RAM, benchmark della CPU e contagiri. Se il piano supera la dimensione abituale si divide in **M8a1** (fondamenta e stress di CPU e RAM) e **M8a2** (benchmark della CPU e contagiri). |
 | **M8b** | GPU: spike iniziale (§5.6), benchmark Calcolo e Grafica, stress S1–S9. |
 | **M8c** | Disco: benchmark Lettura e Scrittura, stress N1–N4 e V1–V4. Un piano unico (§6.4). |
-| **M8d** | Classifica: tabella di riferimento, pagina Classifica, esportazione, issue precompilata, Action di validazione e di aggregazione, GitHub Pages, download automatico. |
+| **M8d** | Classifica: tabella di riferimento, pagina Classifica, esportazione, condivisione anonima, download automatico. Due piani: **M8d1** il server (Cloudflare Worker), **M8d2** l'app (§7.6). |
 
 Ogni piano ha il suo branch `feat/m8x-…`. La release la decide l'utente alla fine di ogni sotto-milestone.
 
@@ -650,6 +650,85 @@ Non contiene campioni, seriali, GUID, nome del PC o nome utente.
 - **Ripiego.** Senza rete o con un file non valido si usa l'ultima copia buona, altrimenti la tabella inclusa nell'installer.
 - **Privacy.** Attivo di default (`communityTable`), si spegne nelle Impostazioni › Prestazioni. Accanto alla casella e in `docs/benchmark-scoring.md` c'è la nota, nello stile di quella della M6c: la richiesta va a `cioscos.github.io` e manda l'indirizzo IP e uno User-Agent con la versione dell'app, nient'altro. Si applica la privacy di GitHub.
 
+### 7.6 Decisioni del brainstorming della M8d (2026-10-08)
+
+Precisano i §7.1–7.5; dove li contraddicono, vale questo paragrafo. Per decisione dell'utente la condivisione non deve richiedere un account, quindi **un Cloudflare Worker anonimo sostituisce le issue GitHub, le Action e GitHub Pages** (§7.3, §7.4 e il server del §7.5). La ricerca sul GDPR è in `docs/superpowers/references/m8/research-gdpr.md` (non è un parere legale).
+
+- **Due piani.**
+  - **M8d1, il server:** il Worker, il database D1, l'aggregazione, le fixture comuni e la documentazione della moderazione. Branch `feat/m8d1-…`.
+  - **M8d2, l'app:** la tabella inclusa, il download, la pagina Classifica, il riferimento ▲ «modello della tabella», «Esporta JSON» e «Condividi». Parte quando il Worker è pubblicato, così si prova dal vivo.
+- **Anonimato (l'opzione «a» della ricerca).**
+  - **Cosa non si salva:** nessun account, nessun id d'installazione, nessun indirizzo IP né nel database né nei log, e i log del Worker sono spenti.
+  - **La data:** si salva il giorno dell'invio, non l'ora.
+  - **Cosa diventa pubblico:** solo le mediane di almeno 3 invii; le righe grezze restano in D1. È il controllo di unicità: una mediana di almeno 3 invii non indica una persona.
+  - **L'IP:** serve solo al rate limit, in memoria. La base giuridica è il legittimo interesse contro gli abusi.
+  - **Il prezzo:** gli invii ripetuti della stessa persona contano più volte. Lo limitano il rate limit, il filtro di plausibilità, la soglia dei 3 invii, la moderazione e il segno «condiviso» locale dell'app.
+- **Il Worker.**
+  - **Dove sta:** la cartella `scores-worker/` del repository, con TypeScript, `wrangler.toml`, test Vitest con il runtime dei Worker simulato e un lockfile proprio.
+  - **Costo:** gratis nel piano Workers Free. Il piano ricontrolla i limiti di richieste, CPU e D1, e se il piano gratuito offre il binding di rate limit e i cron.
+  - **Indirizzo:** un sottodominio del dominio dell'utente su Cloudflare, scelto prima del deploy. Nel codice è un segnaposto in un solo punto per parte: la costante dell'app e `wrangler.toml`. Un URL proprio permette di cambiare host senza aggiornare l'app.
+  - **Deploy:** lo fa l'utente a mano, con `wrangler login` e `wrangler deploy`. Nei segreti di GitHub non c'è nessun token Cloudflare; la CI esegue solo i test e il controllo dei tipi del Worker.
+  - **`POST /v1/submit`:**
+    - **Corpo:** l'oggetto del §8.5 più `overclock` (booleano), al massimo 16 KB.
+    - **Controlli:** schema, `format: 1`, versione del punteggio nota (`cpu-1`, `gpu-1`, `disk-1`), `valid: true`, valori finiti e positivi.
+    - **Plausibilità:** il valore sta dentro un fattore 0,2–5 della mediana del modello. Se il modello non ha una mediana, vale quella della categoria; se la categoria è vuota, vale un tetto per categoria fissato nel piano.
+    - **Risposte:**
+      - `201` se l'invio è accettato;
+      - `400` con un codice d'errore che l'app traduce;
+      - `413` se il corpo è troppo grande;
+      - `429` se le richieste sono troppe.
+    - **Riga salvata:** categoria, versione, modello normalizzato, punteggi, versione dell'app, build di Windows, RAM in GB, avvisi, `overclock` e il giorno.
+  - **Rate limit:** per IP. Si usa il binding di rate limit dei Worker se il piano gratuito lo offre, altrimenti la regola di rate limit gratuita della zona. I numeri li fissa il piano.
+  - **Aggregazione:** un cron giornaliero del Worker.
+    - Esclude gli invii in overclock e i modelli della tabella `hidden_models`.
+    - Calcola la mediana per categoria (`cpu-single`, `cpu-multi`, `gpu-compute`, `gpu-graphics`, `disk`), versione e modello. Un modello entra solo con almeno 3 invii.
+    - Scrive il JSON del §8.4 con `source: "community"`.
+    - Cancella gli invii più vecchi di 24 mesi.
+  - **`GET /v1/reference-scores.json`:** serve il JSON già calcolato, con ETag e `Cache-Control` di un'ora.
+  - **Moderazione:**
+    - gli invii entrano da soli, e l'autore interviene dopo;
+    - gli interventi sono comandi `wrangler d1 execute` documentati in `docs/benchmark-scoring.md`: cancellare un invio, nascondere un modello, ricalcolare la tabella;
+    - non c'è un pannello web.
+- **Regole condivise.**
+  - **Cosa coprono:** la normalizzazione dei modelli (spazi e maiuscole), la validazione, la plausibilità e la mediana.
+  - **Dove stanno:** in Rust (`oma-core::scores`, per l'app) e in TypeScript (il Worker).
+  - **Come restano uguali:** con le fixture di `testdata/scores/`, lette da `cargo test` e da Vitest: invii validi e non validi con il codice atteso, modelli da normalizzare, e un'aggregazione con il risultato atteso.
+  - **La CLI `oma-scores` del §7.4** non serve più.
+- **Righe dell'autore.** Restano separate da quelle della community.
+  - **Nell'app:** `reference-scores.json` (CC0) è incluso con le righe dell'autore, cioè le mediane delle sue misure valide: 7800X3D, RTX 4080, iGPU AMD e Fanxiang S880. È sempre disponibile, anche senza rete.
+  - **Nel Worker:** si pubblicano solo le righe della community. L'app unisce le due tabelle e mostra la fonte di ogni riga.
+- **App.**
+  - **Download:** come il §7.5, ma verso l'URL del Worker.
+    - **Frequenza:** al massimo una volta ogni 24 h; dopo un errore, nuovo tentativo dopo 6 h.
+    - **Controlli:** ETag, al massimo 1 MB, scrittura atomica.
+    - **Ripiego:** l'ultima copia buona, poi le sole righe dell'autore.
+    - **Privacy:** la nota accanto a `communityTable` dice che la richiesta va al dominio del Worker, tramite Cloudflare, con l'indirizzo IP e uno User-Agent con la versione dell'app.
+  - **«Condividi»:** c'è solo sotto un punteggio valido e non provvisorio.
+    - **Anteprima:** mostra il JSON esatto, la casella «Hardware in overclock» e la nota: l'invio è anonimo, senza account e senza IP salvato; diventa pubblico solo come mediana di almeno 3 invii; dopo l'invio non si può più riconoscere né cancellare.
+    - **«Invia»:** fa un POST con una funzione `post` nuova in `oma-win::http`.
+    - **Esito:** se l'invio riesce, l'app segna il punteggio come «condiviso» solo in locale e disattiva il pulsante. Dopo un errore mostra il motivo tradotto e non lo segna.
+  - **Pagina Classifica:** come il §7.2, con un badge della fonte su ogni riga («autore» o «community», con il tooltip).
+  - **Riferimento ▲:** la terza voce, «Modello della tabella…», sceglie un modello della stessa categoria e versione.
+  - **«Esporta JSON»:** salva l'oggetto del §8.5 con un dialogo di salvataggio.
+- **Privacy (al posto del §10 per la condivisione).**
+  - **Quando partono i dati:** l'app li manda solo dopo l'anteprima e «Invia».
+  - **Informativa:** sta nel README e in `docs/benchmark-scoring.md`. Contiene titolare, dati, finalità, base giuridica, conservazione di 24 mesi, Cloudflare come responsabile del trattamento, e il motivo per cui un invio non si può cancellare.
+  - **Punti aperti della ricerca, da verificare nel piano:** i log degli IP nei Worker, la residenza dei dati di D1 e la certificazione DPF di Cloudflare.
+- **Verifiche dal vivo.**
+  - **M8d1:**
+    - `wrangler login` e deploy;
+    - un invio con `curl`;
+    - il cron lanciato a mano;
+    - la tabella scaricata;
+    - un comando di moderazione;
+    - la cancellazione degli invii di prova.
+  - **M8d2:**
+    - la condivisione dall'app;
+    - il download e la Classifica;
+    - l'impostazione spenta;
+    - «Aggiorna ora»;
+    - l'uso senza rete.
+
 ## 8. Formati dei file
 
 Tutti i file sono JSON con `format: 1`, scritti in modo atomico (file temporaneo proprio e rinomina) e letti con tolleranza per i campi sconosciuti. Stanno in `%LOCALAPPDATA%\OpenMonitorAdvanced\performance\`.
@@ -795,9 +874,7 @@ Le fa l'utente, con un elenco a passi come nelle milestone precedenti. Prima di 
 - tooltip presenti in tutte le pagine;
 - contagiri fluidi e budget della finestra.
 
-Per la M8d:
-- issue di prova creata dall'utente, validata e aggregata in un repository di prova o con etichette di prova;
-- Pages pubblicato e tabella scaricata dall'app.
+Per la M8d valgono le verifiche del §7.6, che sostituiscono quelle con le issue e con Pages.
 
 ## 14. Limiti dichiarati
 
@@ -827,10 +904,9 @@ Per la M8d:
 - **Chi tiene la cronologia:** i moduli Rust che leggono e scrivono la cronologia, e i comandi Tauri e gli eventi verso la UI (`performance-*`).
 - **M8b:** gli esiti dello spike (§5.6) e la scelta della compilazione degli shader.
 - **M8c:** quali cartelle «usate di recente» si puliscono all'avvio e dove si registra che sono state usate. Deciso nel §6.4: la cartella del diario aperto e l'ultima cartella usata.
-- **M8d:**
-  - nome e struttura della CLI `oma-scores`;
-  - come provare le Action senza sporcare le issue vere;
-  - testo esatto del modello della issue;
-  - abilitazione di Pages (a carico dell'utente);
-  - nota sulla privacy aggiornata nel README.
+- **M8d:** con il Worker del §7.6 cadono la CLI `oma-scores`, le prove delle Action, il modello della issue e Pages. Restano da fissare:
+  - i limiti attuali del piano gratuito;
+  - i numeri del rate limit e i tetti per categoria;
+  - lo schema di D1;
+  - l'informativa nel README.
 - **Versione e release:** quale numero di versione esce con ogni sotto-milestone (lo decide l'utente).

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-disk-probe"
+description = "Enables the performance_disk_probe command without any pre-configured scope."
+commands.allow = ["performance_disk_probe"]
+
+[[permission]]
+identifier = "deny-performance-disk-probe"
+description = "Denies the performance_disk_probe command without any pre-configured scope."
+commands.deny = ["performance_disk_probe"]

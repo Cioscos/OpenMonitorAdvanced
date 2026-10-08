@@ -586,17 +586,22 @@ fn check_disk_phase(p: &Phase) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// A plain `X:\...` folder: no relative, UNC or `\\?\` paths, no `..` components, no
+/// control characters, at most [`MAX_DISK_DIR_BYTES`] bytes. The app checks a folder
+/// from the UI with it before any use, `validate` again before the helper runs.
+pub fn is_plain_disk_dir(dir: &str) -> bool {
+    let b = dir.as_bytes();
+    b.len() <= MAX_DISK_DIR_BYTES
+        && b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && &b[1..3] == b":\\"
+        && !dir.chars().any(char::is_control)
+        && !dir.split(['\\', '/']).any(|c| c == "..")
+}
+
 fn check_disk_target(t: &DiskTarget) -> Result<(), IpcError> {
     let bad = |m: &str| Err(IpcError::Decode(m.into()));
-    let b = t.dir.as_bytes();
-    // Plain `X:\...` only: no relative, UNC or `\\?\` paths, no `..` components.
-    if b.len() > MAX_DISK_DIR_BYTES
-        || b.len() < 3
-        || !b[0].is_ascii_alphabetic()
-        || &b[1..3] != b":\\"
-        || t.dir.chars().any(char::is_control)
-        || t.dir.split(['\\', '/']).any(|c| c == "..")
-    {
+    if !is_plain_disk_dir(&t.dir) {
         return bad(r"dir is not a plain absolute X:\ path");
     }
     if !(64 << 20..=MAX_DISK_BYTES).contains(&t.file_bytes) || t.file_bytes % (8 << 20) != 0 {

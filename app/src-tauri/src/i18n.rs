@@ -159,6 +159,15 @@ pub const RUST_KEYS: &[&str] = &[
     "performance.toast.gpuBenchDone",
     "performance.toast.gpuBenchInvalid",
     "tray.gpuBenchRunning",
+    "tray.tooltip.disk",
+    "tray.diskBenchRunning",
+    "performance.score.disk.title",
+    "performance.toast.diskBenchDone",
+    "performance.toast.diskBenchInvalid",
+    "performance.outcome.stopped_disk_full",
+    "performance.start.access_denied",
+    "performance.objective.disk.normal",
+    "performance.objective.disk.overclock",
 ];
 
 type Catalog = HashMap<String, String>;

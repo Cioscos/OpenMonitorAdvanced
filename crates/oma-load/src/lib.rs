@@ -3,6 +3,7 @@
 //! `link` and the D3D11 half of `gpu`.
 
 pub mod args;
+pub mod disk;
 pub mod engine;
 pub mod gpu;
 pub mod kernel;

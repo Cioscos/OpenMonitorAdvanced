@@ -155,16 +155,19 @@ Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-0
 
 ## Open: leaderboard server (M8d1)
 
-Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Implementata sul branch `feat/m8d1-scores-worker`; le prove dal vivo W7 sono pendenti.
+Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Implementata sul branch `feat/m8d1-scores-worker`; prove dal vivo W7 superate il 2026-10-09. Il Worker è pubblicato su `https://scores.cischi.dev` con il database D1 `oma-scores` (giurisdizione `eu`).
 
-- **Segnaposto di `wrangler.toml`:** il sottodominio di `routes` (`scores.example.invalid`) e il `database_id` (`wrangler d1 create oma-scores --jurisdiction eu`). Il sottodominio va messo anche nella costante dell'app (M8d2).
-- **Righe della CPU dell'autore:** `reference-scores.json` non ha ancora righe `cpu-single` e `cpu-multi` (le misure fatte prima della taratura B11 sono provvisorie e si escludono). Da misurare in W7 con la build release e rigenerare con `pnpm author-table`.
-- **Prove dal vivo W7 (le fa l'utente):**
-  - `GET /v1/reference-scores.json` con `200`, `ETag` e poi `304` con `If-None-Match`;
-  - `POST /v1/submit`: `201` con un invio valido, `400` con uno non valido;
-  - `429` dopo 6 invii in un minuto, oppure, se il binding non va nel piano gratuito, il ripiego: regola di rate limit della zona nel pannello di Cloudflare, poi `[[ratelimits]]` tolto da `wrangler.toml` e nuovo deploy (il codice salta il controllo senza binding);
-  - aggregazione: 3 invii di `OMA Test CPU` danno una riga con `n: 3`; `hidden_models` la nasconde; poi pulizia degli invii di prova (`DELETE FROM entries WHERE submission = …`) e `pnpm recompute`;
-  - log spenti (nessuna riga con IP o corpi) e giurisdizione UE del database.
+- **Sottodominio nell'app (M8d2):** `scores.cischi.dev` va messo anche nella costante dell'app.
+- **Righe della CPU dell'autore:** misurate in W7 con la build release (3 benchmark del Ryzen 7 7800X3D: single 1491, multi 1495). Il Worker include le righe dell'autore al deploy: dopo ogni `pnpm author-table` serve un nuovo `pnpm run deploy`.
+- **Prove dal vivo W7, superate il 2026-10-09:**
+  - `GET /v1/reference-scores.json`: `200` con la tabella vuota, `ETag: "empty"` e `Cache-Control: public, max-age=3600`; `304` con `If-None-Match`. Con la compressione (`curl --compressed`) Cloudflare risponde `ETag: W/"empty"`, e il `304` arriva con `If-None-Match: W/"empty"`: il confronto debole aggiunto dalla revisione finale serve davvero. `404` e `405` come previsto.
+  - `POST /v1/submit`: `201` con l'invio valido della CPU (modello `OMA Test CPU`), `400 bad_schema` con un corpo incompleto.
+  - **Rate limit:** il binding funziona anche nel piano gratuito, ma è permissivo. 14 richieste in fila non hanno dato nessun `429`; con 30 richieste in parallelo e altre 10 subito dopo, sono arrivati molti `429`. Il ripiego con la regola della zona non serve.
+  - **Aggregazione:** 3 invii di `OMA Test CPU` e `pnpm recompute` pubblicano le righe `cpu-single` 1850 e `cpu-multi` 2400 con `n: 3` e un `ETag` nuovo. Con la chiave in `hidden_models` e un nuovo ricalcolo la tabella torna vuota. In `entries` c'erano solo giorno, valori e modello normalizzato, senza IP.
+  - **Pulizia:** cancellati invii, `hidden_models` e `daily` di prova, poi un ricalcolo: tabella vuota, tre tabelle a zero righe.
+  - **Privacy:** nel pannello, Logs, Traces e Issues del Worker sono spenti; `wrangler d1 list` dà `"jurisdiction":"eu"`.
+- **Primo deploy:** il cron si registra solo se l'account ha un sottodominio `workers.dev`. Il sottodominio si crea aprendo una volta la pagina «Workers & Pages» del pannello; il Worker resta con `workers_dev = false`.
+- **`HEAD` dà `405`:** `HEAD /v1/reference-scores.json` risponde `method_not_allowed`. L'app non lo usa, ma per la semantica HTTP andrebbe trattato come un `GET` senza corpo.
 - **Note di revisione rinviate:**
   - (a) `plausible()` normalizza ogni riga pubblicata a ogni invio: con una tabella grande pesa sulla CPU del Worker; precalcolare la chiave all'aggregazione o tenere una cache per `etag`.
   - (b) l'`ETag` ha la risoluzione del secondo UTC: due ricalcoli nello stesso secondo danno lo stesso `etag`.

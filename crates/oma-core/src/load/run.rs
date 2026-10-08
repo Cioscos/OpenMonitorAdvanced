@@ -32,6 +32,8 @@ const STATUS_EVENTS: usize = 200;
 const MAX_EVENTS: usize = 1_000;
 const FINAL_POLL_MS: u64 = 2_000;
 const TEMP_MISSING_MS: u64 = 10_000;
+/// A disk run whose byte counters stand still this long is hung (R17).
+const STALL_MS: u64 = 120_000;
 /// How long a run may outlast its plan before it counts as hung.
 pub(crate) const OVERRUN_MS: u64 = 120_000;
 /// `oma-load` exits with this code on an invalid command line or message (`EXIT_USAGE`).
@@ -259,6 +261,9 @@ pub struct RunController {
     hot_at: Option<u64>,
     /// Disk runs: when the current phase began, from the latest `Progress`.
     phase_start: Option<u64>,
+    /// Disk runs (R17): the last `read + written` total and when it last grew.
+    stall_bytes: u64,
+    stall_since: Option<u64>,
 }
 
 fn rfc3339(wall_ms: i64) -> String {
@@ -325,6 +330,8 @@ impl RunController {
             disk_status: None,
             hot_at: None,
             phase_start: None,
+            stall_bytes: 0,
+            stall_since: None,
             config,
         };
         if c.is_disk() {
@@ -673,6 +680,11 @@ impl RunController {
                         written_bytes: d.written_bytes,
                         read_bytes: d.read_bytes,
                     });
+                    let total = d.read_bytes.saturating_add(d.written_bytes);
+                    if self.stall_since.is_none() || total > self.stall_bytes {
+                        self.stall_since = Some(self.mono);
+                    }
+                    self.stall_bytes = total;
                     if let Some(s) = self.session.disk.as_mut() {
                         s.read_bytes = d.read_bytes;
                         s.written_bytes = d.written_bytes;
@@ -718,7 +730,7 @@ impl RunController {
             }
             LoadMessage::Error(e) => {
                 self.errors += 1;
-                self.io_failed |= e.kind == ErrorKind::IoError;
+                self.io_failed |= e.kind == ErrorKind::IoError && e.transient != Some(true);
                 let record = self.record(e);
                 let core = e.core.filter(|_| e.kind == ErrorKind::Mismatch);
                 self.coreless_errors |= core.is_none();
@@ -1041,8 +1053,21 @@ impl RunController {
             }
         };
         let overrun = !soft && limit;
+        // R17: the soft phases skip the overrun check, so a disk that stops moving bytes is
+        // caught here. The pause before a phase does not count.
+        let stalled = self.is_disk()
+            && self.stall_since.is_some_and(|since| {
+                let pause_end = self.phase_start.unwrap_or(0)
+                    + self
+                        .session
+                        .plan
+                        .phases
+                        .get(self.phase as usize)
+                        .map_or(0, |p| u64::from(p.pause_before_ms));
+                self.mono.saturating_sub(since.max(pause_end)) > STALL_MS
+            });
         if self.state == RunState::Running
-            && (overrun || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
+            && (overrun || stalled || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
         {
             self.hung = true;
             self.event("hung", &[]);
@@ -2807,6 +2832,16 @@ mod tests {
         LoadMessage::Progress(p)
     }
 
+    /// Like `disk_progress_in`, with bytes that keep growing so the stall clock stays quiet.
+    fn disk_progress_moving(phase: u32, in_phase: u64, at: u64) -> LoadMessage {
+        let LoadMessage::Progress(mut p) = disk_progress(0, 0, 5 + at, 0.0, 5.0) else {
+            unreachable!()
+        };
+        p.phase = phase;
+        p.phase_elapsed_ms = in_phase;
+        LoadMessage::Progress(p)
+    }
+
     #[test]
     fn a_strict_disk_phase_is_timed_from_its_own_start() {
         // A fill 2000 s past its time, then an N1 phase (60 s) on time: not hung.
@@ -2833,11 +2868,11 @@ mod tests {
         let mut t = 1000;
         while t + 900 <= 60_000 + OVERRUN_MS {
             t += 900;
-            c.on_load(&disk_progress_in(0, 0), clock(t));
+            c.on_load(&disk_progress_moving(0, 0, t), clock(t));
             assert!(!c.on_clock(clock(t)).contains(&Action::Kill), "{t}");
         }
         t += 5_000;
-        c.on_load(&disk_progress_in(0, 0), clock(t));
+        c.on_load(&disk_progress_moving(0, 0, t), clock(t));
         assert!(c.on_clock(clock(t)).contains(&Action::Kill));
         assert!(c.hung);
     }
@@ -2856,12 +2891,81 @@ mod tests {
             let mut c = disk_ctl_with(false, kernel);
             c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
             c.on_load(
-                &disk_progress(late - 100, 0, 5, 0.0, 5.0),
+                &disk_progress(late - 100, 0, 6, 0.0, 5.0),
                 clock(late - 100),
             );
             let a = c.on_clock(clock(late));
             assert_eq!(a.contains(&Action::Kill), hung, "{kernel:?}");
             assert_eq!(c.hung, hung, "{kernel:?}");
         }
+    }
+
+    #[test]
+    fn a_transient_io_error_stops_a_stop_on_error_phase() {
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+        let a = c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1500));
+        assert!(a.contains(&Action::SendStop), "{a:?}");
+        // A transient io_error, then a bit flip: the first one already stopped.
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1000));
+        assert_eq!(c.status().state, RunState::Stopping);
+        let a = c.on_load(&disk_error(ErrorKind::BitFlip, None), clock(1100));
+        assert!(!a.contains(&Action::SendStop));
+    }
+
+    #[test]
+    fn a_transient_io_error_does_not_hide_a_later_crash() {
+        let mut c = disk_ctl_with(false, KernelId::N2);
+        c.session.plan.phases[0].stop_on_error = false;
+        c.on_load(&disk_error(ErrorKind::IoError, Some(true)), clock(1000));
+        assert!(!c.io_failed);
+        let mut c = disk_ctl(false);
+        c.on_load(&disk_error(ErrorKind::IoError, Some(false)), clock(1000));
+        assert!(c.io_failed);
+    }
+
+    fn feed_stall(c: &mut RunController, from: u64, to: u64, step: u64, grow: u64) -> bool {
+        let mut t = from;
+        let mut written = 5;
+        while t <= to {
+            written += grow;
+            c.on_load(&disk_progress(t, 0, written, 0.0, 5.0), clock(t));
+            if c.on_clock(clock(t)).contains(&Action::Kill) {
+                return true;
+            }
+            t += step;
+        }
+        false
+    }
+
+    #[test]
+    fn frozen_disk_bytes_for_120_s_are_hung() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        assert!(!feed_stall(&mut c, 1000, 120_000, 2000, 0));
+        assert!(feed_stall(&mut c, 122_000, 130_000, 2000, 0));
+        assert!(c.hung);
+    }
+
+    #[test]
+    fn slow_disk_progress_is_not_hung() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        // One byte every 2 s keeps the clock alive.
+        assert!(!feed_stall(&mut c, 1000, 400_000, 2000, 1));
+    }
+
+    #[test]
+    fn the_pause_before_a_phase_does_not_count_as_a_stall() {
+        let mut c = disk_ctl_with(false, KernelId::V1);
+        c.session.plan.phases[0].pause_before_ms = 5000;
+        // Heartbeats from the pause (phase_elapsed 0), bytes frozen.
+        let mut t = 1000;
+        while t <= 124_000 {
+            c.on_load(&disk_progress_in(0, 0), clock(t));
+            assert!(!c.on_clock(clock(t)).contains(&Action::Kill), "{t}");
+            t += 1000;
+        }
+        c.on_load(&disk_progress_in(0, 0), clock(127_000));
+        assert!(c.on_clock(clock(127_000)).contains(&Action::Kill));
     }
 }

@@ -72,7 +72,7 @@ SMART data.
   click-through window: nothing enters the game (see [In-game overlay](#in-game-overlay)).
 - **Performance view.** A stress test for the CPU, the RAM, the GPU and the disks, with a guided wizard (normal check
   or overclock stability, from Quick to Long), a live page, a result with a verdict, and a history
-  of past sessions, and benchmarks for the CPU (a single-core and a multi-core score) the GPU (a Compute and a Graphics score) and the disks (read and write) on gauges
+  of past sessions, and benchmarks for the CPU (a single-core and a multi-core score), the GPU (a Compute and a Graphics score) and the disks (read and write) on gauges
   (see [Performance view](#performance-view)).
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.

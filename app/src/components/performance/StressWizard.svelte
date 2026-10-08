@@ -3,7 +3,7 @@
   import type { Backend } from '../../lib/backend';
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { diskErrorText, estimatedWrites, formatBytes as formatDiskBytes } from '../../lib/performance/disk';
+  import { estimatedWrites, formatBytes as formatDiskBytes } from '../../lib/performance/disk';
   import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, sizeLabel } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
@@ -117,7 +117,7 @@
           .catch((error) => {
             if (id !== generation) return;
             plan = null;
-            previewError = diskErrorText(error, t, i18n.locale) ?? errorText(error, t);
+            previewError = errorText(error, t, i18n.locale);
           }),
       next.custom ? DEBOUNCE_MS : 0,
     );
@@ -164,7 +164,7 @@
       else startError = t(`performance.wizard.${result.reason}`);
     } catch (error) {
       if (disk && String(error) === 'disk:standby') standbyAsking = true;
-      else startError = t('performance.wizard.startError', { reason: diskErrorText(error, t, i18n.locale) ?? errorText(error, t) });
+      else startError = t('performance.wizard.startError', { reason: errorText(error, t, i18n.locale) });
     } finally {
       starting = false;
     }

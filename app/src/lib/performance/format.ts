@@ -1,7 +1,7 @@
 import { formatBytes } from '../format';
 import type { Params, Translate } from '../i18n/index.svelte';
 import type { DataSize, DiskErrorKind, ErrorRecord, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
-import { formatBytes as formatDiskBytes } from './disk';
+import { diskErrorText, formatBytes as formatDiskBytes, formatMbs } from './disk';
 
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
@@ -104,6 +104,8 @@ export function eventText(event: SessionEvent, t: Translate, locale: string): Pi
   if (recovered) p.id = recovered[1];
   if (p.phase !== undefined && Number.isFinite(Number(p.phase))) p.phase = Number(p.phase) + 1;
   if ((code === 'ram_reduced' || code === 'vram_allocated' || code === 'vram_reduced') && p.value !== undefined) p.value = formatBytes(Number(p.value), locale);
+  if (code === 'file_bytes' || code === 'slc_cliff' || code === 'disk_sector') p.size = formatDiskBytes(Number(p.value), locale);
+  if (code === 'slc_steady') p.speed = formatMbs(Number(p.value), locale);
   if (code === 'vram_bits' && p.value !== undefined) p.value = `0x${Number(p.value).toString(16).toUpperCase()}`;
   const terms: { term: string; word?: string }[] = (EVENT_TERMS[code] ?? []).map((term) => ({ term }));
   if (code === 'whea') {
@@ -172,9 +174,12 @@ export function percentText(ratio: number, locale: string): string {
  * A refusal of the shell in words: `build:<code>` (a plan that cannot be built) and `busy` are
  * translated, anything else is the shell's own text.
  */
-export function errorText(error: unknown, t: Translate): string {
+export function errorText(error: unknown, t: Translate, locale = 'en'): string {
   const text = String(error);
   if (text === 'busy') return t('performance.wizard.busy');
+  const disk = diskErrorText(text, t, locale);
+  if (disk) return disk;
+  if (text === 'build:no_disk') return t('performance.start.no_disk');
   if (!text.startsWith('build:')) return text;
   const key = `performance.wizard.error.${text.slice('build:'.length)}`;
   return t(key) === key ? text : t(key);

@@ -3,7 +3,7 @@
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { Backend } from '../../lib/backend';
   import { benchStore, isBenchRunning, modeValue, type ScoreTarget } from '../../lib/performance/bench.svelte';
-  import { benchWrites, diskErrorText, diskFullScale, formatBytes, formatLatency, MIN_FREE_BYTES } from '../../lib/performance/disk';
+  import { benchWrites, diskErrorText, diskFullScale, formatBytes, formatLatency } from '../../lib/performance/disk';
   import { pieces } from '../../lib/performance/format';
   import { fullScale, gpuFullScale } from '../../lib/performance/gauge';
   import { performanceStore } from '../../lib/performance/performance.svelte';
@@ -201,11 +201,9 @@
             : text === 'build:no_gpu'
               ? t('performance.score.gpu.missing')
               : (diskErrorText(text, t, locale) ??
-                (text === 'build:no_space'
-                  ? t('performance.disk.error.no_space', { size: formatBytes(MIN_FREE_BYTES, locale) })
-                  : text === 'build:no_disk'
-                    ? t('performance.outcome.failed_to_start', { reason: t('performance.start.no_disk') })
-                    : t('performance.score.error.start', { reason: text })));
+                (text === 'build:no_disk'
+                  ? t('performance.outcome.failed_to_start', { reason: t('performance.start.no_disk') })
+                  : t('performance.score.error.start', { reason: text })));
     } finally {
       starting = false;
     }

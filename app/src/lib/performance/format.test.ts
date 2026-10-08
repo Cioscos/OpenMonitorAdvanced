@@ -150,3 +150,21 @@ test('an error offset is the block index times 4096', () => {
   expect(formatOffset(262_144)).toBe('1.0 GiB');
   expect(formatOffset(512)).toBe('2 MiB');
 });
+
+test('errorText maps the disk plan refusals', () => {
+  expect(errorText('build:no_space', t, 'en')).toBe(t('performance.disk.error.no_space', { size: '1.0 GiB' }));
+  expect(errorText('build:no_disk', t)).toBe(t('performance.start.no_disk'));
+});
+
+test('every event the disk controller can emit has a text in both locales', () => {
+  const codes = ['file_bytes', 'disk_full', 'access_denied', 'disk_sector', 'slc_cliff', 'slc_steady', 'first_error_stop'];
+  for (const locale of ['en', 'it'] as const) {
+    i18n.locale = locale;
+    for (const code of codes) {
+      const [piece] = eventText({ atMs: 0, code, params: { phase: '0', value: '1048576' } }, t, locale);
+      expect(piece.text, `${locale} ${code}`).not.toBe(code);
+      expect(piece.text).not.toContain('{');
+    }
+  }
+  i18n.locale = 'en';
+});

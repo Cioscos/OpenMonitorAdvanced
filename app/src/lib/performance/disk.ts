@@ -47,9 +47,10 @@ export function formatLatency(us: number | null | undefined, locale = 'en'): str
 /** The free space a disk test needs on top of the Windows reserve (M8c DC6). */
 export const MIN_FREE_BYTES = GIB;
 
-/** The refusal of a disk command (`disk:<code>`) in words, or null for any other error. */
+/** The refusal of a disk command (`disk:<code>`, or `build:no_space` of a plan) in words, or null for any other error. */
 export function diskErrorText(error: unknown, t: Translate, locale = 'en'): string | null {
-  const code = /^disk:(remote|not_writable|not_found|no_space|link)$/.exec(String(error))?.[1];
+  const match = /^(?:disk:(remote|not_writable|not_found|no_space|link)|build:(no_space))$/.exec(String(error));
+  const code = match?.[1] ?? match?.[2];
   return code ? t(`performance.disk.error.${code}`, { size: formatBytes(MIN_FREE_BYTES, locale) }) : null;
 }
 

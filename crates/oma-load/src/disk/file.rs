@@ -228,6 +228,9 @@ mod win {
             if written as usize != json.len() {
                 return Err(DiskError::Io(ERROR_WRITE_FAULT));
             }
+            // SAFETY: the handle is open and owned by `side`. A power cut early in a run
+            // must leave the sidecar readable for the orphan sweep.
+            unsafe { FlushFileBuffers(side.0) }.map_err(|e| err(&e))?;
             Ok(TestFiles {
                 dir: dir.to_path_buf(),
                 prefix,

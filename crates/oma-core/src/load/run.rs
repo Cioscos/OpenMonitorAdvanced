@@ -650,8 +650,12 @@ impl RunController {
                         m.rate(r, self.mono);
                     }
                 }
+                // The base is fixed at the first sighting of a phase: heartbeats during an
+                // open or a flush report `phase_elapsed_ms` 0 and must not move it.
+                if self.phase_start.is_none() || p.phase != self.phase {
+                    self.phase_start = Some(self.mono.saturating_sub(p.phase_elapsed_ms));
+                }
                 self.phase = p.phase;
-                self.phase_start = Some(self.mono.saturating_sub(p.phase_elapsed_ms));
                 self.current_core = p.current_core;
                 self.checks = p.checks;
                 if let Some(d) = &p.disk {
@@ -2808,6 +2812,23 @@ mod tests {
         // The same phase overrunning its own duration is hung.
         let t = fill_end + 60_000 + OVERRUN_MS + 5_000;
         c.on_load(&disk_progress_in(1, t - fill_end), clock(t));
+        assert!(c.on_clock(clock(t)).contains(&Action::Kill));
+        assert!(c.hung);
+    }
+
+    #[test]
+    fn heartbeats_do_not_reset_a_strict_phase_clock() {
+        let mut c = disk_ctl_with(false, KernelId::N2);
+        c.on_load(&disk_progress_in(0, 1000), clock(1000));
+        // Stuck in an open or a flush: only `phase_elapsed_ms = 0` heartbeats arrive.
+        let mut t = 1000;
+        while t + 900 <= 60_000 + OVERRUN_MS {
+            t += 900;
+            c.on_load(&disk_progress_in(0, 0), clock(t));
+            assert!(!c.on_clock(clock(t)).contains(&Action::Kill), "{t}");
+        }
+        t += 5_000;
+        c.on_load(&disk_progress_in(0, 0), clock(t));
         assert!(c.on_clock(clock(t)).contains(&Action::Kill));
         assert!(c.hung);
     }

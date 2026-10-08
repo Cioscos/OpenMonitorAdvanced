@@ -1,5 +1,6 @@
 import type { Env } from "./env.ts";
 import { json } from "./http.ts";
+import { handleSubmit } from "./submit.ts";
 
 export { json };
 
@@ -34,7 +35,7 @@ export default {
     }
     if (pathname === SUBMIT_PATH) {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" });
-      return json(501, { error: "not_implemented" }); // W4
+      return handleSubmit(request, env, new Date().toISOString().slice(0, 10));
     }
     return json(404, { error: "not_found" });
   },

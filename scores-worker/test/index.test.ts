@@ -31,9 +31,4 @@ describe("router", () => {
     expect(r.status).toBe(304);
     expect(await r.text()).toBe("");
   });
-
-  it("submit_is_501_until_w4", async () => {
-    const r = await SELF.fetch("https://scores.test/v1/submit", { method: "POST", body: "{}" });
-    expect(r.status).toBe(501);
-  });
 });

@@ -86,7 +86,8 @@ pub fn descendants(root: u32) -> io::Result<HashSet<u32>> {
 /// Creation time of process `pid` as a FILETIME `u64` (what `oma-load` writes as `startedAt`);
 /// `None` if the process cannot be opened or has no times.
 pub fn process_started_at(pid: u32) -> Option<u64> {
-    // SAFETY: plain flags and pid; the returned handle is closed below.
+    // SAFETY: plain flags and pid. On success the handle is owned by this function and is
+    // closed below on every path (the times call only reports through `ok`).
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let zero = FILETIME::default();
     let (mut created, mut a, mut b, mut c) = (zero, zero, zero, zero);
@@ -104,7 +105,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires real Windows hardware"]
     fn own_process_start_time_is_known() {
         assert!(process_started_at(std::process::id()).is_some_and(|t| t > 0));
         assert_eq!(process_started_at(u32::MAX), None);

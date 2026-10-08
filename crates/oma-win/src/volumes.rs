@@ -1,5 +1,7 @@
-//! Volume list and target-folder probe for the disk benchmark and stress test (M8c). Metadata
-//! only: nothing here reads data from a disk, so a sleeping HDD stays asleep.
+//! Volume list and target-folder probe for the disk benchmark and stress test (M8c). `volumes()`
+//! reads metadata only, so a sleeping HDD stays asleep. `probe_folder` writes and deletes one
+//! tiny file: call it only when the user picks or confirms a folder or a test starts, never
+//! while typing or on a timer.
 
 use std::fs::OpenOptions;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -11,6 +13,9 @@ use windows::core::HSTRING;
 use windows::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_FLAG_DELETE_ON_CLOSE,
+};
+use windows::Win32::System::Diagnostics::Debug::{
+    SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
 };
 
 use crate::storage_ioctl::PhysicalDrive;
@@ -71,7 +76,11 @@ pub fn is_remote_path(path: &str) -> bool {
 pub fn is_sync_path(path: &str) -> bool {
     path.split(['\\', '/']).any(|c| {
         let c = c.to_lowercase();
-        c == "onedrive" || c == "dropbox" || c == "google drive"
+        c == "onedrive"
+            || c == "dropbox"
+            || c == "google drive"
+            || c.starts_with("onedrive - ")
+            || c.starts_with("dropbox (")
     })
 }
 
@@ -131,6 +140,20 @@ fn volume_texts(root: &str) -> Option<(String, String)> {
 
 /// The mounted drive letters worth testing: no optical drives, no empty readers.
 pub fn volumes() -> Vec<VolumeInfo> {
+    let mut old = THREAD_ERROR_MODE(0);
+    // SAFETY: `old` is a live out-pointer; the mode is restored below on the same thread.
+    let changed = unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, Some(&mut old)) }.is_ok();
+    let out = list_volumes();
+    if changed {
+        // SAFETY: restores the mode saved above.
+        unsafe {
+            let _ = SetThreadErrorMode(old, None);
+        }
+    }
+    out
+}
+
+fn list_volumes() -> Vec<VolumeInfo> {
     let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
     let system_root = format!("{}\\", system.trim_end_matches('\\')).to_lowercase();
     // SAFETY: no arguments.
@@ -147,13 +170,26 @@ pub fn volumes() -> Vec<VolumeInfo> {
         if matches!(raw, DRIVE_UNKNOWN | DRIVE_NO_ROOT_DIR | DRIVE_CDROM) {
             continue;
         }
+        let drive = drive_kind(raw);
+        if drive == DriveKind::Remote {
+            // A disconnected mapped drive blocks these calls for a long time: never ask.
+            out.push(VolumeInfo {
+                root,
+                label: String::new(),
+                fs: String::new(),
+                total_bytes: 0,
+                free_bytes: 0,
+                drive,
+                disk_index: None,
+                system: false,
+            });
+            continue;
+        }
         let Some((label, fs)) = volume_texts(&root) else {
             continue; // no media
         };
-        let drive = drive_kind(raw);
-        let disk_index = (drive != DriveKind::Remote)
-            .then(|| PhysicalDrive::open_path(&format!(r"\\.\{letter}:"))?.disk_number())
-            .flatten();
+        let disk_index =
+            PhysicalDrive::open_path(&format!(r"\\.\{letter}:")).and_then(|d| d.disk_number());
         let (free_bytes, total_bytes) = free_total(&root);
         out.push(VolumeInfo {
             system: root.to_lowercase() == system_root,
@@ -196,24 +232,31 @@ fn can_create_file(dir: &Path) -> bool {
         .is_ok()
 }
 
-/// Looks at a candidate folder without touching its data (DC6).
+/// Probes a candidate folder (DC6). Writes and deletes one tiny file (`oma-probe-*.tmp`): call
+/// only on a user choice or at test start, never while typing or on a timer.
 pub fn probe_folder(path: &Path) -> FolderProbe {
     let text = path.to_string_lossy();
-    let volume_root = drive_letter_root(&text);
+    let mut probe = FolderProbe {
+        volume_root: None,
+        remote: false,
+        exists: false,
+        writable: false,
+        sync: false,
+        free_bytes: 0,
+        total_bytes: 0,
+    };
+    if text.contains('\0') {
+        return probe; // reported as not found
+    }
+    let volume_root = drive_letter_root(text.strip_prefix(r"\\?\").unwrap_or(&text));
     let remote = is_remote_path(&text)
         || volume_root.as_deref().is_some_and(|r| {
             // SAFETY: valid NUL-terminated root path.
             unsafe { GetDriveTypeW(&HSTRING::from(r)) == DRIVE_REMOTE }
         });
-    let mut probe = FolderProbe {
-        volume_root,
-        remote,
-        exists: false,
-        writable: false,
-        sync: is_sync_path(&text),
-        free_bytes: 0,
-        total_bytes: 0,
-    };
+    probe.volume_root = volume_root;
+    probe.remote = remote;
+    probe.sync = is_sync_path(&text);
     if remote {
         return probe;
     }
@@ -241,6 +284,7 @@ mod tests {
         assert!(is_remote_path(r"\\?\UNC\server\x"));
         assert!(!is_remote_path(r"C:\x"));
         assert!(!is_remote_path(r"\\?\C:\x"));
+        assert!(probe_folder(Path::new("C:\\a\0b")).volume_root.is_none());
     }
 
     #[test]
@@ -249,6 +293,9 @@ mod tests {
         assert!(is_sync_path(r"D:\Dropbox"));
         assert!(is_sync_path(r"C:\Users\a\Google Drive\y"));
         assert!(!is_sync_path(r"C:\Users\a\drive\x"));
+        assert!(is_sync_path(r"C:\Users\a\OneDrive - Contoso\x"));
+        assert!(is_sync_path(r"C:\Users\a\Dropbox (Personal)\x"));
+        assert!(!is_sync_path(r"C:\onedriveX"));
     }
 
     #[test]

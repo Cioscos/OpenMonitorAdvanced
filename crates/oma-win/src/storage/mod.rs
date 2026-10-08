@@ -9,7 +9,10 @@ use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Uni
 use oma_core::provider::{Inventory, Provider, ProviderError, Quality};
 use oma_ipc::DriveState;
 use windows::core::HSTRING;
-use windows::Win32::Storage::FileSystem::{BusTypeUsb, GetDiskFreeSpaceExW};
+use windows::Win32::Storage::FileSystem::{
+    BusTypeAta, BusTypeFileBackedVirtual, BusTypeNvme, BusTypeSata, BusTypeUsb, BusTypeVirtual,
+    GetDiskFreeSpaceExW,
+};
 
 use crate::memory::used_pct;
 use crate::pdh::{Counter, Query};
@@ -474,11 +477,13 @@ pub enum DiskKind {
 /// Pure mapping from the storage bus type and the seek-penalty flag.
 pub fn disk_kind(bus: Option<i32>, seek_penalty: Option<bool>) -> DiskKind {
     match bus {
-        Some(17) => DiskKind::Nvme,
-        Some(7) => DiskKind::Usb,
-        Some(14 | 15) => DiskKind::Virtual,
+        Some(b) if b == BusTypeNvme.0 => DiskKind::Nvme,
+        Some(b) if b == BusTypeUsb.0 => DiskKind::Usb,
+        Some(b) if b == BusTypeVirtual.0 || b == BusTypeFileBackedVirtual.0 => DiskKind::Virtual,
         _ if seek_penalty == Some(true) => DiskKind::Hdd,
-        Some(3 | 11) if seek_penalty.is_none() || seek_penalty == Some(false) => DiskKind::SataSsd,
+        Some(b) if (b == BusTypeAta.0 || b == BusTypeSata.0) && seek_penalty != Some(true) => {
+            DiskKind::SataSsd
+        }
         _ => DiskKind::Other,
     }
 }

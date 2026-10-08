@@ -1,6 +1,6 @@
 //! The pipe link to the app: connect, send our `Hello` and the full topology,
 //! then serve the app: `Run` starts the phase engine (the GPU one for a plan with a
-//! `gpu`) on its own thread, `Stop` raises its stop flag, and a closed pipe ends the
+//! `gpu`, the disk one for a plan with a `disk`) on its own thread, `Stop` raises its stop flag, and a closed pipe ends the
 //! process at once.
 //!
 //! The link ends the process: [`run`] returns the exit code.
@@ -20,6 +20,8 @@ pub const EXIT_CONNECT: i32 = 2;
 pub const EXIT_INCOMPATIBLE: i32 = 3;
 /// The GPU of a GPU plan was removed or reset (plan DG2).
 pub const EXIT_DEVICE_LOST: i32 = 4;
+/// A persistent I/O error on the disk of a disk plan (DC3).
+pub const EXIT_IO: i32 = 5;
 
 /// What to do with one received message.
 #[derive(Debug, PartialEq)]
@@ -200,6 +202,10 @@ fn start_engine(
                     let end = crate::gpu::engine::run_gpu(&plan, &out, &stop, inject);
                     exit_code = end.exit_code;
                     end.finished
+                } else if plan.disk.is_some() {
+                    let end = crate::disk::engine::run_disk(&plan, &out, &stop, inject);
+                    exit_code = end.exit_code;
+                    end.finished
                 } else {
                     crate::engine::run(&plan, &topology, &out, &stop, inject)
                 }
@@ -215,7 +221,8 @@ fn start_engine(
             tracing::info!(reason = ?finished.reason, "plan finished");
             out(LoadMessage::Finished(finished));
             if exit_code != EXIT_OK {
-                // A lost GPU device cannot be used again: the process ends (DG2).
+                // A lost GPU device cannot be used again, nor a disk that fails every I/O:
+                // the process ends (DG2, DC3).
                 crate::log::flush();
                 std::process::exit(exit_code);
             }

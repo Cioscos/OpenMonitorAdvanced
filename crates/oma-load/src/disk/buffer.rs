@@ -42,6 +42,12 @@ impl AlignedBuf {
         self.ptr
     }
 
+    /// The start of the buffer for an overlapped `ReadFile`/`WriteFile`: no Rust reference
+    /// to the bytes is held while the I/O is in flight.
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: `ptr` is a live committed allocation of `len` bytes (zeroed by the system),
         // exclusively borrowed through `&mut self`.

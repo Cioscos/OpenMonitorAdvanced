@@ -15,6 +15,13 @@ const ERROR_HANDLE_DISK_FULL: u32 = 39;
 const ERROR_DISK_FULL: u32 = 112;
 #[cfg(windows)]
 const ERROR_INVALID_NAME: u32 = 123;
+#[cfg(windows)]
+const ERROR_WRITE_FAULT: u32 = 29;
+
+/// `free - bytes >= reserve`, with no overflow whatever the inputs.
+pub fn fits(free: u64, bytes: u64, reserve: u64) -> bool {
+    free.checked_sub(bytes).is_some_and(|rest| rest >= reserve)
+}
 
 pub fn classify_win32(code: u32) -> DiskError {
     match code {
@@ -51,7 +58,9 @@ pub fn data_name(prefix: &str, suffix: Option<&str>) -> Option<String> {
 }
 
 #[cfg(windows)]
-pub use win::{DataFile, TestFiles};
+pub use win::{free_space, DataFile, TestFiles};
+#[cfg(windows)]
+pub(crate) use win::{win32_code, Owned};
 
 #[cfg(windows)]
 mod win {
@@ -67,7 +76,7 @@ mod win {
         GetFileInformationByHandleEx, SetFileInformationByHandle, WriteFile, CREATE_NEW, DELETE,
         FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_DELETE_ON_CLOSE,
         FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE,
-        FILE_SHARE_MODE, FILE_SHARE_NONE, FILE_SHARE_READ, FILE_STORAGE_INFO,
+        FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STORAGE_INFO,
     };
     use windows::Win32::System::Ioctl::FSCTL_SET_COMPRESSION;
     use windows::Win32::System::Threading::{
@@ -80,7 +89,7 @@ mod win {
     const _: () = assert!(std::mem::size_of::<FILE_STORAGE_INFO>() == 28);
 
     /// A handle closed on drop.
-    struct Owned(HANDLE);
+    pub(crate) struct Owned(pub(crate) HANDLE);
 
     impl Drop for Owned {
         fn drop(&mut self) {
@@ -98,6 +107,8 @@ mod win {
         owned: Owned,
         pub bytes: u64,
         pub sector: u32,
+        /// Opened with `FILE_FLAG_WRITE_THROUGH` (V4): the per-worker handles are too.
+        pub write_through: bool,
     }
 
     impl DataFile {
@@ -121,28 +132,38 @@ mod win {
         _sidecar: Owned,
     }
 
-    fn err(e: &windows::core::Error) -> DiskError {
+    /// The Win32 code of an error: HRESULT_FROM_WIN32 keeps it in the low 16 bits.
+    pub(crate) fn win32_code(e: &windows::core::Error) -> u32 {
         let hr = e.code().0 as u32;
-        // HRESULT_FROM_WIN32 keeps the code in the low 16 bits.
-        classify_win32(if hr >> 16 == 0x8007 { hr & 0xFFFF } else { hr })
+        if hr >> 16 == 0x8007 {
+            hr & 0xFFFF
+        } else {
+            hr
+        }
     }
 
-    fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    fn err(e: &windows::core::Error) -> DiskError {
+        classify_win32(win32_code(e))
     }
 
-    fn free_bytes(dir: &Path) -> Result<u64, DiskError> {
-        let w = wide(dir);
+    /// The NUL-terminated wide path; a NUL inside it would cut the path short, so it is
+    /// refused.
+    fn wide(p: &Path) -> Result<Vec<u16>, DiskError> {
+        let w: Vec<u16> = p.as_os_str().encode_wide().collect();
+        if w.contains(&0) {
+            return Err(DiskError::Io(ERROR_INVALID_NAME));
+        }
+        Ok(w.into_iter().chain(Some(0)).collect())
+    }
+
+    /// The bytes free for this user on the volume of `dir`.
+    pub fn free_space(dir: &Path) -> Result<u64, DiskError> {
+        let w = wide(dir)?;
         let mut avail = 0u64;
         // SAFETY: `w` is NUL-terminated and `avail` outlives the call.
         unsafe { GetDiskFreeSpaceExW(PCWSTR(w.as_ptr()), Some(&mut avail), None, None) }
             .map_err(|e| err(&e))?;
         Ok(avail)
-    }
-
-    /// `free - bytes >= reserve`, with no overflow whatever the inputs.
-    fn fits(free: u64, bytes: u64, reserve: u64) -> bool {
-        free.checked_sub(bytes).is_some_and(|rest| rest >= reserve)
     }
 
     fn started_at() -> u64 {
@@ -162,7 +183,7 @@ mod win {
         share: FILE_SHARE_MODE,
         flags: FILE_FLAGS_AND_ATTRIBUTES,
     ) -> Result<Owned, DiskError> {
-        let w = wide(path);
+        let w = wide(path)?;
         // SAFETY: `w` is NUL-terminated; no security attributes or template file are passed.
         let h = unsafe {
             CreateFileW(
@@ -186,7 +207,7 @@ mod win {
             if !dir.is_absolute() || dir.components().any(|c| matches!(c, Component::ParentDir)) {
                 return Err(DiskError::Io(ERROR_INVALID_NAME));
             }
-            if !fits(free_bytes(dir)?, 0, reserve) {
+            if !fits(free_space(dir)?, 0, reserve) {
                 return Err(DiskError::Full);
             }
             let prefix = file_prefix(seed);
@@ -204,6 +225,9 @@ mod win {
             // synchronous; the buffer and `written` outlive it.
             unsafe { WriteFile(side.0, Some(json.as_bytes()), Some(&mut written), None) }
                 .map_err(|e| err(&e))?;
+            if written as usize != json.len() {
+                return Err(DiskError::Io(ERROR_WRITE_FAULT));
+            }
             Ok(TestFiles {
                 dir: dir.to_path_buf(),
                 prefix,
@@ -221,7 +245,7 @@ mod win {
             write_through: bool,
         ) -> Result<DataFile, DiskError> {
             let name = data_name(&self.prefix, suffix).ok_or(DiskError::Io(ERROR_INVALID_NAME))?;
-            if !fits(free_bytes(&self.dir)?, bytes, self.reserve) {
+            if !fits(free_space(&self.dir)?, bytes, self.reserve) {
                 return Err(DiskError::Full);
             }
             let eof = i64::try_from(bytes).map_err(|_| DiskError::Full)?;
@@ -230,16 +254,22 @@ mod win {
             if write_through {
                 flags |= FILE_FLAG_WRITE_THROUGH;
             }
+            // Deviation from DC4 ("no sharing"), by ruling: one file object binds to one
+            // completion port for good, so the per-worker IOCPs of DC3 need per-worker file
+            // objects, which `ReOpenFile` gives only if this handle shares read and write.
+            // Without FILE_SHARE_DELETE nobody else can delete or rename the file, and
+            // CREATE_NEW still refuses an existing name.
             let owned = create_new(
                 &self.dir.join(name),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_NONE,
+                GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 flags,
             )?;
             let mut file = DataFile {
                 owned,
                 bytes: 0,
                 sector: 4096,
+                write_through,
             };
             set_uncompressed(file.owned.0);
             file.sector = physical_sector(file.owned.0);
@@ -327,6 +357,33 @@ mod win {
             assert!(!fits(5, 10, 0));
             assert!(!fits(1 << 40, 0, u64::MAX / 2));
             assert!(!fits(u64::MAX, u64::MAX, 1));
+        }
+
+        #[test]
+        fn interior_nul_is_refused() {
+            assert!(wide(Path::new(r"C:\a")).is_ok());
+            assert_eq!(
+                wide(Path::new("C:\\a\u{0}b")).err(),
+                Some(DiskError::Io(ERROR_INVALID_NAME))
+            );
+        }
+
+        #[test]
+        #[ignore = "requires real Windows hardware"]
+        fn others_can_open_but_not_delete_or_rename_the_data_file() {
+            let dir = temp_dir("share");
+            {
+                let tf = TestFiles::create(&dir, 0x99, 1 << 20).unwrap();
+                let _df = tf.open_data(None, 1 << 20, false).unwrap();
+                let path = dir.join("oma-test-0000000000000099.bin");
+                // Read and write are shared (for the per-worker handles of the engine).
+                assert!(std::fs::File::open(&path).is_ok());
+                assert!(std::fs::remove_file(&path).is_err());
+                assert!(std::fs::rename(&path, dir.join("moved.bin")).is_err());
+                assert!(path.exists());
+            }
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+            std::fs::remove_dir(&dir).unwrap();
         }
 
         fn temp_dir(tag: &str) -> PathBuf {

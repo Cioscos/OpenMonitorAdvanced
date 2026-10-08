@@ -3,6 +3,11 @@ import type { Params, Translate } from '../i18n/index.svelte';
 import type { DataSize, DiskErrorKind, ErrorRecord, KernelId, LoadMode, Phase, Schema, Sensor, SessionEvent } from '../types';
 import { diskErrorText, formatBytes as formatDiskBytes, formatMbs } from './disk';
 
+/** The planned length shown to the user: the disk fill ends when the file is written, not on time (R7). */
+export function timedSeconds(phases: Phase[]): number {
+  return phases.reduce((sum, p) => sum + (p.kernel === 'disk_fill' ? 0 : p.duration_s), 0);
+}
+
 /** «5 min», «1 h 30 min», «8 h»; seconds only under an hour («1 min 30 s»). Same units in every language. */
 export function formatDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));

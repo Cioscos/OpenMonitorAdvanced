@@ -573,11 +573,9 @@ fn pause_sends_progress_at_least_every_900_ms() {
         })
         .collect();
     assert!(beats.len() >= 5, "{beats:?}");
-    let mut last = 0;
-    for b in &beats {
-        assert!(b - last <= 1000, "{beats:?}");
-        last = *b;
-    }
+    // `elapsed_ms` counts from the run's start, file setup included: only the gaps between
+    // heartbeats are the pause's.
+    assert!(beats.windows(2).all(|w| w[1] - w[0] <= 1000), "{beats:?}");
     assert_eq!(r.end.finished.reason, FinishReason::Completed);
 }
 

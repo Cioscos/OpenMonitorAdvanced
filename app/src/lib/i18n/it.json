@@ -1023,6 +1023,7 @@
   "performance.wizard.ram.detail": "{total} in tutto",
   "performance.wizard.ram.low": "Non disponibile: c'è troppo poca memoria libera, la quota è sotto i 256 MiB.",
   "performance.wizard.phases": "Fasi previste",
+  "performance.wizard.untilFull": "fino al riempimento",
   "performance.wizard.excluded": "esclusa",
   "performance.wizard.total": "Totale: {duration}",
   "performance.wizard.onePerCore": "Un [thread] per core",

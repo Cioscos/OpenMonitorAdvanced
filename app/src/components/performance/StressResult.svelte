@@ -3,7 +3,7 @@
   import { DASH, formatClock, formatPower, formatTapeCounter, formatTemperature } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { formatBytes as formatDiskBytes, formatMbs, repeatRequest } from '../../lib/performance/disk';
-  import { around, dataErrorKind, dataErrorLine, errorText, hresultText, kernelTerm, percentText, pieces, verdictTitle } from '../../lib/performance/format';
+  import { around, dataErrorKind, dataErrorLine, errorText, hresultText, kernelTerm, percentText, pieces, timedSeconds, verdictTitle } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { ErrorRecord, Isa, KernelId, StartRequest, StressSession } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
@@ -114,7 +114,7 @@
 
   const showCores = $derived(!!session?.cores.length && session.plan.phases.some((p) => p.placement === 'core_cycle'));
 
-  const totalMs = $derived(session?.plan.phases.reduce((sum, p) => sum + p.duration_s * 1000, 0) ?? 0);
+  const totalMs = $derived(session ? timedSeconds(session.plan.phases) * 1000 : 0);
   const durationMs = $derived(session?.endedAt ? Math.max(0, Date.parse(session.endedAt) - Date.parse(session.startedAt)) : null);
   const phaseCounts = $derived.by(() => {
     const phases = session?.phases ?? [];

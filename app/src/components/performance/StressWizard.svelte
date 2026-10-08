@@ -4,7 +4,7 @@
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { estimatedWrites, formatBytes as formatDiskBytes } from '../../lib/performance/disk';
-  import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, sizeLabel } from '../../lib/performance/format';
+  import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, sizeLabel, timedSeconds } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent, VolumeChoice } from '../../lib/types';
@@ -64,7 +64,7 @@
   });
   /** What the disk test writes at most (DC7), from the preview's own plan. */
   const writes = $derived(disk && plan ? estimatedWrites(plan) : 0);
-  const total = $derived(plan?.phases.reduce((sum, p) => sum + p.duration_s, 0) ?? 0);
+  const total = $derived(plan ? timedSeconds(plan.phases) : 0);
   /**
    * The summary's rows: with «Personalizza», every phase of the profile stays in place and those of an
    * unticked mode read «excluded», so the list keeps its length and the panel below does not jump.
@@ -283,7 +283,7 @@
             <span class="name"><Term term={kernelTerm(p.kernel)} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             {#if component !== 'gpu' && !disk}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
             {#if !disk}<span class="load"><Term term={modeTerm(p.mode)} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>{/if}
-            <span class="dur">{off ? t('performance.wizard.excluded') : formatDuration(p.duration_s)}</span>
+            <span class="dur">{off ? t('performance.wizard.excluded') : p.kernel === 'disk_fill' ? t('performance.wizard.untilFull') : formatDuration(p.duration_s)}</span>
           </li>
         {/each}
       </ol>

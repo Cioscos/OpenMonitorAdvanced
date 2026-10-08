@@ -1196,7 +1196,15 @@ impl RunController {
             objective: s.objective,
             preset: s.preset,
             elapsed_ms: self.mono - self.start_mono,
-            total_ms: s.plan.total_seconds() * 1000,
+            // The disk fill ends when the file is written, not on time (R7): its 1200 s are a
+            // bound, so the shown total is the timed phases only.
+            total_ms: s
+                .plan
+                .phases
+                .iter()
+                .filter(|p| p.kernel != KernelId::DiskFill)
+                .map(|p| u64::from(p.duration_s) * 1000)
+                .sum(),
             phase_index: self.phase,
             phases: s
                 .plan
@@ -2510,6 +2518,15 @@ mod tests {
     }
 
     // ---- Disk (M8c) ----
+
+    #[test]
+    fn disk_fill_is_not_in_the_shown_total() {
+        assert_eq!(
+            disk_ctl_with(false, KernelId::DiskFill).status().total_ms,
+            0
+        );
+        assert!(disk_ctl(false).status().total_ms > 0);
+    }
 
     fn disk_ctl(thermal: bool) -> RunController {
         disk_ctl_with(thermal, KernelId::N2)

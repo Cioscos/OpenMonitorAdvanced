@@ -8,7 +8,7 @@ const MEDIANS = `WITH ranked AS (
     ROW_NUMBER() OVER w AS rn,
     COUNT(*) OVER (PARTITION BY board, score_version, model_key) AS n
   FROM entries
-  WHERE overclock = 0 AND model_key NOT IN (SELECT model_key FROM hidden_models)
+  WHERE overclock = 0 AND NOT EXISTS (SELECT 1 FROM hidden_models h WHERE h.model_key = entries.model_key)
   WINDOW w AS (PARTITION BY board, score_version, model_key ORDER BY value)
 )
 SELECT board, score_version, model_key, MIN(model) AS model,

@@ -35,10 +35,10 @@ describe("table", () => {
     for (const v of [299, 7501]) expect(plausible("gpu-compute", "gpu-1", "card", v, rows)).toBe(false);
   });
 
-  it("plausibility_falls_back_to_the_category", () => {
-    const rows = [row("A", 1000), row("B", 1000), row("C", 1000, "gpu-graphics")];
-    expect(plausible("gpu-compute", "gpu-1", "new", 200, rows)).toBe(true);
-    expect(plausible("gpu-compute", "gpu-1", "new", 199, rows)).toBe(false);
+  it("plausibility_falls_back_to_the_category_band", () => {
+    const rows = [row("A", 26), row("B", 1533), row("C", 1000, "gpu-graphics")];
+    for (const v of [5.2, 7665]) expect(plausible("gpu-compute", "gpu-1", "new", v, rows)).toBe(true);
+    for (const v of [5.1, 7666]) expect(plausible("gpu-compute", "gpu-1", "new", v, rows)).toBe(false);
     expect(plausible("gpu-compute", "gpu-2", "new", 1, rows)).toBe(true);
   });
 

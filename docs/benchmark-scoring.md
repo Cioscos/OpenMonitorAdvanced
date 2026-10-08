@@ -59,7 +59,7 @@ Un invio della CPU o della GPU salva due righe (una per punteggio), uno del disc
 - `flags` ha al massimo 16 stringhe del tipo `^[a-z0-9_]{1,32}$` (per esempio `battery`, `throttling`).
 - **Normalizzazione del modello:** si tolgono `(R)`, `(TM)` (senza distinguere maiuscole), `®` e `™`, gli spazi bianchi ripetuti diventano uno solo e si tagliano gli estremi. Il nome mostrato è il risultato; la chiave di confronto è lo stesso testo in minuscolo. Così «AMD Radeon(TM) Graphics» e «AMD Radeon Graphics» sono lo stesso modello.
 - **Ordine dei controlli:** schema (`bad_schema`), poi `format` (`bad_format`), versione (`unknown_version`), `valid` (`not_valid`), valori (`bad_value`). Gli esempi validi e non validi stanno nelle fixture comuni `testdata/scores/` (`submissions.json`, `normalize.json`, `aggregate.json`), lette dai test del Worker e, con la M8d2, anche da quelli Rust.
-- **Plausibilità:** il valore deve stare fra 0,2 e 5 volte il riferimento (estremi compresi). Il riferimento è la mediana dello stesso modello nell'unione fra la tabella già pubblicata e le righe dell'autore; se il modello non c'è, la mediana della categoria; se la categoria è vuota, l'invio passa. Altrimenti `implausible`.
+- **Plausibilità:** il valore deve stare fra 0,2 e 5 volte il riferimento (estremi compresi). Il confronto si fa con l'unione fra la tabella già pubblicata e le righe dell'autore. Se il modello ha righe, il riferimento è la loro mediana. Se non ne ha, il valore deve stare fra 0,2 volte il minimo e 5 volte il massimo delle righe della categoria (la fascia, non la mediana: così passano anche HDD, chiavette USB e GPU integrate). Se la categoria è vuota, l'invio passa. Altrimenti `implausible`.
 
 ## Formato della tabella
 

@@ -16,7 +16,7 @@ CREATE TABLE entries (
 CREATE INDEX entries_group ON entries (board, score_version, model_key, value);
 CREATE INDEX entries_day ON entries (day);
 
-CREATE TABLE hidden_models (model_key TEXT PRIMARY KEY);
+CREATE TABLE hidden_models (model_key TEXT NOT NULL PRIMARY KEY);
 
 CREATE TABLE published (
   id INTEGER PRIMARY KEY CHECK (id = 1),

@@ -49,8 +49,13 @@ export function plausible(board: Board, scoreVersion: string, key: string, value
   const same = rows.filter((r) => r.category === board && r.scoreVersion === scoreVersion);
   if (same.length === 0) return true;
   const own = same.filter((r) => normalizeModel(r.model).key === key);
-  const ref = median((own.length ? own : same).map((r) => r.value));
-  return PLAUSIBLE_MIN * ref <= value && value <= PLAUSIBLE_MAX * ref;
+  if (own.length) {
+    const ref = median(own.map((r) => r.value));
+    return PLAUSIBLE_MIN * ref <= value && value <= PLAUSIBLE_MAX * ref;
+  }
+  // Unknown model: the band of the whole category, so slow hardware (HDD, USB stick, iGPU) still passes.
+  const values = same.map((r) => r.value);
+  return PLAUSIBLE_MIN * Math.min(...values) <= value && value <= PLAUSIBLE_MAX * Math.max(...values);
 }
 
 const KNOWN_VERSION: Record<string, string> = { cpu: "cpu-1", gpu: "gpu-1", disk: "disk-1" };

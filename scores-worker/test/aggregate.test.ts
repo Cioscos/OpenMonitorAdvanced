@@ -60,4 +60,8 @@ describe("aggregate", () => {
   it("aggregate_file_joins_the_statements", () => {
     expect(aggregateFile()).toBe(AGGREGATE_SQL.join(";\n") + ";\n");
   });
+
+  it("hidden_models_rejects_null", async () => {
+    await expect(env.DB.prepare("INSERT INTO hidden_models (model_key) VALUES (NULL)").run()).rejects.toThrow();
+  });
 });

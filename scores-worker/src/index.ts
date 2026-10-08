@@ -14,16 +14,13 @@ async function getReference(request: Request, env: Env): Promise<Response> {
     etag: string;
   }>();
   if (!row) return json(404, { error: "not_found" });
-  if (request.headers.get("If-None-Match") === row.etag) {
-    return new Response(null, { status: 304, headers: { ETag: row.etag } });
-  }
+  const headers = { ETag: row.etag, "Cache-Control": "public, max-age=3600" };
+  // Weak comparison (RFC 9110): the edge may turn our strong ETag into W/"..." when it compresses.
+  const tags = (request.headers.get("If-None-Match") ?? "").split(",").map((t) => t.trim().replace(/^W\//, ""));
+  if (tags.includes("*") || tags.includes(row.etag)) return new Response(null, { status: 304, headers });
   return new Response(row.body, {
     status: 200,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      ETag: row.etag,
-      "Cache-Control": "public, max-age=3600",
-    },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
   });
 }
 

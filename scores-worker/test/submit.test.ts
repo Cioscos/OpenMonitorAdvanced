@@ -96,10 +96,13 @@ describe("submit", () => {
     const table = {
       format: 1,
       generatedAt: "x",
-      rows: [{ category: "cpu-single", scoreVersion: "cpu-1", model: "AMD Ryzen 7 7800X3D 8-Core Processor", value: 100, n: 5, source: "community" }],
+      rows: [{ category: "cpu-single", scoreVersion: "cpu-1", model: "OMA Test CPU", value: 100, n: 5, source: "community" }],
     };
     await env.DB.prepare("UPDATE published SET body = ? WHERE id = 1").bind(JSON.stringify(table)).run();
-    const r = await handleSubmit(post(VALID), envWith(true), TODAY);
+    // A model absent from the author rows, so only the injected row is its reference.
+    const body = JSON.parse(VALID);
+    body.hardware.model = "OMA Test CPU";
+    const r = await handleSubmit(post(JSON.stringify(body)), envWith(true), TODAY);
     expect(r.status).toBe(400);
     expect(await r.json()).toEqual({ error: "implausible" });
     expect(await count("entries")).toBe(0);

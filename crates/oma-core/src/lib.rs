@@ -2,6 +2,7 @@
 //! engine, history and sampling loop.
 
 pub mod csv;
+pub mod disk_block;
 pub mod engine;
 pub mod format;
 pub mod frames;

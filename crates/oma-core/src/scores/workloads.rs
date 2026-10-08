@@ -20,6 +20,14 @@ pub enum BenchKernel {
     Fill,
     Texture,
     Overdraw,
+    // Disk benchmark: the fill step and the tests (`super::disk`).
+    DiskFill,
+    Seq1mQ8t1,
+    Seq1mQ1t1,
+    Seq128kQ32t1,
+    Rnd4kQ32t1,
+    Rnd4kQ32t16,
+    Rnd4kQ1t1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

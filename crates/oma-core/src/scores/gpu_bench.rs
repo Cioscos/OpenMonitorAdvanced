@@ -247,6 +247,7 @@ impl GpuBenchController {
                 multi: None,
                 compute: gpu_points(&medians, BenchMode::Compute, b),
                 graphics: gpu_points(&medians, BenchMode::Graphics, b),
+                ..Scores::default()
             },
             kernels: GPU_LOADS
                 .iter()
@@ -259,6 +260,8 @@ impl GpuBenchController {
                         multi: None,
                         value: r.map(|r| r.0),
                         spread: r.map(|r| r.1),
+                        read: None,
+                        write: None,
                     }
                 })
                 .collect(),
@@ -275,6 +278,7 @@ impl GpuBenchController {
             samples: self.life.samples.clone(),
             app_version: self.ctx.app_version.clone(),
             load_version: self.life.load_version.clone(),
+            disk_profile: None,
         };
         self.life.end_saved(file)
     }

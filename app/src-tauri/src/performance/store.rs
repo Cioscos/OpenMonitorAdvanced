@@ -914,6 +914,7 @@ mod tests {
                 multi: Some(9000),
                 compute: None,
                 graphics: None,
+                ..Default::default()
             },
             kernels: vec![],
             device: oma_core::scores::Device {
@@ -928,6 +929,7 @@ mod tests {
             samples: vec![],
             app_version: "0.0.0".into(),
             load_version: None,
+            disk_profile: None,
         }
     }
 

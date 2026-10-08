@@ -336,6 +336,7 @@ impl BenchController {
                 multi: points(&multi, &b.multi),
                 compute: None,
                 graphics: None,
+                ..Scores::default()
             },
             kernels: WORKLOADS
                 .iter()
@@ -346,6 +347,8 @@ impl BenchController {
                     multi: multi.get(&w.id).copied(),
                     value: None,
                     spread: None,
+                    read: None,
+                    write: None,
                 })
                 .collect(),
             device: self.ctx.device.clone(),
@@ -355,6 +358,7 @@ impl BenchController {
             samples: self.life.samples.clone(),
             app_version: self.ctx.app_version.clone(),
             load_version: self.life.load_version.clone(),
+            disk_profile: None,
         };
         self.life.end_saved(file)
     }

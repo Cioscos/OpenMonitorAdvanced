@@ -3,13 +3,14 @@
 use oma_ipc::load::Isa;
 use serde::{Deserialize, Serialize};
 
+use super::disk::DiskProfile;
 use super::workloads::BenchKernel;
 use crate::load::{session_file_name, FormatError};
 
 /// Score file format, independent of the stress-session one.
 pub const FORMAT: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Scores {
     pub single: Option<u32>,
     pub multi: Option<u32>,
@@ -18,6 +19,24 @@ pub struct Scores {
     pub compute: Option<u32>,
     #[serde(default)]
     pub graphics: Option<u32>,
+    /// Disk groups (DC13): SEQ1M Q8T1 in MB/s, and the points (B1 only).
+    #[serde(default, rename = "readMBs")]
+    pub read_mbs: Option<f64>,
+    #[serde(default, rename = "writeMBs")]
+    pub write_mbs: Option<f64>,
+    #[serde(default)]
+    pub points: Option<u32>,
+}
+
+/// The best measure of a disk test in one direction (DC13).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskRate {
+    /// 10^6 bytes per second.
+    pub mbs: f64,
+    pub iops: f64,
+    pub mean_lat_us: f64,
+    pub p99_lat_us: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +51,11 @@ pub struct KernelRate {
     pub value: Option<f64>,
     #[serde(default)]
     pub spread: Option<f64>,
+    /// Disk test: the best read and write measures (`unit` is `MB/s`).
+    #[serde(default)]
+    pub read: Option<DiskRate>,
+    #[serde(default)]
+    pub write: Option<DiskRate>,
 }
 
 /// A CPU (`cores`, `logical`) or a GPU (`cores` and `logical` 0, and the GPU fields).
@@ -49,6 +73,9 @@ pub struct Device {
     pub dedicated_bytes: Option<u64>,
     #[serde(default)]
     pub integrated: Option<bool>,
+    /// Disk: `nvme`, `sata_ssd`, `hdd`, `usb`, `virtual` or `other`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +111,9 @@ pub struct ScoreFile {
     pub samples: Vec<ScoreSample>,
     pub app_version: String,
     pub load_version: Option<String>,
+    /// Disk score: the test profile.
+    #[serde(default)]
+    pub disk_profile: Option<DiskProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +126,12 @@ pub struct ScoreSummary {
     pub multi: Option<u32>,
     pub compute: Option<u32>,
     pub graphics: Option<u32>,
+    #[serde(default, rename = "readMBs")]
+    pub read_mbs: Option<f64>,
+    #[serde(default, rename = "writeMBs")]
+    pub write_mbs: Option<f64>,
+    #[serde(default)]
+    pub points: Option<u32>,
     pub device_id: Option<String>,
     pub valid: bool,
     pub flags: Vec<String>,
@@ -124,6 +160,9 @@ pub fn summary(s: &ScoreFile) -> ScoreSummary {
         multi: s.scores.multi,
         compute: s.scores.compute,
         graphics: s.scores.graphics,
+        read_mbs: s.scores.read_mbs,
+        write_mbs: s.scores.write_mbs,
+        points: s.scores.points,
         device_id: s.device.device_id.clone(),
         valid: s.valid,
         flags: s.flags.clone(),
@@ -139,6 +178,7 @@ pub fn score_file_name(at_utc: &str, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scores::DiskProfile;
 
     fn sample() -> ScoreFile {
         ScoreFile {
@@ -153,8 +193,7 @@ mod tests {
             scores: Scores {
                 single: Some(1500),
                 multi: None,
-                compute: None,
-                graphics: None,
+                ..Scores::default()
             },
             kernels: vec![KernelRate {
                 id: BenchKernel::Ntt,
@@ -163,6 +202,8 @@ mod tests {
                 multi: None,
                 value: None,
                 spread: None,
+                read: None,
+                write: None,
             }],
             device: Device {
                 model: "CPU".into(),
@@ -181,6 +222,7 @@ mod tests {
             }],
             app_version: "0.5.0".into(),
             load_version: None,
+            disk_profile: None,
         }
     }
 
@@ -266,6 +308,7 @@ mod tests {
                 multi: None,
                 compute: Some(1480),
                 graphics: Some(1520),
+                ..Scores::default()
             },
             kernels: vec![KernelRate {
                 id: BenchKernel::Fma,
@@ -274,6 +317,8 @@ mod tests {
                 multi: None,
                 value: Some(47.18),
                 spread: Some(0.012),
+                read: None,
+                write: None,
             }],
             device: Device {
                 model: "NVIDIA GeForce RTX 4080".into(),
@@ -283,6 +328,7 @@ mod tests {
                 vendor_id: Some(0x10de),
                 dedicated_bytes: Some(17_171_480_576),
                 integrated: Some(false),
+                kind: None,
             },
             scaling: None,
             ..sample()
@@ -311,5 +357,89 @@ mod tests {
             ),
             ("gpu", Some(1480), Some(1520), Some("gpu-pci-0100"))
         );
+    }
+
+    /// A GPU score as M8b2 wrote it, before the disk fields.
+    const M8B2_GPU: &str = r#"{"format":1,"id":"0b9c5a2e-1d3f-4a6b-8c7d-9e0f1a2b3c4d","at":"2026-10-07T10:00:00Z","category":"gpu","scoreVersion":"gpu-1","provisional":false,"isa":null,"shaderDigest":"0123456789abcdef","scores":{"single":null,"multi":null,"compute":1480,"graphics":1520},"kernels":[{"id":"fma","unit":"TFLOPS","single":null,"multi":null,"value":47.18,"spread":0.012}],"device":{"model":"NVIDIA GeForce RTX 4080","cores":0,"logical":0,"deviceId":"gpu-pci-0100","vendorId":4318,"dedicatedBytes":17171480576,"integrated":false},"flags":[],"valid":true,"scaling":null,"samples":[],"appVersion":"0.5.0","loadVersion":"0.5.0"}"#;
+
+    #[test]
+    fn gpu_and_cpu_score_files_still_parse() {
+        let g = parse_score(M8B2_GPU.as_bytes()).unwrap();
+        assert_eq!(g.scores.compute, Some(1480));
+        assert_eq!(
+            (g.scores.read_mbs, g.scores.write_mbs, g.scores.points),
+            (None, None, None)
+        );
+        assert_eq!((&g.kernels[0].read, &g.kernels[0].write), (&None, &None));
+        assert_eq!((g.device.kind, g.disk_profile), (None, None));
+        let c = parse_score(M8A2_CPU.as_bytes()).unwrap();
+        assert_eq!((c.scores.points, c.disk_profile), (None, None));
+        let m = summary(&c);
+        assert_eq!((m.read_mbs, m.write_mbs, m.points), (None, None, None));
+    }
+
+    #[test]
+    fn disk_score_file_round_trips() {
+        let rate = |mbs| DiskRate {
+            mbs,
+            iops: mbs * 1e6 / 1_048_576.0,
+            mean_lat_us: 140.5,
+            p99_lat_us: 310.0,
+        };
+        let s = ScoreFile {
+            category: "disk".into(),
+            score_version: "disk-1".into(),
+            isa: None,
+            scores: Scores {
+                read_mbs: Some(7012.5),
+                write_mbs: Some(5990.0),
+                points: Some(1003),
+                ..Scores::default()
+            },
+            kernels: vec![KernelRate {
+                id: BenchKernel::Seq1mQ8t1,
+                unit: "MB/s".into(),
+                single: None,
+                multi: None,
+                value: None,
+                spread: None,
+                read: Some(rate(7012.5)),
+                write: Some(rate(5990.0)),
+            }],
+            device: Device {
+                model: "Samsung SSD 990 PRO".into(),
+                device_id: Some("disk-0".into()),
+                kind: Some("nvme".into()),
+                ..Device::default()
+            },
+            scaling: None,
+            disk_profile: Some(DiskProfile::B1),
+            ..sample()
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        for key in [
+            "\"category\":\"disk\"",
+            "\"readMBs\":7012.5",
+            "\"writeMBs\":5990.0",
+            "\"points\":1003",
+            "\"id\":\"seq1m_q8t1\"",
+            "\"unit\":\"MB/s\"",
+            "\"meanLatUs\":140.5",
+            "\"p99LatUs\":310.0",
+            "\"kind\":\"nvme\"",
+            "\"diskProfile\":\"b1\"",
+            "\"isa\":null",
+        ] {
+            assert!(text.contains(key), "{key} in {text}");
+        }
+        assert_eq!(parse_score(text.as_bytes()).unwrap(), s);
+        let m = summary(&s);
+        assert_eq!(
+            (m.category.as_str(), m.read_mbs, m.write_mbs, m.points),
+            ("disk", Some(7012.5), Some(5990.0), Some(1003))
+        );
+        assert!(serde_json::to_string(&m)
+            .unwrap()
+            .contains("\"readMBs\":7012.5"));
     }
 }

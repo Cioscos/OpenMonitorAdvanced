@@ -1,0 +1,1 @@
+{"version":"disk-1","provisional":true,"read":{"seq1m_q8t1":7000,"seq1m_q1t1":4500,"rnd4k_q32t1":700,"rnd4k_q1t1":80},"write":{"seq1m_q8t1":6000,"seq1m_q1t1":4000,"rnd4k_q32t1":550,"rnd4k_q1t1":250}}

@@ -32,7 +32,7 @@ impl Baseline {
         match mode {
             BenchMode::Single => Some(&self.single),
             BenchMode::Multi => Some(&self.multi),
-            BenchMode::Compute | BenchMode::Graphics => None,
+            BenchMode::Compute | BenchMode::Graphics | BenchMode::Read | BenchMode::Write => None,
         }
     }
 }
@@ -327,6 +327,7 @@ mod tests {
                 multi: Some(1500),
                 compute: None,
                 graphics: None,
+                ..Scores::default()
             },
             kernels: WORKLOADS
                 .iter()
@@ -337,6 +338,8 @@ mod tests {
                     multi: Some(b.multi[&w.id]),
                     value: None,
                     spread: None,
+                    read: None,
+                    write: None,
                 })
                 .collect(),
             device: Device {
@@ -351,6 +354,7 @@ mod tests {
             samples: vec![],
             app_version: "0.5.0".into(),
             load_version: None,
+            disk_profile: None,
         }
     }
 

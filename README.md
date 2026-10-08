@@ -230,6 +230,14 @@ from the tray. Technical terms have a plain-words tooltip.
 - The load kernels are partly adapted from FIRESTARTER, OpenDCDiag and memtest_vulkan; see
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+### Sharing scores (optional, anonymous)
+
+After a CPU, GPU or disk benchmark you will be able to share the score for a public leaderboard.
+Nothing is sent unless you press the button after seeing a preview. The server stores no account, no
+installation id and no IP address, only the score, the hardware model, the RAM size, the Windows
+build and the day; the public table shows medians of at least 3 submissions. Details, formulas and
+the privacy notice: [docs/benchmark-scoring.md](docs/benchmark-scoring.md) (in Italian).
+
 ## In-game overlay
 
 The overlay shows FPS, frame times and sensors over a game, in a separate window that does not take

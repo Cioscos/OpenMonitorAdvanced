@@ -1,0 +1,87 @@
+{
+  "format": 1,
+  "generatedAt": "2026-10-08T22:26:32Z",
+  "license": "CC0-1.0",
+  "rows": [
+    {
+      "category": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "value": 1495,
+      "n": 3,
+      "source": "author"
+    },
+    {
+      "category": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "value": 1491,
+      "n": 3,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "Extreme",
+      "value": 31,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "Fanxiang S880 2TB",
+      "value": 995,
+      "n": 3,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "SHPP41-2000GM",
+      "value": 976,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "ST2000DM008-2FR102",
+      "value": 6,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "AMD Radeon Graphics",
+      "value": 26,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "NVIDIA GeForce RTX 4080",
+      "value": 1533,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-graphics",
+      "scoreVersion": "gpu-1",
+      "model": "AMD Radeon Graphics",
+      "value": 73,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-graphics",
+      "scoreVersion": "gpu-1",
+      "model": "NVIDIA GeForce RTX 4080",
+      "value": 1539,
+      "n": 1,
+      "source": "author"
+    }
+  ]
+}

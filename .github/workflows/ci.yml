@@ -160,6 +160,41 @@ jobs:
             throw "Integration run not clean: result=$($result.Result) passed=$($result.PassedCount) skipped=$($result.SkippedCount) failed=$($result.FailedCount)"
           }
 
+  scores-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scores-worker
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: scores-worker/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm check
+
+      - name: Tests
+        run: pnpm test
+
+      # The Worker must never log (anonymity, spec 7.6).
+      - name: No console output in src
+        run: |
+          if grep -rn 'console\.' src; then
+            echo "console.* is not allowed in scores-worker/src"
+            exit 1
+          fi
+
   actionlint:
     runs-on: ubuntu-latest
     steps:

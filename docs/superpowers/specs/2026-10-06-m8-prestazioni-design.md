@@ -630,7 +630,7 @@ Non contiene campioni, seriali, GUID, nome del PC o nome utente.
 - **Codice.** La logica sta in `oma-core::scores`, la stessa che usa l'app, e una piccola CLI del workspace (`oma-scores`) la espone alle Action.
 - **`benchmark-validate.yml`** parte a ogni issue aperta o modificata con l'etichetta `benchmark-result`.
   - Estrae il JSON dal corpo della issue.
-  - Controlla schema, versione e plausibilità: valori finiti e positivi, dentro un fattore 0,2–5 della mediana del modello se esiste, altrimenti della categoria.
+  - Controlla schema, versione e plausibilità: valori finiti e positivi, dentro un fattore 0,2–5 della mediana del modello se esiste, altrimenti dentro la fascia della categoria (da 0,2 volte il minimo a 5 volte il massimo delle sue righe).
   - Commenta l'esito e mette l'etichetta `valid` oppure `invalid`.
 - **`benchmark-aggregate.yml`** parte quando un'etichetta cambia, ogni giorno e a mano.
   - Raccoglie le issue con `valid` e senza `rejected`.
@@ -671,7 +671,7 @@ Precisano i §7.1–7.5; dove li contraddicono, vale questo paragrafo. Per decis
   - **`POST /v1/submit`:**
     - **Corpo:** l'oggetto del §8.5 più `overclock` (booleano), al massimo 16 KB.
     - **Controlli:** schema, `format: 1`, versione del punteggio nota (`cpu-1`, `gpu-1`, `disk-1`), `valid: true`, valori finiti e positivi.
-    - **Plausibilità:** il valore sta dentro un fattore 0,2–5 della mediana del modello. Se il modello non ha una mediana, vale quella della categoria; se la categoria è vuota, vale un tetto per categoria fissato nel piano.
+    - **Plausibilità:** il valore sta dentro un fattore 0,2–5 della mediana del modello. Se il modello non ha righe, vale la fascia della categoria (0,2 × minimo, 5 × massimo: la sua mediana scarterebbe l'hardware lento); se la categoria è vuota, vale un tetto per categoria fissato nel piano.
     - **Risposte:**
       - `201` se l'invio è accettato;
       - `400` con un codice d'errore che l'app traduce;

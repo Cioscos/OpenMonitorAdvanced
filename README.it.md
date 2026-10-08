@@ -245,6 +245,14 @@ parole semplici.
 - I kernel di carico sono in parte adattati da FIRESTARTER, OpenDCDiag e memtest_vulkan; vedi
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+### Condividere i punteggi (facoltativo, anonimo)
+
+Dopo un benchmark di CPU, GPU o disco potrai condividere il punteggio per una classifica pubblica.
+Non parte nulla se non premi il pulsante dopo aver visto un'anteprima. Il server non salva account,
+identificativi dell'installazione né indirizzi IP: solo punteggio, modello hardware, RAM, build di
+Windows e giorno; la tabella pubblica mostra mediane di almeno 3 invii. Formule e informativa sulla
+privacy: [docs/benchmark-scoring.md](docs/benchmark-scoring.md).
+
 ## Controllo degli aggiornamenti
 
 L'app può dirti quando esce una nuova versione. In *Impostazioni › Informazioni*, **Controlla ora**

@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8c).
+Updated at the end of every milestone (last update: M8d1).
 
 ## Open: code
 
@@ -152,6 +152,36 @@ Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-0
 - **Interfaccia:** il mock di `pnpm dev` non ha un piano del disco (la procedura guidata del disco in modalità browser non mostra niente); `isDiskKernel` usa un'espressione regolare invece del catalogo; la finestra dello standby non ha focus trap (come le altre).
 - **Controller:** ogni `LoadMessage::Error` conta come `io_error` (il benchmark riceve solo quello); `io_bps` copre da `Progress` a `PhaseDone`.
 - **Esportazione e classifica (M8d):** rinviate.
+
+## Open: leaderboard server (M8d1)
+
+Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Implementata sul branch `feat/m8d1-scores-worker`; prove dal vivo W7 superate il 2026-10-09. Il Worker è pubblicato su `https://scores.cischi.dev` con il database D1 `oma-scores` (giurisdizione `eu`).
+
+- **Sottodominio nell'app (M8d2):** `scores.cischi.dev` va messo anche nella costante dell'app.
+- **Righe della CPU dell'autore:** misurate in W7 con la build release (3 benchmark del Ryzen 7 7800X3D: single 1491, multi 1495). Il Worker include le righe dell'autore al deploy: dopo ogni `pnpm author-table` serve un nuovo `pnpm run deploy`.
+- **Prove dal vivo W7, superate il 2026-10-09:**
+  - `GET /v1/reference-scores.json`: `200` con la tabella vuota, `ETag: "empty"` e `Cache-Control: public, max-age=3600`; `304` con `If-None-Match`. Con la compressione (`curl --compressed`) Cloudflare risponde `ETag: W/"empty"`, e il `304` arriva con `If-None-Match: W/"empty"`: il confronto debole aggiunto dalla revisione finale serve davvero. `404` e `405` come previsto.
+  - `POST /v1/submit`: `201` con l'invio valido della CPU (modello `OMA Test CPU`), `400 bad_schema` con un corpo incompleto.
+  - **Rate limit:** il binding funziona anche nel piano gratuito, ma è permissivo. 14 richieste in fila non hanno dato nessun `429`; con 30 richieste in parallelo e altre 10 subito dopo, sono arrivati molti `429`. Il ripiego con la regola della zona non serve.
+  - **Aggregazione:** 3 invii di `OMA Test CPU` e `pnpm recompute` pubblicano le righe `cpu-single` 1850 e `cpu-multi` 2400 con `n: 3` e un `ETag` nuovo. Con la chiave in `hidden_models` e un nuovo ricalcolo la tabella torna vuota. In `entries` c'erano solo giorno, valori e modello normalizzato, senza IP.
+  - **Pulizia:** cancellati invii, `hidden_models` e `daily` di prova, poi un ricalcolo: tabella vuota, tre tabelle a zero righe.
+  - **Privacy:** nel pannello, Logs, Traces e Issues del Worker sono spenti; `wrangler d1 list` dà `"jurisdiction":"eu"`.
+- **Primo deploy:** il cron si registra solo se l'account ha un sottodominio `workers.dev`. Il sottodominio si crea aprendo una volta la pagina «Workers & Pages» del pannello; il Worker resta con `workers_dev = false`.
+- **`HEAD` dà `405`:** `HEAD /v1/reference-scores.json` risponde `method_not_allowed`. L'app non lo usa, ma per la semantica HTTP andrebbe trattato come un `GET` senza corpo.
+- **Note di revisione rinviate:**
+  - (a) `plausible()` normalizza ogni riga pubblicata a ogni invio: con una tabella grande pesa sulla CPU del Worker; precalcolare la chiave all'aggregazione o tenere una cache per `etag`.
+  - (b) l'`ETag` ha la risoluzione del secondo UTC: due ricalcoli nello stesso secondo danno lo stesso `etag`.
+  - (d) `scripts/recompute.ts`: `spawnSync` con argomenti e `shell: true` dà l'avviso DEP0190 su Node 24.
+  - (e) `\s` e `toLowerCase` di JavaScript e Rust possono differire sui nomi di modello non ASCII: da allineare nella M8d2 con le fixture comuni.
+- **Dopo il primo cron:** controllare in «Cron Events» del pannello di Cloudflare che l'aggregazione sia girata (i log sono spenti, quindi non resta altra traccia).
+- **Note per la M8d2 (parità con l'app):**
+  - `normalizeModel` non è idempotente: `((R)R)` diventa `(R)` al primo giro e vuoto al secondo; l'app deve applicarla una volta sola, come il server;
+  - `1e999` è `bad_value` in JavaScript ma un errore di lettura in `serde_json`: il corpo non arriva al server, ma le fixture non devono dare per scontato lo stesso codice;
+  - `MODEL_MAX` conta unità UTF-16, non caratteri Unicode: Rust deve contare allo stesso modo;
+  - nelle righe della tabella il nome della classifica sta nel campo `category`;
+  - `MIN(model)` sceglie la grafia più piccola in ordine lessicale: da cambiare con la grafia più frequente;
+  - l'interfaccia della M8d2 deve mostrare i nomi dei modelli come testo semplice (mai HTML).
+- **Informativa:** la certificazione Data Privacy Framework di Cloudflare è «da verificare» in `docs/benchmark-scoring.md` (la pagina dell'elenco non si legge in automatico).
 
 ## Open: CPU benchmark (M8a2)
 

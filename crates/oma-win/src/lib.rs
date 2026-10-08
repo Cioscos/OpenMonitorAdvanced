@@ -36,6 +36,7 @@ mod storage_temperature;
 pub mod svc;
 pub mod toast;
 pub mod topology;
+pub mod volumes;
 
 use oma_core::provider::Provider;
 

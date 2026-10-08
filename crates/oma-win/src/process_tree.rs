@@ -6,9 +6,12 @@ use std::io;
 use std::mem::size_of;
 
 use windows::core::HRESULT;
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, FILETIME, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 /// `root` and every descendant, from `(pid, parent pid)` pairs. Always contains `root`; the
@@ -80,9 +83,32 @@ pub fn descendants(root: u32) -> io::Result<HashSet<u32>> {
     Ok(descendants_of(&pairs, root))
 }
 
+/// Creation time of process `pid` as a FILETIME `u64` (what `oma-load` writes as `startedAt`);
+/// `None` if the process cannot be opened or has no times.
+pub fn process_started_at(pid: u32) -> Option<u64> {
+    // SAFETY: plain flags and pid; the returned handle is closed below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let zero = FILETIME::default();
+    let (mut created, mut a, mut b, mut c) = (zero, zero, zero, zero);
+    // SAFETY: `handle` is an open process handle; all four out-pointers are live FILETIMEs.
+    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut a, &mut b, &mut c) }.is_ok();
+    // SAFETY: `handle` is owned here and not used afterwards.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn own_process_start_time_is_known() {
+        assert!(process_started_at(std::process::id()).is_some_and(|t| t > 0));
+        assert_eq!(process_started_at(u32::MAX), None);
+    }
 
     #[test]
     fn descendants_include_grandchildren() {

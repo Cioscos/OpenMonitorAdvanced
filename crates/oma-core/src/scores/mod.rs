@@ -2,6 +2,7 @@
 //! full scale and the score file (pure; no Windows code).
 
 mod bench;
+mod board;
 mod disk;
 mod disk_bench;
 mod file;
@@ -15,6 +16,12 @@ mod workloads;
 
 pub use bench::{
     BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, SegmentState,
+};
+pub use board::{
+    author_rows, known_version, median, normalize_model, parse_table, plausible,
+    validate_submission, Board, ErrorCode, Model, Source, Submission, Table, TableRow,
+    MAX_SUBMIT_BYTES, MAX_TABLE_BYTES, MODEL_MAX, PLAUSIBLE_MAX, PLAUSIBLE_MIN, SUBMIT_URL,
+    TABLE_URL, VALUE_CAP,
 };
 pub use disk::{
     disk_baseline, disk_bench_plan, disk_calibration_from, disk_points, disk_tests, DiskBaseline,

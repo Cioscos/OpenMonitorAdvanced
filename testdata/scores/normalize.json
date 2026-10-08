@@ -28,5 +28,25 @@
     "input": "Intel(r) Arc(tm) A770",
     "display": "Intel Arc A770",
     "key": "intel arc a770"
+  },
+  {
+    "input": "Intel Core\uFEFFi5",
+    "display": "Intel Core i5",
+    "key": "intel core i5"
+  },
+  {
+    "input": "A\u0085B",
+    "display": "A\u0085B",
+    "key": "a\u0085b"
+  },
+  {
+    "input": "ΣΊΣΥΦΟΣ GPU",
+    "display": "ΣΊΣΥΦΟΣ GPU",
+    "key": "σίσυφος gpu"
+  },
+  {
+    "input": "((R)R) X",
+    "display": "(R) X",
+    "key": "(r) x"
   }
 ]

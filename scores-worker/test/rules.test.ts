@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import normalizeCases from "../../testdata/scores/normalize.json";
+import formatChars from "../../testdata/scores/format-chars.json";
 import submissions from "../../testdata/scores/submissions.json";
 import { normalizeModel, validateSubmission } from "../src/rules.ts";
 
@@ -34,5 +35,21 @@ describe("rules", () => {
     const body = submissions.valid.find((c) => c.name === "disk_with_throughput")!.body;
     const r = validateSubmission(body);
     expect(r.ok && r.value.values).toEqual([{ board: "disk", value: 900 }]);
+  });
+
+  it("format_chars_fixture_matches_the_runtime", () => {
+    const re = /^\p{Cf}$/u;
+    const ranges: number[][] = [];
+    let start = -1;
+    for (let c = 0; c <= 0x10ffff; c++) {
+      const hit = c >= 0xd800 && c <= 0xdfff ? false : re.test(String.fromCodePoint(c));
+      if (hit && start < 0) start = c;
+      if (!hit && start >= 0) {
+        ranges.push([start, c - 1]);
+        start = -1;
+      }
+    }
+    if (start >= 0) ranges.push([start, 0x10ffff]);
+    expect(ranges).toEqual(formatChars.cf);
   });
 });

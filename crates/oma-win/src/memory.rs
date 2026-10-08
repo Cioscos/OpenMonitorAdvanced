@@ -2,7 +2,9 @@
 
 use oma_core::model::{Device, DeviceKind, Label, Sensor, SensorKind, Source, Unit};
 use oma_core::provider::{Inventory, Provider, ProviderError};
-use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows::Win32::System::SystemInformation::{
+    GetPhysicallyInstalledSystemMemory, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+};
 
 const DEVICE_ID: &str = "memory/0";
 
@@ -29,6 +31,31 @@ fn status_ex() -> Result<MEMORYSTATUSEX, ProviderError> {
 pub fn memory_status() -> std::io::Result<(u64, u64)> {
     let s = status_ex().map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok((s.ullTotalPhys, s.ullAvailPhys))
+}
+
+/// Installed RAM in whole GiB from the firmware's KiB count, between 1 and 4096.
+pub fn ram_gb_from_kib(kib: u64) -> u32 {
+    let gib = kib.saturating_add(512 * 1024) / (1024 * 1024);
+    gib.clamp(1, 4096) as u32
+}
+
+/// RAM in whole GiB from a byte count, rounded up, between 1 and 4096.
+pub fn ram_gb_from_bytes(bytes: u64) -> u32 {
+    const GIB: u64 = 1 << 30;
+    (bytes / GIB + u64::from(bytes % GIB != 0)).clamp(1, 4096) as u32
+}
+
+/// Installed RAM in GiB: `GetPhysicallyInstalledSystemMemory`, or the usable
+/// `ullTotalPhys` rounded up (a little under the installed size) if that fails.
+pub fn installed_ram_gb() -> Option<u32> {
+    let mut kib = 0u64;
+    // SAFETY: `kib` is a valid, writable u64 alive for the call.
+    if unsafe { GetPhysicallyInstalledSystemMemory(&mut kib) }.is_ok() && kib > 0 {
+        return Some(ram_gb_from_kib(kib));
+    }
+    memory_status()
+        .ok()
+        .map(|(total, _)| ram_gb_from_bytes(total))
 }
 
 #[derive(Default)]
@@ -103,5 +130,21 @@ mod tests {
         assert_eq!(used_pct(32, 8), Some(75.0));
         assert_eq!(used_pct(200, 50), Some(75.0));
         assert_eq!(used_pct(0, 0), None);
+    }
+
+    #[test]
+    fn ram_gb_rounds_to_the_installed_size() {
+        assert_eq!(ram_gb_from_kib(33_554_432), 32);
+        assert_eq!(ram_gb_from_kib(16_777_216), 16);
+        assert_eq!(ram_gb_from_kib(33_520_000), 32);
+        assert_eq!(ram_gb_from_kib(0), 1);
+    }
+
+    #[test]
+    fn ram_gb_from_bytes_rounds_up() {
+        let gib = 1u64 << 30;
+        assert_eq!(ram_gb_from_bytes(gib * 312 / 10), 32);
+        assert_eq!(ram_gb_from_bytes(0), 1);
+        assert_eq!(ram_gb_from_bytes(gib * 5000), 4096);
     }
 }

@@ -65,7 +65,9 @@
   $effect(() => {
     const running = benchStore.running;
     const status = benchStore.status;
-    if (running && !benchWasRunning) {
+    // `run` (the tray, or the toast of a window closed during the test) means the test under way.
+    const asked = page === 'run';
+    if (running && (!benchWasRunning || asked)) {
       page = status?.category === 'gpu' && status.deviceId ? gpuPage(status.deviceId) : status?.category === 'disk' ? 'score-disk' : 'score-cpu';
     }
     benchWasRunning = running;

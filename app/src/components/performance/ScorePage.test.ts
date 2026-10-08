@@ -517,3 +517,16 @@ test('a failed system read says the disks cannot be listed', async () => {
   await screen.findByText(t('performance.score.disk.unavailable'));
   expect((startButton() as HTMLButtonElement).disabled).toBe(true);
 });
+
+test('the run page opens a disk benchmark under way', async () => {
+  const backend: FakeBackend = await connectSettings();
+  backend.performanceSystemInfo = makeSystemInfo({ volumes: [VOL_C, VOL_E] });
+  backend.benchStatusValue = makeDiskBenchStatus('disk-c', { step: 2, liveRead: 3200 });
+  const view = render(PerformanceView, { backend, store: new LiveStore(), page: 'run' });
+  await screen.findByRole('heading', { name: t('performance.score.disk.title') });
+  // Asked again with the view already open (a toast clicked while the window is hidden).
+  await view.rerender({ page: 'history' });
+  await screen.findByRole('heading', { name: t('performance.nav.history') });
+  await view.rerender({ page: 'run' });
+  await screen.findByRole('heading', { name: t('performance.score.disk.title') });
+});

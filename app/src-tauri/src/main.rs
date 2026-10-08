@@ -300,7 +300,10 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(
             |app, args, _cwd| match second_launch(&args) {
                 SecondLaunch::Quit => window::quit(app, window::QuitSource::Flag),
-                SecondLaunch::ShowWindow => window::show_main(app),
+                SecondLaunch::ShowWindow => {
+                    tracing::info!(?args, "second launch: showing the window");
+                    window::show_main(app)
+                }
                 SecondLaunch::Nothing => {}
             },
         ))
@@ -718,7 +721,7 @@ fn main() {
                     app.state::<Arc<notifier::SystemToaster>>().show(
                         tray_icon::PRODUCT_NAME.to_owned(),
                         i18n::t(lang, "performance.closeToTray", &[]),
-                        notifier::launch_for_main(),
+                        notifier::launch_for_run(),
                     );
                 }
             }

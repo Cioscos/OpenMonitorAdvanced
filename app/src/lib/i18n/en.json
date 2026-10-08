@@ -1408,5 +1408,5 @@
   "settings.performance.diskStopC.hint": "The disk test stops if the disk exceeds this temperature for two readings in a row. Automatic uses the disk's own warning threshold, or 70 °C.",
   "settings.performance.diskStopC.auto": "Automatic",
   "settings.performance.diskStopC.set": "Set a temperature",
-  "settings.performance.diskStopC.useAuto": "Automatic"
+  "performance.score.disk.unavailable": "Cannot read the list of disks: close and reopen the Performance view."
 }

@@ -498,6 +498,7 @@ const scoreSummary = (f: ScoreFile): ScoreSummary => ({
   writeMBs: f.scores.writeMBs,
   points: f.scores.points,
   deviceId: f.device.deviceId,
+  model: f.device.model || null,
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,

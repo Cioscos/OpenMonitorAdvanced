@@ -116,6 +116,6 @@ test('disk stop has auto and a number', async () => {
   await fireEvent.input(input, { target: { value: '65' } });
   await fireEvent.blur(input);
   await waitFor(() => expect(patches.at(-1)).toEqual({ performance: { diskStopC: 65 } }));
-  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.diskStopC.useAuto') }));
+  await fireEvent.click(screen.getByRole('button', { name: t('settings.performance.diskStopC.auto') }));
   await waitFor(() => expect(patches.at(-1)).toEqual({ performance: { diskStopC: null } }));
 });

@@ -166,7 +166,7 @@
     {#if page === 'score-cpu'}
       <ScorePage target={{ category: 'cpu' }} />
     {:else if page === 'score-disk'}
-      <ScorePage target={{ category: 'disk' }} {backend} />
+      <ScorePage target={{ category: 'disk', unavailable: systemFailed }} {backend} />
     {:else if gpuTarget}
       <!-- Until the GPU list is read, a GPU page cannot tell a GPU that is gone from one not known yet. -->
       {#if gpus !== null}{#key page}<ScorePage target={gpuTarget} />{/key}{/if}

@@ -1408,5 +1408,5 @@
   "settings.performance.diskStopC.hint": "Il test del disco si ferma se il disco supera questa temperatura per due letture di fila. In automatico usa la soglia d'allarme del disco, oppure 70 °C.",
   "settings.performance.diskStopC.auto": "Automatica",
   "settings.performance.diskStopC.set": "Imposta una temperatura",
-  "settings.performance.diskStopC.useAuto": "Automatica"
+  "performance.score.disk.unavailable": "Impossibile leggere l'elenco dei dischi: chiudi e riapri la vista Prestazioni."
 }

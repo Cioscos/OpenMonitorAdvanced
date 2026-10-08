@@ -111,7 +111,7 @@
               describedBy={errorOf('performance.diskStopC') !== null ? 'performance-disk-stop-error' : undefined}
               onCommit={(diskStopC) => send({ diskStopC })}
             />
-            <button type="button" class="action" onclick={() => send({ diskStopC: null })}>{t('settings.performance.diskStopC.useAuto')}</button>
+            <button type="button" class="action" onclick={() => send({ diskStopC: null })}>{t('settings.performance.diskStopC.auto')}</button>
           {/if}
         </div>
       {/snippet}

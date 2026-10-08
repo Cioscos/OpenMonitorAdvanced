@@ -133,6 +133,9 @@ pub struct ScoreSummary {
     #[serde(default)]
     pub points: Option<u32>,
     pub device_id: Option<String>,
+    /// The device's model name, so a disk that is gone still has a name in the history.
+    #[serde(default)]
+    pub model: Option<String>,
     pub valid: bool,
     pub flags: Vec<String>,
     pub provisional: bool,
@@ -164,6 +167,7 @@ pub fn summary(s: &ScoreFile) -> ScoreSummary {
         write_mbs: s.scores.write_mbs,
         points: s.scores.points,
         device_id: s.device.device_id.clone(),
+        model: Some(s.device.model.clone()).filter(|m| !m.is_empty()),
         valid: s.valid,
         flags: s.flags.clone(),
         provisional: s.provisional,
@@ -275,6 +279,15 @@ mod tests {
             (m.category.as_str(), m.compute, m.device_id),
             ("cpu", None, None)
         );
+    }
+
+    #[test]
+    fn the_summary_carries_the_device_model() {
+        let s = parse_score(M8A2_CPU.as_bytes()).unwrap();
+        assert_eq!(summary(&s).model.as_deref(), Some("AMD Ryzen 7 7800X3D"));
+        let mut empty = s.clone();
+        empty.device.model = String::new();
+        assert_eq!(summary(&empty).model, None);
     }
 
     #[test]

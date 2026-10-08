@@ -168,8 +168,8 @@
   const whole = (v: number | null) => (v === null ? '–' : Math.round(v));
   /** A read / write pair of the disk table. */
   const pair = (read: string, write: string) => `${read} / ${write}`;
-  /** The model of the disk behind a saved score: the volume's own name when it is in the system, else its id. */
-  const modelOf = (s: ScoreSummary) => volumes.find((v) => v.deviceId === s.deviceId)?.model ?? s.deviceId ?? '–';
+  /** The model of the disk behind a saved score: the one saved with it, else the volume's, else «Other». */
+  const modelOf = (s: ScoreSummary) => s.model ?? volumes.find((v) => v.deviceId === s.deviceId)?.model ?? t('performance.disk.kind.other');
   const points = $derived(shown?.scores.points ?? null);
   const when = (at: string) => new Date(at).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' });
   const markOf = (s: ScoreSummary) =>
@@ -227,6 +227,7 @@
 
 <div class="score">
   {#if gpu && target.name}<p class="device">{target.name}</p>{/if}
+  {#if disk && target.unavailable}<p class="notice warn">{t('performance.score.disk.unavailable')}</p>{/if}
   {#if disk && backend}
     <DiskTarget
       {backend}

@@ -478,3 +478,24 @@ test('disk page without volumes cannot start', async () => {
   await setupDisk([], []);
   expect((startButton() as HTMLButtonElement).disabled).toBe(true);
 });
+
+test('an unplugged disk keeps its model in the history', async () => {
+  await setupDisk([
+    makeDiskScoreFile('disk-gone', { id: 'g1', at: '2026-10-08T13:00:00Z', device: { model: 'Gone USB Stick' } }),
+    makeDiskScoreFile('disk-gone2', { id: 'g2', at: '2026-10-08T12:00:00Z', device: { model: '' } }),
+  ]);
+  const rows = within(screen.getByRole('table', { name: t('performance.score.history') })).getAllByRole('row').slice(1);
+  expect(rows[0].textContent).toContain('Gone USB Stick');
+  // Without a saved model the raw device id never shows.
+  expect(rows[1].textContent).toContain(t('performance.disk.kind.other'));
+  expect(document.body.textContent).not.toContain('disk-gone');
+});
+
+test('a failed system read says the disks cannot be listed', async () => {
+  const backend: FakeBackend = await connectSettings();
+  backend.performanceSystemError = 'boom';
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'score-disk' });
+  await screen.findByText(t('performance.score.disk.unavailable'));
+  expect((startButton() as HTMLButtonElement).disabled).toBe(true);
+});

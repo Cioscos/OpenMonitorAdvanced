@@ -1094,6 +1094,8 @@ export interface ScoreSummary {
   writeMBs: number | null;
   points: number | null;
   deviceId: string | null;
+  /** The device's model name, kept with the score so a disk that is gone still has a name. */
+  model: string | null;
   valid: boolean;
   flags: string[];
   provisional: boolean;

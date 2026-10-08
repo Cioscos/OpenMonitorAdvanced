@@ -1337,7 +1337,7 @@
   "performance.nav.scoreDisk": "Disk",
   "performance.score.read": "Read",
   "performance.score.write": "Write",
-  "performance.score.disk.duration": "About 6 minutes. The test writes at most {size} to the disk.",
+  "performance.score.disk.duration": "About 6 minutes. The test rewrites one 1 GiB file over and over: it writes at most {size} in all, but takes only 1 GiB.",
   "performance.score.disk.phase": "{test} · {direction} · {rep}",
   "performance.score.disk.warmup": "warm-up",
   "performance.score.disk.measure": "measurement {n} of 3",

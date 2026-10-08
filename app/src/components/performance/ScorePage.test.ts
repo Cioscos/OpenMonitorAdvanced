@@ -361,6 +361,22 @@ test('disk page runs and shows read and write', async () => {
   expect(entry.textContent).not.toContain('●');
 });
 
+test('another disk shows its own last measure, not the newest of every disk', async () => {
+  await setupDisk([makeDiskScoreFile('disk-c')]);
+  await waitFor(() => expect(diskNow('read')).toBe('6900'));
+  await fireEvent.change(screen.getByRole('combobox', { name: t('performance.disk.volume') }), { target: { value: VOL_E.root } });
+  await waitFor(() => expect(diskNow('read')).toBeNull());
+  expect(diskMeter('read').getAttribute('aria-valuemax')).toBe('2000');
+  expect(screen.queryByRole('table', { name: t('performance.score.detail') })).toBeNull();
+});
+
+test('the volume list is read again when the menu is about to open', async () => {
+  const backend = await setupDisk([], [VOL_C]);
+  backend.performanceSystemInfo = makeSystemInfo({ volumes: [VOL_C, VOL_E] });
+  await fireEvent.focus(screen.getByRole('combobox', { name: t('performance.disk.volume') }));
+  await screen.findByRole('option', { name: new RegExp(VOL_E.model!) });
+});
+
 test('disk detail shows iops and latencies', async () => {
   await setupDisk([makeDiskScoreFile('disk-c')]);
   const table = await screen.findByRole('table', { name: t('performance.score.detail') });

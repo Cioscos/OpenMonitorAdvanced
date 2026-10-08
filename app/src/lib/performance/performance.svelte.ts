@@ -104,6 +104,16 @@ class PerformanceStore {
     await this.#backend?.performanceStop();
   }
 
+  /** Reads the system again for a volume plugged in since (metadata only: a spun-down HDD stays asleep). */
+  async refreshSystem(): Promise<void> {
+    const backend = this.#backend;
+    if (backend === null) return;
+    const generation = this.#generation;
+    const system = await backend.performanceSystem();
+    if (this.#generation === generation)
+      this.system = this.system ? { ...system, serviceConnected: this.system.serviceConnected } : system;
+  }
+
   async refreshHistory(): Promise<void> {
     const backend = this.#backend;
     if (backend === null) return;

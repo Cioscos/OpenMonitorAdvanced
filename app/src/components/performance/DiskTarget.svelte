@@ -2,6 +2,7 @@
   import type { Backend } from '../../lib/backend';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { diskErrorText, formatBytes } from '../../lib/performance/disk';
+  import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { VolumeChoice } from '../../lib/types';
 
   // «Where to test» (M8c DC6, DC15), shared by the disk score page and the stress wizard: the menu
@@ -61,6 +62,16 @@
     }
   }
 
+  // A stick plugged in while the page is open: the list is read again when the menu is about to
+  // open, at most every 2 s.
+  let refreshedAt = 0;
+  function refresh() {
+    const now = Date.now();
+    if (now - refreshedAt < 2000) return;
+    refreshedAt = now;
+    performanceStore.refreshSystem().catch((e) => console.error('volumes unavailable', e));
+  }
+
   const focusOnMount = (node: HTMLElement) => node.focus();
 </script>
 
@@ -68,7 +79,7 @@
   <div class="row">
     <label class="menu">
       <span class="caption">{t('performance.disk.volume')}</span>
-      <select aria-label={t('performance.disk.volume')} value={value?.root ?? ''} disabled={disabled || options.length === 0} onchange={(e) => choose(e.currentTarget.value)}>
+      <select aria-label={t('performance.disk.volume')} value={value?.root ?? ''} disabled={disabled || options.length === 0} onpointerenter={refresh} onfocus={refresh} onchange={(e) => choose(e.currentTarget.value)}>
         {#if value === null}<option value="" disabled></option>{/if}
         {#each options as v (v.root)}<option value={v.root}>{label(v)}</option>{/each}
       </select>

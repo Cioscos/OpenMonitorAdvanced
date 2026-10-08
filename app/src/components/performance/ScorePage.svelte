@@ -49,7 +49,12 @@
   const status = $derived(benchStore.statusFor(target));
   const running = $derived(isBenchRunning(status));
   const scores = $derived(benchStore.scoresFor(target));
-  const latest = $derived<ScoreSummary | null>(scores[0] ?? null);
+  // The disk history lists every disk, but the needle and the detail are the chosen disk's.
+  const latest = $derived<ScoreSummary | null>(
+    (disk ? scores.find((s) => s.deviceId === (volume?.deviceId ?? null)) : scores[0]) ?? null,
+  );
+  // A finished run shows its result only on its own disk.
+  const done = $derived(status?.state === 'done' && (!disk || status.deviceId === (volume?.deviceId ?? null)));
   const step = $derived(status && status.step !== null ? (status.steps[status.step] ?? null) : null);
   // The record and the last measurement of a disk are those of the chosen disk.
   const own = $derived<ScoreTarget>(disk ? { category: 'disk', deviceId: volume?.deviceId ?? null } : target);
@@ -76,7 +81,7 @@
   /** The live needle while the mode runs, then its score; without a run, the last saved one. */
   function valueOf(mode: BenchMode): number | null {
     if (running) return step?.mode === mode ? (finite(liveNow()) ?? held[mode] ?? null) : finite(modeValue(status!, mode));
-    if (status?.state === 'done') return finite(modeValue(status, mode));
+    if (done) return finite(modeValue(status!, mode));
     return latest ? finite(modeValue(latest, mode)) : null;
   }
   const values = $derived(Object.fromEntries(MODES.map((m) => [m, valueOf(m)])) as Partial<Record<BenchMode, number | null>>);
@@ -138,7 +143,7 @@
   });
 
   // The measurement below the gauges: the one just saved, else the newest; loaded in full.
-  const detailId = $derived(status?.state === 'done' && status.scoreId ? status.scoreId : (latest?.id ?? null));
+  const detailId = $derived(done && status!.scoreId ? status!.scoreId : (latest?.id ?? null));
   let detail = $state.raw<ScoreFile | null>(null);
   $effect(() => {
     const id = detailId;

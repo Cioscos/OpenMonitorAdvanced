@@ -86,7 +86,7 @@ pub struct BenchContext {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchStatus {
-    /// `"cpu"` or `"gpu"` (DH12).
+    /// `"cpu"`, `"gpu"` or `"disk"` (DH12).
     pub category: String,
     /// The GPU's `device_id`; `None` for the CPU.
     pub device_id: Option<String>,
@@ -99,6 +99,14 @@ pub struct BenchStatus {
     pub multi: Option<u32>,
     pub compute: Option<u32>,
     pub graphics: Option<u32>,
+    /// Disk (DC13): SEQ1M Q8T1 in MB/s, the points (B1 only) and the two needles in MB/s.
+    #[serde(rename = "readMBs")]
+    pub read_mbs: Option<f64>,
+    #[serde(rename = "writeMBs")]
+    pub write_mbs: Option<f64>,
+    pub points: Option<u32>,
+    pub live_read: Option<f64>,
+    pub live_write: Option<f64>,
     pub flags: Vec<String>,
     pub score_id: Option<String>,
     pub error: Option<String>,
@@ -384,6 +392,11 @@ impl BenchController {
             multi: self.finished_points(BenchMode::Multi),
             compute: None,
             graphics: None,
+            read_mbs: None,
+            write_mbs: None,
+            points: None,
+            live_read: None,
+            live_write: None,
             flags: self.life.flag_names(&FLAG_ORDER),
             score_id: self.life.score_id.clone(),
             error: self.life.error.clone(),

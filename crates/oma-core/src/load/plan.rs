@@ -437,9 +437,11 @@ fn disk_phases(
         }
         Objective::Overclock => {
             let long = preset == Preset::Long;
-            let first = if removable {
+            let spare = usable.saturating_sub(file_bytes);
+            // Below 1 GiB spare there is no whole V3 part to write: use V1 instead.
+            let first = if removable && spare >= GIB {
                 // Fill what is left after the stress file, as h2testw does.
-                let cap = usable.saturating_sub(file_bytes).min(1 << 40);
+                let cap = spare.min(1 << 40);
                 disk_phase(V3, 21_600, capped(disk_job(1 << 20, 0, 0, 4, 1), cap))
             } else {
                 let mut j = disk_job(1 << 20, 0, 0, 4, 1);
@@ -588,9 +590,13 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     if is_gpu && input.gpu.is_none() {
         return Err(BuildError::NoGpu);
     }
-    if is_disk && input.disk.is_none() {
-        return Err(BuildError::NoDisk);
-    }
+    let disk_file = match (is_disk, &input.disk) {
+        (true, None) => return Err(BuildError::NoDisk),
+        (true, Some(d)) => {
+            Some(stress_file_bytes(d.free_bytes, d.volume_bytes).ok_or(BuildError::NoSpace)?)
+        }
+        _ => None,
+    };
     let cores = core_order(input.topology);
     if (cores.is_empty() && !is_disk) || ((is_gpu || is_disk) && req.retry_core.is_some()) {
         return Err(BuildError::NoCores);
@@ -633,8 +639,7 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
         match (req.component, req.objective) {
             (Component::Disk, o) => {
                 let d = disk_in.ok_or(BuildError::NoDisk)?;
-                let file =
-                    stress_file_bytes(d.free_bytes, d.volume_bytes).ok_or(BuildError::NoSpace)?;
+                let file = disk_file.ok_or(BuildError::NoSpace)?;
                 let usable = d.free_bytes.saturating_sub(disk_reserve(d.volume_bytes));
                 disk_phases(o, req.preset, duration, d.removable, usable, file)
             }
@@ -688,13 +693,11 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
         },
         phases,
         gpu: if is_gpu { input.gpu } else { None },
-        disk: disk_in.and_then(|d| {
-            Some(DiskTarget {
-                dir: d.dir.clone(),
-                file_bytes: stress_file_bytes(d.free_bytes, d.volume_bytes)?,
-                compressible: req.custom.as_ref().is_some_and(|c| c.compressible),
-                reserve_bytes: disk_reserve(d.volume_bytes),
-            })
+        disk: disk_in.zip(disk_file).map(|(d, file_bytes)| DiskTarget {
+            dir: d.dir.clone(),
+            file_bytes,
+            compressible: req.custom.as_ref().is_some_and(|c| c.compressible),
+            reserve_bytes: disk_reserve(d.volume_bytes),
         }),
     };
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
@@ -1664,6 +1667,18 @@ mod tests {
     }
 
     #[test]
+    fn small_removable_volume_uses_v1_not_v3() {
+        for (free, volume) in [(4 * GIB, 32 * GIB), (10 * GIB, 64 * GIB)] {
+            let plan = ok_disk(
+                &disk_req(Objective::Overclock, Preset::Standard),
+                disk_input(free, volume, true),
+            );
+            assert_eq!(plan.phases[0].kernel, KernelId::V1, "{free}");
+            assert!(plan.phases.iter().all(|p| p.stop_on_error));
+        }
+    }
+
+    #[test]
     fn disk_plan_validates() {
         for removable in [false, true] {
             for o in [Objective::Normal, Objective::Overclock] {
@@ -1713,30 +1728,45 @@ mod tests {
 
     #[test]
     fn disk_writes_fixture_matches() {
+        // (label, objective, preset, free bytes, volume bytes, removable)
         let cases = [
             (
                 "standard normal",
                 Objective::Normal,
                 Preset::Standard,
+                100 * GIB,
+                TB,
                 false,
             ),
             (
                 "standard stability",
                 Objective::Overclock,
                 Preset::Standard,
+                100 * GIB,
+                TB,
                 false,
             ),
             (
                 "long stability removable",
                 Objective::Overclock,
                 Preset::Long,
+                100 * GIB,
+                TB,
+                true,
+            ),
+            (
+                "small removable falls back to V1",
+                Objective::Overclock,
+                Preset::Standard,
+                4 * GIB,
+                32 * GIB,
                 true,
             ),
         ];
         let entries: Vec<_> = cases
             .iter()
-            .map(|&(label, o, p, removable)| {
-                let plan = ok_disk(&disk_req(o, p), roomy(removable));
+            .map(|&(label, o, p, free, volume, removable)| {
+                let plan = ok_disk(&disk_req(o, p), disk_input(free, volume, removable));
                 let phases: Vec<_> = plan
                     .phases
                     .iter()
@@ -1753,6 +1783,13 @@ mod tests {
                     .collect();
                 serde_json::json!({
                     "label": label,
+                    "input": {
+                        "objective": o,
+                        "preset": p,
+                        "freeBytes": free,
+                        "volumeBytes": volume,
+                        "removable": removable,
+                    },
                     "fileBytes": plan.disk.as_ref().unwrap().file_bytes,
                     "phases": phases,
                     "expectedBytes": estimated_writes(&plan),

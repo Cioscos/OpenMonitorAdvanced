@@ -81,7 +81,7 @@
   const canNext = $derived(step === 0 ? system !== null && (component === 'cpu' || (component === 'ram' ? ramOk : disk ? volume !== null : gpuId !== null)) : true);
   const canStart = $derived(plan !== null && !performanceStore.running && !starting);
   const choice = $derived([
-    component === 'gpu' ? (gpu?.name ?? t('performance.wizard.gpu')) : t(component === 'cpu' ? 'performance.wizard.cpu' : 'performance.wizard.ram'),
+    component === 'gpu' ? (gpu?.name ?? t('performance.wizard.gpu')) : t(`performance.wizard.${component}`),
     t(disk ? `performance.objective.disk.${objective}` : `performance.objective.${objective}`),
     t(`performance.preset.${preset}`),
   ]);

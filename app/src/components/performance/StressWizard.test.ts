@@ -536,6 +536,7 @@ async function toDiskSummary(backend: FakeBackend) {
   // The fill ends when its file is written: it is not in the total.
   await screen.findByText(t('performance.wizard.total', { duration: '30 min' }));
   expect(screen.getByText(t('performance.wizard.untilFull'))).toBeTruthy();
+  expect(screen.getByText(`: ${t('performance.wizard.disk')} ✓`)).toBeTruthy();
 }
 
 test('disk tile shows the volume picker', async () => {

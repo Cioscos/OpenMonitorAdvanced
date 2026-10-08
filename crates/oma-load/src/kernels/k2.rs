@@ -119,13 +119,14 @@ impl FftCore {
             (e, _) => e,
         };
         let fft = Fft::new(max_n, ctx.isa).map_err(fail)?;
-        let buf = || alloc_f64(max_n).map_err(fail);
+        // Page offsets 2..6: the twiddles have 0 and 1.
+        let buf = |slot| alloc_f64(max_n, slot).map_err(fail);
         let mut core = Self {
             fft,
-            in_re: buf()?,
-            in_im: buf()?,
-            re: buf()?,
-            im: buf()?,
+            in_re: buf(2)?,
+            in_im: buf(3)?,
+            re: buf(4)?,
+            im: buf(5)?,
             n: max_n,
             seed: ctx.seed,
             shared: ctx.shared.clone(),
@@ -302,6 +303,25 @@ pub(crate) mod tests {
             Check::Digest(d) => d,
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The six buffers of an FFT sit at six distinct page offsets, the same in every
+    /// process: with the heap's own placement the rate at the fixed size moved by 15 %
+    /// from one run to the next (4K aliasing between the loads of one and the stores of
+    /// another).
+    #[test]
+    fn fft_buffers_have_distinct_page_offsets() {
+        use crate::kernels::buf::SLOT_BYTES;
+        let k = K2::new(&ctx(Isa::Sse2, 7, DataSize::Fixed), false).unwrap();
+        let c = &k.core;
+        let offsets: Vec<usize> = [&c.in_re[..], &c.in_im[..], &c.re[..], &c.im[..]]
+            .iter()
+            .map(|b| b.as_ptr() as usize % 4096)
+            .collect();
+        assert_eq!(
+            offsets,
+            (2..6).map(|slot| slot * SLOT_BYTES).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ use std::arch::x86_64::*;
 
 use oma_ipc::load::Isa;
 
+use super::buf::OffsetBuf;
 use crate::kernel::KernelError;
 use crate::sys::memory::Region;
 
@@ -24,9 +25,9 @@ pub struct Fft {
 /// Buffers above this many bytes come from `Region` (VirtualAlloc), below from the heap.
 const REGION_ABOVE: usize = 64 << 20;
 
-/// A zeroed f64 buffer: a `Vec` when small, a `Region` when big.
+/// A zeroed f64 buffer: an [`OffsetBuf`] when small, a `Region` when big.
 pub enum F64Buf {
-    Heap(Vec<f64>),
+    Heap(OffsetBuf),
     Region(Region),
 }
 
@@ -58,18 +59,15 @@ impl std::ops::DerefMut for F64Buf {
     }
 }
 
-/// `len` zeroed f64, or `Err` when the memory is not there (never aborts). The one place
-/// the FFT kernels allocate their big buffers.
-pub fn alloc_f64(len: usize) -> Result<F64Buf, KernelError> {
+/// `len` zeroed f64 at page offset `slot` (see [`OffsetBuf`]; the twiddles take slots 0
+/// and 1), or `Err` when the memory is not there (never aborts). The one place the FFT
+/// kernels allocate their big buffers.
+pub fn alloc_f64(len: usize, slot: usize) -> Result<F64Buf, KernelError> {
     let bytes = len.checked_mul(8).ok_or(KernelError::Insufficient)?;
     if bytes > REGION_ABOVE {
         return Region::alloc(bytes as u64).map(F64Buf::Region);
     }
-    let mut v = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| KernelError::Insufficient)?;
-    v.resize(len, 0.0);
-    Ok(F64Buf::Heap(v))
+    OffsetBuf::zeroed(len, slot).map(F64Buf::Heap)
 }
 
 impl Fft {
@@ -85,7 +83,7 @@ impl Fft {
             Isa::Sse2 => (2, stage_sse2),
             _ => return Err(KernelError::Unsupported),
         };
-        let (mut tw_re_buf, mut tw_im_buf) = (alloc_f64(n)?, alloc_f64(n)?);
+        let (mut tw_re_buf, mut tw_im_buf) = (alloc_f64(n, 0)?, alloc_f64(n, 1)?);
         // One deref, not one per element (a call per access in a debug build).
         let (tw_re, tw_im) = (&mut tw_re_buf[..], &mut tw_im_buf[..]);
         // The top stage from the formula, the others are every other entry of the one above.
@@ -457,12 +455,12 @@ pub(crate) mod tests {
 
     #[test]
     fn big_buffers_come_from_a_region() {
-        let mut big = alloc_f64(REGION_ABOVE / 8 + 8).unwrap();
+        let mut big = alloc_f64(REGION_ABOVE / 8 + 8, 0).unwrap();
         assert!(matches!(big, F64Buf::Region(_)));
         assert!(big.iter().all(|&x| x == 0.0));
         let last = big.len() - 1;
         big[last] = 1.5;
         assert_eq!(big[last], 1.5);
-        assert!(matches!(alloc_f64(1024).unwrap(), F64Buf::Heap(_)));
+        assert!(matches!(alloc_f64(1024, 0).unwrap(), F64Buf::Heap(_)));
     }
 }

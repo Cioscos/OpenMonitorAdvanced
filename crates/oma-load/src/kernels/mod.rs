@@ -1,6 +1,7 @@
 //! The load kernels (A9–A15), one module each, registered in `crate::kernel::factory`.
 
 pub mod bench;
+pub mod buf;
 pub mod fft;
 pub mod k1;
 pub mod k10;

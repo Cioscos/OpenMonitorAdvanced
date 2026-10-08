@@ -95,6 +95,27 @@
         />
       {/snippet}
     </Field>
+    <Field id="performance-disk-stop" labelFor={current.diskStopC === null ? null : 'performance-disk-stop-input'} label={t('settings.performance.diskStopC')} description={t('settings.performance.diskStopC.hint')} error={errorOf('performance.diskStopC')}>
+      {#snippet control()}
+        <div class="buttons">
+          {#if current.diskStopC === null}
+            <span class="auto">{t('settings.performance.diskStopC.auto')}</span>
+            <button type="button" class="action" onclick={() => send({ diskStopC: 70 })}>{t('settings.performance.diskStopC.set')}</button>
+          {:else}
+            <NumberInput
+              id="performance-disk-stop-input"
+              integer
+              value={current.diskStopC}
+              unit="°C"
+              invalid={errorOf('performance.diskStopC') !== null}
+              describedBy={errorOf('performance.diskStopC') !== null ? 'performance-disk-stop-error' : undefined}
+              onCommit={(diskStopC) => send({ diskStopC })}
+            />
+            <button type="button" class="action" onclick={() => send({ diskStopC: null })}>{t('settings.performance.diskStopC.useAuto')}</button>
+          {/if}
+        </div>
+      {/snippet}
+    </Field>
   </Group>
 
   <Group id="performance-test" title={t('settings.performance.group.test')}>

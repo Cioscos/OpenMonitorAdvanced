@@ -1,12 +1,15 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { i18n, t } from '../../lib/i18n/index.svelte';
-  import { benchStore, isBenchRunning, type ScoreTarget } from '../../lib/performance/bench.svelte';
+  import type { Backend } from '../../lib/backend';
+  import { benchStore, isBenchRunning, modeValue, type ScoreTarget } from '../../lib/performance/bench.svelte';
+  import { benchWrites, diskErrorText, diskFullScale, formatBytes, formatLatency, MIN_FREE_BYTES } from '../../lib/performance/disk';
   import { pieces } from '../../lib/performance/format';
   import { fullScale, gpuFullScale } from '../../lib/performance/gauge';
   import { performanceStore } from '../../lib/performance/performance.svelte';
-  import type { BenchMode, ScoreFile, ScoreSummary } from '../../lib/types';
+  import type { BenchMode, DiskProfile, ScoreFile, ScoreSummary, VolumeChoice } from '../../lib/types';
   import Term from '../common/Term.svelte';
+  import DiskTarget from './DiskTarget.svelte';
   import Gauge from './Gauge.svelte';
 
   // «Score › CPU» (M8a2, spec §3.3 and §4.6) and «Score › <GPU>» (M8b2 DH12): two gauges with the
@@ -14,22 +17,33 @@
   // the last measurement in detail and the saved ones. Everything is the target's own: another
   // target's status and scores never show here. One benchmark or stress test at a time (DB8).
   // A GPU target without `name` is a GPU that is no longer in the system: its history only.
+  // «Score › Disk» (M8c): the same cluster with Read and Write in MB/s, the volume menu on top; the
+  // history covers every disk, the record and the reference are those of the chosen disk (DC15).
 
-  let { target }: { target: ScoreTarget & { name?: string; integrated?: boolean; unavailable?: boolean } } = $props();
+  let { target, backend }: { target: ScoreTarget & { name?: string; integrated?: boolean; unavailable?: boolean }; backend?: Backend } = $props();
 
   const gpu = $derived(target.category === 'gpu');
+  const disk = $derived(target.category === 'disk');
   const noGpu = $derived(target.category === 'gpu' && target.name === undefined);
   // The GPU list could not be read: the GPU is not known to be gone, so no «gone» claim.
   const missing = $derived(noGpu && !target.unavailable);
-  const MODES = $derived<BenchMode[]>(gpu ? ['compute', 'graphics'] : ['single', 'multi']);
-  const TERM: Record<BenchMode, string> = { single: 'singleCore', multi: 'multiCore', compute: 'computeScore', graphics: 'graphicsScore' };
-  /** The invalid reasons (DH9): each is the message of a measurement that is not valid, never a warning. */
-  const REASONS = ['compute_error', 'device_lost', 'hung'];
+  const MODES = $derived<BenchMode[]>(gpu ? ['compute', 'graphics'] : disk ? ['read', 'write'] : ['single', 'multi']);
+  const TERM: Record<BenchMode, string> = { single: 'singleCore', multi: 'multiCore', compute: 'computeScore', graphics: 'graphicsScore', read: 'mbs', write: 'mbs' };
+  /** The invalid reasons (DH9, DC12): each is the message of a measurement that is not valid, never a warning. */
+  const REASONS = ['compute_error', 'device_lost', 'hung', 'io_error', 'disk_full'];
 
   let reference = $state<'record' | 'last'>('record');
   let startError = $state<string | null>(null);
   let starting = $state(false);
   let confirming = $state<string | null>(null);
+  // The disk target: the volume the test would run on (the system one until the user chooses), the
+  // options of «Customize» and the consent to wake a spun-down HDD.
+  let picked = $state<VolumeChoice | null>(null);
+  let profile = $state<DiskProfile>('b1');
+  let compressible = $state(false);
+  let asking = $state(false);
+  const volumes = $derived(performanceStore.system?.volumes ?? []);
+  const volume = $derived(picked ?? volumes.find((v) => v.system) ?? volumes[0] ?? null);
 
   const locale = $derived(i18n.locale);
   const status = $derived(benchStore.statusFor(target));
@@ -37,15 +51,20 @@
   const scores = $derived(benchStore.scoresFor(target));
   const latest = $derived<ScoreSummary | null>(scores[0] ?? null);
   const step = $derived(status && status.step !== null ? (status.steps[status.step] ?? null) : null);
-  const record = $derived(benchStore.recordFor(target));
-  const ref = $derived(reference === 'record' ? record : benchStore.lastFor(target));
+  // The record and the last measurement of a disk are those of the chosen disk.
+  const own = $derived<ScoreTarget>(disk ? { category: 'disk', deviceId: volume?.deviceId ?? null } : target);
+  const record = $derived(benchStore.recordFor(own));
+  const ref = $derived(reference === 'record' ? record : benchStore.lastFor(own));
 
   const finite = (v: number | null | undefined): number | null => (v != null && Number.isFinite(v) ? v : null);
   // Between phases (and during the warm-up pause) the rate is missing: the needle holds the last
   // live value of the mode in progress instead of falling to 0. Forgotten when the run ends.
   let held = $state<Partial<Record<BenchMode, number>>>({});
+  /** The live needle of the step under way: the points, or the disk's speed in its direction. */
+  const liveNow = (): number | null =>
+    disk ? (step?.mode === 'read' ? (status?.liveRead ?? null) : step?.mode === 'write' ? (status?.liveWrite ?? null) : null) : (status?.livePoints ?? null);
   $effect(() => {
-    const live = running ? finite(status?.livePoints) : null;
+    const live = running ? finite(liveNow()) : null;
     const mode = step?.mode;
     const run = running;
     untrack(() => {
@@ -56,16 +75,16 @@
 
   /** The live needle while the mode runs, then its score; without a run, the last saved one. */
   function valueOf(mode: BenchMode): number | null {
-    if (running) return step?.mode === mode ? (finite(status!.livePoints) ?? held[mode] ?? null) : finite(status![mode]);
-    if (status?.state === 'done') return finite(status[mode]);
-    return finite(latest?.[mode]);
+    if (running) return step?.mode === mode ? (finite(liveNow()) ?? held[mode] ?? null) : finite(modeValue(status!, mode));
+    if (status?.state === 'done') return finite(modeValue(status, mode));
+    return latest ? finite(modeValue(latest, mode)) : null;
   }
   const values = $derived(Object.fromEntries(MODES.map((m) => [m, valueOf(m)])) as Partial<Record<BenchMode, number | null>>);
 
   /** DB6, DH7: the CPU dial never drops below 1500 points; a GPU one starts from its estimate. */
   const scaleOf = (mode: BenchMode) => {
     const marks = [record[mode] ?? 0, ref[mode] ?? 0, values[mode] ?? 0];
-    return gpu ? gpuFullScale(marks, target.integrated ?? false) : fullScale(marks);
+    return disk ? diskFullScale(marks, volume?.kind ?? 'other') : gpu ? gpuFullScale(marks, target.integrated ?? false) : fullScale(marks);
   };
   // During a measurement the full scale only grows: the largest one of the run is kept.
   let heldScale = $state<Partial<Record<BenchMode, number>>>({});
@@ -87,6 +106,15 @@
   /** The phase in words, cut around the terms it carries. */
   const phase = $derived.by(() => {
     if (!running || !step) return null;
+    if (disk) {
+      if (step.kernel === 'disk_fill') return [{ text: t('performance.score.disk.fill'), term: null }];
+      const text = t('performance.score.disk.phase', {
+        test: t(`glossary.diskBench.${step.kernel}.name`),
+        direction: t(`performance.score.${step.mode}`),
+        rep: step.rep === 0 ? t('performance.score.disk.warmup') : t('performance.score.disk.measure', { n: step.rep }),
+      });
+      return pieces(text, [{ term: `diskBench.${step.kernel}` }, { term: 'warmup' }], t);
+    }
     if (gpu) {
       const text = t('performance.score.gpu.phase', { kernel: t(`glossary.gpuBench.${step.kernel}.name`), group: t(`performance.score.${step.mode}`) });
       return pieces(text, [{ term: `gpuBench.${step.kernel}` }, { term: TERM[step.mode] }], t);
@@ -104,7 +132,7 @@
     if (startError) return startError;
     const error = status?.state === 'failed' ? status.error : null;
     if (!error) return null;
-    if (error.startsWith('performance.start.')) return t('performance.score.error.start', { reason: t(error) });
+    if (error.startsWith('performance.start.')) return t(disk ? 'performance.outcome.failed_to_start' : 'performance.score.error.start', { reason: t(error) });
     // `exited`, `failed`, `crashed`, `hung`: the run ended early, which says nothing on the hardware.
     return t('performance.score.error.failed');
   });
@@ -127,18 +155,22 @@
   });
   const shown = $derived(running ? null : detail);
   const flagsOf = (flags: string[]) => flags.filter((f) => !REASONS.includes(f));
-  const invalidText = (flags: string[]) =>
-    flags.includes('device_lost')
-      ? t('performance.score.invalid.device_lost')
-      : flags.includes('hung')
-        ? t('performance.score.invalid.hung')
-        : t('performance.score.invalid');
+  const invalidText = (flags: string[]) => {
+    const reason = ['device_lost', 'hung', 'io_error', 'disk_full'].find((f) => flags.includes(f));
+    return reason ? t(`performance.score.invalid.${reason}`) : t('performance.score.invalid');
+  };
   const provisional = $derived(shown?.provisional ?? benchStore.provisionalFor(target));
   const scaling = $derived(shown?.scaling != null ? pieces(t('performance.score.scaling', { pct: Math.round(shown.scaling * 100) }), [{ term: 'scaling' }], t) : null);
 
   const number = (v: number | null) =>
     v === null ? '–' : v.toLocaleString(locale, { maximumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0 });
   const percent = (v: number | null) => (v === null ? '–' : v.toLocaleString(locale, { style: 'percent', maximumFractionDigits: 1 }));
+  const whole = (v: number | null) => (v === null ? '–' : Math.round(v));
+  /** A read / write pair of the disk table. */
+  const pair = (read: string, write: string) => `${read} / ${write}`;
+  /** The model of the disk behind a saved score: the volume's own name when it is in the system, else its id. */
+  const modelOf = (s: ScoreSummary) => volumes.find((v) => v.deviceId === s.deviceId)?.model ?? s.deviceId ?? '–';
+  const points = $derived(shown?.scores.points ?? null);
   const when = (at: string) => new Date(at).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' });
   const markOf = (s: ScoreSummary) =>
     !s.valid
@@ -150,19 +182,30 @@
 
   const busy = $derived(performanceStore.running || benchStore.running);
 
-  async function start() {
+  async function start(wake = false) {
     startError = null;
+    asking = false;
     starting = true;
     try {
-      await benchStore.start(target);
+      if (disk) {
+        if (!volume) return;
+        await benchStore.start(target, { folder: volume.folder, profile, compressible, wake });
+      } else await benchStore.start(target);
     } catch (error) {
       const text = String(error);
-      startError =
-        text === 'busy'
-          ? t('performance.score.error.busy')
-          : text === 'build:no_gpu'
-            ? t('performance.score.gpu.missing')
-            : t('performance.score.error.start', { reason: text });
+      if (disk && text === 'disk:standby') asking = true;
+      else
+        startError =
+          text === 'busy'
+            ? t('performance.score.error.busy')
+            : text === 'build:no_gpu'
+              ? t('performance.score.gpu.missing')
+              : (diskErrorText(text, t, locale) ??
+                (text === 'build:no_space'
+                  ? t('performance.disk.error.no_space', { size: formatBytes(MIN_FREE_BYTES, locale) })
+                  : text === 'build:no_disk'
+                    ? t('performance.outcome.failed_to_start', { reason: t('performance.start.no_disk') })
+                    : t('performance.score.error.start', { reason: text })));
     } finally {
       starting = false;
     }
@@ -184,7 +227,19 @@
 
 <div class="score">
   {#if gpu && target.name}<p class="device">{target.name}</p>{/if}
-  <section class="cluster" aria-label={t(gpu ? 'performance.score.gpu.title' : 'performance.score.title')}>
+  {#if disk && backend}
+    <DiskTarget
+      {backend}
+      {volumes}
+      value={volume}
+      disabled={running}
+      {asking}
+      onChange={(next) => (picked = next)}
+      onWake={() => start(true)}
+      onCancelWake={() => (asking = false)}
+    />
+  {/if}
+  <section class="cluster" aria-label={t(disk ? 'performance.score.disk.title' : gpu ? 'performance.score.gpu.title' : 'performance.score.title')}>
     <div class="gauges">
       {#each MODES as mode (mode)}
         <figure>
@@ -193,14 +248,14 @@
             max={maxOf(mode)}
             reference={ref[mode]}
             label={t(`performance.score.${mode}`)}
-            unit={t('performance.score.points')}
+            unit={disk ? 'MB/s' : t('performance.score.points')}
             moving={running}
           />
           <figcaption>
-            <Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term>
+            {#if disk}{t(`performance.score.${mode}`)}{:else}<Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term>{/if}
             <span class="sub">
-              {#if ref[mode] !== null}<span class="mark-value">▲ {ref[mode]}</span>{/if}
-              <Term term="benchPoints" />
+              {#if ref[mode] !== null}<span class="mark-value">▲ {Math.round(ref[mode])}</span>{/if}
+              {#if disk}<Term term="mbs" />{:else}<Term term="benchPoints" />{/if}
             </span>
           </figcaption>
         </figure>
@@ -228,12 +283,16 @@
         <button
           type="button"
           class="go"
-          disabled={busy || starting || noGpu}
+          disabled={busy || starting || noGpu || (disk && !volume)}
           title={busy ? t('performance.score.error.busy') : undefined}
-          onclick={start}>{t('performance.score.start')}</button
+          onclick={() => start()}>{t('performance.score.start')}</button
         >
       {/if}
-      <p class="duration">{t(gpu ? 'performance.score.gpu.duration' : 'performance.score.duration')}</p>
+      <p class="duration">
+        {disk
+          ? t('performance.score.disk.duration', { size: formatBytes(benchWrites(profile), locale) })
+          : t(gpu ? 'performance.score.gpu.duration' : 'performance.score.duration')}
+      </p>
       <span class="reference">
         <span id="score-reference-label"><Term term="referenceMark">{t('performance.score.reference')}</Term></span>
         <select aria-labelledby="score-reference-label" bind:value={reference}>
@@ -242,6 +301,24 @@
         </select>
       </span>
     </div>
+    {#if disk}
+      <details class="custom">
+        <summary>{t('performance.wizard.customize')}</summary>
+        <div class="options">
+          <label class="option">
+            <span>{t('performance.score.disk.profile')}</span>
+            <select aria-label={t('performance.score.disk.profile')} bind:value={profile} disabled={running}>
+              <option value="b1">{t('performance.score.disk.profile.b1')}</option>
+              <option value="b2">{t('performance.score.disk.profile.b2')}</option>
+            </select>
+          </label>
+          <label class="option check">
+            <input type="checkbox" bind:checked={compressible} disabled={running} />
+            <Term term="compressible">{t('performance.score.disk.compressible')}</Term>
+          </label>
+        </div>
+      </details>
+    {/if}
   </section>
 
   {#if missing}<p class="notice warn">{t('performance.score.gpu.missing')}</p>{/if}
@@ -260,8 +337,42 @@
       <p class="scaling">{#each scaling as p, i (i)}{#if p.term}<Term term={p.term}>{p.text}</Term>{:else}{p.text}{/if}{/each}</p>
     {/if}
 
+    {#if disk}
+      {#if points !== null}
+        <p class="points"><Term term="diskPoints">{t('performance.score.disk.points', { points: points.toLocaleString(locale) })}</Term></p>
+      {:else if shown.diskProfile === 'b2'}
+        <p class="muted">{t('performance.score.disk.noPoints')}</p>
+      {/if}
+    {/if}
+
     <section class="panel">
-      {#if gpu}
+      {#if disk}
+        <h3>{t('performance.score.detail')} <span class="note">(<Term term="seqRnd" />, <Term term="queueDepth" />)</span></h3>
+        <table aria-label={t('performance.score.detail')}>
+          <thead>
+            <tr>
+              <th scope="col">{t('performance.score.col.test')}</th>
+              <th scope="col" class="num">{t('performance.score.read')}</th>
+              <th scope="col" class="num">{t('performance.score.write')}</th>
+              <th scope="col" class="num"><Term term="iops">{t('performance.score.col.iops')}</Term></th>
+              <th scope="col" class="num"><Term term="latency">{t('performance.score.col.meanLat')}</Term></th>
+              <th scope="col" class="num"><Term term="latency">{t('performance.score.col.p99Lat')}</Term></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shown.kernels.filter((k) => k.read || k.write) as k (k.id)}
+              <tr>
+                <th scope="row"><Term term={`diskBench.${k.id}`} /></th>
+                <td class="num">{number(k.read?.mbs ?? null)}</td>
+                <td class="num">{number(k.write?.mbs ?? null)}</td>
+                <td class="num">{pair(number(k.read?.iops ?? null), number(k.write?.iops ?? null))}</td>
+                <td class="num">{pair(formatLatency(k.read?.meanLatUs, locale), formatLatency(k.write?.meanLatUs, locale))}</td>
+                <td class="num">{pair(formatLatency(k.read?.p99LatUs, locale), formatLatency(k.write?.p99LatUs, locale))}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else if gpu}
         <h3>{t('performance.score.detail')} <span class="note">(<Term term="gpuMedian" />)</span></h3>
         <table aria-label={t('performance.score.detail')}>
           <thead>
@@ -321,8 +432,9 @@
         <thead>
           <tr>
             <th scope="col"><span class="visually-hidden">{t('performance.score.history')}</span></th>
+            {#if disk}<th scope="col">{t('performance.score.col.disk')}</th>{/if}
             {#each MODES as mode (mode)}
-              <th scope="col" class="num"><Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term></th>
+              <th scope="col" class="num">{#if disk}{t(`performance.score.${mode}`)}{:else}<Term term={TERM[mode]}>{t(`performance.score.${mode}`)}</Term>{/if}</th>
             {/each}
             <th scope="col"></th>
             <th scope="col"></th>
@@ -333,7 +445,8 @@
             {@const mark = markOf(s)}
             <tr>
               <td>{when(s.at)}</td>
-              {#each MODES as mode (mode)}<td class="num">{s[mode] ?? '–'}</td>{/each}
+              {#if disk}<td>{modelOf(s)}</td>{/if}
+              {#each MODES as mode (mode)}<td class="num">{whole(modeValue(s, mode))}</td>{/each}
               <td><span class="mark {mark.tone}" role="img" aria-label={mark.text} title={mark.text}>{mark.mark}</span></td>
               <td class="buttons">
                 {#if confirming === s.id}
@@ -470,6 +583,34 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
+  }
+  .custom {
+    font-size: 13px;
+  }
+  .custom summary {
+    width: fit-content;
+    cursor: pointer;
+    color: var(--text-muted);
+  }
+  .custom summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .option {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .points {
+    margin: 0;
+    font-weight: 600;
   }
   .go,
   .stop,

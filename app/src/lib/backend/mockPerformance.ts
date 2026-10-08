@@ -5,6 +5,9 @@ import type {
   BenchStatus,
   BenchStep,
   CoreState,
+  DiskBenchKernel,
+  DiskBenchRequest,
+  DiskProfile,
   ScoreFile,
   ScoreSummary,
   ErrorRecord,
@@ -19,6 +22,7 @@ import type {
   StressSession,
   StressSessionSummary,
   SystemInfo,
+  VolumeChoice,
 } from '../types';
 
 // A fake stress test for `pnpm dev`: every test lasts 60 s on an 8-core CPU, whatever its preset.
@@ -26,6 +30,42 @@ import type {
 // `?perf=pass` starts one that passes. Without the parameter a test starts only from the UI, and
 // it passes. `?perf=gpu` starts a GPU test that passes, `?perf=device_lost` one whose GPU resets
 // 85% in (DXGI_ERROR_DEVICE_HUNG, during a ramp) and `?perf=low_stability` one that ends at 95.3%.
+
+/** The two volumes of the mock: the NVMe system disk and a removable USB stick (M8c). */
+export const MOCK_VOLUMES: VolumeChoice[] = [
+  {
+    root: 'C:\\',
+    label: 'Windows',
+    fs: 'NTFS',
+    totalBytes: 1000 * 1024 ** 3,
+    freeBytes: 412 * 1024 ** 3,
+    folder: 'C:\\Users\\mock\\AppData\\Local\\Temp',
+    deviceId: 'storage/device-mock-ssd',
+    model: 'Mock NVMe SSD 1TB',
+    kind: 'nvme',
+    removable: false,
+    system: true,
+    virtualDisk: false,
+    standby: false,
+    sync: false,
+  },
+  {
+    root: 'E:\\',
+    label: 'STICK',
+    fs: 'exFAT',
+    totalBytes: 64 * 1024 ** 3,
+    freeBytes: 58 * 1024 ** 3,
+    folder: 'E:\\',
+    deviceId: 'storage/device-mock-stick',
+    model: 'Mock USB Stick 64GB',
+    kind: 'usb',
+    removable: true,
+    system: false,
+    virtualDisk: false,
+    standby: false,
+    sync: false,
+  },
+];
 
 const CORES = 8;
 const ERROR_CORE = 2;
@@ -358,6 +398,7 @@ export function mockPerformance(scenario: Scenario, serviceConnected: () => bool
         { deviceId: MOCK_GPU, name: 'Mock GeForce RTX 4080', integrated: false, dedicatedBytes: 16 * GIB },
         { deviceId: 'gpu-mock-integrated', name: 'Mock Radeon Graphics', integrated: true, dedicatedBytes: 512 * 1024 ** 2 },
       ],
+      volumes: structuredClone(MOCK_VOLUMES),
     }),
     preview(request: StartRequest): Plan {
       const total = presetSeconds(request);
@@ -453,6 +494,9 @@ const scoreSummary = (f: ScoreFile): ScoreSummary => ({
   multi: f.scores.multi,
   compute: f.scores.compute,
   graphics: f.scores.graphics,
+  readMBs: f.scores.readMBs,
+  writeMBs: f.scores.writeMBs,
+  points: f.scores.points,
   deviceId: f.device.deviceId,
   valid: f.valid,
   flags: f.flags,
@@ -470,7 +514,7 @@ function scoreFile(id: string, atMs: number, single: number, multi: number | nul
     provisional: true,
     isa: 'avx512',
     shaderDigest: null,
-    scores: { single, multi, compute: null, graphics: null },
+    scores: { single, multi, compute: null, graphics: null, readMBs: null, writeMBs: null, points: null },
     kernels: BENCH_KERNELS.map((k) => ({
       id: k.id,
       unit: k.unit,
@@ -501,7 +545,7 @@ function gpuScoreFile(id: string, atMs: number, gpu: GpuChoice, compute: number 
     provisional: true,
     isa: null,
     shaderDigest: '9e3779b97f4a7c15',
-    scores: { single: null, multi: null, compute, graphics },
+    scores: { single: null, multi: null, compute, graphics, readMBs: null, writeMBs: null, points: null },
     kernels: GPU_LOADS.slice(0, done).map((l, i) => ({
       id: l.id,
       unit: l.unit,
@@ -528,13 +572,95 @@ function gpuScoreFile(id: string, atMs: number, gpu: GpuChoice, compute: number 
   };
 }
 
-export function mockBench(scenario: 'error' | null, stressRunning: () => boolean, gpus: GpuChoice[] = []) {
+// The disk benchmark (M8c) over 15 s on the mock volumes: the file preparation, then the four tests
+// of the default profile for reading and for writing, each a warm-up and three measurements (33
+// steps). `?bench=error` ends with a read or write error (`io_error`), so the score is saved as
+// not valid; `?disk=standby` makes the first start answer `disk:standby`, as for a spun-down HDD.
+
+const DISK_BENCH_S = 15;
+const DISK_TESTS: { id: DiskBenchKernel; block: number; read: number; write: number; readLatUs: number; writeLatUs: number }[] = [
+  { id: 'seq1m_q8t1', block: 1 << 20, read: 6900, write: 5800, readLatUs: 1210, writeLatUs: 1440 },
+  { id: 'seq1m_q1t1', block: 1 << 20, read: 3900, write: 3600, readLatUs: 268, writeLatUs: 291 },
+  { id: 'rnd4k_q32t1', block: 4096, read: 1210, write: 980, readLatUs: 106, writeLatUs: 130 },
+  { id: 'rnd4k_q1t1', block: 4096, read: 76, write: 240, readLatUs: 53, writeLatUs: 16 },
+];
+const DISK_STEPS: BenchStep[] = [
+  { kernel: 'disk_fill', mode: 'write', rep: 0 },
+  ...(['read', 'write'] as const).flatMap((mode) => DISK_TESTS.flatMap((test) => [0, 1, 2, 3].map((rep) => ({ kernel: test.id, mode, rep })))),
+];
+/** The step after which a direction's SEQ1M Q8T1 test (the first of each half) is complete. */
+const READ_DONE = 1 + 4;
+const WRITE_DONE = 1 + 16 + 4;
+
+export function parseDiskScenario(search: string): 'standby' | null {
+  return new URLSearchParams(search).get('disk') === 'standby' ? 'standby' : null;
+}
+
+const rateOf = (mbs: number, block: number, latUs: number) => ({
+  mbs,
+  iops: Math.round(((mbs * 1e6) / block) * 10) / 10,
+  meanLatUs: latUs,
+  p99LatUs: Math.round(latUs * 1.8),
+});
+
+/** A disk score of `volume`: SEQ1M Q8T1 as the two gauges, the tests up to `done` (all four by default). */
+function diskScoreFile(id: string, atMs: number, volume: VolumeChoice, profile: DiskProfile, flags: string[], speed = 1, done = DISK_TESTS.length): ScoreFile {
+  const kernels = DISK_TESTS.slice(0, done).map((test) => ({
+    id: test.id as BenchKernel,
+    unit: 'MB/s',
+    single: null,
+    multi: null,
+    value: null,
+    spread: null,
+    read: rateOf(Math.round(test.read * speed * 10) / 10, test.block, test.readLatUs / speed),
+    write: rateOf(Math.round(test.write * speed * 10) / 10, test.block, test.writeLatUs / speed),
+  }));
+  const valid = !flags.includes('io_error') && !flags.includes('disk_full');
+  return {
+    format: 1,
+    id,
+    at: new Date(atMs).toISOString(),
+    category: 'disk',
+    scoreVersion: 'disk-1',
+    provisional: true,
+    isa: null,
+    shaderDigest: null,
+    scores: {
+      single: null,
+      multi: null,
+      compute: null,
+      graphics: null,
+      readMBs: Math.round(DISK_TESTS[0].read * speed),
+      writeMBs: Math.round(DISK_TESTS[0].write * speed),
+      points: profile === 'b1' && done === DISK_TESTS.length ? Math.round(1000 * speed) : null,
+    },
+    kernels,
+    device: { model: volume.model ?? volume.label, cores: 0, logical: 0, deviceId: volume.deviceId, vendorId: null, dedicatedBytes: null, integrated: null, kind: volume.kind },
+    diskProfile: profile,
+    flags,
+    valid,
+    scaling: null,
+    samples: [],
+    appVersion: '0.5.0',
+    loadVersion: '0.5.0',
+  };
+}
+
+export function mockBench(
+  scenario: 'error' | null,
+  stressRunning: () => boolean,
+  gpus: GpuChoice[] = [],
+  volumes: VolumeChoice[] = [],
+  diskScenario: 'standby' | null = null,
+) {
+  let standbyPending = diskScenario === 'standby';
   const listeners = new Set<(status: BenchStatus) => void>();
   const day = 24 * 3600 * 1000;
   let scores: ScoreFile[] = [
     scoreFile('5b0c3f7e-2d41-4e8a-9c6b-7a1e0f2d3c11', Date.now() - day, 1488, 11850, true),
     scoreFile('c2e9a8d1-6f3b-4a70-b5d4-3e8f1a0c9b22', Date.now() - 4 * day, 1512, 12040, true),
     ...(gpus[0] ? [gpuScoreFile('7d4e1f2a-3b5c-4d6e-8f70-1a2b3c4d5e66', Date.now() - 2 * day, gpus[0], 1496, 1512, ['busy_gpu'])] : []),
+    ...(volumes[0] ? [diskScoreFile('3c8a5e10-9b2d-4f61-a7c4-0d5e8b1f2a77', Date.now() - 3 * day, volumes[0], 'b1', [], 0.98)] : []),
   ];
   let status: BenchStatus | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -569,6 +695,11 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
         multi: null,
         compute: null,
         graphics: null,
+        readMBs: null,
+        writeMBs: null,
+        points: null,
+        liveRead: null,
+        liveWrite: null,
         flags: [],
         scoreId: null,
         error: null,
@@ -624,6 +755,11 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
         multi: null,
         compute: null,
         graphics: null,
+        readMBs: null,
+        writeMBs: null,
+        points: null,
+        liveRead: null,
+        liveWrite: null,
         flags: [],
         scoreId: null,
         error: null,
@@ -646,6 +782,80 @@ export function mockBench(scenario: 'error' | null, stressRunning: () => boolean
           segments: segments(step),
           livePoints: (GPU_STEPS[step].mode === 'compute' ? compute : graphics) * (0.95 + 0.1 * Math.random()),
           compute: computeDone,
+        });
+      }, 250);
+      return id;
+    },
+    startDisk(request: DiskBenchRequest): string {
+      if (timer !== null || stressRunning()) throw 'busy';
+      const volume = volumes.find((v) => request.folder.toUpperCase().startsWith(v.root.toUpperCase()));
+      if (!volume) throw 'build:no_disk';
+      if (standbyPending && !request.wake) {
+        standbyPending = false;
+        throw 'disk:standby';
+      }
+      const id = crypto.randomUUID();
+      const startedAtMs = Date.now();
+      const failAt = scenario === 'error' ? 20 : Infinity;
+      const speed = 0.96 + 0.08 * Math.random();
+      const flags = [...(request.compressible ? ['compressible'] : []), ...(volume.removable ? ['removable'] : [])];
+      const segments = (step: number, failed = false) =>
+        DISK_STEPS.map((_, i): BenchSegment => (i < step ? 'done' : i === step ? (failed ? 'failed' : 'running') : 'pending'));
+      publish({
+        category: 'disk',
+        deviceId: volume.deviceId,
+        state: 'starting',
+        step: null,
+        steps: DISK_STEPS,
+        segments: segments(-1),
+        livePoints: null,
+        single: null,
+        multi: null,
+        compute: null,
+        graphics: null,
+        readMBs: null,
+        writeMBs: null,
+        points: null,
+        liveRead: null,
+        liveWrite: null,
+        flags: [],
+        scoreId: null,
+        error: null,
+      });
+      timer = setInterval(() => {
+        const step = Math.min(DISK_STEPS.length, Math.floor((Date.now() - startedAtMs) / ((DISK_BENCH_S * 1000) / DISK_STEPS.length)));
+        const readMBs = step >= READ_DONE ? Math.round(DISK_TESTS[0].read * speed) : null;
+        const writeMBs = step >= WRITE_DONE ? Math.round(DISK_TESTS[0].write * speed) : null;
+        if (step >= failAt) {
+          scores = [diskScoreFile(id, startedAtMs, volume, request.profile, [...flags, 'io_error'], speed, 2), ...scores];
+          return end({ state: 'done', segments: segments(failAt, true), readMBs, writeMBs, flags: ['io_error'], scoreId: id });
+        }
+        if (step >= DISK_STEPS.length) {
+          scores = [diskScoreFile(id, startedAtMs, volume, request.profile, flags, speed), ...scores];
+          return end({
+            state: 'done',
+            segments: segments(DISK_STEPS.length),
+            readMBs,
+            writeMBs,
+            points: request.profile === 'b1' ? Math.round(1000 * speed) : null,
+            flags,
+            scoreId: id,
+          });
+        }
+        const current = DISK_STEPS[step];
+        const test = DISK_TESTS.find((x) => x.id === current.kernel);
+        // The file preparation writes at the disk's sequential speed; like oma-core, a new step has no rate until its first progress.
+        const live = (test ? (current.mode === 'read' ? test.read : test.write) : DISK_TESTS[0].write * 0.8) * speed * (0.92 + 0.16 * Math.random());
+        const fresh = step !== status!.step;
+        publish({
+          ...status!,
+          state: status!.state === 'stopping' ? 'stopping' : 'running',
+          step,
+          segments: segments(step),
+          liveRead: current.mode === 'read' && !fresh ? live : null,
+          liveWrite: current.mode === 'write' && !fresh ? live : null,
+          readMBs,
+          writeMBs,
         });
       }, 250);
       return id;

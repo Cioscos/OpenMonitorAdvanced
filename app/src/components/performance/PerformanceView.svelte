@@ -15,7 +15,7 @@
 
   // The Performance view (spec M8 §3.1): the sidebar with the «Score» and «Stress test» groups on
   // the left, the page on the right. The stores are connected only while the view is on screen.
-  // `score-cpu` is the CPU benchmark, `score-gpu:<deviceId>` a GPU's; `new` is the wizard, `run` the test under way,
+  // `score-cpu` is the CPU benchmark, `score-gpu:<deviceId>` a GPU's, `score-disk` the disks'; `new` is the wizard, `run` the test under way,
   // `result:<id>` a saved session; `history` lists the saved ones.
   // `store` is the app's live store, for the run page's chart.
   let { backend, store, page = $bindable('new') }: { backend: Backend; store: LiveStore; page?: PerformancePage } = $props();
@@ -65,7 +65,9 @@
   $effect(() => {
     const running = benchStore.running;
     const status = benchStore.status;
-    if (running && !benchWasRunning) page = status?.category === 'gpu' && status.deviceId ? gpuPage(status.deviceId) : 'score-cpu';
+    if (running && !benchWasRunning) {
+      page = status?.category === 'gpu' && status.deviceId ? gpuPage(status.deviceId) : status?.category === 'disk' ? 'score-disk' : 'score-cpu';
+    }
     benchWasRunning = running;
   });
 
@@ -79,10 +81,13 @@
   });
   const liveOn = (deviceId: string) => benchStore.running && benchStore.status?.deviceId === deviceId;
   const cpuLive = $derived(benchStore.running && benchStore.status?.category === 'cpu');
+  const diskLive = $derived(benchStore.running && benchStore.status?.category === 'disk');
   const title = $derived(
     page === 'score-cpu'
       ? t('performance.score.title')
-      : gpuTarget
+      : page === 'score-disk'
+        ? t('performance.score.disk.title')
+        : gpuTarget
       ? t('performance.score.gpu.title')
       : page === 'new'
       ? t('performance.nav.new')
@@ -121,6 +126,16 @@
           {g.name}{#if live}<span class="dot" aria-hidden="true"> ●</span>{/if}
         </button>
       {/each}
+      <button
+        type="button"
+        class="entry"
+        class:on={current === 'score-disk'}
+        class:live={diskLive}
+        aria-current={current === 'score-disk' ? 'page' : undefined}
+        onclick={() => (page = 'score-disk')}
+      >
+        {t('performance.nav.scoreDisk')}{#if diskLive}<span class="dot" aria-hidden="true"> ●</span>{/if}
+      </button>
     </div>
     <p class="group" id="performance-group-stress">{t('performance.nav.stress')}</p>
     <div class="entries" role="group" aria-labelledby="performance-group-stress">
@@ -150,6 +165,8 @@
     <h2 id="performance-page-title">{title}</h2>
     {#if page === 'score-cpu'}
       <ScorePage target={{ category: 'cpu' }} />
+    {:else if page === 'score-disk'}
+      <ScorePage target={{ category: 'disk' }} {backend} />
     {:else if gpuTarget}
       <!-- Until the GPU list is read, a GPU page cannot tell a GPU that is gone from one not known yet. -->
       {#if gpus !== null}{#key page}<ScorePage target={gpuTarget} />{/key}{/if}

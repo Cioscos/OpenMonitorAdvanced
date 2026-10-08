@@ -5,11 +5,14 @@ import type { ScoreFile } from '../../lib/types';
 import {
   FakeBackend,
   makeBenchStatus,
+  makeDiskBenchStatus,
+  makeDiskScoreFile,
   makeGpuBenchStatus,
   makeGpuScoreFile,
   makeRunStatus,
   makeScoreFile,
   makeSystemInfo,
+  makeVolume,
 } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
@@ -303,4 +306,175 @@ test('missing gpu page disables start', async () => {
   const rows = within(screen.getByRole('table', { name: t('performance.score.history') })).getAllByRole('row').slice(1);
   expect(rows).toHaveLength(1);
   expect(rows[0].textContent).toContain('321');
+});
+
+// --- Disk (M8c C13) ---
+
+const VOL_C = makeVolume();
+const VOL_E = makeVolume({ root: 'E:\\', folder: 'E:\\', deviceId: 'disk-e', model: 'Fake USB Stick', kind: 'usb', removable: true, system: false });
+
+async function setupDisk(scores: ScoreFile[] = [], volumes = [VOL_C, VOL_E]) {
+  const backend: FakeBackend = await connectSettings();
+  backend.scoreFiles = structuredClone(scores);
+  backend.performanceSystemInfo = makeSystemInfo({ volumes });
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'score-disk' });
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceScores'));
+  await screen.findByRole('heading', { name: t('performance.score.disk.title') });
+  // The volume list comes with the system read: the menu and the start wait for it.
+  await screen.findByRole('combobox', { name: t('performance.disk.volume') });
+  return backend;
+}
+const diskMeter = (key: 'read' | 'write') => screen.getByRole('meter', { name: t(`performance.score.${key}`) });
+const diskNow = (key: 'read' | 'write') => diskMeter(key).getAttribute('aria-valuenow');
+
+test('disk page runs and shows read and write', async () => {
+  const backend = await setupDisk();
+  expect(screen.getByText(t('performance.score.disk.duration', { size: '41.0 GiB' }))).toBeTruthy();
+  await fireEvent.click(startButton());
+  await waitFor(() => expect(backend.diskStartRequests).toEqual([{ folder: VOL_C.folder, profile: 'b1', compressible: false, wake: false }]));
+  // The file preparation first: its own words, the write needle moves.
+  backend.emitBench(makeDiskBenchStatus('disk-c', { step: 0, liveWrite: 1800 }));
+  expect(await screen.findByText(t('performance.score.disk.fill'))).toBeTruthy();
+  await waitFor(() => expect(diskNow('write')).toBe('1800'));
+  const entry = screen.getByRole('button', { name: t('performance.nav.scoreDisk') });
+  expect(entry.classList.contains('live')).toBe(true);
+  // A read measurement: the phase in words, the read needle moves.
+  backend.emitBench(makeDiskBenchStatus('disk-c', { step: 2, liveRead: 3200 }));
+  const phase = t('performance.score.disk.phase', {
+    test: t('glossary.diskBench.seq1m_q8t1.name'),
+    direction: t('performance.score.read'),
+    rep: t('performance.score.disk.measure', { n: 1 }),
+  });
+  await waitFor(() => expect(document.querySelector('.phase')?.textContent?.trim()).toBe(phase));
+  await waitFor(() => expect(diskNow('read')).toBe('3200'));
+  // The dial of an NVMe disk starts at 10 000 MB/s and only grows during the run.
+  expect(diskMeter('read').getAttribute('aria-valuemax')).toBe('10000');
+  backend.emitBench(makeDiskBenchStatus('disk-c', { step: 1, liveRead: 12000 }));
+  await waitFor(() => expect(diskMeter('read').getAttribute('aria-valuemax')).toBe('20000'));
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.score.stop') }));
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceBenchStop'));
+  // Done: both speeds, the detail and the points.
+  backend.scoreFiles = [makeDiskScoreFile('disk-c', { id: 'disk-score-a' })];
+  backend.emitBench(makeDiskBenchStatus('disk-c', { state: 'done', step: null, readMBs: 6900, writeMBs: 5800, points: 1012, scoreId: 'disk-score-a' }));
+  await waitFor(() => expect(diskNow('read')).toBe('6900'));
+  expect(diskNow('write')).toBe('5800');
+  expect(entry.textContent).not.toContain('●');
+});
+
+test('disk detail shows iops and latencies', async () => {
+  await setupDisk([makeDiskScoreFile('disk-c')]);
+  const table = await screen.findByRole('table', { name: t('performance.score.detail') });
+  const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent?.trim());
+  expect(headers).toEqual([
+    t('performance.score.col.test'),
+    t('performance.score.read'),
+    t('performance.score.write'),
+    t('performance.score.col.iops'),
+    t('performance.score.col.meanLat'),
+    t('performance.score.col.p99Lat'),
+  ]);
+  const text = (row: Element) => [...row.querySelectorAll('td')].map((c) => c.textContent?.replace(/\s+/g, ' ').trim());
+  const seq = within(table).getByText(t('glossary.diskBench.seq1m_q8t1.name')).closest('tr')!;
+  expect(text(seq)).toEqual(['6,900', '5,800', '6,580 / 5,530', '1.21 ms / 1.44 ms', '2.1 ms / 2.6 ms']);
+  const rnd = within(table).getByText(t('glossary.diskBench.rnd4k_q1t1.name')).closest('tr')!;
+  expect(text(rnd).slice(0, 3)).toEqual(['76.5', '240', '18,700 / 58,600']);
+  // Every technical term has its tooltip: the test, SEQ/RND, the queue, IOPS, latency and MB/s.
+  expect(seq.querySelectorAll('.term').length).toBeGreaterThanOrEqual(1);
+  const termNames = [...document.querySelectorAll('.term')].map((e) => e.textContent);
+  for (const term of ['seqRnd', 'queueDepth', 'iops', 'mbs']) expect(termNames).toContain(t(`glossary.${term}.name`));
+  for (const header of ['col.meanLat', 'col.p99Lat']) expect(termNames).toContain(t(`performance.score.${header}`));
+  // The points of the default profile, with their term.
+  expect(screen.getByText(t('performance.score.disk.points', { points: '1,012' })).closest('.term')).not.toBeNull();
+});
+
+test('b2 shows no points', async () => {
+  await setupDisk([makeDiskScoreFile('disk-c', { diskProfile: 'b2', scores: { points: null } })]);
+  await screen.findByRole('table', { name: t('performance.score.detail') });
+  expect(screen.getByText(t('performance.score.disk.noPoints'))).toBeTruthy();
+  expect(screen.queryByText(/^Points:/)).toBeNull();
+});
+
+test('disk flags and invalid reasons show their text', async () => {
+  const flags = ['battery', 'thermal', 'other_io', 'compressible', 'virtual_disk', 'removable'];
+  await setupDisk([makeDiskScoreFile('disk-c', { flags })]);
+  for (const flag of flags) expect(await screen.findByText(t(`performance.score.flag.${flag}`))).toBeTruthy();
+  for (const flag of ['io_error', 'disk_full']) {
+    cleanup();
+    disconnectSettings();
+    await setupDisk([makeDiskScoreFile('disk-c', { valid: false, flags: [flag] })]);
+    expect((await screen.findByRole('alert')).textContent).toBe(t(`performance.score.invalid.${flag}`));
+    expect(screen.queryByText(t(`performance.score.flag.${flag}`))).toBeNull();
+  }
+});
+
+test('disk record is per device', async () => {
+  await setupDisk([
+    makeDiskScoreFile('disk-e', { id: 'e1', at: '2026-10-08T13:00:00Z', scores: { readMBs: 400, writeMBs: 120, points: null }, device: { model: 'Fake USB Stick', kind: 'usb' } }),
+    makeDiskScoreFile('disk-c', { id: 'c1', at: '2026-10-08T12:00:00Z', scores: { readMBs: 6900, writeMBs: 5800 } }),
+  ]);
+  const marks = () => [...document.querySelectorAll('.mark-value')].map((m) => m.textContent?.trim());
+  // The chosen volume is the system disk: its record, not the stick's.
+  expect(marks()).toEqual(['▲ 6900', '▲ 5800']);
+  // «Your measurements» lists every disk, with its model.
+  const history = screen.getByRole('table', { name: t('performance.score.history') });
+  expect(within(history).getByRole('columnheader', { name: t('performance.score.col.disk') })).toBeTruthy();
+  const rows = within(history).getAllByRole('row').slice(1);
+  expect(rows).toHaveLength(2);
+  expect(rows[0].textContent).toContain('Fake USB Stick');
+  expect(rows[1].textContent).toContain('Fake NVMe SSD');
+  // The other volume has its own record.
+  await fireEvent.change(screen.getByRole('combobox', { name: t('performance.disk.volume') }), { target: { value: 'E:\\' } });
+  await waitFor(() => expect(marks()).toEqual(['▲ 400', '▲ 120']));
+});
+
+test('cpu and gpu pages ignore disk scores', async () => {
+  const backend = await setup([
+    makeDiskScoreFile('disk-c', { id: 'd', at: '2026-10-08T12:00:00Z' }),
+    makeScoreFile({ id: 'c', at: '2026-10-07T12:00:00Z', scores: { single: 1400, multi: 11000 } }),
+  ]);
+  const rows = within(screen.getByRole('table', { name: t('performance.score.history') })).getAllByRole('row').slice(1);
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('1400');
+  await waitFor(() => expect(now('single')).toBe('1400'));
+  // A disk benchmark under way moves nothing here; it brings its own page forward.
+  backend.emitBench(makeDiskBenchStatus('disk-c', { liveRead: 5000 }));
+  await screen.findByRole('heading', { name: t('performance.score.disk.title') });
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.nav.scoreCpu') }));
+  await waitFor(() => expect((startButton() as HTMLButtonElement).disabled).toBe(true));
+  expect(screen.queryByRole('button', { name: t('performance.score.stop') })).toBeNull();
+  expect(now('single')).toBe('1400');
+  expect(screen.queryByRole('meter', { name: t('performance.score.read') })).toBeNull();
+  // A GPU page shows no disk history either.
+  cleanup();
+  disconnectSettings();
+  await setupGpu([makeDiskScoreFile('gpu-a', { id: 'd2' })]);
+  expect(screen.getByText(t('performance.score.history.empty'))).toBeTruthy();
+});
+
+test('disk start asks before waking a standby hdd and shows the refusals', async () => {
+  const backend = await setupDisk();
+  backend.diskStartErrors = ['disk:standby'];
+  await fireEvent.click(startButton());
+  const dialog = await screen.findByRole('alertdialog');
+  expect(dialog.textContent).toContain(t('performance.disk.standby.title'));
+  await fireEvent.click(screen.getByRole('button', { name: t('performance.disk.standby.confirm') }));
+  await waitFor(() => expect(backend.diskStartRequests.map((r) => r.wake)).toEqual([false, true]));
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  // Refusals in words.
+  backend.diskStartErrors = ['disk:link'];
+  await fireEvent.click(startButton());
+  expect((await screen.findByRole('alert')).textContent).toContain(t('performance.disk.error.link'));
+});
+
+test('disk customize sends the profile and compressible data', async () => {
+  const backend = await setupDisk();
+  await fireEvent.click(screen.getByRole('checkbox', { name: (name) => name.includes(t('performance.score.disk.compressible')) }));
+  await fireEvent.change(screen.getByRole('combobox', { name: t('performance.score.disk.profile') }), { target: { value: 'b2' } });
+  await fireEvent.click(startButton());
+  await waitFor(() => expect(backend.diskStartRequests).toEqual([{ folder: VOL_C.folder, profile: 'b2', compressible: true, wake: false }]));
+});
+
+test('disk page without volumes cannot start', async () => {
+  await setupDisk([], []);
+  expect((startButton() as HTMLButtonElement).disabled).toBe(true);
 });

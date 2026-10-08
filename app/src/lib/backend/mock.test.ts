@@ -1,5 +1,5 @@
 import { catalogs } from '../i18n/index.svelte';
-import { mockBench } from './mockPerformance';
+import { MOCK_VOLUMES, mockBench } from './mockPerformance';
 import {
   MOCK_HISTORY_SECONDS,
   MOCK_SCHEMA,
@@ -621,6 +621,34 @@ test('mock_gpu_bench_runs_twelve_seconds_and_the_error_scenario_loses_the_device
       // An integrated GPU scores a few points, not the dedicated one's 1500.
       expect(file.scores.compute).toBeLessThan(10);
     }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('mock_disk_bench_runs_fifteen_seconds_and_the_error_scenario_is_not_valid', () => {
+  vi.useFakeTimers();
+  try {
+    const volumes = MOCK_VOLUMES;
+    const request = { folder: volumes[0].folder, profile: 'b1' as const, compressible: false, wake: false };
+    for (const scenario of [null, 'error'] as const) {
+      const bench = mockBench(scenario, () => false, [], volumes);
+      expect(() => bench.startDisk({ ...request, folder: 'Z:\nowhere' })).toThrow('build:no_disk');
+      const id = bench.startDisk(request);
+      expect(() => bench.start()).toThrow('busy');
+      expect(bench.status()).toMatchObject({ category: 'disk', deviceId: volumes[0].deviceId });
+      vi.advanceTimersByTime(15_500);
+      expect(bench.status()).toMatchObject({ state: 'done', scoreId: id });
+      const file = bench.score(id)!;
+      expect(file.valid).toBe(scenario === null);
+      expect(file.flags).toEqual(scenario === null ? [] : ['io_error']);
+      expect(bench.scores()[0]).toMatchObject({ id, category: 'disk', deviceId: volumes[0].deviceId });
+      expect(file.scores.points).toEqual(scenario === null ? expect.any(Number) : null);
+    }
+    // A spun-down disk asks once; the retry with consent starts.
+    const standby = mockBench(null, () => false, [], volumes, 'standby');
+    expect(() => standby.startDisk(request)).toThrow('disk:standby');
+    expect(() => standby.startDisk({ ...request, wake: true })).not.toThrow();
   } finally {
     vi.useRealTimers();
   }

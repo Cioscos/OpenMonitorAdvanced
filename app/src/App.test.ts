@@ -532,6 +532,8 @@ test('the tray and a toast open the running test and a result', async () => {
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'CPU Benchmark' })).toBeTruthy());
   backend.emitNavigate({ view: 'simple', performance: { page: 'score-gpu', deviceId: 'gpu-a' } });
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'GPU Benchmark' })).toBeTruthy());
+  backend.emitNavigate({ view: 'simple', performance: { page: 'score-disk' } });
+  await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Disk Benchmark' })).toBeTruthy());
 });
 
 test('a test that starts opens its page and marks the sidebar entry', async () => {

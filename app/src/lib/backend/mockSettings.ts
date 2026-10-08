@@ -86,7 +86,7 @@ const SHAPE: { [key: string]: Node } = {
     hotkeyBenchmark: 'nullable',
     editorBounds: 'nullable',
   },
-  performance: { thermalStop: 'leaf', cpuStopC: 'nullable', gpuStopC: 'leaf', stopOnFirstError: 'nullable', ramSharePercent: 'leaf', riskNoticeSeen: 'leaf' },
+  performance: { thermalStop: 'leaf', cpuStopC: 'nullable', gpuStopC: 'leaf', stopOnFirstError: 'nullable', ramSharePercent: 'leaf', riskNoticeSeen: 'leaf', diskStopC: 'nullable', diskFolder: 'nullable' },
   rules: { overrides: 'overrides', custom: 'leaf' },
 };
 const READ_ONLY = ['version', 'migrations'];
@@ -160,16 +160,18 @@ function checkTypes(merged: Record<string, unknown>): void {
 
 /** The performance checks of the strict decoder: the threshold and the RAM share are integers in range. */
 function checkPerformance(p: Record<string, unknown>): void {
+  if (p.diskFolder !== null && typeof p.diskFolder !== 'string') fail('performance.diskFolder', 'settings.error.type');
   for (const key of ['thermalStop', 'riskNoticeSeen']) if (typeof p[key] !== 'boolean') fail(`performance.${key}`, 'settings.error.type');
   if (p.stopOnFirstError !== null && typeof p.stopOnFirstError !== 'boolean') fail('performance.stopOnFirstError', 'settings.error.type');
   const ranges = [
     ['cpuStopC', 60, 110],
     ['gpuStopC', 60, 110],
+    ['diskStopC', 40, 90],
     ['ramSharePercent', 10, 90],
   ] as const;
   for (const [key, min, max] of ranges) {
     const value = p[key];
-    if (value === null && key === 'cpuStopC') continue;
+    if (value === null && (key === 'cpuStopC' || key === 'diskStopC')) continue;
     if (typeof value !== 'number') fail(`performance.${key}`, 'settings.error.type');
     if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) fail(`performance.${key}`, 'settings.error.range');
   }
@@ -395,7 +397,7 @@ export function defaultSettings(): Settings {
       hotkeyBenchmark: null,
       editorBounds: null,
     },
-    performance: { thermalStop: true, cpuStopC: null, gpuStopC: 90, stopOnFirstError: null, ramSharePercent: 70, riskNoticeSeen: false },
+    performance: { thermalStop: true, cpuStopC: null, gpuStopC: 90, stopOnFirstError: null, ramSharePercent: 70, riskNoticeSeen: false, diskStopC: null, diskFolder: null },
     migrations: { serviceV1: false, webviewV1: false },
   };
 }

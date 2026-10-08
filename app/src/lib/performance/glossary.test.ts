@@ -2,7 +2,8 @@ import { catalogs, type Locale } from '../i18n/index.svelte';
 import performanceSection from '../../components/settings/PerformanceSection.svelte?raw';
 import baseline from '../../../../crates/oma-core/src/scores/cpu-1-baseline.json';
 import gpuBaseline from '../../../../crates/oma-core/src/scores/gpu-1-baseline.json';
-import { BENCH_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
+import diskBaseline from '../../../../crates/oma-core/src/scores/disk-1-baseline.json';
+import { BENCH_TERMS, DISK_BENCH_TERMS, DISK_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
 
 const LOCALES: Locale[] = ['en', 'it'];
 
@@ -53,4 +54,13 @@ test('every_gpu_bench_load_has_an_entry', () => {
   expect([...GPU_SCORE_TERMS].sort()).toEqual(['computeScore', 'gbps', 'gpixels', 'gpuMedian', 'graphicsScore', 'spread', 'tflops']);
   expect(TERMS).toEqual(expect.arrayContaining(GPU_SCORE_TERMS));
   expect(missing([...GPU_BENCH_TERMS, ...GPU_SCORE_TERMS].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
+});
+
+test('every_disk_test_and_term_has_an_entry', () => {
+  // The tests of the default profile are in the score scale `oma-core` ships (DC5); the NVMe profile adds two.
+  const scaled = Object.keys(diskBaseline.read).map((id) => `diskBench.${id}`);
+  expect(DISK_BENCH_TERMS).toEqual(expect.arrayContaining(scaled));
+  expect(DISK_BENCH_TERMS).toHaveLength(6);
+  expect(TERMS).toEqual(expect.arrayContaining(DISK_TERMS));
+  expect(missing([...DISK_BENCH_TERMS, ...DISK_TERMS].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

@@ -233,7 +233,7 @@ export interface NavigationTarget {
   /** The settings section to open, for the update toast. */
   settingsSection?: 'about';
   /** The Performance page the tray or a toast asked for; `quit` also asks «stop the test and quit?». */
-  performance?: { page: 'run' | 'result' | 'quit' | 'score-cpu' | 'score-gpu'; sessionId?: string; deviceId?: string };
+  performance?: { page: 'run' | 'result' | 'quit' | 'score-cpu' | 'score-gpu' | 'score-disk'; sessionId?: string; deviceId?: string };
 }
 
 export interface ServiceModules {
@@ -296,6 +296,10 @@ export interface PerformanceSettings {
   /** 10 to 90. */
   ramSharePercent: number;
   riskNoticeSeen: boolean;
+  /** 40 to 90 °C, or null for the drive's own warning temperature (70 without it). */
+  diskStopC: number | null;
+  /** The folder of the last disk test, kept for the orphan sweep. */
+  diskFolder: string | null;
 }
 
 export interface Settings {
@@ -879,6 +883,43 @@ export interface SystemInfo {
   hypervisor: boolean;
   /** The GPUs a test can target (DG13). */
   gpus: GpuChoice[];
+  /** The local volumes a disk test can target (M8c DC6). */
+  volumes: VolumeChoice[];
+}
+
+export type DiskKind = 'nvme' | 'sata_ssd' | 'hdd' | 'usb' | 'virtual' | 'other';
+
+/** A volume the disk pages offer, with the folder a test would use (M8c DC6). */
+export interface VolumeChoice {
+  /** `X:\`. */
+  root: string;
+  label: string;
+  fs: string;
+  totalBytes: number;
+  freeBytes: number;
+  folder: string;
+  /** The physical disk's schema device id; null for a volume that is not one recognised disk. */
+  deviceId: string | null;
+  model: string | null;
+  kind: DiskKind;
+  removable: boolean;
+  system: boolean;
+  virtualDisk: boolean;
+  /** A spun-down HDD: the test asks before waking it. */
+  standby: boolean;
+  /** The folder is synced to the cloud. */
+  sync: boolean;
+}
+
+export type DiskProfile = 'b1' | 'b2';
+
+/** What the disk benchmark start sends (`performance_disk_bench_start`). */
+export interface DiskBenchRequest {
+  folder: string;
+  profile: DiskProfile;
+  compressible: boolean;
+  /** The user agreed to wake a spun-down HDD. */
+  wake: boolean;
 }
 
 /** A GPU the wizard offers, chosen by its stable device id. */
@@ -993,12 +1034,14 @@ export interface StressSessionSummary {
 
 // --- CPU and GPU benchmark (mirrors crates/oma-core/src/scores and app/src-tauri/src/performance/bench.rs; plans M8a2 B7, M8b2 H10) ---
 
-export type BenchKernel = 'ntt' | 'hash' | 'compress' | 'sort' | 'fft' | 'gemm' | GpuBenchKernel;
+export type BenchKernel = 'ntt' | 'hash' | 'compress' | 'sort' | 'fft' | 'gemm' | GpuBenchKernel | DiskBenchKernel;
+/** The disk benchmark's tests (M8c DC5) and the preparation of the test file. */
+export type DiskBenchKernel = 'disk_fill' | 'seq1m_q8t1' | 'seq1m_q1t1' | 'seq128k_q32t1' | 'rnd4k_q32t1' | 'rnd4k_q32t16' | 'rnd4k_q1t1';
 /** The six GPU loads (M8b2 DH2): the first three are Compute, the others Graphics. */
 export type GpuBenchKernel = 'fma' | 'int_hash' | 'bandwidth' | 'fill' | 'texture' | 'overdraw';
 /** `single`/`multi` for the CPU, `compute`/`graphics` for the GPU groups. */
-export type BenchMode = 'single' | 'multi' | 'compute' | 'graphics';
-export type ScoreCategory = 'cpu' | 'gpu';
+export type BenchMode = 'single' | 'multi' | 'compute' | 'graphics' | 'read' | 'write';
+export type ScoreCategory = 'cpu' | 'gpu' | 'disk';
 export type BenchState = 'starting' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed';
 export type BenchSegment = 'pending' | 'running' | 'done' | 'failed';
 
@@ -1027,6 +1070,12 @@ export interface BenchStatus {
   multi: number | null;
   compute: number | null;
   graphics: number | null;
+  /** Disk: SEQ1M Q8T1 in MB/s, the points (B1 only) and the live needles in MB/s. */
+  readMBs: number | null;
+  writeMBs: number | null;
+  points: number | null;
+  liveRead: number | null;
+  liveWrite: number | null;
   flags: string[];
   scoreId: string | null;
   error: string | null;
@@ -1041,10 +1090,21 @@ export interface ScoreSummary {
   multi: number | null;
   compute: number | null;
   graphics: number | null;
+  readMBs: number | null;
+  writeMBs: number | null;
+  points: number | null;
   deviceId: string | null;
   valid: boolean;
   flags: string[];
   provisional: boolean;
+}
+
+/** The best measure of a disk test in one direction (`mbs` is 10^6 bytes per second). */
+export interface DiskRate {
+  mbs: number;
+  iops: number;
+  meanLatUs: number;
+  p99LatUs: number;
 }
 
 /** A saved score (`performance_score`): the speeds of each workload in its own unit. */
@@ -1058,9 +1118,27 @@ export interface ScoreFile {
   /** null for a GPU score. */
   isa: Isa | null;
   shaderDigest: string | null;
-  scores: { single: number | null; multi: number | null; compute: number | null; graphics: number | null };
+  scores: {
+    single: number | null;
+    multi: number | null;
+    compute: number | null;
+    graphics: number | null;
+    readMBs: number | null;
+    writeMBs: number | null;
+    points: number | null;
+  };
   /** A GPU load has `value` (the median of its windows, true units) and `spread`; a CPU one `single` and `multi`. */
-  kernels: { id: BenchKernel; unit: string; single: number | null; multi: number | null; value: number | null; spread: number | null }[];
+  kernels: {
+    id: BenchKernel;
+    unit: string;
+    single: number | null;
+    multi: number | null;
+    value: number | null;
+    spread: number | null;
+    /** Disk: the best measure of each direction. */
+    read?: DiskRate | null;
+    write?: DiskRate | null;
+  }[];
   device: {
     model: string;
     cores: number;
@@ -1069,7 +1147,11 @@ export interface ScoreFile {
     vendorId: number | null;
     dedicatedBytes: number | null;
     integrated: boolean | null;
+    /** Disk: the drive's class. */
+    kind?: DiskKind | null;
   };
+  /** Disk: the test profile. */
+  diskProfile?: DiskProfile | null;
   flags: string[];
   valid: boolean;
   scaling: number | null;

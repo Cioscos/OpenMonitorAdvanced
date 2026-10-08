@@ -53,7 +53,7 @@ export function gpuFullScale(values: number[], integrated: boolean): number {
 }
 
 /** The first number of the 1-2-2.5-5 x 10^n series at or above `target` (from 1). */
-function series(target: number): number {
+export function series(target: number): number {
   for (let decade = 1; ; decade *= 10) {
     for (const step of [1, 2, 2.5, 5]) {
       if (step * decade >= target) return step * decade;

@@ -25,9 +25,16 @@ export const GPU_SCORE_TERMS: string[] = ['computeScore', 'graphicsScore', 'spre
 /** The terms of the GPU stress pages (table T2 of the M8b1 plan). */
 export const GPU_TERMS: string[] = ['tdr', 'vram', 'deviceLost', 'stability', 'pcieReplay', 'artifact', 'loadLevel'];
 
+/** The six tests of the disk benchmark (M8c DC5): `diskBench.seq1m_q8t1`, `diskBench.rnd4k_q1t1`… */
+export const DISK_BENCH_TERMS: string[] = ['seq1m_q8t1', 'seq1m_q1t1', 'seq128k_q32t1', 'rnd4k_q32t1', 'rnd4k_q32t16', 'rnd4k_q1t1'].map((id) => `diskBench.${id}`);
+
+/** The terms of the disk score page (table T3 of the M8c plan). */
+export const DISK_TERMS: string[] = ['mbs', 'iops', 'queueDepth', 'seqRnd', 'latency', 'compressible', 'diskPoints'];
+
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [
   ...SCORE_TERMS,
+  ...DISK_TERMS,
   ...GPU_SCORE_TERMS,
   ...GPU_TERMS,
   'fft',

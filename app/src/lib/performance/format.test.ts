@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
-import type { Phase } from '../types';
+import type { ErrorRecord, Phase } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, diskChartSensors, errorText, formatOffset, isDiskKernel, kernelTerm, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, timedSeconds, verdictTitle } from './format';
+import { cpuChartSensors, dataErrorKind, diskChartSensors, errorText, formatOffset, isDiskKernel, kernelTerm, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, timedSeconds, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -172,4 +172,10 @@ test('every event the disk controller can emit has a text in both locales', () =
 test('timedSeconds leaves out the disk fill, which ends when the file is written', () => {
   const p = (kernel: string, duration_s: number) => ({ kernel, duration_s }) as Phase;
   expect(timedSeconds([p('disk_fill', 1200), p('n1', 180), p('n2', 120)])).toBe(300);
+});
+
+test('one wrong bit is singular', () => {
+  const bits = (actual: number) => dataErrorKind({ kind: 'bit_flip', actual } as ErrorRecord, t);
+  expect(bits(1)).toBe(t('performance.result.error.bit_flip_one'));
+  expect(bits(3)).toBe(t('performance.result.error.bit_flip', { bits: 3 }));
 });

@@ -1449,6 +1449,7 @@
   "performance.result.transient": "passeggero: la rilettura era giusta",
   "performance.result.persistent": "persistente",
   "performance.result.error.bit_flip": "{bits} bit sbagliati",
+  "performance.result.error.bit_flip_one": "1 bit sbagliato",
   "performance.result.error.misplaced": "blocco nel posto sbagliato",
   "performance.result.error.stale": "blocco vecchio",
   "performance.result.error.zeros": "blocco vuoto (zeri)",

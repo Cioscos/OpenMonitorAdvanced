@@ -1449,6 +1449,7 @@
   "performance.result.transient": "transient: the re-read was right",
   "performance.result.persistent": "persistent",
   "performance.result.error.bit_flip": "{bits} wrong bits",
+  "performance.result.error.bit_flip_one": "1 wrong bit",
   "performance.result.error.misplaced": "block in the wrong place",
   "performance.result.error.stale": "stale block",
   "performance.result.error.zeros": "empty block (zeros)",

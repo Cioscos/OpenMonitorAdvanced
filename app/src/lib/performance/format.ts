@@ -220,6 +220,7 @@ export function formatOffset(index: number, locale = 'en'): string {
 /** A disk data error in words: `bit_flip` says how many bits (`actual`), `io_error` the Win32 code (`actual`). */
 export function dataErrorKind(error: ErrorRecord, t: Translate): string {
   const kind = error.kind as DiskErrorKind;
+  if (kind === 'bit_flip' && error.actual === 1) return t('performance.result.error.bit_flip_one');
   return t(`performance.result.error.${kind}`, { bits: error.actual, code: error.actual });
 }
 

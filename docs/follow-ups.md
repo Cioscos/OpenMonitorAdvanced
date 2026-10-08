@@ -1,7 +1,7 @@
 # Follow-ups
 
 Items consciously left open, with where they live and when they are expected to be picked up.
-Updated at the end of every milestone (last update: M8c).
+Updated at the end of every milestone (last update: M8d1).
 
 ## Open: code
 
@@ -152,6 +152,26 @@ Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-0
 - **Interfaccia:** il mock di `pnpm dev` non ha un piano del disco (la procedura guidata del disco in modalità browser non mostra niente); `isDiskKernel` usa un'espressione regolare invece del catalogo; la finestra dello standby non ha focus trap (come le altre).
 - **Controller:** ogni `LoadMessage::Error` conta come `io_error` (il benchmark riceve solo quello); `io_bps` copre da `Progress` a `PhaseDone`.
 - **Esportazione e classifica (M8d):** rinviate.
+
+## Open: leaderboard server (M8d1)
+
+Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Implementata sul branch `feat/m8d1-scores-worker`; le prove dal vivo W7 sono pendenti.
+
+- **Segnaposto di `wrangler.toml`:** il sottodominio di `routes` (`scores.example.invalid`) e il `database_id` (`wrangler d1 create oma-scores --jurisdiction eu`). Il sottodominio va messo anche nella costante dell'app (M8d2).
+- **Righe della CPU dell'autore:** `reference-scores.json` non ha ancora righe `cpu-single` e `cpu-multi` (le misure fatte prima della taratura B11 sono provvisorie e si escludono). Da misurare in W7 con la build release e rigenerare con `pnpm author-table`.
+- **Prove dal vivo W7 (le fa l'utente):**
+  - `GET /v1/reference-scores.json` con `200`, `ETag` e poi `304` con `If-None-Match`;
+  - `POST /v1/submit`: `201` con un invio valido, `400` con uno non valido;
+  - `429` dopo 6 invii in un minuto, oppure il ripiego con la regola di rate limit della zona se il binding non va nel piano gratuito;
+  - aggregazione: 3 invii di `OMA Test CPU` danno una riga con `n: 3`; `hidden_models` la nasconde; poi pulizia degli invii di prova (`DELETE FROM entries WHERE submission = …`) e `pnpm recompute`;
+  - log spenti (nessuna riga con IP o corpi) e giurisdizione UE del database.
+- **Note di revisione rinviate:**
+  - (a) `plausible()` normalizza ogni riga pubblicata a ogni invio: con una tabella grande pesa sulla CPU del Worker; precalcolare la chiave all'aggregazione o tenere una cache per `etag`.
+  - (b) l'`ETag` ha la risoluzione del secondo UTC: due ricalcoli nello stesso secondo danno lo stesso `etag`.
+  - (c) un `NULL` in `hidden_models` farebbe pubblicare una tabella vuota (`NOT IN` con `NULL`); preferire `NOT EXISTS` o `NOT NULL` sulla colonna.
+  - (d) `scripts/recompute.ts`: `spawnSync` con argomenti e `shell: true` dà l'avviso DEP0190 su Node 24.
+  - (e) `\s` e `toLowerCase` di JavaScript e Rust possono differire sui nomi di modello non ASCII: da allineare nella M8d2 con le fixture comuni.
+- **Informativa:** la certificazione Data Privacy Framework di Cloudflare è «da verificare» in `docs/benchmark-scoring.md` (la pagina dell'elenco non si legge in automatico).
 
 ## Open: CPU benchmark (M8a2)
 

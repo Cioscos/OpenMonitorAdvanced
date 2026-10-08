@@ -226,6 +226,8 @@ pub struct RunController {
     last_save_ms: u64,
     next_whea_ms: u64,
     started: bool,
+    /// A message other than `Hello` came: the plan was accepted and ran.
+    ran: bool,
     /// Set at the end; the final verdict waits for the last WHEA poll.
     ended: bool,
     final_deadline: Option<u64>,
@@ -304,6 +306,7 @@ impl RunController {
             last_save_ms: now.mono_ms,
             next_whea_ms: now.mono_ms + WHEA_EVERY_MS,
             started: false,
+            ran: false,
             ended: false,
             final_deadline: None,
             temp_since: None,
@@ -633,6 +636,7 @@ impl RunController {
         if self.state == RunState::Starting {
             self.state = RunState::Running;
         }
+        self.ran |= !matches!(msg, LoadMessage::Hello(_));
         let mut out = vec![];
         match msg {
             LoadMessage::Hello(h) => self.session.load_version = Some(h.version.clone()),
@@ -1168,8 +1172,8 @@ impl RunController {
         }
         self.tick(now);
         // A clean exit after our own stop request is not a crash; a usage exit means the
-        // plan was refused, so it never ran.
-        if code == Some(LOAD_EXIT_USAGE) {
+        // plan was refused, so it never ran. Once it ran, 1 is a kill (Task Manager's code).
+        if code == Some(LOAD_EXIT_USAGE) && !self.ran {
             self.failed_to_start = Some(INVALID_PLAN.into());
         } else if code == Some(LOAD_EXIT_DEVICE_LOST) {
             // 0: the exit code carries no HRESULT.
@@ -2120,6 +2124,16 @@ mod tests {
         let a = settle(&mut c, a);
         assert_eq!(a[0], Action::Kill);
         assert!(has_finished(&a, Outcome::Hung));
+    }
+
+    #[test]
+    fn exit_one_after_the_plan_ran_is_a_crash() {
+        // Task Manager's «End task» exits with 1, the same code as a refused plan.
+        let mut c = ctl(false, true);
+        c.on_load(&progress(0, None), clock(500));
+        let a = c.on_exit(Some(1), clock(1000));
+        let a = settle(&mut c, a);
+        assert!(has_finished(&a, Outcome::Crashed), "{a:?}");
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub enum Outcome {
     /// The GPU was reset by Windows or the driver (DG8).
     DeviceLost,
     Hung,
+    /// A disk test filled the volume (DC10).
+    StoppedDiskFull,
     SystemCrash,
     StoppedUser,
     StoppedThermal,
@@ -42,6 +44,8 @@ pub struct OutcomeFacts {
     pub error_cores: BTreeSet<u32>,
     /// Some counted error has no core (a reference disagreement): no «core N» verdict.
     pub coreless_errors: bool,
+    /// Disk runs: `oma-load` reported `disk_full`.
+    pub disk_full: bool,
     pub thermal_stop: Option<f64>,
     pub suspended: bool,
     pub user_stop: bool,
@@ -68,7 +72,7 @@ fn key(key: &'static str) -> VerdictKey {
 }
 
 /// Precedence: failed_to_start > system_crash > crashed > device_lost > hung > errors >
-/// stopped_thermal > suspended > stopped_user > low_stability > marginal > passed.
+/// stopped_disk_full > stopped_thermal > suspended > stopped_user > low_stability > marginal > passed.
 pub fn decide(f: &OutcomeFacts) -> (Outcome, VerdictKey) {
     if let Some(reason) = &f.failed_to_start {
         let mut k = key("failed_to_start");
@@ -113,6 +117,9 @@ pub fn decide(f: &OutcomeFacts) -> (Outcome, VerdictKey) {
             _ => (Outcome::Errors, key("errors")),
         };
     }
+    if f.disk_full {
+        return (Outcome::StoppedDiskFull, key("stopped_disk_full"));
+    }
     if let Some(t) = f.thermal_stop {
         let mut k = key("stopped_thermal");
         k.params.insert("temp".into(), format!("{t:.0}"));
@@ -151,7 +158,7 @@ mod tests {
 
     #[test]
     fn precedence_follows_the_plan_table() {
-        let setters: [(Outcome, Setter); 11] = [
+        let setters: [(Outcome, Setter); 12] = [
             (Outcome::FailedToStart, |f| {
                 f.failed_to_start = Some("x".into())
             }),
@@ -160,6 +167,7 @@ mod tests {
             (Outcome::DeviceLost, |f| f.device_lost = Some(1)),
             (Outcome::Hung, |f| f.hung = true),
             (Outcome::Errors, |f| f.errors = 1),
+            (Outcome::StoppedDiskFull, |f| f.disk_full = true),
             (Outcome::StoppedThermal, |f| f.thermal_stop = Some(96.0)),
             (Outcome::Suspended, |f| f.suspended = true),
             (Outcome::StoppedUser, |f| f.user_stop = true),
@@ -179,6 +187,21 @@ mod tests {
             assert_eq!(decide(&f).0, *hi);
         }
         assert_eq!(decide(&base()).0, Outcome::Passed);
+    }
+
+    #[test]
+    fn stopped_disk_full_ranks_after_errors_and_before_thermal() {
+        let mut f = base();
+        f.disk_full = true;
+        f.thermal_stop = Some(80.0);
+        f.user_stop = true;
+        let (o, k) = decide(&f);
+        assert_eq!((o, k.key), (Outcome::StoppedDiskFull, "stopped_disk_full"));
+        f.errors = 1;
+        assert_eq!(decide(&f).0, Outcome::Errors);
+        f.errors = 0;
+        f.hung = true;
+        assert_eq!(decide(&f).0, Outcome::Hung);
     }
 
     #[test]

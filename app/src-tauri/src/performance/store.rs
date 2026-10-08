@@ -510,6 +510,7 @@ fn minimal_session(j: &Journal, app_version: &str) -> Session {
         load_version: None,
         stability: None,
         gpu_device_id: None,
+        disk: None,
     }
 }
 
@@ -589,6 +590,7 @@ mod tests {
             core: None,
             updated_at: updated.into(),
             clean_end: false,
+            disk_folder: None,
         }
     }
 

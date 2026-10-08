@@ -395,6 +395,7 @@ fn idle_status() -> RunStatus {
         load_percent: None,
         stability: None,
         gpu_device_id: None,
+        disk: None,
         checks: 0,
         errors: 0,
         whea_corrected: 0,
@@ -724,6 +725,7 @@ impl PerformanceRunner {
             load_version: None,
             stability: None,
             gpu_device_id: adapter.as_ref().map(|g| g.device_id.clone()),
+            disk: None,
         };
         let zero = Clock {
             mono_ms: 0,

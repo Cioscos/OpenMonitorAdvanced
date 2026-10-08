@@ -59,6 +59,39 @@ pub struct Session {
     /// GPU runs: the schema `device_id` of the GPU, for «Repeat the test» (DG13).
     #[serde(default)]
     pub gpu_device_id: Option<String>,
+    /// Disk runs: the volume, the bytes moved and the SLC cache result (DC10).
+    #[serde(default)]
+    pub disk: Option<DiskSession>,
+}
+
+/// What a disk run records about its target. The folder is not saved: it may hold the
+/// user's name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSession {
+    pub device_id: String,
+    /// For example `C:`.
+    pub volume: String,
+    pub kind: String,
+    pub file_bytes: u64,
+    pub read_bytes: u64,
+    pub written_bytes: u64,
+    /// The SMART host-written counter at the first and the last sample, GiB.
+    pub host_written_before_gib: Option<f64>,
+    pub host_written_after_gib: Option<f64>,
+    pub slc: Option<SlcResult>,
+}
+
+/// The write-cache cliff of an N2 phase (DC8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlcResult {
+    /// Bytes written when the speed fell.
+    pub cache_bytes: u64,
+    /// Write speed after the fall, B/s.
+    pub steady_bps: Option<f64>,
+    /// The drive was hot just before the fall, so the cache may not be the cause.
+    pub thermal_suspect: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +191,9 @@ pub struct Journal {
     /// RFC 3339, UTC.
     pub updated_at: String,
     pub clean_end: bool,
+    /// Disk runs: the test folder, so a later run can clean what a crash left (DC4).
+    #[serde(default)]
+    pub disk_folder: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -373,6 +409,7 @@ mod tests {
             load_version: None,
             stability: None,
             gpu_device_id: None,
+            disk: None,
         }
     }
 
@@ -410,6 +447,38 @@ mod tests {
     }
 
     #[test]
+    fn sessions_and_journals_without_disk_fields_still_parse() {
+        let mut s = session();
+        s.disk = Some(DiskSession {
+            device_id: "disk/nvme-0".into(),
+            volume: "C:".into(),
+            kind: "ssd".into(),
+            file_bytes: 1 << 30,
+            host_written_before_gib: Some(10.5),
+            slc: Some(SlcResult {
+                cache_bytes: 5,
+                steady_bps: None,
+                thermal_suspect: true,
+            }),
+            ..Default::default()
+        });
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["disk"]["hostWrittenBeforeGib"], 10.5);
+        assert_eq!(v["disk"]["slc"]["thermalSuspect"], true);
+        assert_eq!(parse_session(&serde_json::to_vec(&v).unwrap()).unwrap(), s);
+        v.as_object_mut().unwrap().remove("disk");
+        assert_eq!(
+            parse_session(&serde_json::to_vec(&v).unwrap())
+                .unwrap()
+                .disk,
+            None
+        );
+        // A diary written before the M8c has no `diskFolder`.
+        let old = br#"{"format":1,"sessionId":"x","planSummary":"p","phaseIndex":0,"kernel":null,"core":null,"updatedAt":"t","cleanEnd":false}"#;
+        assert_eq!(parse_journal(old).unwrap().disk_folder, None);
+    }
+
+    #[test]
     fn journal_round_trips() {
         let j = Journal {
             format: 1,
@@ -420,6 +489,7 @@ mod tests {
             core: None,
             updated_at: "2026-10-06T14:03:09Z".into(),
             clean_end: false,
+            disk_folder: Some("D:\t".into()),
         };
         assert_eq!(parse_journal(&serde_json::to_vec(&j).unwrap()).unwrap(), j);
     }

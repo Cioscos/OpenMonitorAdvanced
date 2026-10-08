@@ -1024,6 +1024,7 @@
   "performance.wizard.ram.low": "Not available: there is too little free memory, the share is under 256 MiB.",
   "performance.wizard.phases": "Planned phases",
   "performance.wizard.untilFull": "until full",
+  "performance.wizard.upTo": "up to {duration}",
   "performance.wizard.excluded": "excluded",
   "performance.wizard.total": "Total: {duration}",
   "performance.wizard.onePerCore": "One [thread] per core",

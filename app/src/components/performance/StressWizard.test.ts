@@ -534,8 +534,11 @@ async function toDiskSummary(backend: FakeBackend) {
   await screen.findByRole('heading', { name: t('performance.wizard.step.summary') });
   await waitFor(() => expect(backend.performancePreviewRequests.length).toBeGreaterThan(0));
   // The fill ends when its file is written: it is not in the total.
-  await screen.findByText(t('performance.wizard.total', { duration: '30 min' }));
+  // N1, N2 and N4 end at their write cap: their time and the total are «up to».
+  await screen.findByText(t('performance.wizard.total', { duration: t('performance.wizard.upTo', { duration: '30 min' }) }));
   expect(screen.getByText(t('performance.wizard.untilFull'))).toBeTruthy();
+  expect(screen.getByText(t('performance.wizard.upTo', { duration: '9 min' }))).toBeTruthy();
+  expect(screen.getByText('7 min 30 s')).toBeTruthy();
   expect(screen.getByText(`: ${t('performance.wizard.disk')} ✓`)).toBeTruthy();
 }
 

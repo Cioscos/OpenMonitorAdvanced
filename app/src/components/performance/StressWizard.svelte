@@ -4,7 +4,7 @@
   import { formatBytes } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { estimatedWrites, formatBytes as formatDiskBytes } from '../../lib/performance/disk';
-  import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, sizeLabel, timedSeconds } from '../../lib/performance/format';
+  import { around, errorText, formatDuration, kernelTerm, marked, modeTerm, endsEarly, sizeLabel, timedSeconds } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { Custom, GpuChoice, Isa, Objective, Phase, Plan, Preset, StartRequest, StressComponent, VolumeChoice } from '../../lib/types';
@@ -276,14 +276,14 @@
       <div class="tape" aria-hidden="true">
         {#each rows.filter((r) => !r.off) as { p }, index (index)}<span style:flex-grow={p.duration_s} style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})"></span>{/each}
       </div>
-      <p class="total">{t('performance.wizard.total', { duration: formatDuration(total) })}</p>
+      <p class="total">{t('performance.wizard.total', { duration: plan.phases.some(endsEarly) ? t('performance.wizard.upTo', { duration: formatDuration(total) }) : formatDuration(total) })}</p>
       <ol class="phases" aria-label={t('performance.wizard.phases')}>
         {#each rows as { p, off }, index (index)}
           <li class:off class:gpu={component === 'gpu'} class:disk style:--c="var(--{p.placement === 'core_cycle' ? 'accent-2' : p.mode === 'steady' ? 'accent' : 'warn'})">
             <span class="name"><Term term={kernelTerm(p.kernel)} />{#if p.alt_kernel}{' + '}<Term term={`mode.${p.alt_kernel}`} />{/if}{#if sizeLabel(p)}{' · '}<Term term="cache">{sizeLabel(p)}</Term>{/if}</span>
             {#if component !== 'gpu' && !disk}<span class="isa"><Term term={`isa.${p.isa}`} /></span>{/if}
             {#if !disk}<span class="load"><Term term={modeTerm(p.mode)} />{#if component === 'gpu'}{''}{:else}{' · '}{#if PLACEMENT_TERM[p.placement]}<Term term={PLACEMENT_TERM[p.placement]!} />{:else}{onePerCore[0]}<Term term="threads">{onePerCore[1]}</Term>{onePerCore[2]}{/if}{#if p.both_smt}{' · '}<Term term="smt">{t('performance.wizard.bothSmt')}</Term>{/if}{/if}</span>{/if}
-            <span class="dur">{off ? t('performance.wizard.excluded') : p.kernel === 'disk_fill' ? t('performance.wizard.untilFull') : formatDuration(p.duration_s)}</span>
+            <span class="dur">{off ? t('performance.wizard.excluded') : p.kernel === 'disk_fill' ? t('performance.wizard.untilFull') : endsEarly(p) ? t('performance.wizard.upTo', { duration: formatDuration(p.duration_s) }) : formatDuration(p.duration_s)}</span>
           </li>
         {/each}
       </ol>

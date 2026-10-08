@@ -26,6 +26,12 @@ beforeEach(async () => {
 });
 
 describe("submit", () => {
+  it("missing_limiter_skips_rate_limit", async () => {
+    const { SUBMIT_LIMIT: _omitted, ...noLimiter } = envWith(false);
+    const r = await handleSubmit(post(VALID), noLimiter as Env, TODAY);
+    expect(r.status).toBe(201);
+  });
+
   it("valid_cpu_submission_is_201_with_two_rows", async () => {
     const r = await handleSubmit(post(VALID), envWith(true), TODAY);
     expect(r.status).toBe(201);

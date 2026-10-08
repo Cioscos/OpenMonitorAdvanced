@@ -40,8 +40,9 @@ export async function handleSubmit(request: Request, env: Env, today: string): P
   if (text === null) return json(413, { error: "body_too_large" });
 
   const key = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  const { success } = await env.SUBMIT_LIMIT.limit({ key });
-  if (!success) return json(429, { error: "rate_limited" });
+  if (env.SUBMIT_LIMIT && !(await env.SUBMIT_LIMIT.limit({ key })).success) {
+    return json(429, { error: "rate_limited" });
+  }
 
   let body: unknown;
   try {

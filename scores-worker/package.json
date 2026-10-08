@@ -1,0 +1,20 @@
+{
+  "name": "oma-scores-worker",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit",
+    "author-table": "node scripts/author-table.ts",
+    "recompute": "node scripts/recompute.ts",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.0",
+    "@cloudflare/workers-types": "5.20261008.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3",
+    "wrangler": "4.149.0"
+  }
+}

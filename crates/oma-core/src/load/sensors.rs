@@ -185,7 +185,8 @@ pub fn read_disk_sample(
             .iter()
             .any(Option::is_some)
             .then(|| io.iter().flatten().sum()),
-        host_written_gib: get(ids.host_written),
+        // The schema's counter is in bytes (the service scales SMART's units to bytes).
+        host_written_gib: get(ids.host_written).map(|b| b / (1u64 << 30) as f64),
         ..Default::default()
     }
 }
@@ -348,7 +349,7 @@ mod tests {
                 Some(41.0),
                 Some(100.0),
                 Some(50.0),
-                Some(12.5),
+                Some(12.5 * (1u64 << 30) as f64),
             ]),
             &[Quality::Fresh; 5],
         );

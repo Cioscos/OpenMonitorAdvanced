@@ -1094,6 +1094,7 @@ mod tests {
                 custom: None,
                 retry_core: None,
                 gpu: None,
+                disk: None,
             },
             plan: Plan {
                 seed: 1,

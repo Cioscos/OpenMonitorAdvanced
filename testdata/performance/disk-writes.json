@@ -1,0 +1,102 @@
+{
+  "cases": [
+    {
+      "expectedBytes": 330712481792,
+      "fileBytes": 8589934592,
+      "label": "standard normal",
+      "phases": [
+        {
+          "cycles": null,
+          "durationS": 1200,
+          "kernel": "disk_fill",
+          "rateLimitBps": null,
+          "writeCapBytes": null
+        },
+        {
+          "cycles": null,
+          "durationS": 540,
+          "kernel": "n1",
+          "rateLimitBps": null,
+          "writeCapBytes": 214748364800
+        },
+        {
+          "cycles": null,
+          "durationS": 450,
+          "kernel": "n3",
+          "rateLimitBps": null,
+          "writeCapBytes": null
+        },
+        {
+          "cycles": null,
+          "durationS": 360,
+          "kernel": "n2",
+          "rateLimitBps": null,
+          "writeCapBytes": 53687091200
+        },
+        {
+          "cycles": null,
+          "durationS": 450,
+          "kernel": "n4",
+          "rateLimitBps": null,
+          "writeCapBytes": 53687091200
+        }
+      ]
+    },
+    {
+      "expectedBytes": 58116276224,
+      "fileBytes": 8589934592,
+      "label": "standard stability",
+      "phases": [
+        {
+          "cycles": 3,
+          "durationS": 1800,
+          "kernel": "v1",
+          "rateLimitBps": null,
+          "writeCapBytes": null
+        },
+        {
+          "cycles": null,
+          "durationS": 1800,
+          "kernel": "v2",
+          "rateLimitBps": 16777216,
+          "writeCapBytes": null
+        },
+        {
+          "cycles": null,
+          "durationS": 600,
+          "kernel": "v4",
+          "rateLimitBps": null,
+          "writeCapBytes": 2147483648
+        }
+      ]
+    },
+    {
+      "expectedBytes": 171727686656,
+      "fileBytes": 8589934592,
+      "label": "long stability removable",
+      "phases": [
+        {
+          "cycles": null,
+          "durationS": 21600,
+          "kernel": "v3",
+          "rateLimitBps": null,
+          "writeCapBytes": 48784247808
+        },
+        {
+          "cycles": null,
+          "durationS": 7200,
+          "kernel": "v2",
+          "rateLimitBps": 16777216,
+          "writeCapBytes": null
+        },
+        {
+          "cycles": null,
+          "durationS": 600,
+          "kernel": "v4",
+          "rateLimitBps": null,
+          "writeCapBytes": 2147483648
+        }
+      ]
+    }
+  ]
+}

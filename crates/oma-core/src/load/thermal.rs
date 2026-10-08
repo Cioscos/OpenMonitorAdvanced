@@ -14,6 +14,15 @@ pub fn gpu_stop_threshold(setting: u32) -> f64 {
     f64::from(setting)
 }
 
+/// `diskStopC` if set, else the drive's own warning temperature (WCTEMP), else 70 (DC10).
+pub fn disk_stop_threshold(setting: Option<u32>, wctemp_c: Option<f64>) -> f64 {
+    match (setting, wctemp_c) {
+        (Some(s), _) => f64::from(s),
+        (None, Some(w)) => w,
+        (None, None) => 70.0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThermalEvent {
     None,
@@ -81,6 +90,13 @@ mod tests {
         assert_eq!(cpu_stop_threshold(None, Some(89.0)), 84.0);
         assert_eq!(cpu_stop_threshold(Some(70), Some(89.0)), 70.0);
         assert_eq!(cpu_stop_threshold(None, None), 95.0);
+    }
+
+    #[test]
+    fn disk_stop_threshold_prefers_the_setting_then_wctemp_then_70() {
+        assert_eq!(disk_stop_threshold(Some(55), Some(75.0)), 55.0);
+        assert_eq!(disk_stop_threshold(None, Some(75.0)), 75.0);
+        assert_eq!(disk_stop_threshold(None, None), 70.0);
     }
 
     #[test]

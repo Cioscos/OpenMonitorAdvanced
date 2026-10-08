@@ -8,6 +8,10 @@ use serde_json::{json, Value};
 pub const CPU_STOP_C: RangeInclusive<u32> = 60..=110;
 /// Accepted values of `performance.gpuStopC`, in degrees Celsius.
 pub const GPU_STOP_C: RangeInclusive<u32> = 60..=110;
+/// Accepted values of `performance.diskStopC`, in degrees Celsius.
+pub const DISK_STOP_C: RangeInclusive<u32> = 40..=90;
+/// Longest accepted `performance.diskFolder`, in bytes.
+pub const DISK_FOLDER_MAX: usize = 1024;
 /// Accepted values of `performance.ramSharePercent`.
 pub const RAM_SHARE_PERCENT: RangeInclusive<u32> = 10..=90;
 
@@ -25,6 +29,10 @@ pub struct PerformanceSettings {
     pub ram_share_percent: u32,
     /// Whether the risk notice was already acknowledged.
     pub risk_notice_seen: bool,
+    /// Disk stop threshold; `None` = automatic (WCTEMP, else 70); within [`DISK_STOP_C`].
+    pub disk_stop_c: Option<u32>,
+    /// The folder of the last disk test, at most [`DISK_FOLDER_MAX`] bytes.
+    pub disk_folder: Option<String>,
 }
 
 impl Default for PerformanceSettings {
@@ -36,6 +44,8 @@ impl Default for PerformanceSettings {
             stop_on_first_error: None,
             ram_share_percent: 70,
             risk_notice_seen: false,
+            disk_stop_c: None,
+            disk_folder: None,
         }
     }
 }
@@ -50,6 +60,8 @@ impl PerformanceSettings {
             "stopOnFirstError": self.stop_on_first_error,
             "ramSharePercent": self.ram_share_percent,
             "riskNoticeSeen": self.risk_notice_seen,
+            "diskStopC": self.disk_stop_c,
+            "diskFolder": self.disk_folder,
         })
     }
 }
@@ -64,7 +76,8 @@ mod tests {
         assert_eq!(
             p.encode(),
             json!({"thermalStop": true, "cpuStopC": null, "gpuStopC": 90, "stopOnFirstError": null,
-                   "ramSharePercent": 70, "riskNoticeSeen": false})
+                   "ramSharePercent": 70, "riskNoticeSeen": false, "diskStopC": null,
+                   "diskFolder": null})
         );
         assert!(RAM_SHARE_PERCENT.contains(&p.ram_share_percent));
     }

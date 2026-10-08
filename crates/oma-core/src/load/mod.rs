@@ -13,8 +13,9 @@ mod thermal;
 pub use catalog::catalog_json;
 pub use outcome::{decide, Outcome, OutcomeFacts, VerdictKey, NOTHING_RAN};
 pub use plan::{
-    build_plan, core_order, presets, ram_budget, BuildError, BuildInput, Component, Custom,
-    ModeEdit, Objective, Preset, RetryCore, StartRequest, ThreadChoice, KEEP_FREE_BYTES,
+    build_plan, core_order, disk_reserve, estimated_writes, presets, ram_budget, stress_file_bytes,
+    BuildError, BuildInput, Component, Custom, DiskPlanInput, DiskStart, ModeEdit, Objective,
+    Preset, RetryCore, StartRequest, ThreadChoice, KEEP_FREE_BYTES,
 };
 pub use run::{
     Action, Clock, PhaseInfo, RunConfig, RunController, RunState, RunStatus, WheaEvent,
@@ -30,4 +31,6 @@ pub use session::{
     Session, SessionEvent, SessionSummary, Stats, WheaCounts, FORMAT, KEEP_SESSIONS, MAX_ERRORS,
 };
 pub use stability::{StabilityMeter, MIN_STABILITY, WARMUP_MS, WINDOW_MS};
-pub use thermal::{cpu_stop_threshold, gpu_stop_threshold, ThermalEvent, ThermalGuard};
+pub use thermal::{
+    cpu_stop_threshold, disk_stop_threshold, gpu_stop_threshold, ThermalEvent, ThermalGuard,
+};

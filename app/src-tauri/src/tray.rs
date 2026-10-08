@@ -135,6 +135,7 @@ impl TestMark {
             Component::Cpu => "cpu",
             Component::Ram => "ram",
             Component::Gpu => "gpu",
+            Component::Disk => "disk",
         };
         let objective = match status.objective {
             Objective::Normal => "normal",

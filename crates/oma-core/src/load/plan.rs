@@ -1,8 +1,8 @@
 //! Profiles (DA11), "Personalizza" (DA12), RAM quota (DA10) and the plan builder.
 
 use oma_ipc::load::{
-    DataSize, GpuTarget, Isa, KernelId, LoadMode, Phase, Placement, Plan, RamPattern, Topology,
-    MAX_PLAN_SECONDS,
+    DataSize, DiskJob, DiskTarget, GpuTarget, Isa, KernelId, LoadMode, Phase, Placement, Plan,
+    RamPattern, Topology, MAX_PLAN_SECONDS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,7 @@ pub enum Component {
     Cpu,
     Ram,
     Gpu,
+    Disk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +61,9 @@ pub struct Custom {
     /// In the `core_cycle` phases, both threads of the core.
     pub both_smt: bool,
     pub stop_on_first_error: Option<bool>,
+    /// Disk tests: write zeros instead of random data.
+    #[serde(default)]
+    pub compressible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +84,27 @@ pub struct StartRequest {
     /// The `device_id` of the GPU to test (DG13); the app resolves the LUID at start.
     #[serde(default)]
     pub gpu: Option<String>,
+    /// The folder of a disk test; the app turns it into [`DiskPlanInput`].
+    #[serde(default)]
+    pub disk: Option<DiskStart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskStart {
+    pub folder: String,
+    /// The user agreed to wake a spun-down HDD (DC6).
+    #[serde(default)]
+    pub wake: bool,
+}
+
+/// The target volume of a disk test, read by the app from the folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskPlanInput {
+    pub dir: String,
+    pub free_bytes: u64,
+    pub volume_bytes: u64,
+    pub removable: bool,
 }
 
 pub struct BuildInput<'a> {
@@ -93,6 +118,8 @@ pub struct BuildInput<'a> {
     pub seed: u64,
     /// The resolved GPU for `Component::Gpu`.
     pub gpu: Option<GpuTarget>,
+    /// The resolved volume for `Component::Disk`.
+    pub disk: Option<DiskPlanInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -109,6 +136,10 @@ pub enum BuildError {
     RamBudget,
     #[error("no suitable GPU")]
     NoGpu,
+    #[error("no suitable disk")]
+    NoDisk,
+    #[error("not enough free space")]
+    NoSpace,
 }
 
 /// The preset durations in seconds (DA11).
@@ -118,6 +149,8 @@ pub fn presets(component: Component, objective: Objective) -> &'static [(Preset,
         (Component::Cpu, Objective::Normal) => &[(Quick, 300), (Standard, 1800), (Long, 3600)],
         (Component::Ram, Objective::Normal) => &[(Quick, 900), (Standard, 1800), (Long, 3600)],
         (Component::Gpu, Objective::Normal) => &[(Quick, 300), (Standard, 900), (Long, 1800)],
+        (Component::Disk, Objective::Normal) => &[(Quick, 600), (Standard, 1800), (Long, 3600)],
+        (Component::Disk, Objective::Overclock) => &[(Standard, 4200), (Long, 11_400)],
         (Component::Gpu, Objective::Overclock) => &[(Standard, 1800), (Long, 3600), (Night, 7200)],
         (_, Objective::Overclock) => &[(Standard, 3600), (Long, 7200), (Night, 28_800)],
     }
@@ -304,6 +337,128 @@ fn gpu_phases(objective: Objective, duration: u32) -> Vec<Phase> {
     }
 }
 
+const GIB: u64 = 1 << 30;
+const MIB: u64 = 1 << 20;
+const FILE_STEP: u64 = 8 * MIB;
+const MAX_STRESS_FILE: u64 = 8 * GIB;
+const MIN_STRESS_USABLE: u64 = GIB;
+
+/// The free space a disk test leaves to Windows (DC6): 5% of the volume, at least 1 GiB.
+pub fn disk_reserve(volume_bytes: u64) -> u64 {
+    (volume_bytes / 20).max(GIB)
+}
+
+/// The stress test file (DC6): the usable space capped at 8 GiB, down to 8 MiB steps;
+/// `None` below 1 GiB usable.
+pub fn stress_file_bytes(free: u64, volume: u64) -> Option<u64> {
+    let usable = free.saturating_sub(disk_reserve(volume));
+    (usable >= MIN_STRESS_USABLE).then(|| usable.min(MAX_STRESS_FILE) / FILE_STEP * FILE_STEP)
+}
+
+/// The most a disk plan writes (DC7), shown before the start.
+pub fn estimated_writes(plan: &Plan) -> u64 {
+    let file = plan.disk.as_ref().map_or(0, |d| d.file_bytes);
+    plan.phases
+        .iter()
+        .map(|p| {
+            let Some(j) = &p.disk else { return 0 };
+            let cap = j.write_cap_bytes.unwrap_or(0);
+            match p.kernel {
+                KernelId::DiskFill => file,
+                KernelId::V1 => file.saturating_mul(u64::from(j.cycles.unwrap_or(1))),
+                KernelId::V2 => j
+                    .rate_limit_bps
+                    .unwrap_or(0)
+                    .saturating_mul(u64::from(p.duration_s)),
+                KernelId::N1
+                | KernelId::N2
+                | KernelId::N4
+                | KernelId::V3
+                | KernelId::V4
+                | KernelId::DiskBench => cap,
+                _ => 0,
+            }
+        })
+        .fold(0, u64::saturating_add)
+}
+
+fn disk_phase(kernel: KernelId, duration_s: u32, job: DiskJob) -> Phase {
+    let mut p = phase(kernel, Isa::Sse2, DataSize::Auto, duration_s);
+    p.disk = Some(job);
+    p
+}
+
+/// A job with 4 KiB random blocks and sequential blocks of `seq` bytes.
+fn disk_job(seq: u32, random: u8, read: u8, queue: u16, threads: u16) -> DiskJob {
+    DiskJob {
+        block_bytes: 4096,
+        seq_block_bytes: seq,
+        random_percent: random,
+        read_percent: read,
+        queue,
+        threads,
+        write_cap_bytes: None,
+        cycles: None,
+        rate_limit_bps: None,
+    }
+}
+
+fn capped(mut j: DiskJob, cap: u64) -> DiskJob {
+    j.write_cap_bytes = Some(cap);
+    j
+}
+
+/// Disk profiles (DC7). `usable` is the free space above the reserve.
+fn disk_phases(
+    objective: Objective,
+    preset: Preset,
+    duration: u32,
+    removable: bool,
+    usable: u64,
+    file_bytes: u64,
+) -> Vec<Phase> {
+    use KernelId::*;
+    match objective {
+        Objective::Normal => {
+            let d = scale(&[30, 25, 20, 25], duration);
+            let n2_cap = 100 * u64::from(duration) / 3600 * GIB;
+            // The fill ignores its duration (R7); 1200 s is for validation and bookkeeping.
+            vec![
+                disk_phase(DiskFill, 1200, disk_job(1 << 20, 0, 0, 4, 1)),
+                disk_phase(
+                    N1,
+                    d[0],
+                    capped(disk_job(128 << 10, 50, 70, 16, 2), 200 * GIB),
+                ),
+                disk_phase(N3, d[1], disk_job(1 << 20, 0, 100, 8, 1)),
+                disk_phase(N2, d[2], capped(disk_job(1 << 20, 0, 0, 1, 1), n2_cap)),
+                disk_phase(N4, d[3], capped(disk_job(4096, 100, 50, 32, 4), 50 * GIB)),
+            ]
+        }
+        Objective::Overclock => {
+            let long = preset == Preset::Long;
+            let first = if removable {
+                // Fill what is left after the stress file, as h2testw does.
+                let cap = usable.saturating_sub(file_bytes).min(1 << 40);
+                disk_phase(V3, 21_600, capped(disk_job(1 << 20, 0, 0, 4, 1), cap))
+            } else {
+                let mut j = disk_job(1 << 20, 0, 0, 4, 1);
+                j.cycles = Some(if long { 6 } else { 3 });
+                disk_phase(V1, if long { 3600 } else { 1800 }, j)
+            };
+            let mut v2 = disk_job(4096, 100, 0, 4, 1);
+            v2.rate_limit_bps = Some(16 * MIB);
+            let mut v = vec![
+                first,
+                disk_phase(V2, if long { 7200 } else { 1800 }, v2),
+                disk_phase(V4, 600, capped(disk_job(64 << 10, 0, 0, 1, 1), 2 * GIB)),
+            ];
+            v.iter_mut().for_each(|p| p.stop_on_error = true);
+            v
+        }
+    }
+}
+
 /// One round of the overclock profile for `cores` and per-core time `t`; the all-core
 /// phases last `a` seconds each.
 fn oc_round(avx2: Isa, avx512: bool, cores: &[u32], t: u32, a: u32) -> Vec<Phase> {
@@ -429,11 +584,15 @@ fn apply_custom(mut out: Vec<Phase>, c: &Custom, has: &dyn Fn(Isa) -> bool) -> V
 pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     let req = input.request;
     let is_gpu = req.component == Component::Gpu;
+    let is_disk = req.component == Component::Disk;
     if is_gpu && input.gpu.is_none() {
         return Err(BuildError::NoGpu);
     }
+    if is_disk && input.disk.is_none() {
+        return Err(BuildError::NoDisk);
+    }
     let cores = core_order(input.topology);
-    if cores.is_empty() || (is_gpu && req.retry_core.is_some()) {
+    if (cores.is_empty() && !is_disk) || ((is_gpu || is_disk) && req.retry_core.is_some()) {
         return Err(BuildError::NoCores);
     }
     let has = |i: Isa| input.isa.contains(&i);
@@ -443,6 +602,7 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
         .unwrap_or(Isa::Sse2);
     let avx2 = if has(Isa::Avx2) { Isa::Avx2 } else { Isa::Sse2 };
 
+    let disk_in = input.disk.as_ref();
     let mut phases = if let Some(r) = &req.retry_core {
         if !input.topology.logical.iter().any(|l| l.core == r.core) {
             return Err(BuildError::UnknownCore(r.core));
@@ -471,6 +631,13 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
             .map(|&(_, s)| s)
             .ok_or(BuildError::NoPhases)?;
         match (req.component, req.objective) {
+            (Component::Disk, o) => {
+                let d = disk_in.ok_or(BuildError::NoDisk)?;
+                let file =
+                    stress_file_bytes(d.free_bytes, d.volume_bytes).ok_or(BuildError::NoSpace)?;
+                let usable = d.free_bytes.saturating_sub(disk_reserve(d.volume_bytes));
+                disk_phases(o, req.preset, duration, d.removable, usable, file)
+            }
             (Component::Gpu, o) => gpu_phases(o, duration),
             (Component::Ram, o) => ram_phases(best, o, duration),
             (Component::Cpu, Objective::Normal) => cpu_normal(best, duration),
@@ -483,9 +650,9 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     let mut stop = input.stop_override;
     // A retry keeps its own fixed phases: "Personalizza" does not apply to it.
     if let Some(c) = req.custom.as_ref().filter(|_| req.retry_core.is_none()) {
-        // Instruction set and thread choice mean nothing to the GPU (DG9).
+        // Instruction set and thread choice mean nothing to the GPU (DG9) or the disk.
         let gpu_custom;
-        let c = if is_gpu {
+        let c = if is_gpu || is_disk {
             gpu_custom = Custom {
                 isa: None,
                 threads: ThreadChoice::AllLogical,
@@ -514,11 +681,21 @@ pub fn build_plan(input: &BuildInput) -> Result<Plan, BuildError> {
     }
     let plan = Plan {
         seed: input.seed,
-        ram_bytes: if is_gpu { 0 } else { input.ram_budget },
+        ram_bytes: if is_gpu || is_disk {
+            0
+        } else {
+            input.ram_budget
+        },
         phases,
         gpu: if is_gpu { input.gpu } else { None },
-
-        disk: None,
+        disk: disk_in.and_then(|d| {
+            Some(DiskTarget {
+                dir: d.dir.clone(),
+                file_bytes: stress_file_bytes(d.free_bytes, d.volume_bytes)?,
+                compressible: req.custom.as_ref().is_some_and(|c| c.compressible),
+                reserve_bytes: disk_reserve(d.volume_bytes),
+            })
+        }),
     };
     if plan.total_seconds() > u64::from(MAX_PLAN_SECONDS) {
         return Err(BuildError::TooLong);
@@ -583,6 +760,7 @@ mod tests {
             custom: None,
             retry_core: None,
             gpu: None,
+            disk: None,
         }
     }
 
@@ -605,6 +783,7 @@ mod tests {
             stop_override,
             seed: 1,
             gpu: None,
+            disk: None,
         })
     }
 
@@ -619,6 +798,7 @@ mod tests {
             threads: ThreadChoice::AllLogical,
             both_smt: false,
             stop_on_first_error: None,
+            compressible: false,
         }
     }
 
@@ -1170,6 +1350,7 @@ mod tests {
             stop_override: None,
             seed: 1,
             gpu,
+            disk: None,
         })
     }
 
@@ -1306,5 +1487,324 @@ mod tests {
             let plan = ok(&req(c, Objective::Normal, Preset::Standard), &t, &ALL);
             assert_eq!(plan.gpu, None);
         }
+    }
+
+    // ---- Disk (M8c) ----
+
+    const MIB: u64 = 1 << 20;
+    const TB: u64 = 1_000_000_000_000;
+
+    fn disk_input(free: u64, volume: u64, removable: bool) -> DiskPlanInput {
+        DiskPlanInput {
+            dir: "D:\\".into(),
+            free_bytes: free,
+            volume_bytes: volume,
+            removable,
+        }
+    }
+
+    fn disk_req(o: Objective, p: Preset) -> StartRequest {
+        StartRequest {
+            disk: Some(DiskStart {
+                folder: "D:\\".into(),
+                wake: false,
+            }),
+            ..req(Component::Disk, o, p)
+        }
+    }
+
+    fn build_disk(r: &StartRequest, input: Option<DiskPlanInput>) -> Result<Plan, BuildError> {
+        build_plan(&BuildInput {
+            request: r,
+            topology: &topo(4, true, 1, false),
+            isa: &ALL,
+            ram_budget: 8 * GIB,
+            stop_override: None,
+            seed: 1,
+            gpu: None,
+            disk: input,
+        })
+    }
+
+    fn ok_disk(r: &StartRequest, input: DiskPlanInput) -> Plan {
+        let plan = build_disk(r, Some(input)).unwrap();
+        LoadMessage::Run(RunRequest { plan: plan.clone() })
+            .validate()
+            .unwrap();
+        plan
+    }
+
+    fn roomy(removable: bool) -> DiskPlanInput {
+        disk_input(100 * GIB, TB, removable)
+    }
+
+    #[test]
+    fn disk_presets_match_the_plan() {
+        use Preset::*;
+        assert_eq!(
+            presets(Component::Disk, Objective::Normal),
+            &[(Quick, 600), (Standard, 1800), (Long, 3600)]
+        );
+        assert_eq!(
+            presets(Component::Disk, Objective::Overclock),
+            &[(Standard, 4200), (Long, 11_400)]
+        );
+        let caps: Vec<_> = [Quick, Standard, Long]
+            .into_iter()
+            .map(|p| {
+                let plan = ok_disk(&disk_req(Objective::Normal, p), roomy(false));
+                let n2 = plan.phases.iter().find(|x| x.kernel == KernelId::N2);
+                n2.unwrap().disk.as_ref().unwrap().write_cap_bytes.unwrap() / GIB
+            })
+            .collect();
+        assert_eq!(caps, [16, 50, 100]);
+    }
+
+    #[test]
+    fn disk_normal_phases_follow_the_weights() {
+        let plan = ok_disk(&disk_req(Objective::Normal, Preset::Standard), roomy(false));
+        let got: Vec<_> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                let j = p.disk.as_ref().unwrap();
+                (p.kernel, p.duration_s, j.write_cap_bytes.map(|c| c / GIB))
+            })
+            .collect();
+        use KernelId::*;
+        assert_eq!(
+            got,
+            [
+                (DiskFill, 1200, None),
+                (N1, 540, Some(200)),
+                (N3, 450, None),
+                (N2, 360, Some(50)),
+                (N4, 450, Some(50)),
+            ]
+        );
+        let job = |i: usize| plan.phases[i].disk.clone().unwrap();
+        let (n1, n3, n2, n4) = (job(1), job(2), job(3), job(4));
+        assert_eq!(
+            (
+                n1.block_bytes,
+                n1.seq_block_bytes,
+                n1.random_percent,
+                n1.read_percent
+            ),
+            (4096, 128 << 10, 50, 70)
+        );
+        assert_eq!((n1.queue, n1.threads), (16, 2));
+        assert_eq!(
+            (n3.seq_block_bytes, n3.read_percent, n3.queue),
+            (1 << 20, 100, 8)
+        );
+        assert_eq!(
+            (n2.seq_block_bytes, n2.read_percent, n2.queue),
+            (1 << 20, 0, 1)
+        );
+        assert_eq!(
+            (n4.random_percent, n4.read_percent, n4.queue, n4.threads),
+            (100, 50, 32, 4)
+        );
+        assert!(plan.phases.iter().all(|p| !p.stop_on_error));
+        assert_eq!(plan.ram_bytes, 0);
+        assert_eq!(plan.gpu, None);
+    }
+
+    #[test]
+    fn disk_profile_sums_to_its_duration_without_the_fill() {
+        for o in [Objective::Normal, Objective::Overclock] {
+            for &(p, secs) in presets(Component::Disk, o) {
+                let plan = ok_disk(&disk_req(o, p), roomy(false));
+                let fill: u64 = plan
+                    .phases
+                    .iter()
+                    .filter(|x| x.kernel == KernelId::DiskFill)
+                    .map(|x| u64::from(x.duration_s))
+                    .sum();
+                assert_eq!(plan.total_seconds() - fill, u64::from(secs), "{o:?} {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn disk_stability_has_v1_v2_v4_and_v3_on_removable() {
+        use KernelId::*;
+        let shape =
+            |p: &Plan| -> Vec<_> { p.phases.iter().map(|x| (x.kernel, x.duration_s)).collect() };
+        let std = ok_disk(
+            &disk_req(Objective::Overclock, Preset::Standard),
+            roomy(false),
+        );
+        assert_eq!(shape(&std), [(V1, 1800), (V2, 1800), (V4, 600)]);
+        assert!(std.phases.iter().all(|p| p.stop_on_error));
+        assert_eq!(std.phases[0].disk.as_ref().unwrap().cycles, Some(3));
+        assert_eq!(
+            std.phases[1].disk.as_ref().unwrap().rate_limit_bps,
+            Some(16 * MIB)
+        );
+        let v4 = std.phases[2].disk.as_ref().unwrap();
+        assert_eq!(
+            (v4.write_cap_bytes, v4.seq_block_bytes),
+            (Some(2 * GIB), 64 << 10)
+        );
+        let long = ok_disk(&disk_req(Objective::Overclock, Preset::Long), roomy(false));
+        assert_eq!(shape(&long), [(V1, 3600), (V2, 7200), (V4, 600)]);
+        assert_eq!(long.phases[0].disk.as_ref().unwrap().cycles, Some(6));
+
+        let input = roomy(true);
+        let usable = input.free_bytes - disk_reserve(input.volume_bytes);
+        let rem = ok_disk(&disk_req(Objective::Overclock, Preset::Long), input);
+        assert_eq!(shape(&rem), [(V3, 21_600), (V2, 7200), (V4, 600)]);
+        let file = rem.disk.as_ref().unwrap().file_bytes;
+        assert_eq!(
+            rem.phases[0].disk.as_ref().unwrap().write_cap_bytes,
+            Some(usable - file)
+        );
+    }
+
+    #[test]
+    fn disk_plan_validates() {
+        for removable in [false, true] {
+            for o in [Objective::Normal, Objective::Overclock] {
+                for &(p, _) in presets(Component::Disk, o) {
+                    let mut r = disk_req(o, p);
+                    r.custom = Some(Custom {
+                        compressible: removable,
+                        ..custom()
+                    });
+                    ok_disk(&r, roomy(removable)); // validates inside
+                    ok_disk(&disk_req(o, p), disk_input(4 * GIB, 32 * GIB, removable));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stress_file_is_capped_at_8_gib_and_the_free_space() {
+        assert_eq!(stress_file_bytes(100 * GIB, TB), Some(8 * GIB));
+        let want = (3 * GIB - 32 * GIB / 20) / (8 * MIB) * (8 * MIB);
+        assert_eq!(stress_file_bytes(3 * GIB, 32 * GIB), Some(want));
+        assert_eq!(want % (8 * MIB), 0);
+        assert_eq!(stress_file_bytes(GIB + GIB / 2, 32 * GIB), None);
+        assert_eq!(stress_file_bytes(0, 32 * GIB), None);
+    }
+
+    #[test]
+    fn disk_reserve_is_at_least_1_gib_and_5_percent() {
+        assert_eq!(disk_reserve(8 * GIB), GIB);
+        assert_eq!(disk_reserve(TB), TB / 20);
+        assert_eq!(disk_reserve(0), GIB);
+    }
+
+    #[test]
+    fn estimated_writes_sums_the_caps() {
+        let std = ok_disk(&disk_req(Objective::Normal, Preset::Standard), roomy(false));
+        assert_eq!(estimated_writes(&std), (8 + 200 + 50 + 50) * GIB);
+        let oc = ok_disk(
+            &disk_req(Objective::Overclock, Preset::Standard),
+            roomy(false),
+        );
+        assert_eq!(
+            estimated_writes(&oc),
+            8 * GIB * 3 + 16 * MIB * 1800 + 2 * GIB
+        );
+    }
+
+    #[test]
+    fn disk_writes_fixture_matches() {
+        let cases = [
+            (
+                "standard normal",
+                Objective::Normal,
+                Preset::Standard,
+                false,
+            ),
+            (
+                "standard stability",
+                Objective::Overclock,
+                Preset::Standard,
+                false,
+            ),
+            (
+                "long stability removable",
+                Objective::Overclock,
+                Preset::Long,
+                true,
+            ),
+        ];
+        let entries: Vec<_> = cases
+            .iter()
+            .map(|&(label, o, p, removable)| {
+                let plan = ok_disk(&disk_req(o, p), roomy(removable));
+                let phases: Vec<_> = plan
+                    .phases
+                    .iter()
+                    .map(|x| {
+                        let j = x.disk.as_ref().unwrap();
+                        serde_json::json!({
+                            "kernel": x.kernel,
+                            "durationS": x.duration_s,
+                            "writeCapBytes": j.write_cap_bytes,
+                            "cycles": j.cycles,
+                            "rateLimitBps": j.rate_limit_bps,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "label": label,
+                    "fileBytes": plan.disk.as_ref().unwrap().file_bytes,
+                    "phases": phases,
+                    "expectedBytes": estimated_writes(&plan),
+                })
+            })
+            .collect();
+        let want = serde_json::json!({ "cases": entries });
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/performance/disk-writes.json"
+        );
+        if std::env::var_os("OMA_WRITE_FIXTURES").is_some() {
+            std::fs::write(path, serde_json::to_string_pretty(&want).unwrap() + "\n").unwrap();
+        }
+        let got: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn disk_without_input_is_no_disk() {
+        let r = disk_req(Objective::Normal, Preset::Quick);
+        assert_eq!(build_disk(&r, None), Err(BuildError::NoDisk));
+    }
+
+    #[test]
+    fn disk_without_space_is_no_space() {
+        let r = disk_req(Objective::Normal, Preset::Quick);
+        let input = disk_input(GIB + GIB / 2, 32 * GIB, false);
+        assert_eq!(build_disk(&r, Some(input)), Err(BuildError::NoSpace));
+    }
+
+    #[test]
+    fn disk_retry_core_is_refused() {
+        let mut r = disk_req(Objective::Normal, Preset::Quick);
+        r.retry_core = Some(RetryCore {
+            core: 0,
+            kernel: KernelId::K2,
+        });
+        assert_eq!(build_disk(&r, Some(roomy(false))), Err(BuildError::NoCores));
+    }
+
+    #[test]
+    fn compressible_reaches_the_target() {
+        let mut r = disk_req(Objective::Normal, Preset::Quick);
+        let t = ok_disk(&r, roomy(false)).disk.unwrap();
+        assert!(!t.compressible);
+        assert_eq!((t.dir.as_str(), t.reserve_bytes), ("D:\\", TB / 20));
+        r.custom = Some(Custom {
+            compressible: true,
+            ..custom()
+        });
+        assert!(ok_disk(&r, roomy(false)).disk.unwrap().compressible);
     }
 }

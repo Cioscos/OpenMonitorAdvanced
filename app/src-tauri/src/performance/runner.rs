@@ -279,6 +279,8 @@ impl StartError {
             Self::Plan(BuildError::UnknownCore(_)) => "unknown_core",
             Self::Plan(BuildError::RamBudget) => "ram_budget",
             Self::Plan(BuildError::NoGpu) => "no_gpu",
+            Self::Plan(BuildError::NoDisk) => "no_disk",
+            Self::Plan(BuildError::NoSpace) => "no_space",
         };
         format!("build:{code}")
     }
@@ -594,6 +596,8 @@ impl PerformanceRunner {
                 luid: g.luid,
                 integrated: g.integrated,
             }),
+            // ponytail: C12 resolves the volume of a disk request; until then `NoDisk`.
+            disk: None,
         })
         .map_err(StartError::Plan)?;
         Ok((topology, plan, adapter))
@@ -691,6 +695,8 @@ impl PerformanceRunner {
             Component::Gpu => adapter
                 .as_ref()
                 .map_or_else(String::new, |g| g.name.clone()),
+            // C12 names the disk.
+            Component::Disk => String::new(),
         };
         let session = Session {
             format: FORMAT,
@@ -1464,6 +1470,7 @@ pub(crate) mod tests {
             custom: None,
             retry_core: None,
             gpu: None,
+            disk: None,
         }
     }
 

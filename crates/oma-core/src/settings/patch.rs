@@ -146,6 +146,8 @@ const SCHEMA: &[(&str, Node)] = &[
             ("stopOnFirstError", nullable()),
             ("ramSharePercent", leaf()),
             ("riskNoticeSeen", leaf()),
+            ("diskStopC", nullable()),
+            ("diskFolder", nullable()),
         ]),
     ),
     (
@@ -1062,5 +1064,39 @@ mod tests {
         .unwrap();
         assert_eq!(back.performance.cpu_stop_c, None);
         assert_eq!(back.performance.stop_on_first_error, None);
+    }
+
+    #[test]
+    fn disk_stop_patch_out_of_range_is_a_range_error() {
+        let base = Settings::default();
+        for bad in [39, 91] {
+            assert_eq!(
+                apply_patch(&base, &json!({"performance": {"diskStopC": bad}})),
+                Err(err("performance.diskStopC", "settings.error.range"))
+            );
+        }
+        let ok = apply_patch(
+            &base,
+            &json!({"performance": {"diskStopC": 55, "diskFolder": "E:\\t"}}),
+        )
+        .unwrap();
+        assert_eq!(ok.performance.disk_stop_c, Some(55));
+        assert_eq!(ok.performance.disk_folder.as_deref(), Some("E:\\t"));
+        let back = apply_patch(
+            &ok,
+            &json!({"performance": {"diskStopC": null, "diskFolder": null}}),
+        )
+        .unwrap();
+        assert_eq!(
+            (back.performance.disk_stop_c, back.performance.disk_folder),
+            (None, None)
+        );
+        assert_eq!(
+            apply_patch(
+                &base,
+                &json!({"performance": {"diskFolder": "x".repeat(1025)}})
+            ),
+            Err(err("performance.diskFolder", "settings.error.range"))
+        );
     }
 }

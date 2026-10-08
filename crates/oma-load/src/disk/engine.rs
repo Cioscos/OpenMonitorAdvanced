@@ -211,8 +211,8 @@ const HEARTBEAT: Duration = Duration::from_millis(900);
 const SLICE: Duration = Duration::from_millis(2);
 /// The completion wait of a worker (DC3).
 const WAIT_MS: u32 = 100;
-/// The longest real time a worker waits for its I/Os in flight after the phase ended;
-/// past it the queue's drop cancels them.
+/// The longest time (on the engine clock) a worker waits for its I/Os in flight after the
+/// phase ended; past it the queue's drop cancels them.
 const DRAIN_LIMIT: Duration = Duration::from_secs(10);
 /// `Error` messages per phase; the errors after them are only counted.
 const ERRORS_PER_PHASE: u32 = 16;
@@ -466,7 +466,7 @@ impl Run<'_> {
                 beat = now;
                 self.progress(Duration::ZERO, None);
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(SLICE);
         }
     }
 
@@ -557,7 +557,10 @@ impl Run<'_> {
             while !handles.iter().all(|h| h.is_finished()) {
                 thread::sleep(SLICE);
                 let now = self.now();
-                if self.stop.load(Ordering::Relaxed) || now - phase_start >= duration {
+                // `disk_fill` writes the whole file: its duration does not cut it (a partial fill
+                // leaves regions that read back as zeros without touching the media).
+                let timed_out = spec.kernel != KernelId::DiskFill && now - phase_start >= duration;
+                if self.stop.load(Ordering::Relaxed) || timed_out {
                     shared.halt.store(true, Ordering::Relaxed);
                 }
                 if now - meter.at >= PROGRESS_EVERY {
@@ -743,7 +746,8 @@ struct Fill {
 
 impl Fill {
     fn new(ctx: &LoadCtx<'_>, t: u16) -> Fill {
-        let block = u64::from(ctx.job.seq_block_bytes.max(BLOCK_BYTES as u32));
+        // The rule the queue buffers are sized by: the largest block the job uses.
+        let block = u64::from(used_blocks(ctx.job).1.max(BLOCK_BYTES as u32));
         let threads = u128::from(ctx.job.threads.max(1));
         let stripe = |t: u128| -> u64 {
             let at = (u128::from(ctx.file_bytes) * t / threads) as u64;
@@ -889,8 +893,9 @@ fn worker(sh: &Shared<'_>, mut q: Box<dyn IoQueue>, mut load: Box<dyn WorkerLoad
             continue;
         }
         if halted {
-            let since = *halted_at.get_or_insert_with(Instant::now);
-            if since.elapsed() > DRAIN_LIMIT {
+            let now = (sh.clock)();
+            let since = *halted_at.get_or_insert(now);
+            if now - since > DRAIN_LIMIT {
                 tracing::error!(in_flight = w.in_flight, "disk I/O does not complete");
                 break;
             }
@@ -963,8 +968,8 @@ impl Worker<'_, '_> {
     /// An I/O that failed (at submission or completion): full disk ends the run, another
     /// error is retried once on the same slot, a failed retry ends the run with `EXIT_IO`.
     fn failed(&mut self, q: &mut dyn IoQueue, slot: usize, p: Pending, code: u32) {
-        if self.sh.has_fatal() {
-            // Draining after a fatal error: the I/Os still in flight are not reported.
+        if self.sh.halt.load(Ordering::Relaxed) || self.sh.has_fatal() {
+            // Draining after the phase ended (or a fatal error): no retry, no report.
             self.idle.push(slot);
             return;
         }

@@ -13,7 +13,9 @@ use oma_ipc::load::{
     LoadMessage, LoadMode, Notice, Phase, PhaseDone, Placement, Plan, Progress,
 };
 
-use super::engine::{run_disk_with, DataFileApi, DiskHooks, DiskRunEnd, IoDone, IoQueue};
+use super::engine::{
+    run_disk_with, used_blocks, DataFileApi, DiskHooks, DiskRunEnd, IoDone, IoQueue,
+};
 use super::file::DiskError;
 use super::offsets::IoReq;
 use crate::link::{EXIT_IO, EXIT_OK};
@@ -290,7 +292,8 @@ fn run(plan: &Plan, setup: Setup) -> Ran {
     };
     let qdisk = Arc::clone(&disk);
     let queue = move |_: &dyn DataFileApi, j: &DiskJob| {
-        let size = j.block_bytes.max(j.seq_block_bytes) as usize;
+        // Sized like the IOCP queue: the largest block the job uses.
+        let size = used_blocks(j).1 as usize;
         Ok(Box::new(FakeQueue {
             disk: Arc::clone(&qdisk),
             bufs: vec![vec![0u8; size]; usize::from(j.queue)],
@@ -455,6 +458,102 @@ fn fill_writes_every_block_once_with_generation_1() {
     assert_eq!(done[0].disk.as_ref().unwrap().write.bytes, 64 * MIB);
     assert!(done[0].duration_ms < 900_000);
     assert_eq!(r.end.finished.reason, FinishReason::Completed);
+}
+
+fn assert_every_block_once(r: &Ran) {
+    assert_eq!(r.disk.bad_blocks.load(Ordering::Relaxed), 0);
+    let blocks = r.disk.blocks.lock().unwrap();
+    assert_eq!(blocks.len(), (64 * MIB / 4096) as usize);
+    assert!(blocks.values().all(|&n| n == 1));
+    assert_eq!(r.end.finished.reason, FinishReason::Completed);
+}
+
+#[test]
+fn fill_with_a_random_job_shape_uses_the_queue_buffers() {
+    // random_percent 100 and a block smaller than the sequential one: the buffers are
+    // sized from `used_blocks`, and the fill must write in blocks that fit them.
+    let setup = Setup {
+        script: Script {
+            check_writes: true,
+            ..Script::default()
+        },
+        ..Setup::default()
+    };
+    let p = plan(
+        64 * MIB,
+        vec![phase(
+            KernelId::DiskFill,
+            900,
+            job(64 << 10, 1 << 20, 100, 0, 8, 1),
+        )],
+    );
+    let r = run(&p, setup);
+    assert_every_block_once(&r);
+}
+
+#[test]
+fn fill_is_not_cut_by_its_duration() {
+    let setup = Setup {
+        script: Script {
+            check_writes: true,
+            one_per_wait: true,
+            ..Script::default()
+        },
+        ..Setup::default()
+    };
+    // 64 writes, one per wait: far more than 1 s on the test clock.
+    let p = plan(
+        64 * MIB,
+        vec![phase(
+            KernelId::DiskFill,
+            1,
+            job(1 << 20, 1 << 20, 0, 0, 4, 1),
+        )],
+    );
+    let r = run(&p, setup);
+    assert_every_block_once(&r);
+    assert!(
+        r.done()[0].duration_ms > 1000,
+        "{}",
+        r.done()[0].duration_ms
+    );
+}
+
+#[test]
+fn pause_sends_progress_at_least_every_900_ms() {
+    let mut ph = phase(KernelId::DiskBench, 1, job(4096, 1 << 20, 100, 100, 4, 1));
+    ph.pause_before_ms = 5000;
+    let r = run(&plan(64 * MIB, vec![ph]), Setup::default());
+    let beats: Vec<u64> = r
+        .msgs
+        .iter()
+        .filter_map(|m| match m {
+            LoadMessage::Progress(p) if p.disk.is_none() => Some(p.elapsed_ms),
+            _ => None,
+        })
+        .collect();
+    assert!(beats.len() >= 5, "{beats:?}");
+    let mut last = 0;
+    for b in &beats {
+        assert!(b - last <= 1000, "{beats:?}");
+        last = *b;
+    }
+    assert_eq!(r.end.finished.reason, FinishReason::Completed);
+}
+
+#[test]
+fn stop_during_the_pause_finishes_stopped() {
+    let mut ph = phase(KernelId::DiskBench, 5, job(4096, 1 << 20, 100, 100, 4, 1));
+    ph.pause_before_ms = 10_000;
+    let setup = Setup {
+        stop_after_ms: Some(50),
+        speed: 10,
+        ..Setup::default()
+    };
+    let r = run(&plan(64 * MIB, vec![ph]), setup);
+    assert_eq!(r.end.finished.reason, FinishReason::Stopped);
+    assert_eq!(r.disk.submitted.load(Ordering::Relaxed), 0);
+    assert!(r.real < Duration::from_millis(900), "{:?}", r.real);
 }
 
 #[test]

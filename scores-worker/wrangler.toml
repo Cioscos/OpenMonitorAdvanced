@@ -3,8 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2026-10-01"
 workers_dev = false
 
-# OMA: replace the placeholder with the user's own subdomain (the only place to change).
-routes = [{ pattern = "scores.example.invalid", custom_domain = true }]
+# OMA: the leaderboard subdomain (the only place to change it).
+routes = [{ pattern = "scores.cischi.dev", custom_domain = true }]
 
 [observability]
 enabled = false
@@ -12,8 +12,8 @@ enabled = false
 [[d1_databases]]
 binding = "DB"
 database_name = "oma-scores"
-# OMA: placeholder, put the id printed by `wrangler d1 create oma-scores`.
-database_id = "00000000-0000-0000-0000-000000000000"
+# OMA: the id printed by `wrangler d1 create oma-scores --jurisdiction eu`.
+database_id = "0160acfb-5880-4e82-a121-0dbf9a9cf31c"
 migrations_dir = "migrations"
 
 [[ratelimits]]

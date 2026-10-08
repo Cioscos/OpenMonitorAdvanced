@@ -1141,6 +1141,8 @@ export interface ScoreSummary {
   deviceId: string | null;
   /** The device's model name, kept with the score so a disk that is gone still has a name. */
   model: string | null;
+  /** Disk: the test profile. */
+  diskProfile?: DiskProfile | null;
   valid: boolean;
   flags: string[];
   provisional: boolean;

@@ -444,7 +444,7 @@
             {@const mark = markOf(s)}
             <tr>
               <td>{when(s.at)}</td>
-              {#if disk}<td>{modelOf(s)}</td>{/if}
+              {#if disk}<td>{modelOf(s)}{#if s.diskProfile === 'b2'} <span class="profile-tag" title={t('performance.score.disk.noPoints')}>{t('performance.score.disk.profile.b2')}</span>{/if}</td>{/if}
               {#each MODES as mode (mode)}<td class="num">{whole(modeValue(s, mode))}</td>{/each}
               <td><span class="mark {mark.tone}" role="img" aria-label={mark.text} title={mark.text}>{mark.mark}</span></td>
               <td class="buttons">
@@ -734,6 +734,15 @@
     display: flex;
     gap: 6px;
     justify-content: flex-end;
+  }
+  /* Marks the unscored NVMe profile in the history. */
+  .profile-tag {
+    margin-left: 6px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text-muted);
   }
   .muted {
     margin: 0;

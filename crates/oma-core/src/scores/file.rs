@@ -136,6 +136,8 @@ pub struct ScoreSummary {
     /// The device's model name, so a disk that is gone still has a name in the history.
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub disk_profile: Option<DiskProfile>,
     pub valid: bool,
     pub flags: Vec<String>,
     pub provisional: bool,
@@ -168,6 +170,7 @@ pub fn summary(s: &ScoreFile) -> ScoreSummary {
         points: s.scores.points,
         device_id: s.device.device_id.clone(),
         model: Some(s.device.model.clone()).filter(|m| !m.is_empty()),
+        disk_profile: s.disk_profile,
         valid: s.valid,
         flags: s.flags.clone(),
         provisional: s.provisional,
@@ -451,8 +454,12 @@ mod tests {
             (m.category.as_str(), m.read_mbs, m.write_mbs, m.points),
             ("disk", Some(7012.5), Some(5990.0), Some(1003))
         );
+        assert_eq!(m.disk_profile, Some(DiskProfile::B1));
         assert!(serde_json::to_string(&m)
             .unwrap()
             .contains("\"readMBs\":7012.5"));
+        assert!(serde_json::to_string(&m)
+            .unwrap()
+            .contains("\"diskProfile\":\"b1\""));
     }
 }

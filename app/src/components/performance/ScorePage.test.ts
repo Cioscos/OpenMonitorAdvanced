@@ -392,6 +392,8 @@ test('b2 shows no points', async () => {
   await screen.findByRole('table', { name: t('performance.score.detail') });
   expect(screen.getByText(t('performance.score.disk.noPoints'))).toBeTruthy();
   expect(screen.queryByText(/^Points:/)).toBeNull();
+  const history = screen.getByRole('table', { name: t('performance.score.history') });
+  expect(within(history).getByText(t('performance.score.disk.profile.b2'))).toBeTruthy();
 });
 
 test('disk flags and invalid reasons show their text', async () => {

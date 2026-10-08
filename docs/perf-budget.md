@@ -348,6 +348,12 @@ Measured 2026-10-08 with B11, same machine and release build as M8a2, window ope
 
 On the iGPU `oma-load.exe` holds the S3 stream set and the render targets in system memory (shared GPU memory counted as private), so its 789 MB is the plan's VRAM budget, not a leak; it is freed when the process exits. The app's extra polling for "another process on the GPU" reuses the GPU process table already read by the app, with no new timer.
 
+## M8c — disk benchmark and stress test (spec M8 §11)
+
+Nothing changes at rest. `oma-load.exe` exists only while a test runs, and the `performance/` module of the app does no periodic work without a test. The volume list (`performance_system`) reads metadata only and is asked for when the UI needs it, never in a timer, so a sleeping HDD stays asleep; the one small file written by the folder probe happens only when the user picks or confirms a folder or a test starts. During a disk test the load process holds the aligned I/O buffers (queue depth times block size, per thread) and the V2 verification table (at most 4 MiB, the test file is at most 8 GiB for the stress test) on top of its base footprint.
+
+Not measured yet: the memory of `oma-load.exe` during the disk tests and the app's figures with the window on the disk score page are owed to live check D13 (release build, `scripts/measure-footprint.ps1`), to be recorded here. No disk test was run for this section.
+
 ## M7 — motore dei frame e overlay (spec M7 §11)
 
 Limiti del §11 della spec M7 (invariati dopo lo spike, SD9). Si misurano con

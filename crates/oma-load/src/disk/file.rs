@@ -34,6 +34,22 @@ pub fn sidecar_json(pid: u32, started_at: u64, prefix: &str) -> String {
     format!(r#"{{"format":1,"pid":{pid},"startedAt":{started_at},"prefix":"{prefix}"}}"#)
 }
 
+/// `<prefix>[suffix].bin`; the suffix, if any, is `-` plus ASCII letters and digits
+/// (`-3`, `-sync`). Anything else gives `None`.
+pub fn data_name(prefix: &str, suffix: Option<&str>) -> Option<String> {
+    let s = match suffix {
+        None => "",
+        Some(s) => {
+            let tail = s.strip_prefix('-')?;
+            if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return None;
+            }
+            s
+        }
+    };
+    Some(format!("{prefix}{s}.bin"))
+}
+
 #[cfg(windows)]
 pub use win::{DataFile, TestFiles};
 
@@ -197,20 +213,14 @@ mod win {
         }
 
         /// Creates `<prefix>[-suffix].bin` with `CREATE_NEW`, `bytes` long and uncompressed.
-        /// `suffix` is ASCII letters and digits only.
+        /// `suffix` is `None` or `-` plus ASCII letters and digits (`-3`, `-sync`).
         pub fn open_data(
             &self,
             suffix: Option<&str>,
             bytes: u64,
             write_through: bool,
         ) -> Result<DataFile, DiskError> {
-            let mut name = self.prefix.clone();
-            if let Some(s) = suffix {
-                if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                    return Err(DiskError::Io(ERROR_INVALID_NAME));
-                }
-                name = format!("{name}-{s}");
-            }
+            let name = data_name(&self.prefix, suffix).ok_or(DiskError::Io(ERROR_INVALID_NAME))?;
             if !fits(free_bytes(&self.dir)?, bytes, self.reserve) {
                 return Err(DiskError::Full);
             }
@@ -221,7 +231,7 @@ mod win {
                 flags |= FILE_FLAG_WRITE_THROUGH;
             }
             let owned = create_new(
-                &self.dir.join(format!("{name}.bin")),
+                &self.dir.join(name),
                 GENERIC_READ.0 | GENERIC_WRITE.0,
                 FILE_SHARE_NONE,
                 flags,
@@ -354,9 +364,13 @@ mod win {
             let dir = temp_dir("dup");
             let tf = TestFiles::create(&dir, 0x77, 1 << 20).unwrap();
             assert!(TestFiles::create(&dir, 0x77, 1 << 20).is_err());
-            let a = tf.open_data(Some("sync"), 1 << 20, true).unwrap();
-            assert!(tf.open_data(Some("sync"), 1 << 20, true).is_err());
+            let a = tf.open_data(Some("-sync"), 1 << 20, true).unwrap();
+            assert!(tf.open_data(Some("-sync"), 1 << 20, true).is_err());
             assert!(tf.open_data(Some("../x"), 1 << 20, false).is_err());
+            assert!(tf.open_data(Some("sync"), 1 << 20, false).is_err());
+            let b = tf.open_data(Some("-3"), 1 << 20, false).unwrap();
+            assert!(dir.join("oma-test-0000000000000077-3.bin").exists());
+            drop(b);
             drop(a);
             drop(tf);
             std::fs::remove_dir(&dir).unwrap();
@@ -387,6 +401,20 @@ mod tests {
             s,
             r#"{"format":1,"pid":42,"startedAt":133000000000000000,"prefix":"oma-test-00000000000000ab"}"#
         );
+    }
+
+    #[test]
+    fn data_name_takes_a_dashed_suffix() {
+        let p = file_prefix(1);
+        assert_eq!(data_name(&p, None).unwrap(), format!("{p}.bin"));
+        assert_eq!(data_name(&p, Some("-3")).unwrap(), format!("{p}-3.bin"));
+        assert_eq!(
+            data_name(&p, Some("-sync")).unwrap(),
+            format!("{p}-sync.bin")
+        );
+        for bad in ["3", "-", "", "-a/b", "-..", "--3", "-a.b", r"-a\b"] {
+            assert!(data_name(&p, Some(bad)).is_none(), "{bad}");
+        }
     }
 
     #[test]

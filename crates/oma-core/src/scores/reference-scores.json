@@ -1,0 +1,71 @@
+{
+  "format": 1,
+  "generatedAt": "2026-10-08T21:21:49Z",
+  "license": "CC0-1.0",
+  "rows": [
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "Extreme",
+      "value": 31,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "Fanxiang S880 2TB",
+      "value": 995,
+      "n": 3,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "SHPP41-2000GM",
+      "value": 976,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "disk",
+      "scoreVersion": "disk-1",
+      "model": "ST2000DM008-2FR102",
+      "value": 6,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "AMD Radeon Graphics",
+      "value": 26,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "NVIDIA GeForce RTX 4080",
+      "value": 1533,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-graphics",
+      "scoreVersion": "gpu-1",
+      "model": "AMD Radeon Graphics",
+      "value": 73,
+      "n": 1,
+      "source": "author"
+    },
+    {
+      "category": "gpu-graphics",
+      "scoreVersion": "gpu-1",
+      "model": "NVIDIA GeForce RTX 4080",
+      "value": 1539,
+      "n": 1,
+      "source": "author"
+    }
+  ]
+}

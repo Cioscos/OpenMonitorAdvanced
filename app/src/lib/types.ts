@@ -889,7 +889,7 @@ export interface RunStatus {
   /** GPU runs: the schema device id of the GPU under test, else null. */
   gpuDeviceId: string | null;
   /** Disk runs: the latest speeds and the bytes moved so far. */
-  disk?: { readBps: number; writeBps: number; writtenBytes: number; readBytes: number } | null;
+  disk?: { deviceId: string; readBps: number; writeBps: number; writtenBytes: number; readBytes: number } | null;
 }
 
 /** What the machine offers for a test (`performance_system`). */

@@ -29,6 +29,7 @@
     ramInsufficient: { term: 'ramShare' },
     pcieReplay: { term: 'pcieReplay', word: 'PCIe' },
     vramReduced: { term: 'vram' },
+    smartMissing: { term: 'dataUnitsWritten', word: 'SMART' },
   };
   const PLACEMENT_TERM: Record<PhaseInfo['placement'], string | null> = { all_logical: 'mode.allCore', core_cycle: 'mode.coreCycle', one_per_core: null };
 
@@ -55,7 +56,7 @@
   const gpu = $derived(status?.component === 'gpu');
   const disk = $derived(status?.component === 'disk');
   const chartSensors = $derived(
-    gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : disk ? diskChartSensors(store.schema, performanceStore.diskDeviceId) : cpuChartSensors(store.schema),
+    gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : disk ? diskChartSensors(store.schema, status?.disk?.deviceId || performanceStore.diskDeviceId) : cpuChartSensors(store.schema),
   );
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
@@ -121,12 +122,12 @@
       </div>
       {#if disk}
         <div class="tile">
-          <div class="label">{t('performance.run.diskRead')}</div>
+          <div class="label"><Term term="mbs">{t('performance.run.diskRead')}</Term></div>
           <div class="value"><AnimatedNumber value={status.disk?.readBps ?? null} format={(v) => formatMbs(v, locale)} /></div>
           <div class="sub">{formatDiskBytes(status.disk?.readBytes ?? 0, locale)}</div>
         </div>
         <div class="tile">
-          <div class="label">{t('performance.run.diskWrite')}</div>
+          <div class="label"><Term term="mbs">{t('performance.run.diskWrite')}</Term></div>
           <div class="value"><AnimatedNumber value={status.disk?.writeBps ?? null} format={(v) => formatMbs(v, locale)} /></div>
         </div>
         <div class="tile">

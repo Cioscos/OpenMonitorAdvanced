@@ -152,12 +152,10 @@
     // Nothing read (an iGPU without a power sensor): one dash.
     max === null && avg === null ? format(null, locale) : t('performance.result.maxAvg', { max: format(max, locale), avg: format(avg, locale) });
 
-  async function start(saved: StartRequest) {
+  async function start(request: StartRequest | null) {
     starting = true;
     actionError = null;
     try {
-      // A disk test finds its folder again from its volume: the saved session keeps none.
-      const request = saved === session!.request ? repeatRequest(session!, performanceStore.system?.volumes ?? []) : saved;
       if (request === null) {
         actionError = t('performance.wizard.startError', { reason: t('performance.start.no_disk') });
         return;
@@ -255,7 +253,7 @@
           {t('performance.result.retryCore', { core: retry.core })}
         </button>
       {/if}
-      <button type="button" class="ghost" disabled={starting || performanceStore.running} onclick={() => start(session!.request)}>{t('performance.result.repeat')}</button>
+      <button type="button" class="ghost" disabled={starting || performanceStore.running} onclick={() => start(repeatRequest(session!, performanceStore.system?.volumes ?? []))}>{t('performance.result.repeat')}</button>
       <button type="button" class="ghost" onclick={exportJson}>{t('performance.result.export')}</button>
     </div>
     {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}

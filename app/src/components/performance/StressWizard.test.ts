@@ -614,6 +614,12 @@ test('standby disk asks for consent', async () => {
   expect(screen.queryByRole('alertdialog')).toBeNull();
 });
 
+test('the summary keeps the no-device warning of a volume without a recognised disk', async () => {
+  const { backend } = await diskSetup({ system: { volumes: [makeVolume({ deviceId: null })] } });
+  await toDiskSummary(backend);
+  expect(screen.getByText(t('performance.disk.warn.noDevice'))).toBeTruthy();
+});
+
 test('a disk summary names a refused folder in words', async () => {
   const { backend } = await diskSetup();
   backend.performancePreview = async () => {

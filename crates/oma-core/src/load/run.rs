@@ -117,6 +117,8 @@ pub struct PhaseInfo {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskStatus {
+    /// The schema device id of the disk under test, for the UI's chart; empty if unknown.
+    pub device_id: String,
     pub read_bps: f64,
     pub write_bps: f64,
     pub written_bytes: u64,
@@ -660,6 +662,12 @@ impl RunController {
                 self.checks = p.checks;
                 if let Some(d) = &p.disk {
                     self.disk_status = Some(DiskStatus {
+                        device_id: self
+                            .session
+                            .disk
+                            .as_ref()
+                            .map(|s| s.device_id.clone())
+                            .unwrap_or_default(),
                         read_bps: d.read_bps,
                         write_bps: d.write_bps,
                         written_bytes: d.written_bytes,
@@ -2763,6 +2771,7 @@ mod tests {
             (d.read_bps, d.write_bps, d.read_bytes, d.written_bytes),
             (1.5e9, 2.5e9, 30, 70)
         );
+        assert_eq!(d.device_id, "disk/nvme-0");
         // A CPU run has none.
         assert_eq!(ctl(false, true).status().disk, None);
     }

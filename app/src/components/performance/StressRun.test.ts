@@ -238,7 +238,7 @@ const DISK_RUNNING = (over: Partial<RunStatus> = {}) =>
     tempC: 47,
     stopC: 70,
     checks: 123_456,
-    disk: { readBps: 3_200_000_000, writeBps: 1_500_000_000, writtenBytes: 12 * 1024 ** 3, readBytes: 30 * 1024 ** 3 },
+    disk: { deviceId: 'disk/a', readBps: 3_200_000_000, writeBps: 1_500_000_000, writtenBytes: 12 * 1024 ** 3, readBytes: 30 * 1024 ** 3 },
     ...over,
   });
 const sensor = (id: string, deviceId: string) => ({ ...MOCK_SCHEMA.sensors[0], id, deviceId });
@@ -253,6 +253,7 @@ test('disk run shows rates written and blocks without the core grid', async () =
   expect(screen.getByRole('heading', { name: `${t('performance.objective.disk.normal')} · ${t('performance.wizard.disk')}` })).toBeTruthy();
   // Temperature with its stop threshold; no Tjmax, power, clock or WHEA.
   expect(tile(t('performance.run.temp')).textContent).toContain('70');
+  expect(tile(t('performance.run.diskRead')).querySelector('.label .term')?.textContent).toBe(t('performance.run.diskRead'));
   expect(tile(t('performance.run.diskRead')).textContent).toContain('3,200 MB/s');
   expect(tile(t('performance.run.diskWrite')).textContent).toContain('1,500 MB/s');
   expect(tile(t('performance.run.diskWritten')).textContent).toContain('12.0 GiB');
@@ -267,5 +268,12 @@ test('disk run shows rates written and blocks without the core grid', async () =
   await waitFor(() => expect(backend.historyCalls[0]?.ids).toEqual(['disk/a/temperature/drive', 'disk/a/throughput/read', 'disk/a/throughput/write']));
   // The SMART warning carries its term.
   backend.emitPerformanceStatus(DISK_RUNNING({ warnings: ['smartMissing'] }));
-  await screen.findByText(t('performance.warn.smartMissing'));
+  const warning = await screen.findByText((_, node) => node?.tagName === 'P' && node.textContent === t('performance.warn.smartMissing'));
+  expect(warning.querySelector('.term')?.textContent).toBe('SMART');
+});
+
+test('the chart of a disk run comes from the status when the store does not know the disk', async () => {
+  performanceStore.diskDeviceId = null;
+  const { backend } = await setup(DISK_RUNNING(), DISK_SCHEMA);
+  await waitFor(() => expect(backend.historyCalls[0]?.ids).toEqual(['disk/a/temperature/drive', 'disk/a/throughput/read', 'disk/a/throughput/write']));
 });

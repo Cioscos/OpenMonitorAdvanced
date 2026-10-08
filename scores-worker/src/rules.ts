@@ -75,7 +75,7 @@ export function validateSubmission(
   if (!Array.isArray(kernels) || kernels.length > 32) return BAD_SCHEMA;
   if (!isObj(hardware)) return BAD_SCHEMA;
   const { model: rawModel, ramGB, osBuild } = hardware;
-  if (typeof rawModel !== "string" || /[\u0000-\u001f\u007f]/.test(rawModel)) return BAD_SCHEMA;
+  if (typeof rawModel !== "string" || /[\u0000-\u001f\u007f-\u009f\p{Cf}]/u.test(rawModel)) return BAD_SCHEMA;
   const model = normalizeModel(rawModel);
   if (model.display.length < 1 || model.display.length > MODEL_MAX) return BAD_SCHEMA;
   if (typeof ramGB !== "number" || !Number.isInteger(ramGB) || ramGB < 1 || ramGB > 4096) return BAD_SCHEMA;

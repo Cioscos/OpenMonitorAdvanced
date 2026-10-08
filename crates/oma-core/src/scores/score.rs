@@ -390,6 +390,8 @@ mod tests {
     fn baseline_parses_and_has_six_kernels_per_mode() {
         let b = cpu_baseline();
         assert_eq!(b.version, "cpu-1");
+        assert!(!b.provisional);
+        assert_eq!(b.single[&BenchKernel::Gemm], 39.55);
         assert_eq!((b.single.len(), b.multi.len()), (6, 6));
         assert!(b.single.values().chain(b.multi.values()).all(|v| *v > 0.0));
     }

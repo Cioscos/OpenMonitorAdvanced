@@ -1,8 +1,24 @@
 {
   "format": 1,
-  "generatedAt": "2026-10-08T21:21:49Z",
+  "generatedAt": "2026-10-08T22:26:32Z",
   "license": "CC0-1.0",
   "rows": [
+    {
+      "category": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "value": 1495,
+      "n": 3,
+      "source": "author"
+    },
+    {
+      "category": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "value": 1491,
+      "n": 3,
+      "source": "author"
+    },
     {
       "category": "disk",
       "scoreVersion": "disk-1",

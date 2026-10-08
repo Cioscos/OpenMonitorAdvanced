@@ -492,6 +492,7 @@ mod tests {
             app_version: "0.6.0".into(),
             load_version: Some("0.6.0".into()),
             disk_profile: Some(DiskProfile::B1),
+            shared: false,
         }
     }
 

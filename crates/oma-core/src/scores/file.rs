@@ -114,6 +114,9 @@ pub struct ScoreFile {
     /// Disk score: the test profile.
     #[serde(default)]
     pub disk_profile: Option<DiskProfile>,
+    /// Sent to the community table (a local mark only).
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +144,10 @@ pub struct ScoreSummary {
     pub valid: bool,
     pub flags: Vec<String>,
     pub provisional: bool,
+    #[serde(default)]
+    pub shared: bool,
+    #[serde(default)]
+    pub score_version: String,
 }
 
 /// Rejects any format other than `FORMAT` (`FormatError::Future` carries the found value).
@@ -174,6 +181,8 @@ pub fn summary(s: &ScoreFile) -> ScoreSummary {
         valid: s.valid,
         flags: s.flags.clone(),
         provisional: s.provisional,
+        shared: s.shared,
+        score_version: s.score_version.clone(),
     }
 }
 
@@ -230,7 +239,16 @@ mod tests {
             app_version: "0.5.0".into(),
             load_version: None,
             disk_profile: None,
+            shared: false,
         }
+    }
+
+    #[test]
+    fn old_score_files_read_as_not_shared() {
+        let s = parse_score(M8A2_CPU.as_bytes()).unwrap();
+        assert!(!s.shared);
+        assert!(!summary(&s).shared);
+        assert_eq!(summary(&s).score_version, "cpu-1");
     }
 
     #[test]

@@ -201,6 +201,7 @@ export function makeScoreFile(over: ScoreOver = {}): ScoreFile {
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
     ...rest,
   };
 }
@@ -273,6 +274,8 @@ export const scoreSummaryOf = (f: ScoreFile): ScoreSummary => ({
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
+  shared: f.shared,
+  scoreVersion: f.scoreVersion,
 });
 
 /** A stress test run status for tests: idle, before any test; override what matters. */

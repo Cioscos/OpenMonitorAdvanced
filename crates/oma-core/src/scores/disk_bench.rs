@@ -368,6 +368,7 @@ impl DiskBenchController {
             app_version: self.ctx.app_version.clone(),
             load_version: self.life.load_version.clone(),
             disk_profile: Some(self.ctx.profile),
+            shared: false,
         };
         self.life.end_saved(file)
     }

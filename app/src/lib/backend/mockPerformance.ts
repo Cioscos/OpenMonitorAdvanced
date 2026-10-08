@@ -503,6 +503,8 @@ const scoreSummary = (f: ScoreFile): ScoreSummary => ({
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
+  shared: f.shared,
+  scoreVersion: f.scoreVersion,
 });
 
 function scoreFile(id: string, atMs: number, single: number, multi: number | null, valid: boolean): ScoreFile {
@@ -532,6 +534,7 @@ function scoreFile(id: string, atMs: number, single: number, multi: number | nul
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 
@@ -571,6 +574,7 @@ function gpuScoreFile(id: string, atMs: number, gpu: GpuChoice, compute: number 
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 
@@ -645,6 +649,7 @@ function diskScoreFile(id: string, atMs: number, volume: VolumeChoice, profile: 
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 

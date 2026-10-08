@@ -1146,6 +1146,9 @@ export interface ScoreSummary {
   valid: boolean;
   flags: string[];
   provisional: boolean;
+  /** Sent to the community table (local mark). */
+  shared: boolean;
+  scoreVersion: string;
 }
 
 /** The best measure of a disk test in one direction (`mbs` is 10^6 bytes per second). */
@@ -1207,4 +1210,6 @@ export interface ScoreFile {
   samples: { tMs: number; tempC: number | null; powerW: number | null; clockMhz: number | null }[];
   appVersion: string;
   loadVersion: string | null;
+  /** Sent to the community table (local mark). */
+  shared: boolean;
 }

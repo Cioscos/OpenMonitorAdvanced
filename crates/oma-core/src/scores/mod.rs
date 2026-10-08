@@ -12,6 +12,7 @@ mod gpu_bench;
 mod lifecycle;
 mod plan;
 mod score;
+mod share;
 mod workloads;
 
 pub use bench::{
@@ -43,4 +44,5 @@ pub use score::{
     calibration_from, cpu_baseline, median3, per_second_to_units, points, rate, scaling, Baseline,
     BaselineError, SCALE_POINTS, SCORE_VERSION,
 };
+pub use share::{export_bytes, share_block, submission_bytes, HostFacts};
 pub use workloads::{BenchKernel, Workload, WORKLOADS};

@@ -572,6 +572,8 @@ impl Reader {
             "riskNoticeSeen",
             p.risk_notice_seen,
         );
+        p.community_table =
+            self.boolean(&section, "performance", "communityTable", p.community_table);
         match lookup(&section, "stopOnFirstError", true) {
             None => {}
             Some(Value::Bool(b)) => p.stop_on_first_error = Some(*b),
@@ -1615,6 +1617,19 @@ mod tests {
         let d = decode(encode(&want));
         assert_eq!(d.settings.performance, want.performance);
         assert!(d.diagnostics.is_empty(), "{:?}", d.diagnostics);
+    }
+
+    #[test]
+    fn community_table_of_the_wrong_type_is_reported() {
+        let d = decode(json!({"version": 1, "performance": {"communityTable": "yes"}}));
+        assert!(d.settings.performance.community_table);
+        assert_eq!(
+            d.diagnostics,
+            vec![Diagnostic {
+                path: "performance.communityTable".into(),
+                kind: DiagnosticKind::WrongType
+            }]
+        );
     }
 
     #[test]

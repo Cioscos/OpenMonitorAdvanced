@@ -300,6 +300,8 @@ export interface PerformanceSettings {
   diskStopC: number | null;
   /** The folder of the last disk test, kept for the orphan sweep. */
   diskFolder: string | null;
+  /** Whether the community table may be downloaded (default true). */
+  communityTable: boolean;
 }
 
 export interface Settings {

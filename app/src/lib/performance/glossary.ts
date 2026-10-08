@@ -67,4 +67,5 @@ export const TERMS: string[] = [
   'seed',
   'iteration',
   'ramShare',
+  'board',
 ];

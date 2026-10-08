@@ -148,6 +148,7 @@ const SCHEMA: &[(&str, Node)] = &[
             ("riskNoticeSeen", leaf()),
             ("diskStopC", nullable()),
             ("diskFolder", nullable()),
+            ("communityTable", leaf()),
         ]),
     ),
     (
@@ -1014,6 +1015,20 @@ mod tests {
         );
         let cleared = apply_patch(&set, &json!({"overlay": {"editorBounds": null}})).unwrap();
         assert_eq!(cleared.overlay.editor_bounds, None);
+    }
+
+    #[test]
+    fn patch_sets_the_community_table_switch() {
+        let off = apply_patch(
+            &Settings::default(),
+            &json!({"performance": {"communityTable": false}}),
+        )
+        .unwrap();
+        assert!(!off.performance.community_table);
+        assert_eq!(
+            apply_patch(&off, &json!({"performance": {"communityTable": 1}})),
+            Err(err("performance.communityTable", "settings.error.type"))
+        );
     }
 
     #[test]

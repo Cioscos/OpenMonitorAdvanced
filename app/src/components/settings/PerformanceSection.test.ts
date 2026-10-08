@@ -58,6 +58,13 @@ test('automatic_threshold_sends_null', async () => {
   expect(auto.querySelector('.term')?.textContent).toBe('Tjmax');
 });
 
+test('community_table_toggle_sends_the_patch_and_shows_the_note', async () => {
+  const { patches } = await setup();
+  expect(screen.getByText(t('settings.performance.communityTable.note'))).toBeTruthy();
+  await fireEvent.click(screen.getByRole('switch', { name: t('settings.performance.communityTable') }));
+  await waitFor(() => expect(patches).toEqual([{ performance: { communityTable: false } }]));
+});
+
 test('reset_risk_notice', async () => {
   const { patches } = await setup({ performance: { riskNoticeSeen: true } });
   patches.length = 0;

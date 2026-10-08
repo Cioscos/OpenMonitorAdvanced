@@ -153,6 +153,18 @@
       {/snippet}
     </Field>
   </Group>
+
+  <Group id="performance-board" title={t('settings.performance.group.board')}>
+    <Toggle
+      id="performance-community-table"
+      label={t('settings.performance.communityTable')}
+      term="board"
+      description={t('settings.performance.communityTable.note')}
+      checked={current.communityTable}
+      error={errorOf('performance.communityTable')}
+      onChange={(communityTable) => send({ communityTable })}
+    />
+  </Group>
 {/if}
 
 <style>

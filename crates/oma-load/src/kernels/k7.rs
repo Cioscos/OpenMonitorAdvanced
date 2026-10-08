@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use oma_ipc::load::{DataSize, Isa};
 
+use super::buf::OffsetBuf;
 use crate::kernel::{
     Check, Kernel, KernelError, KernelFactory, PhaseShared, RefFailure, WorkerCtx,
 };
@@ -139,43 +140,85 @@ fn supported(isa: Isa) -> bool {
     }
 }
 
-/// C = A·B for n×n row-major matrices (n a multiple of 8). `tick` runs before every block
-/// row of C (n = 2048 is about 0.5 GFLOP per block row) and `false` from it stops the
-/// product (C is then unusable). `mid` runs once, before about half of the block rows.
+/// The 64×64 blocks of an n×n matrix, padded to a multiple of 64, each block
+/// contiguous (row-major inside) and the blocks in row-major order. The micro-kernel
+/// then streams one block sequentially instead of 64 rows at stride `8·n` bytes, which
+/// keeps B in the L2 prefetchers' reach and out of the L3's latency, so the rate does not
+/// depend on what the other cores do with the cache.
+fn pack_b(b: &[f64], n: usize) -> Result<OffsetBuf, KernelError> {
+    let blocks = n.div_ceil(BLOCK);
+    let mut bp = OffsetBuf::zeroed(blocks * blocks * BLOCK * BLOCK, SLOT_B)?;
+    for (k, row) in b.chunks_exact(n).enumerate() {
+        for (j, &x) in row.iter().enumerate() {
+            bp[packed_index(blocks, k, j)] = x;
+        }
+    }
+    Ok(bp)
+}
+
+/// The page offsets of A, B and C (see [`OffsetBuf`]): a load from A or B never has the
+/// low address bits of a store to C.
+const SLOT_A: usize = 0;
+const SLOT_B: usize = 1;
+const SLOT_C: usize = 2;
+
+/// Where `(k, j)` of an n×n matrix with `blocks` blocks per side sits in [`pack_b`].
+fn packed_index(blocks: usize, k: usize, j: usize) -> usize {
+    ((k / BLOCK) * blocks + j / BLOCK) * BLOCK * BLOCK + (k % BLOCK) * BLOCK + j % BLOCK
+}
+
+/// B·r from the packed B (the sums are exact, so their order is free).
+fn mat_vec_packed(bp: &[f64], r: &[f64], n: usize) -> Vec<f64> {
+    let blocks = n.div_ceil(BLOCK);
+    (0..n)
+        .map(|k| {
+            r.iter()
+                .enumerate()
+                .map(|(j, &rj)| bp[packed_index(blocks, k, j)] * rj)
+                .sum()
+        })
+        .collect()
+}
+
+/// C = A·B for an n×n row-major A and a [`pack_b`] B (n a multiple of 8). One block of
+/// B at a time (32 KiB, in L1) against every row of A and C, so the streams are short and
+/// sequential: a 512-byte piece of a row of A and of C per call. `tick` runs before every
+/// block of B (n = 2048 is 16.8 MFLOP per block) and `false` from it stops the product (C
+/// is then unusable). `mid` runs once, before about half of the blocks.
 fn gemm(
     isa: Isa,
     n: usize,
     a: &[f64],
-    b: &[f64],
+    bp: &[f64],
     c: &mut [f64],
     tick: &mut impl FnMut() -> bool,
     mut mid: impl FnMut(&mut [f64]),
 ) -> bool {
     c.fill(0.0);
-    let rows = n.div_ceil(BLOCK);
-    for (bi, ii) in (0..n).step_by(BLOCK).enumerate() {
-        if !tick() {
-            return false;
-        }
-        if bi == rows / 2 {
-            mid(c);
-        }
-        let ib = BLOCK.min(n - ii);
-        for jj in (0..n).step_by(BLOCK) {
-            let jb = BLOCK.min(n - jj);
-            for kk in (0..n).step_by(BLOCK) {
-                let kb = BLOCK.min(n - kk);
-                for i in ii..ii + ib {
-                    row_update(
-                        isa,
-                        &a[i * n + kk..i * n + kk + kb],
-                        &b[kk * n + jj..],
-                        n,
-                        &mut c[i * n + jj..i * n + jj + jb],
-                        kb,
-                        jb,
-                    );
-                }
+    let blocks = n.div_ceil(BLOCK);
+    let mut step = 0;
+    for jj in (0..n).step_by(BLOCK) {
+        let jb = BLOCK.min(n - jj);
+        for kk in (0..n).step_by(BLOCK) {
+            if !tick() {
+                return false;
+            }
+            if step == blocks * blocks / 2 {
+                mid(c);
+            }
+            step += 1;
+            let kb = BLOCK.min(n - kk);
+            let block = packed_index(blocks, kk, jj);
+            for i in 0..n {
+                row_update(
+                    isa,
+                    &a[i * n + kk..i * n + kk + kb],
+                    &bp[block..],
+                    BLOCK,
+                    &mut c[i * n + jj..i * n + jj + jb],
+                    kb,
+                    jb,
+                );
             }
         }
     }
@@ -189,10 +232,10 @@ fn mat_vec(m: &[f64], v: &[f64], n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Freivalds: is A·(B·r) = C·r, exactly? The values are small integers, so the sums are
-/// exact in any order.
-fn freivalds(a: &[f64], b: &[f64], c: &[f64], n: usize, r: &[f64]) -> Result<(), (f64, f64)> {
-    let want = mat_vec(a, &mat_vec(b, r, n), n);
+/// Freivalds: is A·(B·r) = C·r, exactly, given `br` = B·r? The values are small
+/// integers, so the sums are exact in any order.
+fn freivalds(a: &[f64], br: &[f64], c: &[f64], n: usize, r: &[f64]) -> Result<(), (f64, f64)> {
+    let want = mat_vec(a, br, n);
     let got = mat_vec(c, r, n);
     match want.iter().zip(&got).find(|(w, g)| w != g) {
         Some((w, g)) => Err((*w, *g)),
@@ -236,22 +279,13 @@ fn n_ram(ctx: &WorkerCtx) -> Result<usize, KernelError> {
         .ok_or(KernelError::Insufficient)
 }
 
-/// `len` zeroed values, or `Insufficient` (K7 is not in DA10's list; the size already
-/// comes from the quota). Never aborts.
-fn alloc(len: usize) -> Result<Vec<f64>, KernelError> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| KernelError::Insufficient)?;
-    v.resize(len, 0.0);
-    Ok(v)
-}
-
 pub(crate) struct K7 {
     isa: Isa,
     n: usize,
-    a: Vec<f64>,
-    b: Vec<f64>,
-    c: Vec<f64>,
+    a: OffsetBuf,
+    /// B, packed by [`pack_b`].
+    bp: OffsetBuf,
+    c: OffsetBuf,
     seed: u64,
     iteration: u64,
     shared: Arc<PhaseShared>,
@@ -271,16 +305,23 @@ impl K7 {
             DataSize::Ram => n_ram(ctx)?,
             _ => n_for(ctx.budget.l2_thread),
         };
-        let (mut a, mut b) = (alloc(n * n)?, alloc(n * n)?);
-        let c = alloc(n * n)?;
+        // K7 is not in DA10's list: the size already comes from the quota, so a failed
+        // allocation is `Insufficient`.
+        let mut a = OffsetBuf::zeroed(n * n, SLOT_A)?;
+        let mut b = Vec::new();
+        b.try_reserve_exact(n * n)
+            .map_err(|_| KernelError::Insufficient)?;
         let mut rng = Xoshiro256ss::new(ctx.seed);
         a.iter_mut().for_each(|x| *x = small_int(rng.next_u64()));
-        b.iter_mut().for_each(|x| *x = small_int(rng.next_u64()));
+        b.extend((0..n * n).map(|_| small_int(rng.next_u64())));
+        let bp = pack_b(&b, n)?;
+        drop(b);
+        let c = OffsetBuf::zeroed(n * n, SLOT_C)?;
         Ok(Self {
             isa: ctx.isa,
             n,
             a,
-            b,
+            bp,
             c,
             seed: ctx.seed,
             iteration: 0,
@@ -310,7 +351,7 @@ impl Kernel for K7 {
             self.isa,
             self.n,
             &self.a,
-            &self.b,
+            &self.bp,
             &mut self.c,
             &mut tick,
             mid,
@@ -322,7 +363,8 @@ impl Kernel for K7 {
         let mut rng =
             Xoshiro256ss::new(self.seed ^ self.iteration.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let r: Vec<f64> = (0..self.n).map(|_| (rng.next_u64() & 1) as f64).collect();
-        if let Err((expected, actual)) = freivalds(&self.a, &self.b, &self.c, self.n, &r) {
+        let br = mat_vec_packed(&self.bp, &r, self.n);
+        if let Err((expected, actual)) = freivalds(&self.a, &br, &self.c, self.n, &r) {
             return Check::Mismatch {
                 expected: expected as i64 as u64,
                 actual: actual as i64 as u64,
@@ -435,7 +477,8 @@ mod tests {
             let want = naive(&a, &b, n);
             for isa in available() {
                 let mut c = vec![9.0; n * n];
-                assert!(gemm(isa, n, &a, &b, &mut c, &mut || true, |_| {}));
+                let bp = pack_b(&b, n).unwrap();
+                assert!(gemm(isa, n, &a, &bp, &mut c, &mut || true, |_| {}));
                 assert_eq!(c, want, "{isa:?} n={n}");
             }
         }
@@ -447,7 +490,7 @@ mod tests {
         let (a, b) = matrices(n, 4);
         let c = naive(&a, &b, n);
         let r: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
-        assert_eq!(freivalds(&a, &b, &c, n, &r), Ok(()));
+        assert_eq!(freivalds(&a, &mat_vec(&b, &r, n), &c, n, &r), Ok(()));
     }
 
     #[test]
@@ -457,7 +500,27 @@ mod tests {
         let mut c = naive(&a, &b, n);
         c[5 * n + 7] += 1.0;
         // With r = 1 in the damaged column the check cannot pass.
-        assert!(freivalds(&a, &b, &c, n, &vec![1.0; n]).is_err());
+        let r = vec![1.0; n];
+        assert!(freivalds(&a, &mat_vec(&b, &r, n), &c, n, &r).is_err());
+    }
+
+    #[test]
+    fn packed_b_keeps_every_block_contiguous() {
+        // 72 = one full block plus an 8-wide edge, padded to 128.
+        let n = 72;
+        let (_, b) = matrices(n, 5);
+        let bp = pack_b(&b, n).unwrap();
+        assert_eq!(bp.len(), 2 * 2 * BLOCK * BLOCK);
+        // Block (1, 0): rows 64..72, columns 0..64, row-major inside, 64 apart.
+        for k in 64..72 {
+            for j in 0..64 {
+                assert_eq!(bp[BLOCK * BLOCK * 2 + (k - 64) * BLOCK + j], b[k * n + j]);
+            }
+        }
+        // The padding is zero and B·r is the row-major one.
+        assert_eq!(bp[BLOCK * BLOCK * 3 + 8 * BLOCK + 8], 0.0);
+        let r: Vec<f64> = (0..n).map(|i| (i % 3) as f64).collect();
+        assert_eq!(mat_vec_packed(&bp, &r, n), mat_vec(&b, &r, n));
     }
 
     #[test]

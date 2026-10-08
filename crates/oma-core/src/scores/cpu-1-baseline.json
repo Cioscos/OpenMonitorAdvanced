@@ -1,20 +1,20 @@
 {
   "version": "cpu-1",
-  "provisional": true,
+  "provisional": false,
   "single": {
-    "ntt": 428.2,
-    "hash": 1406.0,
-    "compress": 305.0,
-    "sort": 23.99,
-    "fft": 8.623,
-    "gemm": 21.39
+    "ntt": 413.8,
+    "hash": 1385.0,
+    "compress": 309.0,
+    "sort": 22.43,
+    "fft": 10.29,
+    "gemm": 39.55
   },
   "multi": {
-    "ntt": 5138.0,
-    "hash": 16870.0,
-    "compress": 3660.0,
-    "sort": 287.9,
-    "fft": 103.5,
-    "gemm": 256.6
+    "ntt": 3742.0,
+    "hash": 15940.0,
+    "compress": 3210.0,
+    "sort": 281.1,
+    "fft": 89.21,
+    "gemm": 266.7
   }
 }

@@ -344,16 +344,13 @@ impl BenchWorker {
         *lock(&self.status) = Some(status);
     }
 
-    /// The probe of the 5 s poll. The CPU one takes a priming sample: PDH needs two
-    /// collections, and the handshake separates them, so the poll after the launch
-    /// already has the share (DB7: "all'avvio"). The GPU one reads the provider's table.
+    /// The probe of the 5 s poll. The CPU one is primed by the poll right after the
+    /// handshake (PDH needs two collections), so its first share covers the first 5 s
+    /// of the run (DB7: "all'avvio"), not the launch, when the antivirus scans
+    /// `oma-load.exe`. The GPU one reads the provider's table.
     fn busy_probe(&self, busy: Busy) -> Box<dyn FnMut() -> Option<f64>> {
         match busy {
-            Busy::Cpu(logical) => {
-                let mut probe = self.deps.machine.busy_probe(logical);
-                let _ = probe();
-                probe
-            }
+            Busy::Cpu(logical) => self.deps.machine.busy_probe(logical),
             Busy::Gpu(device_id) => {
                 let deps = Arc::clone(&self.deps);
                 Box::new(move || deps.machine.gpu_busy_share(&device_id))
@@ -767,9 +764,10 @@ mod tests {
     }
 
     #[test]
-    fn busy_share_is_known_from_the_start() {
-        // The first PDH sample gives nothing: it is taken before the launch, so
-        // the poll right after it already has a value (DB7).
+    fn busy_share_leaves_out_the_launch() {
+        // The first PDH sample gives nothing and is taken after the handshake, so
+        // the launch (the antivirus scanning oma-load.exe) is never measured: a run
+        // shorter than one poll has no share (DB7).
         let machine = FakeMachine {
             busy: Some(0.5),
             busy_primes: true,
@@ -780,7 +778,7 @@ mod tests {
         wait_idle(&rig.runner);
         let s = rig.runner.store().load_score(&id).unwrap().unwrap();
         assert!(
-            s.flags.contains(&"busy_system".to_string()),
+            !s.flags.contains(&"busy_system".to_string()),
             "{:?}",
             s.flags
         );

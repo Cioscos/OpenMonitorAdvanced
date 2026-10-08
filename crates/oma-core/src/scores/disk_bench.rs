@@ -555,6 +555,14 @@ mod tests {
             .expect("a Save action")
     }
 
+    fn seq_read() -> f64 {
+        disk_baseline().read[&BenchKernel::Seq1mQ8t1]
+    }
+
+    fn seq_write() -> f64 {
+        disk_baseline().write[&BenchKernel::Seq1mQ8t1]
+    }
+
     fn near(a: Option<f64>, b: f64) {
         let a = a.expect("a value");
         assert!((a - b).abs() < 1e-6 * b.max(1.0), "{a} vs {b}");
@@ -565,8 +573,8 @@ mod tests {
         let mut c = ctl();
         run(&mut c, 0..33);
         let st = c.status();
-        near(st.read_mbs, 7000.0);
-        near(st.write_mbs, 6000.0);
+        near(st.read_mbs, seq_read());
+        near(st.write_mbs, seq_write());
         assert_eq!(st.points, Some(1000));
         let a = c.on_load(&finished(FinishReason::Completed), clock(60_000));
         let f = saved(&a);
@@ -576,8 +584,8 @@ mod tests {
             (f.isa, f.scaling, f.disk_profile),
             (None, None, Some(DiskProfile::B1))
         );
-        near(f.scores.read_mbs, 7000.0);
-        near(f.scores.write_mbs, 6000.0);
+        near(f.scores.read_mbs, seq_read());
+        near(f.scores.write_mbs, seq_write());
         assert_eq!(f.scores.points, Some(1000));
         assert_eq!(f.kernels.len(), 4);
         for (k, t) in f.kernels.iter().zip(&B1_TESTS) {
@@ -597,10 +605,10 @@ mod tests {
     fn best_of_three_is_kept() {
         let mut c = ctl();
         run(&mut c, 0..5); // SEQ1M Q8T1 read: 0.5 warm-up, 0.9, 1.0, 0.95
-        near(c.status().read_mbs, 7000.0);
+        near(c.status().read_mbs, seq_read());
         let a = c.on_load(&finished(FinishReason::Completed), clock(9_000));
         let f = saved(&a);
-        near(f.kernels[0].read.as_ref().map(|r| r.mbs), 7000.0);
+        near(f.kernels[0].read.as_ref().map(|r| r.mbs), seq_read());
         assert!(f.kernels[0].write.is_none() && f.scores.points.is_none());
     }
 
@@ -634,7 +642,7 @@ mod tests {
     fn needle_holds_the_result_at_the_end_of_a_test() {
         let mut c = ctl();
         run(&mut c, 0..5);
-        near(c.status().live_read, 7000.0);
+        near(c.status().live_read, seq_read());
     }
 
     #[test]
@@ -662,7 +670,7 @@ mod tests {
         let f = saved(&a);
         assert!(!f.valid);
         assert_eq!(f.flags, ["io_error"]);
-        near(f.scores.read_mbs, 7000.0);
+        near(f.scores.read_mbs, seq_read());
         assert_eq!(f.scores.points, None);
     }
 

@@ -431,10 +431,10 @@ mod tests {
     #[test]
     fn disk_baseline_parses_with_four_tests_per_direction() {
         let b = disk_baseline();
-        assert_eq!((b.version.as_str(), b.provisional), ("disk-1", true));
+        assert_eq!((b.version.as_str(), b.provisional), ("disk-1", false));
         assert_eq!((b.read.len(), b.write.len()), (4, 4));
-        assert_eq!(b.read[&BenchKernel::Seq1mQ8t1], 7000.0);
-        assert_eq!(b.write[&BenchKernel::Rnd4kQ1t1], 250.0);
+        assert_eq!(b.read[&BenchKernel::Seq1mQ8t1], 7342.0);
+        assert_eq!(b.write[&BenchKernel::Rnd4kQ1t1], 223.9);
         let other = DISK_BASELINE_JSON.replace("\"disk-1\"", "\"disk-2\"");
         assert!(parse_disk_baseline(&other).is_err());
         let missing = DISK_BASELINE_JSON.replace("rnd4k_q1t1", "seq128k_q32t1");
@@ -499,8 +499,9 @@ mod tests {
     fn disk_calibration_takes_the_best_rates_of_a_clean_b1_run() {
         let c = disk_calibration_from(&calibration_score()).unwrap();
         assert_eq!((c.version.as_str(), c.provisional), ("disk-1", false));
-        assert_eq!(c.read[&BenchKernel::Seq1mQ8t1], 7000.0);
-        assert_eq!(c.write[&BenchKernel::Rnd4kQ1t1], 250.0);
+        let b = disk_baseline();
+        assert_eq!(c.read, b.read);
+        assert_eq!(c.write, b.write);
     }
 
     #[test]

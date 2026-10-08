@@ -69,7 +69,7 @@ $env:OMA_FRAMES_DEBUG='1'                     # (o 'pcl', o 'all') prima di avvi
 cd scores-worker && pnpm install --frozen-lockfile && pnpm test && pnpm check   # Worker della classifica (M8d1)
 cd scores-worker && pnpm author-table        # rigenera reference-scores.json dai punteggi dell'autore
 cd scores-worker && pnpm recompute           # SOLO L'UTENTE: ricalcola la tabella sul database remoto
-cd scores-worker && pnpm deploy              # SOLO L'UTENTE: wrangler deploy
+cd scores-worker && pnpm run deploy          # SOLO L'UTENTE: wrangler deploy
 ```
 
 - **`OMA_FRAMES_DEBUG` (M7b):** con `1` (FPS mostrati), `pcl` (più la latenza PC con i marcatori Reflex/PCL) o `all` (più il GPU busy e il collo di bottiglia) l'app accende il motore dei frame del servizio, segue il gioco in primo piano e scrive una riga `frames:` al secondo nel suo log (`%LOCALAPPDATA%\OpenMonitorAdvanced\logs`). Ogni altro valore, o nessuno, non avvia niente. Il formato della riga (coppie `chiave=valore`, `-` per i valori assenti) è documentato in testa a `app/src-tauri/src/overlay/frames.rs`. Resta anche con l'overlay (M7c): la riga si costruisce da `FrameReadout`; con l'overlay spento la variabile accende il motore come nella M7b, con l'overlay acceso le opzioni di tracciamento sono l'OR delle due.

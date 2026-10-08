@@ -162,7 +162,7 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
 - **Prove dal vivo W7 (le fa l'utente):**
   - `GET /v1/reference-scores.json` con `200`, `ETag` e poi `304` con `If-None-Match`;
   - `POST /v1/submit`: `201` con un invio valido, `400` con uno non valido;
-  - `429` dopo 6 invii in un minuto, oppure il ripiego con la regola di rate limit della zona se il binding non va nel piano gratuito;
+  - `429` dopo 6 invii in un minuto, oppure, se il binding non va nel piano gratuito, il ripiego: regola di rate limit della zona nel pannello di Cloudflare, poi `[[ratelimits]]` tolto da `wrangler.toml` e nuovo deploy (il codice salta il controllo senza binding);
   - aggregazione: 3 invii di `OMA Test CPU` danno una riga con `n: 3`; `hidden_models` la nasconde; poi pulizia degli invii di prova (`DELETE FROM entries WHERE submission = …`) e `pnpm recompute`;
   - log spenti (nessuna riga con IP o corpi) e giurisdizione UE del database.
 - **Note di revisione rinviate:**

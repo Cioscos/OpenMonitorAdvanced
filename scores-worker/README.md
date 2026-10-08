@@ -12,7 +12,7 @@ pnpm test            # Vitest con il runtime dei Worker simulato
 pnpm check           # controllo dei tipi (tsc --noEmit)
 pnpm author-table    # rigenera crates/oma-core/src/scores/reference-scores.json dai file dei punteggi dell'autore
 pnpm recompute       # SOLO L'UTENTE: ricalcola la tabella pubblicata sul database REMOTO
-pnpm deploy          # SOLO L'UTENTE: wrangler deploy
+pnpm run deploy      # SOLO L'UTENTE: wrangler deploy
 ```
 
 Gli agenti e la CI non toccano mai l'account Cloudflare: niente `wrangler login`, `deploy`, `d1 … --remote`, `secret`.

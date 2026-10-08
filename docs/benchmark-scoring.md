@@ -140,7 +140,7 @@ Lo fa l'utente a mano, dalla cartella `scores-worker/`. Nessun token Cloudflare 
 3. `wrangler d1 create oma-scores --jurisdiction eu` crea il database nella giurisdizione UE e stampa il `database_id`.
 4. In `wrangler.toml` sostituisci i due segnaposto, segnati da un commento `# OMA:`: il sottodominio di `routes` (`scores.example.invalid`) e il `database_id` (`00000000-0000-0000-0000-000000000000`).
 5. `wrangler d1 migrations apply oma-scores --remote` crea le tabelle.
-6. `wrangler deploy` (o `pnpm deploy`) pubblica il Worker.
+6. `wrangler deploy` (o `pnpm run deploy`) pubblica il Worker.
 7. L'URL scelto va messo anche nella costante dell'app (M8d2).
 
-**Ripiego per il rate limit:** se il binding `SUBMIT_LIMIT` non funziona nel piano gratuito, si toglie `[[ratelimits]]` (con il controllo nel codice, da concordare) e si crea nel pannello di Cloudflare una regola di rate limit della zona su `POST /v1/submit`, per IP, con lo stesso limite (5 al minuto o il minimo consentito dal piano).
+**Ripiego per il rate limit:** se il binding `SUBMIT_LIMIT` non funziona nel piano gratuito, si crea nel pannello di Cloudflare una regola di rate limit della zona su `POST /v1/submit`, per IP, con lo stesso limite (5 al minuto o il minimo consentito dal piano); poi si toglie `[[ratelimits]]` da `wrangler.toml` e si ripubblica con `wrangler deploy`. Il codice non cambia: senza il binding il Worker salta il controllo e lascia la regola della zona.

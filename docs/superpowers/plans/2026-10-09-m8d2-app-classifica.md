@@ -102,7 +102,7 @@ Precisano il §7.6 dove la spec lascia una scelta.
 | DZ11 | **Invio** (`performance_share_send`):<br>1. carica il file;<br>2. lo rifiuta con `provisional` se è provvisorio, con `shared` se è già condiviso;<br>3. costruisce i byte (DZ4) e li valida con `validate_submission`, dando il codice di DZ12;<br>4. controlla la plausibilità di ogni valore con la tabella unita (autore e community) → `implausible`, senza inviare;<br>5. fa il `POST` a `SUBMIT_URL` (scadenza 10 s, risposta al massimo 4096 byte).<br>**Esito** (`submit_outcome(status, body) -> Result<(), String>`):<br>• `201` → ok;<br>• `400`, `413`, `429` e `503` con un `{"error": <codice noto>}` → quel codice;<br>• altrimenti `http`.<br>**Se riesce:** `PerformanceStore::mark_shared(id)` riscrive il file con `shared: true`. Se la scrittura fallisce resta un `warn!` nel log, e l'esito è comunque ok. | Lo stesso controllo del server, prima di spendere una richiesta e il rate limit. |
 | DZ12 | **Codici d'errore** tradotti dall'interfaccia con `performance.share.error.<codice>`:<br>• del server: `bad_json`, `bad_schema`, `bad_format`, `unknown_version`, `not_valid`, `bad_value`, `implausible`, `body_too_large`, `rate_limited`, `daily_cap`;<br>• del trasporto: `offline`, `timeout`, `tls`, `http`, `invalid`;<br>• dell'app: `provisional`, `shared`, `not_found`.<br>Un codice sconosciuto si mostra con `performance.share.error.unknown`. | Messaggi chiari per ogni caso. |
 | DZ13 | **Classifica** (`app/src/lib/performance/board.ts`, pura):<br>• le cinque categorie `BOARDS = ['cpu-single', 'cpu-multi', 'gpu-compute', 'gpu-graphics', 'disk']`, nell'ordine;<br>• **righe proprie:** il miglior punteggio `valid`, non provvisorio, della versione corrente, uno per modello (CPU: `single`/`multi`; GPU: `compute`/`graphics`, uno per GPU; disco: `points`, uno per disco, solo B1);<br>• **vicini:** `NEIGHBOURS = 10` righe in tutto (tabella e proprie, per valore decrescente), con la finestra centrata sulla migliore riga propria (`start = clamp(i − 5, 0, len − 10)`); senza punteggi propri, le prime 10;<br>• **percentile:** `Math.floor(100 × righe della tabella con valore < il migliore proprio / righe della tabella)`, mostrato solo con almeno `PERCENTILE_MIN_ROWS = 10` righe della tabella;<br>• si confrontano solo righe con `scoreVersion` uguale a `versions[categoria]`. | Il §7.2 dice 8–12 modelli: 10 è il centro. |
-| DZ14 | **Riferimento ▲ «Modello della tabella…»**:<br>• terza voce del menu, solo per CPU e GPU, perché i contagiri del disco sono in MB/s e la tabella in punti;<br>• una seconda tendina elenca le righe della categoria del primo contagiri, con l'etichetta `<modello> · <fonte>`;<br>• il ▲ di ogni contagiri è la riga con la stessa `key` e la stessa `source` nella sua categoria, `null` se manca;<br>• la scelta resta in memoria, come gli altri riferimenti (DB10). | Per il disco il confronto con un modello sta nella Classifica. |
+| DZ14 | **Riferimento ▲ «Modello della tabella…»**:<br>• terza voce del menu, per CPU, GPU e disco;<br>• una seconda tendina elenca le righe della categoria del primo contagiri (per il disco, della categoria `disk`), con l'etichetta `<modello> · <fonte>`;<br>• CPU e GPU: il ▲ di ogni contagiri è la riga con la stessa `key` e la stessa `source` nella sua categoria, `null` se manca;<br>• **disco:** i contagiri sono in MB/s e la tabella in punti, quindi il ▲ del modello va su una **barra dei punti** (`PointsBar.svelte`) sotto i contagiri, al posto della riga «Punti: N». La barra mostra i punti della misura mostrata (`–` per una misura B2) e il ▲ del riferimento scelto: il record dei punti, i punti dell'ultima misura o la riga della tabella. Con «Modello della tabella…» i contagiri del disco tengono il ▲ del record. Fondo scala: il primo multiplo di 500 sopra `max(punti, ▲, 1000)`;<br>• la scelta resta in memoria, come gli altri riferimenti (DB10). | Il disco ha un confronto con un modello senza toccare il server: i MB/s nella tabella (categorie `disk-read` e `disk-write`) restano una possibile aggiunta futura, con migrazione e deploy del Worker (decisione dell'utente del 2026-10-09). |
 | DZ15 | **Pagina:** `PerformancePage` riceve `'board'`. La voce di menu «Classifica» è l'ultima del gruppo «Punteggio».<br>All'apertura la pagina chiama `refresh(false)`; alla fine di un benchmark salvato, `benchStore` chiama `boardStore.refresh(false)` se il negozio della tabella è collegato. | Il download parte solo mentre la vista Prestazioni è in uso (§7.5). |
 | DZ16 | **Condividi ed Esporta**, sotto il dettaglio della misura mostrata in `ScorePage`:<br>• **«Condividi»** compare se `valid`, non provvisoria e, per il disco, con `points`. Se il punteggio è già condiviso, il pulsante è disattivato con la scritta «Condiviso».<br>• **«Esporta JSON»** c'è per ogni misura salvata. Il file si chiama `oma-score-<categoria>-AAAAMMGG-HHMMSS.json`, con l'ora locale del punteggio, e il dialogo parte nella cartella Documenti, come per lo stress. | La misura mostrata è quella appena fatta o l'ultima del dispositivo. |
 | DZ17 | **Testi fissati** (`it.json`; `en.json` con lo stesso senso):<br>• **nota dell'anteprima** (`performance.share.note`): «L'invio è anonimo: nessun account e nessun indirizzo IP salvato. Diventa pubblico solo come mediana di almeno 3 invii. Dopo l'invio non si può più riconoscere né cancellare.»;<br>• **nota dell'impostazione** (`settings.performance.communityTable.note`): «La tabella si scarica da scores.cischi.dev, tramite Cloudflare, al massimo una volta al giorno e solo mentre usi la vista Prestazioni. La richiesta manda l'indirizzo IP e uno User-Agent con la versione dell'app, nient'altro.»;<br>• **didascalia della Classifica:** «Versione {version} · {count} modelli · tabella aggiornata il {date}» oppure «… · tabella inclusa nell'app» (senza una copia scaricata);<br>• **percentile:** «Più veloce del {pct}% dei modelli in tabella». | Le note del §7.6. |
@@ -414,7 +414,9 @@ Usare la skill `frontend-design:frontend-design` per la pagina, con lo stile del
 Usare la skill `frontend-design:frontend-design`. Il dialogo segue `QuitDialog.svelte`: modale, `Esc` chiude, fuoco al primo controllo e di nuovo sul pulsante di partenza alla chiusura.
 
 **Files:**
-- Create: `app/src/components/performance/ShareDialog.svelte`, `ShareDialog.test.ts`.
+- Create:
+  - `app/src/components/performance/ShareDialog.svelte`, `ShareDialog.test.ts`;
+  - `app/src/components/performance/PointsBar.svelte`, `PointsBar.test.ts`.
 - Modify:
   - `app/src/components/performance/ScorePage.svelte`, `ScorePage.test.ts`;
   - `app/src/lib/performance/bench.svelte.ts` (aggiornare i punteggi dopo un invio);
@@ -425,16 +427,25 @@ Usare la skill `frontend-design:frontend-design`. Il dialogo segue `QuitDialog.s
   - `boardStore.rowsFor` (Z7);
   - `performanceSharePreview`, `performanceShareSend` e `performanceScoreExport` (Z6);
   - `ScoreFile.shared` (Z3).
-- Produces: `ShareDialog` con le props `{ backend: Backend; scoreId: string; onClose: (shared: boolean) => void }`.
+- Produces:
+  - `ShareDialog` con le props `{ backend: Backend; scoreId: string; onClose: (shared: boolean) => void }`;
+  - `PointsBar` con le props `{ value: number | null; reference: number | null; referenceLabel: string | null }`;
+  - `benchStore.pointsFor(target: ScoreTarget): { record: number | null; last: number | null }`, sui punteggi del disco confrontabili (validi, B1, dello stesso disco).
 
 - [ ] **Step 1: test che falliscono.**
 
   In `ScorePage.test.ts`:
   - `table_reference_lists_rows_of_the_first_gauge`;
   - `table_reference_sets_both_marks_from_the_same_model_and_source`, con il ▲ assente se la seconda categoria non ha la riga;
-  - `disk_page_has_no_table_reference`;
+  - `disk_table_reference_moves_the_points_mark`: con «Modello della tabella…» e la riga `Fanxiang S880 2TB` 995, la barra dei punti ha il ▲ a 995 e i contagiri tengono il ▲ del record;
+  - `disk_points_bar_follows_record_and_last`;
+  - `points_bar_shows_a_dash_for_b2`;
   - `share_shows_only_for_valid_final_scores`: nascosto per un punteggio provvisorio, uno non valido e un disco B2; per uno condiviso è disattivato con «Condiviso»;
   - `export_saves_and_names_the_file`.
+
+  In `PointsBar.test.ts`:
+  - `full_scale_is_the_next_500_above_the_marks`: punti 1012 e ▲ 995 → 1500; punti 300 e ▲ nessuno → 1000;
+  - `mark_has_its_label_for_screen_readers`.
 
   In `ShareDialog.test.ts`:
   - `preview_shows_the_exact_json_and_the_note`;
@@ -443,7 +454,7 @@ Usare la skill `frontend-design:frontend-design`. Il dialogo segue `QuitDialog.s
   - `share_error_is_translated_and_retry_is_possible` (Review Focus 5);
   - `send_button_is_disabled_while_sending` (Review Focus 5): due clic → una chiamata;
   - `unknown_error_code_uses_the_fallback`.
-- [ ] **Step 2:** `cd app && pnpm test ScorePage ShareDialog`. Atteso: FAIL.
+- [ ] **Step 2:** `cd app && pnpm test ScorePage ShareDialog PointsBar`. Atteso: FAIL.
 - [ ] **Step 3: implementare** DZ12, DZ14, DZ16 e DZ17.
   - **Anteprima:** `<pre>` con il testo, la casella «Hardware in overclock» (`Term` `overclock`), la nota (`Term` `anonymousShare`), «Invia» e «Annulla».
   - **Dopo un invio riuscito:** `benchStore.refresh()` e un nuovo caricamento del dettaglio.
@@ -471,7 +482,7 @@ Usare la skill `frontend-design:frontend-design`. Il dialogo segue `QuitDialog.s
     - riaprendo la Classifica, lo stato non cambia;
     - la tabella già scaricata si vede ancora.
   - **Z9.4 Senza rete:** l'utente stacca la rete e preme «Aggiorna ora». Si vede il messaggio `offline`, e le righe restano.
-  - **Z9.5 ▲ «Modello della tabella…»:** sulle pagine della CPU e della RTX 4080, il ▲ va al valore della riga scelta.
+  - **Z9.5 ▲ «Modello della tabella…»:** sulle pagine della CPU e della RTX 4080, il ▲ va al valore della riga scelta; sulla pagina del disco, il ▲ va sulla barra dei punti (Fanxiang S880 2TB) e i contagiri tengono quello del record.
   - **Z9.6 Esporta JSON:** il file salvato è identico all'anteprima, senza `overclock`.
   - **Z9.7 Condividi:** su un punteggio della CPU valido. Prima si chiede all'utente se tenere l'invio vero o cancellarlo dopo; la cancellazione da D1 la fa il controller solo con un nuovo via dell'utente.
     - L'anteprima e la nota sono quelle previste.

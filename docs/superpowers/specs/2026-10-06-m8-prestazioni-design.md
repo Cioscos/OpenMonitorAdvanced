@@ -44,7 +44,7 @@ Successo: chi fa overclock o undervolt capisce in pochi clic se il sistema è st
 |---|---|
 | **M8a** | Fondamenta: vista Prestazioni, `oma-load.exe` e protocollo, cronologia, diario dei crash, WHEA, stop termico, tray, tooltip, impostazioni. Stress di CPU e RAM, benchmark della CPU e contagiri. Se il piano supera la dimensione abituale si divide in **M8a1** (fondamenta e stress di CPU e RAM) e **M8a2** (benchmark della CPU e contagiri). |
 | **M8b** | GPU: spike iniziale (§5.6), benchmark Calcolo e Grafica, stress S1–S9. |
-| **M8c** | Disco: benchmark Lettura e Scrittura, stress N1–N4 e V1–V4. |
+| **M8c** | Disco: benchmark Lettura e Scrittura, stress N1–N4 e V1–V4. Un piano unico (§6.4). |
 | **M8d** | Classifica: tabella di riferimento, pagina Classifica, esportazione, issue precompilata, Action di validazione e di aggregazione, GitHub Pages, download automatico. |
 
 Ogni piano ha il suo branch `feat/m8x-…`. La release la decide l'utente alla fine di ogni sotto-milestone.
@@ -120,6 +120,7 @@ Ogni piano ha il suo branch `feat/m8x-…`. La release la decide l'utente alla f
 | `system_crash` | Diario aperto al riavvio (§2.4). | «Interrotto da un crash del sistema durante …» |
 | `stopped_user` | «Ferma e salva», «Ferma il test» dalla tray, oppure «Esci» confermato. | «Fermato da te» |
 | `stopped_thermal` | Lo stop termico è scattato (§2.6). | «Fermato: temperatura a N °C» |
+| `stopped_disk_full` | Spazio esaurito durante un test del disco (M8c, §6.4). | «Fermato: spazio su disco esaurito» |
 | `suspended` | Il PC è andato in sospensione durante il test. | «Interrotto dalla sospensione» |
 | `failed_to_start` | `oma-load.exe` assente o incompatibile, disco pieno, nessuna GPU adatta. | «Non avviato: …», con la causa |
 
@@ -256,6 +257,7 @@ Seguono il mockup approvato (D9).
 | `stopOnFirstError` | `null` (= quello del profilo) | |
 | `ramSharePercent` | `70` | da 10 a 90; restano liberi almeno 2 GB |
 | `communityTable` | `true` | download della classifica (M8d) |
+| `diskFolder` | `null` | ultima cartella del test del disco (M8c, §6.4) |
 | `riskNoticeSeen` | `false` | |
 
 La lettura e la scrittura passano per il modulo delle impostazioni esistente (`oma-core::settings`), con patch e valori fuori intervallo riportati nei limiti.
@@ -440,7 +442,7 @@ Esiti e scelte (2026-10-07): `docs/superpowers/references/m8/spike-gpu.md`. Corr
 - **Prove (B1, predefinito):** SEQ1M Q8T1, SEQ1M Q1T1, RND4K Q32T1 e RND4K Q1T1, ognuna in lettura e in scrittura.
 - **Profilo NVMe (B2), in Personalizza:** SEQ1M Q8T1, SEQ128K Q32T1, RND4K Q32T16 e RND4K Q1T1.
 - **Svolgimento.** File da 1 GiB, 5 s per prova, 5 s di intervallo, un giro di riscaldamento e 3 misure, di cui si tiene la migliore, come CrystalDiskMark.
-- **Tetto di scrittura.** Le prove di scrittura hanno anche un tetto in byte: in tutto al massimo 40 GiB per esecuzione.
+- **Tetto di scrittura.** Le prove di scrittura hanno anche un tetto in byte: in tutto al massimo 40 GiB per esecuzione, divisi per prova come nel §6.4.
 - **Contagiri.** In MB/s (D13): l'ago segue la prova in corso, e alla fine si ferma su SEQ1M Q8T1.
 - **Tabella di dettaglio.** MB/s, IOPS e latenza media e p99 di ogni prova.
 - **Punti per la classifica.** Media geometrica delle 4 prove (lettura e scrittura) contro il disco NVMe di sistema dell'autore = 1000. Versione `disk-1`.
@@ -473,6 +475,113 @@ Prima di partire la pagina mostra la stima dei dati che verranno scritti. Con il
 | Disco · Stabilità | Standard (V1 × 3 cicli, V2 30 min, V4) · Lungo (V1 × 6 cicli, V2 2 h, V4) | V1, V2, V4; V3 al posto di V1 se il disco è rimovibile |
 
 **Stop termico.** Alla soglia di §2.6.
+
+### 6.4 Decisioni del brainstorming della M8c (2026-10-08)
+
+Precisano i §6.1–6.3; dove li contraddicono, vale questo paragrafo.
+
+- **Un piano unico.** La M8c non si divide: benchmark e stress stanno in un solo piano e in un solo branch (`feat/m8c-disk`), decisione dell'utente.
+- **Architettura.**
+  - **`oma-load`:** il motore d'I/O sta nel modulo `disk/`, come la GPU sta in `gpu/`:
+    - un IOCP per thread, con `GetQueuedCompletionStatusEx`;
+    - buffer allocati con `VirtualAlloc`;
+    - latenze misurate con QPC in un istogramma logaritmico (media e p99).
+  - **`oma-core`:** contiene la parte pura:
+    - piani e profili (B1, B2, N, V);
+    - punteggio `disk-1` e controller del benchmark;
+    - formato dei blocchi da 4 KiB e classificazione degli errori, condivisi da `oma-load` e dai test.
+- **Protocollo load v6.** I campi nuovi sono tutti facoltativi in lettura:
+  - `Plan.disk`: un `DiskTarget` con cartella, dimensione del file, settore fisico e tipo di dati (casuali o comprimibili);
+  - per ogni fase, un `DiskJob` con:
+    - dimensione del blocco, coda e thread;
+    - percentuale di letture, accesso sequenziale o casuale;
+    - tetto in byte e tipo di verifica;
+  - i kernel `disk_bench`, `n1`–`n4` e `v1`–`v4`;
+  - `Progress.disk` con `readBps`, `writeBps`, `writtenBytes` e `iops`;
+  - `PhaseDone.disk` con byte, numero di I/O, latenza media e p99, separati per lettura e scrittura;
+  - gli `ErrorKind` del disco: `bit_flip`, `misplaced`, `stale`, `zeros` e `io_error`. Ognuno è marcato come passeggero o persistente; l'indice del blocco prende il posto dell'iterazione;
+  - le notice `disk_full` e `access_denied`, che ricorda l'accesso controllato alle cartelle di Defender;
+  - il codice d'uscita 5 (§2.2).
+- **Bersaglio.**
+  - **Barra laterale:** una sola voce «Disco» sotto Punteggio.
+  - **Scelta del volume:** in cima alla pagina c'è il menu dei volumi locali, per esempio «C: · Samsung 990 Pro · NVMe». Il disco fisico viene dalla tabella dei dischi della M6b. L'ultima voce del menu è «Scegli cartella…».
+  - **Cartella usata:**
+    - sul volume di sistema è `%LOCALAPPDATA%\Temp`;
+    - sugli altri volumi è la radice;
+    - se la radice non è scrivibile, l'app chiede di scegliere una cartella.
+  - **Misure e record:**
+    - «Le tue misure» elenca tutti i dischi, ciascuno con il suo modello;
+    - il record del riferimento ▲ è per disco fisico, identificato con la chiave dei dischi della M6b.
+  - **Procedura guidata dello stress:** al passo 1 la voce Disco mostra lo stesso menu.
+  - **Dischi rifiutati o con avviso:**
+    - rifiutati: i dischi di rete;
+    - con avviso: i dischi rimovibili, le cartelle sincronizzate (OneDrive, Dropbox, Google Drive) e i dischi virtuali;
+    - con consenso: un HDD in standby (§6.1).
+- **File orfani (punto aperto del §15).** Con `FILE_FLAG_DELETE_ON_CLOSE` il file sparisce anche quando `oma-load` o l'app cadono, perché Windows chiude gli handle. Resta solo dopo un crash del sistema o una mancanza di corrente.
+  - **Dove si registra la cartella:**
+    - il diario (`journal.json`, §8.3) ha il campo `diskFolder`;
+    - le impostazioni hanno `performance.diskFolder`, l'ultima cartella usata.
+  - **Pulizia all'avvio:** l'app guarda solo la cartella del diario aperto e l'ultima cartella usata.
+  - **Cosa cancella:** solo i file `oma-test-*.bin` che hanno accanto il loro `.oma-test.json` e il cui PID non è più vivo, oppure è vivo ma con un istante d'avvio diverso.
+- **Benchmark.**
+  - **Svolgimento.**
+    - Il file da 1 GiB si riempie una volta, prima di tutto; il riempimento non conta nel tetto.
+    - Le prove girano prima tutte in lettura, poi tutte in scrittura, così le letture non risentono della pulizia interna del disco dopo le scritture.
+  - **Tetto di 40 GiB diviso per prova** (decisione dell'utente). Una misura finisce dopo 5 s o al suo tetto in byte, quello che arriva prima.
+
+    | Prove di scrittura | Riscaldamento | Ognuna delle 3 misure | Totale |
+    |---|---|---|---|
+    | SEQ1M Q8T1, SEQ1M Q1T1 (in B2: SEQ1M Q8T1, SEQ128K Q32T1) | 1 GiB | 4 GiB | 13 GiB per prova, 26 GiB |
+    | RND4K Q32T1, RND4K Q1T1 (in B2: RND4K Q32T16, RND4K Q1T1) | 1 GiB | 2 GiB | 7 GiB per prova, 14 GiB |
+
+    Sui dischi SATA e sugli HDD il tetto non scatta.
+  - **Misure.** MB/s si intende come 10⁶ B/s, come in CrystalDiskMark; si misura dal primo invio all'ultimo completamento.
+  - **Scala del contagiri.** La stima iniziale dipende dal tipo di disco:
+    - NVMe: 8000 MB/s;
+    - SSD SATA: 600 MB/s;
+    - HDD: 300 MB/s;
+    - USB: 1000 MB/s.
+
+    Poi vale la regola del §3.3: si sceglie il numero tondo sopra la stima e la scala può solo crescere.
+  - **Punti `disk-1`.**
+    - Il calcolo: 1000 × la media geometrica degli 8 rapporti (le 4 prove di B1, in lettura e in scrittura) contro le velocità di riferimento.
+    - La taratura: le velocità di riferimento si tarano sul disco NVMe di sistema dell'autore con l'esempio `calibrate_disk`, come per `cpu-1`.
+    - B2 dà solo MB/s, senza punti.
+  - **Avvisi di validità:**
+    - PC a batteria;
+    - altro I/O sullo stesso disco oltre il 5% durante le misure (dai contatori PDH già letti dall'app);
+    - dati comprimibili;
+    - disco virtuale;
+    - disco rimovibile;
+    - temperatura oltre la soglia.
+
+    Una misura con dati comprimibili non vale per la classifica.
+- **Stress.**
+  - **Intestazione del blocco:** 64 byte.
+
+    | Byte | Campo |
+    |---|---|
+    | 0..8 | magic |
+    | 8..16 | id della sessione |
+    | 16..24 | indice del blocco |
+    | 24..28 | generazione |
+    | 28..32 | versione |
+    | 32..40 | xxh3 dell'intestazione (byte 0..32) e dei dati |
+
+    I dati che seguono si generano dal seme (sessione, indice, generazione).
+  - **Hash.** xxh3 viene da una crate scelta nel piano, con licenza verificata e aggiunta all'elenco `accepted` di `about.toml` (§12).
+  - **N2.**
+    - **Fine della cache SLC:** la velocità resta sotto il 60% di quella iniziale per almeno 3 s.
+    - **Cosa riporta:** la dimensione della cache SLC e la velocità che segue.
+    - **Sospetto termico:** se nei 10 s prima del calo la temperatura era oltre la soglia d'avviso, il calo è marcato come «sospetto termico».
+  - **Pagina durante il test.** Al posto della griglia dei core mostra i blocchi verificati e gli errori, con la loro posizione nel file. Il grafico mostra MB/s e temperatura.
+  - **Riepilogo.** Mostra i dati scritti misurati dallo SMART, cioè la differenza del sensore `data/host-written` del servizio prima e dopo il test.
+  - **Errori iniettati.** Solo nelle build di debug, `OMA_LOAD_INJECT='v1'` corrompe un blocco dopo la lettura.
+- **Esiti.**
+  - Un errore di dati, o un errore d'I/O persistente, dà `errors`, con il tipo dell'errore.
+  - Un errore d'I/O non recuperabile, come un disco scollegato, chiude `oma-load` con il codice 5 e dà `errors`, con la causa.
+  - Lo spazio esaurito durante il test dà un esito nuovo, `stopped_disk_full`, con il verdetto «Fermato: spazio su disco esaurito». Il test si ferma, il file si cancella e la sessione si salva.
+- **Verifica dal vivo in più.** Tre benchmark di fila sul disco NVMe di sistema. La dispersione di SEQ1M Q8T1 in scrittura deve restare entro il 5%; se la supera, il tetto si alza.
 
 ## 7. M8d — Classifica e condivisione
 
@@ -578,7 +687,7 @@ Tutti i file sono JSON con `format: 1`, scritti in modo atomico (file temporaneo
 
 ### 8.3 Diario (`journal.json`)
 
-`sessionId`, `planSummary`, `phaseIndex`, `kernel`, `core`, `updatedAt`, `cleanEnd`.
+`sessionId`, `planSummary`, `phaseIndex`, `kernel`, `core`, `updatedAt`, `cleanEnd`; per i test del disco anche `diskFolder` (M8c, §6.4).
 
 ### 8.4 Tabella di riferimento
 
@@ -717,7 +826,7 @@ Per la M8d:
 - **Stop termico:** sensori e id da usare (Tctl/Tdie, package, hot spot GPU, temperatura NVMe) e come trovare il Tjmax.
 - **Chi tiene la cronologia:** i moduli Rust che leggono e scrivono la cronologia, e i comandi Tauri e gli eventi verso la UI (`performance-*`).
 - **M8b:** gli esiti dello spike (§5.6) e la scelta della compilazione degli shader.
-- **M8c:** quali cartelle «usate di recente» si puliscono all'avvio e dove si registra che sono state usate.
+- **M8c:** quali cartelle «usate di recente» si puliscono all'avvio e dove si registra che sono state usate. Deciso nel §6.4: la cartella del diario aperto e l'ultima cartella usata.
 - **M8d:**
   - nome e struttura della CLI `oma-scores`;
   - come provare le Action senza sporcare le issue vere;

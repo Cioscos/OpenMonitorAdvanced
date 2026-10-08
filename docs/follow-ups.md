@@ -155,7 +155,7 @@ Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-0
 
 ## Open: leaderboard server (M8d1)
 
-Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Implementata sul branch `feat/m8d1-scores-worker`; prove dal vivo W7 superate il 2026-10-09. Il Worker è pubblicato su `https://scores.cischi.dev` con il database D1 `oma-scores` (giurisdizione `eu`).
+Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Unita in `main` il 2026-10-09 (`4d9172b`); prove dal vivo W7 superate lo stesso giorno. Il Worker è pubblicato su `https://scores.cischi.dev` con il database D1 `oma-scores` (giurisdizione `eu`).
 
 - **Sottodominio nell'app (M8d2):** `scores.cischi.dev` va messo anche nella costante dell'app.
 - **Righe della CPU dell'autore:** misurate in W7 con la build release (3 benchmark del Ryzen 7 7800X3D: single 1491, multi 1495). Il Worker include le righe dell'autore al deploy: dopo ogni `pnpm author-table` serve un nuovo `pnpm run deploy`.

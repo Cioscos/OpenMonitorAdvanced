@@ -10,11 +10,10 @@ use oma_ipc::load::{
 };
 use serde::Serialize;
 
-use super::session::SlcResult;
-
 use super::outcome::{decide, Outcome, OutcomeFacts};
 use super::plan::{Component, Objective, Preset};
 use super::sensors::SensorSample;
+use super::session::SlcResult;
 use super::session::{
     CoreResult, ErrorRecord, Journal, OutcomeDetail, PhaseResult, Sample, Session, SessionEvent,
     Stats, FORMAT, MAX_ERRORS,
@@ -1000,9 +999,20 @@ impl RunController {
             return out;
         }
         let mut out = vec![];
-        // A disk fill ends on completion, not on its nominal time (R7): the silent pipe
-        // is the only proof of a hang there.
-        let overrun = !self.is_disk()
+        // Strict phases (R9) must end by their nominal time. A fill (R7) and the V loads
+        // end on completion or after a final verify, so only the silent pipe flags them.
+        let soft = self
+            .session
+            .plan
+            .phases
+            .get(self.phase as usize)
+            .is_some_and(|p| {
+                matches!(
+                    p.kernel,
+                    KernelId::DiskFill | KernelId::V1 | KernelId::V2 | KernelId::V3 | KernelId::V4
+                )
+            });
+        let overrun = !soft
             && self.mono - self.start_mono > self.session.plan.total_seconds() * 1000 + OVERRUN_MS;
         if self.state == RunState::Running
             && (overrun || now.mono_ms.saturating_sub(self.last_msg_ms) > SILENT_PIPE_MS)
@@ -2450,6 +2460,10 @@ mod tests {
     // ---- Disk (M8c) ----
 
     fn disk_ctl(thermal: bool) -> RunController {
+        disk_ctl_with(thermal, KernelId::N2)
+    }
+
+    fn disk_ctl_with(thermal: bool, kernel: KernelId) -> RunController {
         let mut s = session();
         s.component = Component::Disk;
         s.request.component = Component::Disk;
@@ -2471,7 +2485,7 @@ mod tests {
                 cycles: None,
                 rate_limit_bps: None,
             }),
-            ..phase(KernelId::N2)
+            ..phase(kernel)
         }];
         s.plan.disk = Some(oma_ipc::load::DiskTarget {
             dir: "D:\\oma".into(),
@@ -2749,16 +2763,25 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_fill_may_outlast_its_nominal_duration() {
-        // R7: `disk_fill` ends on completion; a live pipe is the proof of life.
-        let mut c = disk_ctl(false);
-        c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+    fn only_soft_disk_phases_may_outlast_their_nominal_duration() {
+        // R9: a strict phase whose Progress ticker is alive is still hung past its time.
         let late = 60 * 1000 + OVERRUN_MS + 50_000;
-        c.on_load(
-            &disk_progress(late - 100, 0, 5, 0.0, 5.0),
-            clock(late - 100),
-        );
-        assert!(!c.on_clock(clock(late)).contains(&Action::Kill));
-        assert_eq!(c.status().state, RunState::Running);
+        for (kernel, hung) in [
+            (KernelId::N2, true),
+            (KernelId::DiskBench, true),
+            (KernelId::DiskFill, false),
+            (KernelId::V1, false),
+            (KernelId::V4, false),
+        ] {
+            let mut c = disk_ctl_with(false, kernel);
+            c.on_load(&disk_progress(1000, 0, 5, 0.0, 5.0), clock(1000));
+            c.on_load(
+                &disk_progress(late - 100, 0, 5, 0.0, 5.0),
+                clock(late - 100),
+            );
+            let a = c.on_clock(clock(late));
+            assert_eq!(a.contains(&Action::Kill), hung, "{kernel:?}");
+            assert_eq!(c.hung, hung, "{kernel:?}");
+        }
     }
 }

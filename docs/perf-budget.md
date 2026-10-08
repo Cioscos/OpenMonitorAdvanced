@@ -352,7 +352,16 @@ On the iGPU `oma-load.exe` holds the S3 stream set and the render targets in sys
 
 Nothing changes at rest. `oma-load.exe` exists only while a test runs, and the `performance/` module of the app does no periodic work without a test. The volume list (`performance_system`) reads metadata only and is asked for when the UI needs it, never in a timer, so a sleeping HDD stays asleep; the one small file written by the folder probe happens only when the user picks or confirms a folder or a test starts. During a disk test the load process holds the aligned I/O buffers (queue depth times block size, per thread) and the V2 verification table (at most 4 MiB, the test file is at most 8 GiB for the stress test) on top of its base footprint.
 
-Not measured yet: the memory of `oma-load.exe` during the disk tests and the app's figures with the window on the disk score page are owed to live check D13 (release build, `scripts/measure-footprint.ps1`), to be recorded here. No disk test was run for this section.
+Measured 2026-10-08 with D13 on the same machine, release build of `feat/m8c-disk` (`pnpm tauri build --no-bundle`, with `oma-load` and `oma-overlay` in release), private memory of the app's process tree (WebView2 included, overlay excluded) and of `oma-load.exe` sampled every 5 s from the Windows counters. The test was a «Verifica normale» Quick run on the SK hynix P41 (F:).
+
+| Mode | App + WebView2 | `oma-load.exe` | Within budget |
+|---|---|---|---|
+| window, at rest before the test | 140–144 MB | — | yes |
+| window, run page open during the stress test | 153–176 MB, with peaks (see below) | 8.9–12.9 MB | yes, apart from the peaks |
+| window, after the test | 158–172 MB | — | yes |
+| tray, during the stress test (window closed) | 22–24 MB | up to 12.9 MB | yes |
+
+During the stress test seven isolated samples reached 203–258 MB, about one every 30–40 s (258 MB at the start of the test); the next sample was back near 160 MB, and there were none at rest, so they look like WebView2 collecting memory rather than a leak. The CPU and GPU benchmarks did not show them. Which process grows is not yet known: open item in `docs/follow-ups.md` (M8c).
 
 ## M7 — motore dei frame e overlay (spec M7 §11)
 

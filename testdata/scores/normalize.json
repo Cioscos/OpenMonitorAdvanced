@@ -1,0 +1,32 @@
+[
+  {
+    "input": "AMD Radeon(TM) Graphics",
+    "display": "AMD Radeon Graphics",
+    "key": "amd radeon graphics"
+  },
+  {
+    "input": "  Intel(R) Core(TM) i9-13900K  ",
+    "display": "Intel Core i9-13900K",
+    "key": "intel core i9-13900k"
+  },
+  {
+    "input": "Intel® Core™ Ultra 9 285K",
+    "display": "Intel Core Ultra 9 285K",
+    "key": "intel core ultra 9 285k"
+  },
+  {
+    "input": "NVIDIA  GeForce\tRTX 4080",
+    "display": "NVIDIA GeForce RTX 4080",
+    "key": "nvidia geforce rtx 4080"
+  },
+  {
+    "input": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "display": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "key": "amd ryzen 7 7800x3d 8-core processor"
+  },
+  {
+    "input": "Intel(r) Arc(tm) A770",
+    "display": "Intel Arc A770",
+    "key": "intel arc a770"
+  }
+]

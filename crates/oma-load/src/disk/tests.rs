@@ -1,13 +1,13 @@
 //! The disk engine with a fake I/O queue and an accelerated clock (at most 3 s each), and
 //! one short run on a real 64 MiB file in the temporary folder.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use oma_core::disk_block::{check_block, BLOCK_BYTES};
+use oma_core::disk_block::{check_block, write_block, BLOCK_BYTES};
 use oma_ipc::load::{
     ComputeError, DataSize, DiskJob, DiskTarget, ErrorKind, FinishReason, Isa, KernelId,
     LoadMessage, LoadMode, Notice, Phase, PhaseDone, Placement, Plan, Progress,
@@ -55,6 +55,13 @@ struct Script {
     one_per_wait: bool,
     /// Check every written 4 KiB block with `check_block`, generation 1.
     check_writes: bool,
+    /// Reads return the valid generation-1 blocks of their offset.
+    serve_reads: bool,
+    /// Reads at this offset return a block of another index, this many times.
+    bad_offset: Option<u64>,
+    bad_reads: u32,
+    /// After this many completed I/Os a `wait` takes four times longer (800 us, not 200), so the speed of a sequential writer drops to a quarter.
+    slow_after_ios: Option<u64>,
 }
 
 #[derive(Default)]
@@ -66,6 +73,9 @@ struct Disk {
     /// Block index -> times written (only with `check_writes`).
     blocks: Mutex<HashMap<u64, u32>>,
     bad_blocks: AtomicU64,
+    bad_left: AtomicU32,
+    /// The (write, length) of every I/O.
+    shapes: Mutex<HashSet<(bool, u32)>>,
 }
 
 struct FakeQueue {
@@ -103,12 +113,41 @@ impl IoQueue for FakeQueue {
                 *blocks.entry(index).or_default() += 1;
             }
         }
+        self.disk
+            .shapes
+            .lock()
+            .unwrap()
+            .insert((req.write, req.len));
+        if !req.write && s.serve_reads && result.is_ok() {
+            let first = req.offset / BLOCK_BYTES as u64;
+            let wrong = s.bad_offset == Some(req.offset)
+                && self
+                    .disk
+                    .bad_left
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    .is_ok();
+            let buf = &mut self.bufs[slot][..req.len as usize];
+            for (i, chunk) in buf.chunks_exact_mut(BLOCK_BYTES).enumerate() {
+                let shift = if wrong && i == 0 { 1000 } else { 0 };
+                write_block(chunk, SEED, first + i as u64 + shift, 1, false);
+            }
+        }
         self.pending.push((slot, result));
         Ok(())
     }
 
     fn wait(&mut self, _timeout_ms: u32, out: &mut Vec<IoDone>) -> Result<(), DiskError> {
-        thread::sleep(Duration::from_micros(50));
+        match self.disk.script.slow_after_ios {
+            Some(n) => {
+                // Spins: a sleep this short rounds up to the timer tick (~15 ms here).
+                let slow = self.disk.completed.load(Ordering::Relaxed) >= n;
+                let until = Instant::now() + Duration::from_micros(if slow { 800 } else { 200 });
+                while Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+            }
+            None => thread::sleep(Duration::from_micros(50)),
+        }
         let take = if self.disk.script.one_per_wait {
             self.pending.len().min(1)
         } else {
@@ -277,6 +316,7 @@ fn plan(file_bytes: u64, phases: Vec<Phase>) -> Plan {
 fn run(plan: &Plan, setup: Setup) -> Ran {
     let disk = Arc::new(Disk {
         script: setup.script.clone(),
+        bad_left: AtomicU32::new(setup.script.bad_reads),
         ..Disk::default()
     });
     let msgs = Mutex::new(Vec::new());
@@ -748,4 +788,130 @@ fn bench_on_a_real_file() {
     assert!(rate.is_finite() && rate > 0.0, "{read:?}");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir(&dir).unwrap();
+}
+
+fn serving() -> Script {
+    Script {
+        serve_reads: true,
+        ..Script::default()
+    }
+}
+
+#[test]
+fn n1_mixes_reads_and_writes_in_both_sizes() {
+    let setup = Setup {
+        script: Script {
+            check_writes: true,
+            ..serving()
+        },
+        ..Setup::default()
+    };
+    let p = plan(
+        64 * MIB,
+        vec![phase(KernelId::N1, 3, job(4096, 128 << 10, 50, 70, 16, 2))],
+    );
+    let r = run(&p, setup);
+    assert_eq!(r.end.finished.reason, FinishReason::Completed);
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let shapes = r.disk.shapes.lock().unwrap().clone();
+    for shape in [
+        (false, 4096),
+        (true, 4096),
+        (false, 128 << 10),
+        (true, 128 << 10),
+    ] {
+        assert!(shapes.contains(&shape), "{shape:?} missing in {shapes:?}");
+    }
+    assert_eq!(r.disk.bad_blocks.load(Ordering::Relaxed), 0);
+    let done = r.done();
+    let read = done[0].disk.as_ref().unwrap().read.bytes;
+    assert!(read > 0);
+    assert_eq!(done[0].checks, read / 4096);
+    assert_eq!(r.end.finished.checks, done[0].checks);
+}
+
+fn n3_with_bad_block(bad_reads: u32) -> Ran {
+    let setup = Setup {
+        script: Script {
+            bad_offset: Some(0),
+            bad_reads,
+            ..serving()
+        },
+        ..Setup::default()
+    };
+    let p = plan(
+        64 * MIB,
+        vec![phase(KernelId::N3, 1, job(4096, 1 << 20, 0, 100, 8, 1))],
+    );
+    run(&p, setup)
+}
+
+#[test]
+fn n3_reads_are_verified_and_errors_classified() {
+    // Bad twice: the reread is bad too, so the error is persistent.
+    let r = n3_with_bad_block(2);
+    let errors = r.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let e = errors[0];
+    assert_eq!(e.kind, ErrorKind::Misplaced);
+    assert_eq!(e.kernel, KernelId::N3);
+    assert_eq!((e.iteration, e.expected, e.actual), (0, 0, 1000));
+    assert_eq!((e.logical, e.core, e.isa), (None, None, Isa::Sse2));
+    assert_eq!(e.transient, Some(false));
+    assert_eq!(r.done()[0].errors, 1);
+    assert_eq!(r.end.finished.errors, 1);
+}
+
+#[test]
+fn a_bad_read_that_reads_right_the_second_time_is_transient() {
+    let r = n3_with_bad_block(1);
+    let errors = r.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].kind, ErrorKind::Misplaced);
+    assert_eq!(errors[0].transient, Some(true));
+    assert_eq!(r.done()[0].errors, 1);
+}
+
+#[test]
+fn n2_sends_the_cliff_notice() {
+    let setup = Setup {
+        script: Script {
+            slow_after_ios: Some(600),
+            ..Script::default()
+        },
+        ..Setup::default()
+    };
+    let p = plan(
+        64 * MIB,
+        vec![phase(KernelId::N2, 30, job(4096, 4096, 0, 0, 1, 1))],
+    );
+    let r = run(&p, setup);
+    assert_eq!(r.end.finished.reason, FinishReason::Completed);
+    let notice = |code: &str| {
+        r.notices()
+            .into_iter()
+            .filter(|n| n.code == code)
+            .collect::<Vec<_>>()
+    };
+    let cliff = notice("slc_cliff");
+    assert_eq!(cliff.len(), 1, "{:?}", r.notices());
+    // The bytes written when the speed fell: after the fast I/Os, long before the end.
+    let fast = 600 * 4096;
+    let at = cliff[0].value.unwrap();
+    assert!(at >= fast / 2 && at <= fast * 2, "{at}");
+    let written = r.done()[0].disk.as_ref().unwrap().write.bytes;
+    assert!(at < written, "{at} of {written}");
+    let steady = notice("slc_steady");
+    assert_eq!(steady.len(), 1);
+    assert!(steady[0].value.unwrap() > 0);
+}
+
+#[test]
+fn n2_without_a_cliff_sends_no_slc_notice() {
+    let p = plan(
+        64 * MIB,
+        vec![phase(KernelId::N2, 12, job(4096, 1 << 20, 0, 0, 1, 1))],
+    );
+    let r = run(&p, Setup::default());
+    assert!(r.notices().iter().all(|n| !n.code.starts_with("slc_")));
 }

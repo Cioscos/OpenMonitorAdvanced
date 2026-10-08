@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use oma_core::disk_block::{write_block, BLOCK_BYTES};
+use oma_core::disk_block::{fault_error_kind, write_block, BlockFault, BLOCK_BYTES};
 use oma_ipc::load::{
     ComputeError, DiskJob, DiskPhaseStats, DiskProgress, DiskTarget, ErrorKind, FinishReason,
     Finished, IoStats, Isa, KernelId, LoadMessage, Notice, Phase, PhaseDone, Plan, Progress,
@@ -29,6 +29,8 @@ use oma_ipc::load::{
 use super::file::{classify_win32, fits, DiskError};
 use super::hist::Histogram;
 use super::offsets::{IoPicker, IoReq};
+use super::slc::SlcDetector;
+use super::stress::Stress;
 use crate::args::Inject;
 use crate::link::{EXIT_IO, EXIT_OK};
 use crate::rng::{phase_seed, Xoshiro256ss};
@@ -168,6 +170,7 @@ pub fn run_disk_with(
         start: now,
         phase: 0,
         checks: 0,
+        live_checks: 0,
         errors: 0,
         read_total: 0,
         written_total: 0,
@@ -209,6 +212,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const HEARTBEAT: Duration = Duration::from_millis(900);
 /// The engine thread's sleep between its looks at the workers.
 const SLICE: Duration = Duration::from_millis(2);
+/// The write-speed sampling of N2 (DC8).
+const SLC_SAMPLE: Duration = Duration::from_millis(500);
 /// The completion wait of a worker (DC3).
 const WAIT_MS: u32 = 100;
 /// The longest time (on the engine clock) a worker waits for its I/Os in flight after the
@@ -294,6 +299,8 @@ struct Run<'r> {
     start: Instant,
     phase: u32,
     checks: u64,
+    /// The checks of the running phase, for `Progress`.
+    live_checks: u64,
     errors: u64,
     /// Bytes read and written since the run started, for `Progress.disk`.
     read_total: u64,
@@ -389,7 +396,7 @@ impl Run<'_> {
             phase: self.phase,
             phase_elapsed_ms: ms(phase_elapsed),
             elapsed_ms: ms(now - self.start),
-            checks: self.checks,
+            checks: self.checks + self.live_checks,
             errors: self.errors,
             current_core: None,
             cores: Vec::new(),
@@ -535,10 +542,14 @@ impl Run<'_> {
             ios: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             errors_sent: AtomicU32::new(0),
+            checks: AtomicU64::new(0),
         };
         // The phase clock starts at the first submissions, after the pause.
         let phase_start = self.now();
         let duration = Duration::from_secs(spec.duration_s.into());
+        // N2 only: the write speed every `SLC_SAMPLE`, to find the SLC cache cliff (DC8).
+        let mut slc = (spec.kernel == KernelId::N2).then(SlcDetector::new);
+        let mut sampled = (phase_start, 0u64);
         let ends = thread::scope(|s| {
             let handles: Vec<_> = queues
                 .into_iter()
@@ -563,7 +574,16 @@ impl Run<'_> {
                 if self.stop.load(Ordering::Relaxed) || timed_out {
                     shared.halt.store(true, Ordering::Relaxed);
                 }
+                if let Some(d) = slc.as_mut().filter(|_| now - sampled.0 >= SLC_SAMPLE) {
+                    let (_, w, _) = shared.counters();
+                    let bps = (w - sampled.1) as f64 / (now - sampled.0).as_secs_f64();
+                    sampled = (now, w);
+                    if let Some(at) = d.sample(bps, w, ms(now - phase_start)) {
+                        self.notice("slc_cliff", Some(at));
+                    }
+                }
                 if now - meter.at >= PROGRESS_EVERY {
+                    self.live_checks = shared.checks.load(Ordering::Relaxed);
                     let (r, w, n) = shared.counters();
                     self.progress(now - phase_start, Some((&mut meter, r, w, n)));
                 }
@@ -574,7 +594,10 @@ impl Run<'_> {
                 .collect::<Vec<_>>()
         });
         let phase_errors = shared.errors.load(Ordering::Relaxed);
+        let phase_checks = shared.checks.load(Ordering::Relaxed);
         self.errors += phase_errors;
+        self.checks += phase_checks;
+        self.live_checks = 0;
         let (read, written, _) = shared.counters();
         self.read_total += read;
         self.written_total += written;
@@ -582,9 +605,12 @@ impl Run<'_> {
             return Err(fatal);
         }
         let stats = merge(&ends);
+        if let Some(v) = slc.and_then(|d| d.steady()) {
+            self.notice("slc_steady", Some(v as u64));
+        }
         self.send(LoadMessage::PhaseDone(PhaseDone {
             phase: self.phase,
-            checks: 0,
+            checks: phase_checks,
             errors: phase_errors,
             duration_ms: ms(self.now() - phase_start),
             skipped: None,
@@ -650,6 +676,8 @@ struct Shared<'a> {
     ios: AtomicU64,
     errors: AtomicU64,
     errors_sent: AtomicU32,
+    /// Blocks verified.
+    checks: AtomicU64,
 }
 
 impl Shared<'_> {
@@ -681,6 +709,29 @@ impl Shared<'_> {
             slot.get_or_insert(f);
         }
         self.halt.store(true, Ordering::Relaxed);
+    }
+
+    /// A verified read that found `fault` at the 4 KiB block `index`; `transient` when the
+    /// reread came back right.
+    fn data_error(&self, index: u64, fault: &BlockFault, transient: bool) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(index, ?fault, transient, "disk data error");
+        if self.errors_sent.fetch_add(1, Ordering::Relaxed) < ERRORS_PER_PHASE {
+            (self.out)(LoadMessage::Error(ComputeError {
+                phase: self.phase,
+                kernel: self.kernel,
+                isa: Isa::Sse2,
+                kind: fault_error_kind(&fault.kind),
+                logical: None,
+                core: None,
+                iteration: index,
+                expected: fault.expected,
+                actual: fault.actual,
+                seed: self.seed,
+                load_percent: None,
+                transient: Some(transient),
+            }));
+        }
     }
 
     /// A retry that came back right: the error is reported and the phase goes on.
@@ -720,7 +771,15 @@ pub trait WorkerLoad: Send {
     fn init(&mut self, _q: &mut dyn IoQueue) {}
     fn next(&mut self) -> Option<IoReq>;
     fn prepare(&mut self, _req: &IoReq, _buf: &mut [u8]) {}
+    /// Verifies a read just completed (`buf` is the `req.len` bytes read): appends each bad
+    /// 4 KiB block (its index and fault) to `faults` and returns the blocks checked.
+    fn check_read(&mut self, _req: &IoReq, _buf: &[u8], _faults: &mut Vec<Fault>) -> u64 {
+        0
+    }
 }
+
+/// A bad block found by a verified read: its 4 KiB index in the file and what is wrong.
+pub type Fault = (u64, BlockFault);
 
 /// The load of worker `t`, or `None` for a kernel without one (the phase is skipped).
 pub fn worker_load(ctx: &LoadCtx<'_>, t: u16) -> Option<Box<dyn WorkerLoad>> {
@@ -731,6 +790,9 @@ pub fn worker_load(ctx: &LoadCtx<'_>, t: u16) -> Option<Box<dyn WorkerLoad>> {
             seed: ctx.seed ^ u64::from(t),
             compressible: ctx.compressible,
         })),
+        KernelId::N1 | KernelId::N2 | KernelId::N3 | KernelId::N4 => {
+            Some(Box::new(Stress::new(ctx, t)))
+        }
         _ => None,
     }
 }
@@ -831,10 +893,12 @@ struct WorkerEnd {
 }
 
 /// An I/O in flight on a slot; `retry_of` is the code of the first try of a retry.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Pending {
     req: IoReq,
     retry_of: Option<u32>,
+    /// The bad blocks of the first read, when this is their reread (DC9).
+    recheck: Option<Vec<Fault>>,
 }
 
 /// One worker of a phase: keeps its queue full until the phase halts or its load ends,
@@ -882,6 +946,7 @@ fn worker(sh: &Shared<'_>, mut q: Box<dyn IoQueue>, mut load: Box<dyn WorkerLoad
                     Pending {
                         req,
                         retry_of: None,
+                        recheck: None,
                     },
                 );
             }
@@ -909,7 +974,7 @@ fn worker(sh: &Shared<'_>, mut q: Box<dyn IoQueue>, mut load: Box<dyn WorkerLoad
             break;
         }
         for d in done.drain(..) {
-            w.completed(&mut *q, d);
+            w.completed(&mut *q, &mut *load, d);
         }
     }
     // Dropping the queue cancels and drains what is left before the buffers go.
@@ -936,7 +1001,7 @@ impl Worker<'_, '_> {
         }
     }
 
-    fn completed(&mut self, q: &mut dyn IoQueue, d: IoDone) {
+    fn completed(&mut self, q: &mut dyn IoQueue, load: &mut dyn WorkerLoad, d: IoDone) {
         let Some(p) = self.slots.get_mut(d.slot).and_then(Option::take) else {
             return;
         };
@@ -958,11 +1023,49 @@ impl Worker<'_, '_> {
                 if let Some(code) = p.retry_of {
                     self.sh.transient(&p.req, code);
                 }
+                if !p.req.write && self.verify(q, load, d.slot, p) {
+                    return;
+                }
                 self.idle.push(d.slot);
             }
             Ok(_) => self.failed(q, d.slot, p, ERROR_HANDLE_EOF),
             Err(code) => self.failed(q, d.slot, p, code),
         }
+    }
+
+    /// Verifies a completed read. A bad block is read again once (the slot is reused for the
+    /// whole request): `true` when that reread started and the slot is busy again. After a
+    /// reread, each first fault is reported: `transient` if its block is now right.
+    fn verify(
+        &mut self,
+        q: &mut dyn IoQueue,
+        load: &mut dyn WorkerLoad,
+        slot: usize,
+        p: Pending,
+    ) -> bool {
+        let mut faults = Vec::new();
+        let buf = &q.buffer(slot)[..p.req.len as usize];
+        let checked = load.check_read(&p.req, buf, &mut faults);
+        let Some(first) = p.recheck else {
+            self.sh.checks.fetch_add(checked, Ordering::Relaxed);
+            if faults.is_empty() {
+                return false;
+            }
+            let p = Pending {
+                recheck: Some(faults),
+                retry_of: None,
+                ..p
+            };
+            self.start(q, slot, p);
+            return true;
+        };
+        for (index, fault) in &first {
+            match faults.iter().find(|(i, _)| i == index) {
+                Some((_, again)) => self.sh.data_error(*index, again, false),
+                None => self.sh.data_error(*index, fault, true),
+            }
+        }
+        false
     }
 
     /// An I/O that failed (at submission or completion): full disk ends the run, another
@@ -988,6 +1091,7 @@ impl Worker<'_, '_> {
                     Pending {
                         req: p.req,
                         retry_of: Some(code),
+                        recheck: p.recheck,
                     },
                 );
             }

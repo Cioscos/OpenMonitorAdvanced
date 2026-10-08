@@ -10,5 +10,7 @@ pub mod hist;
 #[cfg(windows)]
 pub mod iocp;
 pub mod offsets;
+pub mod slc;
+pub mod stress;
 #[cfg(test)]
 mod tests;

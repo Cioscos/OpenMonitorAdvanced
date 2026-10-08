@@ -1,3 +1,4 @@
+import { AGGREGATE_SQL } from "./aggregate.ts";
 import type { Env } from "./env.ts";
 import { json } from "./http.ts";
 import { handleSubmit } from "./submit.ts";
@@ -40,7 +41,7 @@ export default {
     return json(404, { error: "not_found" });
   },
 
-  async scheduled(_controller: ScheduledController, _env: Env, _ctx: ExecutionContext): Promise<void> {
-    // Filled in by W5 (aggregation).
+  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(env.DB.batch(AGGREGATE_SQL.map((s) => env.DB.prepare(s))));
   },
 } satisfies ExportedHandler<Env>;

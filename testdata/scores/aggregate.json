@@ -1,0 +1,174 @@
+{
+  "entries": [
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1400,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1500,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1600,
+      "overclock": false
+    },
+    {
+      "board": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1500,
+      "overclock": false
+    },
+    {
+      "board": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1501,
+      "overclock": false
+    },
+    {
+      "board": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1400,
+      "overclock": false
+    },
+    {
+      "board": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1700,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Alpha CPU",
+      "value": 10,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Alpha CPU",
+      "value": 20,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Alpha CPU",
+      "value": 30,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Overclocked CPU",
+      "value": 900,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Overclocked CPU",
+      "value": 950,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Overclocked CPU",
+      "value": 5000,
+      "overclock": true
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Hidden CPU",
+      "value": 800,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Hidden CPU",
+      "value": 810,
+      "overclock": false
+    },
+    {
+      "board": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Hidden CPU",
+      "value": 820,
+      "overclock": false
+    },
+    {
+      "board": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "AMD Radeon Graphics",
+      "value": 100,
+      "overclock": false
+    },
+    {
+      "board": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "amd radeon graphics",
+      "value": 200,
+      "overclock": false
+    },
+    {
+      "board": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "AMD RADEON GRAPHICS",
+      "value": 300,
+      "overclock": false
+    }
+  ],
+  "hidden": [
+    "hidden cpu"
+  ],
+  "expected": [
+    {
+      "category": "cpu-multi",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1501,
+      "n": 4,
+      "source": "community"
+    },
+    {
+      "category": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Alpha CPU",
+      "value": 20,
+      "n": 3,
+      "source": "community"
+    },
+    {
+      "category": "cpu-single",
+      "scoreVersion": "cpu-1",
+      "model": "Test CPU",
+      "value": 1500,
+      "n": 3,
+      "source": "community"
+    },
+    {
+      "category": "gpu-compute",
+      "scoreVersion": "gpu-1",
+      "model": "AMD RADEON GRAPHICS",
+      "value": 200,
+      "n": 3,
+      "source": "community"
+    }
+  ]
+}

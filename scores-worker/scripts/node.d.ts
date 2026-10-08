@@ -1,5 +1,13 @@
 // Minimal Node typings for the scripts (no @types/node: the Worker has no extra dependencies).
+declare module "node:child_process" {
+  export function spawnSync(
+    command: string,
+    args: string[],
+    options: { stdio: "inherit"; shell: boolean },
+  ): { status: number | null };
+}
 declare module "node:fs" {
+  export function mkdirSync(path: string, options: { recursive: boolean }): void;
   export function existsSync(path: string): boolean;
   export function readdirSync(path: string): string[];
   export function readFileSync(path: string, encoding: "utf8"): string;
@@ -8,7 +16,7 @@ declare module "node:fs" {
 declare module "node:path" {
   export function join(...parts: string[]): string;
 }
-declare const process: { argv: string[]; env: Record<string, string | undefined> };
+declare const process: { argv: string[]; env: Record<string, string | undefined>; exit(code: number): never };
 interface ImportMeta {
   url: string;
 }

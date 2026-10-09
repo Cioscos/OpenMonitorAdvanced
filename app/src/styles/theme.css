@@ -23,6 +23,9 @@
   --strip-h: 44px;
   --strip-compact-h: 28px;
   --chrome-height: var(--topbar-h);
+  /* Stacking: page content stays below 3; overlays (tooltips, dialogs) use 20. */
+  --z-strip: 3;
+  --z-topbar: 4;
   --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   color-scheme: dark;
 }

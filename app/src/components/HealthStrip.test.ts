@@ -8,6 +8,10 @@ import type { Alert, HealthReport } from '../lib/types';
 import { connectSettings, disconnectSettings } from '../test/settings';
 import { FakeBackend } from '../test/fake-backend';
 import HealthStrip from './HealthStrip.svelte';
+import stripSource from './HealthStrip.svelte?raw';
+import { readFileSync } from 'node:fs';
+const themeSource = readFileSync('src/styles/theme.css', 'utf8'); // vitest runs from app/
+const sources = import.meta.glob('./**/*.svelte', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
 const GPU = 'gpu/pci-0000:01:00.0';
 let offHealth: (() => void) | undefined;
@@ -212,4 +216,24 @@ test('one passive scroll listener, removed on unmount, and no work without a cha
   expect(chrome()).toBe('');
   add.mockRestore();
   remove.mockRestore();
+});
+
+test('the in-flow strip box has one height whether the banner is full or compact', () => {
+  expect(stripSource).toMatch(/\.strip\s*\{[^}]*height: var\(--strip-h\);[^}]*pointer-events: none;/);
+  expect(stripSource).not.toMatch(/\.compact\s*\{[^}]*height/);
+});
+
+test('the strip stacks above all page content and below the top bar', () => {
+  const level = (name: string) => Number(new RegExp(String.raw`--${name}:\s*(\d+)`).exec(themeSource)![1]);
+  expect(stripSource).toMatch(/z-index: var\(--z-strip\)/);
+  expect(sources['./TopBar.svelte']).toMatch(/z-index: var\(--z-topbar\)/);
+  expect(level('z-topbar')).toBeGreaterThan(level('z-strip'));
+  // Overlays (tooltips, dialogs) use 20 on purpose; everything else is page content or lives inside the strip.
+  const ignored = ['./HealthStrip.svelte', './simple/HealthBanner.svelte', './TopBar.svelte', './log/Deck.svelte'];
+  const levels = Object.entries(sources)
+    .filter(([file]) => !ignored.includes(file))
+    .flatMap(([file, src]) => [...src.matchAll(/z-index:\s*(\d+)/g)].map((m) => ({ file, z: Number(m[1]) })))
+    .filter(({ z }) => z < 20);
+  expect(levels.length).toBeGreaterThan(0);
+  for (const { file, z } of levels) expect(z, file).toBeLessThan(level('z-strip'));
 });

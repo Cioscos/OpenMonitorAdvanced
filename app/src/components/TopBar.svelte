@@ -106,12 +106,13 @@
   .topbar {
     position: sticky;
     top: 0;
-    z-index: 1;
+    z-index: var(--z-topbar);
     display: grid;
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 12px;
-    height: var(--topbar-h);
+    /* min-height: OS font scaling may grow the bar; the sticky offsets then assume --topbar-h (a known limit). */
+    min-height: var(--topbar-h);
     padding: 0 20px;
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     border-bottom: 1px solid var(--border);

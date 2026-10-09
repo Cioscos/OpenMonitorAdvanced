@@ -54,14 +54,15 @@
           bind:this={toggle}
           type="button"
           class="title toggle"
+          {title}
           aria-expanded={expanded}
           aria-controls={expanded ? listId : undefined}
           onclick={() => (open = !open)}
         >
-          {title}<span class="chevron" class:flipped={expanded} aria-hidden="true">▾</span>
+          <span class="label">{title}</span><span class="chevron" class:flipped={expanded} aria-hidden="true">▾</span>
         </button>
       {:else}
-        <div class="title">{title}</div>
+        <div class="title" {title}>{title}</div>
       {/if}
       {#if !compact}<div class="sub">{sinceText(elapsedMs, t)}</div>{/if}
     </div>
@@ -83,6 +84,7 @@
     display: flex;
     align-items: center;
     height: var(--strip-h);
+    pointer-events: auto;
     padding: 0 20px;
     border-bottom: 1px solid var(--border);
     background: linear-gradient(90deg, color-mix(in srgb, var(--state) 14%, var(--bg)), var(--bg) 70%);
@@ -125,12 +127,16 @@
     font-size: 12px;
   }
   .title {
+    overflow: hidden;
     font-size: 14px;
     font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .toggle {
     display: inline-flex;
     align-items: center;
+    max-width: 100%;
     gap: 8px;
     padding: 1px 8px;
     margin: -1px -8px;
@@ -146,6 +152,11 @@
   .toggle:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+  .label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .chevron {
     flex: none;

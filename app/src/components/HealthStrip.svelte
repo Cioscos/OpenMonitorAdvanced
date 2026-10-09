@@ -67,8 +67,11 @@
   .strip {
     position: sticky;
     top: var(--topbar-h);
-    z-index: 0;
+    z-index: var(--z-strip);
     flex: none;
+    /* Constant in-flow box: the compact banner shrinks inside it, so the page never moves. */
+    height: var(--strip-h);
+    pointer-events: none;
   }
   .animated {
     transition:

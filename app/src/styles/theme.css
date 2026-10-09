@@ -18,6 +18,14 @@
   --series-8: #6c8cff;
 
   --radius: 12px;
+  /* Fixed chrome heights; the health strip publishes --chrome-height (top bar plus the visible strip) for sticky navs. */
+  --topbar-h: 66px;
+  --strip-h: 44px;
+  --strip-compact-h: 28px;
+  --chrome-height: var(--topbar-h);
+  /* Stacking: page content stays below 3; overlays (tooltips, dialogs) use 20. */
+  --z-strip: 3;
+  --z-topbar: 4;
   --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   color-scheme: dark;
 }

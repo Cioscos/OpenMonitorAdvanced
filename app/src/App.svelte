@@ -3,6 +3,7 @@
   import AdvancedView from './components/advanced/AdvancedView.svelte';
   import PerformanceView from './components/performance/PerformanceView.svelte';
   import QuitDialog from './components/performance/QuitDialog.svelte';
+  import HealthStrip from './components/HealthStrip.svelte';
   import SafeModeNotice from './components/SafeModeNotice.svelte';
   import SettingsView from './components/settings/SettingsView.svelte';
   import SimpleView from './components/simple/SimpleView.svelte';
@@ -263,7 +264,8 @@
   onOpenLogFolder={() => backend.openLogFolder()}
   {stale}
 />
-<main>
+{#if visible && ready && (view === 'simple' || view === 'advanced')}<HealthStrip {store} />{/if}
+<main class:simple={view === 'simple'} class:wide={view === 'advanced'}>
   {#if startup?.safeMode}
     <SafeModeNotice status={startup} onEnable={enableVendorLibraries} />
   {/if}
@@ -290,9 +292,25 @@
 {/if}
 
 <style>
+  /* #app is a column at least as tall as the window, so main can take the space under the top bar. */
+  :global(#app) {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+  }
   main {
+    flex: 1;
+    width: 100%;
     max-width: 1100px;
     margin: 0 auto;
     padding: 20px;
+  }
+  main.simple {
+    display: flex;
+    flex-direction: column;
+    max-width: 1280px;
+  }
+  main.wide {
+    max-width: 1600px;
   }
 </style>

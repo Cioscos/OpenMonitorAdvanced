@@ -291,6 +291,27 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
+## M9a — strip chart and full-window layout
+
+**Budget from M9a (user decision, 2026-10-09):** core < 1 % CPU at idle and tray < 30 MB, unchanged; window open < 260 MB in total (WebView2 included, was < 200 MB) and app + WebView2 < 2.5 % CPU with the window open. The extra cost exists only with the window open, and only with many series charted at once: the Simple view and the default series stay under the old 200 MB.
+
+Measured 2026-10-09 on the development machine (Ryzen 7 7800X3D, 16 logical processors, RTX 4080, 2560×1440 at 165 Hz, Windows 11 Pro 10.0.26300), release build of `feat/m9a` at `2fa6bec` (`pnpm tauri build --no-bundle`), window maximized by the user, Spotify, Discord and Teams closed, `scripts/measure-footprint.ps1 -WarmupSeconds 75`, three launches per case. Core CPU 0.03–0.06 % in every run.
+
+| Case | Window memory (app + WebView2) | App + WebView2 CPU | Within budget |
+|---|---|---|---|
+| Simple view | 143.0 / 144.2 / 140.6 MB | 1.58 / 1.37 / 1.17 % | yes (also under 200 MB) |
+| Advanced CPU, «Carico totale» only ¹ | 178.0 / 172.8 / 176.5 MB | 1.29 / 1.33 / 1.44 % | yes (also under 200 MB) |
+| Advanced CPU, every series, 1 h window | 214.7 / 210.7 / 212.1 MB | 1.83 / 1.72 / 1.71 % | yes |
+| Advanced CPU, every series, 1 min window | 228.5 / 231.0 / 220.6 MB | 1.61 / 1.67 / 1.58 % | yes |
+
+Tray at rest (`-Minimized`, build `3ae3a39`): core 0.02 % CPU, 18.7 MB, no WebView2 process — unchanged by M9a.
+
+¹ Meant as the default series (load and effective clock); the effective clock was dropped at every start by a selection bug, fixed afterwards in `6e36f54`.
+
+**Single readings are not reliable.** Before `2fa6bec` the same build read about 50 or about 103 MB in the WebView2 renderer depending on garbage-collection timing, so the first single-shot comparisons (Simple view ~197 MB against 132 MB on `main`) overstated or understated the cost at random. A Chromium memory-infra dump over CDP showed the difference was all in `blink_gc` (Oilpan): 64.8 MB against 10.6 MB, the rest equal. Root cause (memory-infra traces and 5-minute samples of the renderer): the width transition of the Simple view bars (`transition: width 0.3s`) relaid out and repainted the tile at every 165 Hz frame for 300 ms after each tick; the extra Blink garbage (about 1.55 MB/s against 1.15 on `main`) kept V8's memory reducer from running at 30 s, and the heap committed by the first regular GC stayed. The fills now ease with a composited `transform: scaleX()` (`2fa6bec`): renderer 55–60 MB at steady state against 103–118 MB before (`main` 46–64 MB). Measure at least three launches, or over minutes, before a budget decision.
+
+**Slow growth with the window open (all builds, `main` included):** the renderer grows about 3–4 MB a minute over the first minutes. Taken for now as the one-hour live history of the charts filling up (user decision, 2026-10-09); a 60-minute measurement with the window open is owed (`docs/follow-ups.md`, M9a).
+
 ## M8a1 — CPU and RAM stress test (spec M8 §11)
 
 Not measured in this session: `scripts/measure-footprint.ps1` starts the release build of the app and opens its window, and an agent does not drive the app or the user's desktop (live-check rule). The idle and under-load measurements are owed to the live checks (A28, P13). M8a1 adds no idle work: `oma-load.exe` exists only while a test runs, and the app's `performance/` module stays inactive without a test.

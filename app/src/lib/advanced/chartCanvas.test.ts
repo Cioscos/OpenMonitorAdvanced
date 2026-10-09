@@ -144,3 +144,20 @@ test('the X label font size rounds to whole device pixels like uPlot', () => {
   expect(timeTickFont(1.1)).toMatch(/^13px /);
   expect(timeTickFont(1.25)).toMatch(/^15px /);
 });
+
+test('dashed_paths_set_and_reset_the_line_dash', () => {
+  const { plot, ctx } = canvasFixture([[0, 1], [20, 40]]);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [
+    { stroke: new Path2D(), gapsClip: null, color: '#f0f', dash: [6, 4] },
+  ], [], 60, 'en', 0, theme, [{ x: 100, y: 50, color: '#f0f', dash: [6, 4] }]);
+  const calls = ctx.setLineDash.mock.calls as unknown as number[][][];
+  expect(calls.filter(([d]) => d.length === 2)).toHaveLength(2);
+  expect(calls.at(-1)![0]).toEqual([]);
+});
+
+test('time_labels_false_draws_grid_lines_without_labels', () => {
+  const { plot, ctx } = canvasFixture([[0, 1], [20, 40]]);
+  drawChartCanvas(ctx as unknown as CanvasRenderingContext2D, plot, [], [0, 2], 60, 'en', 0, theme, [], { timeLabels: false });
+  expect(ctx.fillText).not.toHaveBeenCalled();
+  expect(ctx.moveTo).toHaveBeenCalledWith(10, 20);
+});

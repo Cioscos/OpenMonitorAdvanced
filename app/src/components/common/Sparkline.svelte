@@ -175,7 +175,7 @@
       class="endpoint"
       style="position: absolute; width: 5px; height: 5px; border-radius: 50%; background: white; transform: translate(-50%, -50%); pointer-events: none;"
       style:left="100%"
-      style:top="{geometry.endpoint.y}px"
+      style:top="{(geometry.endpoint.y / HEIGHT) * 100}%"
     ></span>
   {/if}
 </div>
@@ -185,7 +185,8 @@
     position: relative;
     display: block;
     width: 100%;
-    height: 34px;
+    height: 100%;
+    min-height: 34px;
   }
   .sparkline-scroll {
     position: absolute;

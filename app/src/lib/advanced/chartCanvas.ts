@@ -5,6 +5,8 @@ export type ChartCanvasPath = Readonly<{
   stroke: Path2D | null;
   gapsClip: Path2D | null;
   color: string;
+  /** Line dash; absent means solid. */
+  dash?: readonly number[];
 }>;
 
 /**
@@ -15,6 +17,7 @@ export type ChartHeldSegment = Readonly<{
   x: number;
   y: number;
   color: string;
+  dash?: readonly number[];
 }>;
 
 /** uPlot 1.6.32's default axis font family, in which it draws the Y axis labels. */
@@ -39,6 +42,7 @@ export function drawChartCanvas(
   overscanPx: number,
   theme: { gridColor: string; textColor: string },
   held: ReadonlyArray<ChartHeldSegment> = [],
+  options: { timeLabels?: boolean } = {},
 ): void {
   const { left, top, width, height } = plot.bbox;
   const start = left - Math.max(0, overscanPx);
@@ -71,7 +75,7 @@ export function drawChartCanvas(
     }
   }
 
-  for (const { stroke, gapsClip, color } of paths) {
+  for (const { stroke, gapsClip, color, dash } of paths) {
     if (!stroke) continue;
     ctx.save();
     try {
@@ -80,7 +84,7 @@ export function drawChartCanvas(
       ctx.clip();
       if (gapsClip) ctx.clip(gapsClip);
       ctx.shadowBlur = 0;
-      ctx.setLineDash([]);
+      ctx.setLineDash(dash ? [...dash] : []);
       ctx.strokeStyle = color;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -90,6 +94,7 @@ export function drawChartCanvas(
       ctx.lineWidth = 1.5 * ratio;
       ctx.globalAlpha = 1;
       ctx.stroke(stroke);
+      ctx.setLineDash([]);
     } finally {
       ctx.restore();
     }
@@ -97,7 +102,7 @@ export function drawChartCanvas(
 
   // Drawn into the translated canvas, the held segments scroll with their curves, so frames
   // between samples need no per-series layer writes.
-  for (const { x, y, color } of held) {
+  for (const { x, y, color, dash } of held) {
     ctx.save();
     try {
       ctx.beginPath();
@@ -107,7 +112,7 @@ export function drawChartCanvas(
       ctx.moveTo(Math.max(start, x), y);
       ctx.lineTo(right, y);
       ctx.shadowBlur = 0;
-      ctx.setLineDash([]);
+      ctx.setLineDash(dash ? [...dash] : []);
       ctx.strokeStyle = color;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -117,12 +122,13 @@ export function drawChartCanvas(
       ctx.lineWidth = 1.5 * ratio;
       ctx.globalAlpha = 1;
       ctx.stroke();
+      ctx.setLineDash([]);
     } finally {
       ctx.restore();
     }
   }
 
-  if (tickXs.length > 0) {
+  if (tickXs.length > 0 && options.timeLabels !== false) {
     ctx.save();
     try {
       ctx.globalAlpha = 1;

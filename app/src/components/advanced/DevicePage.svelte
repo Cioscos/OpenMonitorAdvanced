@@ -10,7 +10,7 @@
   import { display } from '../../lib/units.svelte';
   import DeviceInfo from './DeviceInfo.svelte';
   import GpuProcesses from './GpuProcesses.svelte';
-  import HistoryChart from './HistoryChart.svelte';
+  import StripChart from './StripChart.svelte';
   import KpiRow from './KpiRow.svelte';
   import SensorTable from './SensorTable.svelte';
   import ServiceNotice from './ServiceNotice.svelte';
@@ -58,7 +58,7 @@
       <div><span class="tag disk-state">{t(`storage.power.${power}`)}</span></div>
     {/if}
     <KpiRow {kpis} {valueOf} {qualityOf} statsOf={stats.statsOf} {rate} />
-    <HistoryChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} {rate} />
+    <StripChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} {rate} />
     <SensorTable {sensors} {valueOf} {qualityOf} {stats} {rate} />
     {#if hasProperties || entry.kind === 'gpu'}
       <div class="extra">

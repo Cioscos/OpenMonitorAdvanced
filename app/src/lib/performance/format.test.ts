@@ -1,7 +1,7 @@
 import { i18n, t } from '../i18n/index.svelte';
-import type { ErrorRecord, Phase } from '../types';
+import type { ErrorRecord, Phase, Schema, Sensor } from '../types';
 import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA } from '../backend/mock';
-import { cpuChartSensors, dataErrorKind, diskChartSensors, errorText, formatOffset, isDiskKernel, kernelTerm, gpuChartSensors, eventText, formatDuration, marked, modeTerm, phaseLabel, timedSeconds, verdictTitle } from './format';
+import { stressChartSensors, dataErrorKind, diskChartSensors, errorText, formatOffset, isDiskKernel, kernelTerm, eventText, formatDuration, marked, modeTerm, phaseLabel, timedSeconds, verdictTitle } from './format';
 
 const phase = (over: Partial<Phase>): Phase => ({
   kernel: 'k2',
@@ -107,23 +107,6 @@ test('verdict_title_reads_the_recovered_phase', () => {
   expect(verdictTitle(null, t)).toBe(t('performance.result.unknown'));
 });
 
-test('chart_sensors_follow_da5', () => {
-  expect(cpuChartSensors(MOCK_SCHEMA)).toEqual([]);
-  expect(cpuChartSensors(SERVICE_MOCK_SCHEMA).map((s) => s.id)).toEqual(['cpu/0/temperature/package', 'cpu/0/power/package']);
-  const tdie = { ...SERVICE_MOCK_SCHEMA.sensors[0], id: 'cpu/0/temperature/tdie' };
-  expect(cpuChartSensors({ ...SERVICE_MOCK_SCHEMA, sensors: [...SERVICE_MOCK_SCHEMA.sensors, tdie] })[0].id).toBe('cpu/0/temperature/tdie');
-  expect(cpuChartSensors(null)).toEqual([]);
-});
-
-test('gpu chart sensors come from the status device, not from a guess', () => {
-  const first = MOCK_SCHEMA.sensors.filter((x) => x.deviceId.startsWith('gpu/'));
-  const other = first.map((x) => ({ ...x, id: x.id.replace('gpu/pci-0000:01:00.0', 'gpu/pci-0000:0c:00.0'), deviceId: 'gpu/pci-0000:0c:00.0' }));
-  const schema = { ...MOCK_SCHEMA, sensors: [...first, ...other] };
-  expect(gpuChartSensors(schema, 'gpu/pci-0000:0c:00.0').map((x) => x.id)).toEqual(['gpu/pci-0000:0c:00.0/temperature/core', 'gpu/pci-0000:0c:00.0/power/board']);
-  expect(gpuChartSensors(schema, 'gpu/pci-0000:01:00.0')[0].deviceId).toBe('gpu/pci-0000:01:00.0');
-  expect(gpuChartSensors(schema, null)).toEqual([]);
-});
-
 test('disk chart sensors are the drive temperature and the two speeds of the test disk', () => {
   const sensor = (id: string, deviceId: string) => ({ ...MOCK_SCHEMA.sensors[0], id, deviceId });
   const disk = (d: string) => [`${d}/temperature/composite`, `${d}/temperature/drive`, `${d}/throughput/read`, `${d}/throughput/write`, `${d}/data/host-written`].map((id) => sensor(id, d));
@@ -178,4 +161,47 @@ test('one wrong bit is singular', () => {
   const bits = (actual: number) => dataErrorKind({ kind: 'bit_flip', actual } as ErrorRecord, t);
   expect(bits(1)).toBe(t('performance.result.error.bit_flip_one'));
   expect(bits(3)).toBe(t('performance.result.error.bit_flip', { bits: 3 }));
+});
+
+describe('stressChartSensors', () => {
+  const GPU = 'gpu/pci-0000:01:00.0';
+  const DISK = 'storage/disk0';
+  const sensor = (id: string, key = id): Sensor => ({ ...SERVICE_MOCK_SCHEMA.sensors[0], id, deviceId: id.split('/').slice(0, -2).join('/'), label: { key } as Sensor['label'] });
+  const schemaOf = (...sensors: Sensor[]): Schema => ({ ...SERVICE_MOCK_SCHEMA, sensors });
+  const ids = (list: Sensor[]) => list.map((s) => s.id);
+  const cpu = [sensor('cpu/0/temperature/package'), sensor('cpu/0/power/package'), sensor('cpu/0/clock/avg', 'cpu.clock.effective'), sensor('cpu/0/clock/other', 'cpu.clock.core')];
+  const gpu = ['temperature/core', 'temperature/hotspot', 'power/board', 'clock/core'].map((n) => sensor(`${GPU}/${n}`));
+
+  test('stress_chart_cpu_normal_is_temperature_and_power', () => {
+    expect(ids(stressChartSensors(schemaOf(...cpu), 'cpu', 'normal', null, null))).toEqual(['cpu/0/temperature/package', 'cpu/0/power/package']);
+  });
+  test('stress_chart_cpu_temperature_prefers_tdie', () => {
+    expect(ids(stressChartSensors(schemaOf(...cpu, sensor('cpu/0/temperature/tdie')), 'cpu', 'normal', null, null))[0]).toBe('cpu/0/temperature/tdie');
+  });
+  test('stress_chart_cpu_overclock_is_temperature_and_clock', () => {
+    expect(ids(stressChartSensors(schemaOf(...cpu), 'cpu', 'overclock', null, null))).toEqual(['cpu/0/temperature/package', 'cpu/0/clock/avg']);
+  });
+  test('stress_chart_ram_is_used_and_dimm_temperatures', () => {
+    const ram = [sensor('memory/0/temperature/d0', 'memory.temperature.dimm'), sensor('memory/0/load/used', 'memory.load'), sensor('memory/0/temperature/d1', 'memory.temperature.dimm')];
+    expect(ids(stressChartSensors(schemaOf(...cpu, ...ram), 'ram', 'normal', null, null))).toEqual(['memory/0/load/used', 'memory/0/temperature/d0', 'memory/0/temperature/d1']);
+  });
+  test('stress_chart_ram_without_dimms_falls_back_to_cpu_temperature', () => {
+    const ram = [sensor('memory/0/load/used', 'memory.load')];
+    expect(ids(stressChartSensors(schemaOf(...cpu, ...ram), 'ram', 'overclock', null, null))).toEqual(['memory/0/load/used', 'cpu/0/temperature/package']);
+  });
+  test('stress_chart_gpu_normal_is_core_hotspot_and_power', () => {
+    expect(ids(stressChartSensors(schemaOf(...gpu), 'gpu', 'normal', GPU, null))).toEqual([`${GPU}/temperature/core`, `${GPU}/temperature/hotspot`, `${GPU}/power/board`]);
+  });
+  test('stress_chart_gpu_overclock_is_core_hotspot_and_clock', () => {
+    expect(ids(stressChartSensors(schemaOf(...gpu), 'gpu', 'overclock', GPU, null))).toEqual([`${GPU}/temperature/core`, `${GPU}/temperature/hotspot`, `${GPU}/clock/core`]);
+  });
+  test('stress_chart_disk_is_temperature_read_and_write', () => {
+    const disk = ['temperature/drive', 'throughput/read', 'throughput/write'].map((n) => sensor(`${DISK}/${n}`));
+    expect(ids(stressChartSensors(schemaOf(...disk), 'disk', 'normal', null, DISK))).toEqual(disk.map((s) => s.id));
+  });
+  test('stress_chart_skips_missing_sensors', () => {
+    expect(ids(stressChartSensors(schemaOf(gpu[1]), 'gpu', 'normal', GPU, null))).toEqual([`${GPU}/temperature/hotspot`]);
+    expect(stressChartSensors(schemaOf(), 'cpu', 'overclock', null, null)).toEqual([]);
+    expect(stressChartSensors(null, 'ram', 'normal', null, null)).toEqual([]);
+  });
 });

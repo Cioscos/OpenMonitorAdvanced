@@ -4,7 +4,7 @@ import baseline from '../../../../crates/oma-core/src/scores/cpu-1-baseline.json
 import gpuBaseline from '../../../../crates/oma-core/src/scores/gpu-1-baseline.json';
 import diskBaseline from '../../../../crates/oma-core/src/scores/disk-1-baseline.json';
 import catalog from '../../../../testdata/performance/catalog.json';
-import { BENCH_TERMS, DISK_BENCH_TERMS, DISK_MODE_TERMS, DISK_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
+import { BENCH_TERMS, DISK_BENCH_TERMS, DISK_MODE_TERMS, DISK_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, MONITOR_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
 
 const LOCALES: Locale[] = ['en', 'it'];
 
@@ -85,4 +85,9 @@ test('every_disk_term_has_an_entry', () => {
   expect([...DISK_TERMS].sort()).toEqual(['compressible', 'dataError', 'dataUnitsWritten', 'diskPoints', 'iops', 'latency', 'mbs', 'queueDepth', 'seqRnd', 'slcCache']);
   expect(TERMS).toEqual(expect.arrayContaining(DISK_TERMS));
   expect(missing(DISK_TERMS.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
+});
+
+test('monitor_terms_have_texts', () => {
+  expect(MONITOR_TERMS).toEqual(['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock']);
+  expect(missing([...MONITOR_TERMS, 'vram', 'throttling', 'clock'].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

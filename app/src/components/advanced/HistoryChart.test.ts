@@ -301,6 +301,22 @@ test('the saved selection of the section wins over the defaults', async () => {
   expect(backend.historyCalls[0].ids).toEqual([VRAM]);
 });
 
+test('fixed_series_hides_the_picker_and_ignores_the_saved_selection', async () => {
+  await settings.update({ advanced: { series: { [GPU]: [VRAM] } } });
+  const backend = fakeBackend();
+  const { container } = render(HistoryChart, { sectionId: GPU, sensors: gpuSensors, defaults: [LOAD, TEMP], schema: MOCK_SCHEMA, store: new LiveStore(), backend, fixedSeries: true });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(container.querySelector('details.picker')).toBeNull();
+  expect(backend.historyCalls[0].ids).toEqual([LOAD, TEMP]);
+});
+
+test('fixed_series_saves_nothing', async () => {
+  const backend = fakeBackend();
+  render(HistoryChart, { sectionId: GPU, sensors: gpuSensors, defaults: [LOAD, TEMP], schema: MOCK_SCHEMA, store: new LiveStore(), backend, fixedSeries: true });
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(settings.state?.settings.advanced.series[GPU]).toBeUndefined();
+});
+
 test('an empty selection shows a hint and fetches nothing', async () => {
   await settings.update({ advanced: { series: { [GPU]: [] } } });
   const backend = fakeBackend();

@@ -3,6 +3,7 @@ import { i18n } from './lib/i18n/index.svelte';
 beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
 afterEach(() => { cleanup(); settings.state = null; settings.errors = {}; });
 import { flushSync } from 'svelte';
+import appSource from './App.svelte?raw';
 import App from './App.svelte';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
@@ -38,7 +39,7 @@ test('simple view shows the banner and the CPU, RAM and network tiles', async ()
   expect(screen.getByText('CPU')).toBeTruthy();
   expect(screen.getByText('RAM')).toBeTruthy();
   expect(screen.getByText('Network · Disks')).toBeTruthy();
-  expect(screen.getByText((text) => text.startsWith('C: 65% · '))).toBeTruthy();
+  expect(screen.getByText('C: · 65%')).toBeTruthy();
   expect(screen.queryByText('Re-enable')).toBeNull();
 });
 
@@ -52,7 +53,8 @@ test('simple view shows only discrete gpus', async () => {
 
   expect(screen.getAllByText('GPU')).toHaveLength(1);
   expect(screen.getByText('Mock GeForce RTX 4080')).toBeTruthy();
-  expect(screen.getByText((text) => text.startsWith('VRAM ') && text.endsWith(' / 16.0 GB'))).toBeTruthy();
+  expect(screen.getByText('VRAM')).toBeTruthy();
+  expect(screen.getByText((text) => text.endsWith(' / 16.0 GB'))).toBeTruthy();
   expect(screen.queryByText('AMD Radeon(TM) Graphics')).toBeNull();
 });
 
@@ -105,7 +107,7 @@ test('clicking the GPU tile opens its Advanced page, the toggle goes back', asyn
   backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 1000, values: mockValues(1) });
   flushSync();
 
-  await fireEvent.click(screen.getByText('Mock GeForce RTX 4080').closest('button')!);
+  await fireEvent.click(screen.getByRole('button', { name: 'GPU' }));
   expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('GPU');
   await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('gpu/pci-0000:01:00.0'));
   await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
@@ -550,4 +552,41 @@ test('a test that starts opens its page and marks the sidebar entry', async () =
   await fireEvent.click(screen.getByRole('button', { name: 'History' }));
   backend.emitPerformanceStatus(makeRunStatus({ state: 'running', sessionId: 'x', elapsedMs: 1000 }));
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'History' })).toBeTruthy());
+});
+
+test('simple_is_1280_advanced_1600_performance_1100', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  const main = () => document.querySelector('main')!;
+  await vi.waitFor(() => expect(main().classList.contains('simple')).toBe(true));
+  expect(main().classList.contains('wide')).toBe(false);
+  expect(appSource).toMatch(/main\.simple\s*\{[^}]*max-width: 1280px;/);
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  expect(main().classList.contains('wide')).toBe(true);
+  expect(main().classList.contains('simple')).toBe(false);
+  expect(appSource).toMatch(/main\.wide\s*\{[^}]*max-width: 1600px;/);
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  expect(main().classList.contains('wide')).toBe(false);
+  expect(main().classList.contains('simple')).toBe(false);
+  expect(appSource).toMatch(/\n {2}main \{[^}]*max-width: 1100px;/);
+});
+
+test('the health strip sits under the top bar in Simple and Advanced only', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: Date.now(), values: mockValues(1) });
+  const strip = () => document.querySelector('.strip');
+  await vi.waitFor(() => expect(strip()).not.toBeNull());
+  expect(strip()!.previousElementSibling!.tagName).toBe('HEADER');
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  expect(strip()).not.toBeNull();
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  expect(strip()).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  expect(strip()).toBeNull();
+  expect(document.documentElement.style.getPropertyValue('--chrome-height')).toBe('');
 });

@@ -90,6 +90,23 @@ export class ChartBuffer {
       }),
     ];
   }
+
+  /** The x column in seconds, a fresh copy; strips of one snapshot share it and never write to it. */
+  times(): number[] {
+    return this.#timestampsMs.map((ms) => ms / 1000);
+  }
+
+  /** `times` plus only the columns at `indices`; `convert[k]` applies to `indices[k]`. */
+  columns(indices: number[], convert: ReadonlyArray<((value: number) => number) | undefined> = [], times: number[] = this.times()): uPlot.AlignedData {
+    return [
+      times,
+      ...indices.map((index, k) => {
+        const column = this.#series[index] ?? [];
+        const fn = convert[k];
+        return fn ? column.map((v) => (v === null ? null : fn(v))) : [...column];
+      }),
+    ];
+  }
 }
 
 /** Distinct units of `ids`, in order of first appearance; unknown ids are skipped. */
@@ -133,6 +150,21 @@ export function initialSeries(saved: string[] | null, candidates: string[], defa
   return kept.length > 0 ? kept : fallback;
 }
 
+/** The ids present in `candidates`, in order and once each: the strip chart has no series or unit limit. */
+export function knownSelection(ids: string[], candidates: string[]): string[] {
+  const known = new Set(candidates);
+  return [...new Set(ids)].filter((id) => known.has(id));
+}
+
+/** `initialSeries` for the strip chart: the same rules, over `knownSelection`. */
+export function initialStripSeries(saved: string[] | null, candidates: string[], defaults: string[]): string[] {
+  const fallback = knownSelection(defaults, candidates);
+  if (saved === null) return fallback;
+  if (saved.length === 0) return [];
+  const kept = knownSelection(saved, candidates);
+  return kept.length > 0 ? kept : fallback;
+}
+
 /** Series colours: accent tokens first, then the four chart-only tokens of theme.css. */
 export const PALETTE_TOKENS = ['--accent', '--accent-2', '--ok', '--warn', '--series-5', '--series-6', '--series-7', '--series-8'] as const;
 
@@ -173,6 +205,21 @@ export function displayScale(unit: Unit, units: ChartUnits): DisplayScale {
     };
   }
   return { convert: undefined, format: (value, locale, t) => formatValue(value, unit, locale, t) };
+}
+
+/** Units whose values pick their own prefix (GHz, GB, Mbit/s, kJ): no single symbol fits a title. */
+const AUTO_PREFIX_UNITS: ReadonlySet<Unit> = new Set(['megahertz', 'bytes', 'bytes_per_second', 'bits_per_second', 'joule']);
+
+/**
+ * The symbol a display scale of `unit` writes after its numbers ("%", "°F", "RPM"), read from
+ * its own formatter so it follows the display units; null for units without one (count, flags,
+ * lanes) and for those whose values pick their own prefix.
+ */
+export function scaleSymbol(unit: Unit, scale: DisplayScale, locale: string, t: Translate): string | null {
+  if (AUTO_PREFIX_UNITS.has(unit)) return null;
+  const text = scale.format(1, locale, t);
+  const symbol = text.replace(/^[\d\s.,]+/u, '');
+  return symbol !== text && symbol !== '' && !/\d/.test(symbol) ? symbol : null;
 }
 
 /** Scale key per series (its unit): the first unit is drawn on the left axis, the second on the right. */
@@ -307,4 +354,61 @@ export function timeAxisSpace(
     previous = spacing;
   }
   return TIME_AXIS_MIN_SPACE;
+}
+
+/** Height of a chart with one strip, its time axis included (CSS px). */
+export const STRIP_SINGLE_HEIGHT = 260;
+/** Height of the lines of each strip when several are stacked (CSS px). */
+export const STRIP_HEIGHT = 130;
+/** Room the last strip adds under its lines for the time labels (CSS px). */
+export const TIME_AXIS_HEIGHT = 40;
+/** Width of every strip's Y axis, so the lines of all strips line up (CSS px). */
+export const Y_AXIS_PX = 72;
+/** Width of the legend at the right of each strip, and its gap to the lines (CSS px). */
+export const LEGEND_PX = 220;
+export const LEGEND_GAP_PX = 12;
+
+/** One chart strip: a single unit, with the positions of its ids in the list given to `stripLayout`. */
+export interface Strip {
+  unit: Unit;
+  ids: string[];
+  indices: number[];
+}
+
+/** One strip per unit, in order of the first series of each unit; ids missing from the schema are skipped. */
+export function stripLayout(ids: string[], schema: Schema): Strip[] {
+  const strips: Strip[] = [];
+  ids.forEach((id, index) => {
+    const unit = schema.sensors.find((s) => s.id === id)?.unit;
+    if (!unit) return;
+    let strip = strips.find((x) => x.unit === unit);
+    if (!strip) strips.push((strip = { unit, ids: [], indices: [] }));
+    strip.ids.push(id);
+    strip.indices.push(index);
+  });
+  return strips;
+}
+
+/** Line dashes used when the eight palette colours run out: solid, dashed, dotted. */
+export const STRIP_DASHES: readonly (readonly number[])[] = [[], [6, 4], [2, 3]];
+
+/** Colour token and dash of the series at each index: the palette repeats every 8, the dash every 8 up to 3 times. */
+export function stripPalette(count: number): Array<{ token: (typeof PALETTE_TOKENS)[number]; dash: readonly number[] }> {
+  return Array.from({ length: count }, (_, i) => ({
+    token: PALETTE_TOKENS[i % PALETTE_TOKENS.length],
+    dash: STRIP_DASHES[Math.floor(i / PALETTE_TOKENS.length) % STRIP_DASHES.length],
+  }));
+}
+
+/** Min and max of the non-null values whose x is at least `sinceSeconds`; null when there are none. */
+export function windowExtent(xs: number[], column: (number | null)[], sinceSeconds: number): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    const v = column[i];
+    if (xs[i] < sinceSeconds || v === null || v === undefined) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return min > max ? null : { min, max };
 }

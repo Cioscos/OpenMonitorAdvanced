@@ -183,6 +183,19 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
   - l'interfaccia della M8d2 deve mostrare i nomi dei modelli come testo semplice (mai HTML).
 - **Informativa:** la certificazione Data Privacy Framework di Cloudflare è «da verificare» in `docs/benchmark-scoring.md` (la pagina dell'elenco non si legge in automatico).
 
+## Open: charts and layout (M9a)
+
+Grafico a strisce, cassetto «Serie», Semplice e Avanzata a tutta finestra, fascia dello stato (spec `docs/superpowers/specs/2026-10-09-m9a-grafico-layout-design.md`, piano `docs/superpowers/plans/2026-10-09-m9a-grafico-layout.md`). Prove dal vivo Z1–Z7 e della fascia superate con l'utente il 2026-10-09 (Z6 compresa), senza input sintetico. Misure in `docs/perf-budget.md`, sezione M9a.
+
+- **Misura lunga dovuta:** con la finestra aperta il renderer di WebView2 cresce di circa 3–4 MB al minuto nei primi minuti, anche sulla `main`. Per ora si considera lo storico di un'ora dei grafici che si riempie (decisione dell'utente del 2026-10-09); da confermare con una misura di 60 minuti a finestra aperta e massimizzata, campionando il renderer ogni 30 s.
+- **Memoria ancora da indagare:** le sparkline della Semplice scrivono circa 244 trasformazioni inline al secondo, la fonte più grande di garbage di Blink rimasta (anche sulla `main`); il processo GPU di WebView2 ha circa 17 MB in più della `main` (sospetto un `backdrop-filter`). Analisi e strumenti in `.superpowers/diag/m9a-memory/` (locale): `memory-findings.md`, `sample.ps1` (memoria del renderer ogni 5 s), `memdump.ps1` e `parse.py` (dump memory-infra via CDP).
+- **Minori rinviati dalle revisioni:**
+  - legenda: il titolo mostra il simbolo base (MHz, B) mentre i valori si adattano (GHz, GB); i nomi lunghi sono troncati con il nome intero nel `title`;
+  - cassetto: Esc lo chiude solo con il fuoco dentro; la × e il clic sul nome nella legenda contano come clic fuori e lo chiudono; con una selezione vuota e il cassetto aperto resta una fascia di 40 px senza asse del tempo; la soglia delle due colonne si misura sul `contentRect` (~544 px) invece che a 520 px;
+  - Semplice: il sollevamento di tutto `.threads` blocca i clic negli spazi tra le barre (basterebbe sollevare `.threads i`); `.disks [title]` prende anche `.act` con il titolo vuoto; le barre dei thread non hanno `aria-valuetext`; il testo del `Term` «/ 320 W» è solo il valore del limite; `linkBps` porta bit/s e si divide per 8 in `SimpleView`;
+  - stress test: `chosen` resta in `$state` con `fixedSeries` anche se non serve; i sensori di clock e RAM si cercano per `label.key` in tutto lo schema;
+  - test: asserzioni con regex sul sorgente in `SimpleView.test.ts` e nel `Tile`; i test di `select.ts` scritti dopo il codice; il filtro `/fan/i` di un test è largo.
+
 ## Open: leaderboard app (M8d2)
 
 App della classifica (piano `docs/superpowers/plans/2026-10-09-m8d2-app-classifica.md`, documenti in `docs/benchmark-scoring.md`, sezione «L'app»). Implementata nel branch `feat/m8d2-app-classifica`, non unita in `main`. Prove dal vivo Z9.1–Z9.9 fatte con l'utente il 2026-10-09, senza input sintetico. Restano aperte solo la Z9.4 e la parte senza rete della Z9.7.

@@ -4,7 +4,7 @@
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
   import { formatBytes as formatDiskBytes, formatMbs } from '../../lib/performance/disk';
-  import { around, cpuChartSensors, diskChartSensors, gpuChartSensors, kernelTerm, marked, modeTerm, pieces } from '../../lib/performance/format';
+  import { around, kernelTerm, marked, modeTerm, pieces, stressChartSensors } from '../../lib/performance/format';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { PerformancePage } from '../../lib/view';
   import type { PhaseInfo, RunWarning } from '../../lib/types';
@@ -55,9 +55,7 @@
   });
   const gpu = $derived(status?.component === 'gpu');
   const disk = $derived(status?.component === 'disk');
-  const chartSensors = $derived(
-    gpu ? gpuChartSensors(store.schema, status?.gpuDeviceId ?? null) : disk ? diskChartSensors(store.schema, status?.disk?.deviceId || performanceStore.diskDeviceId) : cpuChartSensors(store.schema),
-  );
+  const chartSensors = $derived(status ? stressChartSensors(store.schema, status.component, status.objective, status.gpuDeviceId ?? null, status.disk?.deviceId || performanceStore.diskDeviceId) : []);
   const counter = $derived(new Intl.NumberFormat(locale));
   const wheaLabel = $derived(around(t('performance.run.whea'), 'WHEA'));
   const clockLabel = $derived(around(t('performance.run.clock'), t('glossary.clock.name')));
@@ -181,7 +179,7 @@
       <section class="panel" aria-label={t('performance.run.chart')}>
         <p class="label">{t('performance.run.chart')}</p>
         {#if chartSensors.length > 0 && store.schema}
-          <HistoryChart sectionId="performance" sensors={chartSensors} defaults={chartSensors.map((s) => s.id)} schema={store.schema} {store} {backend} fixedWindow={CHART_SECONDS} />
+          <HistoryChart sectionId="performance" sensors={chartSensors} defaults={chartSensors.map((s) => s.id)} schema={store.schema} {store} {backend} fixedWindow={CHART_SECONDS} fixedSeries />
         {:else}
           <p class="muted">{t('performance.run.noChart')}</p>
         {/if}

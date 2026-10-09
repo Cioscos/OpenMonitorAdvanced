@@ -91,6 +91,7 @@ test('monitor_terms_have_texts', () => {
   expect(MONITOR_TERMS).toEqual([
     'hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock',
     'pcieTraffic', 'energySinceStart', 'reallocatedSectors', 'pendingSectors', 'uncorrectableSectors', 'powerLimitation',
+    'sectorWarning', 'diskCriticalWarning', 'batteryRemaining',
   ]);
   expect(missing([...MONITOR_TERMS, 'vram', 'throttling', 'clock'].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });

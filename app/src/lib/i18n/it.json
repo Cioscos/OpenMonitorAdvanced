@@ -1016,7 +1016,7 @@
   "glossary.tjmax.name": "Tjmax",
   "glossary.thermalStop": "Il test si ferma da solo se la temperatura supera la soglia per due letture di fila.",
   "glossary.thermalStop.name": "Stop termico",
-  "glossary.throttling": "La CPU abbassa da sola la frequenza perché è troppo calda o consuma troppo.",
+  "glossary.throttling": "Il chip abbassa da solo la frequenza perché è troppo caldo.",
   "glossary.throttling.name": "Throttling",
   "glossary.whea": "Gli errori hardware che Windows registra. Quelli «corretti» li ha già sistemati l'hardware, ma dicono che il sistema è al limite.",
   "glossary.whea.name": "WHEA",
@@ -1718,5 +1718,11 @@
   "glossary.trfc2.name": "tRFC2",
   "glossary.trfc2": "Un refresh cycle time più corto (modalità a granularità fine della DDR5), in cicli: per quanto tempo la RAM è occupata in quel rinfresco.",
   "glossary.trfcSb.name": "tRFCsb",
-  "glossary.trfcSb": "Refresh cycle time per banco (DDR5): quanto dura il rinfresco di un solo banco, mentre gli altri continuano a lavorare."
+  "glossary.trfcSb": "Refresh cycle time per banco (DDR5): quanto dura il rinfresco di un solo banco, mentre gli altri continuano a lavorare.",
+  "glossary.sectorWarning.name": "Avviso sui settori",
+  "glossary.sectorWarning": "Il disco segnala settori riallocati, in attesa o non correggibili: sono state trovate zone danneggiate. Fai una copia dei dati.",
+  "glossary.diskCriticalWarning.name": "Avviso critico",
+  "glossary.diskCriticalWarning": "Il disco dice che si sta guastando: un NVMe ha alzato l'avviso critico, oppure un valore di salute SATA è sceso alla soglia di guasto.",
+  "glossary.batteryRemaining.name": "Energia residua",
+  "glossary.batteryRemaining": "L'energia rimasta adesso nella batteria, in wattora (Wh)."
 }

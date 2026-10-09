@@ -1016,7 +1016,7 @@
   "glossary.tjmax.name": "Tjmax",
   "glossary.thermalStop": "The test stops by itself if the temperature goes over the threshold for two readings in a row.",
   "glossary.thermalStop.name": "Thermal stop",
-  "glossary.throttling": "The CPU lowers its own frequency because it is too hot or drawing too much power.",
+  "glossary.throttling": "The chip lowers its own frequency because it is too hot.",
   "glossary.throttling.name": "Throttling",
   "glossary.whea": "The hardware errors Windows records. The «corrected» ones were already fixed by the hardware, but they say the system is at its limit.",
   "glossary.whea.name": "WHEA",
@@ -1718,5 +1718,11 @@
   "glossary.trfc2.name": "tRFC2",
   "glossary.trfc2": "A shorter refresh cycle time (DDR5 fine-granularity mode), in cycles: how long the RAM is busy during that refresh.",
   "glossary.trfcSb.name": "tRFCsb",
-  "glossary.trfcSb": "Same-bank refresh cycle time (DDR5): how long a refresh of one bank takes, while the other banks keep working."
+  "glossary.trfcSb": "Same-bank refresh cycle time (DDR5): how long a refresh of one bank takes, while the other banks keep working.",
+  "glossary.sectorWarning.name": "Sector warning",
+  "glossary.sectorWarning": "The disk reports reallocated, pending or uncorrectable sectors: damaged areas were found. Back up your data.",
+  "glossary.diskCriticalWarning.name": "Critical warning",
+  "glossary.diskCriticalWarning": "The disk says it is failing: an NVMe drive raised its critical warning, or a SATA health value fell to its failure threshold.",
+  "glossary.batteryRemaining.name": "Remaining energy",
+  "glossary.batteryRemaining": "The energy left in the battery right now, shown in watt-hours (Wh)."
 }

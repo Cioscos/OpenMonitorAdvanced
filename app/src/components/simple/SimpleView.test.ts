@@ -234,6 +234,7 @@ test('battery_tile_only_on_laptops', async () => {
   expect(text()).toContain(t('tile.battery'));
   expect(text()).toContain('64');
   expect(text()).toContain(t('tile.battery.discharging'));
+  expect(text()).toContain('-12.5 W');
   expect(text()).toContain(t('duration.hoursMinutes', { h: 1, m: 30 }));
   await fireEvent.click(screen.getByRole('button', { name: new RegExp(t('tile.battery')) }));
   expect(opened).toHaveBeenCalledWith(sectionForTile('battery', 'battery/0'));

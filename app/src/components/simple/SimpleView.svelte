@@ -55,6 +55,8 @@
   const netDiskAt = $derived(memAt + (mem ? 1 : 0));
   const batteryAt = $derived(netDiskAt + (net || disk ? 1 : 0));
 
+  /** Signed watts with one decimal; a rate that rounds to zero shows as plain 0, never "-0". */
+  const batteryWatts = (w: number) => `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(Math.round(w * 10) / 10 + 0)} W`;
   const rpm = (v: number) => formatValue(v, 'rpm', locale, t);
   const sensorById = $derived(new Map(store.schema?.sensors.map((s) => [s.id, s])));
   /** A sensor's display name; the id when the schema no longer has it. */
@@ -136,7 +138,7 @@
         {/if}
         {#if gpu.throttle}
           <div class="chips">
-            <div class="chip warn"><Term term="throttling">{t(`tile.throttle.${gpu.throttle}`)}</Term></div>
+            <div class="chip warn"><Term term={gpu.throttle === 'power' ? 'powerLimitation' : 'throttling'}>{t(`tile.throttle.${gpu.throttle}`)}</Term></div>
           </div>
         {/if}
         {#if gpu.loadId}
@@ -230,7 +232,7 @@
         </div>
         {#if battery.rateW !== null}
           <div class="chips">
-            <div class="chip"><span><Term term="batteryRate">{t('tile.power')}</Term></span> {formatPower(battery.rateW, locale)}</div>
+            <div class="chip"><span><Term term="batteryRate">{t('tile.power')}</Term></span> {batteryWatts(battery.rateW)}</div>
           </div>
         {/if}
         <div class="spark"><Sparkline values={store.series(battery.chargeId)} timestampsMs={seriesTimestampsMs} max={100} /></div>

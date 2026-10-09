@@ -38,6 +38,7 @@ export const DISK_MODE_TERMS: string[] = catalog.diskKernels.map((id) => `mode.$
 export const MONITOR_TERMS: string[] = [
   'hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock',
   'pcieTraffic', 'energySinceStart', 'reallocatedSectors', 'pendingSectors', 'uncorrectableSectors', 'powerLimitation',
+  'sectorWarning', 'diskCriticalWarning', 'batteryRemaining',
 ];
 
 /** The terms of the RAM timings section of the Advanced view (M9b DN13). */
@@ -60,6 +61,9 @@ export const SENSOR_TERMS: Record<string, string> = {
   'gpu.throttle.power': 'powerLimitation',
   'cpu.throttle.thermal': 'throttling',
   'cpu.throttle.power': 'powerLimitation',
+  'storage.sectorWarning': 'sectorWarning',
+  'storage.criticalWarning': 'diskCriticalWarning',
+  'battery.remaining': 'batteryRemaining',
   'storage.reallocatedSectors': 'reallocatedSectors',
   'storage.pendingSectors': 'pendingSectors',
   'storage.uncorrectableSectors': 'uncorrectableSectors',

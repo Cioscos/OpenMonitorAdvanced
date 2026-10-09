@@ -5,10 +5,11 @@ import { i18n } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
 import { health } from '../../lib/health.svelte';
-import type { Alert, HealthReport, Schema } from '../../lib/types';
+import type { Alert, HealthReport, Schema, Sensor } from '../../lib/types';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeBackend } from '../../test/fake-backend';
 import { sectionForTile } from '../../lib/advanced/nav';
+import tileSource from './Tile.svelte?raw';
 import SimpleView from './SimpleView.svelte';
 
 beforeEach(() => { i18n.locale = 'en'; });
@@ -188,4 +189,73 @@ test('fill_mode_needs_720px_of_height', () => {
   } finally {
     window.innerHeight = original;
   }
+});
+
+const chipTexts = () => [...document.querySelectorAll('.chip')].map((c) => c.textContent?.trim() ?? '');
+
+test('missing_sensors_hide_their_chips', () => {
+  // MOCK_SCHEMA has no fan, no throttle, no power limit and no DIMM temperature.
+  setup();
+  const chips = chipTexts();
+  expect(chips.length).toBeGreaterThan(0);
+  expect(chips.some((c) => /fan/i.test(c) || /dimm/i.test(c) || /limited/i.test(c))).toBe(false);
+  expect(chips.some((c) => c.includes('—'))).toBe(false);
+  expect(chips.some((c) => c.startsWith('Hotspot'))).toBe(true);
+});
+
+const DISK2 = 'storage/device-mock-hdd';
+function twoDisks(): { store: LiveStore; schema: Schema } {
+  const sensor = (key: string, kind: 'throughput' | 'percent', unit: 'bytes_per_second' | 'percent', arg?: string): Sensor => ({
+    id: `${DISK2}/${kind}/${key}`,
+    deviceId: DISK2,
+    kind,
+    unit,
+    label: { key, arg },
+    source: 'mock',
+    category: kind,
+  });
+  const schema: Schema = {
+    ...MOCK_SCHEMA,
+    devices: [...MOCK_SCHEMA.devices, { id: DISK2, kind: 'storage', name: 'Disk 1 (D:)' }],
+    sensors: [
+      ...MOCK_SCHEMA.sensors,
+      sensor('storage.read', 'throughput', 'bytes_per_second'),
+      sensor('storage.write', 'throughput', 'bytes_per_second'),
+      sensor('storage.volumeUsed', 'percent', 'percent', 'D:'),
+    ],
+  };
+  const store = new LiveStore();
+  store.applySchema(schema);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: [...mockValues(1), 4_000_000, 5_000_000, 41] });
+  return { store, schema };
+}
+
+test('standby_disk_shows_standby_only', () => {
+  const { store } = twoDisks();
+  store.setDiskStates([{ deviceId: DISK2, power: 'standby' }]);
+  render(SimpleView, { store, onOpenAdvanced: () => {} });
+  const rows = [...document.querySelectorAll('.disk-row')];
+  expect(rows).toHaveLength(2);
+  expect(rows[1].textContent).toContain('In standby');
+  expect(rows[1].textContent).not.toContain('MB');
+  expect(rows[1].textContent).not.toContain('—');
+  // The awake disk keeps its values.
+  expect(rows[0].textContent).not.toContain('In standby');
+  expect(rows[0].textContent).toContain('/s');
+});
+
+test('thread_bars_have_their_value_in_a_tooltip', () => {
+  setup();
+  const bars = [...document.querySelectorAll<HTMLElement>('.threads i')];
+  expect(bars).toHaveLength(8);
+  expect(bars.every((b) => /^\d+%$/.test(b.title) && b.style.height.endsWith('%'))).toBe(true);
+});
+
+test('technical_labels_use_term', () => {
+  setup();
+  const terms = [...document.querySelectorAll('.term')].map((t) => t.textContent);
+  expect(terms).toEqual(expect.arrayContaining(['Hotspot', 'Load per thread', 'VRAM', 'Activity', 'Link']));
+  // A Term is focusable, so it never sits inside the tile's button, and only Terms are lifted above its overlay.
+  expect(document.querySelectorAll('button .term')).toHaveLength(0);
+  expect(tileSource).toMatch(/\.tile :global\(\.term\)\s*\{[^}]*position: relative;[^}]*z-index: 1;/);
 });

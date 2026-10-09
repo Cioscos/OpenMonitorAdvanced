@@ -38,7 +38,7 @@ test('simple view shows the banner and the CPU, RAM and network tiles', async ()
   expect(screen.getByText('CPU')).toBeTruthy();
   expect(screen.getByText('RAM')).toBeTruthy();
   expect(screen.getByText('Network · Disks')).toBeTruthy();
-  expect(screen.getByText((text) => text.startsWith('C: 65% · '))).toBeTruthy();
+  expect(screen.getByText('C: · 65%')).toBeTruthy();
   expect(screen.queryByText('Re-enable')).toBeNull();
 });
 
@@ -52,7 +52,8 @@ test('simple view shows only discrete gpus', async () => {
 
   expect(screen.getAllByText('GPU')).toHaveLength(1);
   expect(screen.getByText('Mock GeForce RTX 4080')).toBeTruthy();
-  expect(screen.getByText((text) => text.startsWith('VRAM ') && text.endsWith(' / 16.0 GB'))).toBeTruthy();
+  expect(screen.getByText('VRAM')).toBeTruthy();
+  expect(screen.getByText((text) => text.endsWith(' / 16.0 GB'))).toBeTruthy();
   expect(screen.queryByText('AMD Radeon(TM) Graphics')).toBeNull();
 });
 

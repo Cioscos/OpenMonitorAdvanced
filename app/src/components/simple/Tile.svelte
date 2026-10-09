@@ -45,6 +45,11 @@
     inset: 0;
     border-radius: var(--radius);
   }
+  /* Tooltip terms are focusable and must sit above the label's overlay; the rest stays under it. */
+  .tile :global(.term) {
+    position: relative;
+    z-index: 1;
+  }
   .open:focus-visible {
     outline: none;
   }

@@ -4,12 +4,13 @@ import {
   gpuSummaries,
   memorySummary,
   networkSummary,
+  diskRows,
   simpleViewGpus,
   storageSummary,
   sumSeries,
   type GpuSummary,
 } from './select';
-import type { Schema } from './types';
+import type { Schema, Sensor } from './types';
 
 const values = mockValues(1);
 const valueOf = (id: string) => {
@@ -38,6 +39,11 @@ test('gpu summaries read the core sensors of each GPU', () => {
     powerW: valueOf('gpu/pci-0000:01:00.0/power/board'),
     memUsedBytes: valueOf('gpu/pci-0000:01:00.0/data/memory-dedicated-used'),
     memTotalBytes: 16 * 1024 ** 3,
+    hotspotC: valueOf('gpu/pci-0000:01:00.0/temperature/hotspot'),
+    powerLimitW: null,
+    fanPct: null,
+    fanRpm: null,
+    throttle: null,
   });
 });
 
@@ -59,6 +65,11 @@ test('gpu summaries report missing sensors as null', () => {
       powerW: null,
       memUsedBytes: null,
       memTotalBytes: null,
+      hotspotC: null,
+      powerLimitW: null,
+      fanPct: null,
+      fanRpm: null,
+      throttle: null,
     },
   ]);
 });
@@ -74,6 +85,11 @@ const gpu = (deviceId: string, integrated: boolean): GpuSummary => ({
   powerW: null,
   memUsedBytes: null,
   memTotalBytes: null,
+  hotspotC: null,
+  powerLimitW: null,
+  fanPct: null,
+  fanRpm: null,
+  throttle: null,
 });
 
 test('simple view keeps discrete GPUs and hides the integrated one', () => {
@@ -127,4 +143,69 @@ test('sumSeries right-aligns and ignores gaps', () => {
   expect(sumSeries([[1, 2], [5, 6, 7]])).toEqual([5, 7, 9]);
   expect(Number.isNaN(sumSeries([[NaN]])[0])).toBe(true);
   expect(sumSeries([])).toEqual([]);
+});
+
+const sensorOf = (deviceId: string, key: string, arg?: string): Sensor => ({
+  id: `${deviceId}/x/${key}${arg ?? ''}`,
+  deviceId,
+  kind: 'load',
+  unit: 'percent',
+  label: { key, arg },
+  source: 'mock',
+  category: 'load',
+});
+const withSensors = (devices: Schema['devices'], sensors: Schema['sensors']): Schema => ({ revision: 1, devices, sensors });
+
+test('cpu_summary_has_temperature_power_and_threads', () => {
+  const cpuDev = { id: 'cpu/0', kind: 'cpu' as const, name: 'CPU' };
+  const schema = withSensors([cpuDev], [
+    sensorOf('cpu/0', 'cpu.temperature.tctl'),
+    sensorOf('cpu/0', 'cpu.power.package'),
+    sensorOf('cpu/0', 'cpu.load.thread', '0'),
+    sensorOf('cpu/0', 'cpu.load.thread', '1'),
+  ]);
+  const v: Record<string, number> = { 'cpu/0/x/cpu.temperature.tctl': 61, 'cpu/0/x/cpu.power.package': 88, 'cpu/0/x/cpu.load.thread0': 20, 'cpu/0/x/cpu.load.thread1': 90 };
+  const cpu = cpuSummary(schema, (id) => v[id] ?? null)!;
+  expect(cpu.temperatureC).toBe(61);
+  expect(cpu.powerW).toBe(88);
+  expect(cpu.busiestThread).toBe(90);
+  expect(cpu.threads.map((th) => th.value)).toEqual([20, 90]);
+  const bare = cpuSummary(withSensors([cpuDev], []), () => null)!;
+  expect([bare.temperatureC, bare.powerW, bare.busiestThread, bare.threads]).toEqual([null, null, null, []]);
+});
+
+test('gpu_summary_reports_throttle_only_when_set', () => {
+  const dev = { id: 'gpu/a', kind: 'gpu' as const, name: 'G' };
+  const schema = withSensors([dev], [sensorOf('gpu/a', 'gpu.throttle.power'), sensorOf('gpu/a', 'gpu.throttle.thermal')]);
+  const at = (power: number, thermal: number) =>
+    gpuSummaries(schema, (id) => (id.endsWith('power') ? power : thermal))[0].throttle;
+  expect(at(0, 0)).toBeNull();
+  expect(at(1, 0)).toBe('power');
+  expect(at(0, 1)).toBe('thermal');
+});
+
+test('memory_available_never_negative', () => {
+  const dev = { id: 'memory/0', kind: 'memory' as const, name: 'RAM' };
+  const schema = withSensors([dev], [sensorOf('memory/0', 'memory.used'), sensorOf('memory/0', 'memory.total'), sensorOf('memory/0', 'memory.temperature.dimm', '0')]);
+  const mem = (used: number) => memorySummary(schema, (id) => (id.includes('used') ? used : id.includes('total') ? 100 : null))!;
+  expect(mem(30).availableBytes).toBe(70);
+  expect(mem(130).availableBytes).toBe(0);
+  expect(mem(30).dimmTempsC).toEqual([]);
+});
+
+test('disk_rows_follow_schema_order_with_letters', () => {
+  const devs = [
+    { id: 'storage/b', kind: 'storage' as const, name: 'B' },
+    { id: 'storage/a', kind: 'storage' as const, name: 'A' },
+  ];
+  const schema = withSensors(devs, [sensorOf('storage/a', 'storage.volumeUsed', 'D:'), sensorOf('storage/b', 'storage.volumeUsed', 'C:')]);
+  const rows = diskRows(schema, () => 5, (id) => (id === 'storage/a' ? 'standby' : 'active'));
+  expect(rows.map((r) => [r.name, r.letter, r.standby])).toEqual([['B', 'C:', false], ['A', 'D:', true]]);
+  expect(rows[0].temperatureC).toBeNull();
+});
+
+test('network_summary_has_adapter_and_link', () => {
+  const net = networkSummary(MOCK_SCHEMA, valueOf)!;
+  expect(net.adapterName).toBe('Ethernet');
+  expect(net.linkBps).toBe(valueOf('network/mock-eth/throughput/link-speed'));
 });

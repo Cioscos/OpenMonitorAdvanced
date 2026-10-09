@@ -34,6 +34,9 @@ export const DISK_TERMS: string[] = ['mbs', 'iops', 'queueDepth', 'seqRnd', 'lat
 /** The disk stress kernels (M8c DC1): `mode.diskFill` (the catalog's `disk_fill`), `mode.n1`… `mode.v4` (table T4). */
 export const DISK_MODE_TERMS: string[] = catalog.diskKernels.map((id) => `mode.${id.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`);
 
+/** The terms of the Simple view tiles (M9a DM15); `vram` and `throttling` come from the other lists. */
+export const MONITOR_TERMS: string[] = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm'];
+
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [
   ...SCORE_TERMS,

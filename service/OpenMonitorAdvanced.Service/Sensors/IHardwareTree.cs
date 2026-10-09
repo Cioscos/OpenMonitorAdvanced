@@ -57,6 +57,13 @@ public interface IHardwareTree : IDisposable
     uint? ReadSmn(uint address);
 
     /// <summary>
+    /// IA32_PACKAGE_THERM_STATUS (MSR 0x1B1) of the package of that CPU, read through PawnIO on its
+    /// first thread; <see langword="null"/> without PawnIO, on a non-Intel
+    /// CPU, for an unknown CPU or when the read fails. Reads only, never a write.
+    /// </summary>
+    ulong? ReadIntelPackageThermStatus(string cpuIdentifier);
+
+    /// <summary>
     /// Raised when hardware is added or removed, or when a sensor is activated or deactivated.
     /// Handlers must only record the change (they may run inside an LHM callback or an update).
     /// </summary>

@@ -63,6 +63,9 @@ public sealed class LhmTree : IHardwareTree
     private AmdFamily17? _smn; // guarded by _smnLock
     private Mutex? _pciMutex; // guarded by _smnLock; one instance for the tree's lifetime
     private bool _smnFailed; // guarded by _smnLock
+    private readonly object _msrLock = new();
+    private IntelMsr? _intelMsr; // guarded by _msrLock; opened on the first Intel read, closed with the tree
+    private bool _msrFailed; // guarded by _msrLock
 
     public LhmTree(ILogger<LhmTree> log)
         : this(log, CreateComputer)
@@ -227,6 +230,37 @@ public sealed class LhmTree : IHardwareTree
     }
 
     /// <inheritdoc />
+    public ulong? ReadIntelPackageThermStatus(string cpuIdentifier) =>
+        _composition.Entries.TryGetValue(cpuIdentifier, out Entry? entry) && entry.Hardware is GenericCpu { CpuId: { Length: > 0 } ids } cpu
+            && cpu.CpuId[0].Length > 0 && ids[0][0].Vendor == Vendor.Intel
+            ? ReadIntelThermStatus(ids[0][0].Affinity)
+            : null;
+
+    // MSR 0x1B1 on the thread of the package; the PawnIO IntelMSR module allows it (0x64F it does not).
+    private ulong? ReadIntelThermStatus(GroupAffinity affinity)
+    {
+        lock (_msrLock)
+        {
+            if (_msrFailed || Volatile.Read(ref _disposed) == 1)
+            {
+                return null;
+            }
+
+            try
+            {
+                _intelMsr ??= new IntelMsr();
+                return _intelMsr.ReadMsr(0x1B1, out uint eax, out uint edx, affinity) ? ((ulong)edx << 32) | eax : null;
+            }
+            catch (Exception e)
+            {
+                _msrFailed = true;
+                _log.LogWarning(e, "MSR reads are not available");
+                return null;
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public byte? ReadNvmeCriticalWarning(string storageIdentifier) =>
         _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? CriticalWarningOf(entry.Hardware) : null;
 
@@ -383,6 +417,20 @@ public sealed class LhmTree : IHardwareTree
             _pciMutex = null;
         }
 
+        lock (_msrLock)
+        {
+            try
+            {
+                _intelMsr?.Close();
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning(e, "Closing the MSR module failed");
+            }
+
+            _intelMsr = null;
+        }
+
         Computer? computer = _computer;
         _computer = null;
         if (computer is null)
@@ -524,7 +572,7 @@ public sealed class LhmTree : IHardwareTree
         }
     }
 
-    private static HardwareNode BuildNode(IHardware hardware, StorageInfo? storage, Dictionary<string, ISensor> sensors)
+    private HardwareNode BuildNode(IHardware hardware, StorageInfo? storage, Dictionary<string, ISensor> sensors)
     {
         // Sorted, so the schema order does not depend on LHM's HashSet order.
         ISensor[] active = [.. hardware.Sensors.OrderBy(s => s.SensorType).ThenBy(s => s.Index)];
@@ -549,7 +597,7 @@ public sealed class LhmTree : IHardwareTree
     /// "TjMax [°C]" parameter of its "CPU Package" sensor. Members are read directly (no
     /// reflection), so the trimmer keeps them.
     /// </summary>
-    private static CpuInfo? ReadCpuInfo(IHardware hardware, ISensor[] sensors)
+    private CpuInfo? ReadCpuInfo(IHardware hardware, ISensor[] sensors)
     {
         if (hardware is not GenericCpu cpu || cpu.CpuId.Length == 0 || cpu.CpuId[0].Length == 0)
         {
@@ -565,7 +613,10 @@ public sealed class LhmTree : IHardwareTree
             intelTjMaxC = tjMax?.Value;
         }
 
-        return new CpuInfo(id.Vendor.ToString(), id.BrandString ?? string.Empty, (int)id.Family, (int)id.Model, intelTjMaxC);
+        // One successful read decides, once per node build, whether the throttling flags exist at all.
+        bool thermReadable = id.Vendor == Vendor.Intel && ReadIntelThermStatus(id.Affinity) is not null;
+        bool powerLimit = thermReadable && (System.Runtime.Intrinsics.X86.X86Base.CpuId(6, 0).Eax & (1 << 4)) != 0;
+        return new CpuInfo(id.Vendor.ToString(), id.BrandString ?? string.Empty, (int)id.Family, (int)id.Model, intelTjMaxC, thermReadable, powerLimit);
     }
 
     private sealed record Composition(HardwareNode[] Roots, Dictionary<string, Entry> Entries, Dictionary<string, ISensor> Sensors)

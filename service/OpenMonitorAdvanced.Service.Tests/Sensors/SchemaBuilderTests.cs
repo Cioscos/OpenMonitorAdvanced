@@ -193,7 +193,8 @@ public sealed class SchemaBuilderTests
                 Sensor("/amdcpu/0/clock/5", SensorType.Clock, "P-Core #1", 5),
                 Sensor("/amdcpu/0/clock/6", SensorType.Clock, "E-Core #1", 6),
             ],
-            []);
+            [],
+            Cpu: new CpuInfo("Intel", "x", 6, 0x9E, null, ThermStatusReadable: true, PowerLimitNotification: true));
         var ram = new HardwareNode(
             "/ram",
             HardwareType.Memory,

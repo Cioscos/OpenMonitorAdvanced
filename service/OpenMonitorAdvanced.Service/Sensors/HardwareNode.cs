@@ -64,6 +64,15 @@ public enum BindingSource
     /// attributes by <see cref="IHardwareTree.ReadNvmeCriticalWarning"/> and published as 0/1.
     /// </summary>
     NvmeCriticalWarning,
+
+    /// <summary>
+    /// Bit 0 (thermal status) of IA32_PACKAGE_THERM_STATUS (MSR 0x1B1), read once per CPU per tick by
+    /// <see cref="IHardwareTree.ReadIntelPackageThermStatus"/>; <see cref="SensorBinding.LhmIdentifier"/> is the CPU's.
+    /// </summary>
+    IntelThermal,
+
+    /// <summary>Bit 10 (power limitation status) of the same MSR.</summary>
+    IntelPowerLimit,
 }
 
 /// <summary>

@@ -780,6 +780,8 @@
   "sensor.cpu.temperature.pCore": "P-core {arg}",
   "sensor.cpu.temperature.eCore": "E-core {arg}",
   "sensor.cpu.temperature.coreMax": "Max core temperature",
+  "sensor.cpu.throttle.thermal": "Thermal throttling",
+  "sensor.cpu.throttle.power": "Power limit throttling",
   "sensor.cpu.temperature.coreAverage": "Average core temperature",
   "sensor.cpu.power.package": "Package power",
   "sensor.cpu.power.core": "Core {arg} power",

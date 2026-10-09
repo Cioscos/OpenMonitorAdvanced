@@ -21,6 +21,8 @@ public static class CanonicalNames
         "cpu.temperature.eCore",
         "cpu.temperature.coreMax",
         "cpu.temperature.coreAverage",
+        "cpu.throttle.thermal",
+        "cpu.throttle.power",
         "cpu.power.package",
         "cpu.power.core",
         "cpu.power.soc",

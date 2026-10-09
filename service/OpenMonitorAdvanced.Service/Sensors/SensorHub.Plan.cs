@@ -289,6 +289,10 @@ public sealed partial class SensorHub
                     FromStorage[i] = true;
                     Owner[i] = binding.LhmIdentifier;
                 }
+                else if (binding.Source is BindingSource.IntelThermal or BindingSource.IntelPowerLimit)
+                {
+                    Owner[i] = binding.LhmIdentifier; // the CPU root itself, so a failed update of it makes the flags absent
+                }
                 else if (owners.TryGetValue(binding.LhmIdentifier, out (string Root, bool Storage) owner))
                 {
                     FromStorage[i] = owner.Storage;

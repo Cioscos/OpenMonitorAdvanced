@@ -136,7 +136,19 @@ public static partial class SchemaBuilder
             properties = new Dictionary<string, string> { ["tjMaxC"] = tjMaxC.ToString(CultureInfo.InvariantCulture) };
         }
 
-        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", DisplayName.Clean(cpu.Name), new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties);
+        // Not LHM sensors: bits of MSR 0x1B1, bound to the CPU hardware itself (see BindingSource).
+        var extras = new List<(WireSensor, SensorBinding)>();
+        if (cpu.Cpu is { ThermStatusReadable: true } info)
+        {
+            string deviceId = DeviceId(cpu.Identifier);
+            extras.Add((new WireSensor(deviceId, "flag", "throttle-thermal", "boolean", "cpu.throttle.thermal", LabelArg: null, "flag"), new SensorBinding(cpu.Identifier, 1.0, BindingSource.IntelThermal)));
+            if (info.PowerLimitNotification)
+            {
+                extras.Add((new WireSensor(deviceId, "flag", "throttle-power", "boolean", "cpu.throttle.power", LabelArg: null, "flag"), new SensorBinding(cpu.Identifier, 1.0, BindingSource.IntelPowerLimit)));
+            }
+        }
+
+        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", DisplayName.Clean(cpu.Name), new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties, extras);
     }
 
     /// <summary>Kind prefix and label key of an Intel core sensor, by the LHM name prefix of its core type.</summary>
@@ -744,7 +756,8 @@ public static partial class SchemaBuilder
         IdentityHint? hint,
         Func<SensorNode, SensorMatch> resolve,
         Output output,
-        IReadOnlyDictionary<string, string>? properties = null)
+        IReadOnlyDictionary<string, string>? properties = null,
+        IReadOnlyList<(WireSensor Sensor, SensorBinding Binding)>? extras = null)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();
@@ -761,6 +774,12 @@ public static partial class SchemaBuilder
             string wireName = DisambiguateName(used, m.Kind!, m.Name!, s.Identifier);
             local.Add(new WireSensor(deviceId, m.Kind!, wireName, m.Unit!, m.LabelKey!, m.LabelArg, m.Kind!));
             localBindings.Add(new SensorBinding(s.Identifier, m.Scale));
+        }
+
+        foreach ((WireSensor sensor, SensorBinding binding) in extras ?? [])
+        {
+            local.Add(sensor);
+            localBindings.Add(binding);
         }
 
         if (local.Count == 0)

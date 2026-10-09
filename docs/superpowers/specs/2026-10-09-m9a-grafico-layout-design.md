@@ -143,22 +143,25 @@ Nel grafico a strisce non ci sono `MAX_SERIES` e `MAX_UNITS`: la selezione scart
 
 `main` in `App.svelte` passa da `max-width: 1100px` a una larghezza per vista:
 
-- **Semplice e Avanzata:** 1600 px;
+- **Avanzata:** 1600 px;
+- **Semplice:** 1280 px (§5.2);
 - **Prestazioni:** 1100 px, come oggi.
 
 Sotto i 1100 px non cambia niente.
 
 ### 5.2 Vista Semplice
 
-- **Sotto 900 px di contenuto** la griglia resta quella di oggi (`auto-fit, minmax(260px, 1fr)`), con l'altezza naturale.
-- **Da 900 px di larghezza in su**, le tessere vanno su due righe che si dividono l'altezza libera sotto il banner, senza scorrimento:
+Rivisto il 2026-10-09 dopo le misure della M7. Le tessere che riempivano tutta l'altezza erano troppo grandi per l'utente, e costavano circa 64 MB e 1 punto di CPU in più rispetto alla build precedente.
+
+- **Larghezza.** La colonna della Semplice è larga al massimo 1280 px; l'Avanzata resta a 1600 px (§5.1).
+- **Sotto 900 px di contenuto** la griglia resta quella di oggi (`auto-fit, minmax(260px, 1fr)`).
+- **Da 900 px di larghezza in su**, le tessere vanno su una griglia a due righe, **ad altezza naturale**, senza allungarsi per riempire lo schermo:
   - 4 tessere: 2 × 2;
   - 5 tessere (due GPU visibili): 3 sopra e 2 sotto, su una griglia di 6 colonne con span 2 e 3;
   - 3 tessere: 2 sopra e 1 sotto, a tutta larghezza;
   - 2 tessere: 1 × 2.
-
-  Questo vale solo se la finestra è alta almeno 720 px. Sotto, le righe hanno l'altezza naturale e la pagina scorre.
-- **Sparkline.** Nelle tessere che si allungano, la sparkline occupa lo spazio verticale che resta, con un minimo di 34 px, l'altezza di oggi. `Sparkline.svelte` prende l'altezza dal contenitore invece dei 34 px fissi.
+- **Centratura verticale.** Quando banner e tessere sono più bassi della finestra, il blocco sta al centro in verticale, con lo stesso margine sopra e sotto e almeno 32 px. Quando sono più alti, la pagina scorre come oggi.
+- **Sparkline.** Nelle tessere della griglia a due righe la sparkline è alta 80 px; sotto i 900 px resta di 34 px. `Sparkline.svelte` prende l'altezza dal contenitore.
 - **Numeri grandi.** Crescono con la finestra: `clamp(28px, 2.2vw, 40px)`.
 
 ### 5.3 Dati in più nelle tessere

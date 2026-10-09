@@ -5,22 +5,23 @@ import { i18n } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
 import { health } from '../../lib/health.svelte';
-import type { Alert, HealthReport } from '../../lib/types';
+import type { Alert, HealthReport, Schema } from '../../lib/types';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeBackend } from '../../test/fake-backend';
+import { sectionForTile } from '../../lib/advanced/nav';
 import SimpleView from './SimpleView.svelte';
 
 beforeEach(() => { i18n.locale = 'en'; });
 let offHealth: (() => void) | undefined;
 afterEach(() => { cleanup(); disconnectSettings(); offHealth?.(); offHealth = undefined; });
 
-function setup() {
+function setup(onOpenAdvanced: (section: string | null) => void = () => {}, schema: Schema = MOCK_SCHEMA) {
   const store = new LiveStore();
-  store.applySchema(MOCK_SCHEMA);
+  store.applySchema(schema);
   const values = mockValues(1);
   store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values });
-  render(SimpleView, { store, onOpenAdvanced: () => {} });
-  const valueOf = (id: string) => values[MOCK_SCHEMA.sensors.findIndex((s) => s.id === id)] as number;
+  render(SimpleView, { store, onOpenAdvanced });
+  const valueOf = (id: string) => values[schema.sensors.findIndex((s) => s.id === id)] as number;
   return { valueOf };
 }
 
@@ -137,4 +138,54 @@ test('the banner reformats when the temperature unit changes', async () => {
   expect(text()).toContain('overheating (92 °C)');
   await settings.update({ general: { temperatureUnit: 'f' } });
   await vi.waitFor(() => expect(text()).toContain('overheating (198 °F)'));
+});
+
+const GPU2 = 'gpu/pci-0000:02:00.0';
+/** MOCK_SCHEMA plus a second discrete GPU: five tiles. */
+const fiveTiles: Schema = {
+  ...MOCK_SCHEMA,
+  devices: [
+    ...MOCK_SCHEMA.devices,
+    { id: GPU2, kind: 'gpu', name: 'Second GPU', vendor: 'NVIDIA', properties: { integrated: 'false' } },
+  ],
+  sensors: [
+    ...MOCK_SCHEMA.sensors,
+    { id: `${GPU2}/load/core`, deviceId: GPU2, kind: 'load', unit: 'percent', label: { key: 'gpu.load.core' }, source: 'mock', category: 'load' },
+  ],
+};
+const grid = () => document.querySelector<HTMLElement>('.grid')!;
+const simple = () => document.querySelector<HTMLElement>('.simple')!;
+
+test('the_whole_tile_opens_the_advanced_page', async () => {
+  const opened: Array<string | null> = [];
+  setup((section) => opened.push(section));
+  const button = screen.getByRole('button', { name: 'GPU' });
+  expect(button.classList.contains('open')).toBe(true);
+  expect(button.closest('.tile')?.tagName).toBe('DIV');
+  await fireEvent.click(button);
+  expect(opened).toEqual([sectionForTile('gpu', GPU)]);
+});
+
+test('five_tiles_span_two_and_three_columns', () => {
+  setup(() => {}, fiveTiles);
+  expect(grid().style.getPropertyValue('--cols')).toBe('6');
+  const spans = [...document.querySelectorAll<HTMLElement>('.tile')].map((tile) => tile.style.getPropertyValue('--span'));
+  expect(spans).toEqual(['2', '2', '2', '3', '3']);
+});
+
+test('fill_mode_needs_720px_of_height', () => {
+  const original = window.innerHeight;
+  try {
+    window.innerHeight = 719;
+    setup();
+    expect(simple().classList.contains('fill')).toBe(false);
+    cleanup();
+    window.innerHeight = 720;
+    setup();
+    expect(simple().classList.contains('fill')).toBe(true);
+    // Four tiles: two rows.
+    expect(grid().style.getPropertyValue('--rows')).toBe('2');
+  } finally {
+    window.innerHeight = original;
+  }
 });

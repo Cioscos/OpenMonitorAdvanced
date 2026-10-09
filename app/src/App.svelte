@@ -263,7 +263,7 @@
   onOpenLogFolder={() => backend.openLogFolder()}
   {stale}
 />
-<main>
+<main class:wide={view === 'simple' || view === 'advanced'}>
   {#if startup?.safeMode}
     <SafeModeNotice status={startup} onEnable={enableVendorLibraries} />
   {/if}
@@ -294,5 +294,8 @@
     max-width: 1100px;
     margin: 0 auto;
     padding: 20px;
+  }
+  main.wide {
+    max-width: 1600px;
   }
 </style>

@@ -210,7 +210,7 @@ test('hides the held segment and marker for a missing final sample or expired ta
   expect((view.container.querySelector('.endpoint') as HTMLElement).style.display).toBe('none');
 });
 
-test.each([[0, '34px'], [100, '0px'], [50, '17px']])('the endpoint at %i%% is whole at the right edge while path and held segment stay clipped', (value, top) => {
+test.each([[0, '100%'], [100, '0%'], [50, '50%']])('the endpoint at %i%% is whole at the right edge while path and held segment stay clipped', (value, top) => {
   const { container } = render(Sparkline, { values: [value], timestampsMs: [1_000], max: 100 });
   const root = container.querySelector('.sparkline') as HTMLElement;
   const marker = container.querySelector('.endpoint') as HTMLElement;

@@ -105,7 +105,7 @@ test('clicking the GPU tile opens its Advanced page, the toggle goes back', asyn
   backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: 1000, values: mockValues(1) });
   flushSync();
 
-  await fireEvent.click(screen.getByText('Mock GeForce RTX 4080').closest('button')!);
+  await fireEvent.click(screen.getByRole('button', { name: 'GPU' }));
   expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('GPU');
   await vi.waitFor(() => expect(settings.state?.settings.advanced.section).toBe('gpu/pci-0000:01:00.0'));
   await vi.waitFor(() => expect(settings.state?.settings.view.last).toBe('advanced'));
@@ -550,4 +550,17 @@ test('a test that starts opens its page and marks the sidebar entry', async () =
   await fireEvent.click(screen.getByRole('button', { name: 'History' }));
   backend.emitPerformanceStatus(makeRunStatus({ state: 'running', sessionId: 'x', elapsedMs: 1000 }));
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'History' })).toBeTruthy());
+});
+
+test('simple_and_advanced_are_wide_performance_is_not', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  const main = () => document.querySelector('main')!;
+  await vi.waitFor(() => expect(main().classList.contains('wide')).toBe(true));
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  expect(main().classList.contains('wide')).toBe(true);
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  expect(main().classList.contains('wide')).toBe(false);
 });

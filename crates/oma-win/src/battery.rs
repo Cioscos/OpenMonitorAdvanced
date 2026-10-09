@@ -121,8 +121,9 @@ fn charge_pct(status: &BatteryStatus, info: &BatteryInformation) -> Option<f64> 
 }
 
 /// Power in watts, positive while charging and negative while discharging.
-fn rate_w(status: &BatteryStatus) -> Option<f64> {
-    (status.rate != UNKNOWN_RATE).then(|| f64::from(status.rate) / 1000.0)
+fn rate_w(status: &BatteryStatus, info: &BatteryInformation) -> Option<f64> {
+    // With relative capacity the rate is in relative units, not mW.
+    (!is_relative(info) && status.rate != UNKNOWN_RATE).then(|| f64::from(status.rate) / 1000.0)
 }
 
 fn voltage_v(status: &BatteryStatus) -> Option<f64> {
@@ -202,11 +203,25 @@ fn battery_properties(
     map
 }
 
+/// Plain integer data (no padding, any bit pattern valid) that a driver may
+/// fill through `DeviceIoControl`.
+///
+/// # Safety
+/// Implement only for types with no padding and no invalid bit patterns.
+unsafe trait Pod {}
+// SAFETY: each type is made only of integers, with no padding.
+unsafe impl Pod for u32 {}
+unsafe impl Pod for [u16; 128] {}
+unsafe impl Pod for BatteryInformation {}
+unsafe impl Pod for BatteryStatus {}
+unsafe impl Pod for BatteryQueryInformation {}
+unsafe impl Pod for BatteryWaitStatus {}
+
 /// An open battery device, closed on drop.
 struct BatteryHandle(HANDLE);
 
-// SAFETY: a kernel file handle may be used from any thread; the provider
-// owns it exclusively and only one thread polls at a time.
+// SAFETY: a kernel handle has no thread affinity. `BatteryHandle` owns it
+// exclusively and closes it once, in `Drop`; it is Send but not Sync.
 unsafe impl Send for BatteryHandle {}
 
 impl Drop for BatteryHandle {
@@ -221,8 +236,9 @@ impl Drop for BatteryHandle {
 impl BatteryHandle {
     fn open(path: &str) -> Option<Self> {
         let path = HSTRING::from(path);
-        // SAFETY: valid NUL-terminated path; the class driver requires write
-        // access for its IOCTLs, but they only read the battery state.
+        // SAFETY: `path` is NUL-terminated and outlives the call. Read and
+        // write access match Microsoft's battery sample; the three IOCTLs
+        // used here need only read access and never change the battery.
         let handle = unsafe {
             CreateFileW(
                 &path,
@@ -238,9 +254,13 @@ impl BatteryHandle {
         Some(Self(handle))
     }
 
+    /// Sends `code` and requires the driver to fill all of `output`.
+    fn ioctl<I: Pod, O: Pod>(&self, code: u32, input: &I, output: &mut O) -> Option<()> {
+        (self.ioctl_partial(code, input, output)? == size_of::<O>()).then_some(())
+    }
+
     /// Sends `code`; the number of bytes the driver wrote, `None` on failure.
-    /// `I` and `O` are padding-free structs of integers (or arrays of them).
-    fn ioctl<I, O>(&self, code: u32, input: &I, output: &mut O) -> Option<usize> {
+    fn ioctl_partial<I: Pod, O: Pod>(&self, code: u32, input: &I, output: &mut O) -> Option<usize> {
         let mut returned = 0u32;
         // SAFETY: the handle is open; both pointers cover exactly the sizes
         // passed, and `returned` is a valid out-pointer.
@@ -257,7 +277,7 @@ impl BatteryHandle {
             )
         }
         .ok()?;
-        Some(returned as usize)
+        Some((returned as usize).min(size_of::<O>()))
     }
 
     fn tag(&self) -> Option<u32> {
@@ -266,23 +286,23 @@ impl BatteryHandle {
         (tag != 0).then_some(tag)
     }
 
-    fn query<O>(&self, tag: u32, level: u32, mut out: O) -> Option<(O, usize)> {
+    fn query<O: Pod>(&self, tag: u32, level: u32, mut out: O, exact: bool) -> Option<(O, usize)> {
         let query = BatteryQueryInformation {
             tag,
             level,
             at_rate: 0,
         };
-        let n = self.ioctl(IOCTL_BATTERY_QUERY_INFORMATION, &query, &mut out)?;
-        Some((out, n))
+        let n = self.ioctl_partial(IOCTL_BATTERY_QUERY_INFORMATION, &query, &mut out)?;
+        (!exact || n == size_of::<O>()).then_some((out, n))
     }
 
     fn info(&self, tag: u32) -> Option<BatteryInformation> {
-        self.query(tag, LEVEL_INFORMATION, BatteryInformation::default())
+        self.query(tag, LEVEL_INFORMATION, BatteryInformation::default(), true)
             .map(|(info, _)| info)
     }
 
     fn text(&self, tag: u32, level: u32) -> Option<String> {
-        let (units, bytes): ([u16; 128], usize) = self.query(tag, level, [0u16; 128])?;
+        let (units, bytes): ([u16; 128], usize) = self.query(tag, level, [0u16; 128], false)?;
         let units = &units[..(bytes / 2).min(128)];
         let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
         let text = String::from_utf16_lossy(&units[..end]).trim().to_owned();
@@ -290,7 +310,7 @@ impl BatteryHandle {
     }
 
     fn estimated_time(&self, tag: u32) -> u32 {
-        self.query(tag, LEVEL_ESTIMATED_TIME, 0u32)
+        self.query(tag, LEVEL_ESTIMATED_TIME, 0u32, true)
             .map_or(UNKNOWN, |(raw, _)| raw)
     }
 
@@ -341,8 +361,13 @@ fn battery_paths() -> Vec<String> {
     paths
 }
 
+/// Whether the enumerated battery paths differ from the ones known at
+/// discovery (which includes batteries that failed to open).
+fn paths_changed(known: &[String], current: &[String]) -> bool {
+    known != current
+}
+
 struct Battery {
-    path: String,
     handle: BatteryHandle,
     tag: u32,
     info: BatteryInformation,
@@ -352,15 +377,14 @@ struct Battery {
 }
 
 impl Battery {
-    fn open(path: String) -> Option<Self> {
-        let handle = BatteryHandle::open(&path)?;
+    fn open(path: &str) -> Option<Self> {
+        let handle = BatteryHandle::open(path)?;
         let tag = handle.tag()?;
         let info = handle.info(tag)?;
         Some(Self {
             name: handle.text(tag, LEVEL_DEVICE_NAME),
             manufacturer: handle.text(tag, LEVEL_MANUFACTURE_NAME),
             time_raw: handle.estimated_time(tag),
-            path,
             handle,
             tag,
             info,
@@ -371,6 +395,8 @@ impl Battery {
 #[derive(Default)]
 pub struct BatteryProvider {
     batteries: Vec<Battery>,
+    /// Every enumerated path at discovery, opened or not.
+    paths: Vec<String>,
     last_time: Option<Instant>,
     last_static: Option<Instant>,
 }
@@ -378,10 +404,7 @@ pub struct BatteryProvider {
 impl BatteryProvider {
     /// Whether the static data, the tags or the set of batteries differ.
     fn static_changed(&self) -> bool {
-        let paths = battery_paths();
-        if paths.len() != self.batteries.len()
-            || paths.iter().zip(&self.batteries).any(|(p, b)| *p != b.path)
-        {
+        if paths_changed(&self.paths, &battery_paths()) {
             return true;
         }
         self.batteries.iter().any(|b| {
@@ -396,8 +419,11 @@ impl Provider for BatteryProvider {
     }
 
     fn discover(&mut self) -> Result<Inventory, ProviderError> {
-        self.batteries = battery_paths()
-            .into_iter()
+        self.paths = battery_paths();
+        self.batteries = self
+            .paths
+            .iter()
+            .map(String::as_str)
             .filter_map(Battery::open)
             .collect();
         let now = Instant::now();
@@ -500,7 +526,7 @@ impl Provider for BatteryProvider {
             let flag = |bit: u32| Some(f64::from(u8::from(status.power_state & bit != 0)));
             values.extend([
                 charge_pct(&status, &battery.info),
-                rate_w(&status),
+                rate_w(&status, &battery.info),
                 voltage_v(&status),
                 remaining_j(&status, &battery.info),
                 estimated_s(battery.time_raw, status.power_state & DISCHARGING != 0),
@@ -552,13 +578,14 @@ mod tests {
         };
         assert_eq!(charge_pct(&status(64, 0), &info), Some(64.0));
         assert_eq!(remaining_j(&status(64, 0), &info), None);
+        assert_eq!(rate_w(&status(64, 500), &info), None);
         assert_eq!(wear_pct(&info), None);
     }
 
     #[test]
     fn rate_sign_follows_charging() {
-        assert_eq!(rate_w(&status(1, -12_000)), Some(-12.0));
-        assert_eq!(rate_w(&status(1, 5_000)), Some(5.0));
+        assert_eq!(rate_w(&status(1, -12_000), &absolute(1, 1)), Some(-12.0));
+        assert_eq!(rate_w(&status(1, 5_000), &absolute(1, 1)), Some(5.0));
     }
 
     #[test]
@@ -571,7 +598,7 @@ mod tests {
         };
         let info = absolute(50_000, 50_000);
         assert_eq!(charge_pct(&unknown, &info), None);
-        assert_eq!(rate_w(&unknown), None);
+        assert_eq!(rate_w(&unknown, &info), None);
         assert_eq!(voltage_v(&unknown), None);
         assert_eq!(remaining_j(&unknown, &info), None);
         assert_eq!(estimated_s(UNKNOWN, true), None);
@@ -591,6 +618,13 @@ mod tests {
         let wear = wear_pct(&absolute(50_000, 42_500)).unwrap();
         assert!((wear - 15.0).abs() < 1e-9);
         assert_eq!(wear_pct(&absolute(50_000, 55_000)), Some(0.0));
+    }
+
+    #[test]
+    fn a_path_that_never_opens_is_no_change() {
+        let known = vec!["a".to_owned(), "b".to_owned()];
+        assert!(!paths_changed(&known, &known.clone()));
+        assert!(paths_changed(&known, &known[..1]));
     }
 
     #[test]

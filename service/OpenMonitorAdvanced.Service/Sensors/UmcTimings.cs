@@ -220,7 +220,7 @@ public static class UmcTimings
             }
         }
 
-        uint inUse = mode == "normal" ? trfc : trfc2;
+        uint inUse = mode is "normal" or "pbOnly" ? trfc : trfc2;
         return Fields(
             mclk,
             Bits(clock, 17, 17) == 1,

@@ -16,7 +16,9 @@ test('shows_in_use_timings_and_modules', () => {
   const text = container.textContent ?? '';
   expect(text).toContain('36-48-48-104');
   expect(text).toContain('6,000 MT/s');
-  expect(text).toContain('943 (170.7 ns)');
+  expect(text).toContain('943 (314.3 ns)');
+  expect(text).toContain('512 (170.7 ns)');
+  expect(text).toContain('416 (138.7 ns)');
   expect(text).toContain('1T');
   expect(text).toContain('Mixed');
   expect(text).toContain('DIMM #1');

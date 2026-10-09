@@ -205,6 +205,8 @@ public sealed partial class SensorHub
         _watch.Rearm();
     }
 
+    private static readonly string[] AtaKeys = ["critical", "sectors", "reallocated", "pending", "uncorrectable"];
+
     /// <summary>
     /// A resting disk's values of the round before, carried into this one as held (the caller
     /// has checked that round is still current, <see cref="IsCurrent"/>). Only those
@@ -212,8 +214,6 @@ public sealed partial class SensorHub
     /// round enumerated at its number must share one <see cref="DriveKey"/> (the same LHM
     /// identifier or drive number alone proves nothing). Absent and non-finite values are not kept.
     /// </summary>
-    private static readonly string[] AtaKeys = ["critical", "sectors", "reallocated", "pending", "uncorrectable"];
-
     private static void KeepValues(
         HardwareNode root,
         DiskResolution resolution,

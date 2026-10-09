@@ -49,6 +49,17 @@ public sealed class UmcTimingsTests
     }
 
     [Fact]
+    public void PerBankOnlyModeUsesTrfcForTheNanoseconds()
+    {
+        uint refresh = (DumpChannel()[0x5012C] & ~(7u << 16)) | 2; // per-bank, FGR 0
+
+        JsonElement timings = Parse(UmcTimings.Decode(Channels(With(DumpChannel(), 0x5012C, refresh)), DramGeneration.Ddr5));
+
+        Assert.Equal("pbOnly", timings.GetProperty("refreshMode").GetString());
+        Assert.Equal(314.333, timings.GetProperty("trfcNs").GetDouble(), 3);
+    }
+
+    [Fact]
     public void TrfcSbTakesTheFirstNonZeroRegister()
     {
         Dictionary<uint, uint> regs = With(DumpChannel(), 0x502C4, 416);

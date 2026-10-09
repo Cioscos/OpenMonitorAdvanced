@@ -1676,7 +1676,7 @@
   "property.manufacturer": "Manufacturer",
   "property.model": "Model",
   "glossary.batteryWear.name": "Battery wear",
-  "glossary.batteryWear": "How much capacity the battery has lost since it was new: 10 % means it now holds 10 % less than its design capacity.",
+  "glossary.batteryWear": "How much capacity the battery has lost since it was new: 10% means it now holds 10% less than its design capacity.",
   "glossary.chargeCycles.name": "Charge cycles",
   "glossary.chargeCycles": "How many times the battery has been charged and discharged in full (two half charges count as one). Batteries wear with the cycles.",
   "glossary.batteryRate.name": "Battery power",

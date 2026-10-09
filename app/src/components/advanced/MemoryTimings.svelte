@@ -16,7 +16,10 @@
   const cell = (n: number | undefined, suffix = '') => (n === undefined ? '–' : `${num(n)}${suffix}`);
   const flag = (v: boolean | undefined) => (v === undefined ? '–' : t(v ? 'advanced.memory.on' : 'advanced.memory.off'));
   const primary = (c: ChannelTimings) => [c.cl, c.trcdRd, c.trp, c.tras].map((v) => v ?? '–').join('-');
-  const trfc = (c: ChannelTimings) => (c.trfc === undefined ? '–' : `${num(c.trfc)}${c.trfcNs !== undefined ? ` (${num(c.trfcNs)} ns)` : ''}`);
+  // Each refresh row shows its own time: cycles / MCLK (the service's trfcNs belongs to one of them only).
+  const withNs = (c: ChannelTimings, cycles: number | undefined) =>
+    cycles === undefined ? '–' : `${num(cycles)}${c.mclkMhz ? ` (${num((cycles / c.mclkMhz) * 1000)} ns)` : ''}`;
+  const trfc = (c: ChannelTimings) => withNs(c, c.trfc);
   const speed = (c: ChannelTimings) => (c.dataRate === undefined ? '–' : `${num(c.dataRate, 0)} MT/s`);
   const gen = $derived(timings?.generation ? timings.generation.toUpperCase() : '');
 
@@ -101,7 +104,7 @@
               {#each visibleSecondary as [label, key] (key)}
                 <tr>
                   <th scope="row" class="plain"><Term term={key}>{label}</Term></th>
-                  {#each channels as c, i (i)}<td>{cell(c[key] as number | undefined)}</td>{/each}
+                  {#each channels as c, i (i)}<td>{key === 'trfc2' || key === 'trfcSb' ? withNs(c, c[key]) : cell(c[key] as number | undefined)}</td>{/each}
                 </tr>
               {/each}
             {/if}

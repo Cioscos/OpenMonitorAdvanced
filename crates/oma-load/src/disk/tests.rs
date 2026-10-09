@@ -563,7 +563,15 @@ fn fill_is_not_cut_by_its_duration() {
 fn pause_sends_progress_at_least_every_900_ms() {
     let mut ph = phase(KernelId::DiskBench, 1, job(4096, 1 << 20, 100, 100, 4, 1));
     ph.pause_before_ms = 5000;
-    let r = run(&plan(64 * MIB, vec![ph]), Setup::default());
+    // The test clock runs `speed` times faster than real time, so each real 2 ms slice of the
+    // pause loop is `speed` × longer on it. With the default 50 a Windows runner at the 15.6 ms
+    // timer resolution sleeps ~10 ms per slice, i.e. 500 ms on the test clock, and the beats
+    // land 1000 ms apart. At 4 a coarse 16 ms slice is 64 ms, inside the 100 ms of margin.
+    let setup = Setup {
+        speed: 4,
+        ..Setup::default()
+    };
+    let r = run(&plan(64 * MIB, vec![ph]), setup);
     let beats: Vec<u64> = r
         .msgs
         .iter()
@@ -574,9 +582,8 @@ fn pause_sends_progress_at_least_every_900_ms() {
         .collect();
     assert!(beats.len() >= 5, "{beats:?}");
     // `elapsed_ms` counts from the run's start, file setup included: only the gaps between
-    // heartbeats are the pause's. The bound leaves room for scheduling delays on a loaded
-    // CI runner (a 1003 ms gap was seen with the whole suite running in parallel).
-    assert!(beats.windows(2).all(|w| w[1] - w[0] <= 1500), "{beats:?}");
+    // heartbeats are the pause's.
+    assert!(beats.windows(2).all(|w| w[1] - w[0] <= 1000), "{beats:?}");
     assert_eq!(r.end.finished.reason, FinishReason::Completed);
 }
 

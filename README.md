@@ -36,6 +36,13 @@ SMART data.
     value comes from;
   - static device details, such as the PCIe link, power limits and temperature thresholds;
   - for GPUs, the processes using the GPU, with their load and memory.
+  - newer sensors where the hardware has them: the RAM page shows the SPD data of each module
+    and, with the service on a supported AMD Zen CPU, the timings in use (CL, tRCD, tRP, tRAS,
+    tRFC and more); NVIDIA GPUs add the energy used since start and the PCIe traffic; Intel CPUs
+    flag thermal and power-limit throttling; SATA disks show their reallocated, pending and
+    uncorrectable sector counts, with a *Disk sectors* rule; a laptop gets a Battery page with
+    charge, power, remaining time and wear, and a low-battery rule that waits while it is
+    plugged in. Sensors the hardware does not report simply do not appear.
 - **Settings view.** Language, temperature in °C or °F, network speed in bit/s or byte/s,
   sampling interval (0.5 to 5 s), chart refresh rate (60, 30 or 15 FPS), default view, closing
   to the tray, starting with Windows and the sensor shown by the tray icon. The *Rules and

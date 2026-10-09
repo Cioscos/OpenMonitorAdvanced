@@ -196,6 +196,22 @@ Grafico a strisce, cassetto «Serie», Semplice e Avanzata a tutta finestra, fas
   - stress test: `chosen` resta in `$state` con `fixedSeries` anche se non serve; i sensori di clock e RAM si cercano per `label.key` in tutto lo schema;
   - test: asserzioni con regex sul sorgente in `SimpleView.test.ts` e nel `Tile`; i test di `select.ts` scritti dopo il codice; il filtro `/fan/i` di un test è largo.
 
+## Open: new sensors (M9b)
+
+Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Implementata sul branch `feat/m9b`; verifiche automatiche verdi, prove dal vivo e misure ancora da fare.
+
+- **Prove dal vivo su questo PC (spec §9.2), con l'utente:**
+  - pagina RAM con il servizio e PawnIO: i timing in uso coincidono con ZenTimings (tRFCsb 416 compreso) e la sezione SPD mostra i due moduli;
+  - pagina GPU: energia che cresce, RX/TX che salgono in un gioco o nel benchmark della GPU, nessuno scatto del grafico a 60 FPS, CPU del nucleo nel budget;
+  - disco SATA (se presente): i contatori dei settori compaiono e gli avvisi restano spenti; con l'HDD in standby il disco resta fermo;
+  - senza batteria: nessuna voce «Batteria» e nessuna tessera.
+- **Misure dovute:** `scripts/measure-footprint.ps1` a riposo e con la pagina GPU aperta con le serie PCIe, da registrare in `docs/perf-budget.md` (sezione M9b).
+- **Da collaudare altrove (spec §9.3):**
+  - batteria su un portatile: carica, potenza con il segno, tempo stimato, usura, regola `battery-low` solo in scarica;
+  - throttling Intel su un PC Intel: termico sotto carico con dissipatore limitato, potenza con PL1 basso;
+  - timing in uso su Zen 2, Zen 3 e Zen 5;
+  - un disco SATA con settori riallocati o un attributo sotto soglia.
+
 ## Open: leaderboard app (M8d2)
 
 App della classifica (piano `docs/superpowers/plans/2026-10-09-m8d2-app-classifica.md`, documenti in `docs/benchmark-scoring.md`, sezione «L'app»). Implementata nel branch `feat/m8d2-app-classifica`, non unita in `main`. Prove dal vivo Z9.1–Z9.9 fatte con l'utente il 2026-10-09, senza input sintetico. Restano aperte solo la Z9.4 e la parte senza rete della Z9.7.

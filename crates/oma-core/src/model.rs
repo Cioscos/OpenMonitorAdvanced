@@ -37,6 +37,8 @@ pub enum SensorKind {
     Link,
     /// A cumulative count, e.g. a disk's power-on cycles.
     Counter,
+    /// A span of time, e.g. the battery time remaining.
+    Duration,
 }
 
 impl SensorKind {
@@ -57,6 +59,7 @@ impl SensorKind {
             SensorKind::Percent => "percent",
             SensorKind::Link => "link",
             SensorKind::Counter => "counter",
+            SensorKind::Duration => "duration",
         }
     }
 }
@@ -84,6 +87,8 @@ pub enum Unit {
     Lanes,
     /// Power-on hours of a storage device.
     Hours,
+    /// A span of time in seconds.
+    Seconds,
     /// A whole-number count, e.g. power-on cycles.
     Count,
 }
@@ -289,6 +294,19 @@ mod tests {
             json!(["pcie_generation", "lanes"])
         );
         assert_eq!(serde_json::to_value(Source::Pnp).unwrap(), json!("pnp"));
+    }
+
+    #[test]
+    fn duration_and_seconds_serialize_in_snake_case() {
+        assert_eq!(SensorKind::Duration.as_str(), "duration");
+        assert_eq!(
+            serde_json::to_value(SensorKind::Duration).unwrap(),
+            json!("duration")
+        );
+        assert_eq!(
+            serde_json::to_value(Unit::Seconds).unwrap(),
+            json!("seconds")
+        );
     }
 
     #[test]

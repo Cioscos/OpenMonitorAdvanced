@@ -191,6 +191,7 @@ pub fn unit_symbol(unit: Unit, units: DisplayUnits, network: bool) -> (&'static 
         Unit::BitsPerSecond => ("bit/s", Conversion::None),
         Unit::Joule => ("J", Conversion::None),
         Unit::Hours => ("h", Conversion::None),
+        Unit::Seconds => ("s", Conversion::None),
         Unit::Boolean => ("", Conversion::Flag),
         Unit::PcieGeneration | Unit::Lanes | Unit::Count => ("", Conversion::None),
     }
@@ -694,6 +695,7 @@ mod tests {
             (Unit::Bytes, "B"),
             (Unit::Joule, "J"),
             (Unit::Hours, "h"),
+            (Unit::Seconds, "s"),
             (Unit::Boolean, ""),
             (Unit::PcieGeneration, ""),
             (Unit::Lanes, ""),

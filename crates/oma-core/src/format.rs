@@ -38,7 +38,6 @@ impl Default for FormatOptions {
 
 const BYTE_UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
 const BIT_UNITS: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
-const JOULE_UNITS: [&str; 4] = ["J", "kJ", "MJ", "GJ"];
 
 /// A sensor value as `formatValue` in `app/src/lib/format.ts` shows it, as
 /// number and unit; the dash when absent or not finite. Texts without a
@@ -82,7 +81,8 @@ pub fn format_value(value: Option<f64>, unit: Unit, opts: &FormatOptions) -> (St
         },
         Unit::BytesPerSecond => throughput(v, opts.rate, opts),
         Unit::BitsPerSecond => throughput(v / 8.0, ThroughputUnit::Bits, opts),
-        Unit::Joule => stepped(v, 1000.0, &JOULE_UNITS, "", opts),
+        Unit::Joule => energy(v, opts),
+        Unit::Seconds => plain(duration(v)),
         Unit::Boolean => plain(if v >= 0.5 {
             opts.flag_on.clone()
         } else {
@@ -182,6 +182,35 @@ fn stepped(
         number(value, digits, opts.decimal_comma),
         format!("{}{suffix}", units[unit]),
     )
+}
+
+/// Joules shown as Wh, or kWh from 1000 Wh; below 10 two decimals, below 100
+/// one, else none (`formatEnergy` in `format.ts`).
+fn energy(joule: f64, opts: &FormatOptions) -> (String, String) {
+    let wh = joule / 3600.0;
+    let (value, unit) = if wh.abs() >= 1000.0 {
+        (wh / 1000.0, "kWh")
+    } else {
+        (wh, "Wh")
+    };
+    let default = match value.abs() {
+        a if a < 10.0 => 2,
+        a if a < 100.0 => 1,
+        _ => 0,
+    };
+    let digits = opts.decimals.map_or(default, usize::from);
+    (number(value, digits, opts.decimal_comma), unit.to_owned())
+}
+
+/// Seconds as `10 min` or `1 h 30 min`, whole minutes rounded down; the same
+/// in both languages (`formatDuration` in `format.ts`).
+fn duration(seconds: f64) -> String {
+    let minutes = (seconds / 60.0).floor().max(0.0) as u64;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h {} min", minutes / 60, minutes % 60)
+    }
 }
 
 /// A byte count in a fixed binary unit (`index` in [`BYTE_UNITS`]).
@@ -320,6 +349,22 @@ mod tests {
             ..opts()
         };
         assert_eq!(fmt(1.2346, Unit::Volt, &zero), "1 V");
+    }
+
+    #[test]
+    fn seconds_format_as_hours_and_minutes() {
+        assert_eq!(fmt(5400.0, Unit::Seconds, &opts()), "1 h 30 min");
+        assert_eq!(fmt(600.0, Unit::Seconds, &opts()), "10 min");
+        assert_eq!(fmt(59.0, Unit::Seconds, &opts()), "0 min");
+    }
+
+    #[test]
+    fn joules_format_as_watt_hours() {
+        assert_eq!(fmt(3600.0, Unit::Joule, &opts()), "1.00 Wh");
+        assert_eq!(fmt(180_000.0, Unit::Joule, &opts()), "50.0 Wh");
+        assert_eq!(fmt(1_800_000.0, Unit::Joule, &opts()), "500 Wh");
+        assert_eq!(fmt(3_600_000.0, Unit::Joule, &opts()), "1.00 kWh");
+        assert_eq!(fmt(360_000_000.0, Unit::Joule, &opts()), "100 kWh");
     }
 
     #[test]

@@ -6,7 +6,6 @@ export const DASH = '—';
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 const BIT_UNITS = ['bit/s', 'kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s'];
-const JOULE_UNITS = ['J', 'kJ', 'MJ', 'GJ'];
 const formatters = new Map<string, Intl.NumberFormat>();
 
 // `locale` is a BCP 47 tag ('en', 'it'); Intl accepts any tag, so callers may pass a plain string.
@@ -75,16 +74,17 @@ export function formatPower(watt: number | null, locale: string): string {
   return missing(watt) ? DASH : `${num(watt, 0, locale)} W`;
 }
 
-/** Energy with decimal steps (J, kJ, MJ, GJ). */
+/** Joules shown as Wh, or kWh from 1000 Wh: two decimals below 10, one below 100, else none. */
 function formatEnergy(joule: number, locale: string): string {
-  let value = joule;
-  let unit = 0;
-  while (Math.abs(value) >= 1000 && unit < JOULE_UNITS.length - 1) {
+  let value = joule / 3600;
+  let unit = 'Wh';
+  if (Math.abs(value) >= 1000) {
     value /= 1000;
-    unit++;
+    unit = 'kWh';
   }
-  const digits = unit === 0 || value >= 100 ? 0 : 1;
-  return `${num(value, digits, locale)} ${JOULE_UNITS[unit]}`;
+  const abs = Math.abs(value);
+  const digits = abs < 10 ? 2 : abs < 100 ? 1 : 0;
+  return `${num(value, digits, locale)} ${unit}`;
 }
 
 /** Options of `formatValue`. */
@@ -136,6 +136,8 @@ export function formatValue(
       return `x${Math.round(value)}`;
     case 'hours':
       return `${num(value, 0, locale)} h`;
+    case 'seconds':
+      return formatDuration(value * 1000, t);
     case 'count':
       return num(value, 0, locale);
     default: {

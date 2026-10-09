@@ -12,6 +12,7 @@
   import GpuProcesses from './GpuProcesses.svelte';
   import StripChart from './StripChart.svelte';
   import KpiRow from './KpiRow.svelte';
+  import MemoryTimings from './MemoryTimings.svelte';
   import SensorTable from './SensorTable.svelte';
   import ServiceNotice from './ServiceNotice.svelte';
 
@@ -59,6 +60,7 @@
     {/if}
     <KpiRow {kpis} {valueOf} {qualityOf} statsOf={stats.statsOf} {rate} />
     <StripChart sectionId={entry.id} {sensors} {defaults} {schema} {store} {backend} {rate} />
+    {#if entry.kind === 'memory'}<MemoryTimings {devices} />{/if}
     <SensorTable {sensors} {valueOf} {qualityOf} {stats} {rate} />
     {#if hasProperties || entry.kind === 'gpu'}
       <div class="extra">

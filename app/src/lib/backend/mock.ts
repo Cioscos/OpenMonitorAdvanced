@@ -51,6 +51,18 @@ const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, labe
 });
 
 /** Same ids and label keys the Rust providers produce (crates/oma-win). */
+/** The two RAM properties of this machine (DN3 example: DDR5-6000 CL36-48-48-104). */
+export const MOCK_MEMORY_PROPERTIES = {
+  memoryModules: JSON.stringify([
+    { slot: 'DIMM #1', capacityBytes: 17179869184, tempHighC: 55, tempCritC: 85, tckMinNs: 0.416, taaNs: 16, trcdNs: 16, trpNs: 16, trasNs: 32, trcNs: 48, trfc1Ns: 295, trfc2Ns: 160, trfcSbNs: 130 },
+    { slot: 'DIMM #3', capacityBytes: 17179869184, tckMinNs: 0.416, taaNs: 16 },
+  ]),
+  memoryTimings: JSON.stringify({
+    generation: 'ddr5', mclkMhz: 3000, dataRate: 6000, cmd2t: false, gdm: true, refreshMode: 'mixed', cl: 36, trcdRd: 48, trcdWr: 48, trp: 48, tras: 104, trc: 152,
+    trrdS: 8, trrdL: 16, tfaw: 32, twtrS: 8, twtrL: 32, tcwl: 34, twr: 72, trtp: 24, trefi: 11677, trfc: 943, trfc2: 512, trfcSb: 416, trfcNs: 170.667,
+  }),
+};
+
 export const MOCK_SCHEMA: Schema = {
   revision: 1,
   devices: [
@@ -62,7 +74,7 @@ export const MOCK_SCHEMA: Schema = {
       vendor: 'NVIDIA',
       properties: { pciAddress: '0000:01:00.0', integrated: 'false' },
     },
-    { id: 'memory/0', kind: 'memory', name: 'RAM' },
+    { id: 'memory/0', kind: 'memory', name: 'RAM', properties: MOCK_MEMORY_PROPERTIES },
     { id: 'storage/device-mock-ssd', kind: 'storage', name: 'Disk 0 (C:)', properties: { smartSelectable: 'true' } },
     { id: 'network/mock-eth', kind: 'network', name: 'Ethernet' },
   ],

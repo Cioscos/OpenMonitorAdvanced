@@ -37,6 +37,9 @@ export const DISK_MODE_TERMS: string[] = catalog.diskKernels.map((id) => `mode.$
 /** The terms of the Simple view tiles (M9a DM15); `vram` and `throttling` come from the other lists. */
 export const MONITOR_TERMS: string[] = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock'];
 
+/** The terms of the RAM timings section of the Advanced view (M9b DN13). */
+export const MEMORY_TERMS: string[] = ['cl', 'trcd', 'trp', 'tras', 'trc', 'trfc', 'gdm', 'commandRate', 'jedec', 'spd', 'mclk', 'refreshMode', 'secondaryTimings'];
+
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [
   ...SCORE_TERMS,

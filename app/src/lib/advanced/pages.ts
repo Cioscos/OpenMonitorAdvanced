@@ -267,7 +267,7 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
 };
 
 /** Properties meant for other screens: `smartSelectable` and `smartDefault` feed the Settings' SMART switches. */
-const HIDDEN_PROPERTIES = new Set(['smartSelectable', 'smartDefault']);
+const HIDDEN_PROPERTIES = new Set(['smartSelectable', 'smartDefault', 'memoryModules', 'memoryTimings']);
 
 export interface PropertyRow {
   key: string;

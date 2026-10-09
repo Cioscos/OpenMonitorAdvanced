@@ -37,10 +37,16 @@ pub(crate) enum GpuField {
     PcieLinkGen,
     /// Current PCIe link width in lanes.
     PcieLinkWidth,
+    /// Energy drawn since the app started (joules), from NVML's millijoule counter.
+    EnergyTotal,
+    /// PCIe receive throughput.
+    PcieRx,
+    /// PCIe transmit throughput.
+    PcieTx,
 }
 
 impl GpuField {
-    pub const ALL: [GpuField; 26] = [
+    pub const ALL: [GpuField; 29] = [
         GpuField::LoadCore,
         GpuField::Load3d,
         GpuField::LoadCompute,
@@ -67,6 +73,9 @@ impl GpuField {
         GpuField::ThrottleThermal,
         GpuField::PcieLinkGen,
         GpuField::PcieLinkWidth,
+        GpuField::EnergyTotal,
+        GpuField::PcieRx,
+        GpuField::PcieTx,
     ];
 
     pub fn kind(self) -> SensorKind {
@@ -83,6 +92,8 @@ impl GpuField {
             VoltageCore => SensorKind::Voltage,
             ThrottlePower | ThrottleThermal => SensorKind::Flag,
             PcieLinkGen | PcieLinkWidth => SensorKind::Link,
+            EnergyTotal => SensorKind::Energy,
+            PcieRx | PcieTx => SensorKind::Throughput,
         }
     }
 
@@ -116,6 +127,9 @@ impl GpuField {
             ThrottleThermal => "throttle-thermal",
             PcieLinkGen => "pcie-gen",
             PcieLinkWidth => "pcie-width",
+            EnergyTotal => "total",
+            PcieRx => "pcie-rx",
+            PcieTx => "pcie-tx",
         }
     }
 
@@ -133,6 +147,8 @@ impl GpuField {
             ThrottlePower | ThrottleThermal => Unit::Boolean,
             PcieLinkGen => Unit::PcieGeneration,
             PcieLinkWidth => Unit::Lanes,
+            EnergyTotal => Unit::Joule,
+            PcieRx | PcieTx => Unit::BytesPerSecond,
         }
     }
 
@@ -166,6 +182,9 @@ impl GpuField {
             ThrottleThermal => "gpu.throttle.thermal",
             PcieLinkGen => "gpu.pcie.gen",
             PcieLinkWidth => "gpu.pcie.width",
+            EnergyTotal => "gpu.energy.total",
+            PcieRx => "gpu.pcie.rx",
+            PcieTx => "gpu.pcie.tx",
         }
     }
 }
@@ -287,6 +306,35 @@ mod tests {
         assert_eq!(position(GpuField::LoadDecoder), 7);
         assert_eq!(position(GpuField::PcieLinkGen), 24);
         assert_eq!(position(GpuField::PcieLinkWidth), 25);
+    }
+
+    #[test]
+    fn m9b_slow_fields_match_the_contract() {
+        let row = |f: GpuField| (f.kind(), f.name(), f.unit(), f.label_key());
+        assert_eq!(
+            row(GpuField::EnergyTotal),
+            (SensorKind::Energy, "total", Unit::Joule, "gpu.energy.total")
+        );
+        assert_eq!(
+            row(GpuField::PcieRx),
+            (
+                SensorKind::Throughput,
+                "pcie-rx",
+                Unit::BytesPerSecond,
+                "gpu.pcie.rx"
+            )
+        );
+        assert_eq!(
+            row(GpuField::PcieTx),
+            (
+                SensorKind::Throughput,
+                "pcie-tx",
+                Unit::BytesPerSecond,
+                "gpu.pcie.tx"
+            )
+        );
+        assert_eq!(GpuField::ALL.len(), 29);
+        assert_eq!(GpuField::ALL[28], GpuField::PcieTx);
     }
 
     #[test]

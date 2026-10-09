@@ -19,6 +19,7 @@ use oma_core::provider::ProviderError;
 use super::adapter::{Adapter, PciAddress, Vendor};
 use super::field::GpuField;
 use super::layer::{GpuLayer, Readings};
+use super::nvml_slow::{Handle, SlowReader, Target, SLOW_FIELDS};
 use super::trim;
 use crate::dynlib::Library;
 
@@ -361,6 +362,10 @@ struct Api {
     power_default_limit: Option<U32Fn>,
     temperature_threshold: Option<U32ArgFn>,
     pcie_replay: Option<U32Fn>,
+    /// Millijoules since the driver loaded (slow: ~9 ms p95, only the slow thread calls it).
+    energy: Option<U64Fn>,
+    /// KB/s per counter (0 = TX, 1 = RX); blocks ~30 ms, only the slow thread calls it.
+    pcie_throughput: Option<U32ArgFn>,
 }
 
 fn call_u32(f: Option<U32Fn>, device: DeviceHandle) -> (Ret, u32) {
@@ -390,6 +395,29 @@ fn call_u32_pair(f: Option<U32PairFn>, device: DeviceHandle) -> (Ret, u32, u32) 
     // SAFETY: as in `call_u32`, with two valid out pointers.
     let ret = unsafe { f(device, &mut first, &mut second) };
     (ret, first, second)
+}
+
+/// PCIe throughput counters of `nvmlDeviceGetPcieThroughput`.
+const PCIE_TX: u32 = 0;
+const PCIE_RX: u32 = 1;
+
+/// Raw counter of a slow field: millijoules, or KB/s. Slow: never call from the tick.
+fn slow_raw(
+    energy: Option<U64Fn>,
+    pcie: Option<U32ArgFn>,
+    device: DeviceHandle,
+    field: GpuField,
+) -> (Ret, u64) {
+    match field {
+        GpuField::EnergyTotal => call_u64(energy, device),
+        GpuField::PcieRx => widen(call_u32_arg(pcie, device, PCIE_RX)),
+        GpuField::PcieTx => widen(call_u32_arg(pcie, device, PCIE_TX)),
+        _ => (ERROR_NOT_SUPPORTED, 0),
+    }
+}
+
+fn widen((ret, value): (Ret, u32)) -> (Ret, u64) {
+    (ret, u64::from(value))
 }
 
 fn call_u64(f: Option<U64Fn>, device: DeviceHandle) -> (Ret, u64) {
@@ -433,6 +461,8 @@ impl Api {
                 power_default_limit: library.symbol(c"nvmlDeviceGetPowerManagementDefaultLimit"),
                 temperature_threshold: library.symbol(c"nvmlDeviceGetTemperatureThreshold"),
                 pcie_replay: library.symbol(c"nvmlDeviceGetPcieReplayCounter"),
+                energy: library.symbol(c"nvmlDeviceGetTotalEnergyConsumption"),
+                pcie_throughput: library.symbol(c"nvmlDeviceGetPcieThroughput"),
             })
         }
     }
@@ -547,7 +577,14 @@ impl Api {
         }
     }
 
-    /// Reads one field of `device` (which has `fans` fans).
+    /// One slow read, for the support probe at attach only.
+    fn probe_slow(&self, device: DeviceHandle, field: GpuField) -> Read {
+        let (ret, raw) = slow_raw(self.energy, self.pcie_throughput, device, field);
+        (ret, Some(raw as f64))
+    }
+
+    /// Reads one field of `device` (which has `fans` fans). The slow fields are not read
+    /// here: the tick takes them from the slow thread's cache.
     fn read(&self, device: DeviceHandle, fans: u32, field: GpuField) -> Read {
         let u32_read = |(ret, value): (Ret, u32), map: fn(u32) -> f64| (ret, Some(map(value)));
         match field {
@@ -624,6 +661,8 @@ pub(crate) struct NvmlLayer {
     api: Api,
     /// Per adapter of the last attach: its NVML binding, if it is an NVIDIA GPU NVML knows.
     bound: Vec<Option<Bound>>,
+    /// The `oma-gpu-slow` thread, started by the first attach that has a slow field.
+    slow: Option<SlowReader>,
     /// Keeps nvml.dll referenced; it is never unloaded (D1).
     _library: Library,
 }
@@ -661,8 +700,46 @@ impl NvmlLayer {
         Some(Self {
             api,
             bound: Vec::new(),
+            slow: None,
             _library: library,
         })
+    }
+
+    /// Starts the slow thread if a GPU has a slow field (else drops those fields) and tells
+    /// it which GPUs to read.
+    fn attach_slow(&mut self) {
+        let targets: Vec<Target> = self
+            .bound
+            .iter()
+            .flatten()
+            .map(|b| Target {
+                handle: Handle(b.device),
+                fields: b
+                    .fields
+                    .iter()
+                    .copied()
+                    .filter(|f| SLOW_FIELDS.contains(f))
+                    .collect(),
+            })
+            .filter(|t| !t.fields.is_empty())
+            .collect();
+        if !targets.is_empty() && self.slow.is_none() {
+            let (energy, pcie) = (self.api.energy, self.api.pcie_throughput);
+            self.slow = SlowReader::start(move |device, field| {
+                match slow_raw(energy, pcie, device, field) {
+                    (SUCCESS, raw) => Some(raw),
+                    _ => None,
+                }
+            });
+        }
+        match &self.slow {
+            Some(slow) => slow.set_targets(targets),
+            None => {
+                for b in self.bound.iter_mut().flatten() {
+                    b.fields.retain(|f| !SLOW_FIELDS.contains(f));
+                }
+            }
+        }
     }
 
     fn bind(&self, adapter: &Adapter) -> Option<Bound> {
@@ -671,7 +748,11 @@ impl NvmlLayer {
         }
         let device = self.api.handle_for(adapter.pci?)?;
         let fans = self.api.fan_count(device);
-        let fields = probe(&FIELDS, |field| self.api.read(device, fans, field));
+        let mut fields = probe(&FIELDS, |field| self.api.read(device, fans, field));
+        // One call per slow field, outside the tick.
+        fields.extend(probe(&SLOW_FIELDS, |field| {
+            self.api.probe_slow(device, field)
+        }));
         let properties = self.api.static_reads(device).properties();
         Some(Bound {
             device,
@@ -689,6 +770,7 @@ impl GpuLayer for NvmlLayer {
 
     fn attach(&mut self, adapters: &[Adapter]) -> Vec<BTreeSet<GpuField>> {
         self.bound = adapters.iter().map(|adapter| self.bind(adapter)).collect();
+        self.attach_slow();
         self.bound
             .iter()
             .map(|bound| bound.as_ref().map(|b| b.fields.clone()).unwrap_or_default())
@@ -696,10 +778,18 @@ impl GpuLayer for NvmlLayer {
     }
 
     fn sample(&mut self) -> Result<Vec<Readings>, ProviderError> {
+        let now = std::time::Instant::now();
         self.bound
             .iter()
             .map(|bound| match bound {
-                Some(b) => collect(&b.fields, |field| self.api.read(b.device, b.fans, field)),
+                Some(b) => {
+                    let mut readings =
+                        collect(&b.fields, |field| self.api.read(b.device, b.fans, field))?;
+                    if let Some(slow) = &self.slow {
+                        readings.extend(slow.poll(b.device, now));
+                    }
+                    Ok(readings)
+                }
                 None => Ok(Readings::new()),
             })
             .collect()
@@ -908,6 +998,106 @@ mod tests {
                 function: 0
             }
         ));
+    }
+
+    #[test]
+    fn unsupported_fields_are_not_attached() {
+        let supported = probe(&SLOW_FIELDS, |field| match field {
+            GpuField::EnergyTotal => (SUCCESS, Some(1.0)),
+            GpuField::PcieRx => (ERROR_NOT_SUPPORTED, None),
+            _ => (ERROR_FUNCTION_NOT_FOUND, None),
+        });
+        assert_eq!(supported, fields(&[GpuField::EnergyTotal]));
+    }
+
+    static ENERGY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PCIE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe extern "C" fn fake_init() -> Ret {
+        SUCCESS
+    }
+
+    unsafe extern "C" fn fake_energy(_: DeviceHandle, out: *mut u64) -> Ret {
+        ENERGY_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the caller passes a valid out pointer.
+        unsafe { *out = 1 };
+        SUCCESS
+    }
+
+    unsafe extern "C" fn fake_pcie(_: DeviceHandle, _: u32, out: *mut u32) -> Ret {
+        PCIE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the caller passes a valid out pointer.
+        unsafe { *out = 1 };
+        SUCCESS
+    }
+
+    #[test]
+    fn sample_never_calls_slow_functions() {
+        let api = Api {
+            init: fake_init,
+            count: None,
+            by_index: None,
+            by_bus_id: None,
+            pci_info: None,
+            temperature_v: None,
+            temperature: None,
+            clock_info: None,
+            power_usage: None,
+            enforced_power_limit: None,
+            num_fans: None,
+            fan_speed: None,
+            fan_speed_rpm: None,
+            memory_v2: None,
+            memory_v1: None,
+            event_reasons: None,
+            throttle_reasons: None,
+            encoder_utilization: None,
+            decoder_utilization: None,
+            curr_link_gen: None,
+            curr_link_width: None,
+            power_constraints: None,
+            power_default_limit: None,
+            temperature_threshold: None,
+            pcie_replay: None,
+            energy: Some(fake_energy),
+            pcie_throughput: Some(fake_pcie),
+        };
+        let all = fields(&GpuField::ALL);
+        let readings = collect(&all, |field| api.read(std::ptr::null_mut(), 0, field));
+        assert_eq!(readings, Ok(Readings::new()));
+        use std::sync::atomic::Ordering::SeqCst;
+        assert_eq!((ENERGY_CALLS.load(SeqCst), PCIE_CALLS.load(SeqCst)), (0, 0));
+        // The probe at attach is the one place that does call them.
+        api.probe_slow(std::ptr::null_mut(), GpuField::EnergyTotal);
+        api.probe_slow(std::ptr::null_mut(), GpuField::PcieRx);
+        assert_eq!((ENERGY_CALLS.load(SeqCst), PCIE_CALLS.load(SeqCst)), (1, 1));
+    }
+
+    #[test]
+    #[ignore = "requires real Windows hardware"]
+    fn nvml_slow_fields_on_this_gpu() {
+        let adapters = crate::gpu::enumerate::enumerate().expect("enumerate");
+        let mut layer = NvmlLayer::load().expect("NVML loads");
+        let supported = layer.attach(&adapters);
+        let nvidia = supported
+            .iter()
+            .position(|set| set.contains(&GpuField::EnergyTotal))
+            .expect("an NVIDIA GPU with the energy counter");
+        assert!(supported[nvidia].contains(&GpuField::PcieRx));
+        let energy = |layer: &mut NvmlLayer| {
+            layer.sample().expect("sample")[nvidia]
+                .get(&GpuField::EnergyTotal)
+                .copied()
+        };
+        assert_eq!(energy(&mut layer), None, "the first tick has no cache yet");
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+        let first = energy(&mut layer).expect("energy after one period");
+        std::thread::sleep(std::time::Duration::from_millis(2_000));
+        let readings = layer.sample().expect("sample");
+        let last = readings[nvidia][&GpuField::EnergyTotal];
+        assert!(last > first, "energy {first} -> {last}");
+        assert!(readings[nvidia][&GpuField::PcieRx] >= 0.0);
+        assert!(readings[nvidia][&GpuField::PcieTx] >= 0.0);
     }
 
     #[test]

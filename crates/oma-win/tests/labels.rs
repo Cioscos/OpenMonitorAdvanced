@@ -49,6 +49,9 @@ const KEYS: &[&str] = &[
     "gpu.throttle.thermal",
     "gpu.pcie.gen",
     "gpu.pcie.width",
+    "gpu.energy.total",
+    "gpu.pcie.rx",
+    "gpu.pcie.tx",
 ];
 
 #[test]

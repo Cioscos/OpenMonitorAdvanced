@@ -9,9 +9,7 @@
 
 **Architecture:**
 - **Solo interfaccia,** in `app/src/`. Rust, servizio e protocollo restano invariati.
-- **`StripChart.svelte`** prende il posto di `HistoryChart.svelte` con le **stesse props**: `sectionId`, `sensors`, `defaults`, `schema`, `store`, `backend`, `rate` e `fixedWindow`. Si sostituisce senza toccare chi lo usa:
-  - `DevicePage`;
-  - `StressRun`.
+- **`StripChart.svelte`** prende il posto di `HistoryChart.svelte` con le **stesse props**: `sectionId`, `sensors`, `defaults`, `schema`, `store`, `backend`, `rate` e `fixedWindow`. Lo usa `DevicePage`. `StressRun` tiene `HistoryChart`, con le serie scelte dal test (M6, spec §5.4).
 - **Cosa tiene `StripChart`:**
   - la selezione;
   - un solo `ChartBuffer`;
@@ -32,7 +30,8 @@
   - M3: cassetto;
   - M4: larghezze e griglia della Semplice;
   - M5: dati delle tessere;
-  - M6: misure, documenti e prove dal vivo.
+  - M6: grafico dello stress test;
+  - M7: misure, documenti e prove dal vivo.
 
 **Tech Stack:** quelli già in uso, cioè Svelte 5, TypeScript 6, uPlot 1.6.32 e Vitest con `@testing-library/svelte`. Nessuna dipendenza nuova.
 
@@ -54,7 +53,7 @@
   - mai ricerche a tutto il disco;
   - mai comandi elevati;
   - mai clic sintetici o UI Automation sul desktop;
-  - mai build release o misure di footprint senza il via dell'utente (M6), per non caricare la CPU senza avviso.
+  - mai build release o misure di footprint senza il via dell'utente (M7), per non caricare la CPU senza avviso.
 - **Prestazioni:**
   - fra due dati, un frame cambia solo i `transform` dei canvas (uno per striscia) e niente altro;
   - i percorsi si ricalcolano solo a ogni dato e solo per le strisce visibili.
@@ -78,14 +77,14 @@
 | DM6 | **`ChartStrip.svelte`:** uno uPlot con una sola scala Y (`unit`), `legend: { show: false }` e `cursor.sync: { key: <chiave del grafico> }`. Tiene ciò che oggi è per grafico:<br>• il canvas composito;<br>• i punti bianchi;<br>• il segmento tenuto;<br>• le transizioni Y (`yRange`, `stepY`, `finishY`);<br>• `timeSpace` e lo spostamento del cursore.<br>**Props:** `unit`, `colors: Array<{ color: string; dash: readonly number[] }>`, `labels: string[]`, `hidden: boolean[]`, `format` (di `displayScale`), `viewport`, `windowSeconds`, `height`, `timeAxis: boolean`, `syncKey`, `reducedMotion`, `oncursor: (idx: number \| null) => void`.<br>**Metodi esportati**, chiamati dal padre:<br>• `build(data)`: crea o ricrea il plot;<br>• `setData(data, nowMonoMs)`: nuovo dato, come oggi `tail`;<br>• `frame(nowMonoMs)`: Y e spostamento;<br>• `finishY()`;<br>• `reset()`: finestra nascosta;<br>• `destroy()`.<br>**Fuori dallo schermo:** un `IntersectionObserver` sul contenitore; da nascosta la striscia tiene l'ultimo `data`, salta `setData` e `frame`, e quando torna visibile rifà `setData` più rebase. Senza `IntersectionObserver` (jsdom) è sempre visibile. | Spec §4 e §6. Il padre non conosce uPlot. |
 | DM7 | **`StripChart.svelte`:** tiene quello che `HistoryChart` fa oggi per tutto il grafico:<br>• selezione, persistenza e finestra;<br>• `reseed` e `getHistory` (una richiesta per tutte le serie);<br>• `tail`;<br>• visibilità e `windowAllSuspended` (per striscia);<br>• `subscribeChartFrame`: una sola iscrizione, che chiama `frame` su ogni striscia;<br>• unità e locale, che a ogni cambio ricostruiscono le strisce dal buffer.<br>**Cursore:** `cursorIdx: number \| null`, l'ultimo indice riportato da una striscia (`null` all'uscita).<br>**Fra un rebuild e l'altro restano:** le serie nascoste (`hiddenIds: Set<string>`) e la chiave di sincronizzazione `chart-<sectionId>`. | Spec §4. Un solo viewport, quindi le strisce scorrono insieme. |
 | DM8 | **`StripLegend.svelte`:** una per striscia.<br>**Props:** `title: string`, `rows: Array<{ id; label; color; dash; now: string; min: string; max: string; hidden: boolean }>`, `ontoggle(id)` e `onremove(id)`.<br>**Valore `now`:**<br>• senza cursore: `format(convert(store.measured(id)))`;<br>• col cursore: il valore della colonna in `cursorIdx`.<br>`—` (`DASH`) se assente.<br>**Righe:**<br>• il nome è un `<button>` che nasconde o mostra la serie, con `aria-pressed` = visibile;<br>• la × è un `<button>` con `aria-label` = `advanced.chart.remove` (`{name}`).<br>**Titolo:** `advanced.chart.unit.<unit>`, con una voce per ognuno dei 16 valori di `Unit`. | Spec §2.4. |
-| DM9 | **Limiti tolti:**<br>• si cancellano `MAX_SERIES`, `MAX_UNITS`, `canAdd`, `scaleLayout` e la chiave `advanced.chart.maxSeries`;<br>• `fitSelection(ids, candidates)` tiene gli id presenti in `candidates`, nell'ordine e senza duplicati;<br>• `initialSeries` resta com'è, sopra la nuova `fitSelection`.<br>`HistoryChart.svelte` e `HistoryChart.test.ts` si cancellano in M2. | Spec §2.2. |
+| DM9 | **Limiti tolti solo nel grafico a strisce:**<br>• `MAX_SERIES`, `MAX_UNITS`, `canAdd`, `fitSelection`, `initialSeries`, `scaleLayout` e la chiave `advanced.chart.maxSeries` restano com'erano, per `HistoryChart`;<br>• per `StripChart`, `knownSelection(ids: string[], candidates: string[]): string[]` tiene gli id presenti in `candidates`, nell'ordine e senza duplicati;<br>• `initialStripSeries(saved: string[] \| null, candidates: string[], defaults: string[]): string[]` ha le regole di `initialSeries`, ma sopra `knownSelection`.<br>`HistoryChart.svelte` e `HistoryChart.test.ts` restano. | Spec §2.2 e §5.4. |
 | DM10 | **Tessera cliccabile con i tooltip dentro:** `Tile.svelte` diventa un `<div class="tile">`. L'etichetta è un `<button class="open">` il cui `::after` copre tutta la tessera (`position: absolute; inset: 0`), così il clic su qualunque punto apre la vista Avanzata. Il contenuto con un `Term` ha `position: relative; z-index: 1`. | `Term` è focalizzabile e non può stare dentro un `<button>` (commento in `Term.svelte`). Lo schema della «scheda con link esteso» tiene il clic su tutta la tessera. |
 | DM11 | **Larghezze:** in `App.svelte`, `main` ha `class:wide={view === 'simple' \|\| view === 'advanced'}`, con `.wide { max-width: 1600px }`. Le altre viste restano a 1100 px. | Spec §5.1. |
 | DM12 | **Griglia della Semplice** (`app/src/lib/simpleGrid.ts`): `simpleGrid(count: number): { columns: number; spans: number[]; rows: number }`.<br>• 1 → `{1, [1], 1}`;<br>• 2 → `{2, [1,1], 1}`;<br>• 3 → `{2, [1,1,2], 2}`;<br>• 4 → `{2, [1,1,1,1], 2}`;<br>• 5 → `{6, [2,2,2,3,3], 2}`;<br>• 6 → `{3, [1×6], 2}`;<br>• ≥ 7 → `{3, [1×count], ceil(count/3)}`.<br>**Riempimento:** il modo «riempie» vale con larghezza del contenuto ≥ 900 px (container query su `.simple`) e `window.innerHeight` ≥ 720, solo per `rows ≤ 2`. In questo modo:<br>• `.simple` è alta `calc(100dvh - var(--simple-top) - 20px)`, con `--simple-top` = il `getBoundingClientRect().top` dell'elemento, misurato al mount e a ogni `resize`;<br>• le righe sono `repeat(rows, 1fr)`.<br>Sotto, la griglia di oggi. | Spec §5.2. Il conteggio delle tessere varia con le GPU visibili. |
 | DM13 | **Sparkline e numeri:**<br>• `Sparkline.svelte`: `height: 100%` con `min-height: 34px` (oggi 34 px fissi); il contenitore nella tessera ha `flex: 1`;<br>• numeri grandi: `.big { font-size: clamp(28px, 2.2vw, 40px) }`, e `.big.rate` resta proporzionato con `clamp(20px, 1.6vw, 30px)`. | Spec §5.2. |
 | DM14 | **Dati delle tessere** (`select.ts`), con i campi nuovi accanto a quelli di oggi:<br>• `CpuSummary`: `temperatureC` (`cpu.temperature.package`, poi `cpu.temperature.tctl`), `powerW` (`cpu.power.package`), `busiestThread: number \| null` (massimo di `cpu.load.thread`) e `threads: Array<{ id: string; value: number \| null }>` (`cpu.load.thread`, in ordine di schema);<br>• `GpuSummary`: `hotspotC` (`gpu.temperature.hotspot`), `powerLimitW` (`gpu.power.limit`), `fanPct` (`gpu.fan.percent`), `fanRpm` (`gpu.fan.rpm`) e `throttle: 'power' \| 'thermal' \| null` (`gpu.throttle.power`, poi `gpu.throttle.thermal`, se il valore è 1);<br>• `MemorySummary`: `availableBytes` (totale meno usata, mai sotto 0) e `dimmTempsC: number[]` (`memory.temperature.dimm` con un valore);<br>• `NetworkSummary`: `adapterName` (il nome del primo dispositivo di rete) e `linkBps` (`network.linkSpeed` del primo);<br>• nuova `diskRows(schema, valueOf, powerOf: (deviceId: string) => string \| undefined): DiskRow[]`, con `DiskRow { deviceId; name; letter: string \| null; usedPct; activePct; readBps; writeBps; temperatureC; standby: boolean }`, nell'ordine dei dischi nello schema (lo stesso di `nav.ts`).<br>`letter` è l'`arg` del primo `storage.volumeUsed` del disco; `standby` vale `powerOf(id) === 'standby'`. | Spec §5.3. Le chiavi sono quelle che usano già `pages.ts` e lo schema. |
 | DM15 | **Glossario:** `MONITOR_TERMS = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm']` in `app/src/lib/performance/glossary.ts`. Usano anche le voci esistenti `vram` e `throttling`.<br>Il test del glossario controlla che ogni termine abbia `glossary.<term>` e `glossary.<term>.name` in tutte e due le lingue. | Regola dei tooltip. |
-| DM16 | **Pagina dello stress** (`StressRun.svelte`): usa `StripChart` con `fixedWindow`, come oggi `HistoryChart`, quindi ha anche lei le strisce. | `HistoryChart` sparisce (spec §4); l'alternativa sarebbe tenere due grafici. |
+| DM16 | **Pagina dello stress** (`StressRun.svelte`), con `HistoryChart` e `fixedWindow` come oggi:<br>• `stressChartSensors(schema: Schema \| null, component: StressComponent, objective: Objective, gpuDeviceId: string \| null, diskDeviceId: string \| null): Sensor[]`, in `app/src/lib/performance/format.ts`, al posto della scelta di oggi in `StressRun`; segue la tabella del §5.4 della spec;<br>• **CPU:** temperatura (`CPU_TEMPERATURES`), poi `cpu/0/power/package` o, in overclock, il primo `cpu.clock.effective`;<br>• **RAM:** il primo `memory.load`, poi ogni `memory.temperature.dimm`; senza moduli, la temperatura della CPU;<br>• **GPU:** `<gpu>/temperature/core` e `<gpu>/temperature/hotspot`, poi `<gpu>/power/board` o, in overclock, `<gpu>/clock/core`;<br>• **disco:** `diskChartSensors` di oggi.<br>Le funzioni `cpuChartSensors`, `gpuChartSensors` e `diskChartSensors` restano, usate da `stressChartSensors`.<br>**Prop nuova di `HistoryChart`:** `fixedSeries?: boolean`. Se vale `true`, nasconde il `<details>` «Serie», usa sempre `defaults` (filtrati da `fitSelection`), e non legge né salva la selezione. `StressRun` la passa a `true`. | Scelta dell'utente del 2026-10-09: il vecchio grafico resta allo stress, con le serie scelte dal test. |
 
 ## Review Focus
 
@@ -93,7 +92,7 @@
    - **Atteso:** frame fatti solo di `transform`; una striscia fuori dallo schermo non ricalcola.
    - **Test:**
      - M2: `offscreen_strips_skip_set_data_until_visible`, `frames_only_translate_every_strip`;
-     - M6: la misura.
+     - M7: la misura.
 2. **Cambio di unità o di schema col grafico aperto** (°C ↔ °F, una nuova revisione in cui un sensore sparisce).
    - **Atteso:** le strisce si rifanno dal buffer, °C e °F restano una sola striscia, e la serie sparita esce senza lasciare una striscia vuota.
    - **Test (M2):** `temperature_unit_change_keeps_one_strip`, `schema_revision_regroups_strips`.
@@ -165,11 +164,11 @@
   - `app/src/components/advanced/StripLegend.svelte`, `StripLegend.test.ts`.
 - Modify:
   - `app/src/components/advanced/DevicePage.svelte`;
-  - `app/src/components/performance/StressRun.svelte`;
   - `app/src/lib/advanced/chartData.ts`, `chartData.test.ts` (DM9);
   - `app/src/lib/i18n/en.json`, `it.json`;
   - `app/src/test/uplot-stub.ts`, se serve `cursor.sync`.
-- Delete: `app/src/components/advanced/HistoryChart.svelte`, `HistoryChart.test.ts`.
+
+`HistoryChart.svelte` e `HistoryChart.test.ts` non si toccano.
 
 **Interfaces:**
 - Consumes: M1.
@@ -177,7 +176,7 @@
   - `StripChart` con le props di `HistoryChart`;
   - `ChartStrip` (DM6);
   - `StripLegend` (DM8);
-  - `fitSelection(ids: string[], candidates: string[]): string[]` (DM9).
+  - `knownSelection` e `initialStripSeries` (DM9).
 
   Per M3, `StripChart` espone al cassetto:
   - `chosen`;
@@ -186,7 +185,7 @@
   - le unità delle strisce (`strips.map((s) => s.unit)`).
 
 - [ ] **Step 1: test che falliscono.**
-  - **Port:** `HistoryChart.test.ts` diventa `StripChart.test.ts` con `renderChart` che monta `StripChart`. Ogni test di oggi resta, con lo stesso nome e le stesse asserzioni, **tranne** questi, riscritti come indicato:
+  - **Copia:** `StripChart.test.ts` nasce da una copia di `HistoryChart.test.ts`, con `renderChart` che monta `StripChart`. Ogni test di oggi resta, con lo stesso nome e le stesse asserzioni, **tranne** questi, riscritti come indicato:
     - `seeds the default series and draws them on two unit scales` → `one_plot_per_unit_with_its_own_y_axis`: carico e temperatura danno due plot; `plots[0]` ha la serie `percent` e l'asse `percent` a sinistra, `plots[1]` `celsius`; una sola richiesta di storico per le due serie;
     - `the picker allows at most 8 series…` → `the_picker_has_no_series_limit_and_saves_per_section`: 12 serie spuntabili, salvate;
     - `the picker refuses a third unit` → `a_third_unit_adds_a_third_strip`;
@@ -205,17 +204,17 @@
     - `temperature_unit_change_keeps_one_strip` (Review Focus 2);
     - `schema_revision_regroups_strips` (Review Focus 2);
     - `cursor_sync_key_is_shared_by_the_strips_of_a_chart`;
-    - `stress_page_keeps_its_fixed_window` (DM16).
+    - `known_selection_keeps_order_and_drops_unknown_and_duplicates` (in `chartData.test.ts`).
   - **In `StripLegend.test.ts`:**
     - `name_button_toggles_and_reports_pressed`;
     - `remove_has_an_accessible_name`;
     - `dashed_swatch_matches_the_series`.
 - [ ] **Step 2:** `cd app && pnpm test StripChart StripLegend chartData`. Atteso: FAIL.
 - [ ] **Step 3: implementare** DM5–DM9 e DM16.
-  - **Fonte del codice:** si sposta da `HistoryChart.svelte` (stessi commenti, stessi nomi), senza riscriverlo.
+  - **Fonte del codice:** si copia da `HistoryChart.svelte` (stessi commenti, stessi nomi), senza riscriverlo. `HistoryChart.svelte` resta com'è per lo stress test.
   - **Picker:** resta il `<details>` di oggi, senza limiti e senza il testo `maxSeries`, finché M3 non lo sostituisce.
   - **Layout di ogni striscia:** una griglia `1fr 220px` con 12 px di spazio; a destra la legenda.
-- [ ] **Step 4:** `pnpm test && pnpm check && pnpm build`. Atteso: PASS, e nessun riferimento a `HistoryChart` (`git grep HistoryChart` vuoto, tranne i documenti storici in `docs/`).
+- [ ] **Step 4:** `pnpm test && pnpm check && pnpm build`. Atteso: PASS. `HistoryChart` resta solo in `StressRun.svelte` e nei suoi test (`git grep -l HistoryChart app/src`).
 - [ ] **Step 5: commit** `feat(ui): strip chart, one plot per unit, with a value legend`.
 
 ### Task M3: cassetto «Serie»
@@ -350,7 +349,36 @@ Usare `frontend-design:frontend-design`, con il mockup `simple-2x2-data.html` co
 - [ ] **Step 4:** `pnpm test && pnpm check && pnpm build`. Atteso: PASS.
 - [ ] **Step 5: commit** `feat(ui): more readings in the Simple view tiles`.
 
-### Task M6: misure, documenti e prove dal vivo con l'utente
+### Task M6: grafico dello stress test
+
+**Files:**
+- Modify:
+  - `app/src/lib/performance/format.ts`, `format.test.ts`;
+  - `app/src/components/advanced/HistoryChart.svelte`, `HistoryChart.test.ts`;
+  - `app/src/components/performance/StressRun.svelte` e il suo test, se c'è.
+
+**Interfaces:**
+- Produces: `stressChartSensors` e la prop `fixedSeries` (DM16).
+
+- [ ] **Step 1: test che falliscono.**
+  - In `format.test.ts`, una riga per caso della tabella del §5.4:
+    - `stress_chart_cpu_normal_is_temperature_and_power`;
+    - `stress_chart_cpu_overclock_is_temperature_and_clock`;
+    - `stress_chart_ram_is_used_and_dimm_temperatures`;
+    - `stress_chart_ram_without_dimms_falls_back_to_cpu_temperature`;
+    - `stress_chart_gpu_normal_is_core_hotspot_and_power`;
+    - `stress_chart_gpu_overclock_is_core_hotspot_and_clock`;
+    - `stress_chart_disk_is_temperature_read_and_write`;
+    - `stress_chart_skips_missing_sensors`.
+  - In `HistoryChart.test.ts`:
+    - `fixed_series_hides_the_picker_and_ignores_the_saved_selection`: con una selezione salvata per `performance`, il grafico mostra i `defaults`;
+    - `fixed_series_saves_nothing`.
+- [ ] **Step 2:** `cd app && pnpm test format HistoryChart`. Atteso: FAIL.
+- [ ] **Step 3: implementare** DM16. `StressRun` passa `fixedSeries` e prende le serie da `stressChartSensors(store.schema, status.component, status.objective, status.gpuDeviceId, status.disk?.deviceId || performanceStore.diskDeviceId)`.
+- [ ] **Step 4:** `pnpm test && pnpm check && pnpm build`. Atteso: PASS.
+- [ ] **Step 5: commit** `feat(ui): stress chart series follow the test`.
+
+### Task M7: misure, documenti e prove dal vivo con l'utente
 
 **Files:**
 - Modify:
@@ -371,4 +399,5 @@ Usare `frontend-design:frontend-design`, con il mockup `simple-2x2-data.html` co
   - **Z4:** le pagine GPU, RAM, Disco e Rete, e la pagina dello stress con le strisce.
   - **Z5:** la Semplice a schermo intero, 2 × 2, con i dati nuovi e i tooltip. La finestra piccola torna come oggi.
   - **Z6:** con la GPU integrata visibile (se l'utente lo può fare), 5 tessere in 3 + 2.
+  - **Z7:** uno stress test breve della CPU e uno della RAM (preset «Rapido»). Il grafico mostra le serie della tabella del §5.4, senza il pannello «Serie».
 - [ ] **Step 5: commit** `docs: M9a strip chart and full-window layout`.

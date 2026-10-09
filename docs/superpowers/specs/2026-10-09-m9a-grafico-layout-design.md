@@ -37,7 +37,7 @@ La M9 lavora sul monitor e si divide in due piani:
 
 ### 1.3 Fuori da questa spec
 
-- I grafici delle Prestazioni e le sparkline della Semplice: cambiano solo altezza e dati intorno.
+- I grafici delle Prestazioni e le sparkline della Semplice: cambiano solo altezza e dati intorno. Il grafico dello stress test tiene `HistoryChart` (decisione dell'utente del 2026-10-09) e cambia solo nelle serie, che sceglie da solo (§5.4).
 - Lo zoom e la selezione col trascinamento.
 - Le annotazioni.
 - L'esportazione del grafico.
@@ -60,7 +60,7 @@ La M9 lavora sul monitor e si divide in due piani:
 
 ### 2.2 Limiti tolti
 
-`MAX_SERIES` e `MAX_UNITS` spariscono, insieme a `canAdd` e al testo `advanced.chart.maxSeries`. `fitSelection` e `initialSeries` filtrano solo i sensori che non esistono più. Le selezioni già salvate restano valide così come sono.
+Nel grafico a strisce non ci sono `MAX_SERIES` e `MAX_UNITS`: la selezione scarta solo i sensori che non esistono più. Le selezioni già salvate restano valide così come sono. I limiti, `canAdd` e il testo `advanced.chart.maxSeries` restano solo per `HistoryChart` (§5.4).
 
 ### 2.3 Colori
 
@@ -133,9 +133,9 @@ La M9 lavora sul monitor e si divide in due piani:
   - `windowExtent(column)`, che dà min e max di una colonna senza i `null`;
   - `drawerGroups(sensors, schema, stripUnits, filter)`, che dà gruppi, ordine e filtro del cassetto.
 
-  `scaleLayout` e `canAdd` si tolgono.
+  `scaleLayout` e `canAdd` restano solo per `HistoryChart`.
 - **`chartCanvas.ts`** resta com'è. Dal disegno di una striscia escono le etichette del tempo se `timeAxis` è falso.
-- **`HistoryChart.svelte`** si toglie quando `StripChart` lo sostituisce in tutte le pagine. I suoi test passano a `ChartStrip` o a `StripChart` secondo cosa verificano.
+- **`HistoryChart.svelte`** resta solo per lo stress test, con i suoi limiti di 8 serie e 2 unità (§5.4). `StripChart` lo sostituisce nella vista Avanzata, e i test del canvas composito e delle transizioni Y si copiano per `StripChart`.
 
 ## 5. Layout a finestra grande
 
@@ -187,6 +187,21 @@ I dati vengono tutti da sensori già presenti nello schema. Ognuno compare solo 
 
 Le funzioni di selezione stanno in `app/src/lib/select.ts`, accanto a quelle di oggi, e sono pure e testate.
 
+### 5.4 Grafico dello stress test
+
+Il grafico della pagina dello stress resta `HistoryChart`, ma le serie le sceglie da solo secondo il test (`RunStatus.component` e `RunStatus.objective`):
+
+| Test | Normale | Stabilità overclock |
+|---|---|---|
+| **CPU** | temperatura della CPU (°C) + potenza del package (W) | temperatura della CPU (°C) + clock effettivo |
+| **RAM** | RAM usata (%) + temperature dei moduli (°C); senza moduli, la temperatura della CPU, dove sta il controller della memoria | uguale |
+| **GPU** | temperatura del core e hotspot (°C) + potenza della scheda (W), della GPU in prova | temperatura del core e hotspot (°C) + clock del core |
+| **Disco** | temperatura (°C) + lettura e scrittura, del disco in prova | uguale |
+
+- La temperatura della CPU è la prima presente fra `tdie`, `tctl`, `package` e `core-max`, come oggi.
+- Un sensore assente si salta; senza nessun sensore, la pagina mostra `performance.run.noChart` come oggi.
+- **Niente pannello «Serie»** e nessuna selezione salvata: il grafico mostra sempre le serie del test. Oggi tutti i tipi di stress condividono la selezione salvata `performance`, che passa da un test all'altro.
+
 ## 6. Prestazioni
 
 - **Frame.** Per frame il costo è uno spostamento CSS del canvas di ogni striscia più il punto bianco di ogni serie: la crescita è lineare nel numero di strisce, non di serie.
@@ -219,7 +234,8 @@ Le funzioni di selezione stanno in `app/src/lib/select.ts`, accanto a quelle di 
   - il cassetto si apre e si chiude con il pulsante, con Esc e col clic fuori, e il fuoco torna al pulsante;
   - una spunta aggiunge una striscia se l'unità è nuova;
   - nessun limite di serie;
-  - i test del canvas composito e delle transizioni Y di `HistoryChart.test.ts`, portati su `ChartStrip`.
+  - i test del canvas composito e delle transizioni Y di `HistoryChart.test.ts`, copiati per `StripChart`;
+  - la scelta delle serie dello stress per ogni riga della tabella del §5.4, e il grafico dello stress senza «Serie».
 - **Verifiche dal vivo** (le fa l'utente, senza input sintetico):
   - la pagina CPU con 3 o più unità;
   - il cassetto con le linee visibili sotto;

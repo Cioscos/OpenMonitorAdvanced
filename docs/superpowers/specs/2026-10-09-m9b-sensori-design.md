@@ -129,7 +129,7 @@ Esiste già (soglie 15% e 5%) e finora non aveva istanze. Vale solo in scarica: 
 | PCIe in ricezione | `throughput/pcie-rx` | `bytes_per_second` | KB/s × 1024 |
 | PCIe in trasmissione | `throughput/pcie-tx` | `bytes_per_second` | KB/s × 1024 |
 
-Sono sensori normali: tabella, grafico, regole dell'utente e log CSV. Non entrano tra le serie predefinite del grafico della GPU. L'unità del traffico segue l'impostazione byte/bit.
+Sono sensori normali: tabella, grafico, regole dell'utente e log CSV. Non entrano tra le serie predefinite del grafico della GPU. Il traffico PCIe si mostra sempre in byte al secondo: l'impostazione byte/bit riguarda solo la velocità di rete.
 
 ## 5. Throttling della CPU Intel
 

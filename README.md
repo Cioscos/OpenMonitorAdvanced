@@ -36,11 +36,12 @@ SMART data.
     value comes from;
   - static device details, such as the PCIe link, power limits and temperature thresholds;
   - for GPUs, the processes using the GPU, with their load and memory.
-  - newer sensors where the hardware has them: the RAM page shows the SPD data of each module
-    and, with the service on a supported AMD Zen CPU, the timings in use (CL, tRCD, tRP, tRAS,
-    tRFC and more); NVIDIA GPUs add the energy used since start and the PCIe traffic; Intel CPUs
-    flag thermal and power-limit throttling; SATA disks show their reallocated, pending and
-    uncorrectable sector counts, with a *Disk sectors* rule; a laptop gets a Battery page with
+  - newer sensors where the hardware has them: with the service and PawnIO, the RAM page shows
+    the SPD data of each module and, on a supported AMD Zen CPU, the timings in use (CL, tRCD,
+    tRP, tRAS, tRFC and more), Intel CPUs flag thermal and power-limit throttling, and SATA disks
+    show their reallocated, pending and uncorrectable sector counts and a critical warning (with
+    SMART reads enabled for the disk), with a *Disk sectors* rule; NVIDIA GPUs add the energy
+    used since start and the PCIe traffic; a laptop gets a Battery page with
     charge, power, remaining time and wear, and a low-battery rule that waits while it is
     plugged in. Sensors the hardware does not report simply do not appear.
 - **Settings view.** Language, temperature in °C or °F, network speed in bit/s or byte/s,
@@ -56,8 +57,9 @@ SMART data.
   vertical bar. It turns amber or red while a rule is in warning or critical, and the tooltip
   then starts with the problem before listing CPU, GPU and RAM. The menu opens the Simple or the
   Advanced view directly.
-- **Rules and alerts.** Built-in rules watch CPU, GPU and disk temperatures, GPU throttling, RAM
-  use, full volumes, NVMe wear and the NVMe critical warning. The CPU thresholds follow the
+- **Rules and alerts.** Built-in rules watch CPU, GPU and disk temperatures, CPU and GPU throttling
+  (CPU: Intel only), RAM use, full volumes, NVMe wear, the NVMe and SATA critical warning, SATA
+  bad sectors (*Disk sectors*) and a low battery (*battery-low*, paused while on AC power). The CPU thresholds follow the
   processor's own TjMax when it is known. Each rule has a warning and a critical level, each with
   a threshold and how long the value must stay past it, plus a hysteresis. You can change them,
   switch them off, restore them, or add your own rule on any sensor, also with *Create rule…*
@@ -179,9 +181,9 @@ and the Microsoft-signed [PawnIO](https://pawnio.eu/) driver, and runs as `Local
   by default, because standby behind a USB adapter could not be tested: you can switch them on
   per disk in *Data sources*, but some adapters may then keep the disk awake. A disk plugged in
   while SMART reads are on, that LibreHardwareMonitor cannot identify, may be woken whenever
-  another device is plugged in or removed. CPU thermal throttling is not available from
-  LibreHardwareMonitor 0.9.6, so that rule has no sensor. The disk critical
-  warning covers NVMe drives only. The processor's TjMax is known for Intel CPUs and for the AMD
+  another device is plugged in or removed. CPU throttling flags exist on Intel CPUs only and
+  need the service with PawnIO (AMD has no such sensor, so the rule has no instance there). The
+  disk critical warning covers NVMe and SATA drives. The processor's TjMax is known for Intel CPUs and for the AMD
   desktop models in the built-in table; other CPUs use the fallback thresholds (85/95 °C). Excel
   with a semicolon as the list separator (many European locales) shows the CSV log in one column:
   open it with *Data* → *From Text/CSV* and choose the comma.

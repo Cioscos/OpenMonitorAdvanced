@@ -23,10 +23,10 @@
   const num = (v: number) => v.toLocaleString(locale, { maximumFractionDigits: 0 });
   const caption = $derived.by(() => {
     if (!table || !view) return '';
-    const count = view.models;
-    if (!table.communityAt) return t('performance.board.caption.bundled', { version, count });
+    const count = t(`performance.board.models.${view.models === 1 ? 'one' : 'other'}`, { count: view.models });
+    if (!table.communityAt) return t('performance.board.caption.bundled', { version, models: count });
     const date = new Date(table.communityAt).toLocaleDateString(locale, { dateStyle: 'long' });
-    return t('performance.board.caption.updated', { version, count, date });
+    return t('performance.board.caption.updated', { version, models: count, date });
   });
 
   // The download runs once, when the page opens and the local table has been read.
@@ -54,16 +54,16 @@
       <ol class="rows" aria-label={t(`performance.board.${board}`)}>
         {#each view.rows as r, i (r.kind === 'own' ? `own:${r.own.scoreId}` : `${r.row.key}:${r.row.source}:${i}`)}
           {@const own = r.kind === 'own'}
+          {@const model = r.kind === 'own' ? r.own.model : r.row.model}
           {@const value = r.kind === 'own' ? r.own.value : r.row.value}
           <li class="row" class:own>
-            <span class="name">
-              {r.kind === 'own' ? r.own.model : r.row.model}
-              {#if r.kind === 'own'}<em class="you">{t('performance.board.you')}</em>{/if}
-            </span>
+            <span class="name" title={model}>{model}</span>
             <span class="bar" aria-hidden="true"><span class="fill" style:width="{(100 * value) / top}%"></span></span>
             <span class="value">{num(value)}</span>
             <span class="source">
-              {#if r.kind === 'table'}
+              {#if r.kind === 'own'}
+                <em class="you">{t('performance.board.you')}</em>
+              {:else}
                 <span title={t('performance.board.n', { n: r.row.n })}>
                   <Term term={r.row.source === 'author' ? 'sourceAuthor' : 'sourceCommunity'}>
                     {t(`performance.board.source.${r.row.source}`)}
@@ -147,7 +147,7 @@
   }
   .row {
     display: grid;
-    grid-template-columns: minmax(120px, 1.4fr) minmax(80px, 2fr) 72px 112px;
+    grid-template-columns: minmax(160px, 3fr) minmax(48px, 1fr) 72px 120px;
     align-items: center;
     gap: 12px;
     padding: 6px 10px;
@@ -165,8 +165,7 @@
     white-space: nowrap;
   }
   .you {
-    margin-left: 6px;
-    font-size: 12px;
+    font-weight: 600;
     font-style: normal;
     color: var(--accent);
   }

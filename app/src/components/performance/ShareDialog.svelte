@@ -70,7 +70,9 @@
       <input type="checkbox" bind:this={first} bind:checked={overclock} disabled={sending} />
       <Term term="overclock">{t('performance.share.overclock')}</Term>
     </label>
-    <p class="note"><Term term="anonymousShare">{t('performance.share.note')}</Term></p>
+    <p class="note">
+      {t('performance.share.note.before')}<Term term="anonymousShare">{t('performance.share.note.term')}</Term>{t('performance.share.note.after')}
+    </p>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <div class="actions">
       <button type="button" class="ghost" disabled={sending} onclick={() => onClose(false)}>{t('performance.share.cancel')}</button>

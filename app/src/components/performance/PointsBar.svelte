@@ -15,7 +15,8 @@
 
 <div class="points">
   <p class="head">
-    <Term term="diskPoints">{value === null ? '–' : t('performance.score.disk.points', { points: text(value) })}</Term>
+    <span class="label"><Term term="diskPoints">{t('performance.score.disk.pointsLabel')}</Term></span>
+    <span class="value">{value === null ? '–' : text(value)}</span>
   </p>
   <div
     class="track"
@@ -32,6 +33,11 @@
     {/if}
   </div>
   <p class="scale" aria-hidden="true"><span>0</span><span>{text(max)}</span></p>
+  {#if reference !== null}
+    <p class="ref" aria-hidden="true">
+      <span class="tri">▲</span> <span class="num">{text(reference)}</span> {t('performance.score.points')}{referenceLabel ? ` · ${referenceLabel}` : ''}
+    </p>
+  {/if}
 </div>
 
 <style>
@@ -41,8 +47,33 @@
     gap: 4px;
   }
   .head {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
     margin: 0;
+  }
+  .label {
     font-weight: 600;
+  }
+  .value {
+    font-family: 'Orbitron', var(--font-mono, monospace);
+    font-size: 26px;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  .ref {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .tri {
+    color: var(--accent-2);
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
   }
   .track {
     position: relative;

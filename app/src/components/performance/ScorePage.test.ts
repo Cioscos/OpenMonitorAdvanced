@@ -401,7 +401,8 @@ test('disk detail shows iops and latencies', async () => {
   for (const term of ['seqRnd', 'queueDepth', 'iops', 'mbs']) expect(termNames).toContain(t(`glossary.${term}.name`));
   for (const header of ['col.meanLat', 'col.p99Lat']) expect(termNames).toContain(t(`performance.score.${header}`));
   // The points of the default profile, with their term.
-  expect(screen.getByText(t('performance.score.disk.points', { points: '1,012' })).closest('.term')).not.toBeNull();
+  expect(screen.getByText(t('performance.score.disk.pointsLabel')).closest('.term')).not.toBeNull();
+  expect(document.querySelector('.points .value')?.textContent).toBe('1,012');
 });
 
 test('b2 shows no points', async () => {

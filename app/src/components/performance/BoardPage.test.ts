@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import type { Board, BoardRow } from '../../lib/types';
-import { FakeBackend } from '../../test/fake-backend';
+import { FakeBackend, makeScoreFile } from '../../test/fake-backend';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import PerformanceView from './PerformanceView.svelte';
 
@@ -47,7 +47,7 @@ test('tabs_switch_the_category', async () => {
 
 test('caption_says_bundled_or_updated', async () => {
   await setup();
-  expect(screen.getByText(t('performance.board.caption.bundled', { version: 'cpu-1', count: 12 }), { exact: false })).toBeTruthy();
+  expect(screen.getByText(t('performance.board.caption.bundled', { version: 'cpu-1', models: '12 models' }), { exact: false })).toBeTruthy();
   cleanup();
   disconnectSettings();
   await setup((b) => (b.boardTable.communityAt = '2026-10-09T03:00:00Z'));
@@ -89,4 +89,19 @@ test('model_names_render_as_text', async () => {
   await setup((b) => (b.boardTable.rows[0].model = '<img src=x onerror=alert(1)>'));
   expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeTruthy();
   expect(document.querySelector('img')).toBeNull();
+});
+
+test('own_row_label_is_outside_the_truncated_name_and_names_have_a_title', async () => {
+  const long = 'AMD Ryzen 7 7800X3D 8-Core Processor';
+  await setup((b) => (b.scoreFiles = [makeScoreFile({ id: 's1', device: { model: long } })]));
+  const own = document.querySelector('.row.own')!;
+  expect(own.querySelector('.name')?.textContent).toBe(long);
+  expect(own.querySelector('.name')?.getAttribute('title')).toBe(long);
+  expect(own.querySelector('.name .you')).toBeNull();
+  expect(own.querySelector('.source .you')?.textContent).toBe(t('performance.board.you'));
+});
+
+test('caption_uses_the_singular_for_one_model', async () => {
+  await setup((b) => (b.boardTable.rows = [row(1)]));
+  expect(screen.getByText(/Version cpu-1 · 1 model ·/)).toBeTruthy();
 });

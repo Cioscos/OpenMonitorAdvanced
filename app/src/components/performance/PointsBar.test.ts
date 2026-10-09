@@ -21,3 +21,15 @@ test('mark_has_its_label_for_screen_readers', () => {
   render(PointsBar, { value: 1012, reference: 995, referenceLabel: 'Fanxiang S880 2TB · Author' });
   expect(screen.getByRole('img', { name: 'Fanxiang S880 2TB · Author: 995' })).toBeTruthy();
 });
+
+test('shows_label_big_value_and_the_mark_caption', () => {
+  render(PointsBar, { value: 1012, reference: 995, referenceLabel: 'Fanxiang S880 2TB · Author' });
+  expect(screen.getByText('Points')).toBeTruthy();
+  expect(screen.getByText('1,012')).toBeTruthy();
+  expect(screen.getByText('995', { selector: '.num' }).parentElement?.textContent).toMatch(/▲\s*995 points · Fanxiang S880 2TB · Author/);
+});
+
+test('dash_without_points', () => {
+  render(PointsBar, { value: null, reference: null, referenceLabel: null });
+  expect(screen.getByText('–')).toBeTruthy();
+});

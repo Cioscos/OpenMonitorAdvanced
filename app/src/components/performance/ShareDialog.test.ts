@@ -22,7 +22,12 @@ const previewText = () => screen.getByLabelText(t('performance.share.preview')).
 test('preview_shows_the_exact_json_and_the_note', async () => {
   await open();
   await waitFor(() => expect(previewText()).toBe('{ "overclock": false }'));
-  expect(screen.getByText(t('performance.share.note'))).toBeTruthy();
+  const note = ['before', 'term', 'after'].map((k) => t(`performance.share.note.${k}`)).join('');
+  const p = document.querySelector('.note');
+  expect(p?.textContent?.replace(/\s+/g, ' ').trim()).toBe(note);
+  // Only the word «anonymous» is the term, not the whole note.
+  expect(screen.getByText(t('performance.share.note.term')).closest('p')).toBe(p);
+  expect(screen.getByText(t('performance.share.note.term')).textContent).not.toBe(p?.textContent);
   expect(screen.getByRole('dialog', { name: t('performance.share.title') })).toBeTruthy();
 });
 

@@ -14,9 +14,11 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::bench::DiskBenchRequest;
+use super::board::{BoardService, BoardTable};
 use super::runner::{PerformanceRunner, SystemInfo, VolumeChoice};
 use super::store::parse_rfc3339_ms;
 use crate::report::{documents_dir, local_now, write_report};
+use crate::settings::SettingsStore;
 use crate::window::{QuitSource, MAIN};
 
 /// How long «Stop and quit» waits for the test to end (A21).
@@ -180,6 +182,38 @@ pub struct BaselineInfo {
     gpu_provisional: bool,
     /// The same for the disk scale.
     disk_provisional: bool,
+}
+
+/// The leaderboard table from disk only (DZ10).
+#[tauri::command]
+pub async fn performance_board(
+    board: State<'_, Arc<BoardService>>,
+    settings: State<'_, Arc<SettingsStore>>,
+) -> Result<BoardTable, String> {
+    let (board, enabled) = (
+        board.inner().clone(),
+        settings.snapshot().performance.community_table,
+    );
+    tauri::async_runtime::spawn_blocking(move || board.table(enabled))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Downloads the community table when due, or now when `manual`; nothing is requested
+/// with `communityTable` off (DZ9).
+#[tauri::command]
+pub async fn performance_board_refresh(
+    board: State<'_, Arc<BoardService>>,
+    settings: State<'_, Arc<SettingsStore>>,
+    manual: bool,
+) -> Result<BoardTable, String> {
+    let (board, enabled) = (
+        board.inner().clone(),
+        settings.snapshot().performance.community_table,
+    );
+    tauri::async_runtime::spawn_blocking(move || board.refresh(enabled, manual, unix_ms()))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

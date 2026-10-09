@@ -1215,3 +1215,30 @@ export interface ScoreFile {
   /** Sent to the community table (local mark). */
   shared: boolean;
 }
+
+/** The leaderboard categories, in display order (`oma_core::scores::Board`). */
+export type Board = 'cpu-single' | 'cpu-multi' | 'gpu-compute' | 'gpu-graphics' | 'disk';
+
+/** A row of the leaderboard table; `key` is the normalized model, computed in Rust. */
+export interface BoardRow {
+  board: Board;
+  scoreVersion: string;
+  model: string;
+  key: string;
+  value: number;
+  n: number;
+  source: 'author' | 'community';
+}
+
+/** `performance_board`: the author rows plus the saved community copy, sorted by board and value. */
+export interface BoardTable {
+  rows: BoardRow[];
+  /** `generatedAt` of the downloaded copy; null without one. */
+  communityAt: string | null;
+  checkedAtMs: number | null;
+  /** The last download error category, or null. */
+  error: string | null;
+  /** The `performance.communityTable` setting. */
+  enabled: boolean;
+  versions: { cpu: string; gpu: string; disk: string };
+}

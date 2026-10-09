@@ -403,6 +403,8 @@ fn main() {
             performance::commands::performance_score,
             performance::commands::performance_score_delete,
             performance::commands::performance_baseline,
+            performance::commands::performance_board,
+            performance::commands::performance_board_refresh,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has
@@ -475,6 +477,11 @@ fn main() {
                 log::CLOSE_TIMEOUT,
             );
             app.manage(log_service.clone());
+            app.manage(Arc::new(performance::board::BoardService::new(
+                performance::performance_dir(),
+                Arc::new(performance::board::WinHttpBoard),
+                app.package_info().version.to_string(),
+            )));
             // The stress test runner: without a test it does no periodic work (§11).
             #[cfg(windows)]
             let perf = {

@@ -73,6 +73,8 @@
     "allow-performance-scores",
     "allow-performance-score",
     "allow-performance-score-delete",
-    "allow-performance-baseline"
+    "allow-performance-baseline",
+    "allow-performance-board",
+    "allow-performance-board-refresh"
   ]
 }

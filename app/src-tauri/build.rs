@@ -81,6 +81,8 @@ fn main() {
             "performance_score",
             "performance_score_delete",
             "performance_baseline",
+            "performance_board",
+            "performance_board_refresh",
         ]),
     ))
     .expect("Tauri build")

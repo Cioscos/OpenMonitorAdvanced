@@ -2,6 +2,7 @@ import type {
   BenchStatus,
   DiskBenchRequest,
   VolumeChoice,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -217,6 +218,10 @@ export interface Backend {
   performanceScoreDelete(id: string): Promise<void>;
   /** Whether the CPU, GPU and disk score scales are still provisional (not calibrated). */
   performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }>;
+  /** The leaderboard table from disk (author rows plus the saved community copy); no network. */
+  performanceBoard(): Promise<BoardTable>;
+  /** Downloads the community table when due, or now when `manual`; nothing with the setting off. */
+  performanceBoardRefresh(manual: boolean): Promise<BoardTable>;
   /** The benchmark status on every change and at most every 500 ms while it runs, only with the main window open. */
   onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */

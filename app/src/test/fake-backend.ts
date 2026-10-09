@@ -6,6 +6,7 @@ import type {
   BenchStep,
   DiskBenchRequest,
   VolumeChoice,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -1030,6 +1031,25 @@ export class FakeBackend implements Backend {
   async performanceScoreDelete(id: string): Promise<void> {
     this.performanceCalls.push(`performanceScoreDelete:${id}`);
     this.scoreFiles = this.scoreFiles.filter((f) => f.id !== id);
+  }
+
+  boardTable: BoardTable = {
+    rows: [],
+    communityAt: null,
+    checkedAtMs: null,
+    error: null,
+    enabled: true,
+    versions: { cpu: 'cpu-1', gpu: 'gpu-1', disk: 'disk-1' },
+  };
+
+  async performanceBoard(): Promise<BoardTable> {
+    this.performanceCalls.push('performanceBoard');
+    return structuredClone(this.boardTable);
+  }
+
+  async performanceBoardRefresh(manual: boolean): Promise<BoardTable> {
+    this.performanceCalls.push(manual ? 'performanceBoardRefresh:manual' : 'performanceBoardRefresh');
+    return structuredClone(this.boardTable);
   }
 
   async performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }> {

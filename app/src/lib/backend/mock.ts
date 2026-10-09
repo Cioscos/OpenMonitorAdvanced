@@ -32,7 +32,7 @@ import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
 import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
-import { MOCK_VOLUMES, mockBench, mockPerformance, parseBenchScenario, parseDiskScenario, parsePerfScenario } from './mockPerformance';
+import { MOCK_VOLUMES, mockBench, mockBoardTable, mockPerformance, parseBenchScenario, parseDiskScenario, parsePerfScenario } from './mockPerformance';
 
 const THREADS = 8;
 const GIB = 1024 ** 3;
@@ -692,6 +692,8 @@ export function createMockBackend(intervalMs = 1000): Backend {
     performanceScores: async () => bench.scores(),
     performanceScore: async (id) => bench.score(id),
     performanceScoreDelete: async (id) => bench.remove(id),
+    performanceBoard: async () => mockBoardTable(),
+    performanceBoardRefresh: async () => mockBoardTable(),
     performanceBaseline: async () => ({ provisional: true, gpuProvisional: true, diskProvisional: true }),
     onPerformanceBench: async (cb) => bench.subscribe(cb),
     benchmarkToggle: async () => console.info('mock: benchmark toggle'),

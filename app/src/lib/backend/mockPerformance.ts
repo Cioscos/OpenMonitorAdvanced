@@ -8,6 +8,7 @@ import type {
   DiskBenchKernel,
   DiskBenchRequest,
   DiskProfile,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   ErrorRecord,
@@ -882,5 +883,29 @@ export function mockBench(
       listeners.add(cb);
       return () => listeners.delete(cb);
     },
+  };
+}
+
+/** A fake leaderboard for `pnpm dev`: 14 `cpu-single` rows, so the percentile shows. */
+export function mockBoardTable(): BoardTable {
+  const rows = Array.from({ length: 14 }, (_, i) => {
+    const model = `Mock CPU ${i + 1}`;
+    return {
+      board: 'cpu-single' as const,
+      scoreVersion: 'cpu-1',
+      model,
+      key: model.toLowerCase(),
+      value: 1500 - i * 100,
+      n: i < 3 ? 1 : 5,
+      source: i < 3 ? ('author' as const) : ('community' as const),
+    };
+  });
+  return {
+    rows,
+    communityAt: '2026-10-09T10:00:00Z',
+    checkedAtMs: Date.now(),
+    error: null,
+    enabled: true,
+    versions: { cpu: 'cpu-1', gpu: 'gpu-1', disk: 'disk-1' },
   };
 }

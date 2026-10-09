@@ -42,6 +42,7 @@
   let sharing = $state<string | null>(null);
   let reloads = $state(0);
   let exported = $state<string | null>(null);
+  let exportError = $state<string | null>(null);
   let startError = $state<string | null>(null);
   let starting = $state(false);
   let confirming = $state<string | null>(null);
@@ -250,7 +251,11 @@
     benchStore.stop().catch((error) => console.error('stopping the benchmark failed', error));
   }
 
-  const canShare = $derived(!!shown && shown.valid && !shown.provisional && (!disk || shown.scores.points != null));
+  // A disk the history names by its drive letter has no model to put in the table.
+  const noModel = $derived(disk && /^[A-Za-z]:\\$/.test(shown?.device.model ?? ''));
+  const canShare = $derived(
+    !!shown && shown.valid && !shown.provisional && !noModel && (!disk || shown.scores.points != null),
+  );
 
   function closeShare(shared: boolean) {
     sharing = null;
@@ -261,11 +266,13 @@
 
   async function exportJson(id: string) {
     exported = null;
+    exportError = null;
     try {
       const name = await backend?.performanceScoreExport(id);
       if (name) exported = name;
     } catch (error) {
-      startError = String(error);
+      const code = String(error);
+      exportError = t(code === 'invalid' || code === 'not_found' ? `performance.share.error.${code}` : 'performance.share.error.unknown');
     }
   }
 
@@ -498,6 +505,7 @@
         {/if}
         <button type="button" class="action" onclick={() => exportJson(shown.id)}>{t('performance.share.export')}</button>
         {#if exported}<span class="muted" role="status">{t('performance.share.exported', { name: exported })}</span>{/if}
+        {#if exportError}<span class="muted" role="alert">{exportError}</span>{/if}
       </div>
     {/if}
   {/if}

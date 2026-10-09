@@ -10,7 +10,7 @@
 
   const CODES = [
     'bad_json', 'bad_schema', 'bad_format', 'unknown_version', 'not_valid', 'bad_value', 'implausible', 'body_too_large',
-    'rate_limited', 'daily_cap', 'offline', 'timeout', 'tls', 'http', 'invalid', 'provisional', 'shared', 'not_found',
+    'rate_limited', 'daily_cap', 'offline', 'timeout', 'tls', 'http', 'invalid', 'provisional', 'shared', 'not_found', 'no_model',
   ];
   const errorText = (error: unknown) => {
     const code = String(error);

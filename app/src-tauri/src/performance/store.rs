@@ -994,6 +994,7 @@ mod tests {
         assert!(store.list_scores()[0].shared);
         assert!(!store.mark_shared(&uuid(9)).unwrap());
     }
+
     #[test]
     fn scores_round_trip_newest_first() {
         let store = PerformanceStore::new(temp_dir("scores-rt"));

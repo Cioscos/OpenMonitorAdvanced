@@ -338,7 +338,10 @@ fn score_export(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
     let file = runner
         .store()
         .load_score(id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            tracing::warn!(%e, "cannot read the score to export");
+            "invalid".to_owned()
+        })?
         .ok_or_else(|| "not_found".to_owned())?;
     let bytes = export_bytes(&file, &host_facts()?);
     let at = parse_rfc3339_ms(&file.at).map_or(unix_ms(), |ms| ms.max(0) as u64);
@@ -356,10 +359,13 @@ fn score_export(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
     let Some(picked) = dialog.blocking_save_file() else {
         return Ok(None);
     };
-    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let path = picked.into_path().map_err(|e| {
+        tracing::warn!(%e, "cannot use the chosen export path");
+        "invalid".to_owned()
+    })?;
     write_report(&path, &bytes).map_err(|err| {
         tracing::warn!(%err, "cannot export the score");
-        err.to_string()
+        "invalid".to_owned()
     })?;
     Ok(Some(
         path.file_name()

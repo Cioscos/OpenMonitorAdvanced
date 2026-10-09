@@ -153,6 +153,8 @@ pub struct BoardService {
     app_version: String,
     /// One request at a time; whoever waits finds the state already updated.
     refreshing: Mutex<()>,
+    /// One send at a time; the second finds the score already marked shared.
+    sharing: Mutex<()>,
 }
 
 impl BoardService {
@@ -162,6 +164,7 @@ impl BoardService {
             transport,
             app_version,
             refreshing: Mutex::new(()),
+            sharing: Mutex::new(()),
         }
     }
 
@@ -264,6 +267,7 @@ impl BoardService {
         facts: &HostFacts,
         overclock: bool,
     ) -> Result<(), String> {
+        let _one = self.sharing.lock().unwrap_or_else(PoisonError::into_inner);
         let file = store
             .load_score(id)
             .map_err(|_| "invalid".to_owned())?
@@ -300,6 +304,16 @@ impl BoardService {
             board_index(a.board)
                 .cmp(&board_index(b.board))
                 .then(b.value.total_cmp(&a.value))
+        });
+        // The UI keys its rows by board, version, key and source: keep the first of a repeat.
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|r| {
+            seen.insert((
+                board_index(r.board),
+                r.score_version.clone(),
+                r.key.clone(),
+                r.source == Source::Community,
+            ))
         });
         BoardTable {
             rows,
@@ -364,7 +378,10 @@ impl BoardService {
         if r.body.len() > MAX_TABLE_BYTES || parse_table(&r.body).is_none() {
             return Err("invalid");
         }
-        write_file(&self.root.join(TABLE_FILE), &r.body).map_err(|_| "invalid")?;
+        write_file(&self.root.join(TABLE_FILE), &r.body).map_err(|e| {
+            tracing::warn!("leaderboard: cannot save the table: {e}");
+            "invalid"
+        })?;
         Ok(r.etag.clone())
     }
 }
@@ -429,6 +446,7 @@ mod tests {
         }
         fn submit(&self, _: &str, body: &[u8]) -> Result<Reply, CheckError> {
             self.submits.lock().unwrap().push(body.to_vec());
+            std::thread::sleep(std::time::Duration::from_millis(50));
             match self.submit_reply.lock().unwrap().clone() {
                 Some(r) => r.map(|(status, body, etag)| Reply { status, body, etag }),
                 None => Err(CheckError::Offline),
@@ -685,6 +703,38 @@ mod tests {
 
     fn created() -> Option<Canned> {
         Some(Ok((201, b"{}".to_vec(), None)))
+    }
+
+    #[test]
+    fn duplicate_rows_are_dropped() {
+        let body = table_json(&format!(
+            "{},{}",
+            row("Dup CPU", 20.0, "community"),
+            row("Dup CPU", 10.0, "community")
+        ));
+        let fake = Fake::with(vec![Ok((200, body, None))]);
+        let s = service("dups", &fake);
+        let t = s.refresh(true, false, NOW);
+        let dups: Vec<_> = t.rows.iter().filter(|r| r.model == "Dup CPU").collect();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].value, 20.0);
+    }
+
+    #[test]
+    fn concurrent_shares_post_once() {
+        let (s, fake, store) = sharer("twice", created());
+        store.save_score(&cpu_score(1491)).unwrap();
+        let s = Arc::new(s);
+        let store = Arc::new(store);
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (s, store) = (s.clone(), store.clone());
+                std::thread::spawn(move || s.share_stored(&store, ID, &facts(), false))
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(fake.submits.lock().unwrap().len(), 1);
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     }
 
     #[test]

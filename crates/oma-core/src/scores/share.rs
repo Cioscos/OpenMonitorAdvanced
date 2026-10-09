@@ -115,12 +115,20 @@ pub fn submission_bytes(
     Ok(bytes)
 }
 
-/// Why this score cannot be shared, if so (`provisional` before `shared`).
+/// A drive root such as `C:\`: what the history shows when the disk has no model name.
+fn is_drive_root(model: &str) -> bool {
+    let b = model.as_bytes();
+    b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
+}
+
+/// Why this score cannot be shared, if so (`provisional`, then `shared`, then `no_model`).
 pub fn share_block(file: &ScoreFile) -> Option<&'static str> {
     if file.provisional {
         Some("provisional")
     } else if file.shared {
         Some("shared")
+    } else if file.category == "disk" && is_drive_root(&file.device.model) {
+        Some("no_model")
     } else {
         None
     }
@@ -303,6 +311,19 @@ mod tests {
         assert_eq!(share_block(&f), Some("shared"));
         f.provisional = true;
         assert_eq!(share_block(&f), Some("provisional"));
+    }
+
+    #[test]
+    fn disk_named_by_its_drive_root_is_not_shareable() {
+        let mut f = cpu();
+        f.category = "disk".into();
+        f.device.model = "C:\\".into();
+        assert_eq!(share_block(&f), Some("no_model"));
+        f.device.model = "Fanxiang S880 2TB".into();
+        assert_eq!(share_block(&f), None);
+        f.category = "cpu".into();
+        f.device.model = "C:\\".into();
+        assert_eq!(share_block(&f), None);
     }
 
     #[test]

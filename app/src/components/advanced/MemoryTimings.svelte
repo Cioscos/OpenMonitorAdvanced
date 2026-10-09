@@ -20,7 +20,7 @@
   const speed = (c: ChannelTimings) => (c.dataRate === undefined ? '–' : `${num(c.dataRate, 0)} MT/s`);
   const gen = $derived(timings?.generation ? timings.generation.toUpperCase() : '');
 
-  /** Secondary timings in cycles, as (label, field) pairs; fields a channel lacks show «–». */
+  /** Secondary timings in cycles, as (label, field) pairs; the glossary term is the field name. Fields a channel lacks show «–». */
   const SECONDARY: [string, keyof ChannelTimings][] = [
     ['tRCDWR', 'trcdWr'],
     ['tRRD_S', 'trrdS'],
@@ -100,7 +100,7 @@
               <tr class="sub"><th scope="row" colspan={channels.length + 1}><Term term="secondaryTimings" /></th></tr>
               {#each visibleSecondary as [label, key] (key)}
                 <tr>
-                  <th scope="row" class="plain">{label}</th>
+                  <th scope="row" class="plain"><Term term={key}>{label}</Term></th>
                   {#each channels as c, i (i)}<td>{cell(c[key] as number | undefined)}</td>{/each}
                 </tr>
               {/each}

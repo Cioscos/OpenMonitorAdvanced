@@ -4,7 +4,7 @@ import baseline from '../../../../crates/oma-core/src/scores/cpu-1-baseline.json
 import gpuBaseline from '../../../../crates/oma-core/src/scores/gpu-1-baseline.json';
 import diskBaseline from '../../../../crates/oma-core/src/scores/disk-1-baseline.json';
 import catalog from '../../../../testdata/performance/catalog.json';
-import { BENCH_TERMS, DISK_BENCH_TERMS, DISK_MODE_TERMS, DISK_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, MEMORY_TERMS, MONITOR_TERMS, PATTERN_TERMS, SCORE_TERMS, TERMS } from './glossary';
+import { BATTERY_TERMS, BENCH_TERMS, DISK_BENCH_TERMS, DISK_MODE_TERMS, DISK_TERMS, GPU_BENCH_TERMS, GPU_SCORE_TERMS, GPU_TERMS, ISA_TERMS, MODE_TERMS, MEMORY_TERMS, MONITOR_TERMS, PATTERN_TERMS, PROPERTY_TERMS, SCORE_TERMS, SENSOR_TERMS, TERMS } from './glossary';
 
 const LOCALES: Locale[] = ['en', 'it'];
 
@@ -88,11 +88,34 @@ test('every_disk_term_has_an_entry', () => {
 });
 
 test('monitor_terms_have_texts', () => {
-  expect(MONITOR_TERMS).toEqual(['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock']);
+  expect(MONITOR_TERMS).toEqual([
+    'hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock',
+    'pcieTraffic', 'energySinceStart', 'reallocatedSectors', 'pendingSectors', 'uncorrectableSectors', 'powerLimitation',
+  ]);
   expect(missing([...MONITOR_TERMS, 'vram', 'throttling', 'clock'].flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
 });
 
 test('memory_terms_have_texts', () => {
-  expect(MEMORY_TERMS).toEqual(['cl', 'trcd', 'trp', 'tras', 'trc', 'trfc', 'gdm', 'commandRate', 'jedec', 'spd', 'mclk', 'refreshMode', 'secondaryTimings']);
+  expect(MEMORY_TERMS).toEqual([
+    'cl', 'trcd', 'trp', 'tras', 'trc', 'trfc', 'gdm', 'commandRate', 'jedec', 'spd', 'mclk', 'refreshMode', 'secondaryTimings',
+    'trcdWr', 'trrdS', 'trrdL', 'tfaw', 'twtrS', 'twtrL', 'tcwl', 'twr', 'trtp', 'trefi', 'trfc2', 'trfcSb',
+  ]);
   expect(missing(MEMORY_TERMS.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
+});
+
+test('battery_terms_have_texts', () => {
+  expect(BATTERY_TERMS).toEqual(['batteryWear', 'chargeCycles', 'batteryRate', 'designCapacity']);
+  expect(missing(BATTERY_TERMS.flatMap((term) => [`glossary.${term}`, `glossary.${term}.name`]))).toEqual([]);
+});
+
+test('sensor_and_property_terms_point_to_known_terms', () => {
+  const known = [...MONITOR_TERMS, ...BATTERY_TERMS, ...MEMORY_TERMS, ...TERMS];
+  for (const [label, term] of Object.entries({ ...SENSOR_TERMS, ...PROPERTY_TERMS })) {
+    expect(known, label).toContain(term);
+    expect(missing([`glossary.${term}`, `glossary.${term}.name`]), label).toEqual([]);
+  }
+  // Every key is a label or property the app really has.
+  for (const label of Object.keys(SENSOR_TERMS)) expect(catalogs.en[`sensor.${label}`], label).toBeDefined();
+  for (const key of Object.keys(PROPERTY_TERMS)) expect(catalogs.en[`property.${key}`], key).toBeDefined();
+  expect(SENSOR_TERMS['gpu.pcie.rx']).toBe('pcieTraffic');
 });

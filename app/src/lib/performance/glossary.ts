@@ -35,10 +35,43 @@ export const DISK_TERMS: string[] = ['mbs', 'iops', 'queueDepth', 'seqRnd', 'lat
 export const DISK_MODE_TERMS: string[] = catalog.diskKernels.map((id) => `mode.${id.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`);
 
 /** The terms of the Simple view tiles (M9a DM15); `vram` and `throttling` come from the other lists. */
-export const MONITOR_TERMS: string[] = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock'];
+export const MONITOR_TERMS: string[] = [
+  'hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock',
+  'pcieTraffic', 'energySinceStart', 'reallocatedSectors', 'pendingSectors', 'uncorrectableSectors', 'powerLimitation',
+];
 
 /** The terms of the RAM timings section of the Advanced view (M9b DN13). */
-export const MEMORY_TERMS: string[] = ['cl', 'trcd', 'trp', 'tras', 'trc', 'trfc', 'gdm', 'commandRate', 'jedec', 'spd', 'mclk', 'refreshMode', 'secondaryTimings'];
+export const MEMORY_TERMS: string[] = [
+  'cl', 'trcd', 'trp', 'tras', 'trc', 'trfc', 'gdm', 'commandRate', 'jedec', 'spd', 'mclk', 'refreshMode', 'secondaryTimings',
+  // The secondary timing rows (tRCDWR… tRFCsb).
+  'trcdWr', 'trrdS', 'trrdL', 'tfaw', 'twtrS', 'twtrL', 'tcwl', 'twr', 'trtp', 'trefi', 'trfc2', 'trfcSb',
+];
+
+/** The terms of the battery page (M9b DN13). */
+export const BATTERY_TERMS: string[] = ['batteryWear', 'chargeCycles', 'batteryRate', 'designCapacity'];
+
+/** Sensor rows and KPI tiles with a tooltip: label key (`sensor.<key>` in the catalogs) to term. */
+export const SENSOR_TERMS: Record<string, string> = {
+  'battery.rate': 'batteryRate',
+  'gpu.pcie.rx': 'pcieTraffic',
+  'gpu.pcie.tx': 'pcieTraffic',
+  'gpu.energy.total': 'energySinceStart',
+  'gpu.throttle.thermal': 'throttling',
+  'gpu.throttle.power': 'powerLimitation',
+  'cpu.throttle.thermal': 'throttling',
+  'cpu.throttle.power': 'powerLimitation',
+  'storage.reallocatedSectors': 'reallocatedSectors',
+  'storage.pendingSectors': 'pendingSectors',
+  'storage.uncorrectableSectors': 'uncorrectableSectors',
+};
+
+/** Device properties with a tooltip: property key (`property.<key>`) to term. */
+export const PROPERTY_TERMS: Record<string, string> = {
+  designCapacityWh: 'designCapacity',
+  fullChargeCapacityWh: 'designCapacity',
+  wearPct: 'batteryWear',
+  cycleCount: 'chargeCycles',
+};
 
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [

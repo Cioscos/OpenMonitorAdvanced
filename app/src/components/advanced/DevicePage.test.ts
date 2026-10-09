@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
 import type { SidebarEntry } from '../../lib/advanced/nav';
-import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
+import { MOCK_BATTERY_SCHEMA, MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockBatteryValues, mockValues } from '../../lib/backend/mock';
 import { formatValue } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
@@ -292,4 +292,38 @@ test('the advanced view mounts the full page under its heading', async () => {
   expect(kpiLabels()).toHaveLength(4);
   await vi.waitFor(() => expect(plots).toHaveLength(2));
   await vi.waitFor(() => expect(screen.getByText('game.exe')).toBeTruthy());
+});
+
+test('sensor_rows_with_a_term_have_a_tooltip', () => {
+  const schema = {
+    ...MOCK_SCHEMA,
+    sensors: [
+      ...MOCK_SCHEMA.sensors,
+      { id: `${GPU}/throughput/pcie-rx`, deviceId: GPU, kind: 'throughput' as const, unit: 'bytes_per_second' as const, label: { key: 'gpu.pcie.rx' }, source: 'nvml' as const, category: 'throughput' },
+    ],
+  };
+  const backend = new FakeBackend(schema);
+  const store = new LiveStore();
+  store.applySchema(schema);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: [...mockValues(1), 1e6] });
+  render(DevicePage, { entry: GPU_ENTRY, store, backend });
+  const term = [...document.querySelectorAll('.sensors th[scope="row"] .term')].find((e) => e.textContent?.startsWith(t('sensor.gpu.pcie.rx')));
+  expect(term).toBeTruthy();
+  expect(document.body.textContent).toContain(t('glossary.pcieTraffic'));
+  // A row without an entry stays plain text.
+  expect(document.querySelectorAll('.sensors th[scope="row"] .term').length).toBe(1);
+});
+
+test('battery page: kpis with wear and charge, properties with tooltips', () => {
+  const entry: SidebarEntry = { id: 'battery/0', kind: 'battery', deviceIds: ['battery/0'], labelKey: 'advanced.section.battery', labelArg: 'Mock battery' };
+  const backend = new FakeBackend(MOCK_BATTERY_SCHEMA);
+  const store = new LiveStore();
+  store.applySchema(MOCK_BATTERY_SCHEMA);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: mockBatteryValues(1) });
+  render(DevicePage, { entry, store, backend });
+  expect(kpiLabels()).toEqual(['charge', 'power', 'timeLeft', 'wear'].map((id) => t(`advanced.kpi.${id}`)));
+  expect(kpiValues()[2]).toBe(formatValue(5400, 'seconds', 'en', t));
+  const infoTerms = [...document.querySelectorAll('.info dt .term')].map((e) => e.textContent);
+  expect(infoTerms).toEqual([t('property.designCapacityWh'), t('property.fullChargeCapacityWh'), t('property.wearPct'), t('property.cycleCount')]);
+  expect(document.querySelectorAll('.kpi .label .term').length).toBe(2);
 });

@@ -2,6 +2,7 @@
   import { propertyRows } from '../../lib/advanced/pages';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { Device } from '../../lib/types';
+  import Term from '../common/Term.svelte';
 
   let { devices }: { devices: Device[] } = $props();
 </script>
@@ -11,7 +12,7 @@
   {#each devices as device (device.id)}
     <dl>
       {#each propertyRows(device, i18n.locale, t) as row (row.key)}
-        <dt>{row.label}</dt>
+        <dt>{#if row.term}<Term term={row.term}>{row.label}</Term>{:else}{row.label}{/if}</dt>
         <dd>{row.value}</dd>
       {/each}
     </dl>

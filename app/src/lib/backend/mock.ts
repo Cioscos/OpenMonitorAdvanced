@@ -50,7 +50,6 @@ const sensor = (id: string, deviceId: string, kind: SensorKind, unit: Unit, labe
   category: kind,
 });
 
-/** Same ids and label keys the Rust providers produce (crates/oma-win). */
 /** The two RAM properties of this machine (DN3 example: DDR5-6000 CL36-48-48-104). */
 export const MOCK_MEMORY_PROPERTIES = {
   memoryModules: JSON.stringify([
@@ -63,6 +62,7 @@ export const MOCK_MEMORY_PROPERTIES = {
   }),
 };
 
+/** Same ids and label keys the Rust providers produce (crates/oma-win). */
 export const MOCK_SCHEMA: Schema = {
   revision: 1,
   devices: [
@@ -104,6 +104,45 @@ export const MOCK_SCHEMA: Schema = {
     sensor('network/mock-eth/throughput/link-speed', 'network/mock-eth', 'throughput', 'bits_per_second', { key: 'network.linkSpeed' }),
   ],
 };
+
+/** A laptop battery (test option: the default mock stays a desktop). Same ids and labels as `BatteryProvider`. */
+const BATTERY = 'battery/0';
+export const MOCK_BATTERY_SCHEMA: Schema = {
+  revision: MOCK_SCHEMA.revision,
+  devices: [
+    ...MOCK_SCHEMA.devices,
+    {
+      id: BATTERY,
+      kind: 'battery',
+      name: 'Mock battery',
+      properties: { designCapacityWh: '56.7', fullChargeCapacityWh: '49.5', wearPct: '12.7', cycleCount: '212', chemistry: 'LION', manufacturer: 'MockCell', model: 'MB-1' },
+    },
+  ],
+  sensors: [
+    ...MOCK_SCHEMA.sensors,
+    sensor(`${BATTERY}/percent/charge`, BATTERY, 'percent', 'percent', { key: 'battery.charge' }),
+    sensor(`${BATTERY}/power/rate`, BATTERY, 'power', 'watt', { key: 'battery.rate' }),
+    sensor(`${BATTERY}/voltage/voltage`, BATTERY, 'voltage', 'volt', { key: 'battery.voltage' }),
+    sensor(`${BATTERY}/energy/remaining`, BATTERY, 'energy', 'joule', { key: 'battery.remaining' }),
+    sensor(`${BATTERY}/duration/remaining`, BATTERY, 'duration', 'seconds', { key: 'battery.timeRemaining' }),
+    sensor(`${BATTERY}/flag/charging`, BATTERY, 'flag', 'boolean', { key: 'battery.charging' }),
+    sensor(`${BATTERY}/flag/ac-online`, BATTERY, 'flag', 'boolean', { key: 'battery.acOnline' }),
+  ],
+};
+
+/** Values of `MOCK_BATTERY_SCHEMA` at tick `t`: discharging at 64 % with 90 min left, or plugged in and charging. */
+export function mockBatteryValues(t: number, plugged = false): (number | null)[] {
+  return [
+    ...mockValues(t),
+    plugged ? 80 : 64,
+    plugged ? 30 : -12.5,
+    12.3,
+    plugged ? 160_000 : 144_000,
+    plugged ? null : 5400,
+    plugged ? 1 : 0,
+    plugged ? 1 : 0,
+  ];
+}
 
 /** A hard disk in standby: it keeps its last temperature (quality 2) and its history. */
 const MOCK_HDD = 'storage/device-mock-hdd';

@@ -1,4 +1,5 @@
 import { formatBytes, formatPercent, formatValue, type FormatOptions } from '../format';
+import { PROPERTY_TERMS } from '../performance/glossary';
 import { catalogs, i18n, t as translateNow, type Translate } from '../i18n/index.svelte';
 import type { ValueOf } from '../select';
 import type { Device, DeviceKind, Schema, Sensor, SensorStats, Source, Unit } from '../types';
@@ -70,6 +71,8 @@ export interface KpiDef {
    * is a KPI name). Absent for statistics and derived values: they are not a reading.
    */
   sensorId?: string;
+  /** Glossary term of the label, when the figure needs a plain-words tooltip. */
+  term?: string;
 }
 
 const KPI_COUNT = 4;
@@ -193,6 +196,17 @@ function candidates(kind: DeviceKind, schema: Schema, ids: string[]): (KpiDef | 
         live('linkSpeed', find('network.linkSpeed')),
         peak('peakDown', find('network.down')),
       ];
+    case 'battery': {
+      const rate = live('power', find('battery.rate'));
+      const wear = Number(schema.devices.find((d) => ids.includes(d.id))?.properties?.wearPct);
+      return [
+        live('charge', find('battery.charge')),
+        rate && { ...rate, term: 'batteryRate' },
+        live('timeLeft', find('battery.timeRemaining')),
+        // Relative-capacity batteries report no wear: the tile is left out.
+        Number.isFinite(wear) ? { ...kpi('wear', 'percent', () => wear), term: 'batteryWear' } : null,
+      ];
+    }
     default:
       return [];
   }
@@ -211,6 +225,7 @@ const DEFAULT_SERIES: Partial<Record<DeviceKind, string[][]>> = {
   memory: [['memory.load']],
   storage: [['storage.read'], ['storage.write']],
   network: [['network.down'], ['network.up']],
+  battery: [['battery.charge'], ['battery.rate']],
 };
 
 /** Kinds whose default series are the first two temperature sensors (LHM-fed, no fixed label keys). */
@@ -245,6 +260,13 @@ export const PROPERTY_ORDER = [
   'tempWarningC',
   'tempCriticalC',
   'tjMaxC',
+  'designCapacityWh',
+  'fullChargeCapacityWh',
+  'wearPct',
+  'cycleCount',
+  'chemistry',
+  'manufacturer',
+  'model',
 ];
 
 /**
@@ -264,6 +286,10 @@ const PROPERTY_FORMATS: Record<string, Unit | 'number'> = {
   tempWarningC: 'celsius',
   tempCriticalC: 'celsius',
   tjMaxC: 'celsius',
+  designCapacityWh: 'number',
+  fullChargeCapacityWh: 'number',
+  wearPct: 'percent',
+  cycleCount: 'number',
 };
 
 /** Properties meant for other screens: `smartSelectable` and `smartDefault` feed the Settings' SMART switches. */
@@ -273,6 +299,8 @@ export interface PropertyRow {
   key: string;
   label: string;
   value: string;
+  /** Glossary term of the label, when it has one. */
+  term?: string;
 }
 
 /** Device properties as translated label/value rows (`property.<key>`), in display order. */
@@ -296,6 +324,6 @@ export function propertyRows(device: Device, locale: string, t: Translate): Prop
       else if (format && raw.trim() !== '' && Number.isFinite(number)) {
         value = format === 'number' ? new Intl.NumberFormat(locale).format(number) : formatValue(number, format, locale, t);
       }
-      return { key, label, value };
+      return { key, label, value, ...(PROPERTY_TERMS[key] ? { term: PROPERTY_TERMS[key] } : {}) };
     });
 }

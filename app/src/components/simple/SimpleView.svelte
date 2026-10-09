@@ -8,6 +8,7 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import type { DeviceKind } from '../../lib/types';
   import {
+    batterySummary,
     cpuSummary,
     diskRows,
     gpuSummaries,
@@ -39,18 +40,20 @@
   const disk = $derived(store.schema ? storageSummary(store.schema, valueOf) : null);
   const disks = $derived(store.schema ? diskRows(store.schema, valueOf, (id) => store.diskPower(id)) : []);
   const net = $derived(store.schema ? networkSummary(store.schema, valueOf) : null);
+  const battery = $derived(store.schema ? batterySummary(store.schema, valueOf) : null);
   const netSeries = $derived(net ? sumSeries(net.downIds.map((id) => store.series(id))) : []);
   const seriesTimestampsMs = $derived(store.seriesTimestampsMs());
   const firstDevice = (kind: DeviceKind) => store.schema?.devices.find((d) => d.kind === kind)?.id;
   const netDiskSection = $derived(
     net ? sectionForTile('network', firstDevice('network')) : sectionForTile('storage', firstDevice('storage')),
   );
-  // Tiles in render order: CPU, one per GPU, memory, network and disks.
-  const tileCount = $derived((cpu ? 1 : 0) + gpus.length + (mem ? 1 : 0) + (net || disk ? 1 : 0));
+  // Tiles in render order: CPU, one per GPU, memory, network and disks, battery (laptops only).
+  const tileCount = $derived((cpu ? 1 : 0) + gpus.length + (mem ? 1 : 0) + (net || disk ? 1 : 0) + (battery ? 1 : 0));
   const layout = $derived(simpleGrid(tileCount));
   const gpuBase = $derived(cpu ? 1 : 0);
   const memAt = $derived(gpuBase + gpus.length);
   const netDiskAt = $derived(memAt + (mem ? 1 : 0));
+  const batteryAt = $derived(netDiskAt + (net || disk ? 1 : 0));
 
   const rpm = (v: number) => formatValue(v, 'rpm', locale, t);
   const sensorById = $derived(new Map(store.schema?.sensors.map((s) => [s.id, s])));
@@ -210,6 +213,27 @@
             {/each}
           </div>
         {/if}
+      </Tile>
+    {/if}
+
+    {#if battery}
+      <Tile label={t('tile.battery')} span={layout.spans[batteryAt]} onclick={() => onOpenAdvanced(sectionForTile('battery', battery.deviceId))}>
+        <div class="big"><AnimatedNumber value={battery.chargePct} format={(v) => formatPercent(v, locale)} /></div>
+        <div class="bar" role="meter" aria-label={t('tile.battery')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={battery.chargePct ?? 0}>
+          <i style:transform="scaleX({(battery.chargePct ?? 0) / 100})"></i>
+        </div>
+        <div class="mlab">
+          <span>{t(`tile.battery.${battery.state}`)}</span>
+          {#if battery.state === 'discharging' && battery.secondsLeft !== null}
+            <span>{t('tile.battery.left')} {formatValue(battery.secondsLeft, 'seconds', locale, t)}</span>
+          {/if}
+        </div>
+        {#if battery.rateW !== null}
+          <div class="chips">
+            <div class="chip"><span><Term term="batteryRate">{t('tile.power')}</Term></span> {formatPower(battery.rateW, locale)}</div>
+          </div>
+        {/if}
+        <div class="spark"><Sparkline values={store.series(battery.chargeId)} timestampsMs={seriesTimestampsMs} max={100} /></div>
       </Tile>
     {/if}
   </div>

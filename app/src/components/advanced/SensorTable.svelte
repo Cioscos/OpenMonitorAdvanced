@@ -6,7 +6,9 @@
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { ValueOf } from '../../lib/select';
   import type { Sensor } from '../../lib/types';
+  import { SENSOR_TERMS } from '../../lib/performance/glossary';
   import { openSettings } from '../../lib/view';
+  import Term from '../common/Term.svelte';
 
   let {
     sensors,
@@ -65,7 +67,9 @@
           {@const stale = current !== null && qualityOf(sensor.id) === 2}
           <tr tabindex="0">
             <th scope="row">
-              <span class="name">{sensorLabel(sensor, t)}</span>
+              <span class="name"
+                >{#if SENSOR_TERMS[sensor.label.key]}<Term term={SENSOR_TERMS[sensor.label.key]}>{sensorLabel(sensor, t)}</Term>{:else}{sensorLabel(sensor, t)}{/if}</span
+              >
               {#if sensor.experimental}<span class="tag exp">{t('advanced.experimental')}</span>{/if}
               <span class="tag source" title={t(`source.${sensor.source}`)}>{sourceCode(sensor.source)}</span>
             </th>

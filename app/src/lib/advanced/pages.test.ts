@@ -1,4 +1,4 @@
-import { MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockValues } from '../backend/mock';
+import { MOCK_BATTERY_SCHEMA, MOCK_SCHEMA, SERVICE_MOCK_SCHEMA, mockBatteryValues, mockValues } from '../backend/mock';
 import { connectSettings, disconnectSettings } from '../../test/settings';
 import { DASH, formatValue } from '../format';
 import { catalogs, i18n, translate } from '../i18n/index.svelte';
@@ -204,14 +204,41 @@ test('network kpis: down, up, link speed and peak download', () => {
   expect(kpi('network', NIC, 'peakDown').value(valueOf, stats)).toBe(5e6);
 });
 
+test('battery kpis: charge, power, time left and wear', () => {
+  const kpis = kpisFor('battery', MOCK_BATTERY_SCHEMA, ['battery/0']);
+  expect(kpis.map((k) => k.id)).toEqual(['charge', 'power', 'timeLeft', 'wear']);
+  const values = mockBatteryValues(1);
+  const valueOf = (id: string) => values[MOCK_BATTERY_SCHEMA.sensors.findIndex((s) => s.id === id)] as number;
+  const none: StatsOf = () => null;
+  expect(kpis.map((k) => k.unit)).toEqual(['percent', 'watt', 'seconds', 'percent']);
+  expect(kpis.map((k) => k.value(valueOf, none))).toEqual([64, -12.5, 5400, 12.7]);
+  expect(kpis.find((k) => k.id === 'wear')?.sensorId).toBeUndefined();
+  // A battery that does not report its capacities has no wear tile.
+  const relative = { ...MOCK_BATTERY_SCHEMA, devices: MOCK_BATTERY_SCHEMA.devices.map((d) => (d.kind === 'battery' ? { ...d, properties: { chemistry: 'LION' } } : d)) };
+  expect(kpisFor('battery', relative, ['battery/0']).map((k) => k.id)).toEqual(['charge', 'power', 'timeLeft']);
+});
+
+test('battery properties are ordered, formatted and translated', () => {
+  const device = MOCK_BATTERY_SCHEMA.devices.find((d) => d.kind === 'battery')!;
+  const rows = propertyRows(device, 'en', tEn);
+  expect(rows.map((r) => r.key)).toEqual(['designCapacityWh', 'fullChargeCapacityWh', 'wearPct', 'cycleCount', 'chemistry', 'manufacturer', 'model']);
+  expect(rows.map((r) => r.value)).toEqual(['56.7', '49.5', formatValue(12.7, 'percent', 'en', tEn), '212', 'LION', 'MockCell', 'MB-1']);
+  expect(rows.filter((r) => r.term).map((r) => [r.key, r.term])).toEqual([
+    ['designCapacityWh', 'designCapacity'],
+    ['fullChargeCapacityWh', 'designCapacity'],
+    ['wearPct', 'batteryWear'],
+    ['cycleCount', 'chargeCycles'],
+  ]);
+});
+
 test('kinds without kpi definitions get none', () => {
   expect(kpisFor('motherboard', MOCK_SCHEMA, ['cpu/0'])).toEqual([]);
 });
 
 test('every kpi label is translated in both languages', () => {
-  const pages: [DeviceKind, string][] = [['cpu', 'cpu/0'], ['gpu', GPU], ['memory', 'memory/0'], ['storage', DISK], ['network', NIC]];
+  const pages: [DeviceKind, string][] = [['cpu', 'cpu/0'], ['gpu', GPU], ['memory', 'memory/0'], ['storage', DISK], ['network', NIC], ['battery', 'battery/0']];
   const keys = ['advanced.kpi.vramOf', 'advanced.kpi.temperature', 'advanced.kpi.clock', 'advanced.info.yes', 'advanced.info.no'];
-  for (const [kind, id] of pages) keys.push(...kpisFor(kind, MOCK_SCHEMA, [id]).map((k) => k.labelKey));
+  for (const [kind, id] of pages) keys.push(...kpisFor(kind, MOCK_BATTERY_SCHEMA, [id]).map((k) => k.labelKey));
   for (const key of keys) {
     expect(catalogs.en[key], key).toBeDefined();
     expect(catalogs.it[key], key).toBeDefined();
@@ -227,6 +254,7 @@ test('default series per kind', () => {
   expect(defaultSeries('network', MOCK_SCHEMA, [NIC])).toEqual([`${NIC}/throughput/down`, `${NIC}/throughput/up`]);
   expect(defaultSeries('motherboard', MOCK_SCHEMA, ['cpu/0'])).toEqual(['cpu/0/load/total']);
   expect(defaultSeries('battery', MOCK_SCHEMA, ['none'])).toEqual([]);
+  expect(defaultSeries('battery', MOCK_BATTERY_SCHEMA, ['battery/0'])).toEqual(['battery/0/percent/charge', 'battery/0/power/rate']);
 });
 
 test('adapterType is shown translated', () => {

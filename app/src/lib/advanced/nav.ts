@@ -12,7 +12,7 @@ export interface SidebarEntry {
   labelArg?: string;
 }
 
-export type SimpleTile = 'cpu' | 'gpu' | 'memory' | 'storage' | 'network';
+export type SimpleTile = 'cpu' | 'gpu' | 'memory' | 'storage' | 'network' | 'battery';
 
 const CPU_SECTION = 'cpu/0';
 const MEMORY_SECTION = 'memory/0';

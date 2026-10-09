@@ -151,11 +151,11 @@ test('warnings_are_listed', async () => {
 });
 
 test('chart_hidden_without_cpu_sensors', async () => {
-  await setup(RUNNING(), MOCK_SCHEMA);
+  await setup(RUNNING({ objective: 'normal' }), MOCK_SCHEMA);
   expect(screen.getByText(t('performance.run.noChart'))).toBeTruthy();
   expect(FakeUplot.instances).toHaveLength(0);
   cleanup();
-  const { backend } = await setup(RUNNING(), SERVICE_MOCK_SCHEMA);
+  const { backend } = await setup(RUNNING({ objective: 'normal' }), SERVICE_MOCK_SCHEMA);
   expect(screen.queryByText(t('performance.run.noChart'))).toBeNull();
   await waitFor(() => expect(backend.historyCalls[0]).toEqual({ ids: ['cpu/0/temperature/package', 'cpu/0/power/package'], seconds: 600, maxPoints: undefined }));
   // The window is fixed at 10 minutes: no window buttons.

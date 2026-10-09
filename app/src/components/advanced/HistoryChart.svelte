@@ -44,6 +44,7 @@
     backend,
     rate = 'bytes',
     fixedWindow,
+    fixedSeries = false,
   }: {
     /** Section id; parents re-key the component when it changes. */
     sectionId: string;
@@ -57,6 +58,8 @@
     rate?: ThroughputUnit;
     /** A window in seconds that the user cannot change (the stress test's 10 minutes); not saved. */
     fixedWindow?: number;
+    /** Show always `defaults` (the stress test's series): no picker, the saved selection is neither read nor written. */
+    fixedSeries?: boolean;
   } = $props();
 
   const HEIGHT = 260;
@@ -65,8 +68,8 @@
 
   const candidateIds = $derived(sensors.map((s) => s.id));
   let windowSeconds = $state<number>(untrack(() => fixedWindow) ?? loadWindow() ?? DEFAULT_WINDOW);
-  let chosen = $state<string[]>(untrack(() => initialSeries(loadSeries(sectionId), candidateIds, defaults, schema)));
-  const selected = $derived(fitSelection(chosen, candidateIds, schema));
+  let chosen = $state<string[]>(untrack(() => initialSeries(fixedSeries ? null : loadSeries(sectionId), candidateIds, defaults, schema)));
+  const selected = $derived(fitSelection(fixedSeries ? defaults : chosen, candidateIds, schema));
   const selectionKey = $derived(selected.join('\n'));
   let paused = $state(document.visibilityState === 'hidden');
   /** Every series is empty over the visible window and its latest reading is suspended. */
@@ -674,6 +677,7 @@
         {/each}
       </div>
     {/if}
+    {#if !fixedSeries}
     <details class="picker">
       <summary>{t('advanced.chart.series')} · {selected.length}/{MAX_SERIES}</summary>
       <p class="hint">{t('advanced.chart.maxSeries')}</p>
@@ -695,6 +699,7 @@
         {/each}
       </ul>
     </details>
+    {/if}
   </div>
   <div class="plot" bind:this={container}></div>
   {#if selected.length === 0}

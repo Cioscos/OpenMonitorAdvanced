@@ -185,17 +185,18 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
 
 ## Open: leaderboard app (M8d2)
 
-App della classifica (piano `docs/superpowers/plans/2026-10-09-m8d2-app-classifica.md`, documenti in `docs/benchmark-scoring.md`, sezione «L'app»). Implementata nel branch `feat/m8d2-app-classifica`, non unita in `main`. Prove dal vivo da fare con l'utente, un passo alla volta e senza input sintetico:
+App della classifica (piano `docs/superpowers/plans/2026-10-09-m8d2-app-classifica.md`, documenti in `docs/benchmark-scoring.md`, sezione «L'app»). Implementata nel branch `feat/m8d2-app-classifica`, non unita in `main`. Prove dal vivo Z9.1–Z9.9 fatte con l'utente il 2026-10-09, senza input sintetico. Restano aperte solo la Z9.4 e la parte senza rete della Z9.7.
 
-- **Z9.1 Classifica e download:** `reference-scores.json` e `reference-scores.state.json` (con un `etag`) compaiono nella cartella delle Prestazioni; la didascalia dice «tabella aggiornata il …»; le righe dell'autore hanno il badge «autore».
-- **Z9.2 «Aggiorna ora»:** `checkedAtMs` cambia, l'`etag` resta lo stesso (`304`).
-- **Z9.3 Impostazione spenta:** «Aggiorna ora» è disattivato, riaprendo la Classifica lo stato non cambia, la tabella già scaricata si vede ancora.
-- **Z9.4 Senza rete:** con la rete staccata, «Aggiorna ora» mostra `offline` e le righe restano.
-- **Z9.5 ▲ «Modello della tabella…»:** CPU e RTX 4080, il ▲ va al valore della riga scelta; disco, il ▲ va sulla barra dei punti (Fanxiang S880 2TB) e i contagiri tengono quello del record.
-- **Z9.6 Esporta JSON:** il file salvato è identico all'anteprima, senza `overclock`.
-- **Z9.7 Condividi** (punteggio valido della CPU): prima si decide se tenere l'invio vero (la cancellazione da D1 la fa il controller solo con un nuovo via dell'utente); anteprima e nota come previste; «Invia» dà esito positivo e il pulsante diventa «Condiviso», anche dopo un riavvio; prima, con la rete staccata, «Invia» dà `offline` e il punteggio non risulta condiviso.
-- **Z9.8 Tooltip:** presenti su tutti i termini nuovi.
-- **Z9.9 Impronta:** `scripts/measure-footprint.ps1` con la Classifica aperta, finestra sotto 200 MB.
+- **Z9.1 Classifica e download, superata:** `reference-scores.json` e `reference-scores.state.json` creati con `etag`; didascalia «tabella aggiornata il 9 ottobre 2026»; badge «Autore». Nessuna riga della community: il server pubblica `rows: []` finché un modello non ha 3 invii.
+- **Z9.2 «Aggiorna ora», superata:** `checkedAtMs` cambiato, `etag` uguale, risposta `304`.
+- **Z9.3 Impostazione spenta, superata:** «Aggiorna ora» disattivato con il motivo, nessuna richiesta, la tabella salvata resta.
+- **Z9.4 Senza rete, saltata su scelta dell'utente: da fare.**
+- **Z9.5 ▲ «Modello della tabella…», superata:** ▲ della tabella a 1491/1495 (CPU) e 1533/1539 (RTX 4080); sul disco ▲ a 995 sulla barra dei punti (Fanxiang S880 2TB), contagiri con il ▲ del record.
+- **Z9.6 Esporta JSON, superata:** file in Documenti uguale all'anteprima, senza `overclock`; `ramGB` 32, `osBuild` 26300, nessun identificatore.
+- **Z9.7 Condividi, superata in parte:** invio vero di un punteggio della CPU (con «Hardware in overclock» spuntato dall'utente), pulsante «Condiviso» anche dopo il riavvio. Le due righe in D1 sono state cancellate su richiesta dell'utente (il contatore giornaliero `daily` resta a 1). Da fare: la prova preliminare senza rete (offline), insieme alla Z9.4.
+- **Z9.8 Tooltip, superata:** presenti su tutti i termini nuovi.
+- **Z9.9 Impronta, superata:** con la Classifica aperta 158,4 MB di memoria privata (app più WebView2), build di sviluppo, sotto i 200 MB.
+- **Correzioni dopo le prove (commit `5108243`):** «Il tuo punteggio» nascosto dal nome troncato, nomi lunghi senza tooltip, «1 modelli», barra dei punti poco leggibile, tooltip su tutta la nota dell'anteprima.
 - **Fuori dalla M8d2** (lato server, voci in «Open: leaderboard server (M8d1)»): `HEAD` che dà `405`, `MIN(model)`, note di revisione (a), (b), (d).
 - **Possibile aggiunta futura:** i MB/s del disco nella tabella (categorie `disk-read` e `disk-write`), con migrazione e deploy del Worker (decisione dell'utente del 2026-10-09).
 

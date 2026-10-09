@@ -391,6 +391,9 @@
       height,
       // StripLegend replaces uPlot's legend.
       legend: { show: false },
+      // No band at the right: the lines end 12 px before the legend. The endpoint dot's
+      // layer overhangs the plot by its radius, so the dot stays whole.
+      padding: [null, 0, null, null],
       cursor: {
         drag: { x: false, y: false, setScale: false },
         // The strips of one chart share the cursor: the same instant in every strip.

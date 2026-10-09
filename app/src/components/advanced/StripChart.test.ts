@@ -49,6 +49,9 @@ const checkbox = (label: string) => screen.getByLabelText(label) as HTMLInputEle
 /** The legend row of a series, found by its name button. */
 const legendRow = (s: Sensor) => screen.getByRole('button', { name: labelOf(s) }).closest<HTMLElement>('.row')!;
 const legendCell = (s: Sensor, cell: 'now' | 'min' | 'max') => legendRow(s).querySelector(`.${cell}`)!.textContent;
+/** Legend title of a unit, «Name · symbol»; `named` matches it whatever the symbol. */
+const legendTitle = (unit: string, symbol: string) => `${t(`advanced.chart.unit.${unit}`)} · ${symbol}`;
+const named = (unit: string) => new RegExp(`^${t(`advanced.chart.unit.${unit}`)}( · |$)`);
 const removeButton = (s: Sensor) => screen.getByRole('button', { name: t('advanced.chart.remove', { name: labelOf(s) }) });
 
 /** Runs a strip's cursor hook as uPlot does with the pointer at sample `idx` (null: it left). */
@@ -155,8 +158,8 @@ test('one_plot_per_unit_with_its_own_y_axis', async () => {
     // Our legend replaces uPlot's.
     expect(plot.opts.legend?.show).toBe(false);
   }
-  expect(screen.getByText(t('advanced.chart.unit.percent'))).toBeTruthy();
-  expect(screen.getByText(t('advanced.chart.unit.celsius'))).toBeTruthy();
+  expect(screen.getByText(legendTitle('percent', '%'))).toBeTruthy();
+  expect(screen.getByText(legendTitle('celsius', '°C'))).toBeTruthy();
 });
 
 test('long windows ask for decimated history and the choice persists', async () => {
@@ -324,7 +327,7 @@ test('a_third_unit_adds_a_third_strip', async () => {
   await vi.waitFor(() => expect(plots).toHaveLength(5));
   expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent', 'celsius', 'bytes']);
   expect(document.querySelectorAll('.strip')).toHaveLength(3);
-  expect(screen.getByText(t('advanced.chart.unit.bytes'))).toBeTruthy();
+  expect(screen.getByText(legendTitle('bytes', 'B'))).toBeTruthy();
   expect(checkbox(labelOf(byId(VRAM))).checked).toBe(true);
 });
 
@@ -1203,9 +1206,8 @@ async function realTimeAxis(configured: FakeUplot, plotWidthPx: number, windowSe
   const target = document.createElement('div');
   document.body.append(target);
   const { draw: _draw, ...hooks } = configured.opts.hooks ?? {};
-  // The Y axis is 72 px wide and uPlot pads the side without an axis by half its default
-  // axis size (25 px); the rest of the width is the plot.
-  const actual = new RealUplot({ ...configured.opts, width: plotWidthPx + 72 + 25, hooks }, configured.data, target);
+  // The Y axis is 72 px wide and the right side has no padding; the rest of the width is the plot.
+  const actual = new RealUplot({ ...configured.opts, width: plotWidthPx + 72, hooks }, configured.data, target);
   const end = Date.UTC(2026, 8, 27, 21, 9, 3) / 1000;
   const unit = configured.opts.series[1].scale!;
   actual.batch(() => {
@@ -1915,7 +1917,7 @@ test('removing_the_last_series_of_a_unit_drops_its_strip', async () => {
   await vi.waitFor(() => expect(plots).toHaveLength(3));
   expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent']);
   expect(document.querySelectorAll('.strip')).toHaveLength(1);
-  expect(screen.queryByText(t('advanced.chart.unit.celsius'))).toBeNull();
+  expect(screen.queryByText(named('celsius'))).toBeNull();
   // The cursor index is gone with it: the legend shows the latest reading again.
   expect(legendCell(byId(LOAD), 'now')).toBe(formatValue(mockValues(1)[index(LOAD)], 'percent', 'en', t));
   // The one strip left carries the time axis, at the single-strip height.
@@ -1936,7 +1938,9 @@ test('temperature_unit_change_keeps_one_strip', async () => {
   expect(live()[1].data).toEqual([[1, 2], [51.8, 69.8], [53.6, 71.6]]);
   expect(axisAndLegend(live()[1], 'celsius', 212)).toEqual(['212 °F', '212 °F']);
   expect(document.querySelectorAll('.strip')).toHaveLength(2);
-  expect(screen.getAllByText(t('advanced.chart.unit.celsius'))).toHaveLength(1);
+  // One temperature legend, its title in the unit now drawn.
+  expect(screen.getAllByText(named('celsius'))).toHaveLength(1);
+  expect(screen.getByText(legendTitle('celsius', '°F'))).toBeTruthy();
   expect(legendCell(byId(TEMP), 'max')).toBe('70 °F');
   expect(backend.historyCalls).toHaveLength(1);
 });
@@ -1961,7 +1965,7 @@ test('schema_revision_regroups_strips', async () => {
   // No empty strip is left behind, and the bytes strip is now the last, with the time axis.
   expect(document.querySelectorAll('.strip')).toHaveLength(2);
   expect(live().map((p) => p.opts.axes![0].size)).toEqual([0, 40]);
-  expect(screen.queryByText(t('advanced.chart.unit.celsius'))).toBeNull();
+  expect(screen.queryByText(named('celsius'))).toBeNull();
   expect(screen.queryByRole('button', { name: labelOf(byId(TEMP)) })).toBeNull();
 });
 
@@ -1969,4 +1973,68 @@ test('cursor_sync_key_is_shared_by_the_strips_of_a_chart', async () => {
   renderChart(fakeBackend(), new LiveStore(), gpuSensors, [LOAD, TEMP, VRAM]);
   await vi.waitFor(() => expect(plots).toHaveLength(3));
   expect(plots.map((p) => (p.opts.cursor?.sync as { key: string } | undefined)?.key)).toEqual(Array(3).fill(`chart-${GPU}`));
+});
+
+test('a_strip_with_16_series_keeps_its_height_and_its_legend_scrolls', async () => {
+  // Sixteen load series on one strip, plus a temperature strip under it.
+  const extra = Array.from({ length: 8 }, (_, i) => ({
+    ...byId(`cpu/0/load/thread-0-${i}`),
+    id: `cpu/0/load/thread-1-${i}`,
+    label: { key: 'cpu.load.thread', arg: String(8 + i) },
+  }));
+  const schema = { ...MOCK_SCHEMA, sensors: [...MOCK_SCHEMA.sensors, ...extra] };
+  const loads = [...cpuSensors.filter((s) => s.unit === 'percent').slice(1), ...extra];
+  expect(loads).toHaveLength(16);
+  const store = new LiveStore();
+  store.applySchema(schema);
+  const backend = new FakeBackend(schema);
+  backend.history = { timestampsMs: [1000, 2000], series: Array.from({ length: 17 }, (_, i) => [10 + i, 20 + i]) };
+  const ids = [...loads.map((s) => s.id), TEMP];
+  render(StripChart, { sectionId: 'cpu/0', sensors: [...loads, byId(TEMP)], defaults: ids, schema, store, backend });
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect(plots[0].opts.series).toHaveLength(17);
+  expect(plots.map((p) => p.opts.height)).toEqual([130, 170]);
+  // Each legend is bounded to its strip and scrolls; the strip height stays the spec's.
+  const legends = [...document.querySelectorAll<HTMLElement>('.strip .legend')];
+  expect(legends.map((l) => l.style.height)).toEqual(['130px', '170px']);
+  expect(legends.map((l) => l.style.overflowY)).toEqual(['auto', 'auto']);
+  expect(legends[0].querySelectorAll('.row')).toHaveLength(16);
+});
+
+test('legend_titles_carry_the_display_unit_symbol', async () => {
+  await connectSettings({ general: { temperatureUnit: 'f' } });
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect(screen.getByText(legendTitle('celsius', '°F'))).toBeTruthy();
+  await settings.update({ general: { temperatureUnit: 'c' } });
+  await vi.waitFor(() => expect(screen.getByText(legendTitle('celsius', '°C'))).toBeTruthy());
+  expect(screen.getByText(legendTitle('percent', '%'))).toBeTruthy();
+
+  cleanup();
+  const store = new LiveStore();
+  store.applySchema(MOCK_SCHEMA);
+  render(StripChart, { sectionId: NIC, sensors: nicSensors, defaults: NIC_DEFAULTS, schema: MOCK_SCHEMA, store, backend: fakeBackend(), rate: 'bits' });
+  await vi.waitFor(() => expect(screen.getByText(legendTitle('bytes_per_second', 'bit/s'))).toBeTruthy());
+});
+
+test('strips_have_no_right_padding_so_the_lines_end_by_the_legend', async () => {
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  for (const plot of plots) expect(plot.opts.padding?.[1]).toBe(0);
+  // In a real uPlot the plot box then ends at the right edge of the chart.
+  const { default: RealUplot } = await vi.importActual<{ default: typeof import('uplot') }>('uplot');
+  const ctx = new Proxy({ measureText: (text: string) => ({ width: text.length * 7 }) }, {
+    get: (target, key) => key in target ? target[key as keyof typeof target] : () => {},
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const target = document.createElement('div');
+  document.body.append(target);
+  const { draw: _draw, ...hooks } = plots[1].opts.hooks ?? {};
+  const actual = new RealUplot({ ...plots[1].opts, width: 800, hooks }, plots[1].data, target);
+  try {
+    expect((actual.bbox.left + actual.bbox.width) / FakeUplot.pxRatio).toBe(800);
+  } finally {
+    actual.destroy();
+    target.remove();
+  }
 });

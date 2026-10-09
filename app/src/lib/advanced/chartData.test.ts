@@ -19,6 +19,7 @@ import {
   NUMERIC_INCRS,
   scaleLayout,
   scaleOptions,
+  scaleSymbol,
   stripLayout,
   stripPalette,
   windowExtent,
@@ -375,5 +376,18 @@ describe('strips', () => {
     expect(initialStripSeries([], ['a', 'b', 'c'], ['b'])).toEqual([]);
     const ten = ['cpu/0/load/total', ...CPU_THREADS, 'cpu/0/clock/effective'];
     expect(initialStripSeries(ten, ALL, [])).toEqual(ten);
+  });
+
+  test('scale_symbol_follows_the_display_units', () => {
+    const symbol = (unit: Parameters<typeof displayScale>[0], units: Parameters<typeof displayScale>[1] = { temperature: 'c', rate: 'bytes' }, locale = 'en') =>
+      scaleSymbol(displayScale(unit, units), locale, tEn);
+    expect(symbol('percent')).toBe('%');
+    expect(symbol('celsius')).toBe('°C');
+    expect(symbol('celsius', { temperature: 'f', rate: 'bytes' })).toBe('°F');
+    expect(symbol('bytes_per_second', { temperature: 'c', rate: 'bits' })).toBe('bit/s');
+    expect(symbol('bytes_per_second', { temperature: 'c', rate: 'bits' }, 'it')).toBe('bit/s');
+    expect(symbol('watt')).toBe('W');
+    // No symbol: the title shows the name only.
+    for (const unit of ['count', 'boolean', 'lanes', 'pcie_generation'] as const) expect(symbol(unit)).toBeNull();
   });
 });

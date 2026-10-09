@@ -19,11 +19,14 @@
   let {
     title,
     rows,
+    height,
     ontoggle,
     onremove,
   }: {
     title: string;
     rows: StripLegendRow[];
+    /** CSS height of the strip: the legend never makes it taller, it scrolls instead. */
+    height?: number;
     /** The name was clicked: hide or show the line. */
     ontoggle: (id: string) => void;
     /** The × was clicked: drop the series from the selection. */
@@ -31,22 +34,17 @@
   } = $props();
 </script>
 
-<div class="legend" role="group" aria-label={title}>
+<div class="legend" role="group" aria-label={title} style:height={height === undefined ? undefined : `${height}px`} style:overflow-y="auto">
   <p class="title">{title}</p>
-  <div class="head" aria-hidden="true">
-    <span>{t('advanced.table.current')}</span>
-    <span>{t('advanced.table.min')}</span>
-    <span>{t('advanced.table.max')}</span>
-  </div>
   <ul>
     {#each rows as row (row.id)}
       <li class="row" class:off={row.hidden}>
-        <svg class="swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
+        <svg class="swatch" viewBox="0 0 14 8" width="14" height="8" aria-hidden="true">
           <line
             x1="1"
-            y1="5"
-            x2="17"
-            y2="5"
+            y1="4"
+            x2="13"
+            y2="4"
             stroke={row.color}
             stroke-width="2"
             stroke-linecap="round"
@@ -56,6 +54,7 @@
         <button type="button" class="name" aria-pressed={!row.hidden} title={row.label} onclick={() => ontoggle(row.id)}>
           {row.label}
         </button>
+        <span class="now">{row.now}</span>
         <button
           type="button"
           class="remove"
@@ -63,10 +62,9 @@
           title={t('advanced.chart.remove', { name: row.label })}
           onclick={() => onremove(row.id)}
         >×</button>
-        <span class="values">
-          <span class="now">{row.now}</span>
-          <span class="min">{row.min}</span>
-          <span class="max">{row.max}</span>
+        <span class="range">
+          {t('advanced.table.min')} <span class="min">{row.min}</span>
+          · {t('advanced.table.max')} <span class="max">{row.max}</span>
         </span>
       </li>
     {/each}
@@ -74,45 +72,43 @@
 </div>
 
 <style>
+  /* Bounded to its strip's height (inline): with many series the legend scrolls, the strip stays put. */
   .legend {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
     min-width: 0;
+    overscroll-behavior: contain;
     font-size: 12px;
   }
   .title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     margin: 0;
+    padding-bottom: 2px;
+    background: var(--surface);
     color: var(--text-muted);
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
-  .head,
-  .values {
-    display: grid;
-    grid-template-columns: 1.3fr 1fr 1fr;
-    gap: 6px;
-  }
-  .head {
-    padding-left: 24px;
-    color: var(--text-muted);
-    font-size: 10px;
-  }
   ul {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
     margin: 0;
     padding: 0;
     list-style: none;
   }
+  /* Swatch, name, value now and ×; min and max in a small line under the name. */
   .row {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) auto;
+    grid-template-columns: 14px minmax(0, 1fr) auto auto;
     column-gap: 6px;
     align-items: center;
+    line-height: 1.25;
   }
   .row.off {
     opacity: 0.45;
@@ -132,8 +128,14 @@
   .name:hover {
     color: var(--accent);
   }
+  .now {
+    color: var(--text);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
   .remove {
-    padding: 0 4px;
+    padding: 0 3px;
     border: 0;
     border-radius: 4px;
     background: none;
@@ -146,13 +148,13 @@
     color: var(--text);
     background: var(--surface-2);
   }
-  .values {
-    grid-column: 2 / 4;
-    font-variant-numeric: tabular-nums;
+  .range {
+    grid-column: 2 / 5;
     color: var(--text-muted);
-  }
-  .now {
-    color: var(--text);
-    font-weight: 600;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

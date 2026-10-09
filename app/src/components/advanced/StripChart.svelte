@@ -14,6 +14,7 @@
     initialStripSeries,
     knownSelection,
     maxPointsFor,
+    scaleSymbol,
     stripLayout,
     stripPalette,
     windowExtent,
@@ -274,6 +275,13 @@
     });
   }
 
+  /** «Temperature · °F»: the unit's name and the symbol its values are drawn in, when it has one. */
+  function titleOf(s: number, strip: Strip): string {
+    const name = t(`advanced.chart.unit.${strip.unit}`);
+    const symbol = scaleSymbol(scales[s] ?? displayScale(strip.unit, { temperature: display.temperature, rate }), i18n.locale, t);
+    return symbol ? `${name} · ${symbol}` : name;
+  }
+
   /** Swatch colour of a picked series: its strip's palette entry. */
   function swatchOf(id: string): string {
     const strip = strips.find((x) => x.ids.includes(id));
@@ -417,7 +425,7 @@
             />
             {#if suspended[s]}<p class="empty">{t('chart.suspended')}</p>{/if}
           </div>
-          <StripLegend title={t(`advanced.chart.unit.${strip.unit}`)} rows={rowsOf(s, strip)} ontoggle={toggleHidden} onremove={toggle} />
+          <StripLegend title={titleOf(s, strip)} rows={rowsOf(s, strip)} height={heightOf(s)} ontoggle={toggleHidden} onremove={toggle} />
         </div>
       {/each}
     </div>

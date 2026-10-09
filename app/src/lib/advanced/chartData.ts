@@ -202,6 +202,16 @@ export function displayScale(unit: Unit, units: ChartUnits): DisplayScale {
   return { convert: undefined, format: (value, locale, t) => formatValue(value, unit, locale, t) };
 }
 
+/**
+ * The symbol a display scale writes after its numbers ("%", "°F", "bit/s"), read from its own
+ * formatter so it follows the display units; null for units without one (count, flags, lanes).
+ */
+export function scaleSymbol(scale: DisplayScale, locale: string, t: Translate): string | null {
+  const text = scale.format(1, locale, t);
+  const symbol = text.replace(/^[\d\s.,]+/u, '');
+  return symbol !== text && symbol !== '' && !/\d/.test(symbol) ? symbol : null;
+}
+
 /** Scale key per series (its unit): the first unit is drawn on the left axis, the second on the right. */
 export function scaleLayout(ids: string[], schema: Schema): { scales: Unit[]; seriesScale: Unit[] } {
   const scales = unitsOf(ids, schema);

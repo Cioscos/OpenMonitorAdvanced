@@ -572,3 +572,21 @@ test('simple_is_1280_advanced_1600_performance_1100', async () => {
   expect(main().classList.contains('simple')).toBe(false);
   expect(appSource).toMatch(/\n {2}main \{[^}]*max-width: 1100px;/);
 });
+
+test('the health strip sits under the top bar in Simple and Advanced only', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  const store = new LiveStore();
+  render(App, { backend, store });
+  await vi.waitFor(() => expect(store.schema).not.toBeNull());
+  backend.emitSnapshot({ revision: 1, seq: 1, timestampMs: Date.now(), values: mockValues(1) });
+  const strip = () => document.querySelector('.strip');
+  await vi.waitFor(() => expect(strip()).not.toBeNull());
+  expect(strip()!.previousElementSibling!.tagName).toBe('HEADER');
+  await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  expect(strip()).not.toBeNull();
+  await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
+  expect(strip()).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  expect(strip()).toBeNull();
+  expect(document.documentElement.style.getPropertyValue('--chrome-height')).toBe('');
+});

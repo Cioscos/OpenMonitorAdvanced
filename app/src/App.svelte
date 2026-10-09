@@ -3,6 +3,7 @@
   import AdvancedView from './components/advanced/AdvancedView.svelte';
   import PerformanceView from './components/performance/PerformanceView.svelte';
   import QuitDialog from './components/performance/QuitDialog.svelte';
+  import HealthStrip from './components/HealthStrip.svelte';
   import SafeModeNotice from './components/SafeModeNotice.svelte';
   import SettingsView from './components/settings/SettingsView.svelte';
   import SimpleView from './components/simple/SimpleView.svelte';
@@ -263,6 +264,7 @@
   onOpenLogFolder={() => backend.openLogFolder()}
   {stale}
 />
+{#if visible && ready && (view === 'simple' || view === 'advanced')}<HealthStrip {store} />{/if}
 <main class:simple={view === 'simple'} class:wide={view === 'advanced'}>
   {#if startup?.safeMode}
     <SafeModeNotice status={startup} onEnable={enableVendorLibraries} />

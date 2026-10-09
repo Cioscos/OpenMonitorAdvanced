@@ -3,11 +3,10 @@
   import { simpleGrid } from '../../lib/simpleGrid';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { sectionForTile } from '../../lib/advanced/nav';
-  import { bannerText, health } from '../../lib/health.svelte';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import { display } from '../../lib/units.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import type { DeviceKind, HealthReport } from '../../lib/types';
+  import type { DeviceKind } from '../../lib/types';
   import {
     cpuSummary,
     diskRows,
@@ -21,7 +20,6 @@
   import AnimatedNumber from '../common/AnimatedNumber.svelte';
   import Term from '../common/Term.svelte';
   import Sparkline from '../common/Sparkline.svelte';
-  import HealthBanner from './HealthBanner.svelte';
   import Tile from './Tile.svelte';
 
   let {
@@ -33,7 +31,6 @@
     onOpenAdvanced: (section: string | null) => void;
   } = $props();
 
-  const NEUTRAL: HealthReport = { level: 'neutral', sinceMs: 0, revision: 0, coverage: 'complete', unavailableTargets: [], alerts: [] };
   const valueOf = (id: string) => store.value(id);
   const locale = $derived(i18n.locale);
   const cpu = $derived(store.schema ? cpuSummary(store.schema, valueOf) : null);
@@ -44,12 +41,6 @@
   const net = $derived(store.schema ? networkSummary(store.schema, valueOf) : null);
   const netSeries = $derived(net ? sumSeries(net.downIds.map((id) => store.series(id))) : []);
   const seriesTimestampsMs = $derived(store.seriesTimestampsMs());
-  // Until the first report arrives the banner only says that monitoring runs.
-  const report = $derived(health.report ?? NEUTRAL);
-  const banner = $derived(bannerText(report, store.schema, t, locale, display.temperature, display.throughput));
-  const bannerItems = $derived(banner.items.map((text, i) => ({ text, level: report.alerts[i].level })));
-  // The core's monotonic time in the level, never a difference of system times.
-  const elapsedMs = $derived(health.elapsedMs ?? 0);
   const firstDevice = (kind: DeviceKind) => store.schema?.devices.find((d) => d.kind === kind)?.id;
   const netDiskSection = $derived(
     net ? sectionForTile('network', firstDevice('network')) : sectionForTile('storage', firstDevice('storage')),
@@ -74,8 +65,6 @@
 
 <div class="host">
 <div class="simple">
-  {#if store.timestampMs > 0}<HealthBanner level={report.level} title={banner.title} items={bannerItems} {elapsedMs} />{/if}
-
   <div class="grid" style:--cols={layout.columns}>
     {#if cpu}
       <Tile label={t('tile.cpu')} span={layout.spans[0]} onclick={() => onOpenAdvanced(sectionForTile('cpu'))}>

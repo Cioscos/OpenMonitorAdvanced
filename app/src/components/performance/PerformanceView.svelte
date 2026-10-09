@@ -215,7 +215,7 @@
     flex-direction: column;
     gap: 4px;
     position: sticky;
-    top: 76px;
+    top: calc(var(--chrome-height) + 10px);
   }
   .group {
     margin: 0 0 4px;

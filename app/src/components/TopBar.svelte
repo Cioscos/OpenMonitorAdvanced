@@ -111,7 +111,8 @@
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 12px;
-    padding: 12px 20px;
+    height: var(--topbar-h);
+    padding: 0 20px;
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     border-bottom: 1px solid var(--border);
     backdrop-filter: blur(8px);

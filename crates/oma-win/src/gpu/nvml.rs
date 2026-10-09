@@ -331,6 +331,11 @@ pub(crate) fn pcie_replay_count(device_id: &str) -> Option<u32> {
     }
 }
 
+/// Whether the slow thread serves any of `fields`.
+fn has_slow(fields: &BTreeSet<GpuField>) -> bool {
+    SLOW_FIELDS.iter().any(|f| fields.contains(f))
+}
+
 fn pci_matches(info: &PciInfo, pci: PciAddress) -> bool {
     info.bus == pci.bus && info.device == pci.device
 }
@@ -651,6 +656,7 @@ impl Api {
 struct Bound {
     device: DeviceHandle,
     fans: u32,
+    pci: PciAddress,
     fields: BTreeSet<GpuField>,
     /// Static limits and link capability (decision D9), read once here.
     properties: BTreeMap<String, String>,
@@ -668,7 +674,10 @@ pub(crate) struct NvmlLayer {
 }
 
 // SAFETY: NVML is documented as thread-safe and its device handles are process-wide tokens,
-// not tied to the thread that obtained them. The layer is used by one thread at a time.
+// not tied to the thread that obtained them. The layer is used by one thread at a time, but
+// its `Api` function pointers and the handles are also used concurrently from `oma-gpu-slow`:
+// sound because NVML documents concurrent calls as thread-safe and handles live until
+// nvmlShutdown, which is never called (D1).
 unsafe impl Send for NvmlLayer {}
 
 impl NvmlLayer {
@@ -713,6 +722,7 @@ impl NvmlLayer {
             .iter()
             .flatten()
             .map(|b| Target {
+                key: b.pci,
                 handle: Handle(b.device),
                 fields: b
                     .fields
@@ -727,8 +737,8 @@ impl NvmlLayer {
             let (energy, pcie) = (self.api.energy, self.api.pcie_throughput);
             self.slow = SlowReader::start(move |device, field| {
                 match slow_raw(energy, pcie, device, field) {
-                    (SUCCESS, raw) => Some(raw),
-                    _ => None,
+                    (SUCCESS, raw) => Ok(raw),
+                    (ret, _) => Err(is_stale(ret)),
                 }
             });
         }
@@ -746,16 +756,22 @@ impl NvmlLayer {
         if adapter.vendor() != Some(Vendor::Nvidia) {
             return None;
         }
-        let device = self.api.handle_for(adapter.pci?)?;
+        let pci = adapter.pci?;
+        let device = self.api.handle_for(pci)?;
         let fans = self.api.fan_count(device);
         let mut fields = probe(&FIELDS, |field| self.api.read(device, fans, field));
-        // One call per slow field, outside the tick.
-        fields.extend(probe(&SLOW_FIELDS, |field| {
-            self.api.probe_slow(device, field)
+        // Runs once per attach, on the discover path (never in the tick). The PCIe counter is
+        // probed once (TX, the ~30 ms call) and RX is supported iff TX is.
+        fields.extend(probe(&[GpuField::EnergyTotal], |f| {
+            self.api.probe_slow(device, f)
         }));
+        if !probe(&[GpuField::PcieTx], |f| self.api.probe_slow(device, f)).is_empty() {
+            fields.extend([GpuField::PcieRx, GpuField::PcieTx]);
+        }
         let properties = self.api.static_reads(device).properties();
         Some(Bound {
             device,
+            pci,
             fans,
             fields,
             properties,
@@ -785,8 +801,8 @@ impl GpuLayer for NvmlLayer {
                 Some(b) => {
                     let mut readings =
                         collect(&b.fields, |field| self.api.read(b.device, b.fans, field))?;
-                    if let Some(slow) = &self.slow {
-                        readings.extend(slow.poll(b.device, now));
+                    if let Some(slow) = self.slow.as_ref().filter(|_| has_slow(&b.fields)) {
+                        readings.extend(slow.poll(b.pci, now).ok_or(ProviderError::Rediscover)?);
                     }
                     Ok(readings)
                 }
@@ -1032,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_never_calls_slow_functions() {
+    fn collect_and_api_read_never_call_slow_functions() {
         let api = Api {
             init: fake_init,
             count: None,

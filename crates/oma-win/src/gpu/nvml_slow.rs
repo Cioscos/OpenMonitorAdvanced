@@ -11,6 +11,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::adapter::PciAddress;
 use super::field::GpuField;
 use super::layer::Readings;
 
@@ -23,7 +24,8 @@ const IDLE_AFTER: Duration = Duration::from_secs(3);
 /// Cached values older than this are absent.
 const FRESH_FOR: Duration = Duration::from_secs(3);
 const PERIOD: Duration = Duration::from_secs(1);
-/// NVML reports PCIe throughput in KB/s, meaning 1024 bytes.
+/// NVML reports PCIe throughput in "KB/s" without defining KB; 1024 bytes is the spec 4.2
+/// choice.
 const KB: f64 = 1024.0;
 
 /// Joules since the first reading of an NVML millijoule counter. A counter that goes
@@ -79,6 +81,8 @@ unsafe impl Send for Handle {}
 /// A GPU the thread reads, with the slow fields it supports.
 #[derive(Clone)]
 pub(super) struct Target {
+    /// Identity of the GPU across re-enumerations (a handle may change, the address does not).
+    pub(super) key: PciAddress,
     pub(super) handle: Handle,
     pub(super) fields: Vec<GpuField>,
 }
@@ -86,6 +90,8 @@ pub(super) struct Target {
 /// Last published values of one GPU.
 #[derive(Default)]
 struct Latest {
+    /// The last read said the GPU or driver is gone: the layer must rediscover.
+    stale: bool,
     values: [Option<(f64, Instant)>; 3],
 }
 
@@ -110,7 +116,7 @@ impl Latest {
 struct State {
     demand: Demand,
     targets: Vec<Target>,
-    latest: HashMap<usize, Latest>,
+    latest: HashMap<PciAddress, Latest>,
 }
 
 struct Shared {
@@ -124,16 +130,19 @@ impl Shared {
     }
 }
 
-/// Handle on the running `oma-gpu-slow` thread (it lives as long as the process).
+/// Handle on the running `oma-gpu-slow` thread. The thread is deliberately never joined and
+/// may outlive its layer (it lives as long as the process; tests leak one parked thread per
+/// load + attach, which is harmless).
 pub(super) struct SlowReader {
     shared: Arc<Shared>,
 }
 
 impl SlowReader {
-    /// Starts the thread. `read(handle, field)` returns the raw NVML counter: millijoules for
-    /// the energy, KB/s for the PCIe throughput.
+    /// Starts the thread. `read(handle, field)` returns the raw NVML counter (millijoules for
+    /// the energy, KB/s for the PCIe throughput) or `Err(stale)`, where `stale` means the GPU
+    /// or the driver is gone.
     pub(super) fn start(
-        read: impl Fn(*mut c_void, GpuField) -> Option<u64> + Send + 'static,
+        read: impl Fn(*mut c_void, GpuField) -> Result<u64, bool> + Send + 'static,
     ) -> Option<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -149,27 +158,49 @@ impl SlowReader {
     }
 
     pub(super) fn set_targets(&self, targets: Vec<Target>) {
-        self.shared.lock().targets = targets;
+        let mut state = self.shared.lock();
+        state.targets = targets;
+        // A rediscover is what the stale flag asked for.
+        state.latest.values_mut().for_each(|l| l.stale = false);
     }
 
     /// Marks demand (waking the thread if it sleeps) and returns the fresh cached values of
-    /// the GPU with handle `device`. Never calls NVML.
-    pub(super) fn poll(&self, device: *mut c_void, now: Instant) -> Readings {
+    /// the GPU at `key`, or `None` when its last read found it lost. Never calls NVML.
+    pub(super) fn poll(&self, key: PciAddress, now: Instant) -> Option<Readings> {
         let mut state = self.shared.lock();
         state.demand.touch(now);
-        let readings = state
-            .latest
-            .get(&(device as usize))
-            .map(|latest| latest.readings(now))
-            .unwrap_or_default();
+        let readings = match state.latest.get(&key) {
+            Some(latest) if latest.stale => None,
+            Some(latest) => Some(latest.readings(now)),
+            None => Some(Readings::new()),
+        };
         drop(state);
         self.shared.wake.notify_one();
         readings
     }
 }
 
-fn run(shared: &Shared, read: impl Fn(*mut c_void, GpuField) -> Option<u64>) {
-    let mut meters: HashMap<usize, EnergyMeter> = HashMap::new();
+/// One round of slow reads, with no lock held: `(gpu, field, value or stale)`.
+fn read_all(
+    meters: &mut HashMap<PciAddress, EnergyMeter>,
+    targets: &[Target],
+    read: &impl Fn(*mut c_void, GpuField) -> Result<u64, bool>,
+) -> Vec<(PciAddress, GpuField, Result<f64, bool>)> {
+    let mut out = Vec::new();
+    for target in targets {
+        for &field in &target.fields {
+            let value = read(target.handle.0, field).map(|raw| match field {
+                GpuField::EnergyTotal => meters.entry(target.key).or_default().update(raw),
+                _ => raw as f64 * KB,
+            });
+            out.push((target.key, field, value));
+        }
+    }
+    out
+}
+
+fn run(shared: &Shared, read: impl Fn(*mut c_void, GpuField) -> Result<u64, bool>) {
+    let mut meters: HashMap<PciAddress, EnergyMeter> = HashMap::new();
     loop {
         let targets = {
             let mut state = shared.lock();
@@ -182,26 +213,20 @@ fn run(shared: &Shared, read: impl Fn(*mut c_void, GpuField) -> Option<u64>) {
             state.targets.clone()
         };
         // The (slow) NVML calls happen with no lock held.
-        let mut published = Vec::new();
-        for target in &targets {
-            let key = target.handle.0 as usize;
-            for &field in &target.fields {
-                let Some(raw) = read(target.handle.0, field) else {
-                    continue;
-                };
-                let value = match field {
-                    GpuField::EnergyTotal => meters.entry(key).or_default().update(raw),
-                    _ => raw as f64 * KB,
-                };
-                published.push((key, field, value));
-            }
-        }
+        let published = read_all(&mut meters, &targets, &read);
         {
             let mut state = shared.lock();
             let at = Instant::now();
             for (key, field, value) in published {
-                if let Some(slot) = Latest::slot(field) {
-                    state.latest.entry(key).or_default().values[slot] = Some((value, at));
+                let latest = state.latest.entry(key).or_default();
+                match value {
+                    Ok(value) => {
+                        if let Some(slot) = Latest::slot(field) {
+                            latest.values[slot] = Some((value, at));
+                        }
+                    }
+                    Err(true) => latest.stale = true,
+                    Err(false) => {}
                 }
             }
         }
@@ -253,5 +278,45 @@ mod tests {
         latest.values[1] = Some((1024.0, t0 + Duration::from_secs(2)));
         let readings = latest.readings(t0 + Duration::from_millis(4_000));
         assert_eq!(readings, Readings::from([(GpuField::PcieRx, 1024.0)]));
+    }
+
+    fn target(key: u32, handle: usize) -> Target {
+        Target {
+            key: PciAddress {
+                bus: key,
+                device: 0,
+                function: 0,
+            },
+            handle: Handle(handle as *mut c_void),
+            fields: vec![GpuField::EnergyTotal],
+        }
+    }
+
+    #[test]
+    fn a_new_handle_for_the_same_gpu_keeps_the_energy_total() {
+        let read = |handle: *mut c_void, _| Ok(handle as u64 * 1_000);
+        let mut meters = HashMap::new();
+        let first = read_all(&mut meters, &[target(1, 5)], &read);
+        assert_eq!(first[0].2, Ok(0.0));
+        // The same GPU re-enumerated with another handle and a counter 3 J higher.
+        let second = read_all(&mut meters, &[target(1, 8)], &read);
+        assert_eq!(second[0].2, Ok(3.0));
+    }
+
+    #[test]
+    fn a_lost_gpu_makes_the_poll_stale_until_the_next_attach() {
+        let t0 = Instant::now();
+        let t = target(1, 5);
+        let reader = SlowReader {
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::default()),
+                wake: Condvar::new(),
+            }),
+        };
+        assert_eq!(reader.poll(t.key, t0), Some(Readings::new()));
+        reader.shared.lock().latest.entry(t.key).or_default().stale = true;
+        assert_eq!(reader.poll(t.key, t0), None);
+        reader.set_targets(vec![t.clone()]);
+        assert_eq!(reader.poll(t.key, t0), Some(Readings::new()));
     }
 }

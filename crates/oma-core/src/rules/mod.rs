@@ -332,6 +332,14 @@ pub fn default_rules() -> Vec<Rule> {
             flag_level(0),
         ),
         builtin(
+            "disk-sectors",
+            (Storage, Flag, &["sector-warning"]),
+            Unit::Boolean,
+            FlagActive,
+            flag_level(0),
+            None,
+        ),
+        builtin(
             "volume-used",
             (Storage, Percent, &["volume-*"]),
             Unit::Percent,
@@ -463,6 +471,7 @@ mod tests {
                 "disk-temp",
                 "disk-wear",
                 "disk-critical",
+                "disk-sectors",
                 "volume-used",
                 "ram-used",
                 "battery-low"
@@ -549,6 +558,14 @@ mod tests {
                 FlagActive,
                 None,
                 flag(0),
+            ),
+            (
+                "disk-sectors",
+                selector(Storage, Flag, &["sector-warning"]),
+                Unit::Boolean,
+                FlagActive,
+                flag(0),
+                None,
             ),
             (
                 "volume-used",

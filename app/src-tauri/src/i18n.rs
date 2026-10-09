@@ -87,6 +87,8 @@ pub const RUST_KEYS: &[&str] = &[
     "rule.disk-wear.message",
     "rule.disk-critical.name",
     "rule.disk-critical.message",
+    "rule.disk-sectors.name",
+    "rule.disk-sectors.message",
     "rule.volume-used.name",
     "rule.volume-used.message",
     "rule.ram-used.name",

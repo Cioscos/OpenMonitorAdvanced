@@ -11,7 +11,7 @@ use oma_core::rules::{default_rules, expand};
 
 /// Rules that need hardware this machine does not have (or a state it is not
 /// in), so they legitimately have no instance here.
-const ONLY_IF_PRESENT: [&str; 3] = ["battery-low", "cpu-throttle", "gpu-hotspot"];
+const ONLY_IF_PRESENT: [&str; 4] = ["battery-low", "cpu-throttle", "disk-sectors", "gpu-hotspot"];
 
 fn recorded_schema() -> Schema {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

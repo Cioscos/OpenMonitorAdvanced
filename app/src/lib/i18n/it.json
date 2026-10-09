@@ -312,6 +312,8 @@
   "rule.disk-wear.message": "Usura elevata su {device} ({value})",
   "rule.disk-critical.name": "Avviso critico del disco",
   "rule.disk-critical.message": "{device} segnala un avviso critico",
+  "rule.disk-sectors.name": "Settori del disco",
+  "rule.disk-sectors.message": "{device}: settori riallocati, in attesa o non correggibili",
   "rule.volume-used.name": "Spazio usato del volume",
   "rule.volume-used.message": "Volume {volume} quasi pieno ({value})",
   "rule.ram-used.name": "RAM usata",

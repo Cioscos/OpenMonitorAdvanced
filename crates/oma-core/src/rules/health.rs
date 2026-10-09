@@ -179,6 +179,10 @@ struct Slot {
     /// monotonic time for ordering.
     since_ms: u64,
     since_mono: u64,
+    /// `battery-low` only: the battery's `flag/ac-online` sensor; while it
+    /// reads on, the instance is paused (it clears, like a value above the
+    /// threshold, and `step` is not called).
+    ac_index: Option<usize>,
 }
 
 /// An instance whose sensor left the schema (R2), with the rule it was
@@ -253,6 +257,7 @@ impl Slot {
             available: false,
             since_ms: wall,
             since_mono: mono,
+            ac_index: None,
         }
     }
 
@@ -427,7 +432,15 @@ impl RuleEngine {
                 .flatten()
                 .filter(|v| v.is_finite());
             let quality = quality.get(index).copied().unwrap_or(Quality::Fresh);
-            let step = slot.instance.step(rule, value, quality, monotonic_ms);
+            let plugged = slot
+                .ac_index
+                .and_then(|i| values.get(i).copied().flatten())
+                .is_some_and(|v| v >= 0.5);
+            let step = if plugged {
+                slot.instance.clear()
+            } else {
+                slot.instance.step(rule, value, quality, monotonic_ms)
+            };
             if step != Step::Stay {
                 slot.since_ms = timestamp_ms;
                 slot.since_mono = monotonic_ms;
@@ -583,6 +596,12 @@ impl RuleEngine {
             }
         }
         lost.sort_unstable_by(|a, b| a.slot.instance.key.cmp(&b.slot.instance.key));
+
+        for slot in &mut slots {
+            slot.ac_index = (slot.instance.key.rule_id == "battery-low")
+                .then(|| format!("{}/flag/ac-online", slot.present.device_id))
+                .and_then(|id| schema.sensors.iter().position(|s| s.id == id));
+        }
 
         self.rules = rules;
         self.slots = slots;
@@ -1947,5 +1966,65 @@ mod tests {
             serde_json::to_value(Coverage::Unavailable).unwrap(),
             json!("unavailable")
         );
+    }
+
+    // --- battery-low pause on AC power -------------------------------------
+
+    fn battery_schema(with_ac: bool) -> Schema {
+        let device = Device {
+            id: "battery/0".into(),
+            kind: DeviceKind::Battery,
+            name: "Battery".into(),
+            vendor: None,
+            properties: Default::default(),
+        };
+        let mut sensors = vec![Sensor::new(
+            "battery/0",
+            SensorKind::Percent,
+            "charge",
+            Unit::Percent,
+            Label::new("battery.charge"),
+            Source::Mock,
+        )];
+        if with_ac {
+            sensors.push(Sensor::new(
+                "battery/0",
+                SensorKind::Flag,
+                "ac-online",
+                Unit::Boolean,
+                Label::new("battery.acOnline"),
+                Source::Mock,
+            ));
+        }
+        schema(vec![device], sensors)
+    }
+
+    #[test]
+    fn battery_low_waits_while_plugged_in() {
+        let mut rig = Rig::new(vec![builtin("battery-low")], battery_schema(true));
+        rig.tick(&[Some(3.0), Some(1.0)]);
+        assert_eq!(rig.report().level, OverallLevel::Ok);
+        assert!(rig.report().alerts.is_empty());
+        assert!(rig.report().unavailable_targets.is_empty());
+    }
+
+    #[test]
+    fn battery_low_fires_after_unplug() {
+        let mut rig = Rig::new(vec![builtin("battery-low")], battery_schema(true));
+        rig.tick(&[Some(3.0), Some(1.0)]);
+        let out = rig.tick(&[Some(3.0), Some(0.0)]);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].level, Level::Crit);
+        // Plugging in again clears it at once.
+        rig.tick(&[Some(3.0), Some(1.0)]);
+        assert!(rig.report().alerts.is_empty());
+    }
+
+    #[test]
+    fn battery_low_without_ac_sensor_behaves_as_before() {
+        let mut rig = Rig::new(vec![builtin("battery-low")], battery_schema(false));
+        let out = rig.tick(&[Some(3.0)]);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].level, Level::Crit);
     }
 }

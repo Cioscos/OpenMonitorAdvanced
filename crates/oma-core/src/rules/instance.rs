@@ -376,6 +376,22 @@ impl Instance {
         }
     }
 
+    /// Drops both levels and all timers, as a value back under the threshold
+    /// would, without waiting for the exit duration.
+    pub fn clear(&mut self) -> Step {
+        let before = self.level();
+        self.warn = LevelState::default();
+        self.crit = LevelState::default();
+        self.anchor_ms = None;
+        match before {
+            Level::Ok => Step::Stay,
+            from => Step::Left {
+                from,
+                to: Level::Ok,
+            },
+        }
+    }
+
     /// Clears the running entry and exit timers; the levels stay.
     pub fn reset_timers(&mut self) {
         self.warn.reset_timers();

@@ -185,12 +185,12 @@
     {#if page === 'board'}
       <BoardPage />
     {:else if page === 'score-cpu'}
-      <ScorePage target={{ category: 'cpu' }} />
+      <ScorePage target={{ category: 'cpu' }} {backend} />
     {:else if page === 'score-disk'}
       <ScorePage target={{ category: 'disk', unavailable: systemFailed }} {backend} />
     {:else if gpuTarget}
       <!-- Until the GPU list is read, a GPU page cannot tell a GPU that is gone from one not known yet. -->
-      {#if gpus !== null}{#key page}<ScorePage target={gpuTarget} />{/key}{/if}
+      {#if gpus !== null}{#key page}<ScorePage target={gpuTarget} {backend} />{/key}{/if}
     {:else if page === 'new'}
       <StressWizard {backend} onStarted={() => (page = 'run')} />
     {:else if page === 'run'}

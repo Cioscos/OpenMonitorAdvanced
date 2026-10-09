@@ -2,15 +2,18 @@
   import { untrack } from 'svelte';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { Backend } from '../../lib/backend';
-  import { benchStore, isBenchRunning, modeValue, type ScoreTarget } from '../../lib/performance/bench.svelte';
+  import { benchStore, isBenchRunning, modeValue, type ScoreSet, type ScoreTarget } from '../../lib/performance/bench.svelte';
   import { benchWrites, diskErrorText, diskFullScale, formatBytes, formatLatency } from '../../lib/performance/disk';
   import { pieces } from '../../lib/performance/format';
+  import { boardStore } from '../../lib/performance/board.svelte';
   import { fullScale, gpuFullScale } from '../../lib/performance/gauge';
   import { performanceStore } from '../../lib/performance/performance.svelte';
-  import type { BenchMode, DiskProfile, ScoreFile, ScoreSummary, VolumeChoice } from '../../lib/types';
+  import type { BenchMode, Board, BoardRow, DiskProfile, ScoreFile, ScoreSummary, VolumeChoice } from '../../lib/types';
   import Term from '../common/Term.svelte';
   import DiskTarget from './DiskTarget.svelte';
   import Gauge from './Gauge.svelte';
+  import PointsBar from './PointsBar.svelte';
+  import ShareDialog from './ShareDialog.svelte';
 
   // «Score › CPU» (M8a2, spec §3.3 and §4.6) and «Score › <GPU>» (M8b2 DH12): two gauges with the
   // live needle, the phases as a bar, Start or Stop, the reference ▲ (in memory only, DB10), then
@@ -32,7 +35,13 @@
   /** The invalid reasons (DH9, DC12): each is the message of a measurement that is not valid, never a warning. */
   const REASONS = ['compute_error', 'device_lost', 'hung', 'io_error', 'disk_full'];
 
-  let reference = $state<'record' | 'last'>('record');
+  let reference = $state<'record' | 'last' | 'table'>('record');
+  // The table model (DZ14): rows of the first gauge's category; the other gauge's mark is the row
+  // with the same model and source in its own category.
+  let tableId = $state('');
+  let sharing = $state<string | null>(null);
+  let reloads = $state(0);
+  let exported = $state<string | null>(null);
   let startError = $state<string | null>(null);
   let starting = $state(false);
   let confirming = $state<string | null>(null);
@@ -59,8 +68,29 @@
   // The record and the last measurement of a disk are those of the chosen disk.
   const own = $derived<ScoreTarget>(disk ? { category: 'disk', deviceId: volume?.deviceId ?? null } : target);
   const record = $derived(benchStore.recordFor(own));
-  const ref = $derived(reference === 'record' ? record : benchStore.lastFor(own));
-
+  const BOARD_OF: Partial<Record<BenchMode, Board>> = { single: 'cpu-single', multi: 'cpu-multi', compute: 'gpu-compute', graphics: 'gpu-graphics' };
+  const rowId = (r: BoardRow) => `${r.key}|${r.source}`;
+  const rowLabel = (r: BoardRow) => t('performance.score.reference.modelOption', { model: r.model, source: t(`performance.board.source.${r.source}`) });
+  const tableRows = $derived(boardStore.rowsFor(disk ? 'disk' : gpu ? 'gpu-compute' : 'cpu-single'));
+  const tableRow = $derived(tableRows.find((r) => rowId(r) === tableId) ?? tableRows[0] ?? null);
+  const tableMark = (mode: BenchMode): number | null => {
+    const board = BOARD_OF[mode];
+    if (!tableRow || !board) return null;
+    return boardStore.rowsFor(board).find((r) => r.key === tableRow.key && r.source === tableRow.source)?.value ?? null;
+  };
+  // The disk dials are in MB/s and the table in points: its model moves the points bar only.
+  const ref = $derived<ScoreSet>(
+    reference === 'table' && !disk
+      ? (Object.fromEntries(MODES.map((m) => [m, tableMark(m)])) as ScoreSet)
+      : reference === 'last'
+        ? benchStore.lastFor(own)
+        : record,
+  );
+  const ownPoints = $derived(disk ? benchStore.pointsFor(own) : { record: null, last: null });
+  const pointsRef = $derived(reference === 'table' ? (tableRow?.value ?? null) : reference === 'last' ? ownPoints.last : ownPoints.record);
+  const pointsRefLabel = $derived(
+    reference === 'table' ? (tableRow ? rowLabel(tableRow) : null) : t(`performance.score.reference.${reference}`),
+  );
   const finite = (v: number | null | undefined): number | null => (v != null && Number.isFinite(v) ? v : null);
   // Between phases (and during the warm-up pause) the rate is missing: the needle holds the last
   // live value of the mode in progress instead of falling to 0. Forgotten when the run ends.
@@ -147,6 +177,7 @@
   let detail = $state.raw<ScoreFile | null>(null);
   $effect(() => {
     const id = detailId;
+    void reloads;
     if (id === null) {
       detail = null;
       return;
@@ -218,6 +249,25 @@
     benchStore.stop().catch((error) => console.error('stopping the benchmark failed', error));
   }
 
+  const canShare = $derived(!!shown && shown.valid && !shown.provisional && (!disk || shown.scores.points != null));
+
+  function closeShare(shared: boolean) {
+    sharing = null;
+    if (!shared) return;
+    benchStore.refresh().catch((error) => console.error('scores unavailable', error));
+    reloads++;
+  }
+
+  async function exportJson(id: string) {
+    exported = null;
+    try {
+      const name = await backend?.performanceScoreExport(id);
+      if (name) exported = name;
+    } catch (error) {
+      startError = String(error);
+    }
+  }
+
   async function remove(id: string) {
     confirming = null;
     try {
@@ -265,6 +315,9 @@
         </figure>
       {/each}
     </div>
+    {#if disk && !running}
+      <PointsBar value={shown?.scores.points ?? null} reference={pointsRef} referenceLabel={pointsRefLabel} />
+    {/if}
 
     {#if status && status.segments.length > 0 && (running || status.state !== 'done')}
       <ol class="segments" aria-hidden="true">
@@ -302,7 +355,18 @@
         <select aria-labelledby="score-reference-label" bind:value={reference}>
           <option value="record">{t('performance.score.reference.record')}</option>
           <option value="last">{t('performance.score.reference.last')}</option>
+          <option value="table">{t('performance.score.reference.table')}</option>
         </select>
+        {#if reference === 'table'}
+          <select
+            aria-label={t('performance.score.reference.model')}
+            disabled={tableRows.length === 0}
+            value={tableRow ? rowId(tableRow) : ''}
+            onchange={(e) => (tableId = e.currentTarget.value)}
+          >
+            {#each tableRows as r (rowId(r))}<option value={rowId(r)}>{rowLabel(r)}</option>{/each}
+          </select>
+        {/if}
       </span>
     </div>
     {#if disk}
@@ -342,9 +406,7 @@
     {/if}
 
     {#if disk}
-      {#if points !== null}
-        <p class="points"><Term term="diskPoints">{t('performance.score.disk.points', { points: points.toLocaleString(locale) })}</Term></p>
-      {:else if shown.diskProfile === 'b2'}
+      {#if points === null && shown.diskProfile === 'b2'}
         <p class="muted">{t('performance.score.disk.noPoints')}</p>
       {/if}
     {/if}
@@ -425,6 +487,18 @@
         </table>
       {/if}
     </section>
+
+    {#if backend}
+      <div class="share">
+        {#if canShare}
+          <button type="button" class="action" disabled={shown.shared} onclick={() => (sharing = shown.id)}>
+            {shown.shared ? t('performance.share.done') : t('performance.share.button')}
+          </button>
+        {/if}
+        <button type="button" class="action" onclick={() => exportJson(shown.id)}>{t('performance.share.export')}</button>
+        {#if exported}<span class="muted" role="status">{t('performance.share.exported', { name: exported })}</span>{/if}
+      </div>
+    {/if}
   {/if}
 
   <section class="panel">
@@ -467,6 +541,8 @@
     {/if}
   </section>
 </div>
+
+{#if sharing && backend}<ShareDialog {backend} scoreId={sharing} onClose={closeShare} />{/if}
 
 <style>
   .score {
@@ -612,9 +688,11 @@
     gap: 8px;
     align-items: center;
   }
-  .points {
-    margin: 0;
-    font-weight: 600;
+  .share {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
   }
   .go,
   .stop,

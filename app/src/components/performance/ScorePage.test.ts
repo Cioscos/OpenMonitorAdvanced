@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
-import type { ScoreFile } from '../../lib/types';
+import { boardStore } from '../../lib/performance/board.svelte';
+import type { BoardRow, ScoreFile } from '../../lib/types';
 import {
   FakeBackend,
   makeBenchStatus,
@@ -529,4 +530,125 @@ test('the run page opens a disk benchmark under way', async () => {
   await screen.findByRole('heading', { name: t('performance.nav.history') });
   await view.rerender({ page: 'run' });
   await screen.findByRole('heading', { name: t('performance.score.disk.title') });
+});
+
+// --- Table model, points bar, share and export (M8d2 Z8) ---
+
+const boardRow = (board: BoardRow['board'], model: string, key: string, value: number, source: BoardRow['source'] = 'author'): BoardRow => ({
+  board,
+  scoreVersion: board === 'disk' ? 'disk-1' : 'cpu-1',
+  model,
+  key,
+  value,
+  n: 5,
+  source,
+});
+const marks = () => [...document.querySelectorAll('.mark-value')].map((m) => m.textContent?.trim());
+const referenceMenu = () => screen.getByRole('combobox', { name: t('performance.score.reference') }) as HTMLSelectElement;
+const modelMenu = () => screen.getByRole('combobox', { name: t('performance.score.reference.model') }) as HTMLSelectElement;
+const pointsBar = () => screen.getByRole('meter', { name: t('performance.score.disk.pointsBar') });
+
+async function withRows(backend: FakeBackend, rows: BoardRow[]) {
+  backend.boardTable.rows = rows;
+  await boardStore.refresh(false);
+}
+
+test('table_reference_lists_rows_of_the_first_gauge', async () => {
+  const backend = await setup([makeScoreFile()]);
+  await withRows(backend, [
+    boardRow('cpu-single', 'Ryzen X', 'ryzen x', 1800),
+    boardRow('cpu-single', 'Core Y', 'core y', 900, 'community'),
+    boardRow('cpu-multi', 'Only Multi', 'only multi', 20000),
+    boardRow('disk', 'Some Disk', 'some disk', 500),
+  ]);
+  await fireEvent.change(referenceMenu(), { target: { value: 'table' } });
+  expect([...modelMenu().options].map((o) => o.textContent)).toEqual(['Ryzen X · Author', 'Core Y · Community']);
+});
+
+test('table_reference_sets_both_marks_from_the_same_model_and_source', async () => {
+  const backend = await setup([makeScoreFile()]);
+  await withRows(backend, [
+    boardRow('cpu-single', 'Ryzen X', 'ryzen x', 1800),
+    boardRow('cpu-multi', 'Ryzen X', 'ryzen x', 15000),
+    boardRow('cpu-single', 'Core Y', 'core y', 900),
+    boardRow('cpu-multi', 'Core Y', 'core y', 7000, 'community'),
+  ]);
+  await fireEvent.change(referenceMenu(), { target: { value: 'table' } });
+  expect(marks()).toEqual(['▲ 1800', '▲ 15000']);
+  // The second category has the model from another source only: no mark.
+  await fireEvent.change(modelMenu(), { target: { value: 'core y|author' } });
+  expect(marks()).toEqual(['▲ 900']);
+});
+
+test('disk_table_reference_moves_the_points_mark', async () => {
+  const backend = await setupDisk([makeDiskScoreFile('disk-c')]);
+  await withRows(backend, [boardRow('disk', 'Fanxiang S880 2TB', 'fanxiang s880 2tb', 995)]);
+  await fireEvent.change(referenceMenu(), { target: { value: 'table' } });
+  expect(screen.getByRole('img', { name: 'Fanxiang S880 2TB · Author: 995' })).toBeTruthy();
+  expect(pointsBar().getAttribute('aria-valuemax')).toBe('1500');
+  // The dials keep the ▲ of the record.
+  expect(marks()).toEqual(['▲ 6900', '▲ 5800']);
+});
+
+test('disk_points_bar_follows_record_and_last', async () => {
+  await setupDisk([
+    makeDiskScoreFile('disk-c', { id: 'd-new', at: '2026-10-08T12:00:00Z', scores: { points: 900 } }),
+    makeDiskScoreFile('disk-c', { id: 'd-old', at: '2026-10-07T12:00:00Z', scores: { points: 1100 } }),
+  ]);
+  await screen.findByRole('table', { name: t('performance.score.detail') });
+  expect(pointsBar().getAttribute('aria-valuenow')).toBe('900');
+  expect(screen.getByRole('img', { name: `${t('performance.score.reference.record')}: 1,100` })).toBeTruthy();
+  await fireEvent.change(referenceMenu(), { target: { value: 'last' } });
+  expect(screen.getByRole('img', { name: `${t('performance.score.reference.last')}: 900` })).toBeTruthy();
+});
+
+test('points_bar_shows_a_dash_for_b2', async () => {
+  await setupDisk([makeDiskScoreFile('disk-c', { diskProfile: 'b2', scores: { points: null } })]);
+  await screen.findByRole('table', { name: t('performance.score.detail') });
+  expect(pointsBar().getAttribute('aria-valuenow')).toBeNull();
+  expect(pointsBar().getAttribute('aria-valuetext')).toBe('–');
+});
+
+test('share_shows_only_for_valid_final_scores', async () => {
+  const shareButton = () => screen.queryByRole('button', { name: t('performance.share.button') });
+  const reset = () => {
+    cleanup();
+    disconnectSettings();
+  };
+  await setup([makeScoreFile()]);
+  expect(await screen.findByRole('button', { name: t('performance.share.button') })).toBeTruthy();
+  reset();
+  await setup([makeScoreFile({ provisional: true })], true);
+  await screen.findByRole('button', { name: t('performance.share.export') });
+  expect(shareButton()).toBeNull();
+  reset();
+  await setup([makeScoreFile({ valid: false, flags: ['compute_error'] })]);
+  await screen.findByRole('button', { name: t('performance.share.export') });
+  expect(shareButton()).toBeNull();
+  reset();
+  await setupDisk([makeDiskScoreFile('disk-c', { diskProfile: 'b2', scores: { points: null } })]);
+  await screen.findByRole('button', { name: t('performance.share.export') });
+  expect(shareButton()).toBeNull();
+  reset();
+  await setup([makeScoreFile({ shared: true })]);
+  const done = (await screen.findByRole('button', { name: t('performance.share.done') })) as HTMLButtonElement;
+  expect(done.disabled).toBe(true);
+});
+
+test('share_sends_and_marks_the_score_shared', async () => {
+  const backend = await setup([makeScoreFile()]);
+  await fireEvent.click(await screen.findByRole('button', { name: t('performance.share.button') }));
+  const send = await screen.findByRole('button', { name: t('performance.share.send') });
+  await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
+  await fireEvent.click(send);
+  const done = (await screen.findByRole('button', { name: t('performance.share.done') })) as HTMLButtonElement;
+  expect(done.disabled).toBe(true);
+  expect(backend.performanceCalls).toContain('performanceShareSend:score-a:false');
+});
+
+test('export_saves_and_names_the_file', async () => {
+  const backend = await setup([makeScoreFile()]);
+  await fireEvent.click(await screen.findByRole('button', { name: t('performance.share.export') }));
+  await waitFor(() => expect(backend.performanceCalls).toContain('performanceScoreExport:score-a'));
+  expect(await screen.findByText(t('performance.share.exported', { name: 'oma-score-score-a.json' }))).toBeTruthy();
 });

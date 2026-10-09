@@ -304,6 +304,8 @@ Measured 2026-10-09 on the development machine (Ryzen 7 7800X3D, 16 logical proc
 | Advanced CPU, every series, 1 h window | 214.7 / 210.7 / 212.1 MB | 1.83 / 1.72 / 1.71 % | yes |
 | Advanced CPU, every series, 1 min window | 228.5 / 231.0 / 220.6 MB | 1.61 / 1.67 / 1.58 % | yes |
 
+Tray at rest (`-Minimized`, build `3ae3a39`): core 0.02 % CPU, 18.7 MB, no WebView2 process — unchanged by M9a.
+
 ¹ Meant as the default series (load and effective clock); the effective clock was dropped at every start by a selection bug, fixed afterwards in `6e36f54`.
 
 **Single readings are not reliable.** Before `2fa6bec` the same build read about 50 or about 103 MB in the WebView2 renderer depending on garbage-collection timing, so the first single-shot comparisons (Simple view ~197 MB against 132 MB on `main`) overstated or understated the cost at random. A Chromium memory-infra dump over CDP showed the difference was all in `blink_gc` (Oilpan): 64.8 MB against 10.6 MB, the rest equal. Root cause (memory-infra traces and 5-minute samples of the renderer): the width transition of the Simple view bars (`transition: width 0.3s`) relaid out and repainted the tile at every 165 Hz frame for 300 ms after each tick; the extra Blink garbage (about 1.55 MB/s against 1.15 on `main`) kept V8's memory reducer from running at 30 s, and the heap committed by the first regular GC stayed. The fills now ease with a composited `transform: scaleX()` (`2fa6bec`): renderer 55–60 MB at steady state against 103–118 MB before (`main` 46–64 MB). Measure at least three launches, or over minutes, before a budget decision.

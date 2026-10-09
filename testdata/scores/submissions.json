@@ -81,6 +81,33 @@
       }
     },
     {
+      "name": "ram_integral_float",
+      "body": {
+        "format": 1,
+        "appVersion": "0.6.0",
+        "category": "cpu",
+        "scoreVersion": "cpu-1",
+        "valid": true,
+        "overclock": false,
+        "scores": {
+          "single": 1850,
+          "multi": 2400
+        },
+        "kernels": [
+          {
+            "id": "k1",
+            "rate": 1.5
+          }
+        ],
+        "hardware": {
+          "model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+          "ramGB": 32.0,
+          "osBuild": "26300.1"
+        },
+        "flags": []
+      }
+    },
+    {
       "name": "unknown_field_ignored",
       "body": {
         "format": 1,
@@ -1036,6 +1063,34 @@
         ],
         "hardware": {
           "model": "AMD Ryzen\u0085 7",
+          "ramGB": 32,
+          "osBuild": "26300.1"
+        },
+        "flags": []
+      },
+      "error": "bad_schema"
+    },
+    {
+      "name": "model_astral_65",
+      "body": {
+        "format": 1,
+        "appVersion": "0.6.0",
+        "category": "cpu",
+        "scoreVersion": "cpu-1",
+        "valid": true,
+        "overclock": false,
+        "scores": {
+          "single": 1850,
+          "multi": 2400
+        },
+        "kernels": [
+          {
+            "id": "k1",
+            "rate": 1.5
+          }
+        ],
+        "hardware": {
+          "model": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
           "ramGB": 32,
           "osBuild": "26300.1"
         },

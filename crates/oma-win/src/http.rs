@@ -1,5 +1,5 @@
-//! HTTPS GET over WinHTTP (spec M6c §2.1), used only by the update check on a
-//! background thread. Synchronous; TLS 1.2/1.3 only (TLS 1.2 alone where
+//! HTTPS GET and POST over WinHTTP (spec M6c §2.1; M8d2 adds POST and the ETag),
+//! used on background threads (update check, leaderboard). Synchronous; TLS 1.2/1.3 only (TLS 1.2 alone where
 //! WinHTTP does not know TLS 1.3), no cookies, redirects only from HTTPS to
 //! HTTPS. WinHTTP validates the server certificate chain and name against the
 //! Windows store, with no option to ignore errors. Revocation checking
@@ -17,16 +17,16 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, ERROR_WINHTTP_CANNOT_CONNECT,
     ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, ERROR_WINHTTP_CONNECTION_ERROR,
-    ERROR_WINHTTP_NAME_NOT_RESOLVED, ERROR_WINHTTP_SECURE_CERT_CN_INVALID,
-    ERROR_WINHTTP_SECURE_CERT_DATE_INVALID, ERROR_WINHTTP_SECURE_CERT_REV_FAILED,
-    ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE, ERROR_WINHTTP_SECURE_CHANNEL_ERROR,
-    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_SECURE_INVALID_CA,
-    ERROR_WINHTTP_SECURE_INVALID_CERT, ERROR_WINHTTP_TIMEOUT, URL_COMPONENTS,
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_COOKIES, WINHTTP_FLAG_SECURE,
-    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+    ERROR_WINHTTP_HEADER_NOT_FOUND, ERROR_WINHTTP_NAME_NOT_RESOLVED,
+    ERROR_WINHTTP_SECURE_CERT_CN_INVALID, ERROR_WINHTTP_SECURE_CERT_DATE_INVALID,
+    ERROR_WINHTTP_SECURE_CERT_REV_FAILED, ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE,
+    ERROR_WINHTTP_SECURE_CHANNEL_ERROR, ERROR_WINHTTP_SECURE_FAILURE,
+    ERROR_WINHTTP_SECURE_INVALID_CA, ERROR_WINHTTP_SECURE_INVALID_CERT, ERROR_WINHTTP_TIMEOUT,
+    URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_COOKIES,
+    WINHTTP_FLAG_SECURE, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
     WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_REDIRECT_POLICY,
     WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP, WINHTTP_OPTION_SECURE_PROTOCOLS,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_QUERY_ETAG, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 // `URL_COMPONENTS` comes from the `windows` crate; pin its layout anyway,
@@ -38,6 +38,8 @@ const _: () = assert!(std::mem::size_of::<URL_COMPONENTS>() == 104);
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// The `ETag` response header; `None` if absent or longer than 256 characters.
+    pub etag: Option<String>,
 }
 
 /// Maps a WinHTTP error code (`GetLastError`) to a check error category.
@@ -58,7 +60,7 @@ pub(crate) fn classify(code: u32) -> CheckError {
         | ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE => CheckError::Tls,
         _ => {
             // The category alone would hide the cause; keep the raw code.
-            tracing::warn!(code, "update check: unclassified WinHTTP error");
+            tracing::warn!(code, "http: unclassified WinHTTP error");
             CheckError::Invalid
         }
     }
@@ -184,10 +186,7 @@ fn response_timeouts(remaining_ms: i32) -> [i32; 4] {
 fn with_tls_fallback(mut set: impl FnMut(u32) -> Result<(), CheckError>) -> Result<(), CheckError> {
     set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3).or_else(
         |error| {
-            tracing::debug!(
-                ?error,
-                "update check: TLS 1.3 not accepted, using TLS 1.2 alone"
-            );
+            tracing::debug!(?error, "http: TLS 1.3 not accepted, using TLS 1.2 alone");
             set(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2)
         },
     )
@@ -303,6 +302,68 @@ pub fn get(
     deadline: Duration,
     max_body: usize,
 ) -> Result<HttpResponse, CheckError> {
+    send(w!("GET"), url, user_agent, headers, &[], deadline, max_body)
+}
+
+/// Sends `POST url` with `body` over HTTPS; same rules as [`get`]. The caller
+/// passes `Content-Type` in `headers`.
+pub fn post(
+    url: &str,
+    user_agent: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    deadline: Duration,
+    max_body: usize,
+) -> Result<HttpResponse, CheckError> {
+    send(
+        w!("POST"),
+        url,
+        user_agent,
+        headers,
+        body,
+        deadline,
+        max_body,
+    )
+}
+
+/// The `ETag` header of a request with a response, if present and at most
+/// 256 characters.
+fn query_etag(request: &Handle) -> Option<String> {
+    let mut buf = [0u16; 257];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    // SAFETY: `request` has a response; `buf` is `size` writable bytes; no
+    // header index. A too-small buffer or a missing header makes this fail,
+    // which is `None` (ERROR_WINHTTP_HEADER_NOT_FOUND included).
+    let result = unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_ETAG,
+            PCWSTR::null(),
+            Some(buf.as_mut_ptr().cast::<c_void>()),
+            &mut size,
+            std::ptr::null_mut(),
+        )
+    };
+    if let Err(error) = result {
+        if error.code() != windows::core::HRESULT::from_win32(ERROR_WINHTTP_HEADER_NOT_FOUND) {
+            tracing::debug!(?error, "http: ETag not read");
+        }
+        return None;
+    }
+    let len = (size as usize / 2).min(buf.len());
+    let etag = String::from_utf16(&buf[..len]).ok()?;
+    (!etag.is_empty() && etag.chars().count() <= 256).then_some(etag)
+}
+
+fn send(
+    verb: PCWSTR,
+    url: &str,
+    user_agent: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    deadline: Duration,
+    max_body: usize,
+) -> Result<HttpResponse, CheckError> {
     let deadline = Deadline(Instant::now() + deadline);
     let target = crack_url(url)?;
     let header_block = header_block(headers)?;
@@ -335,7 +396,7 @@ pub fn get(
     let request = Handle::new(unsafe {
         WinHttpOpenRequest(
             connection.0,
-            w!("GET"),
+            verb,
             PCWSTR(target.object.as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
@@ -356,9 +417,14 @@ pub fn get(
 
     deadline.arm_phases(&request)?;
     let extra = (!header_block.is_empty()).then_some(header_block.as_slice());
+    let total = u32::try_from(body.len()).map_err(|_| CheckError::Invalid)?;
+    let optional = (!body.is_empty()).then_some(body.as_ptr().cast::<c_void>());
     // SAFETY: `request` is live; the header block is passed with its length
-    // and outlives the call; no request body.
-    unsafe { WinHttpSendRequest(request.0, extra, None, 0, 0, 0) }.map_err(win_error)?;
+    // and outlives the call; `body` (a null pointer when empty) is `total`
+    // bytes that outlive the request, since `body` is a parameter of this
+    // function and the response is read before it returns.
+    unsafe { WinHttpSendRequest(request.0, extra, optional, total, total, 0) }
+        .map_err(win_error)?;
 
     deadline.arm_response(&request)?;
     // SAFETY: `request` is live and was sent; the reserved pointer is null.
@@ -380,6 +446,7 @@ pub fn get(
     }
     .map_err(win_error)?;
     let status = u16::try_from(status).map_err(|_| CheckError::Invalid)?;
+    let etag = query_etag(&request);
 
     let mut body = Vec::new();
     loop {
@@ -396,7 +463,7 @@ pub fn get(
                 read = body.len(),
                 available,
                 max_body,
-                "update check: response body too large"
+                "http: response body too large"
             );
             return Err(CheckError::Invalid);
         }
@@ -420,7 +487,7 @@ pub fn get(
             break;
         }
     }
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse { status, body, etag })
 }
 
 #[cfg(test)]
@@ -460,6 +527,28 @@ mod tests {
             "https://example.invalid/",
             "test",
             &headers,
+            Duration::from_secs(10),
+            1024,
+        );
+        assert_eq!(result, Err(CheckError::Invalid));
+    }
+
+    #[test]
+    fn post_rejects_non_https_without_connecting() {
+        for url in ["http://example.com/", "ftp://example.com/", "not a url", ""] {
+            let result = post(url, "test", &[], b"{}", Duration::from_secs(10), 1024);
+            assert_eq!(result, Err(CheckError::Invalid), "url {url:?}");
+        }
+    }
+
+    #[test]
+    fn post_rejects_header_line_breaks_without_connecting() {
+        let headers = [("X-Test", "a\r\nInjected: b")];
+        let result = post(
+            "https://example.invalid/",
+            "test",
+            &headers,
+            b"{}",
             Duration::from_secs(10),
             1024,
         );
@@ -605,5 +694,30 @@ mod tests {
         assert_eq!(response.status, 200);
         let release = parse_latest(response.status, &response.body).expect("valid release");
         println!("latest release: {} at {}", release.version, release.url);
+    }
+
+    #[test]
+    #[ignore = "requires network"]
+    fn table_get_returns_an_etag_and_304() {
+        let ua = user_agent("0.0.0");
+        let first = get(
+            oma_core::scores::TABLE_URL,
+            &ua,
+            &[],
+            Duration::from_secs(10),
+            oma_core::scores::MAX_TABLE_BYTES,
+        )
+        .expect("request");
+        assert_eq!(first.status, 200);
+        let etag = first.etag.expect("etag");
+        let second = get(
+            oma_core::scores::TABLE_URL,
+            &ua,
+            &[("If-None-Match", &etag)],
+            Duration::from_secs(10),
+            oma_core::scores::MAX_TABLE_BYTES,
+        )
+        .expect("request");
+        assert_eq!(second.status, 304);
     }
 }

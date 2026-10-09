@@ -499,6 +499,7 @@ pub(crate) mod test_support {
                 risk_notice_seen: true,
                 disk_stop_c: Some(75),
                 disk_folder: Some("E:\\Tests".into()),
+                community_table: false,
             },
             migrations: Migrations {
                 service_v1: true,
@@ -541,7 +542,7 @@ mod tests {
                         "hotkeyBenchmark": null, "editorBounds": null},
             "performance": {"thermalStop": true, "cpuStopC": null, "gpuStopC": 90,
                             "stopOnFirstError": null, "ramSharePercent": 70, "riskNoticeSeen": false, "diskStopC": null,
-                            "diskFolder": null},
+                            "diskFolder": null, "communityTable": true},
             "migrations": {"serviceV1": false, "webviewV1": false}
         });
         assert_eq!(encode(&Settings::default()), expected);

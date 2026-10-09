@@ -156,6 +156,18 @@ impl PerformanceStore {
             None => Ok(()),
         }
     }
+
+    /// Sets the local «shared» mark; `false` if the score is not there.
+    pub fn mark_shared(&self, id: &str) -> io::Result<bool> {
+        match self.load_score(id)? {
+            Some(mut score) => {
+                score.shared = true;
+                self.save_score(&score)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 /// Valid file names (`AAAAMMGG-HHMMSS-<uuid>.json`) in `dir`, newest first.
@@ -966,7 +978,21 @@ mod tests {
             app_version: "0.0.0".into(),
             load_version: None,
             disk_profile: None,
+            shared: false,
         }
+    }
+
+    #[test]
+    fn mark_shared_rewrites_the_file() {
+        let store = PerformanceStore::new(temp_dir("mark-shared"));
+        store
+            .save_score(&score(ID, "2026-10-06T14:03:09Z"))
+            .unwrap();
+        assert!(!store.load_score(ID).unwrap().unwrap().shared);
+        assert!(store.mark_shared(ID).unwrap());
+        assert!(store.load_score(ID).unwrap().unwrap().shared);
+        assert!(store.list_scores()[0].shared);
+        assert!(!store.mark_shared(&uuid(9)).unwrap());
     }
 
     #[test]

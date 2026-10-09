@@ -300,6 +300,8 @@ export interface PerformanceSettings {
   diskStopC: number | null;
   /** The folder of the last disk test, kept for the orphan sweep. */
   diskFolder: string | null;
+  /** Whether the community table may be downloaded (default true). */
+  communityTable: boolean;
 }
 
 export interface Settings {
@@ -1146,6 +1148,9 @@ export interface ScoreSummary {
   valid: boolean;
   flags: string[];
   provisional: boolean;
+  /** Sent to the community table (local mark). */
+  shared: boolean;
+  scoreVersion: string;
 }
 
 /** The best measure of a disk test in one direction (`mbs` is 10^6 bytes per second). */
@@ -1207,4 +1212,33 @@ export interface ScoreFile {
   samples: { tMs: number; tempC: number | null; powerW: number | null; clockMhz: number | null }[];
   appVersion: string;
   loadVersion: string | null;
+  /** Sent to the community table (local mark). */
+  shared: boolean;
+}
+
+/** The leaderboard categories, in display order (`oma_core::scores::Board`). */
+export type Board = 'cpu-single' | 'cpu-multi' | 'gpu-compute' | 'gpu-graphics' | 'disk';
+
+/** A row of the leaderboard table; `key` is the normalized model, computed in Rust. */
+export interface BoardRow {
+  board: Board;
+  scoreVersion: string;
+  model: string;
+  key: string;
+  value: number;
+  n: number;
+  source: 'author' | 'community';
+}
+
+/** `performance_board`: the author rows plus the saved community copy, sorted by board and value. */
+export interface BoardTable {
+  rows: BoardRow[];
+  /** `generatedAt` of the downloaded copy; null without one. */
+  communityAt: string | null;
+  checkedAtMs: number | null;
+  /** The last download error category, or null. */
+  error: string | null;
+  /** The `performance.communityTable` setting. */
+  enabled: boolean;
+  versions: { cpu: string; gpu: string; disk: string };
 }

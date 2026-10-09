@@ -2,6 +2,7 @@ import type {
   BenchStatus,
   DiskBenchRequest,
   VolumeChoice,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -217,6 +218,16 @@ export interface Backend {
   performanceScoreDelete(id: string): Promise<void>;
   /** Whether the CPU, GPU and disk score scales are still provisional (not calibrated). */
   performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }>;
+  /** The leaderboard table from disk (author rows plus the saved community copy); no network. */
+  performanceBoard(): Promise<BoardTable>;
+  /** The exact text «Send» will post (the anonymous submission); rejects with an error code (`performance.share.error.<code>`). */
+  performanceSharePreview(id: string, overclock: boolean): Promise<string>;
+  /** Posts the anonymous submission and marks the score shared; rejects with an error code. */
+  performanceShareSend(id: string, overclock: boolean): Promise<void>;
+  /** Saves the score as shareable JSON where the user chooses; the file name, or `null` if cancelled. */
+  performanceScoreExport(id: string): Promise<string | null>;
+  /** Downloads the community table when due, or now when `manual`; nothing with the setting off. */
+  performanceBoardRefresh(manual: boolean): Promise<BoardTable>;
   /** The benchmark status on every change and at most every 500 ms while it runs, only with the main window open. */
   onPerformanceBench(cb: (status: BenchStatus) => void): Promise<Unsubscribe>;
   /** Starts or stops a benchmark capture, like the hotkey; the outcome arrives in `OverlayStatus.benchmark`. */

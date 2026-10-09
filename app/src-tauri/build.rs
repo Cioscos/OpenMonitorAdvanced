@@ -81,6 +81,11 @@ fn main() {
             "performance_score",
             "performance_score_delete",
             "performance_baseline",
+            "performance_board",
+            "performance_board_refresh",
+            "performance_share_preview",
+            "performance_share_send",
+            "performance_score_export",
         ]),
     ))
     .expect("Tauri build")

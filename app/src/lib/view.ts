@@ -8,9 +8,9 @@ import type { NavigationTarget } from './types';
 
 /**
  * A page of the Performance view: a saved session's result is `result:<id>`; `score-cpu` is the
- * CPU benchmark, `score-gpu:<deviceId>` the one of a GPU and `score-disk` the disk one.
+ * CPU benchmark, `score-gpu:<deviceId>` the one of a GPU and `score-disk` the disk one; `board` is the leaderboard.
  */
-export type PerformancePage = 'new' | 'run' | 'history' | 'score-cpu' | 'score-disk' | `score-gpu:${string}` | `result:${string}`;
+export type PerformancePage = 'new' | 'run' | 'history' | 'score-cpu' | 'score-disk' | 'board' | `score-gpu:${string}` | `result:${string}`;
 
 /** The page a tray item or a toast asks for (`NavigationTarget.performance`), or null for none. */
 export function performancePageOf(perf: NavigationTarget['performance']): PerformancePage | null {

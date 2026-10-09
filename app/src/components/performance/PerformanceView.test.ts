@@ -24,12 +24,13 @@ test('sidebar lists one score entry per gpu', async () => {
   });
   render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
   const group = await screen.findByRole('group', { name: t('performance.nav.score') });
-  await waitFor(() => expect(group.querySelectorAll('button')).toHaveLength(4));
+  await waitFor(() => expect(group.querySelectorAll('button')).toHaveLength(5));
   expect([...group.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual([
     t('performance.nav.scoreCpu'),
     'Fake GeForce RTX 4080',
     'Fake Radeon Graphics',
     t('performance.nav.scoreDisk'),
+    t('performance.nav.board'),
   ]);
   await fireEvent.click(screen.getByRole('button', { name: 'Fake Radeon Graphics' }));
   await screen.findByRole('heading', { name: t('performance.score.gpu.title') });
@@ -56,12 +57,20 @@ test('sidebar has the disk entry after the gpus', async () => {
   });
   render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
   const group = await screen.findByRole('group', { name: t('performance.nav.score') });
-  await waitFor(() => expect(group.querySelectorAll('button')).toHaveLength(3));
+  await waitFor(() => expect(group.querySelectorAll('button')).toHaveLength(4));
   const names = [...group.querySelectorAll('button')].map((b) => b.textContent?.trim());
-  expect(names).toEqual([t('performance.nav.scoreCpu'), 'Fake GeForce RTX 4080', t('performance.nav.scoreDisk')]);
+  expect(names).toEqual([t('performance.nav.scoreCpu'), 'Fake GeForce RTX 4080', t('performance.nav.scoreDisk'), t('performance.nav.board')]);
   await fireEvent.click(screen.getByRole('button', { name: t('performance.nav.scoreDisk') }));
   await screen.findByRole('heading', { name: t('performance.score.disk.title') });
   expect(screen.getByRole('button', { name: t('performance.nav.scoreDisk') }).getAttribute('aria-current')).toBe('page');
   // The volumes come with the one system read the view makes when it opens.
   expect(backend.performanceCalls.filter((c) => c === 'performanceSystem')).toHaveLength(1);
+});
+
+test('board_entry_opens_the_board_page', async () => {
+  const backend: FakeBackend = await connectSettings();
+  render(PerformanceView, { backend, store: new LiveStore(), page: 'history' });
+  await fireEvent.click(await screen.findByRole('button', { name: t('performance.nav.board') }));
+  await screen.findByRole('heading', { name: t('performance.board.title') });
+  expect(screen.getByRole('tablist', { name: t('performance.board.tabs') })).toBeTruthy();
 });

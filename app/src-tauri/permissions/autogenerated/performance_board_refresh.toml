@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-board-refresh"
+description = "Enables the performance_board_refresh command without any pre-configured scope."
+commands.allow = ["performance_board_refresh"]
+
+[[permission]]
+identifier = "deny-performance-board-refresh"
+description = "Denies the performance_board_refresh command without any pre-configured scope."
+commands.deny = ["performance_board_refresh"]

@@ -67,4 +67,11 @@ export const TERMS: string[] = [
   'seed',
   'iteration',
   'ramShare',
+  'board',
+  'percentile',
+  'sourceAuthor',
+  'sourceCommunity',
+  'scoreVersion',
+  'overclock',
+  'anonymousShare',
 ];

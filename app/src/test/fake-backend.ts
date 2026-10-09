@@ -6,6 +6,7 @@ import type {
   BenchStep,
   DiskBenchRequest,
   VolumeChoice,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   AppInfo,
@@ -201,6 +202,7 @@ export function makeScoreFile(over: ScoreOver = {}): ScoreFile {
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
     ...rest,
   };
 }
@@ -273,6 +275,8 @@ export const scoreSummaryOf = (f: ScoreFile): ScoreSummary => ({
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
+  shared: f.shared,
+  scoreVersion: f.scoreVersion,
 });
 
 /** A stress test run status for tests: idle, before any test; override what matters. */
@@ -1027,6 +1031,46 @@ export class FakeBackend implements Backend {
   async performanceScoreDelete(id: string): Promise<void> {
     this.performanceCalls.push(`performanceScoreDelete:${id}`);
     this.scoreFiles = this.scoreFiles.filter((f) => f.id !== id);
+  }
+
+  boardTable: BoardTable = {
+    rows: [],
+    communityAt: null,
+    checkedAtMs: null,
+    error: null,
+    enabled: true,
+    versions: { cpu: 'cpu-1', gpu: 'gpu-1', disk: 'disk-1' },
+  };
+
+  /** The code the next share call rejects with; `null` accepts it. */
+  shareError: string | null = null;
+
+  async performanceSharePreview(id: string, overclock: boolean): Promise<string> {
+    this.performanceCalls.push(`performanceSharePreview:${id}:${overclock}`);
+    if (this.shareError) throw this.shareError;
+    return `{ "overclock": ${overclock} }`;
+  }
+
+  async performanceShareSend(id: string, overclock: boolean): Promise<void> {
+    this.performanceCalls.push(`performanceShareSend:${id}:${overclock}`);
+    if (this.shareError) throw this.shareError;
+    const file = this.scoreFiles.find((f) => f.id === id);
+    if (file) file.shared = true;
+  }
+
+  async performanceScoreExport(id: string): Promise<string | null> {
+    this.performanceCalls.push(`performanceScoreExport:${id}`);
+    return `oma-score-${id}.json`;
+  }
+
+  async performanceBoard(): Promise<BoardTable> {
+    this.performanceCalls.push('performanceBoard');
+    return structuredClone(this.boardTable);
+  }
+
+  async performanceBoardRefresh(manual: boolean): Promise<BoardTable> {
+    this.performanceCalls.push(manual ? 'performanceBoardRefresh:manual' : 'performanceBoardRefresh');
+    return structuredClone(this.boardTable);
   }
 
   async performanceBaseline(): Promise<{ provisional: boolean; gpuProvisional: boolean; diskProvisional: boolean }> {

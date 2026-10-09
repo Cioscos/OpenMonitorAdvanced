@@ -28,6 +28,18 @@ pub fn os_version() -> Option<String> {
         .then(|| format_version(info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber))
 }
 
+/// The Windows build number as text (e.g. `"26300"`); `None` if the call fails.
+pub fn os_build() -> Option<String> {
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: as in `os_version`: a valid, writable OSVERSIONINFOW with its
+    // size field set, alive for the call.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status.is_ok().then(|| info.dwBuildNumber.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,5 +59,12 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), 3, "{version}");
         assert!(parts[0] >= 10, "{version}");
+    }
+
+    #[test]
+    fn os_build_is_digits() {
+        let build = os_build().expect("RtlGetVersion");
+        assert!((4..=6).contains(&build.len()), "{build}");
+        assert!(build.bytes().all(|b| b.is_ascii_digit()), "{build}");
     }
 }

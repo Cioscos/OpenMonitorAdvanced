@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-share-preview"
+description = "Enables the performance_share_preview command without any pre-configured scope."
+commands.allow = ["performance_share_preview"]
+
+[[permission]]
+identifier = "deny-performance-share-preview"
+description = "Denies the performance_share_preview command without any pre-configured scope."
+commands.deny = ["performance_share_preview"]

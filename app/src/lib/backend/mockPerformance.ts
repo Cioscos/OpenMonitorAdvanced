@@ -8,6 +8,7 @@ import type {
   DiskBenchKernel,
   DiskBenchRequest,
   DiskProfile,
+  BoardTable,
   ScoreFile,
   ScoreSummary,
   ErrorRecord,
@@ -503,6 +504,8 @@ const scoreSummary = (f: ScoreFile): ScoreSummary => ({
   valid: f.valid,
   flags: f.flags,
   provisional: f.provisional,
+  shared: f.shared,
+  scoreVersion: f.scoreVersion,
 });
 
 function scoreFile(id: string, atMs: number, single: number, multi: number | null, valid: boolean): ScoreFile {
@@ -532,6 +535,7 @@ function scoreFile(id: string, atMs: number, single: number, multi: number | nul
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 
@@ -571,6 +575,7 @@ function gpuScoreFile(id: string, atMs: number, gpu: GpuChoice, compute: number 
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 
@@ -645,6 +650,7 @@ function diskScoreFile(id: string, atMs: number, volume: VolumeChoice, profile: 
     samples: [],
     appVersion: '0.5.0',
     loadVersion: '0.5.0',
+    shared: false,
   };
 }
 
@@ -870,6 +876,19 @@ export function mockBench(
     status: () => structuredClone(status),
     scores: () => scores.map(scoreSummary),
     score: (id: string) => structuredClone(scores.find((s) => s.id === id) ?? null),
+    /** The submission text, as the real command would show it. */
+    sharePreview(id: string, overclock: boolean) {
+      const s = scores.find((x) => x.id === id);
+      if (!s) throw 'not_found';
+      return JSON.stringify({ format: 1, appVersion: s.appVersion, category: s.category, scoreVersion: s.scoreVersion, valid: s.valid, overclock, scores: s.scores, hardware: { model: s.device.model, ramGB: 32, osBuild: '26300' }, flags: s.flags }, null, 2);
+    },
+    /** Accepts the submission and marks the score shared; a model containing `fail` is refused (to try the message). */
+    share(id: string) {
+      const s = scores.find((x) => x.id === id);
+      if (!s) throw 'not_found';
+      if (s.device.model.toLowerCase().includes('fail')) throw 'rate_limited';
+      s.shared = true;
+    },
     remove(id: string) {
       scores = scores.filter((s) => s.id !== id);
     },
@@ -877,5 +896,29 @@ export function mockBench(
       listeners.add(cb);
       return () => listeners.delete(cb);
     },
+  };
+}
+
+/** A fake leaderboard for `pnpm dev`: 14 `cpu-single` rows, so the percentile shows. */
+export function mockBoardTable(): BoardTable {
+  const rows = Array.from({ length: 14 }, (_, i) => {
+    const model = `Mock CPU ${i + 1}`;
+    return {
+      board: 'cpu-single' as const,
+      scoreVersion: 'cpu-1',
+      model,
+      key: model.toLowerCase(),
+      value: 1500 - i * 100,
+      n: i < 3 ? 1 : 5,
+      source: i < 3 ? ('author' as const) : ('community' as const),
+    };
+  });
+  return {
+    rows,
+    communityAt: '2026-10-09T10:00:00Z',
+    checkedAtMs: Date.now(),
+    error: null,
+    enabled: true,
+    versions: { cpu: 'cpu-1', gpu: 'gpu-1', disk: 'disk-1' },
   };
 }

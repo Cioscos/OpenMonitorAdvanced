@@ -1,4 +1,5 @@
 import type { Backend, Unsubscribe } from '../backend/backend';
+import { boardStore } from './board.svelte';
 import type { BenchMode, BenchStatus, DiskBenchRequest, ScoreFile, ScoreSummary } from '../types';
 
 /** A benchmark is under way from `starting` until it ends (`done`, `stopped` or `failed`). */
@@ -73,6 +74,14 @@ class BenchStore {
     return Object.fromEntries(MODES.map((m) => [m, s ? modeValue(s, m) : null])) as ScoreSet;
   }
 
+  /** The disk points (comparable B1 measurements of the same disk): the best and the newest. */
+  pointsFor(target: ScoreTarget): { record: number | null; last: number | null } {
+    const points = this.#comparable(target)
+      .filter((s) => s.diskProfile !== 'b2' && s.points !== null)
+      .map((s) => s.points);
+    return { record: maxOf(points), last: points[0] ?? null };
+  }
+
   /** Valid scores on the current scale: once calibrated, provisional ones are not comparable. */
   #comparable(target: ScoreTarget): ScoreSummary[] {
     const provisional = this.provisionalFor(target);
@@ -91,6 +100,8 @@ class BenchStore {
     const generation = ++this.#generation;
     this.#backend = backend;
     this.status = null;
+    // Stale scores would let a page ask for a detail before the backend is set, and keep the miss.
+    this.scores = [];
     let eventSeen = false;
     let off: Unsubscribe | null = null;
     const stop = () => {
@@ -163,7 +174,11 @@ class BenchStore {
   #accept(next: BenchStatus) {
     const savedNow = next.state === 'done' && this.status?.state !== 'done';
     this.status = next;
-    if (savedNow) this.refresh().catch((error) => console.error('scores unavailable', error));
+    if (savedNow) {
+      this.refresh().catch((error) => console.error('scores unavailable', error));
+      // A finished benchmark may be due a table download (the store ignores it when not connected).
+      void boardStore.refresh(false);
+    }
   }
 }
 

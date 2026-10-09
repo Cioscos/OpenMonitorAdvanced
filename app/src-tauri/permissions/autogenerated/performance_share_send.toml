@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-performance-share-send"
+description = "Enables the performance_share_send command without any pre-configured scope."
+commands.allow = ["performance_share_send"]
+
+[[permission]]
+identifier = "deny-performance-share-send"
+description = "Denies the performance_share_send command without any pre-configured scope."
+commands.deny = ["performance_share_send"]

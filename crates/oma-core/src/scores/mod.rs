@@ -2,6 +2,7 @@
 //! full scale and the score file (pure; no Windows code).
 
 mod bench;
+mod board;
 mod disk;
 mod disk_bench;
 mod file;
@@ -11,10 +12,17 @@ mod gpu_bench;
 mod lifecycle;
 mod plan;
 mod score;
+mod share;
 mod workloads;
 
 pub use bench::{
     BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, SegmentState,
+};
+pub use board::{
+    author_rows, known_version, median, normalize_model, parse_table, plausible, submit_outcome,
+    validate_submission, Board, ErrorCode, Model, Source, Submission, Table, TableRow,
+    MAX_SUBMIT_BYTES, MAX_TABLE_BYTES, MODEL_MAX, PLAUSIBLE_MAX, PLAUSIBLE_MIN, SUBMIT_URL,
+    TABLE_URL, VALUE_CAP,
 };
 pub use disk::{
     disk_baseline, disk_bench_plan, disk_calibration_from, disk_points, disk_tests, DiskBaseline,
@@ -36,4 +44,5 @@ pub use score::{
     calibration_from, cpu_baseline, median3, per_second_to_units, points, rate, scaling, Baseline,
     BaselineError, SCALE_POINTS, SCORE_VERSION,
 };
+pub use share::{export_bytes, share_block, submission_bytes, HostFacts};
 pub use workloads::{BenchKernel, Workload, WORKLOADS};

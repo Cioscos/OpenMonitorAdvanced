@@ -355,6 +355,7 @@ mod tests {
             app_version: "0.5.0".into(),
             load_version: None,
             disk_profile: None,
+            shared: false,
         }
     }
 

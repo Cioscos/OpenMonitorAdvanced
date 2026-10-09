@@ -33,6 +33,8 @@ pub struct PerformanceSettings {
     pub disk_stop_c: Option<u32>,
     /// The folder of the last disk test, at most [`DISK_FOLDER_MAX`] bytes.
     pub disk_folder: Option<String>,
+    /// Whether the community table may be downloaded from the leaderboard Worker.
+    pub community_table: bool,
 }
 
 impl Default for PerformanceSettings {
@@ -46,6 +48,7 @@ impl Default for PerformanceSettings {
             risk_notice_seen: false,
             disk_stop_c: None,
             disk_folder: None,
+            community_table: true,
         }
     }
 }
@@ -62,6 +65,7 @@ impl PerformanceSettings {
             "riskNoticeSeen": self.risk_notice_seen,
             "diskStopC": self.disk_stop_c,
             "diskFolder": self.disk_folder,
+            "communityTable": self.community_table,
         })
     }
 }
@@ -77,7 +81,7 @@ mod tests {
             p.encode(),
             json!({"thermalStop": true, "cpuStopC": null, "gpuStopC": 90, "stopOnFirstError": null,
                    "ramSharePercent": 70, "riskNoticeSeen": false, "diskStopC": null,
-                   "diskFolder": null})
+                   "diskFolder": null, "communityTable": true})
         );
         assert!(RAM_SHARE_PERCENT.contains(&p.ram_share_percent));
     }

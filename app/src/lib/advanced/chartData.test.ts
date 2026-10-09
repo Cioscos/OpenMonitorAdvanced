@@ -17,6 +17,9 @@ import {
   NUMERIC_INCRS,
   scaleLayout,
   scaleOptions,
+  stripLayout,
+  stripPalette,
+  windowExtent,
   seriesPalette,
   timeAxisSpace,
   TIME_AXIS_MIN_SPACE,
@@ -313,5 +316,45 @@ describe('labelSafeIncrs', () => {
     // ...and genuinely have distinct labels end-to-end, not merely for an early sample of them.
     const labels = splitsFor(min, max, smallest).map((v) => formatValue(v, 'bytes_per_second', 'en', tEn));
     expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
+describe('strips', () => {
+  const sensor = (id: string, unit: string) => ({ id, unit }) as never;
+  const schema = { revision: 1, devices: [], sensors: [sensor('a', 'percent'), sensor('b', 'celsius'), sensor('c', 'percent')] };
+
+  test('strip_layout_groups_by_unit_in_first_seen_order', () => {
+    expect(stripLayout(['a', 'b', 'c'], schema)).toEqual([
+      { unit: 'percent', ids: ['a', 'c'], indices: [0, 2] },
+      { unit: 'celsius', ids: ['b'], indices: [1] },
+    ]);
+  });
+
+  test('strip_layout_skips_unknown_ids', () => {
+    expect(stripLayout(['zzz', 'b'], schema)).toEqual([{ unit: 'celsius', ids: ['b'], indices: [1] }]);
+  });
+
+  test('strip_palette_repeats_colours_with_dashes', () => {
+    const p = stripPalette(25);
+    expect(p[0]).toEqual({ token: '--accent', dash: [] });
+    expect(p[8]).toEqual({ token: '--accent', dash: [6, 4] });
+    expect(p[16].dash).toEqual([2, 3]);
+    expect(p[24].dash).toEqual([]);
+  });
+
+  test('window_extent_ignores_nulls_and_samples_before_the_window', () => {
+    expect(windowExtent([1, 2, 3, 4], [100, 5, null, 9], 2)).toEqual({ min: 5, max: 9 });
+  });
+
+  test('window_extent_of_an_empty_column_is_null', () => {
+    expect(windowExtent([], [], 0)).toBeNull();
+    expect(windowExtent([1, 2], [null, 3], 2.5)).toBeNull();
+  });
+
+  test('columns_copies_only_the_chosen_series_and_converts_them', () => {
+    const buffer = new ChartBuffer(['a', 'b', 'c'], 60);
+    buffer.append(1000, [1, 2, 3]);
+    buffer.append(2000, [4, null, 6]);
+    expect(buffer.columns([2, 1], [(v) => v * 10, undefined])).toEqual([[1, 2], [30, 60], [2, null]]);
   });
 });

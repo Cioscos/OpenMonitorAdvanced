@@ -90,6 +90,18 @@ export class ChartBuffer {
       }),
     ];
   }
+
+  /** x (seconds) plus only the columns at `indices`; `convert[k]` applies to `indices[k]`. */
+  columns(indices: number[], convert: ReadonlyArray<((value: number) => number) | undefined> = []): uPlot.AlignedData {
+    return [
+      this.#timestampsMs.map((ms) => ms / 1000),
+      ...indices.map((index, k) => {
+        const column = this.#series[index] ?? [];
+        const fn = convert[k];
+        return fn ? column.map((v) => (v === null ? null : fn(v))) : [...column];
+      }),
+    ];
+  }
 }
 
 /** Distinct units of `ids`, in order of first appearance; unknown ids are skipped. */
@@ -307,4 +319,49 @@ export function timeAxisSpace(
     previous = spacing;
   }
   return TIME_AXIS_MIN_SPACE;
+}
+
+/** One chart strip: a single unit, with the positions of its ids in the list given to `stripLayout`. */
+export interface Strip {
+  unit: Unit;
+  ids: string[];
+  indices: number[];
+}
+
+/** One strip per unit, in order of the first series of each unit; ids missing from the schema are skipped. */
+export function stripLayout(ids: string[], schema: Schema): Strip[] {
+  const strips: Strip[] = [];
+  ids.forEach((id, index) => {
+    const unit = schema.sensors.find((s) => s.id === id)?.unit;
+    if (!unit) return;
+    let strip = strips.find((x) => x.unit === unit);
+    if (!strip) strips.push((strip = { unit, ids: [], indices: [] }));
+    strip.ids.push(id);
+    strip.indices.push(index);
+  });
+  return strips;
+}
+
+/** Line dashes used when the eight palette colours run out: solid, dashed, dotted. */
+export const STRIP_DASHES: readonly (readonly number[])[] = [[], [6, 4], [2, 3]];
+
+/** Colour token and dash of the series at each index: the palette repeats every 8, the dash every 8 up to 3 times. */
+export function stripPalette(count: number): Array<{ token: (typeof PALETTE_TOKENS)[number]; dash: readonly number[] }> {
+  return Array.from({ length: count }, (_, i) => ({
+    token: PALETTE_TOKENS[i % PALETTE_TOKENS.length],
+    dash: STRIP_DASHES[Math.floor(i / PALETTE_TOKENS.length) % STRIP_DASHES.length],
+  }));
+}
+
+/** Min and max of the non-null values whose x is at least `sinceSeconds`; null when there are none. */
+export function windowExtent(xs: number[], column: (number | null)[], sinceSeconds: number): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    const v = column[i];
+    if (xs[i] < sinceSeconds || v === null || v === undefined) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return min > max ? null : { min, max };
 }

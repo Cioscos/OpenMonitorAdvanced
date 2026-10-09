@@ -1,5 +1,5 @@
 {
-  "note": "Registers of Ryzen 7 7800X3D channels 0 and 1 from the M9b spike dump (2026-10-09), SMN offsets within a channel, hex. 50DF0/50000/50008 are the presence registers the spike decoded (channel present, DIMM in slot 2) but did not print.",
+  "note": "Registers of Ryzen 7 7800X3D channels 0 and 1 from the M9b spike dump (2026-10-09), SMN offsets within a channel, hex. 50DF0/50000/50008 are the presence registers the spike decoded (channel present, DIMM in slot 2) but did not print. 502C4/502C8/502CC are 0 (the spike read only 502C0).",
   "channels": {
     "0": {
       "50DF0": "00000000",
@@ -19,7 +19,10 @@
       "50264": "00C00138",
       "50268": "020003AF",
       "5026C": "00C00138",
-      "502C0": "00000000"
+      "502C0": "00000000",
+      "502C4": "00000000",
+      "502C8": "00000000",
+      "502CC": "00000000"
     },
     "1": {
       "50DF0": "00000000",
@@ -39,7 +42,10 @@
       "50264": "00C00138",
       "50268": "020003AF",
       "5026C": "00C00138",
-      "502C0": "00000000"
+      "502C0": "00000000",
+      "502C4": "00000000",
+      "502C8": "00000000",
+      "502CC": "00000000"
     }
   }
 }

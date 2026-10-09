@@ -163,6 +163,11 @@ public sealed class UmcTimingsTests
     private static FakeTree TreeWith(params int[] channels)
     {
         var tree = new FakeTree();
+        for (uint c = 0; c < 12; c++)
+        {
+            tree.Smn[(c << 20) | 0x50DF0] = 1u << 19; // disabled unless the dump below replaces it
+        }
+
         foreach (int channel in channels)
         {
             foreach ((uint address, uint value) in DumpChannel())
@@ -183,8 +188,8 @@ public sealed class UmcTimingsTests
 
         Assert.Equal(36, timings.GetProperty("cl").GetInt32());
         Assert.False(timings.TryGetProperty("channels", out _));
-        // Channels 1-11 cost one read (0x50DF0) each; channel 0 costs its presence registers plus the timings.
-        Assert.True(tree.SmnReads < DumpChannel().Count + 11 + 20);
+        // Channels 1-11 cost one read (0x50DF0) each; channel 0 costs its three presence registers plus 17 timing registers.
+        Assert.Equal(11 + 3 + 17, tree.SmnReads);
     }
 
     [Fact]
@@ -195,6 +200,60 @@ public sealed class UmcTimingsTests
         tree.Smn[0x50DF0] = 1u << 19; // channel 0: disabled
 
         Assert.Null(UmcTimings.Read(tree.ReadSmn, Zen4));
+    }
+
+    [Fact]
+    public void AMissingTimingRegisterMakesTheReadIncomplete()
+    {
+        FakeTree tree = TreeWith(0);
+        tree.Smn.TryRemove(0x50214, out _);
+
+        bool complete = UmcTimings.TryRead(tree.ReadSmn, Zen4, out string? json, null);
+
+        Assert.False(complete);
+        Assert.Null(json);
+        Assert.Null(UmcTimings.Read(tree.ReadSmn, Zen4));
+    }
+
+    [Fact]
+    public void AMissingPresenceRegisterMakesTheReadIncomplete()
+    {
+        FakeTree tree = TreeWith(0);
+        tree.Smn.TryRemove(5u << 20 | 0x50DF0, out _);
+
+        Assert.False(UmcTimings.TryRead(tree.ReadSmn, Zen4, out string? json, null));
+        Assert.Null(json);
+    }
+
+    [Fact]
+    public void AnEmptyMachineIsAFinalAnswer()
+    {
+        FakeTree tree = TreeWith();
+
+        Assert.True(UmcTimings.TryRead(tree.ReadSmn, Zen4, out string? json, null));
+        Assert.Null(json);
+    }
+
+    [Fact]
+    public void AnIncompleteReadIsRetriedByTheNextSchemaBuildAndThenPublished()
+    {
+        FakeTree tree = TreeWith(0);
+        tree.Smn.TryRemove(0x50214, out _);
+        tree.Initial.Add(CpuRoot());
+        tree.Initial.Add(RamRoot());
+        var time = new FakeTimeProvider();
+        using var hub = new SensorHub(tree, new FakeDisks(), new FakeActivity(), () => true, time, new ListLogger<SensorHub>()) { StartWorkers = false };
+        var updates = new List<FeedUpdate>();
+        hub.Subscribe(1000, updates.Add);
+        hub.TickOnce();
+        Assert.False(updates.Last(u => u.Schema is not null).Schema!.Devices.Single(d => d.Kind == "memory").Properties.ContainsKey("memoryTimings"));
+
+        tree.Smn[0x50214] = DumpChannel()[0x50214];
+        tree.Replace(CpuRoot(), RamRoot()); // raises HardwareChanged: the schema is built again
+        time.Advance(TimeSpan.FromSeconds(1));
+        hub.TickOnce();
+
+        Assert.Equal(Zen4Expected, updates.Last(u => u.Schema is not null).Schema!.Devices.Single(d => d.Kind == "memory").Properties["memoryTimings"]);
     }
 
     [Fact]

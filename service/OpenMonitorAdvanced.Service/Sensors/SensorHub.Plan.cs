@@ -180,8 +180,9 @@ public sealed partial class SensorHub
             && schemaRoots.Any(r => r.Type == HardwareType.Memory && r.Identifier == "/ram")
             && schemaRoots.FirstOrDefault(r => r.Type == HardwareType.Cpu && r.Cpu is not null)?.Cpu is { } cpu)
         {
-            _memoryTimingsRead = true;
-            _memoryTimings = UmcTimings.Read(_tree.ReadSmn, cpu, message => _log.LogInformation("{Message}", message));
+            // An incomplete read (mutex contention, module failure) stays retryable: the next schema build asks again.
+            _memoryTimingsRead = UmcTimings.TryRead(_tree.ReadSmn, cpu, out string? timings, message => _log.LogInformation("{Message}", message));
+            _memoryTimings = timings;
         }
 
         return _memoryTimings;

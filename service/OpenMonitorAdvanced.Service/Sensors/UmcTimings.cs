@@ -25,13 +25,19 @@ public static class UmcTimings
     private const int MaxChannels = 12;
     private const uint ChannelStep = 1u << 20;
 
-    /// <summary>Per channel: presence, then every register a layout decodes.</summary>
-    private static readonly uint[] Registers =
+    /// <summary>Registers a DDR5 decode needs, besides the three presence registers.</summary>
+    private static readonly uint[] Ddr5Registers =
     [
-        0x50DF0, 0x50000, 0x50008,
         0x5012C, 0x50200, 0x50204, 0x50208, 0x5020C, 0x50210, 0x50214, 0x50218, 0x50230,
         0x50260, 0x50264, 0x50268, 0x5026C,
         0x502C0, 0x502C4, 0x502C8, 0x502CC,
+    ];
+
+    /// <summary>Registers a DDR4 decode needs, besides the three presence registers.</summary>
+    private static readonly uint[] Ddr4Registers =
+    [
+        0x5012C, 0x50200, 0x50204, 0x50208, 0x5020C, 0x50210, 0x50214, 0x50218, 0x50230,
+        0x50260, 0x50264,
     ];
 
     /// <summary>The DDR5 tRFC registers hold this value when unused.</summary>
@@ -57,44 +63,70 @@ public static class UmcTimings
 
     /// <summary>
     /// Reads and decodes every channel; <see langword="null"/> for an unsupported CPU (no SMN read
-    /// is made then) or when no channel gives plausible timings.
+    /// is made then), when no channel gives plausible timings, or when a read failed (see <see cref="TryRead"/>).
     /// </summary>
     public static string? Read(Func<uint, uint?> smn, CpuInfo cpu, Action<string>? log = null)
     {
+        TryRead(smn, cpu, out string? json, log);
+        return json;
+    }
+
+    /// <summary>
+    /// Like <see cref="Read"/>, and says whether the answer is final. It is not when any register
+    /// a channel needs could not be read (the global mutex timed out, the module failed): then
+    /// <paramref name="json"/> is <see langword="null"/> and the caller should try again later,
+    /// instead of publishing zeros. A channel the presence bits say is empty or disabled is
+    /// final; so is an unsupported CPU.
+    /// </summary>
+    public static bool TryRead(Func<uint, uint?> smn, CpuInfo cpu, out string? json, Action<string>? log = null)
+    {
+        json = null;
         if (Generation(cpu) is not { } generation)
         {
-            return null;
+            return true;
         }
 
+        uint[] needed = generation == DramGeneration.Ddr5 ? Ddr5Registers : Ddr4Registers;
         var channels = new List<UmcChannel>();
         for (int i = 0; i < MaxChannels; i++)
         {
             uint offset = (uint)i * ChannelStep;
-            if (smn(offset | 0x50DF0) is not { } disabled || (disabled >> 19 & 1) != 0)
+            if (smn(offset | 0x50DF0) is not { } disabled)
+            {
+                return false;
+            }
+
+            if ((disabled >> 19 & 1) != 0)
             {
                 continue;
             }
 
-            uint dimm1 = smn(offset | 0x50000) ?? 0;
-            uint dimm2 = smn(offset | 0x50008) ?? 0;
+            if (smn(offset | 0x50000) is not { } dimm1 || smn(offset | 0x50008) is not { } dimm2)
+            {
+                return false;
+            }
+
             if (((dimm1 | dimm2) & 1) == 0)
             {
                 continue;
             }
 
             var registers = new Dictionary<uint, uint>();
-            foreach (uint address in Registers)
+            foreach (uint address in needed)
             {
-                if (smn(offset | address) is { } value)
+                if (smn(offset | address) is not { } value)
                 {
-                    registers[address] = value;
+                    return false;
                 }
+
+                registers[address] = value;
             }
 
             channels.Add(new UmcChannel(i, registers));
         }
 
-        return Decode(channels, generation, log);
+        json = Decode(channels, generation, log);
+        return true;
     }
 
     /// <summary>

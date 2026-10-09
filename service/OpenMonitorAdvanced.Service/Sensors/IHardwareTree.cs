@@ -50,6 +50,13 @@ public interface IHardwareTree : IDisposable
     byte? ReadNvmeCriticalWarning(string storageIdentifier);
 
     /// <summary>
+    /// One read of an AMD System Management Network register through PawnIO, inside the global
+    /// <c>Access_PCI</c> mutex; <see langword="null"/> without PawnIO, on a non-AMD CPU, or when the
+    /// mutex cannot be taken within 100 ms. Reads only, never a write.
+    /// </summary>
+    uint? ReadSmn(uint address);
+
+    /// <summary>
     /// Raised when hardware is added or removed, or when a sensor is activated or deactivated.
     /// Handlers must only record the change (they may run inside an LHM callback or an update).
     /// </summary>

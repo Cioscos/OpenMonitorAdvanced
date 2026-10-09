@@ -19,6 +19,7 @@ internal sealed class FakeTree : IHardwareTree
     private readonly ConcurrentDictionary<string, int> _reads = new();
     private readonly ConcurrentDictionary<string, int> _criticalWarningReads = new();
     private List<HardwareNode> _roots = [];
+    private int _smnReads;
     private int _openCount;
     private int _closeCount;
     private int _enableStorageCount;
@@ -40,6 +41,12 @@ internal sealed class FakeTree : IHardwareTree
 
     /// <summary>The critical warning byte <see cref="ReadNvmeCriticalWarning"/> answers per storage identifier; absent = the attribute is not there.</summary>
     public ConcurrentDictionary<string, byte?> NvmeCriticalWarnings { get; } = new();
+
+    /// <summary>The SMN registers <see cref="ReadSmn"/> answers by full address (channel offset included); absent = not readable.</summary>
+    public ConcurrentDictionary<uint, uint> Smn { get; } = new();
+
+    /// <summary>How many times <see cref="ReadSmn"/> was called.</summary>
+    public int SmnReads => Volatile.Read(ref _smnReads);
 
     /// <summary>Runs at the start of <see cref="Update"/>, on the calling thread.</summary>
     public Action<HardwareNode>? BeforeUpdate { get; set; }
@@ -154,6 +161,12 @@ internal sealed class FakeTree : IHardwareTree
     {
         _criticalWarningReads.AddOrUpdate(storageIdentifier, 1, (_, n) => n + 1);
         return NvmeCriticalWarnings.TryGetValue(storageIdentifier, out byte? v) ? v : null;
+    }
+
+    public uint? ReadSmn(uint address)
+    {
+        Interlocked.Increment(ref _smnReads);
+        return Smn.TryGetValue(address, out uint v) ? v : null;
     }
 
     public void EnableStorage()

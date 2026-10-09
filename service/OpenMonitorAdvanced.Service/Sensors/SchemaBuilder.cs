@@ -73,11 +73,11 @@ public static partial class SchemaBuilder
     /// The schema of <paramref name="roots"/>, with <paramref name="service"/> as its service block
     /// (every module active when omitted).
     /// </summary>
-    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null, ServiceStateBlock? service = null)
+    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null, ServiceStateBlock? service = null, string? memoryTimings = null)
     {
         var output = new Output();
 
-        BuildMemoryDevice(roots, pawnIoAvailable, output);
+        BuildMemoryDevice(roots, pawnIoAvailable, memoryTimings, output);
         var storageIds = new Dictionary<string, string>(StringComparer.Ordinal);
         BuildStorageDevices(roots, storageDeviceIds, storageIds, output);
 
@@ -299,7 +299,7 @@ public static partial class SchemaBuilder
         }
     }
 
-    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, Output output)
+    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, string? memoryTimings, Output output)
     {
         HardwareNode? ram = roots.FirstOrDefault(r => r.Type == HardwareType.Memory && r.Identifier == "/ram");
         if (ram is null)
@@ -335,6 +335,11 @@ public static partial class SchemaBuilder
             if (SpdModulesJson(dimms) is { } modules)
             {
                 properties["memoryModules"] = modules;
+            }
+
+            if (memoryTimings is not null)
+            {
+                properties["memoryTimings"] = memoryTimings;
             }
 
             foreach (HardwareNode dimm in dimms)

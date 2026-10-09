@@ -18,6 +18,7 @@ public sealed partial class SensorHub
         _applier.Open(groups);
         ApplyDesired();
         _pawnIo = _pawnIoAvailable();
+        _memoryTimingsRead = false;
         _log.LogInformation("PawnIO available: {PawnIo}", _pawnIo);
 
         // Changes raised during Open() are covered by the Roots read right after.
@@ -136,7 +137,7 @@ public sealed partial class SensorHub
             }
         }
 
-        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins, _serviceState);
+        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins, _serviceState, ReadMemoryTimings(schemaRoots));
         foreach (string skipped in built.SkippedRoots)
         {
             LogNotUnique(skipped);
@@ -166,6 +167,24 @@ public sealed partial class SensorHub
         return SchemaComparer.SameStructure(current.Built, built)
             ? new Plan(planRoots, current.Built, current.Revision, filter, resolved)
             : new Plan(planRoots, built, current.Revision + 1, filter, resolved);
+    }
+
+    /// <summary>
+    /// The in-use DRAM timings (spec M9b §2.3): read once per opened tree, as soon as PawnIO, the
+    /// memory device and a supported AMD CPU are all there, never in the tick. Timings do not change
+    /// without a reboot. Runs on the sampler.
+    /// </summary>
+    private string? ReadMemoryTimings(IReadOnlyList<HardwareNode> schemaRoots)
+    {
+        if (!_memoryTimingsRead && _pawnIo
+            && schemaRoots.Any(r => r.Type == HardwareType.Memory && r.Identifier == "/ram")
+            && schemaRoots.FirstOrDefault(r => r.Type == HardwareType.Cpu && r.Cpu is not null)?.Cpu is { } cpu)
+        {
+            _memoryTimingsRead = true;
+            _memoryTimings = UmcTimings.Read(_tree.ReadSmn, cpu, message => _log.LogInformation("{Message}", message));
+        }
+
+        return _memoryTimings;
     }
 
     /// <summary>The disk identity a pinned id depends on: the NVMe health flags come and go with updates and never change an id.</summary>

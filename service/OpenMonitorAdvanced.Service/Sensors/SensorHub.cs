@@ -164,6 +164,8 @@ public sealed partial class SensorHub : ISensorFeed, IDisposable
     private Plan? _plan;
     private readonly Dictionary<string, (DiskResolution Disk, string Id)> _storagePins = new(StringComparer.Ordinal);
     private bool _pawnIo;
+    private bool _memoryTimingsRead;
+    private string? _memoryTimings;
     private ulong _seq;
     private long _publishedGeneration; // the storage round whose values the latest snapshot carried
 

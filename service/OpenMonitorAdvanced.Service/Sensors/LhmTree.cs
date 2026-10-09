@@ -2,6 +2,7 @@ using DiskInfoToolkit.Interop.Enums;
 using LibreHardwareMonitor.Hardware;
 using LibreHardwareMonitor.Hardware.Cpu;
 using LibreHardwareMonitor.Hardware.Storage;
+using LibreHardwareMonitor.PawnIo;
 using Microsoft.Extensions.Logging;
 using SmartAttribute = DiskInfoToolkit.SmartAttribute;
 
@@ -58,6 +59,10 @@ public sealed class LhmTree : IHardwareTree
     private int _membershipDirty;
     private int _storageEnabled;
     private int _disposed;
+    private readonly object _smnLock = new();
+    private AmdFamily17? _smn; // guarded by _smnLock
+    private Mutex? _pciMutex; // guarded by _smnLock; one instance for the tree's lifetime
+    private bool _smnFailed; // guarded by _smnLock
 
     public LhmTree(ILogger<LhmTree> log)
         : this(log, CreateComputer)
@@ -172,6 +177,54 @@ public sealed class LhmTree : IHardwareTree
     /// <inheritdoc />
     public double? Read(string sensorIdentifier) =>
         _composition.Sensors.TryGetValue(sensorIdentifier, out ISensor? sensor) && sensor.Value is float value ? value : null;
+
+    /// <inheritdoc />
+    public uint? ReadSmn(uint address)
+    {
+        lock (_smnLock)
+        {
+            if (_smnFailed || Volatile.Read(ref _disposed) == 1)
+            {
+                return null;
+            }
+
+            bool held = false;
+            try
+            {
+                // The PawnIO module asks for the machine-wide PCI mutex that LHM and HWiNFO also use.
+                _pciMutex ??= new Mutex(false, @"Global\Access_PCI");
+                try
+                {
+                    held = _pciMutex.WaitOne(100);
+                }
+                catch (AbandonedMutexException)
+                {
+                    held = true; // the previous owner died; we own it now
+                }
+
+                if (!held)
+                {
+                    return null;
+                }
+
+                _smn ??= new AmdFamily17();
+                return _smn.ReadSmn(address);
+            }
+            catch (Exception e)
+            {
+                _smnFailed = true;
+                _log.LogWarning(e, "SMN reads are not available");
+                return null;
+            }
+            finally
+            {
+                if (held)
+                {
+                    _pciMutex!.ReleaseMutex();
+                }
+            }
+        }
+    }
 
     /// <inheritdoc />
     public byte? ReadNvmeCriticalWarning(string storageIdentifier) =>
@@ -312,6 +365,22 @@ public sealed class LhmTree : IHardwareTree
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
         {
             return;
+        }
+
+        lock (_smnLock)
+        {
+            try
+            {
+                _smn?.Close();
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning(e, "Closing the SMN module failed");
+            }
+
+            _smn = null;
+            _pciMutex?.Dispose();
+            _pciMutex = null;
         }
 
         Computer? computer = _computer;

@@ -20,13 +20,17 @@ SMART data.
 
 ## Features
 
-- **Two views.** The Simple view has one tile per component. Click a tile to open that
-  component's page in the Advanced view.
+- **Two views.** The Simple view has one tile per component, with temperature, power, clock,
+  per-thread load, VRAM and a row per disk. Click a tile to open that component's page in the
+  Advanced view. A status strip under the top bar sums up the alerts; it hides while you scroll
+  down, and with an alert it shrinks to one line instead.
 - **One page per component** in the Advanced view: the CPU, each GPU (integrated ones too),
   RAM, each disk and each network adapter. Each page shows:
   - four key figures;
-  - a history chart for the last 1, 5, 30 or 60 minutes, with up to 8 series and 2 units. The
-    30- and 60-minute windows draw a min/max band, so short peaks stay visible;
+  - a history chart for the last 1, 5, 30 or 60 minutes, with one strip per unit and any number
+    of series. Each strip has its own axis and a legend with the current, minimum and maximum
+    value. The *Series* drawer picks the sensors, with search and *Restore defaults*. The 30- and
+    60-minute windows draw a min/max band, so short peaks stay visible;
   - a table of every sensor with its current, minimum, maximum and average value. Statistics are
     kept from app start, also while the app sits in the tray. Hover a sensor to see where its
     value comes from;
@@ -77,7 +81,7 @@ SMART data.
 - **GPU support** for NVIDIA, AMD and Intel, through Windows and the libraries that come with the
   graphics driver.
 - **Light on resources.** The monitor should not distort what it measures. Its budget is under 1% CPU at idle,
-  under 30 MB in the tray, under 200 MB with the window open (WebView2 included).
+  under 30 MB in the tray, under 260 MB with the window open (WebView2 included; about 145 MB on the Simple view).
 - **English and Italian** interface and installer.
 
 ## Download and install

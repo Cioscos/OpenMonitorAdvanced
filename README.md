@@ -232,11 +232,18 @@ from the tray. Technical terms have a plain-words tooltip.
 
 ### Sharing scores (optional, anonymous)
 
-After a CPU, GPU or disk benchmark you will be able to share the score for a public leaderboard.
-Nothing is sent unless you press the button after seeing a preview. The server stores no account, no
-installation id and no IP address, only the score, the hardware model, the RAM size, the Windows
-build and the day; the public table shows medians of at least 3 submissions. Details, formulas and
-the privacy notice: [docs/benchmark-scoring.md](docs/benchmark-scoring.md) (in Italian).
+After a CPU, GPU or disk benchmark you can share the score for a public leaderboard.
+Nothing is sent unless you press *Share* after seeing the exact preview. The server stores no
+account, no installation id and no IP address, only the score, the hardware model, the RAM size, the
+Windows build and the day; the public table shows medians of at least 3 submissions. *Export JSON*
+saves the same object to a file, without the overclock flag.
+
+The *Leaderboard* page of the Performance view compares your scores with the models of the table
+(the author's measurements plus the community's). The app downloads the community table from
+`scores.cischi.dev` at most once a day and only while you use the Performance view; the request
+sends your IP address and a User-Agent with the app version, nothing else. Turn it off in
+*Settings › Performance › Download the community table*. Details, formulas and the privacy notice:
+[docs/benchmark-scoring.md](docs/benchmark-scoring.md) (in Italian).
 
 ## In-game overlay
 

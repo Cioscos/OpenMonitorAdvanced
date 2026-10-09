@@ -157,7 +157,7 @@ Voci aperte dopo le revisioni della M8c (piano `docs/superpowers/plans/2026-10-0
 
 Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-classifica.md`, server in `scores-worker/`, documenti in `docs/benchmark-scoring.md`). Unita in `main` il 2026-10-09 (`4d9172b`); prove dal vivo W7 superate lo stesso giorno. Il Worker è pubblicato su `https://scores.cischi.dev` con il database D1 `oma-scores` (giurisdizione `eu`).
 
-- **Sottodominio nell'app (M8d2):** `scores.cischi.dev` va messo anche nella costante dell'app.
+- **Sottodominio nell'app (M8d2):** chiusa: `scores.cischi.dev` sta in `TABLE_URL` e `SUBMIT_URL` (`crates/oma-core/src/scores/board.rs`).
 - **Righe della CPU dell'autore:** misurate in W7 con la build release (3 benchmark del Ryzen 7 7800X3D: single 1491, multi 1495). Il Worker include le righe dell'autore al deploy: dopo ogni `pnpm author-table` serve un nuovo `pnpm run deploy`.
 - **Prove dal vivo W7, superate il 2026-10-09:**
   - `GET /v1/reference-scores.json`: `200` con la tabella vuota, `ETag: "empty"` e `Cache-Control: public, max-age=3600`; `304` con `If-None-Match`. Con la compressione (`curl --compressed`) Cloudflare risponde `ETag: W/"empty"`, e il `304` arriva con `If-None-Match: W/"empty"`: il confronto debole aggiunto dalla revisione finale serve davvero. `404` e `405` come previsto.
@@ -182,6 +182,22 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
   - `MIN(model)` sceglie la grafia più piccola in ordine lessicale: da cambiare con la grafia più frequente;
   - l'interfaccia della M8d2 deve mostrare i nomi dei modelli come testo semplice (mai HTML).
 - **Informativa:** la certificazione Data Privacy Framework di Cloudflare è «da verificare» in `docs/benchmark-scoring.md` (la pagina dell'elenco non si legge in automatico).
+
+## Open: leaderboard app (M8d2)
+
+App della classifica (piano `docs/superpowers/plans/2026-10-09-m8d2-app-classifica.md`, documenti in `docs/benchmark-scoring.md`, sezione «L'app»). Implementata nel branch `feat/m8d2-app-classifica`, non unita in `main`. Prove dal vivo da fare con l'utente, un passo alla volta e senza input sintetico:
+
+- **Z9.1 Classifica e download:** `reference-scores.json` e `reference-scores.state.json` (con un `etag`) compaiono nella cartella delle Prestazioni; la didascalia dice «tabella aggiornata il …»; le righe dell'autore hanno il badge «autore».
+- **Z9.2 «Aggiorna ora»:** `checkedAtMs` cambia, l'`etag` resta lo stesso (`304`).
+- **Z9.3 Impostazione spenta:** «Aggiorna ora» è disattivato, riaprendo la Classifica lo stato non cambia, la tabella già scaricata si vede ancora.
+- **Z9.4 Senza rete:** con la rete staccata, «Aggiorna ora» mostra `offline` e le righe restano.
+- **Z9.5 ▲ «Modello della tabella…»:** CPU e RTX 4080, il ▲ va al valore della riga scelta; disco, il ▲ va sulla barra dei punti (Fanxiang S880 2TB) e i contagiri tengono quello del record.
+- **Z9.6 Esporta JSON:** il file salvato è identico all'anteprima, senza `overclock`.
+- **Z9.7 Condividi** (punteggio valido della CPU): prima si decide se tenere l'invio vero (la cancellazione da D1 la fa il controller solo con un nuovo via dell'utente); anteprima e nota come previste; «Invia» dà esito positivo e il pulsante diventa «Condiviso», anche dopo un riavvio; prima, con la rete staccata, «Invia» dà `offline` e il punteggio non risulta condiviso.
+- **Z9.8 Tooltip:** presenti su tutti i termini nuovi.
+- **Z9.9 Impronta:** `scripts/measure-footprint.ps1` con la Classifica aperta, finestra sotto 200 MB.
+- **Fuori dalla M8d2** (lato server, voci in «Open: leaderboard server (M8d1)»): `HEAD` che dà `405`, `MIN(model)`, note di revisione (a), (b), (d).
+- **Possibile aggiunta futura:** i MB/s del disco nella tabella (categorie `disk-read` e `disk-write`), con migrazione e deploy del Worker (decisione dell'utente del 2026-10-09).
 
 ## Open: CPU benchmark (M8a2)
 

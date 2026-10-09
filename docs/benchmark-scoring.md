@@ -1,6 +1,6 @@
 # Punteggi dei benchmark e classifica anonima
 
-Questo documento spiega come si calcolano i punteggi di OpenMonitor Advanced, che cosa riceve il server della classifica (un Cloudflare Worker, cartella `scores-worker/`), come si modera e quali dati tratta. Il server è la parte M8d1; l'app che invia i punteggi (pulsante «Condividi», tabella inclusa) arriva con la M8d2. Le decisioni sono nel §7.6 della spec `docs/superpowers/specs/2026-10-06-m8-prestazioni-design.md`.
+Questo documento spiega come si calcolano i punteggi di OpenMonitor Advanced, che cosa riceve il server della classifica (un Cloudflare Worker, cartella `scores-worker/`), come si modera e quali dati tratta. Il server è la parte M8d1; l'app (tabella, pagina Classifica, «Condividi» ed «Esporta JSON») è la M8d2. Le decisioni sono nel §7.6 della spec `docs/superpowers/specs/2026-10-06-m8-prestazioni-design.md`.
 
 ## Macchine base e formule
 
@@ -118,6 +118,35 @@ pnpm recompute
 
 Dopo una cancellazione o un'esclusione la tabella pubblica cambia solo al prossimo ricalcolo (il cron, oppure `pnpm recompute`). Se `published.body` si guasta, l'invio continua a funzionare con le sole righe dell'autore.
 
+## L'app
+
+Le regole del server stanno anche nell'app, in Rust (`oma-core::scores::board`, porting di `scores-worker/src/rules.ts` e `table.ts`), e le stesse fixture di `testdata/scores/` le leggono i test del Worker e quelli dell'app: normalizzazione, validazione e plausibilità danno lo stesso esito.
+
+### La tabella
+
+- **Fonti:** le righe dell'autore sono incluse nell'app (`reference-scores.json`); quelle della community vengono dalla copia scaricata, di cui si tengono solo le righe `community`. Una riga `author` scaricata si scarta. Le righe non valide si scartano una per una; un file di più di 1 MiB, con `format` diverso da 1 o con un `n` non intero si rifiuta tutto, e resta la copia buona.
+- **Dove si salva:** nella cartella delle Prestazioni (`%LOCALAPPDATA%\OpenMonitorAdvanced\performance\`): `reference-scores.json` (i byte ricevuti con il `200`, scritti in modo atomico) e `reference-scores.state.json` (`etag`, `checkedAtMs`, `failedAtMs`, `error`).
+- **Quando si scarica:** all'apertura della Classifica, alla fine di un benchmark salvato e con «Aggiorna ora». Il download automatico parte se l'ultimo controllo ha più di 24 ore e l'ultimo errore più di 6; «Aggiorna ora» salta questi limiti. Un istante nel futuro (orologio spostato) conta come scaduto. Una richiesta alla volta.
+- **Richiesta:** `GET` con scadenza di 10 s, corpo al massimo 1 MiB, User-Agent con la versione dell'app, `If-None-Match` solo se la copia salvata si legge bene (altrimenti il `304` non ripristinerebbe mai la tabella). Un `304` aggiorna solo `checkedAtMs`.
+- **Ripiego:** dopo un errore (`offline`, `timeout`, `tls`, `http`, `invalid`) la tabella buona resta e la pagina mostra il motivo; senza copia scaricata vale la tabella inclusa, e la didascalia dice «tabella inclusa nell'app».
+- **Impostazione spenta** (`performance.communityTable`, acceso per impostazione predefinita): nessuna richiesta, neanche con «Aggiorna ora» (il pulsante è disattivato); la copia già scaricata si usa ancora.
+
+### La Classifica
+
+Cinque categorie (CPU singolo e multi, GPU calcolo e grafica, disco). Per ognuna: 10 righe attorno al miglior punteggio proprio valido, non provvisorio e della versione corrente (uno per modello); senza punteggi propri, le prime 10. La fonte di ogni riga è un badge («autore» o «community», con `n` nel suggerimento). Il percentile («Più veloce del N% dei modelli in tabella») compare con almeno 10 righe in tabella. I nomi dei modelli si mostrano solo come testo.
+
+### Il riferimento ▲
+
+Nelle pagine dei punteggi, la terza voce del menu ▲ è «Modello della tabella…», con una seconda tendina delle righe della categoria. CPU e GPU: il ▲ di ogni contagiri va alla riga con lo stesso modello e la stessa fonte (assente se manca). Disco: la tabella è in punti e i contagiri in MB/s, quindi il ▲ va su una barra dei punti sotto i contagiri, e i contagiri tengono il ▲ del record.
+
+### Condividi ed Esporta JSON
+
+- **Condividi** compare per un punteggio valido e non provvisorio (per il disco, con i punti); già condiviso, il pulsante dice «Condiviso» ed è disattivato. Il dialogo mostra l'anteprima: il testo identico ai byte che partono (`format`, `appVersion`, `category`, `scoreVersion`, `valid`, `overclock`, `scores`, `kernels`, `hardware`, `flags`). Il modello è quello grezzo, lo normalizza il server; `ramGB` (RAM installata) e `osBuild` si leggono al momento dell'anteprima. La casella «overclock» ricarica l'anteprima. Non parte niente prima di «Invia».
+- **Controlli prima dell'invio:** gli stessi del server (schema e plausibilità sulla tabella unita), così un invio che il server rifiuterebbe non spende una richiesta.
+- **Invio:** `POST` con scadenza di 10 s e risposta al massimo 4096 byte. Con `201` il punteggio si segna come condiviso (`shared: true` nel file); se la scrittura del segno fallisce resta un avviso nel log. Un invio che fallisce non lo segna e si può riprovare.
+- **Codici d'errore** (tradotti in `performance.share.error.<codice>`): quelli del server (`bad_json`, `bad_schema`, `bad_format`, `unknown_version`, `not_valid`, `bad_value`, `implausible`, `body_too_large`, `rate_limited`, `daily_cap`); del trasporto (`offline`, `timeout`, `tls`, `http`, `invalid`); dell'app (`provisional`, `shared`, `not_found`). Un codice sconosciuto dà il messaggio generico.
+- **Esporta JSON** (ogni misura salvata): lo stesso oggetto senza `overclock`, in `oma-score-<categoria>-AAAAMMGG-HHMMSS.json` (ora locale del punteggio), con il dialogo di salvataggio che parte da Documenti. Nessun identificativo né nell'invio né nell'esportazione.
+
 ## Informativa sulla privacy della condivisione
 
 Non è un parere legale: descrive che cosa fa il sistema.
@@ -129,7 +158,7 @@ Non è un parere legale: descrive che cosa fa il sistema.
 - **Conservazione:** 24 mesi, poi la riga si cancella. Nella tabella pubblica compaiono solo mediane di almeno 3 invii.
 - **Responsabile del trattamento:** Cloudflare, Inc., che esegue il Worker e il database; vale il suo accordo sul trattamento dei dati (DPA) incluso nei termini del servizio, e i dati di D1 stanno in UE (giurisdizione `eu`). Certificazione EU-U.S. Data Privacy Framework di Cloudflare: **da verificare** (la pagina `https://www.dataprivacyframework.gov/list` non si è potuta leggere al momento della stesura).
 - **Diritti:** poiché un invio è anonimo, l'autore non può riconoscerlo come tuo, quindi non può cancellarlo, correggerlo o fartelo avere su richiesta (art. 11 del GDPR: non è tenuto a identificarti solo per questo). Se un invio è palesemente sbagliato o abusivo, si può segnalare nelle issue indicando il modello e il giorno: l'autore può nascondere il modello o cancellare gli invii che riconosce come abusivi.
-- **Scaricare la tabella:** l'app la scarica da sola (al massimo una volta al giorno, si può spegnere). Per il download Cloudflare vede, come per ogni richiesta web, l'indirizzo IP e l'User-Agent; il Worker non li salva.
+- **Scaricare la tabella:** l'app la scarica da `scores.cischi.dev` (al massimo una volta al giorno, solo mentre si usa la vista Prestazioni; si spegne con *Impostazioni › Prestazioni › Classifica › Scarica la tabella della community*). Per il download Cloudflare vede, come per ogni richiesta web, l'indirizzo IP e l'User-Agent (con la versione dell'app, nient'altro); il Worker non li salva.
 
 ## Deploy
 
@@ -141,7 +170,7 @@ Lo fa l'utente a mano, dalla cartella `scores-worker/`. Nessun token Cloudflare 
 4. In `wrangler.toml` sostituisci i due segnaposto, segnati da un commento `# OMA:`: il sottodominio di `routes` (`scores.example.invalid`) e il `database_id` (`00000000-0000-0000-0000-000000000000`).
 5. `pnpm exec wrangler d1 migrations apply oma-scores --remote` crea le tabelle.
 6. `pnpm run deploy` (cioè `pnpm exec wrangler deploy`) pubblica il Worker.
-7. L'URL scelto va messo anche nella costante dell'app (M8d2).
+7. L'URL scelto sta anche nell'app, in un solo punto: `TABLE_URL` e `SUBMIT_URL` in `crates/oma-core/src/scores/board.rs`.
 
 **Righe dell'autore:** `crates/oma-core/src/scores/reference-scores.json` viene incluso nel Worker al momento del deploy. Dopo `pnpm author-table` bisogna quindi ripubblicare (`pnpm run deploy`), altrimenti il server continua a usare le righe vecchie.
 

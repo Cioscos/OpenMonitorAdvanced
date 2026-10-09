@@ -2121,6 +2121,18 @@ describe('series drawer', () => {
     for (const legend of document.querySelectorAll('.legend')) expect(dialog.contains(legend)).toBe(false);
   });
 
+  test('restore defaults charts and saves the page defaults again', async () => {
+    await settings.update({ advanced: { series: { [GPU]: [VRAM] } } });
+    const backend = fakeBackend();
+    renderChart(backend);
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    await fireEvent.click(seriesButton());
+    await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.restoreDefaults') }));
+    await vi.waitFor(() => expect(backend.historyCalls.at(-1)?.ids).toEqual([LOAD, TEMP]));
+    expect(loadSeries(GPU)).toEqual([LOAD, TEMP]);
+    expect(checkbox(labelOf(byId(VRAM))).checked).toBe(false);
+  });
+
   test('drawer_closes_on_escape_outside_click_and_button_and_returns_focus', async () => {
     renderChart(fakeBackend());
     await vi.waitFor(() => expect(plots).toHaveLength(2));

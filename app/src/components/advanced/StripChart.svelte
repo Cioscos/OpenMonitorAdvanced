@@ -135,6 +135,10 @@
     chosen = on ? [...selected, ...ids.filter((id) => !selected.includes(id))] : selected.filter((id) => !set.has(id));
     saveSeries(sectionId, chosen);
   }
+  function resetSeries() {
+    chosen = [...defaults];
+    saveSeries(sectionId, chosen);
+  }
   /** Units of the strips, in order: the drawer lists them first. */
   const stripUnits = $derived(strips.map((s) => s.unit));
 
@@ -501,6 +505,7 @@
         unitSymbol={symbolOf}
         ontoggle={toggle}
         onsetmany={setMany}
+        onreset={resetSeries}
         onclose={closeDrawer}
       />
     {/if}

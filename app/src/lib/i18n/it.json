@@ -442,6 +442,7 @@
   "advanced.chart.search": "Cerca sensore…",
   "advanced.chart.all": "tutti",
   "advanced.chart.none": "nessuno",
+  "advanced.chart.restoreDefaults": "Ripristina predefinite",
   "advanced.chart.unit.celsius": "Temperatura",
   "advanced.chart.unit.percent": "Percentuale",
   "advanced.chart.unit.megahertz": "Frequenza",

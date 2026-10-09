@@ -18,6 +18,7 @@
     unitSymbol = () => null,
     ontoggle,
     onsetmany,
+    onreset,
     onclose,
   }: {
     /** Element id, for the button's `aria-controls`. */
@@ -35,6 +36,8 @@
     ontoggle: (id: string) => void;
     /** Ticks (`on`) or unticks the given ids: the group's rows left by the filter. */
     onsetmany: (ids: string[], on: boolean) => void;
+    /** Charts the page's default series again. */
+    onreset: () => void;
     onclose: () => void;
   } = $props();
 
@@ -82,6 +85,7 @@
     autocomplete="off"
     spellcheck="false"
   />
+  <button type="button" class="reset" onclick={onreset}>{t('advanced.chart.restoreDefaults')}</button>
   <div class="groups" style:grid-template-columns={twoColumns ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'}>
     {#each groups as group (group.unit)}
       {@const unitName = unitTitle(group.unit)}
@@ -191,7 +195,12 @@
     gap: 4px;
     white-space: nowrap;
   }
-  .bulk button {
+  .reset {
+    align-self: flex-end;
+    font-size: 11.5px;
+  }
+  .bulk button,
+  .reset {
     padding: 0;
     border: 0;
     background: none;
@@ -200,7 +209,9 @@
     cursor: pointer;
   }
   .bulk button:hover,
-  .bulk button:focus-visible {
+  .bulk button:focus-visible,
+  .reset:hover,
+  .reset:focus-visible {
     color: var(--accent);
   }
   ul {

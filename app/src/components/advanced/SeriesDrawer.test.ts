@@ -29,6 +29,7 @@ function renderDrawer(filter = '', chosen = [LOAD, TEMP]) {
     unitTitle,
     ontoggle,
     onsetmany,
+    onreset: vi.fn(),
     onclose,
   });
   return { ontoggle, onsetmany, onclose };

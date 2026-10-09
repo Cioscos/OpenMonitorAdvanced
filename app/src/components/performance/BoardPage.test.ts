@@ -67,7 +67,6 @@ test('refresh_now_is_disabled_when_the_setting_is_off', async () => {
 
 test('opening_the_page_refreshes_once', async () => {
   const backend = await setup();
-  
   await waitFor(() => expect(backend.performanceCalls.filter((c) => c === 'performanceBoardRefresh')).toHaveLength(1));
   await fireEvent.click(screen.getByRole('tab', { name: t('performance.board.disk') }));
   expect(backend.performanceCalls.filter((c) => c === 'performanceBoardRefresh')).toHaveLength(1);

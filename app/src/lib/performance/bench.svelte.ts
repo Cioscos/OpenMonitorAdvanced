@@ -1,4 +1,5 @@
 import type { Backend, Unsubscribe } from '../backend/backend';
+import { boardStore } from './board.svelte';
 import type { BenchMode, BenchStatus, DiskBenchRequest, ScoreFile, ScoreSummary } from '../types';
 
 /** A benchmark is under way from `starting` until it ends (`done`, `stopped` or `failed`). */
@@ -163,7 +164,11 @@ class BenchStore {
   #accept(next: BenchStatus) {
     const savedNow = next.state === 'done' && this.status?.state !== 'done';
     this.status = next;
-    if (savedNow) this.refresh().catch((error) => console.error('scores unavailable', error));
+    if (savedNow) {
+      this.refresh().catch((error) => console.error('scores unavailable', error));
+      // A finished benchmark may be due a table download (the store ignores it when not connected).
+      void boardStore.refresh(false);
+    }
   }
 }
 

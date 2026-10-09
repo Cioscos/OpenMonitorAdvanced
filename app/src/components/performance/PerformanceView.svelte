@@ -4,9 +4,11 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import { t } from '../../lib/i18n/index.svelte';
   import { benchStore } from '../../lib/performance/bench.svelte';
+  import { boardStore } from '../../lib/performance/board.svelte';
   import { performanceStore } from '../../lib/performance/performance.svelte';
   import type { GpuChoice } from '../../lib/types';
   import type { PerformancePage } from '../../lib/view';
+  import BoardPage from './BoardPage.svelte';
   import ScorePage from './ScorePage.svelte';
   import StressHistory from './StressHistory.svelte';
   import StressResult from './StressResult.svelte';
@@ -47,6 +49,10 @@
       .connect(backend)
       .then(keep)
       .catch((error) => console.error('benchmark status unavailable', error));
+    boardStore
+      .connect(backend)
+      .then(keep)
+      .catch((error) => console.error('leaderboard unavailable', error));
     return () => {
       cancelled = true;
       offs.forEach((off) => off());
@@ -73,7 +79,7 @@
     benchWasRunning = running;
   });
 
-  const current = $derived(page.startsWith('score-') ? page : page === 'run' || page === 'new' ? 'test' : 'history');
+  const current = $derived(page.startsWith('score-') || page === 'board' ? page : page === 'run' || page === 'new' ? 'test' : 'history');
   /** The GPU of a `score-gpu:` page, with its name and kind while it is in the system. */
   const gpuTarget = $derived.by(() => {
     if (!page.startsWith('score-gpu:')) return null;
@@ -85,7 +91,9 @@
   const cpuLive = $derived(benchStore.running && benchStore.status?.category === 'cpu');
   const diskLive = $derived(benchStore.running && benchStore.status?.category === 'disk');
   const title = $derived(
-    page === 'score-cpu'
+    page === 'board'
+      ? t('performance.board.title')
+      : page === 'score-cpu'
       ? t('performance.score.title')
       : page === 'score-disk'
         ? t('performance.score.disk.title')
@@ -138,6 +146,15 @@
       >
         {t('performance.nav.scoreDisk')}{#if diskLive}<span class="dot" aria-hidden="true"> ●</span>{/if}
       </button>
+      <button
+        type="button"
+        class="entry"
+        class:on={current === 'board'}
+        aria-current={current === 'board' ? 'page' : undefined}
+        onclick={() => (page = 'board')}
+      >
+        {t('performance.nav.board')}
+      </button>
     </div>
     <p class="group" id="performance-group-stress">{t('performance.nav.stress')}</p>
     <div class="entries" role="group" aria-labelledby="performance-group-stress">
@@ -165,7 +182,9 @@
 
   <section class="content" aria-labelledby="performance-page-title">
     <h2 id="performance-page-title">{title}</h2>
-    {#if page === 'score-cpu'}
+    {#if page === 'board'}
+      <BoardPage />
+    {:else if page === 'score-cpu'}
       <ScorePage target={{ category: 'cpu' }} />
     {:else if page === 'score-disk'}
       <ScorePage target={{ category: 'disk', unavailable: systemFailed }} {backend} />

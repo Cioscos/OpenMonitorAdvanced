@@ -128,7 +128,7 @@
             <Term term="vram" /><span>{formatBytes(gpu.memUsedBytes, locale)} / {formatBytes(gpu.memTotalBytes, locale)}</span>
           </div>
           <div class="bar" role="meter" aria-label={t('glossary.vram.name')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pctOf(gpu.memUsedBytes, gpu.memTotalBytes)}>
-            <i style:width="{pctOf(gpu.memUsedBytes, gpu.memTotalBytes)}%"></i>
+            <i style:transform="scaleX({pctOf(gpu.memUsedBytes, gpu.memTotalBytes) / 100})"></i>
           </div>
         {/if}
         {#if gpu.throttle}
@@ -148,7 +148,7 @@
           {formatBytes(mem.usedBytes, locale)} <span class="unit">/ {formatBytes(mem.totalBytes, locale)}</span>
         </div>
         <div class="bar" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={mem.usedPct ?? 0}>
-          <i style:width="{mem.usedPct ?? 0}%"></i>
+          <i style:transform="scaleX({(mem.usedPct ?? 0) / 100})"></i>
         </div>
         <div class="mlab">
           <span>{formatPercent(mem.usedPct, locale)}</span>
@@ -283,12 +283,17 @@
     border-radius: 4px;
     background: var(--border);
   }
+  /* The fill eases with a composited transform: a width transition would relayout and repaint the
+     tile at every frame and leave megabytes of Blink garbage per second. */
   .bar i {
     display: block;
+    width: 100%;
     height: 100%;
     border-radius: 4px;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    transition: width 0.3s ease-out;
+    transform-origin: left;
+    transition: transform 0.3s ease-out;
+    will-change: transform;
   }
   .chips {
     display: flex;

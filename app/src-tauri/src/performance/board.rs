@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use oma_core::scores::{
-    author_rows, normalize_model, parse_table, Board, Source, TableRow, DISK_SCORE_VERSION,
-    GPU_SCORE_VERSION, MAX_TABLE_BYTES, SCORE_VERSION,
+    author_rows, normalize_model, parse_table, plausible, share_block, submission_bytes,
+    submit_outcome, validate_submission, Board, ErrorCode, HostFacts, ScoreFile, Source, TableRow,
+    DISK_SCORE_VERSION, GPU_SCORE_VERSION, MAX_TABLE_BYTES, SCORE_VERSION,
 };
 use oma_core::updates::{user_agent, CheckError};
 use serde::{Deserialize, Serialize};
 
+use super::store::PerformanceStore;
 use crate::overlay::store::write_file;
 
 const TABLE_FILE: &str = "reference-scores.json";
@@ -30,8 +32,6 @@ pub struct Reply {
 /// The HTTP side, replaced by a fake in the tests.
 pub trait BoardTransport: Send + Sync {
     fn get_table(&self, user_agent: &str, etag: Option<&str>) -> Result<Reply, CheckError>;
-    // Used by the share command (Z6).
-    #[allow(dead_code)]
     fn submit(&self, user_agent: &str, body: &[u8]) -> Result<Reply, CheckError>;
 }
 
@@ -199,12 +199,80 @@ impl BoardService {
     }
 
     /// The author rows and the saved community rows, for the plausibility check.
-    // Used by the plausibility check of the share command (Z6).
-    #[allow(dead_code)]
     pub fn merged_rows(&self) -> Vec<TableRow> {
         let mut rows = author_rows().to_vec();
         rows.extend(self.community().map(|c| c.0).unwrap_or_default());
         rows
+    }
+
+    /// The checked submission bytes: exactly what the preview shows and the send posts (DZ4).
+    fn prepare(
+        &self,
+        file: &ScoreFile,
+        facts: &HostFacts,
+        overclock: bool,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(code) = share_block(file) {
+            return Err(code.to_owned());
+        }
+        submission_bytes(file, facts, overclock).map_err(|c| c.as_str().to_owned())
+    }
+
+    /// The text the user previews before sending.
+    pub fn preview(
+        &self,
+        file: &ScoreFile,
+        facts: &HostFacts,
+        overclock: bool,
+    ) -> Result<String, String> {
+        let bytes = self.prepare(file, facts, overclock)?;
+        String::from_utf8(bytes).map_err(|_| "invalid".to_owned())
+    }
+
+    /// Posts the submission (DZ11): the same checks as the server, locally first.
+    pub fn share(
+        &self,
+        file: &ScoreFile,
+        facts: &HostFacts,
+        overclock: bool,
+    ) -> Result<(), String> {
+        let bytes = self.prepare(file, facts, overclock)?;
+        let value = serde_json::from_slice(&bytes).map_err(|_| "invalid".to_owned())?;
+        let submission = validate_submission(&value).map_err(|c| c.as_str().to_owned())?;
+        let rows = self.merged_rows();
+        let key = &submission.model.key;
+        if !submission
+            .values
+            .iter()
+            .all(|&(b, v)| plausible(b, &submission.score_version, key, v, &rows))
+        {
+            return Err(ErrorCode::Implausible.as_str().to_owned());
+        }
+        let reply = self
+            .transport
+            .submit(&self.user_agent(), &bytes)
+            .map_err(|e| e.category().to_owned())?;
+        submit_outcome(reply.status, &reply.body)
+    }
+
+    /// Sends the stored score and, only if that succeeded, marks it shared. A failed
+    /// mark is logged: the data is already out.
+    pub fn share_stored(
+        &self,
+        store: &PerformanceStore,
+        id: &str,
+        facts: &HostFacts,
+        overclock: bool,
+    ) -> Result<(), String> {
+        let file = store
+            .load_score(id)
+            .map_err(|_| "invalid".to_owned())?
+            .ok_or_else(|| "not_found".to_owned())?;
+        self.share(&file, facts, overclock)?;
+        if let Err(e) = store.mark_shared(id) {
+            tracing::warn!("leaderboard: cannot mark the score shared: {e}");
+        }
+        Ok(())
     }
 
     /// The table from what is on disk; never touches the network.
@@ -331,6 +399,8 @@ mod tests {
         etags: Mutex<Vec<Option<String>>>,
         replies: Mutex<Vec<Canned>>,
         delay: bool,
+        submits: Mutex<Vec<Vec<u8>>>,
+        submit_reply: Mutex<Option<Canned>>,
     }
 
     impl Fake {
@@ -357,8 +427,12 @@ mod tests {
             };
             next.map(|(status, body, etag)| Reply { status, body, etag })
         }
-        fn submit(&self, _: &str, _: &[u8]) -> Result<Reply, CheckError> {
-            Err(CheckError::Offline)
+        fn submit(&self, _: &str, body: &[u8]) -> Result<Reply, CheckError> {
+            self.submits.lock().unwrap().push(body.to_vec());
+            match self.submit_reply.lock().unwrap().clone() {
+                Some(r) => r.map(|(status, body, etag)| Reply { status, body, etag }),
+                None => Err(CheckError::Offline),
+            }
         }
     }
 
@@ -583,5 +657,101 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn facts() -> HostFacts {
+        HostFacts {
+            ram_gb: 32,
+            os_build: "26300".into(),
+        }
+    }
+
+    const ID: &str = "0b9c5a2e-1d3f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    fn cpu_score(single: u32) -> ScoreFile {
+        let json = format!(
+            r#"{{"format":1,"id":"{ID}","at":"2026-10-07T10:00:00Z","category":"cpu","scoreVersion":"cpu-1","provisional":false,"isa":null,"shaderDigest":null,"scores":{{"single":{single},"multi":1495,"compute":null,"graphics":null}},"kernels":[],"device":{{"model":"AMD Ryzen 7 7800X3D","cores":8,"logical":16}},"flags":[],"valid":true,"scaling":null,"samples":[],"appVersion":"0.5.0"}}"#
+        );
+        oma_core::scores::parse_score(json.as_bytes()).expect("a valid score file")
+    }
+
+    fn sharer(name: &str, reply: Option<Canned>) -> (BoardService, Arc<Fake>, PerformanceStore) {
+        let fake = Fake::with(vec![Ok((200, good(), None))]);
+        *fake.submit_reply.lock().unwrap() = reply;
+        let dir = temp_dir(name);
+        let s = BoardService::new(dir.clone(), fake.clone(), "0.0.0".into());
+        (s, fake, PerformanceStore::new(dir))
+    }
+
+    fn created() -> Option<Canned> {
+        Some(Ok((201, b"{}".to_vec(), None)))
+    }
+
+    #[test]
+    fn share_posts_the_previewed_bytes() {
+        let (s, fake, _) = sharer("post", created());
+        let f = cpu_score(1491);
+        let preview = s.preview(&f, &facts(), true).unwrap();
+        s.share(&f, &facts(), true).unwrap();
+        let sent = fake.submits.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0], preview.as_bytes());
+        assert_eq!(sent[0], submission_bytes(&f, &facts(), true).unwrap());
+    }
+
+    #[test]
+    fn implausible_share_is_refused_without_a_request() {
+        let (s, fake, _) = sharer("implausible", created());
+        assert_eq!(
+            s.share(&cpu_score(50000), &facts(), false),
+            Err("implausible".to_owned())
+        );
+        assert!(fake.submits.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_send_is_not_marked_shared() {
+        let (s, fake, store) = sharer("failed", None);
+        store.save_score(&cpu_score(1491)).unwrap();
+        assert_eq!(
+            s.share_stored(&store, ID, &facts(), false),
+            Err("offline".to_owned())
+        );
+        assert!(!store.load_score(ID).unwrap().unwrap().shared);
+        *fake.submit_reply.lock().unwrap() =
+            Some(Ok((429, br#"{"error":"rate_limited"}"#.to_vec(), None)));
+        assert_eq!(
+            s.share_stored(&store, ID, &facts(), false),
+            Err("rate_limited".to_owned())
+        );
+        assert!(!store.load_score(ID).unwrap().unwrap().shared);
+        assert_eq!(fake.submits.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn successful_send_marks_the_score_shared() {
+        let (s, fake, store) = sharer("ok", created());
+        store.save_score(&cpu_score(1491)).unwrap();
+        s.share_stored(&store, ID, &facts(), false).unwrap();
+        assert!(store.load_score(ID).unwrap().unwrap().shared);
+        // Already shared: refused, nothing more is sent.
+        assert_eq!(
+            s.share_stored(&store, ID, &facts(), false),
+            Err("shared".to_owned())
+        );
+        assert_eq!(fake.submits.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn provisional_and_shared_scores_are_refused() {
+        let (s, fake, _) = sharer("refused", created());
+        let mut f = cpu_score(1491);
+        f.provisional = true;
+        assert_eq!(s.share(&f, &facts(), false), Err("provisional".to_owned()));
+        f.provisional = false;
+        f.shared = true;
+        assert_eq!(s.share(&f, &facts(), false), Err("shared".to_owned()));
+        assert!(s.preview(&f, &facts(), false).is_err());
+        assert!(fake.submits.lock().unwrap().is_empty());
     }
 }

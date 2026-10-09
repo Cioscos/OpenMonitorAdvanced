@@ -405,6 +405,9 @@ fn main() {
             performance::commands::performance_baseline,
             performance::commands::performance_board,
             performance::commands::performance_board_refresh,
+            performance::commands::performance_share_preview,
+            performance::commands::performance_share_send,
+            performance::commands::performance_score_export,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

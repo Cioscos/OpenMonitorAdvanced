@@ -1042,6 +1042,27 @@ export class FakeBackend implements Backend {
     versions: { cpu: 'cpu-1', gpu: 'gpu-1', disk: 'disk-1' },
   };
 
+  /** The code the next share call rejects with; `null` accepts it. */
+  shareError: string | null = null;
+
+  async performanceSharePreview(id: string, overclock: boolean): Promise<string> {
+    this.performanceCalls.push(`performanceSharePreview:${id}:${overclock}`);
+    if (this.shareError) throw this.shareError;
+    return `{ "overclock": ${overclock} }`;
+  }
+
+  async performanceShareSend(id: string, overclock: boolean): Promise<void> {
+    this.performanceCalls.push(`performanceShareSend:${id}:${overclock}`);
+    if (this.shareError) throw this.shareError;
+    const file = this.scoreFiles.find((f) => f.id === id);
+    if (file) file.shared = true;
+  }
+
+  async performanceScoreExport(id: string): Promise<string | null> {
+    this.performanceCalls.push(`performanceScoreExport:${id}`);
+    return `oma-score-${id}.json`;
+  }
+
   async performanceBoard(): Promise<BoardTable> {
     this.performanceCalls.push('performanceBoard');
     return structuredClone(this.boardTable);

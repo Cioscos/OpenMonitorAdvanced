@@ -75,6 +75,9 @@
     "allow-performance-score-delete",
     "allow-performance-baseline",
     "allow-performance-board",
-    "allow-performance-board-refresh"
+    "allow-performance-board-refresh",
+    "allow-performance-share-preview",
+    "allow-performance-share-send",
+    "allow-performance-score-export"
   ]
 }

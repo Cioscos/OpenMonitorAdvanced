@@ -158,8 +158,6 @@ impl PerformanceStore {
     }
 
     /// Sets the local «shared» mark; `false` if the score is not there.
-    // OMA: used by the share command (Z6); drop the allow there.
-    #[allow(dead_code)]
     pub fn mark_shared(&self, id: &str) -> io::Result<bool> {
         match self.load_score(id)? {
             Some(mut score) => {

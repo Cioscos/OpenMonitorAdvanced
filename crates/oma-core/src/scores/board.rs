@@ -69,6 +69,19 @@ impl ErrorCode {
     }
 }
 
+/// What the Worker's answer to a submission means: `Ok` for `201`, else the error code
+/// (the server's own for `400`/`413`/`429`/`503` with a known `{"error"}`, otherwise `http`).
+pub fn submit_outcome(status: u16, body: &[u8]) -> Result<(), String> {
+    if status == 201 {
+        return Ok(());
+    }
+    let known = matches!(status, 400 | 413 | 429 | 503)
+        .then(|| serde_json::from_slice::<Value>(body).ok())
+        .flatten()
+        .and_then(|v| serde_json::from_value::<ErrorCode>(v.get("error")?.clone()).ok());
+    Err(known.map_or("http", ErrorCode::as_str).to_owned())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model {
     pub display: String,
@@ -418,6 +431,27 @@ pub fn author_rows() -> &'static [TableRow] {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn submit_outcome_maps_the_worker_answers() {
+        let e = |c: &str| format!(r#"{{"error":"{c}"}}"#).into_bytes();
+        assert_eq!(submit_outcome(201, b"{}"), Ok(()));
+        assert_eq!(
+            submit_outcome(400, &e("implausible")),
+            Err("implausible".into())
+        );
+        assert_eq!(
+            submit_outcome(429, &e("rate_limited")),
+            Err("rate_limited".into())
+        );
+        assert_eq!(
+            submit_outcome(503, &e("daily_cap")),
+            Err("daily_cap".into())
+        );
+        assert_eq!(submit_outcome(400, &e("strange")), Err("http".into()));
+        assert_eq!(submit_outcome(500, &e("implausible")), Err("http".into()));
+        assert_eq!(submit_outcome(400, b"not json"), Err("http".into()));
+    }
 
     const NORMALIZE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -876,6 +876,19 @@ export function mockBench(
     status: () => structuredClone(status),
     scores: () => scores.map(scoreSummary),
     score: (id: string) => structuredClone(scores.find((s) => s.id === id) ?? null),
+    /** The submission text, as the real command would show it. */
+    sharePreview(id: string, overclock: boolean) {
+      const s = scores.find((x) => x.id === id);
+      if (!s) throw 'not_found';
+      return JSON.stringify({ format: 1, appVersion: s.appVersion, category: s.category, scoreVersion: s.scoreVersion, valid: s.valid, overclock, scores: s.scores, hardware: { model: s.device.model, ramGB: 32, osBuild: '26300' }, flags: s.flags }, null, 2);
+    },
+    /** Accepts the submission and marks the score shared; a model containing `fail` is refused (to try the message). */
+    share(id: string) {
+      const s = scores.find((x) => x.id === id);
+      if (!s) throw 'not_found';
+      if (s.device.model.toLowerCase().includes('fail')) throw 'rate_limited';
+      s.shared = true;
+    },
     remove(id: string) {
       scores = scores.filter((s) => s.id !== id);
     },

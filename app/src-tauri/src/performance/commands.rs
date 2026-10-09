@@ -7,7 +7,8 @@ use oma_core::csv::LocalTime;
 use oma_core::load::{RunStatus, Session, SessionSummary, StartRequest};
 use oma_core::sampler::unix_ms;
 use oma_core::scores::{
-    cpu_baseline, disk_baseline, gpu_baseline, BenchStatus, ScoreFile, ScoreSummary,
+    cpu_baseline, disk_baseline, export_bytes, gpu_baseline, BenchStatus, HostFacts, ScoreFile,
+    ScoreSummary,
 };
 use oma_ipc::load::Plan;
 use tauri::{AppHandle, Manager, State};
@@ -277,6 +278,108 @@ pub async fn performance_export(app: AppHandle, id: String) -> Result<Option<Str
         .map_err(|e| e.to_string())?
 }
 
+/// What the submission and the export say about this machine (DZ5), read now: the score
+/// file does not hold it. Missing data fails with `invalid`.
+fn host_facts() -> Result<HostFacts, String> {
+    Ok(HostFacts {
+        ram_gb: oma_win::memory::installed_ram_gb().ok_or("invalid")?,
+        os_build: oma_win::os_version::os_build().ok_or("invalid")?,
+    })
+}
+
+/// The exact text that «Send» will post (DZ4), for the preview dialog.
+#[tauri::command]
+pub async fn performance_share_preview(
+    runner: Runner<'_>,
+    board: State<'_, Arc<BoardService>>,
+    id: String,
+    overclock: bool,
+) -> Result<String, String> {
+    let (runner, board) = (runner.inner().clone(), board.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = runner
+            .store()
+            .load_score(&id)
+            .map_err(|_| "invalid".to_owned())?
+            .ok_or_else(|| "not_found".to_owned())?;
+        board.preview(&file, &host_facts()?, overclock)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Posts the submission and, on success, marks the score shared (DZ11). The error is a
+/// code the UI translates (DZ12).
+#[tauri::command]
+pub async fn performance_share_send(
+    runner: Runner<'_>,
+    board: State<'_, Arc<BoardService>>,
+    id: String,
+    overclock: bool,
+) -> Result<(), String> {
+    let (runner, board) = (runner.inner().clone(), board.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        board.share_stored(runner.store(), &id, &host_facts()?, overclock)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `oma-score-<category>-YYYYMMDD-HHMMSS.json`, from the score's time in local time.
+fn score_export_file_name(category: &str, local: LocalTime) -> String {
+    format!(
+        "oma-score-{category}-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
+        local.year, local.month, local.day, local.hour, local.minute, local.second
+    )
+}
+
+fn score_export(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
+    let runner = app.state::<Arc<PerformanceRunner>>();
+    let file = runner
+        .store()
+        .load_score(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "not_found".to_owned())?;
+    let bytes = export_bytes(&file, &host_facts()?);
+    let at = parse_rfc3339_ms(&file.at).map_or(unix_ms(), |ms| ms.max(0) as u64);
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_file_name(score_export_file_name(&file.category, local_now(at)))
+        .add_filter("JSON", &["json"]);
+    if let Some(documents) = documents_dir() {
+        dialog = dialog.set_directory(documents);
+    }
+    if let Some(window) = app.get_webview_window(MAIN) {
+        dialog = dialog.set_parent(&window);
+    }
+    let Some(picked) = dialog.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    write_report(&path, &bytes).map_err(|err| {
+        tracing::warn!(%err, "cannot export the score");
+        err.to_string()
+    })?;
+    Ok(Some(
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ))
+}
+
+/// Saves the score as the shareable JSON (section 8.5, no `overclock`) where the user
+/// chooses; the file name, or `None` when the dialog is cancelled.
+#[tauri::command]
+pub async fn performance_score_export(
+    app: AppHandle,
+    id: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || score_export(&app, &id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// «Stop and quit»: the test ends (`stopped_user`), then the tray's «Quit» goes on.
 #[tauri::command]
 pub async fn performance_quit_confirmed(app: AppHandle) {
@@ -303,5 +406,22 @@ mod tests {
             millis: 999,
         };
         assert_eq!(export_file_name(local), "oma-stress-20261006-090507.json");
+    }
+
+    #[test]
+    fn score_export_file_name_uses_local_time() {
+        let local = LocalTime {
+            year: 2026,
+            month: 10,
+            day: 9,
+            hour: 9,
+            minute: 30,
+            second: 0,
+            millis: 0,
+        };
+        assert_eq!(
+            score_export_file_name("cpu", local),
+            "oma-score-cpu-20261009-093000.json"
+        );
     }
 }

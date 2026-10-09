@@ -19,7 +19,7 @@ pub use bench::{
     BenchAction, BenchContext, BenchController, BenchEnd, BenchState, BenchStatus, SegmentState,
 };
 pub use board::{
-    author_rows, known_version, median, normalize_model, parse_table, plausible,
+    author_rows, known_version, median, normalize_model, parse_table, plausible, submit_outcome,
     validate_submission, Board, ErrorCode, Model, Source, Submission, Table, TableRow,
     MAX_SUBMIT_BYTES, MAX_TABLE_BYTES, MODEL_MAX, PLAUSIBLE_MAX, PLAUSIBLE_MIN, SUBMIT_URL,
     TABLE_URL, VALUE_CAP,

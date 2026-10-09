@@ -12,6 +12,8 @@ import {
   fitSelection,
   formatTimeTick,
   initialSeries,
+  initialStripSeries,
+  knownSelection,
   labelSafeIncrs,
   maxPointsFor,
   NUMERIC_INCRS,
@@ -356,5 +358,22 @@ describe('strips', () => {
     buffer.append(1000, [1, 2, 3]);
     buffer.append(2000, [4, null, 6]);
     expect(buffer.columns([2, 1], [(v) => v * 10, undefined])).toEqual([[1, 2], [30, 60], [2, null]]);
+  });
+
+  test('known_selection_keeps_order_and_drops_unknown_and_duplicates', () => {
+    expect(knownSelection(['c', 'gone', 'a', 'c', 'b', 'a'], ['a', 'b', 'c'])).toEqual(['c', 'a', 'b']);
+    expect(knownSelection([], ['a'])).toEqual([]);
+    // No series or unit limit: every known id is kept.
+    const many = Array.from({ length: 30 }, (_, i) => `s${i}`);
+    expect(knownSelection(many, many)).toEqual(many);
+  });
+
+  test('initial_strip_series_follow_the_initial_series_rules_without_limits', () => {
+    expect(initialStripSeries(null, ['a', 'b', 'c'], ['b', 'gone'])).toEqual(['b']);
+    expect(initialStripSeries(['c', 'gone', 'a'], ['a', 'b', 'c'], ['b'])).toEqual(['c', 'a']);
+    expect(initialStripSeries(['gone'], ['a', 'b', 'c'], ['b'])).toEqual(['b']);
+    expect(initialStripSeries([], ['a', 'b', 'c'], ['b'])).toEqual([]);
+    const ten = ['cpu/0/load/total', ...CPU_THREADS, 'cpu/0/clock/effective'];
+    expect(initialStripSeries(ten, ALL, [])).toEqual(ten);
   });
 });

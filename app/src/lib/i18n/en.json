@@ -424,6 +424,7 @@
   "advanced.chart.series": "Series",
   "advanced.chart.maxSeries": "Up to 8 series with at most 2 units.",
   "advanced.chart.empty": "Choose at least one series.",
+  "advanced.chart.remove": "Remove {name}",
   "advanced.chart.unit.celsius": "Temperature",
   "advanced.chart.unit.percent": "Percentage",
   "advanced.chart.unit.megahertz": "Frequency",

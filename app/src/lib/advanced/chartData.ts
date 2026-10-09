@@ -145,6 +145,21 @@ export function initialSeries(saved: string[] | null, candidates: string[], defa
   return kept.length > 0 ? kept : fallback;
 }
 
+/** The ids present in `candidates`, in order and once each: the strip chart has no series or unit limit. */
+export function knownSelection(ids: string[], candidates: string[]): string[] {
+  const known = new Set(candidates);
+  return [...new Set(ids)].filter((id) => known.has(id));
+}
+
+/** `initialSeries` for the strip chart: the same rules, over `knownSelection`. */
+export function initialStripSeries(saved: string[] | null, candidates: string[], defaults: string[]): string[] {
+  const fallback = knownSelection(defaults, candidates);
+  if (saved === null) return fallback;
+  if (saved.length === 0) return [];
+  const kept = knownSelection(saved, candidates);
+  return kept.length > 0 ? kept : fallback;
+}
+
 /** Series colours: accent tokens first, then the four chart-only tokens of theme.css. */
 export const PALETTE_TOKENS = ['--accent', '--accent-2', '--ok', '--warn', '--series-5', '--series-6', '--series-7', '--series-8'] as const;
 
@@ -320,6 +335,18 @@ export function timeAxisSpace(
   }
   return TIME_AXIS_MIN_SPACE;
 }
+
+/** Height of a chart with one strip, its time axis included (CSS px). */
+export const STRIP_SINGLE_HEIGHT = 260;
+/** Height of the lines of each strip when several are stacked (CSS px). */
+export const STRIP_HEIGHT = 130;
+/** Room the last strip adds under its lines for the time labels (CSS px). */
+export const TIME_AXIS_HEIGHT = 40;
+/** Width of every strip's Y axis, so the lines of all strips line up (CSS px). */
+export const Y_AXIS_PX = 72;
+/** Width of the legend at the right of each strip, and its gap to the lines (CSS px). */
+export const LEGEND_PX = 220;
+export const LEGEND_GAP_PX = 12;
 
 /** One chart strip: a single unit, with the positions of its ids in the list given to `stripLayout`. */
 export interface Strip {

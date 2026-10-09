@@ -54,8 +54,9 @@ test('gpu page: kpis, chart, sensor table, properties and processes', async () =
   expect(screen.getByText(t('advanced.kpi.vramOf', { total: '16.0 GB' }))).toBeTruthy();
 
   await vi.waitFor(() => expect(backend.statsCalls[0]).toEqual(idsOf(GPU)));
-  await vi.waitFor(() => expect(plots).toHaveLength(1));
-  expect(backend.historyCalls[0]).toEqual({ ids: [`${GPU}/load/core`, `${GPU}/temperature/core`], seconds: 300, maxPoints: undefined });
+  // Load and temperature: one strip each, one history request for both.
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect(backend.historyCalls).toEqual([{ ids: [`${GPU}/load/core`, `${GPU}/temperature/core`], seconds: 300, maxPoints: undefined }]);
   expect(screen.getByRole('button', { name: t('advanced.table.reset') })).toBeTruthy();
 
   expect(screen.getByText(t('advanced.info.title'))).toBeTruthy();
@@ -289,6 +290,6 @@ test('the advanced view mounts the full page under its heading', async () => {
 
   expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(t('advanced.section.gpu'));
   expect(kpiLabels()).toHaveLength(4);
-  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
   await vi.waitFor(() => expect(screen.getByText('game.exe')).toBeTruthy());
 });

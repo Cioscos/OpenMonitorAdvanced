@@ -23,15 +23,17 @@
     type WindowSeconds,
   } from '../../lib/advanced/chartData';
   import { createChartViewport } from '../../lib/advanced/chartViewport';
+  import { drawerGroups } from '../../lib/advanced/drawer';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { loadSeries, loadWindow, saveSeries, saveWindow } from '../../lib/advanced/persist';
   import type { Backend } from '../../lib/backend/backend';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { LiveStore } from '../../lib/live.svelte';
-  import type { HistorySeed, Schema, Sensor, ThroughputUnit } from '../../lib/types';
+  import type { HistorySeed, Schema, Sensor, ThroughputUnit, Unit } from '../../lib/types';
   import { display } from '../../lib/units.svelte';
   import ChartStrip from './ChartStrip.svelte';
+  import SeriesDrawer from './SeriesDrawer.svelte';
   import StripLegend, { type StripLegendRow } from './StripLegend.svelte';
 
   // The history chart of the Advanced view (spec §2, §4): one strip per unit, stacked, all on
@@ -134,6 +136,35 @@
   }
   /** Units of the strips, in order: the drawer lists them first. */
   const stripUnits = $derived(strips.map((s) => s.unit));
+
+  // The «Series» drawer (spec §3), over the column of lines.
+  const drawerId = untrack(() => `series-${sectionId}`);
+  let drawerOpen = $state(false);
+  let drawerFilter = $state('');
+  let seriesButton: HTMLButtonElement;
+  const groups = $derived(drawerOpen ? drawerGroups(sensors, stripUnits, drawerFilter, (s) => sensorLabel(s, t)) : []);
+  const unitOf = $derived(new Map(sensors.map((s) => [s.id, s.unit])));
+
+  /** Closes the drawer; focus goes back to its button unless a click put it somewhere else. */
+  function closeDrawer() {
+    const active = document.activeElement;
+    const drawer = document.getElementById(drawerId);
+    drawerOpen = false;
+    drawerFilter = '';
+    if (!active || active === document.body || drawer?.contains(active)) seriesButton.focus();
+  }
+
+  // A click outside the drawer and its button closes it.
+  $effect(() => {
+    if (!drawerOpen) return;
+    const onClick = (event: MouseEvent) => {
+      const path = event.composedPath();
+      if (path.includes(seriesButton) || path.some((node) => node instanceof Element && node.id === drawerId)) return;
+      closeDrawer();
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  });
 
   function toggleHidden(id: string) {
     const next = new Set(hiddenIds);
@@ -247,6 +278,20 @@
   }
 
   const fallbackScale = displayScale('count', { temperature: 'c', rate: 'bytes' });
+  /** How a unit is drawn with the display units of now. */
+  const scaleFor = (unit: Unit) => displayScale(unit, { temperature: display.temperature, rate });
+
+  /** The latest snapshot of `id` in the scale's unit, not the value the held segment projects. */
+  function latest(id: string, scale: DisplayScale): number | null {
+    const measured = store.measured(id);
+    return measured === null || !scale.convert ? measured : scale.convert(measured);
+  }
+
+  /** A drawer row's value now: the legend's latest reading, for any sensor of the page. */
+  function valueText(id: string): string {
+    const scale = scaleFor(unitOf.get(id) ?? 'count');
+    return scale.format(latest(id, scale), i18n.locale, t);
+  }
 
   /** Legend rows of strip `s`: the cursor's values when there is one, else the latest readings. */
   function rowsOf(s: number, strip: Strip): StripLegendRow[] {
@@ -254,12 +299,7 @@
     const data = stripData[s];
     const show = (value: number | null) => scale.format(value, i18n.locale, t);
     return strip.ids.map((id, k) => {
-      let now: number | null;
-      if (cursorIdx === null) {
-        // The latest snapshot, not the value the held segment projects.
-        const measured = store.measured(id);
-        now = measured === null || !scale.convert ? measured : scale.convert(measured);
-      } else now = data?.[k + 1]?.[cursorIdx] ?? null;
+      const now = cursorIdx === null ? latest(id, scale) : data?.[k + 1]?.[cursorIdx] ?? null;
       const extent = extents[s]?.[k] ?? null;
       const color = colors[s]?.[k];
       return {
@@ -276,17 +316,10 @@
   }
 
   /** «Temperature · °F»: the unit's name and the symbol its values are drawn in, when it has one. */
-  function titleOf(s: number, strip: Strip): string {
-    const name = t(`advanced.chart.unit.${strip.unit}`);
-    const symbol = scaleSymbol(scales[s] ?? displayScale(strip.unit, { temperature: display.temperature, rate }), i18n.locale, t);
+  function titleOf(unit: Unit): string {
+    const name = t(`advanced.chart.unit.${unit}`);
+    const symbol = scaleSymbol(scaleFor(unit), i18n.locale, t);
     return symbol ? `${name} · ${symbol}` : name;
-  }
-
-  /** Swatch colour of a picked series: its strip's palette entry. */
-  function swatchOf(id: string): string {
-    const strip = strips.find((x) => x.ids.includes(id));
-    const k = strip?.ids.indexOf(id) ?? -1;
-    return strip && k >= 0 ? `var(${stripPalette(k + 1)[k].token})` : 'transparent';
   }
 
   const heightOf = (s: number) => (strips.length === 1 ? STRIP_SINGLE_HEIGHT : STRIP_HEIGHT + (s === strips.length - 1 ? TIME_AXIS_HEIGHT : 0));
@@ -383,28 +416,23 @@
         {/each}
       </div>
     {/if}
-    <details class="picker">
-      <summary>{t('advanced.chart.series')} · {selected.length}</summary>
-      <ul>
-        {#each sensors as sensor (sensor.id)}
-          {@const on = selected.includes(sensor.id)}
-          <li>
-            <label>
-              <input type="checkbox" checked={on} onchange={() => toggle(sensor.id)} />
-              <i class="swatch" style:background={on ? swatchOf(sensor.id) : 'transparent'}></i>
-              {sensorLabel(sensor, t)}
-            </label>
-          </li>
-        {/each}
-      </ul>
-    </details>
+    <button
+      bind:this={seriesButton}
+      type="button"
+      class="series"
+      class:on={drawerOpen}
+      aria-expanded={drawerOpen}
+      aria-controls={drawerId}
+      onclick={() => (drawerOpen ? closeDrawer() : (drawerOpen = true))}
+    >{t('advanced.chart.series')} · {selected.length}</button>
   </div>
-  {#if selected.length === 0}
-    <div class="placeholder" style:min-height="{STRIP_SINGLE_HEIGHT}px">
-      <p class="empty">{t('advanced.chart.empty')}</p>
-    </div>
-  {:else}
-    <div class="strips">
+  <!-- The drawer is as tall as the strips, which grow to 360 px for it while it is open. -->
+  <div class="strips" style:min-height={drawerOpen ? '360px' : undefined}>
+    {#if selected.length === 0}
+      <div class="placeholder" style:min-height="{STRIP_SINGLE_HEIGHT}px">
+        <p class="empty">{t('advanced.chart.empty')}</p>
+      </div>
+    {:else}
       {#each strips as strip, s (strip.unit)}
         <div class="strip">
           <div class="lines">
@@ -425,11 +453,24 @@
             />
             {#if suspended[s]}<p class="empty">{t('chart.suspended')}</p>{/if}
           </div>
-          <StripLegend title={titleOf(s, strip)} rows={rowsOf(s, strip)} height={heightOf(s)} ontoggle={toggleHidden} onremove={toggle} />
+          <StripLegend title={titleOf(strip.unit)} rows={rowsOf(s, strip)} height={heightOf(s)} ontoggle={toggleHidden} onremove={toggle} />
         </div>
       {/each}
-    </div>
-  {/if}
+    {/if}
+    {#if drawerOpen}
+      <SeriesDrawer
+        id={drawerId}
+        {groups}
+        chosen={selected}
+        bind:filter={drawerFilter}
+        {valueText}
+        unitTitle={titleOf}
+        ontoggle={toggle}
+        onsetmany={setMany}
+        onclose={closeDrawer}
+      />
+    {/if}
+  </div>
 </section>
 
 <style>
@@ -472,37 +513,23 @@
     color: var(--on-accent);
     font-weight: 600;
   }
-  .picker {
-    min-width: 220px;
-    font-size: 13px;
-  }
-  .picker summary {
-    cursor: pointer;
-    color: var(--text-muted);
-    text-align: right;
-  }
-  .picker ul {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 2px 12px;
-    margin: 6px 0 0;
-    padding: 8px;
-    list-style: none;
-    background: var(--surface-2);
-    border-radius: 8px;
-  }
-  .picker label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .swatch {
-    width: 10px;
-    height: 10px;
-    border-radius: 3px;
+  .series {
+    margin-left: auto;
+    padding: 4px 12px;
     border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .series.on {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .strips {
+    position: relative;
     display: flex;
     flex-direction: column;
     min-width: 0;

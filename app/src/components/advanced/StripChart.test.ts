@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
 import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { i18n, t } from '../../lib/i18n/index.svelte';
@@ -45,7 +45,18 @@ const cpuSensors = MOCK_SCHEMA.sensors.filter((s) => s.deviceId === 'cpu/0');
 const byId = (id: string) => MOCK_SCHEMA.sensors.find((s) => s.id === id)!;
 const index = (id: string) => MOCK_SCHEMA.sensors.findIndex((s) => s.id === id);
 const labelOf = (s: Sensor) => t(`sensor.${s.label.key}`, s.label.arg === undefined ? {} : { arg: s.label.arg });
-const checkbox = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
+const seriesButton = () => screen.getByRole('button', { name: new RegExp(`^${t('advanced.chart.series')} · \\d+$`) });
+const drawer = () => screen.queryByRole('dialog', { name: t('advanced.chart.series') });
+/** Opens the «Series» drawer when it is closed; its checkboxes exist only while it is open. */
+function openDrawer() {
+  if (drawer()) return;
+  void fireEvent.click(seriesButton());
+  flushSync();
+}
+const checkbox = (label: string) => {
+  openDrawer();
+  return screen.getByLabelText(label) as HTMLInputElement;
+};
 /** The legend row of a series, found by its name button. */
 const legendRow = (s: Sensor) => screen.getByRole('button', { name: labelOf(s) }).closest<HTMLElement>('.row')!;
 const legendCell = (s: Sensor, cell: 'now' | 'min' | 'max') => legendRow(s).querySelector(`.${cell}`)!.textContent;
@@ -299,7 +310,7 @@ test('a snapshot that arrives while history loads is not lost', async () => {
   expect(plots[1].data[0]).toEqual([1, 2, 3]);
 });
 
-test('the_picker_has_no_series_limit_and_saves_per_section', async () => {
+test('the_drawer_has_no_series_limit_and_saves_per_section', async () => {
   const backend = fakeBackend();
   renderChart(backend, new LiveStore(), [...cpuSensors, ...gpuSensors], ['cpu/0/load/total', 'cpu/0/clock/effective'], 'cpu/0');
   await vi.waitFor(() => expect(plots).toHaveLength(2));
@@ -327,7 +338,7 @@ test('a_third_unit_adds_a_third_strip', async () => {
   await vi.waitFor(() => expect(plots).toHaveLength(5));
   expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent', 'celsius', 'bytes']);
   expect(document.querySelectorAll('.strip')).toHaveLength(3);
-  expect(screen.getByText(legendTitle('bytes', 'B'))).toBeTruthy();
+  expect(within(document.querySelectorAll<HTMLElement>('.strip')[2]).getByText(legendTitle('bytes', 'B'))).toBeTruthy();
   expect(checkbox(labelOf(byId(VRAM))).checked).toBe(true);
 });
 
@@ -2037,4 +2048,182 @@ test('strips_have_no_right_padding_so_the_lines_end_by_the_legend', async () => 
     actual.destroy();
     target.remove();
   }
+});
+
+describe('series drawer', () => {
+  const groupNames = () => [...drawer()!.querySelectorAll('[role="group"]')].map((g) => g.getAttribute('aria-label'));
+
+  test('series_button_opens_the_drawer_over_the_lines_only', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    expect(drawer()).toBeNull();
+    await fireEvent.click(seriesButton());
+    const dialog = drawer()!;
+    expect(dialog).toBeTruthy();
+    expect(dialog.getAttribute('aria-modal')).not.toBe('true');
+    // Over the column of lines: from the Y axis (72 px) to the legend (220 px + 12 px gap).
+    const strips = dialog.parentElement!;
+    expect(strips.classList.contains('strips')).toBe(true);
+    expect(strips.querySelectorAll('.strip')).toHaveLength(2);
+    expect(dialog.style.left).toBe('72px');
+    expect(dialog.style.right).toBe('232px');
+    expect(dialog.style.top).toBe('0px');
+    expect(dialog.style.bottom).toBe('0px');
+    // Axes and legends stay outside it.
+    for (const legend of document.querySelectorAll('.legend')) expect(dialog.contains(legend)).toBe(false);
+  });
+
+  test('drawer_closes_on_escape_outside_click_and_button_and_returns_focus', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+
+    await fireEvent.click(seriesButton());
+    await fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+    expect(drawer()).toBeNull();
+    expect(document.activeElement).toBe(seriesButton());
+
+    await fireEvent.click(seriesButton());
+    // A click inside keeps it open.
+    await fireEvent.click(drawer()!.querySelector('[role="group"]')!);
+    expect(drawer()).toBeTruthy();
+    await fireEvent.click(document.body);
+    expect(drawer()).toBeNull();
+    expect(document.activeElement).toBe(seriesButton());
+
+    await fireEvent.click(seriesButton());
+    expect(drawer()).toBeTruthy();
+    await fireEvent.click(seriesButton());
+    expect(drawer()).toBeNull();
+    expect(document.activeElement).toBe(seriesButton());
+  });
+
+  test('search_has_focus_on_open', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    await fireEvent.click(seriesButton());
+    const search = screen.getByRole('searchbox');
+    expect(document.activeElement).toBe(search);
+    expect(search.getAttribute('placeholder')).toBe(t('advanced.chart.search'));
+  });
+
+  test('typing_in_the_search_filters_the_rows', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    openDrawer();
+    expect(screen.getAllByRole('checkbox')).toHaveLength(gpuSensors.length);
+    await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'TEMPERATÚRE' } });
+    expect(screen.getAllByRole<HTMLInputElement>('checkbox').map((box) => box.getAttribute('aria-label')))
+      .toEqual([labelOf(byId(TEMP)), labelOf(byId(HOTSPOT))]);
+    expect(groupNames()).toEqual([legendTitle('celsius', '°C')]);
+  });
+
+  test('all_and_none_set_only_the_filtered_rows_and_save', async () => {
+    const backend = fakeBackend();
+    renderChart(backend);
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    openDrawer();
+    await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'hotspot' } });
+    // The legend of the temperature strip is a group of the same name, outside the drawer.
+    const inDrawer = () => within(drawer()!).getByRole('group', { name: legendTitle('celsius', '°C') });
+    await fireEvent.click(within(inDrawer()).getByRole('button', { name: t('advanced.chart.all') }));
+    await vi.waitFor(() => expect(backend.historyCalls.at(-1)?.ids).toEqual([LOAD, TEMP, HOTSPOT]));
+    await vi.waitFor(() => expect(settings.state?.settings.advanced.series[GPU]).toEqual([LOAD, TEMP, HOTSPOT]));
+    expect(seriesButton().textContent?.trim()).toBe(`${t('advanced.chart.series')} · 3`);
+
+    await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'temp' } });
+    await fireEvent.click(within(inDrawer()).getByRole('button', { name: t('advanced.chart.none') }));
+    await vi.waitFor(() => expect(settings.state?.settings.advanced.series[GPU]).toEqual([LOAD]));
+    await vi.waitFor(() => expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent']));
+    expect(drawer()).toBeTruthy();
+  });
+
+  test('ticking_a_new_unit_adds_a_strip_while_open', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    openDrawer();
+    expect(groupNames().slice(0, 2)).toEqual([legendTitle('percent', '%'), legendTitle('celsius', '°C')]);
+    await fireEvent.click(checkbox(labelOf(byId(VRAM))));
+    await vi.waitFor(() => expect(plots).toHaveLength(5));
+    expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent', 'celsius', 'bytes']);
+    expect(drawer()).toBeTruthy();
+    expect(checkbox(labelOf(byId(VRAM))).checked).toBe(true);
+    // The strips' units come first in the drawer, in strip order, named like the legends.
+    expect(groupNames().slice(0, 3)).toEqual([legendTitle('percent', '%'), legendTitle('celsius', '°C'), legendTitle('bytes', 'B')]);
+    expect(screen.getAllByRole('group', { name: legendTitle('bytes', 'B') }).filter((g) => !drawer()!.contains(g))).toHaveLength(1);
+  });
+
+  test('unticking_in_the_drawer_drops_an_empty_strip', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    hover(plots[0], 0);
+    expect(legendCell(byId(LOAD), 'now')).toBe('10%');
+    openDrawer();
+    await fireEvent.click(checkbox(labelOf(byId(TEMP))));
+    await vi.waitFor(() => expect(plots).toHaveLength(3));
+    expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent']);
+    expect(document.querySelectorAll('.strip')).toHaveLength(1);
+    expect(document.querySelectorAll('.legend')).toHaveLength(1);
+    // The cursor index went back to null: the legend shows the latest reading, none yet.
+    expect(legendCell(byId(LOAD), 'now')).toBe('—');
+    expect(drawer()).toBeTruthy();
+    expect(checkbox(labelOf(byId(TEMP))).checked).toBe(false);
+  });
+
+  test('chart_grows_to_360px_while_the_drawer_is_open', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    const strips = document.querySelector<HTMLElement>('.strips')!;
+    expect(strips.style.minHeight).toBe('');
+    openDrawer();
+    expect(strips.style.minHeight).toBe('360px');
+    await fireEvent.click(seriesButton());
+    expect(strips.style.minHeight).toBe('');
+  });
+
+  test('the_drawer_opens_with_no_series_chosen', async () => {
+    await settings.update({ advanced: { series: { [GPU]: [] } } });
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(screen.getByText(t('advanced.chart.empty'))).toBeTruthy());
+    openDrawer();
+    expect(drawer()!.parentElement!.classList.contains('strips')).toBe(true);
+    await fireEvent.click(checkbox(labelOf(byId(LOAD))));
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    // The same drawer stays open, focus and all.
+    expect(drawer()).toBeTruthy();
+  });
+
+  test('button_reports_aria_expanded_and_count', async () => {
+    renderChart(fakeBackend());
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    const button = seriesButton();
+    expect(button.textContent?.trim()).toBe(`${t('advanced.chart.series')} · 2`);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    openDrawer();
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(button.getAttribute('aria-controls')).toBe(drawer()!.id);
+    await fireEvent.click(checkbox(labelOf(byId(VRAM))));
+    expect(button.textContent?.trim()).toBe(`${t('advanced.chart.series')} · 3`);
+    await fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  test('rows_show_the_value_now_like_the_legend', async () => {
+    await connectSettings({ general: { temperatureUnit: 'f' } });
+    const store = new LiveStore();
+    renderChart(fakeBackend(), store);
+    await vi.waitFor(() => expect(plots).toHaveLength(2));
+    const values = MOCK_SCHEMA.sensors.map((s) => (s.id === TEMP ? 100 : s.id === HOTSPOT ? 0 : 42));
+    store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values });
+    flushSync();
+    openDrawer();
+    const value = (s: Sensor) => checkbox(labelOf(s)).closest('li')!.querySelector('.value')!.textContent;
+    expect(value(byId(LOAD))).toBe(legendCell(byId(LOAD), 'now'));
+    expect(value(byId(TEMP))).toBe('212 °F');
+    expect(value(byId(TEMP))).toBe(legendCell(byId(TEMP), 'now'));
+    // A sensor outside the chart shows its value too, in the display units.
+    expect(value(byId(HOTSPOT))).toBe('32 °F');
+    store.applySnapshot({ revision: 1, seq: 2, timestampMs: 4000, values: values.map((v) => (v === 42 ? 7 : v)) });
+    flushSync();
+    expect(value(byId(LOAD))).toBe('7%');
+  });
 });

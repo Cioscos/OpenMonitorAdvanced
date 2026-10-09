@@ -35,7 +35,7 @@ export const DISK_TERMS: string[] = ['mbs', 'iops', 'queueDepth', 'seqRnd', 'lat
 export const DISK_MODE_TERMS: string[] = catalog.diskKernels.map((id) => `mode.${id.replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}`);
 
 /** The terms of the Simple view tiles (M9a DM15); `vram` and `throttling` come from the other lists. */
-export const MONITOR_TERMS: string[] = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm'];
+export const MONITOR_TERMS: string[] = ['hotspot', 'busiestThread', 'threadLoad', 'powerLimit', 'linkSpeed', 'diskActivity', 'dimm', 'gpuClock'];
 
 /** The technical terms of the pages (table T2 of the plan). */
 export const TERMS: string[] = [

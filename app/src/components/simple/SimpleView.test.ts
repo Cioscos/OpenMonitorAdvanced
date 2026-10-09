@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { formatRate, formatTemperature } from '../../lib/format';
-import { i18n } from '../../lib/i18n/index.svelte';
+import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
 import { health } from '../../lib/health.svelte';
@@ -10,6 +10,7 @@ import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeBackend } from '../../test/fake-backend';
 import { sectionForTile } from '../../lib/advanced/nav';
 import tileSource from './Tile.svelte?raw';
+import viewSource from './SimpleView.svelte?raw';
 import SimpleView from './SimpleView.svelte';
 
 beforeEach(() => { i18n.locale = 'en'; });
@@ -258,4 +259,50 @@ test('technical_labels_use_term', () => {
   // A Term is focusable, so it never sits inside the tile's button, and only Terms are lifted above its overlay.
   expect(document.querySelectorAll('button .term')).toHaveLength(0);
   expect(tileSource).toMatch(/\.tile :global\(\.term\)\s*\{[^}]*position: relative;[^}]*z-index: 1;/);
+});
+
+test('clock_chips_use_their_terms', () => {
+  setup();
+  const clocks = [...document.querySelectorAll<HTMLElement>('.chip .term')].filter((term) => term.textContent === t('tile.clock'));
+  const tips = clocks.map((term) => document.getElementById(term.getAttribute('aria-describedby')!)?.textContent);
+  expect(tips).toEqual([t('glossary.clock'), t('glossary.gpuClock')]);
+});
+
+test('sparklines_let_clicks_through_and_bars_with_tooltips_sit_above_the_overlay', () => {
+  // The sparkline never takes the click meant for the tile; the bars and disk names keep their tooltips.
+  expect(viewSource).toMatch(/\.spark\s*\{[^}]*pointer-events: none;/);
+  expect(viewSource).toMatch(/\.threads,\s*\.disks \[title\]\s*\{[^}]*position: relative;[^}]*z-index: 1;/);
+});
+
+test('fill_rows_never_clip_their_content', () => {
+  expect(viewSource).toMatch(/\.simple\.fill\s*\{[^}]*min-height: calc\(/);
+  expect(viewSource).not.toMatch(/\.simple\.fill\s*\{[^}]*[^-]height: calc\(/);
+  expect(viewSource).toContain('grid-template-rows: repeat(var(--rows), minmax(min-content, 1fr));');
+});
+
+test('bars_expose_their_values_as_meters', () => {
+  const { valueOf } = setup();
+  const vram = document.querySelector<HTMLElement>('.bar[role="meter"][aria-label="VRAM"]')!;
+  expect(vram).toBeTruthy();
+  const used = valueOf(`${GPU}/data/memory-dedicated-used`);
+  const total = valueOf(`${GPU}/data/memory-dedicated-total`);
+  expect(Number(vram.getAttribute('aria-valuenow'))).toBeCloseTo(Math.min(100, (used / total) * 100));
+  expect(vram.getAttribute('aria-valuemax')).toBe('100');
+  const threads = [...document.querySelectorAll<HTMLElement>('.threads i')];
+  expect(threads.every((bar) => bar.getAttribute('role') === 'meter' && bar.getAttribute('aria-valuenow') !== null)).toBe(true);
+  expect(threads[0].getAttribute('aria-label')).toBe(t('sensor.cpu.load.thread', { arg: '0' }));
+  const activity = [...document.querySelectorAll<HTMLElement>('.disks .act')];
+  expect(activity.length).toBeGreaterThan(0);
+  expect(activity.every((bar) => bar.getAttribute('role') === 'meter' && bar.getAttribute('aria-valuenow') !== null && bar.getAttribute('aria-label')?.startsWith(t('tile.disk.activity')))).toBe(true);
+});
+
+test('fan_rpm_uses_the_locale_separators', () => {
+  i18n.locale = 'it';
+  const rpm: Sensor = { id: `${GPU}/fan/rpm`, deviceId: GPU, kind: 'fan', unit: 'rpm', label: { key: 'gpu.fan.rpm' }, source: 'mock', category: 'fan' };
+  const schema: Schema = { ...MOCK_SCHEMA, sensors: [...MOCK_SCHEMA.sensors, rpm] };
+  const store = new LiveStore();
+  store.applySchema(schema);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: [...mockValues(1), 1500] });
+  render(SimpleView, { store, onOpenAdvanced: () => {} });
+  expect(chipTexts().some((chip) => chip.includes('1.500 RPM'))).toBe(true);
 });

@@ -1595,5 +1595,7 @@
   "glossary.diskActivity.name": "Disk activity",
   "glossary.diskActivity": "The share of time the disk is working: at 100% it is always busy.",
   "glossary.dimm.name": "DIMM",
-  "glossary.dimm": "The RAM modules fitted on the motherboard; the temperature is only there with the advanced sensors."
+  "glossary.dimm": "The RAM modules fitted on the motherboard; the temperature is only there with the advanced sensors.",
+  "glossary.gpuClock.name": "GPU clock",
+  "glossary.gpuClock": "The frequency the GPU chip is running at right now: it rises under load and drops at idle."
 }

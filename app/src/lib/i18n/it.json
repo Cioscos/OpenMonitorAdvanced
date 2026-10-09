@@ -1595,5 +1595,7 @@
   "glossary.diskActivity.name": "Attività del disco",
   "glossary.diskActivity": "La parte di tempo in cui il disco sta lavorando: al 100% è sempre occupato.",
   "glossary.dimm.name": "DIMM",
-  "glossary.dimm": "I moduli di RAM montati sulla scheda madre; la temperatura c'è solo con i sensori avanzati."
+  "glossary.dimm": "I moduli di RAM montati sulla scheda madre; la temperatura c'è solo con i sensori avanzati.",
+  "glossary.gpuClock.name": "Clock della GPU",
+  "glossary.gpuClock": "La frequenza a cui lavora il chip della GPU in questo momento: sale sotto carico e scende a riposo."
 }

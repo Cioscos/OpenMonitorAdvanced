@@ -380,14 +380,17 @@ describe('strips', () => {
 
   test('scale_symbol_follows_the_display_units', () => {
     const symbol = (unit: Parameters<typeof displayScale>[0], units: Parameters<typeof displayScale>[1] = { temperature: 'c', rate: 'bytes' }, locale = 'en') =>
-      scaleSymbol(displayScale(unit, units), locale, tEn);
+      scaleSymbol(unit, displayScale(unit, units), locale, tEn);
     expect(symbol('percent')).toBe('%');
     expect(symbol('celsius')).toBe('°C');
     expect(symbol('celsius', { temperature: 'f', rate: 'bytes' })).toBe('°F');
-    expect(symbol('bytes_per_second', { temperature: 'c', rate: 'bits' })).toBe('bit/s');
-    expect(symbol('bytes_per_second', { temperature: 'c', rate: 'bits' }, 'it')).toBe('bit/s');
     expect(symbol('watt')).toBe('W');
+    expect(symbol('volt')).toBe('V');
+    expect(symbol('rpm')).toBe('RPM');
     // No symbol: the title shows the name only.
     for (const unit of ['count', 'boolean', 'lanes', 'pcie_generation'] as const) expect(symbol(unit)).toBeNull();
+    // Values that pick their own prefix (GHz, GB, Mbit/s, kJ): a base symbol in the title would be wrong.
+    for (const unit of ['megahertz', 'bytes', 'bytes_per_second', 'bits_per_second', 'joule'] as const) expect(symbol(unit)).toBeNull();
+    expect(symbol('bytes_per_second', { temperature: 'c', rate: 'bits' })).toBeNull();
   });
 });

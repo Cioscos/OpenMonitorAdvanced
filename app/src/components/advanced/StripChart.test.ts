@@ -11,10 +11,12 @@ import { connectSettings, disconnectSettings } from '../../test/settings';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
-import { formatTimeTick, scaleOptions, TIME_LABEL_GAP_PX } from '../../lib/advanced/chartData';
+import { ChartBuffer, formatTimeTick, scaleOptions, TIME_LABEL_GAP_PX } from '../../lib/advanced/chartData';
 import { formatValue } from '../../lib/format';
 import type uPlot from 'uplot';
 import StripChart from './StripChart.svelte';
+import legendSource from './StripLegend.svelte?raw';
+import drawerSource from './SeriesDrawer.svelte?raw';
 
 // Calls through to the real painter; tests read the held segments it was handed.
 vi.mock('../../lib/advanced/chartCanvas', async (importOriginal) => {
@@ -60,9 +62,16 @@ const checkbox = (label: string) => {
 /** The legend row of a series, found by its name button. */
 const legendRow = (s: Sensor) => screen.getByRole('button', { name: labelOf(s) }).closest<HTMLElement>('.row')!;
 const legendCell = (s: Sensor, cell: 'now' | 'min' | 'max') => legendRow(s).querySelector(`.${cell}`)!.textContent;
-/** Legend title of a unit, «Name · symbol»; `named` matches it whatever the symbol. */
-const legendTitle = (unit: string, symbol: string) => `${t(`advanced.chart.unit.${unit}`)} · ${symbol}`;
-const named = (unit: string) => new RegExp(`^${t(`advanced.chart.unit.${unit}`)}( · |$)`);
+/** Title of a unit, «Name · symbol», or the name alone for units whose values pick their own prefix. */
+const legendTitle = (unit: string, symbol: string | null = null) => {
+  const name = t(`advanced.chart.unit.${unit}`);
+  return symbol === null ? name : `${name} · ${symbol}`;
+};
+/** Matches a legend title by its whole text (the symbol has its own span). */
+const titled = (text: string) => (_: string, el: Element | null) => !!el?.matches('.legend .title') && el.textContent === text;
+/** Matches the legend title of a unit whatever its symbol. */
+const named = (unit: string) => (_: string, el: Element | null) =>
+  !!el?.matches('.legend .title') && new RegExp(`^${t(`advanced.chart.unit.${unit}`)}( · |$)`).test(el.textContent ?? '');
 const removeButton = (s: Sensor) => screen.getByRole('button', { name: t('advanced.chart.remove', { name: labelOf(s) }) });
 
 /** Runs a strip's cursor hook as uPlot does with the pointer at sample `idx` (null: it left). */
@@ -169,8 +178,8 @@ test('one_plot_per_unit_with_its_own_y_axis', async () => {
     // Our legend replaces uPlot's.
     expect(plot.opts.legend?.show).toBe(false);
   }
-  expect(screen.getByText(legendTitle('percent', '%'))).toBeTruthy();
-  expect(screen.getByText(legendTitle('celsius', '°C'))).toBeTruthy();
+  expect(screen.getByText(titled(legendTitle('percent', '%')))).toBeTruthy();
+  expect(screen.getByText(titled(legendTitle('celsius', '°C')))).toBeTruthy();
 });
 
 test('long windows ask for decimated history and the choice persists', async () => {
@@ -338,7 +347,7 @@ test('a_third_unit_adds_a_third_strip', async () => {
   await vi.waitFor(() => expect(plots).toHaveLength(5));
   expect(live().map((p) => p.opts.series[1].scale)).toEqual(['percent', 'celsius', 'bytes']);
   expect(document.querySelectorAll('.strip')).toHaveLength(3);
-  expect(within(document.querySelectorAll<HTMLElement>('.strip')[2]).getByText(legendTitle('bytes', 'B'))).toBeTruthy();
+  expect(within(document.querySelectorAll<HTMLElement>('.strip')[2]).getByText(titled(legendTitle('bytes')))).toBeTruthy();
   expect(checkbox(labelOf(byId(VRAM))).checked).toBe(true);
 });
 
@@ -1819,10 +1828,14 @@ test('offscreen_strips_skip_set_data_until_visible', async () => {
   const painted = paintsOf(hiddenCanvas).length;
 
   monotonicMs = 500;
+  const columns = vi.spyOn(ChartBuffer.prototype, 'columns');
   store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
   flushSync();
   expect(percent.setDataCalls).toBe(1);
   expect(celsius.setDataCalls).toBe(0);
+  // Only the strip on screen gets its columns built.
+  expect(columns).toHaveBeenCalledTimes(1);
+  columns.mockRestore();
   frame(1000);
   frame(2000);
   // No paths, no paint, no scroll for the strip off screen.
@@ -1839,6 +1852,16 @@ test('offscreen_strips_skip_set_data_until_visible', async () => {
   // Rebased on the shared viewport, 1.5 s after the snapshot rebased the strip on screen.
   expect(celsius.scales.at(-1)?.range.max).toBeCloseTo(percent.scales.at(-1)!.range.max + 1.5, 9);
   expect(paintsOf(hiddenCanvas).length).toBeGreaterThan(painted);
+});
+
+test('strips_share_one_time_column_per_snapshot', async () => {
+  const store = new LiveStore();
+  renderChart(fakeBackend(), store);
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 3000, values: mockValues(1) });
+  flushSync();
+  expect(plots[0].data[0]).toEqual([1, 2, 3]);
+  expect(plots[1].data[0]).toBe(plots[0].data[0]);
 });
 
 test('legend_shows_latest_values_without_cursor_and_cursor_values_on_hover', async () => {
@@ -1951,7 +1974,7 @@ test('temperature_unit_change_keeps_one_strip', async () => {
   expect(document.querySelectorAll('.strip')).toHaveLength(2);
   // One temperature legend, its title in the unit now drawn.
   expect(screen.getAllByText(named('celsius'))).toHaveLength(1);
-  expect(screen.getByText(legendTitle('celsius', '°F'))).toBeTruthy();
+  expect(screen.getByText(titled(legendTitle('celsius', '°F')))).toBeTruthy();
   expect(legendCell(byId(TEMP), 'max')).toBe('70 °F');
   expect(backend.historyCalls).toHaveLength(1);
 });
@@ -2016,16 +2039,27 @@ test('legend_titles_carry_the_display_unit_symbol', async () => {
   await connectSettings({ general: { temperatureUnit: 'f' } });
   renderChart(fakeBackend());
   await vi.waitFor(() => expect(plots).toHaveLength(2));
-  expect(screen.getByText(legendTitle('celsius', '°F'))).toBeTruthy();
+  expect(screen.getByText(titled(legendTitle('celsius', '°F')))).toBeTruthy();
   await settings.update({ general: { temperatureUnit: 'c' } });
-  await vi.waitFor(() => expect(screen.getByText(legendTitle('celsius', '°C'))).toBeTruthy());
-  expect(screen.getByText(legendTitle('percent', '%'))).toBeTruthy();
+  await vi.waitFor(() => expect(screen.getByText(titled(legendTitle('celsius', '°C')))).toBeTruthy());
+  expect(screen.getByText(titled(legendTitle('percent', '%')))).toBeTruthy();
 
   cleanup();
   const store = new LiveStore();
   store.applySchema(MOCK_SCHEMA);
   render(StripChart, { sectionId: NIC, sensors: nicSensors, defaults: NIC_DEFAULTS, schema: MOCK_SCHEMA, store, backend: fakeBackend(), rate: 'bits' });
-  await vi.waitFor(() => expect(screen.getByText(legendTitle('bytes_per_second', 'bit/s'))).toBeTruthy());
+  await vi.waitFor(() => expect(screen.getByText(titled(legendTitle('bytes_per_second')))).toBeTruthy());
+});
+
+test('title_symbols_keep_their_case_in_their_own_span', async () => {
+  await connectSettings({ general: { temperatureUnit: 'f' } });
+  renderChart(fakeBackend());
+  await vi.waitFor(() => expect(plots).toHaveLength(2));
+  expect([...document.querySelectorAll('.legend .title .symbol')].map((el) => el.textContent)).toEqual(['%', '°F']);
+  expect(legendSource).toMatch(/\.symbol\s*\{[^}]*text-transform: none;/);
+  expect(drawerSource).toMatch(/\.symbol\s*\{[^}]*text-transform: none;/);
+  openDrawer();
+  expect(drawer()!.querySelectorAll('.title .symbol').length).toBeGreaterThan(0);
 });
 
 test('strips_have_no_right_padding_so_the_lines_end_by_the_legend', async () => {
@@ -2068,7 +2102,8 @@ describe('series drawer', () => {
     expect(dialog.style.left).toBe('72px');
     expect(dialog.style.right).toBe('232px');
     expect(dialog.style.top).toBe('0px');
-    expect(dialog.style.bottom).toBe('0px');
+    // It ends where the last strip's time labels start, so they stay readable.
+    expect(dialog.style.bottom).toBe('40px');
     // Axes and legends stay outside it.
     for (const legend of document.querySelectorAll('.legend')) expect(dialog.contains(legend)).toBe(false);
   });
@@ -2148,8 +2183,8 @@ describe('series drawer', () => {
     expect(drawer()).toBeTruthy();
     expect(checkbox(labelOf(byId(VRAM))).checked).toBe(true);
     // The strips' units come first in the drawer, in strip order, named like the legends.
-    expect(groupNames().slice(0, 3)).toEqual([legendTitle('percent', '%'), legendTitle('celsius', '°C'), legendTitle('bytes', 'B')]);
-    expect(screen.getAllByRole('group', { name: legendTitle('bytes', 'B') }).filter((g) => !drawer()!.contains(g))).toHaveLength(1);
+    expect(groupNames().slice(0, 3)).toEqual([legendTitle('percent', '%'), legendTitle('celsius', '°C'), legendTitle('bytes')]);
+    expect(screen.getAllByRole('group', { name: legendTitle('bytes') }).filter((g) => !drawer()!.contains(g))).toHaveLength(1);
   });
 
   test('unticking_in_the_drawer_drops_an_empty_strip', async () => {
@@ -2172,12 +2207,27 @@ describe('series drawer', () => {
   test('chart_grows_to_360px_while_the_drawer_is_open', async () => {
     renderChart(fakeBackend());
     await vi.waitFor(() => expect(plots).toHaveLength(2));
-    const strips = document.querySelector<HTMLElement>('.strips')!;
-    expect(strips.style.minHeight).toBe('');
+    const legends = () => [...document.querySelectorAll<HTMLElement>('.strip .legend')].map((l) => l.style.height);
+    const [first, last] = live();
+    expect(legends()).toEqual(['130px', '170px']);
     openDrawer();
-    expect(strips.style.minHeight).toBe('360px');
+    // 130 + 170 px: the last strip takes the 60 px missing to 360, so its time labels stay under the drawer.
+    expect(last.sizes.at(-1)).toEqual({ width: last.width, height: 230 });
+    expect(last.height).toBe(230);
+    expect(first.sizes).toEqual([]);
+    expect(legends()).toEqual(['130px', '230px']);
+    expect(document.querySelector<HTMLElement>('.strips')!.style.minHeight).toBe('');
     await fireEvent.click(seriesButton());
-    expect(strips.style.minHeight).toBe('');
+    expect(last.height).toBe(170);
+    expect(legends()).toEqual(['130px', '170px']);
+    expect(live()).toEqual([first, last]);
+  });
+
+  test('a_single_strip_grows_to_360px_with_the_drawer', async () => {
+    renderChart(fakeBackend(), new LiveStore(), gpuSensors, [TEMP]);
+    await vi.waitFor(() => expect(plots).toHaveLength(1));
+    openDrawer();
+    expect(plots[0].height).toBe(360);
   });
 
   test('the_drawer_opens_with_no_series_chosen', async () => {
@@ -2198,6 +2248,8 @@ describe('series drawer', () => {
     const button = seriesButton();
     expect(button.textContent?.trim()).toBe(`${t('advanced.chart.series')} · 2`);
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    // Only an open drawer is in the document to be controlled.
+    expect(button.hasAttribute('aria-controls')).toBe(false);
     openDrawer();
     expect(button.getAttribute('aria-expanded')).toBe('true');
     expect(button.getAttribute('aria-controls')).toBe(drawer()!.id);
@@ -2205,6 +2257,7 @@ describe('series drawer', () => {
     expect(button.textContent?.trim()).toBe(`${t('advanced.chart.series')} · 3`);
     await fireEvent.click(button);
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(button.hasAttribute('aria-controls')).toBe(false);
   });
 
   test('rows_show_the_value_now_like_the_legend', async () => {

@@ -35,6 +35,7 @@
     syncKey,
     reducedMotion,
     oncursor,
+    onvisible,
   }: {
     unit: Unit;
     /** Colour and dash of each series, in strip order. */
@@ -55,6 +56,8 @@
     reducedMotion: boolean;
     /** Data index under the cursor of this strip or of a synced one; null once it leaves. */
     oncursor: (idx: number | null) => void;
+    /** Back on screen: the parent hands over its data of now through `setData`. */
+    onvisible: () => void;
   } = $props();
 
   /** Radius of the white endpoint dot in CSS px; its layer is padded by it on every side. */
@@ -64,8 +67,6 @@
   let plot: uPlot | undefined;
   /** The latest data handed over by the parent; the plot may hold older data while off screen. */
   let latest: uPlot.AlignedData | undefined;
-  /** `latest` is newer than the plot's data (the strip was off screen). */
-  let stale = false;
   /** Without IntersectionObserver (jsdom) a strip is always on screen. */
   let visible = true;
   /** The window is hidden: nothing is drawn until the parent rebuilds the strip. */
@@ -81,8 +82,9 @@
   let tickIncrement = 60;
   let autoscaleY = true;
   let labelContext: CanvasRenderingContext2D | null | undefined;
-  /** CSS width the plot was built or last sized at; only a new width resizes it. */
+  /** CSS size the plot was built or last sized at; only a new size resizes it. */
   let plotCssWidth = 0;
+  let plotCssHeight = 0;
 
   type YRange = { min: number; max: number };
   /** Duration in ms of the move to a new automatic Y range. */
@@ -379,7 +381,7 @@
     plot?.destroy();
     plot = undefined;
     latest = data;
-    stale = false;
+    plotCssHeight = height;
     const css = getComputedStyle(document.documentElement);
     const read = (token: string) => css.getPropertyValue(token).trim();
     const muted = read('--text-muted');
@@ -474,14 +476,15 @@
     rebase(performance.now());
   }
 
-  /** A new sample: the parent's data, then a rebase on the shared viewport. Off screen, kept for later. */
+  /** On screen: the parent builds no new columns for a strip off screen. */
+  export function onScreen() {
+    return visible;
+  }
+
+  /** A new sample: the parent's data, then a rebase on the shared viewport. Off screen, nothing is drawn. */
   export function setData(data: uPlot.AlignedData, nowMonoMs: number) {
     latest = data;
-    if (!plot || paused) return;
-    if (!visible) {
-      stale = true;
-      return;
-    }
+    if (!plot || paused || !visible) return;
     plot.batch(() => {
       plot!.setData(data, false);
       rebase(nowMonoMs);
@@ -501,6 +504,17 @@
     plot = undefined;
     latest = undefined;
   }
+
+  // The drawer makes the last strip taller: uPlot keeps scales and series, and its draw hook
+  // repaints the layers at the new size. Only on open and close, never per frame.
+  $effect(() => {
+    const next = height;
+    untrack(() => {
+      if (paused || !plot || next === plotCssHeight) return;
+      plotCssHeight = next;
+      plot.setSize({ width: plotCssWidth, height: next });
+    });
+  });
 
   // The legend hides and shows series: uPlot redraws, and the draw hook repaints the layers.
   $effect(() => {
@@ -523,7 +537,7 @@
             const width = Math.max(320, (entries.at(-1)?.contentRect.width ?? container.clientWidth) || 800);
             if (paused || !plot || width === plotCssWidth) return;
             plotCssWidth = width;
-            plot.setSize({ width, height });
+            plot.setSize({ width, height: plotCssHeight });
           });
     resizeObserver?.observe(container);
     // Off screen, a strip neither recomputes paths nor draws; back on screen it catches up.
@@ -534,14 +548,7 @@
             const next = entries.at(-1)?.isIntersecting ?? visible;
             if (next === visible) return;
             visible = next;
-            if (!visible || !plot || paused || !latest) return;
-            const data = latest;
-            const resync = stale;
-            stale = false;
-            plot.batch(() => {
-              if (resync) plot!.setData(data, false);
-              rebase(performance.now());
-            });
+            if (visible && plot && !paused) onvisible();
           });
     intersectionObserver?.observe(container);
     return () => {

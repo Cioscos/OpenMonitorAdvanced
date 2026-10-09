@@ -18,12 +18,16 @@
   // The legend of one strip (spec §2.4): uPlot's own legend is off. Sensor names are text only.
   let {
     title,
+    symbol = null,
     rows,
     height,
     ontoggle,
     onremove,
   }: {
+    /** The unit's name. */
     title: string;
+    /** The symbol its values are drawn in, shown after the name in its own case; null for none. */
+    symbol?: string | null;
     rows: StripLegendRow[];
     /** CSS height of the strip: the legend never makes it taller, it scrolls instead. */
     height?: number;
@@ -34,8 +38,8 @@
   } = $props();
 </script>
 
-<div class="legend" role="group" aria-label={title} style:height={height === undefined ? undefined : `${height}px`} style:overflow-y="auto">
-  <p class="title">{title}</p>
+<div class="legend" role="group" aria-label={symbol ? `${title} · ${symbol}` : title} style:height={height === undefined ? undefined : `${height}px`} style:overflow-y="auto">
+  <p class="title">{title}{#if symbol}{' · '}<span class="symbol">{symbol}</span>{/if}</p>
   <ul>
     {#each rows as row (row.id)}
       <li class="row" class:off={row.hidden}>
@@ -93,6 +97,10 @@
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+  /* MHz, bit/s and °F keep their case. */
+  .symbol {
+    text-transform: none;
   }
   ul {
     display: flex;

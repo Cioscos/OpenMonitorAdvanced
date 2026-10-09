@@ -91,10 +91,15 @@ export class ChartBuffer {
     ];
   }
 
-  /** x (seconds) plus only the columns at `indices`; `convert[k]` applies to `indices[k]`. */
-  columns(indices: number[], convert: ReadonlyArray<((value: number) => number) | undefined> = []): uPlot.AlignedData {
+  /** The x column in seconds, a fresh copy; strips of one snapshot share it and never write to it. */
+  times(): number[] {
+    return this.#timestampsMs.map((ms) => ms / 1000);
+  }
+
+  /** `times` plus only the columns at `indices`; `convert[k]` applies to `indices[k]`. */
+  columns(indices: number[], convert: ReadonlyArray<((value: number) => number) | undefined> = [], times: number[] = this.times()): uPlot.AlignedData {
     return [
-      this.#timestampsMs.map((ms) => ms / 1000),
+      times,
       ...indices.map((index, k) => {
         const column = this.#series[index] ?? [];
         const fn = convert[k];
@@ -202,11 +207,16 @@ export function displayScale(unit: Unit, units: ChartUnits): DisplayScale {
   return { convert: undefined, format: (value, locale, t) => formatValue(value, unit, locale, t) };
 }
 
+/** Units whose values pick their own prefix (GHz, GB, Mbit/s, kJ): no single symbol fits a title. */
+const AUTO_PREFIX_UNITS: ReadonlySet<Unit> = new Set(['megahertz', 'bytes', 'bytes_per_second', 'bits_per_second', 'joule']);
+
 /**
- * The symbol a display scale writes after its numbers ("%", "°F", "bit/s"), read from its own
- * formatter so it follows the display units; null for units without one (count, flags, lanes).
+ * The symbol a display scale of `unit` writes after its numbers ("%", "°F", "RPM"), read from
+ * its own formatter so it follows the display units; null for units without one (count, flags,
+ * lanes) and for those whose values pick their own prefix.
  */
-export function scaleSymbol(scale: DisplayScale, locale: string, t: Translate): string | null {
+export function scaleSymbol(unit: Unit, scale: DisplayScale, locale: string, t: Translate): string | null {
+  if (AUTO_PREFIX_UNITS.has(unit)) return null;
   const text = scale.format(1, locale, t);
   const symbol = text.replace(/^[\d\s.,]+/u, '');
   return symbol !== text && symbol !== '' && !/\d/.test(symbol) ? symbol : null;

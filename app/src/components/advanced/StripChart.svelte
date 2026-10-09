@@ -189,19 +189,46 @@
     }));
   }
 
-  /** The strips' columns of the buffer, with the legend extents and the suspended notices. */
-  function collect() {
+  /**
+   * The strips' columns of the buffer, with the legend extents and the suspended notices. One
+   * time column serves every strip of the snapshot; a strip off screen keeps what it has, unless
+   * `all` (a build), and gets fresh columns when it comes back (`refreshStrip`).
+   */
+  function collect(all = false) {
     if (!buffer) return;
-    const data = strips.map((strip, s) => buffer!.columns(strip.indices, strip.ids.map(() => scales[s]?.convert)));
-    const last = buffer.lastTimestampMs;
-    const since = last === null ? Infinity : (last - buffer.windowSeconds * 1000) / 1000;
+    const times = buffer.times();
+    const keep = (s: number) => !all && stripData[s] !== undefined && refs[strips[s].unit]?.onScreen() === false;
+    const next = strips.map((_, s) => (keep(s) ? null : stripColumns(s, times)));
+    stripData = next.map((entry, s) => entry?.data ?? stripData[s]);
+    extents = next.map((entry, s) => entry?.extents ?? extents[s]);
+    suspended = next.map((entry, s) => entry?.suspended ?? suspended[s]);
+  }
+
+  /** Strip `s`'s columns over `times`, the extents of its series and its suspended notice. */
+  function stripColumns(s: number, times: number[]) {
+    const strip = strips[s];
+    const data = buffer!.columns(strip.indices, strip.ids.map(() => scales[s]?.convert), times);
+    const last = buffer!.lastTimestampMs;
+    const since = last === null ? Infinity : (last - buffer!.windowSeconds * 1000) / 1000;
     // ChartBuffer columns are plain arrays, never typed ones.
-    extents = data.map(([xs, ...columns]) => columns.map((column) => windowExtent(xs as number[], column as (number | null)[], since)));
+    const [, ...columns] = data;
+    const stripExtents = columns.map((column) => windowExtent(times, column as (number | null)[], since));
     // True when no series has a value inside the visible window (the one retained sample
     // before its left edge does not count) and the store's latest quality of each is suspended.
-    suspended = strips.map((strip, s) => last !== null
-      && strip.ids.every((id) => store.quality(id) === 2) && extents[s].every((extent) => extent === null));
-    stripData = data;
+    const isSuspended = last !== null && strip.ids.every((id) => store.quality(id) === 2) && stripExtents.every((extent) => extent === null);
+    return { data, extents: stripExtents, suspended: isSuspended };
+  }
+
+  /** A strip came back on screen: its columns of now, then the strip catches up. */
+  function refreshStrip(unit: Unit) {
+    const s = strips.findIndex((strip) => strip.unit === unit);
+    if (paused || !buffer || s < 0) return;
+    const entry = stripColumns(s, buffer.times());
+    const put = <T,>(list: T[], value: T) => list.map((old, k) => (k === s ? value : old));
+    stripData = put(stripData, entry.data);
+    extents = put(extents, entry.extents);
+    suspended = put(suspended, entry.suspended);
+    refs[unit]?.setData(entry.data, performance.now());
   }
 
   async function reseed(ids: string[], seconds: number) {
@@ -256,7 +283,7 @@
     // A series that left the selection comes back visible.
     hiddenIds = new Set(buffer.ids.filter((id) => hiddenIds.has(id)));
     configure();
-    collect();
+    collect(true);
     for (const [s, strip] of strips.entries()) refs[strip.unit]?.build(stripData[s]);
     startFrames();
   }
@@ -272,9 +299,11 @@
     buffer.append(timestampMs, buffer.ids.map((id) => store.measured(id)));
     buffer.trim(timestampMs);
     viewport.sample(timestampMs, performance.now());
+    const before = stripData;
     collect();
     const now = performance.now();
-    for (const [s, strip] of strips.entries()) refs[strip.unit]?.setData(stripData[s], now);
+    // A strip off screen kept its columns: nothing new to hand over.
+    for (const [s, strip] of strips.entries()) if (stripData[s] !== before[s]) refs[strip.unit]?.setData(stripData[s], now);
   }
 
   const fallbackScale = displayScale('count', { temperature: 'c', rate: 'bytes' });
@@ -315,14 +344,16 @@
     });
   }
 
-  /** «Temperature · °F»: the unit's name and the symbol its values are drawn in, when it has one. */
-  function titleOf(unit: Unit): string {
-    const name = t(`advanced.chart.unit.${unit}`);
-    const symbol = scaleSymbol(scaleFor(unit), i18n.locale, t);
-    return symbol ? `${name} · ${symbol}` : name;
-  }
+  /** A unit's title is its name and the symbol its values are drawn in, when it has one: «Temperature · °F». */
+  const nameOf = (unit: Unit) => t(`advanced.chart.unit.${unit}`);
+  const symbolOf = (unit: Unit) => scaleSymbol(unit, scaleFor(unit), i18n.locale, t);
 
-  const heightOf = (s: number) => (strips.length === 1 ? STRIP_SINGLE_HEIGHT : STRIP_HEIGHT + (s === strips.length - 1 ? TIME_AXIS_HEIGHT : 0));
+  /** Least height of the strips while the drawer is open (spec §3). */
+  const DRAWER_MIN_HEIGHT = 360;
+  const baseHeightOf = (s: number) => (strips.length === 1 ? STRIP_SINGLE_HEIGHT : STRIP_HEIGHT + (s === strips.length - 1 ? TIME_AXIS_HEIGHT : 0));
+  /** What the last strip grows by while the drawer is open, so the strips are at least 360 px tall. */
+  const drawerExtra = $derived(drawerOpen ? Math.max(0, DRAWER_MIN_HEIGHT - strips.reduce((sum, _, s) => sum + baseHeightOf(s), 0)) : 0);
+  const heightOf = (s: number) => baseHeightOf(s) + (s === strips.length - 1 ? drawerExtra : 0);
 
   // Reseed on selection, window or schema change, and when the window becomes visible again.
   $effect(() => {
@@ -422,14 +453,14 @@
       class="series"
       class:on={drawerOpen}
       aria-expanded={drawerOpen}
-      aria-controls={drawerId}
+      aria-controls={drawerOpen ? drawerId : undefined}
       onclick={() => (drawerOpen ? closeDrawer() : (drawerOpen = true))}
     >{t('advanced.chart.series')} · {selected.length}</button>
   </div>
-  <!-- The drawer is as tall as the strips, which grow to 360 px for it while it is open. -->
-  <div class="strips" style:min-height={drawerOpen ? '360px' : undefined}>
+  <!-- The drawer ends where the time labels start; the last strip grows for it to 360 px in all. -->
+  <div class="strips">
     {#if selected.length === 0}
-      <div class="placeholder" style:min-height="{STRIP_SINGLE_HEIGHT}px">
+      <div class="placeholder" style:min-height="{drawerOpen ? DRAWER_MIN_HEIGHT : STRIP_SINGLE_HEIGHT}px">
         <p class="empty">{t('advanced.chart.empty')}</p>
       </div>
     {:else}
@@ -450,10 +481,11 @@
               {syncKey}
               {reducedMotion}
               oncursor={(idx) => (cursorIdx = idx)}
+              onvisible={() => refreshStrip(strip.unit)}
             />
             {#if suspended[s]}<p class="empty">{t('chart.suspended')}</p>{/if}
           </div>
-          <StripLegend title={titleOf(strip.unit)} rows={rowsOf(s, strip)} height={heightOf(s)} ontoggle={toggleHidden} onremove={toggle} />
+          <StripLegend title={nameOf(strip.unit)} symbol={symbolOf(strip.unit)} rows={rowsOf(s, strip)} height={heightOf(s)} ontoggle={toggleHidden} onremove={toggle} />
         </div>
       {/each}
     {/if}
@@ -464,7 +496,8 @@
         chosen={selected}
         bind:filter={drawerFilter}
         {valueText}
-        unitTitle={titleOf}
+        unitTitle={nameOf}
+        unitSymbol={symbolOf}
         ontoggle={toggle}
         onsetmany={setMany}
         onclose={closeDrawer}

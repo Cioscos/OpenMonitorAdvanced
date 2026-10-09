@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { LEGEND_GAP_PX, LEGEND_PX, Y_AXIS_PX } from '../../lib/advanced/chartData';
+  import { LEGEND_GAP_PX, LEGEND_PX, TIME_AXIS_HEIGHT, Y_AXIS_PX } from '../../lib/advanced/chartData';
   import type { DrawerGroup } from '../../lib/advanced/drawer';
   import { sensorLabel } from '../../lib/advanced/labels';
   import { t } from '../../lib/i18n/index.svelte';
   import type { Unit } from '../../lib/types';
 
   // The «Series» drawer (spec §3): a non-modal dialog over the column of lines only, between
-  // the strips' Y axes and their legends, so neither is ever covered. Sensor names are text only.
+  // the strips' Y axes and their legends and above the time labels, so none is ever covered. Sensor names are text only.
   let {
     id,
     groups,
@@ -15,6 +15,7 @@
     filter = $bindable(''),
     valueText,
     unitTitle,
+    unitSymbol = () => null,
     ontoggle,
     onsetmany,
     onclose,
@@ -29,6 +30,8 @@
     valueText: (id: string) => string;
     /** Group heading: the same as the legend title of that unit. */
     unitTitle: (unit: Unit) => string;
+    /** The symbol after the heading, as in the legend; null for none. */
+    unitSymbol?: (unit: Unit) => string | null;
     ontoggle: (id: string) => void;
     /** Ticks (`on`) or unticks the given ids: the group's rows left by the filter. */
     onsetmany: (ids: string[], on: boolean) => void;
@@ -66,7 +69,7 @@
   style:left="{Y_AXIS_PX}px"
   style:right="{LEGEND_PX + LEGEND_GAP_PX}px"
   style:top="0px"
-  style:bottom="0px"
+  style:bottom="{TIME_AXIS_HEIGHT}px"
   {onkeydown}
 >
   <input
@@ -81,11 +84,13 @@
   />
   <div class="groups" style:grid-template-columns={twoColumns ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'}>
     {#each groups as group (group.unit)}
-      {@const title = unitTitle(group.unit)}
+      {@const unitName = unitTitle(group.unit)}
+      {@const symbol = unitSymbol(group.unit)}
+      {@const title = symbol ? `${unitName} · ${symbol}` : unitName}
       {@const ids = group.sensors.map((s) => s.id)}
       <section class="group" role="group" aria-label={title}>
         <header>
-          <span class="title">{title}</span>
+          <span class="title">{unitName}{#if symbol}{' · '}<span class="symbol">{symbol}</span>{/if}</span>
           <span class="bulk">
             <button type="button" onclick={() => onsetmany(ids, true)}>{t('advanced.chart.all')}</button>
             <span aria-hidden="true">·</span>
@@ -177,6 +182,9 @@
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+  .symbol {
+    text-transform: none;
   }
   .bulk {
     display: flex;

@@ -143,22 +143,8 @@ export function verdictTitle(detail: { verdict: string | null; params: Record<st
   return t(`performance.outcome.${detail.verdict}`, params);
 }
 
-/** DA5: the CPU temperature (first present) and package power, as the chart's series. */
+/** DA5: the CPU temperatures in order of preference; the chart shows the first present. */
 const CPU_TEMPERATURES = ['tdie', 'tctl', 'package', 'core-max'].map((name) => `cpu/0/temperature/${name}`);
-export function cpuChartSensors(schema: Schema | null): Sensor[] {
-  const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
-  const temperature = CPU_TEMPERATURES.map((id) => byId.get(id)).find(Boolean);
-  return [temperature, byId.get('cpu/0/power/package')].filter((s): s is Sensor => s !== undefined);
-}
-
-/** DA5/DG12: the GPU temperature (core, else hotspot) and board power of a GPU device, as the chart's series; `deviceId` is the test's GPU (`RunStatus.gpuDeviceId`). */
-export function gpuChartSensors(schema: Schema | null, deviceId: string | null): Sensor[] {
-  const byId = new Map(schema?.sensors.map((s) => [s.id, s]));
-  const device = deviceId;
-  if (device === null) return [];
-  const temperature = ['core', 'hotspot'].map((name) => byId.get(`${device}/temperature/${name}`)).find(Boolean);
-  return [temperature, byId.get(`${device}/power/board`)].filter((s): s is Sensor => s !== undefined);
-}
 
 /** DM16: the series of the stress chart, by component and objective (spec §5.4); a missing sensor is skipped. */
 export function stressChartSensors(schema: Schema | null, component: StressComponent, objective: Objective, gpuDeviceId: string | null, diskDeviceId: string | null): Sensor[] {

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { formatBytes, formatClock, formatPercent, formatPower, formatRate, formatTemperature } from '../../lib/format';
+  import { formatBytes, formatClock, formatPercent, formatPower, formatRate, formatTemperature, formatValue } from '../../lib/format';
   import { simpleGrid } from '../../lib/simpleGrid';
+  import { sensorLabel } from '../../lib/advanced/labels';
   import { sectionForTile } from '../../lib/advanced/nav';
   import { bannerText, health } from '../../lib/health.svelte';
   import { i18n, t } from '../../lib/i18n/index.svelte';
@@ -61,7 +62,13 @@
   const memAt = $derived(gpuBase + gpus.length);
   const netDiskAt = $derived(memAt + (mem ? 1 : 0));
 
-  const rpm = (v: number) => `${Math.round(v)} RPM`;
+  const rpm = (v: number) => formatValue(v, 'rpm', locale, t);
+  const sensorById = $derived(new Map(store.schema?.sensors.map((s) => [s.id, s])));
+  /** A sensor's display name; the id when the schema no longer has it. */
+  const nameOf = (id: string) => {
+    const sensor = sensorById.get(id);
+    return sensor ? sensorLabel(sensor, t) : id;
+  };
   const pctOf = (used: number | null, total: number | null) =>
     used !== null && total ? Math.min(100, (used / total) * 100) : 0;
 
@@ -94,7 +101,7 @@
         <div class="chips">
           {#if cpu.temperatureC !== null}<div class="chip"><span>{t('tile.temperature')}</span> {formatTemperature(cpu.temperatureC, locale)}</div>{/if}
           {#if cpu.powerW !== null}<div class="chip"><span>{t('tile.power')}</span> {formatPower(cpu.powerW, locale)}</div>{/if}
-          {#if cpu.clockMhz !== null}<div class="chip"><span>{t('tile.clock')}</span> {formatClock(cpu.clockMhz, locale)}</div>{/if}
+          {#if cpu.clockMhz !== null}<div class="chip"><span><Term term="clock">{t('tile.clock')}</Term></span> {formatClock(cpu.clockMhz, locale)}</div>{/if}
           {#if cpu.busiestThread !== null}
             <div class="chip"><span><Term term="busiestThread">{t('tile.busiestThread')}</Term></span> {formatPercent(cpu.busiestThread, locale)}</div>
           {/if}
@@ -103,7 +110,15 @@
           <div class="mlab"><Term term="threadLoad">{t('tile.threadLoad')}</Term></div>
           <div class="threads">
             {#each cpu.threads as thread (thread.id)}
-              <i title={formatPercent(thread.value, locale)} style:height="{thread.value ?? 0}%"></i>
+              <i
+                role="meter"
+                aria-label={nameOf(thread.id)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={thread.value ?? 0}
+                title={formatPercent(thread.value, locale)}
+                style:height="{thread.value ?? 0}%"
+              ></i>
             {/each}
           </div>
         {/if}
@@ -122,7 +137,7 @@
           {#if gpu.hotspotC !== null}
             <div class="chip"><span><Term term="hotspot">{t('tile.hotspot')}</Term></span> {formatTemperature(gpu.hotspotC, locale)}</div>
           {/if}
-          {#if gpu.clockMhz !== null}<div class="chip"><span>{t('tile.clock')}</span> {formatClock(gpu.clockMhz, locale)}</div>{/if}
+          {#if gpu.clockMhz !== null}<div class="chip"><span><Term term="gpuClock">{t('tile.clock')}</Term></span> {formatClock(gpu.clockMhz, locale)}</div>{/if}
           {#if gpu.powerW !== null}
             <div class="chip">
               <span>{t('tile.power')}</span> {formatPower(gpu.powerW, locale)}
@@ -140,7 +155,9 @@
           <div class="mlab">
             <Term term="vram" /><span>{formatBytes(gpu.memUsedBytes, locale)} / {formatBytes(gpu.memTotalBytes, locale)}</span>
           </div>
-          <div class="bar"><i style:width="{pctOf(gpu.memUsedBytes, gpu.memTotalBytes)}%"></i></div>
+          <div class="bar" role="meter" aria-label={t('glossary.vram.name')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pctOf(gpu.memUsedBytes, gpu.memTotalBytes)}>
+            <i style:width="{pctOf(gpu.memUsedBytes, gpu.memTotalBytes)}%"></i>
+          </div>
         {/if}
         {#if gpu.throttle}
           <div class="chips">
@@ -204,7 +221,15 @@
                 {#if row.standby}
                   <span class="standby">{t('storage.power.standby')}</span>
                 {:else}
-                  <span class="act" title={row.activePct !== null ? formatPercent(row.activePct, locale) : ''}><i style:width="{row.activePct ?? 0}%"></i></span>
+                  <span
+                    class="act"
+                    role="meter"
+                    aria-label="{t('tile.disk.activity')} {row.letter ?? row.name}"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={row.activePct ?? 0}
+                    title={row.activePct !== null ? formatPercent(row.activePct, locale) : ''}
+                  ><i style:width="{row.activePct ?? 0}%"></i></span>
                   <span>{row.readBps !== null ? formatRate(row.readBps, 'bytes', locale) : ''}</span>
                   <span>{row.writeBps !== null ? formatRate(row.writeBps, 'bytes', locale) : ''}</span>
                   <span>{row.temperatureC !== null ? formatTemperature(row.temperatureC, locale) : ''}</span>
@@ -233,9 +258,17 @@
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 12px;
   }
+  /* Clicks on the sparkline fall through to the tile's overlay. */
   .spark {
     flex: 1;
     min-height: 34px;
+    pointer-events: none;
+  }
+  /* Bars and names with a tooltip sit above the overlay, like the terms. */
+  .threads,
+  .disks [title] {
+    position: relative;
+    z-index: 1;
   }
   /* Wide content: the columns and spans of simpleGrid; a tall window fills the height with two rows at most. */
   @container simple (min-width: 900px) {
@@ -246,12 +279,12 @@
       grid-column: span var(--span, 1);
     }
     .simple.fill {
-      height: calc(100dvh - var(--simple-top) - 20px);
+      min-height: calc(100dvh - var(--simple-top) - 20px);
     }
     .simple.fill .grid {
       flex: 1;
       min-height: 0;
-      grid-template-rows: repeat(var(--rows), 1fr);
+      grid-template-rows: repeat(var(--rows), minmax(min-content, 1fr));
     }
   }
   .big {

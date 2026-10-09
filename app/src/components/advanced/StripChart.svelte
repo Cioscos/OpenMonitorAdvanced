@@ -12,7 +12,6 @@
     WINDOWS,
     displayScale,
     initialStripSeries,
-    knownSelection,
     maxPointsFor,
     scaleSymbol,
     stripLayout,
@@ -65,8 +64,10 @@
 
   const candidateIds = $derived(sensors.map((s) => s.id));
   let windowSeconds = $state<number>(untrack(() => fixedWindow) ?? loadWindow() ?? DEFAULT_WINDOW);
-  let chosen = $state<string[]>(untrack(() => initialStripSeries(loadSeries(sectionId), candidateIds, defaults)));
-  const selected = $derived(knownSelection(chosen, candidateIds));
+  // The saved choice stays whole: a sensor the schema adds after mount (the effective clock) joins
+  // the chart when it appears instead of being dropped for the session.
+  let chosen = $state<string[] | null>(untrack(() => loadSeries(sectionId)));
+  const selected = $derived(initialStripSeries(chosen, candidateIds, defaults));
   const selectionKey = $derived(selected.join('\n'));
   let paused = $state(document.visibilityState === 'hidden');
   let reducedMotion = $state(false);

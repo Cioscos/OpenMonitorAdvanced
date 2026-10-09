@@ -4,6 +4,7 @@ import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
 import { settings } from '../../lib/settings.svelte';
+import { loadSeries } from '../../lib/advanced/persist';
 import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { spyChartFrames } from '../../test/chart-frames';
@@ -357,6 +358,18 @@ test('the saved selection of the section wins over the defaults', async () => {
   renderChart(backend);
   await vi.waitFor(() => expect(plots).toHaveLength(1));
   expect(backend.historyCalls[0].ids).toEqual([VRAM]);
+});
+
+test('a saved sensor that appears after mount joins the chart, without saving over the selection', async () => {
+  await settings.update({ advanced: { series: { [GPU]: [LOAD, VRAM] } } });
+  const backend = fakeBackend();
+  const early = gpuSensors.filter((s) => s.id !== VRAM);
+  const { rerender } = renderChart(backend, new LiveStore(), early);
+  await vi.waitFor(() => expect(plots).toHaveLength(1));
+  expect(backend.historyCalls[0].ids).toEqual([LOAD]);
+  await rerender({ sectionId: GPU, sensors: gpuSensors, defaults: [LOAD, TEMP], schema: MOCK_SCHEMA, store: new LiveStore(), backend });
+  await vi.waitFor(() => expect(backend.historyCalls.at(-1)?.ids).toEqual([LOAD, VRAM]));
+  expect(loadSeries(GPU)).toEqual([LOAD, VRAM]);
 });
 
 test('an empty selection shows a hint and fetches nothing', async () => {

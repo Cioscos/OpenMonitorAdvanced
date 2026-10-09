@@ -295,7 +295,7 @@ pub(crate) fn assign_disk_ids(
 }
 
 /// Owns a SetupAPI device information set.
-struct DeviceInfoSet(HDEVINFO);
+pub(crate) struct DeviceInfoSet(pub(crate) HDEVINFO);
 
 impl Drop for DeviceInfoSet {
     fn drop(&mut self) {
@@ -307,7 +307,7 @@ impl Drop for DeviceInfoSet {
 }
 
 /// Device path and device element of one disk interface.
-fn interface_detail(
+pub(crate) fn interface_detail(
     set: &DeviceInfoSet,
     interface: &SP_DEVICE_INTERFACE_DATA,
 ) -> Option<(String, SP_DEVINFO_DATA)> {

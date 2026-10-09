@@ -175,21 +175,16 @@ test('five_tiles_span_two_and_three_columns', () => {
   expect(spans).toEqual(['2', '2', '2', '3', '3']);
 });
 
-test('fill_mode_needs_720px_of_height', () => {
-  const original = window.innerHeight;
-  try {
-    window.innerHeight = 719;
-    setup();
-    expect(simple().classList.contains('fill')).toBe(false);
-    cleanup();
-    window.innerHeight = 720;
-    setup();
-    expect(simple().classList.contains('fill')).toBe(true);
-    // Four tiles: two rows.
-    expect(grid().style.getPropertyValue('--rows')).toBe('2');
-  } finally {
-    window.innerHeight = original;
-  }
+test('tiles_keep_natural_height_and_the_block_is_centred', () => {
+  setup();
+  expect(simple().classList.contains('fill')).toBe(false);
+  expect(viewSource).not.toMatch(/simple-top|grid-template-rows|flex: 1/);
+  expect(viewSource).toMatch(/\.host\s*\{[^}]*margin-block: auto;[^}]*padding-block: 12px;/);
+});
+
+test('sparkline_is_34px_and_80px_in_the_two_row_grid', () => {
+  expect(viewSource).toMatch(/\.spark\s*\{[^}]*height: 34px;/);
+  expect(viewSource).toMatch(/@container simple \(min-width: 900px\)[\s\S]*\.spark\s*\{\s*height: 80px;/);
 });
 
 const chipTexts = () => [...document.querySelectorAll('.chip')].map((c) => c.textContent?.trim() ?? '');
@@ -272,12 +267,6 @@ test('sparklines_let_clicks_through_and_bars_with_tooltips_sit_above_the_overlay
   // The sparkline never takes the click meant for the tile; the bars and disk names keep their tooltips.
   expect(viewSource).toMatch(/\.spark\s*\{[^}]*pointer-events: none;/);
   expect(viewSource).toMatch(/\.threads,\s*\.disks \[title\]\s*\{[^}]*position: relative;[^}]*z-index: 1;/);
-});
-
-test('fill_rows_never_clip_their_content', () => {
-  expect(viewSource).toMatch(/\.simple\.fill\s*\{[^}]*min-height: calc\(/);
-  expect(viewSource).not.toMatch(/\.simple\.fill\s*\{[^}]*[^-]height: calc\(/);
-  expect(viewSource).toContain('grid-template-rows: repeat(var(--rows), minmax(min-content, 1fr));');
 });
 
 test('bars_expose_their_values_as_meters', () => {

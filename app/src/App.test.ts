@@ -3,6 +3,7 @@ import { i18n } from './lib/i18n/index.svelte';
 beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
 afterEach(() => { cleanup(); settings.state = null; settings.errors = {}; });
 import { flushSync } from 'svelte';
+import appSource from './App.svelte?raw';
 import App from './App.svelte';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
@@ -553,15 +554,21 @@ test('a test that starts opens its page and marks the sidebar entry', async () =
   await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'History' })).toBeTruthy());
 });
 
-test('simple_and_advanced_are_wide_performance_is_not', async () => {
+test('simple_is_1280_advanced_1600_performance_1100', async () => {
   const backend = new FakeBackend(MOCK_SCHEMA);
   const store = new LiveStore();
   render(App, { backend, store });
   await vi.waitFor(() => expect(store.schema).not.toBeNull());
   const main = () => document.querySelector('main')!;
-  await vi.waitFor(() => expect(main().classList.contains('wide')).toBe(true));
+  await vi.waitFor(() => expect(main().classList.contains('simple')).toBe(true));
+  expect(main().classList.contains('wide')).toBe(false);
+  expect(appSource).toMatch(/main\.simple\s*\{[^}]*max-width: 1280px;/);
   await fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
   expect(main().classList.contains('wide')).toBe(true);
+  expect(main().classList.contains('simple')).toBe(false);
+  expect(appSource).toMatch(/main\.wide\s*\{[^}]*max-width: 1600px;/);
   await fireEvent.click(screen.getByRole('tab', { name: 'Performance' }));
   expect(main().classList.contains('wide')).toBe(false);
+  expect(main().classList.contains('simple')).toBe(false);
+  expect(appSource).toMatch(/\n {2}main \{[^}]*max-width: 1100px;/);
 });

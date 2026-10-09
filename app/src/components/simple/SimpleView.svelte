@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { formatBytes, formatClock, formatPercent, formatPower, formatRate, formatTemperature, formatValue } from '../../lib/format';
   import { simpleGrid } from '../../lib/simpleGrid';
   import { sensorLabel } from '../../lib/advanced/labels';
@@ -71,29 +70,13 @@
   };
   const pctOf = (used: number | null, total: number | null) =>
     used !== null && total ? Math.min(100, (used / total) * 100) : 0;
-
-  let simpleEl: HTMLDivElement;
-  let innerHeight = $state(window.innerHeight);
-  let simpleTop = $state(0);
-  // Fill mode (tall window, at most two rows) also needs a content width of 900 px: the container query in CSS.
-  const fill = $derived(innerHeight >= 720 && layout.rows <= 2);
-
-  onMount(() => {
-    const measure = () => {
-      innerHeight = window.innerHeight;
-      simpleTop = simpleEl.getBoundingClientRect().top;
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  });
 </script>
 
 <div class="host">
-<div class="simple" class:fill bind:this={simpleEl} style:--simple-top="{simpleTop}px">
+<div class="simple">
   {#if store.timestampMs > 0}<HealthBanner level={report.level} title={banner.title} items={bannerItems} {elapsedMs} />{/if}
 
-  <div class="grid" style:--cols={layout.columns} style:--rows={layout.rows}>
+  <div class="grid" style:--cols={layout.columns}>
     {#if cpu}
       <Tile label={t('tile.cpu')} span={layout.spans[0]} onclick={() => onOpenAdvanced(sectionForTile('cpu'))}>
         <div class="big"><AnimatedNumber value={cpu.load} format={(v) => formatPercent(v, locale)} /></div>
@@ -245,8 +228,11 @@
 </div>
 
 <style>
+  /* Centred in main's free height; the padding adds to main's 20 px for a margin of at least 32 px. */
   .host {
     container: simple / inline-size;
+    margin-block: auto;
+    padding-block: 12px;
   }
   .simple {
     display: flex;
@@ -260,8 +246,7 @@
   }
   /* Clicks on the sparkline fall through to the tile's overlay. */
   .spark {
-    flex: 1;
-    min-height: 34px;
+    height: 34px;
     pointer-events: none;
   }
   /* Bars and names with a tooltip sit above the overlay, like the terms. */
@@ -270,7 +255,7 @@
     position: relative;
     z-index: 1;
   }
-  /* Wide content: the columns and spans of simpleGrid; a tall window fills the height with two rows at most. */
+  /* Wide content: the columns and spans of simpleGrid; tiles keep their natural height. */
   @container simple (min-width: 900px) {
     .grid {
       grid-template-columns: repeat(var(--cols), 1fr);
@@ -278,13 +263,8 @@
     .grid > :global(.tile) {
       grid-column: span var(--span, 1);
     }
-    .simple.fill {
-      min-height: calc(100dvh - var(--simple-top) - 20px);
-    }
-    .simple.fill .grid {
-      flex: 1;
-      min-height: 0;
-      grid-template-rows: repeat(var(--rows), minmax(min-content, 1fr));
+    .spark {
+      height: 80px;
     }
   }
   .big {

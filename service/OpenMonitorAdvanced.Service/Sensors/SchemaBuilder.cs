@@ -328,9 +328,15 @@ public static partial class SchemaBuilder
             }
         }
 
+        var properties = new Dictionary<string, string>();
         if (pawnIoAvailable)
         {
             IEnumerable<HardwareNode> dimms = roots.Where(r => r.Type == HardwareType.Memory && r.Identifier.StartsWith("/memory/dimm/", StringComparison.Ordinal));
+            if (SpdModulesJson(dimms) is { } modules)
+            {
+                properties["memoryModules"] = modules;
+            }
+
             foreach (HardwareNode dimm in dimms)
             {
                 uint i = ParseTrailingIndex(dimm.Identifier);
@@ -355,7 +361,77 @@ public static partial class SchemaBuilder
             return;
         }
 
-        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", DisplayName.Clean(ram.Name), Vendor: null, EmptyProperties, new MemoryHint()), localSensors, localBindings);
+        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", DisplayName.Clean(ram.Name), Vendor: null, properties, new MemoryHint()), localSensors, localBindings);
+    }
+
+    /// <summary>
+    /// The DIMM SPD data (capacity, thermal limits, JEDEC timings) as a JSON array, one object per
+    /// module; zero or absent values are left out. Sensors are matched by LHM name (DimmMemory.cs,
+    /// v0.9.6), never by index. Written with Utf8JsonWriter: the service is trimmed, no reflection.
+    /// </summary>
+    private static string? SpdModulesJson(IEnumerable<HardwareNode> dimms)
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        int count = 0;
+        using (var w = new System.Text.Json.Utf8JsonWriter(buffer))
+        {
+            w.WriteStartArray();
+            foreach (HardwareNode dimm in dimms)
+            {
+                var fields = new List<(string Key, double Value)>();
+                foreach (SensorNode s in dimm.Sensors)
+                {
+                    if (s.Value is not { } v || !float.IsFinite(v) || v <= 0)
+                    {
+                        continue;
+                    }
+
+                    string? key = s.Type switch
+                    {
+                        SensorType.Data when s.Name == "Capacity" => "capacityBytes",
+                        SensorType.Temperature when s.Name.Contains("Critical", StringComparison.Ordinal) && !s.Name.Contains("Low", StringComparison.Ordinal) => "tempCritC",
+                        SensorType.Temperature when s.Name.Contains("High", StringComparison.Ordinal) => "tempHighC",
+                        SensorType.Timing => s.Name.Split(' ')[0] switch
+                        {
+                            "tCKAVGmin" => "tckMinNs",
+                            "tAA" => "taaNs",
+                            "tRCD" => "trcdNs",
+                            "tRP" => "trpNs",
+                            "tRAS" => "trasNs",
+                            "tRC" => "trcNs",
+                            "tRFC1" => "trfc1Ns",
+                            "tRFC2" => "trfc2Ns",
+                            "tRFCsb" => "trfcSbNs",
+                            _ => null,
+                        },
+                        _ => null,
+                    };
+                    if (key is not null)
+                    {
+                        fields.Add((key, key == "capacityBytes" ? Math.Round(v * TwoPow30) : Math.Round(v, 3)));
+                    }
+                }
+
+                if (fields.Count == 0)
+                {
+                    continue; // no SPD readings: nothing worth listing
+                }
+
+                w.WriteStartObject();
+                w.WriteString("slot", $"DIMM #{ParseTrailingIndex(dimm.Identifier).ToString(CultureInfo.InvariantCulture)}");
+                foreach ((string key, double value) in fields)
+                {
+                    w.WriteNumber(key, value);
+                }
+
+                w.WriteEndObject();
+                count++;
+            }
+
+            w.WriteEndArray();
+        }
+
+        return count == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
     private static SensorMatch MatchMemorySensor(SensorNode s) => s.Type switch

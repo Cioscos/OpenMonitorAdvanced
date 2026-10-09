@@ -490,6 +490,87 @@ public sealed class SchemaBuilderTests
         Assert.Contains(schema.Schema.Sensors, s => s.Kind == "load" && s.Name == "core-max");
     }
 
+    private static HardwareNode SpdDimm(int i, float capacityGb, params (string Name, float Value)[] extra)
+    {
+        string id = $"/memory/dimm/{i}";
+        var sensors = new List<SensorNode>
+        {
+            Sensor($"{id}/temperature/0", SensorType.Temperature, $"DIMM #{i}", 0, 40f),
+            Sensor($"{id}/temperature/3", SensorType.Temperature, "High", 3, 55f),
+            Sensor($"{id}/temperature/5", SensorType.Temperature, "Critical High limit", 5, 85f),
+            Sensor($"{id}/data/50", SensorType.Data, "Capacity", 50, capacityGb),
+        };
+        int index = 20;
+        foreach ((string name, float value) in extra)
+        {
+            sensors.Add(Sensor($"{id}/timing/{index}", SensorType.Timing, name, index, value));
+            index++;
+        }
+
+        return new HardwareNode(id, HardwareType.Memory, $"Corsair (#{i})", sensors, []);
+    }
+
+    private static readonly (string, float)[] Ddr5Spd =
+    [
+        ("tCKAVGmin (Minimum Cycle Time)", 0.416f),
+        ("tCKAVGmax (Maximum Cycle Time)", 1.616f),
+        ("tAA (CAS Latency Time)", 16f),
+        ("tRCD (RAS to CAS Delay Time)", 16f),
+        ("tRP (Row Precharge Delay Time)", 16f),
+        ("tRAS (Active to Precharge Delay Time)", 32f),
+        ("tRC (Active to Active/Refresh Delay Time)", 48f),
+        ("tWR (Write Recovery Time)", 30f),
+        ("tRFC1 (Normal Refresh Recovery Time)", 295f),
+        ("tRFC2 (Fine Granularity Refresh Recovery Time)", 160f),
+        ("tRFCsb (Same Bank Refresh Recovery Time)", 130f),
+        ("tRFC1_dlr (Normal Refresh Recovery Time 3DS)", 0f),
+        ("tRFC2_dlr (Fine Granularity Refresh Recovery Time 3DS)", 0f),
+        ("tRFCsb_dlr (Same Bank Refresh Recovery Time 3DS)", 0f),
+    ];
+
+    private static HardwareNode PlainRam() =>
+        new("/ram", HardwareType.Memory, "Total Memory", [Sensor("/ram/load/0", SensorType.Load, "Memory", 0)], []);
+
+    private static string? ModulesJson(BuiltSchema schema) =>
+        Assert.Single(schema.Schema.Devices).Properties.GetValueOrDefault("memoryModules");
+
+    [Fact]
+    public void DimmSpdBecomesTheMemoryModulesProperty()
+    {
+        BuiltSchema schema = Build([PlainRam(), SpdDimm(1, 16, Ddr5Spd), SpdDimm(3, 16, Ddr5Spd)], pawnIoAvailable: true);
+        string expected(int n) => $$"""
+            {"slot":"DIMM #{{n}}","capacityBytes":17179869184,"tempHighC":55,"tempCritC":85,"tckMinNs":0.416,"taaNs":16,"trcdNs":16,"trpNs":16,"trasNs":32,"trcNs":48,"trfc1Ns":295,"trfc2Ns":160,"trfcSbNs":130}
+            """;
+        var want = System.Text.Json.Nodes.JsonNode.Parse($"[{expected(1)},{expected(3)}]");
+        var got = System.Text.Json.Nodes.JsonNode.Parse(ModulesJson(schema)!);
+        Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(want, got), ModulesJson(schema));
+    }
+
+    [Fact]
+    public void DimmTimingsAtZeroAreOmitted()
+    {
+        BuiltSchema schema = Build([PlainRam(), SpdDimm(1, 16, Ddr5Spd)], pawnIoAvailable: true);
+        string json = ModulesJson(schema)!;
+        Assert.DoesNotContain("dlr", json);
+        Assert.Equal(13, System.Text.Json.JsonDocument.Parse(json).RootElement[0].EnumerateObject().Count());
+    }
+
+    [Fact]
+    public void WithoutPawnIoThereAreNoMemoryModules()
+    {
+        BuiltSchema schema = Build([PlainRam(), SpdDimm(1, 16, Ddr5Spd)], pawnIoAvailable: false);
+        Assert.Null(ModulesJson(schema));
+    }
+
+    [Fact]
+    public void DimmTemperaturesStaySensors()
+    {
+        BuiltSchema schema = Build([PlainRam(), SpdDimm(1, 16, Ddr5Spd)], pawnIoAvailable: true);
+        string deviceId = Assert.Single(schema.Schema.Devices).Id;
+        Find(schema, deviceId, "temperature", "dimm-1");
+        Assert.Equal(2, schema.Schema.Sensors.Count);
+    }
+
     [Fact]
     public void MemoryAndDimmsBecomeOneDevice()
     {

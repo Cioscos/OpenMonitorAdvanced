@@ -50,6 +50,13 @@ public interface IHardwareTree : IDisposable
     byte? ReadNvmeCriticalWarning(string storageIdentifier);
 
     /// <summary>
+    /// The ATA SMART attributes of a non-NVMe storage hardware as the last <see cref="Update"/> left
+    /// them: no command is sent. <see langword="null"/> when the hardware is unknown, is NVMe, or has
+    /// no attribute. Called from the storage worker only, right after the storage root's update.
+    /// </summary>
+    IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier);
+
+    /// <summary>
     /// One read of an AMD System Management Network register through PawnIO, inside the global
     /// <c>Access_PCI</c> mutex; <see langword="null"/> without PawnIO, on a non-AMD CPU, or when the
     /// mutex cannot be taken within 100 ms. Reads only, never a write.

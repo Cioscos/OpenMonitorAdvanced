@@ -574,6 +574,9 @@ public static partial class SchemaBuilder
 
     private static string StorageIdentityKey(HardwareNode node) => StorageModel(node) + "\0" + node.Storage?.DriveSerial?.Trim();
 
+    /// <summary>Joins a storage identifier to the name of one SATA health value in the hub's cache and in <see cref="BindingSource.AtaHealth"/> bindings.</summary>
+    internal const string AtaKeyPrefix = "#ata-";
+
     private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint? hint, Output output)
     {
         var used = new HashSet<string>();
@@ -610,6 +613,33 @@ public static partial class SchemaBuilder
         {
             local.Add(new WireSensor(deviceId, "flag", "critical-warning", "boolean", "storage.criticalWarning", LabelArg: null, "flag"));
             localBindings.Add(new SensorBinding(node.Identifier, 1.0, BindingSource.NvmeCriticalWarning));
+        }
+
+        // SATA health from the ATA attributes of the same SMART pass; a counter only for an attribute the disk has.
+        if (node.Storage is { IsNvme: false, HasAtaHealth: true } sata)
+        {
+            AddAtaSensor("flag", "critical-warning", "boolean", "storage.criticalWarning", "critical");
+            AddAtaSensor("flag", "sector-warning", "boolean", "storage.sectorWarning", "sectors");
+            if ((sata.AtaSectorAttributes & 1) != 0)
+            {
+                AddAtaSensor("counter", "reallocated-sectors", "count", "storage.reallocatedSectors", "reallocated");
+            }
+
+            if ((sata.AtaSectorAttributes & 2) != 0)
+            {
+                AddAtaSensor("counter", "pending-sectors", "count", "storage.pendingSectors", "pending");
+            }
+
+            if ((sata.AtaSectorAttributes & 4) != 0)
+            {
+                AddAtaSensor("counter", "uncorrectable-sectors", "count", "storage.uncorrectableSectors", "uncorrectable");
+            }
+        }
+
+        void AddAtaSensor(string kind, string name, string unit, string label, string cacheKey)
+        {
+            local.Add(new WireSensor(deviceId, kind, name, unit, label, LabelArg: null, kind));
+            localBindings.Add(new SensorBinding(node.Identifier + AtaKeyPrefix + cacheKey, 1.0, BindingSource.AtaHealth));
         }
 
         if (local.Count == 0 && properties.Count == 0)

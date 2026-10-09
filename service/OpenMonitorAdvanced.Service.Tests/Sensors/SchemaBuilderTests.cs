@@ -223,7 +223,15 @@ public sealed class SchemaBuilderTests
             [],
             new StorageInfo(2, "Drive", null, "S1", Rotational: false, IsNvme: true, HasCriticalWarning: true));
 
-        BuiltSchema schema = Build([cpu, ram, dimm, disk], pawnIoAvailable: true);
+        var sata = new HardwareNode(
+            "/hdd/0",
+            HardwareType.Storage,
+            "Sata",
+            [Sensor("/hdd/0/temperature/0", SensorType.Temperature, "Temperature", 0)],
+            [],
+            new StorageInfo(0, "Sata", null, "S2", Rotational: true, HasAtaHealth: true, AtaSectorAttributes: 7));
+
+        BuiltSchema schema = Build([cpu, ram, dimm, disk, sata], pawnIoAvailable: true);
 
         Assert.Equal(
             CanonicalNames.LabelKeys.Order(StringComparer.Ordinal),
@@ -784,7 +792,7 @@ public sealed class SchemaBuilderTests
     }
 
     [Fact]
-    public void SataDisksHaveNoCriticalWarning()
+    public void SataDisksPublishHealthFromAtaAttributes()
     {
         var ssd = new HardwareNode(
             "/ssd/1",
@@ -799,13 +807,36 @@ public sealed class SchemaBuilderTests
             "ST2000DM008-2FR102",
             [Sensor("/hdd/0/temperature/0", SensorType.Temperature, "Temperature", 0)],
             [],
-            new StorageInfo(0, "ST2000DM008-2FR102", null, "HDD-SERIAL", Rotational: true));
+            new StorageInfo(0, "ST2000DM008-2FR102", null, "HDD-SERIAL", Rotational: true, HasAtaHealth: true, AtaSectorAttributes: 0b101));
 
         BuiltSchema schema = Build([ssd, hdd], pawnIoAvailable: true);
 
         Assert.Equal(2, schema.Schema.Devices.Count);
-        Assert.DoesNotContain(schema.Schema.Sensors, s => s.Kind == "flag");
-        Assert.All(schema.Bindings, b => Assert.Equal(BindingSource.Sensor, b.Source));
+        string[] names = [.. schema.Schema.Sensors.Where(s => s.Kind is "flag" or "counter").Select(s => s.Kind + "/" + s.Name)];
+        Assert.Equal(["flag/critical-warning", "flag/sector-warning", "counter/reallocated-sectors", "counter/uncorrectable-sectors"], names);
+        Assert.Equal("count", schema.Schema.Sensors.Single(s => s.Name == "reallocated-sectors").Unit);
+        Assert.Equal("storage.sectorWarning", schema.Schema.Sensors.Single(s => s.Name == "sector-warning").LabelKey);
+        Assert.Equal(
+            ["/hdd/0#ata-critical", "/hdd/0#ata-sectors", "/hdd/0#ata-reallocated", "/hdd/0#ata-uncorrectable"],
+            schema.Bindings.Where(b => b.Source == BindingSource.AtaHealth).Select(b => b.LhmIdentifier));
+        Assert.All(schema.Bindings.Where(b => b.LhmIdentifier.StartsWith("/ssd/1", StringComparison.Ordinal)), b => Assert.Equal(BindingSource.Sensor, b.Source));
+    }
+
+    [Fact]
+    public void NvmeDisksHaveNoSataSensors()
+    {
+        var nvme = new HardwareNode(
+            "/nvme/2",
+            HardwareType.Storage,
+            "Fanxiang S880 2TB",
+            [Sensor("/nvme/2/temperature/0", SensorType.Temperature, "Composite Temperature", 0)],
+            [],
+            new StorageInfo(2, "Fanxiang S880 2TB", null, "NVME-SERIAL", Rotational: false, IsNvme: true, HasCriticalWarning: true, HasAtaHealth: true, AtaSectorAttributes: 7));
+
+        BuiltSchema schema = Build([nvme], pawnIoAvailable: true);
+
+        Assert.Equal(["critical-warning"], schema.Schema.Sensors.Where(s => s.Kind is "flag" or "counter").Select(s => s.Name));
+        Assert.DoesNotContain(schema.Bindings, b => b.Source == BindingSource.AtaHealth);
     }
 
     [Fact]

@@ -264,6 +264,28 @@ public sealed class LhmTree : IHardwareTree
     public byte? ReadNvmeCriticalWarning(string storageIdentifier) =>
         _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? CriticalWarningOf(entry.Hardware) : null;
 
+    /// <inheritdoc />
+    public IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier) =>
+        _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? AtaAttributesOf(entry.Hardware) : null;
+
+    /// <summary>The attributes the last SMART pass fetched, copied; members read directly (no reflection).</summary>
+    private static List<AtaAttribute>? AtaAttributesOf(IHardware hardware)
+    {
+        if (hardware is not StorageDevice { Storage: { IsNVMe: false, Smart: { } smart } })
+        {
+            return null;
+        }
+
+        var list = new List<AtaAttribute>();
+        foreach (SmartAttribute attribute in smart.SmartAttributes)
+        {
+            var data = attribute.Attribute;
+            list.Add(new AtaAttribute(data.ID, data.CurrentValue, data.Threshold, data.RawValueULong));
+        }
+
+        return list.Count > 0 ? list : null;
+    }
+
     /// <summary>
     /// The Critical Warning attribute of an NVMe disk (<c>SmartAttributeType.CriticalWarning</c>,
     /// byte 0 of the SMART/Health log), as the last <c>Update()</c> left it. Never the raw id
@@ -589,6 +611,16 @@ public sealed class LhmTree : IHardwareTree
         HardwareNode[] children = [.. hardware.SubHardware.Select(sub => BuildNode(sub, null, sensors))];
         // The attribute list is filled by an Update(): a node rebuilt after one reports it.
         StorageInfo? withHealth = storage is null ? null : storage with { HasCriticalWarning = storage.IsNvme && CriticalWarningOf(hardware) is not null };
+        if (withHealth is { IsNvme: false } && AtaAttributesOf(hardware) is { } ata)
+        {
+            SataHealthResult health = SataHealth.Evaluate(ata);
+            withHealth = withHealth with
+            {
+                HasAtaHealth = true,
+                AtaSectorAttributes = (byte)((health.Reallocated is null ? 0 : 1) | (health.Pending is null ? 0 : 2) | (health.Uncorrectable is null ? 0 : 4)),
+            };
+        }
+
         return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, withHealth, ReadCpuInfo(hardware, active));
     }
 

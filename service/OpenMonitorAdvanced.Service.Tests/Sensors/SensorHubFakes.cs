@@ -43,6 +43,20 @@ internal sealed class FakeTree : IHardwareTree
     /// <summary>The critical warning byte <see cref="ReadNvmeCriticalWarning"/> answers per storage identifier; absent = the attribute is not there.</summary>
     public ConcurrentDictionary<string, byte?> NvmeCriticalWarnings { get; } = new();
 
+    /// <summary>The ATA attributes <see cref="ReadAtaAttributes"/> answers per storage identifier; absent = none.</summary>
+    public ConcurrentDictionary<string, IReadOnlyList<AtaAttribute>> AtaAttributes { get; } = new();
+
+    /// <summary>How many times <see cref="ReadAtaAttributes"/> was called for that storage identifier.</summary>
+    public int AtaAttributeReads(string storageIdentifier) => _ataReads.GetValueOrDefault(storageIdentifier);
+
+    private readonly ConcurrentDictionary<string, int> _ataReads = new();
+
+    public IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier)
+    {
+        _ataReads.AddOrUpdate(storageIdentifier, 1, (_, n) => n + 1);
+        return AtaAttributes.TryGetValue(storageIdentifier, out IReadOnlyList<AtaAttribute>? v) ? v : null;
+    }
+
     /// <summary>The SMN registers <see cref="ReadSmn"/> answers by full address (channel offset included); absent = not readable.</summary>
     public ConcurrentDictionary<uint, uint> Smn { get; } = new();
 

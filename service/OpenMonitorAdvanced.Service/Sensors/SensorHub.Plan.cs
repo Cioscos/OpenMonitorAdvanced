@@ -189,7 +189,7 @@ public sealed partial class SensorHub
     }
 
     /// <summary>The disk identity a pinned id depends on: the NVMe health flags come and go with updates and never change an id.</summary>
-    private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false };
+    private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false, HasAtaHealth = false, AtaSectorAttributes = 0 };
 
     /// <summary>
     /// The disk's identity with the descriptor model/serial and the rotational flag, from
@@ -288,6 +288,12 @@ public sealed partial class SensorHub
                     // Keyed by the storage hardware identifier, and only ever cached by the storage worker.
                     FromStorage[i] = true;
                     Owner[i] = binding.LhmIdentifier;
+                }
+                else if (binding.Source == BindingSource.AtaHealth)
+                {
+                    // "<storageId>#ata-...": cached by the storage worker, owned by the storage root.
+                    FromStorage[i] = true;
+                    Owner[i] = binding.LhmIdentifier[..binding.LhmIdentifier.LastIndexOf(SchemaBuilder.AtaKeyPrefix, StringComparison.Ordinal)];
                 }
                 else if (binding.Source is BindingSource.IntelThermal or BindingSource.IntelPowerLimit)
                 {

@@ -29,7 +29,10 @@ test('preview_shows_the_exact_json_and_the_note', async () => {
 test('overclock_box_reloads_the_preview', async () => {
   const { backend } = await open();
   await waitFor(() => expect(previewText()).toBe('{ "overclock": false }'));
+  const fast = backend.performanceSharePreview.bind(backend);
+  backend.performanceSharePreview = (id, overclock) => new Promise((r) => setTimeout(() => r(fast(id, overclock)), 30));
   await fireEvent.click(screen.getByRole('checkbox'));
+  expect(send().disabled).toBe(true);
   await waitFor(() => expect(previewText()).toBe('{ "overclock": true }'));
   expect(backend.performanceCalls).toContain('performanceSharePreview:score-a:true');
 });
@@ -75,8 +78,14 @@ test('unknown_error_code_uses_the_fallback', async () => {
 });
 
 test('escape_cancels_and_focus_starts_on_the_first_control', async () => {
+  const opener = document.createElement('button');
+  document.body.append(opener);
+  opener.focus();
   const { onClose } = await open();
   expect(document.activeElement).toBe(screen.getByRole('checkbox'));
   await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   expect(onClose).toHaveBeenCalledWith(false);
+  cleanup();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
 });

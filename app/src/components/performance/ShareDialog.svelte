@@ -26,6 +26,8 @@
   $effect(() => {
     const flag = overclock;
     const load = ++loads;
+    // Send waits for the text that matches the box.
+    preview = null;
     backend
       .performanceSharePreview(scoreId, flag)
       .then((text) => load === loads && ((preview = text), (error = null)))

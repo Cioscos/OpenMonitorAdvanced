@@ -178,6 +178,7 @@
   $effect(() => {
     const id = detailId;
     void reloads;
+    exported = null;
     if (id === null) {
       detail = null;
       return;

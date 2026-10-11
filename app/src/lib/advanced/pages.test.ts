@@ -10,6 +10,7 @@ import {
   defaultSeries,
   formatAverage,
   groupSensors,
+  isRunningTotal,
   kpisFor,
   propertyRows,
   sourceCode,
@@ -65,6 +66,17 @@ test('every source has a badge description', () => {
   }
   expect(sourceCode('ip_helper')).toBe('IP HELPER');
   expect(sourceCode('nvml')).toBe('NVML');
+});
+
+test('running totals are told apart from values that can fall', () => {
+  const withKey = (key: string): Sensor => ({ ...sensor('x', 'c'), label: { key } });
+  for (const key of ['gpu.energy.total', 'storage.hostRead', 'storage.hostWritten', 'storage.powerOnHours', 'storage.powerCycles', 'storage.reallocatedSectors']) {
+    expect(isRunningTotal(withKey(key))).toBe(true);
+  }
+  // Remaining battery energy, used memory and pending sectors go down as well as up.
+  for (const key of ['battery.remaining', 'memory.used', 'storage.pendingSectors', 'storage.uncorrectableSectors']) {
+    expect(isRunningTotal(withKey(key))).toBe(false);
+  }
 });
 
 test('the average of a flag is the share of time it was on', () => {

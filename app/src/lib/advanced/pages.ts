@@ -43,6 +43,23 @@ export function sourceCode(source: Source): string {
   return source.replace(/_/g, ' ').toUpperCase();
 }
 
+/**
+ * Sensors that only ever grow (energy since start, SMART lifetime counters): their maximum is
+ * the current value and min and average say nothing, so the table shows only the current one.
+ */
+const RUNNING_TOTALS = new Set([
+  'gpu.energy.total',
+  'storage.hostRead',
+  'storage.hostWritten',
+  'storage.powerOnHours',
+  'storage.powerCycles',
+  'storage.reallocatedSectors',
+]);
+
+export function isRunningTotal(sensor: Sensor): boolean {
+  return RUNNING_TOTALS.has(sensor.label.key);
+}
+
 /** Average column: for on/off flags it is the share of time the flag was on. */
 export function formatAverage(
   stats: SensorStats | null,

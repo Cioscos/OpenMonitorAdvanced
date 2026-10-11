@@ -1,6 +1,6 @@
 <script lang="ts">
   import { sensorLabel } from '../../lib/advanced/labels';
-  import { categoryLabel, formatAverage, groupSensors, sourceCode } from '../../lib/advanced/pages';
+  import { categoryLabel, formatAverage, groupSensors, isRunningTotal, sourceCode } from '../../lib/advanced/pages';
   import type { StatsPoller } from '../../lib/advanced/statsPoller.svelte';
   import { formatValue } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
@@ -62,7 +62,7 @@
           <th scope="rowgroup" colspan="6">{categoryLabel(group.category, t)}</th>
         </tr>
         {#each group.sensors as sensor (sensor.id)}
-          {@const s = stats.statsOf(sensor.id)}
+          {@const s = isRunningTotal(sensor) ? null : stats.statsOf(sensor.id)}
           {@const current = valueOf(sensor.id)}
           {@const stale = current !== null && qualityOf(sensor.id) === 2}
           <tr tabindex="0">

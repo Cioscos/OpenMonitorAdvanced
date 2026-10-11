@@ -291,6 +291,17 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
+## M9b — new sensors
+
+Budget unchanged from M9a. Measured 2026-10-11 on the development machine (Ryzen 7 7800X3D, RTX 4080, 2560×1440 at 165 Hz, Windows 11 Pro 10.0.26300), release build of `feat/m9b` at `ad25e22` (`pnpm tauri build --bundles nsis`, installed with its service), `scripts/measure-footprint.ps1`, three launches per case.
+
+| Case | Core CPU | App + WebView2 CPU | Memory | Within budget |
+|---|---|---|---|---|
+| Tray (`-Minimized -WarmupSeconds 60`) | 0.05 / 0.09 / 0.06 % | same (one process) | 19.1 / 19.2 / 19.5 MB | yes (< 1 %, < 30 MB) |
+| Window maximized, Advanced NVIDIA GPU page with PCIe RX/TX charted (`-WarmupSeconds 15`) | 0.07 / 0.09 / 0.07 % | 1.26 / 1.21 / 1.23 % | 179.1 / 187.9 / 190.3 MB | yes (< 2.5 %, < 260 MB) |
+
+The `oma-gpu-slow` thread keeps reading NVML energy and PCIe traffic while the core ticks in the tray (about 3 calls per NVIDIA GPU a second): against M9a (0.02 %, 18.7 MB) it costs a few hundredths of a point of CPU and under 1 MB, so it gets no tray gate (ruling 13 of the M9b ledger, settled by this measurement).
+
 ## M9a — strip chart and full-window layout
 
 **Budget from M9a (user decision, 2026-10-09):** core < 1 % CPU at idle and tray < 30 MB, unchanged; window open < 260 MB in total (WebView2 included, was < 200 MB) and app + WebView2 < 2.5 % CPU with the window open. The extra cost exists only with the window open, and only with many series charted at once: the Simple view and the default series stay under the old 200 MB.

@@ -198,23 +198,18 @@ Grafico a strisce, cassetto «Serie», Semplice e Avanzata a tutta finestra, fas
 
 ## Open: new sensors (M9b)
 
-Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Implementata sul branch `feat/m9b`; verifiche automatiche verdi, prove dal vivo e misure ancora da fare.
+Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Implementata sul branch `feat/m9b`; verifiche automatiche verdi, prove dal vivo e misure superate il 2026-10-11.
 
-- **Prove dal vivo su questo PC (spec §9.2), con l'utente:**
-  - pagina RAM con il servizio e PawnIO: i timing in uso coincidono con ZenTimings (tRFCsb 416 compreso) e la sezione SPD mostra i due moduli;
-  - pagina GPU: energia che cresce, RX/TX che salgono in un gioco o nel benchmark della GPU, nessuno scatto del grafico a 60 FPS, CPU del nucleo nel budget;
-  - disco SATA (se presente): i contatori dei settori compaiono e gli avvisi restano spenti; con l'HDD in standby il disco resta fermo;
-  - senza batteria: nessuna voce «Batteria» e nessuna tessera.
-- **Misure dovute:** `scripts/measure-footprint.ps1` a riposo e con la pagina GPU aperta con le serie PCIe, da registrare in `docs/perf-budget.md` (sezione M9b).
+- **Prove dal vivo su questo PC (spec §9.2): superate il 2026-10-11** con la build release di `ad25e22`. I timing in uso coincidono con ZenTimings 1.39 campo per campo (tRFCsb 416 compreso); l'SPD mostra i due moduli; energia e PCIe RX/TX nella pagina della GPU durante il benchmark, grafico a 60 FPS senza scatti; l'HDD SATA D: resta in standby con l'app aperta; nessuna voce «Batteria». Consumi in `docs/perf-budget.md` (sezione M9b), nel budget anche in tray.
+- **Correzioni dalle prove dal vivo (2026-10-11):** l'«Avviso settori» si accende solo sui dischi che possono essere rotativi (su un SSD SATA, il Corsair Force LS di E:, il contatore 05h valeva 1 blocco ritirato e CrystalDiskInfo lo giudica «Buono»; decisione dell'utente); la tabella dei sensori non mostra minimo, massimo e media per i totali che crescono soltanto (energia dall'avvio, dati letti e scritti, ore e cicli di accensione, settori riallocati).
 - **Da collaudare altrove (spec §9.3):**
   - batteria su un portatile: carica, potenza con il segno, tempo stimato, usura, regola `battery-low` solo in scarica;
   - throttling Intel su un PC Intel: termico sotto carico con dissipatore limitato, potenza con PL1 basso;
   - timing in uso su Zen 2, Zen 3 e Zen 5;
   - un disco SATA con settori riallocati o un attributo sotto soglia.
 - **Altre prove dal vivo dovute (revisione finale):**
-  - etichetta `slot` dell'SPD contro il «DIMM #n» di LibreHardwareMonitor (lo slot nasce dall'indice dell'identificatore);
-  - su un disco SATA vero, DiskInfoToolkit riempie `Threshold` (senza soglie l'avviso critico non scatta mai);
-  - consumi della tray con una GPU NVIDIA: il thread `oma-gpu-slow` non ha un cancello a richiesta che si riposi mentre il tick del nucleo gira in tray (circa 3 chiamate NVML per GPU NVIDIA al secondo); da misurare e da decidere se metterlo dietro un cancello.
+  - etichetta `slot` dell'SPD: su questo PC dice «DIMM #1» e «DIMM #3» (come i sensori di temperatura di LibreHardwareMonitor), mentre ZenTimings dice A2 e B2; lasciata così, da rivedere solo se si trova una corrispondenza affidabile con gli slot della scheda;
+  - su un disco SATA vero, DiskInfoToolkit riempie `Threshold` (senza soglie l'avviso critico non scatta mai).
 - **Minori rinviati dalle revisioni (M9b):**
   - formattazione: unità e cifre della batteria si scelgono prima dell'arrotondamento (9,995 Wh dà «10,00 Wh», 999,6 Wh dà «1.000 Wh»), in Rust, TS e overlay; durata con «min»/«h» scritti nel codice di Rust e dell'overlay; mancano i casi joule e secondi in `overlayFormat.test.ts`; `scalesFor` di `rules.ts` non ha il caso dei secondi; i watt della batteria sono interi nei KPI della Avanzata e con un decimale nella Semplice;
   - SPD e timing: il nome del sensore di LHM «Thermal Sensor High Limit» è provato solo con i nomi del dump; il mutex si prende per registro e non per gruppo (nel caso peggiore 12 × 100 ms); mancano i test dei limiti CL > 80 e MCLK > 5000; le lettere dei canali vengono dall'indice UMC (A, C possibili); dopo una lettura incompleta il nuovo tentativo arriva solo al prossimo evento di ricostruzione dello schema e `memoryTimings` può restare assente (mai sbagliato); un modulo con un campo sbagliato è scartato intero; mancano i test DDR4 e senza `trfcSb`; `MEMORY_TERMS` non è in `TERMS`; «39-–-–-–» con SPD parziale;

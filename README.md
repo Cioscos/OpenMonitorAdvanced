@@ -38,9 +38,10 @@ SMART data.
   - for GPUs, the processes using the GPU, with their load and memory.
   - newer sensors where the hardware has them: with the service and PawnIO, the RAM page shows
     the SPD data of each module and, on a supported AMD Zen CPU, the timings in use (CL, tRCD,
-    tRP, tRAS, tRFC and more), Intel CPUs flag thermal and power-limit throttling, and SATA disks
-    show their reallocated, pending and uncorrectable sector counts and a critical warning (with
-    SMART reads enabled for the disk), with a *Disk sectors* rule; NVIDIA GPUs add the energy
+    tRP, tRAS, tRFC and more), and Intel CPUs flag thermal and power-limit throttling; with the
+    service alone and SMART reads enabled for the disk, SATA disks show their reallocated, pending
+    and uncorrectable sector counts and a critical warning, with a *Disk sectors* rule for hard
+    disks (on an SSD that counter tracks retired flash blocks, normal wear); NVIDIA GPUs add the energy
     used since start and the PCIe traffic; a laptop gets a Battery page with
     charge, power, remaining time and wear, and a low-battery rule that waits while it is
     plugged in. Sensors the hardware does not report simply do not appear.
@@ -58,7 +59,7 @@ SMART data.
   then starts with the problem before listing CPU, GPU and RAM. The menu opens the Simple or the
   Advanced view directly.
 - **Rules and alerts.** Built-in rules watch CPU, GPU and disk temperatures, CPU and GPU throttling
-  (CPU: Intel only), RAM use, full volumes, NVMe wear, the NVMe and SATA critical warning, SATA
+  (CPU: Intel only), RAM use, full volumes, NVMe wear, the NVMe and SATA critical warning, hard-disk
   bad sectors (*Disk sectors*) and a low battery (*battery-low*, paused while on AC power). The CPU thresholds follow the
   processor's own TjMax when it is known. Each rule has a warning and a critical level, each with
   a threshold and how long the value must stay past it, plus a hysteresis. You can change them,

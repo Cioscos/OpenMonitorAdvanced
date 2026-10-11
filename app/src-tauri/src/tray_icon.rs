@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(f(16.0, Unit::Lanes, Lang::En), "x16");
         assert_eq!(f(1.0, Unit::Boolean, Lang::En), "Active");
         assert_eq!(f(0.0, Unit::Boolean, Lang::It), "No");
-        assert_eq!(f(2_500.0, Unit::Joule, Lang::En), "2.5 kJ");
+        assert_eq!(f(7_200.0, Unit::Joule, Lang::En), "2.00 Wh");
         assert_eq!(f(1_000.0, Unit::BitsPerSecond, Lang::En), "1.0 kbit/s");
         assert_eq!(f(-0.2, Unit::Celsius, Lang::En), "0 °C");
         assert_eq!(f(-5.6, Unit::Celsius, Lang::En), "-6 °C");

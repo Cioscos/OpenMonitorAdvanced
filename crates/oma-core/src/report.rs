@@ -32,6 +32,13 @@ pub const REPORT_PROPERTIES: &[&str] = &[
     "tjMaxC",
     "availableSpareThresholdPct",
     "adapterType",
+    "memoryModules",
+    "memoryTimings",
+    "designCapacityWh",
+    "fullChargeCapacityWh",
+    "wearPct",
+    "cycleCount",
+    "chemistry",
 ];
 
 /// Everything the report describes, gathered by the shell.
@@ -465,6 +472,15 @@ mod tests {
                         ("pciAddress", "0000:01:00.0"),
                         ("integrated", "false"),
                         ("serialNumber", SERIAL),
+                        ("memoryModules", "[]"),
+                        ("memoryTimings", "{}"),
+                        ("designCapacityWh", "50"),
+                        ("fullChargeCapacityWh", "45"),
+                        ("wearPct", "10"),
+                        ("cycleCount", "100"),
+                        ("chemistry", "LION"),
+                        ("manufacturer", "Acme"),
+                        ("model", "B1"),
                     ],
                 ),
                 device("lhm/motherboard/0", DeviceKind::Motherboard, "Board", &[]),
@@ -888,7 +904,12 @@ mod tests {
         let gpu = &report["devices"][1];
         assert_eq!(
             gpu["properties"],
-            json!({"pciAddress": "0000:01:00.0", "integrated": "false"})
+            json!({
+                "pciAddress": "0000:01:00.0", "integrated": "false",
+                "memoryModules": "[]", "memoryTimings": "{}",
+                "designCapacityWh": "50", "fullChargeCapacityWh": "45",
+                "wearPct": "10", "cycleCount": "100", "chemistry": "LION"
+            })
         );
         assert_eq!(
             report["devices"][5]["properties"],

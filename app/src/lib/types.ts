@@ -23,7 +23,8 @@ export type SensorKind =
   | 'flag'
   | 'percent'
   | 'link'
-  | 'counter';
+  | 'counter'
+  | 'duration';
 
 export type Unit =
   | 'celsius'
@@ -41,6 +42,7 @@ export type Unit =
   | 'pcie_generation'
   | 'lanes'
   | 'hours'
+  | 'seconds'
   | 'count';
 
 export type Source =

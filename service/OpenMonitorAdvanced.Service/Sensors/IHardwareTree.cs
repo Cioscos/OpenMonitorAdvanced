@@ -50,6 +50,27 @@ public interface IHardwareTree : IDisposable
     byte? ReadNvmeCriticalWarning(string storageIdentifier);
 
     /// <summary>
+    /// The ATA SMART attributes of a non-NVMe storage hardware as the last <see cref="Update"/> left
+    /// them: no command is sent. <see langword="null"/> when the hardware is unknown, is NVMe, or has
+    /// no attribute. Called from the storage worker only, right after the storage root's update.
+    /// </summary>
+    IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier);
+
+    /// <summary>
+    /// One read of an AMD System Management Network register through PawnIO, inside the global
+    /// <c>Access_PCI</c> mutex; <see langword="null"/> without PawnIO, on a non-AMD CPU, or when the
+    /// mutex cannot be taken within 100 ms. Reads only, never a write.
+    /// </summary>
+    uint? ReadSmn(uint address);
+
+    /// <summary>
+    /// IA32_PACKAGE_THERM_STATUS (MSR 0x1B1) of the package of that CPU, read through PawnIO on its
+    /// first thread; <see langword="null"/> without PawnIO, on a non-Intel
+    /// CPU, for an unknown CPU or when the read fails. Reads only, never a write.
+    /// </summary>
+    ulong? ReadIntelPackageThermStatus(string cpuIdentifier);
+
+    /// <summary>
     /// Raised when hardware is added or removed, or when a sensor is activated or deactivated.
     /// Handlers must only record the change (they may run inside an LHM callback or an update).
     /// </summary>

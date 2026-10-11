@@ -61,13 +61,26 @@ pub(crate) fn display_key(value: f64, unit: Unit) -> [i64; 4] {
         // Throughput is shown in bytes or in bits, as the settings say.
         Unit::BytesPerSecond => pair(bytes_key(value), bits_key(value)),
         Unit::BitsPerSecond => pair(bytes_key(value / 8.0), bits_key(value / 8.0)),
-        // `formatEnergy`: decimal steps, J to GJ, decimals like bytes.
-        Unit::Joule => pair(
-            stepped(value, 1000.0, 3, |step, v| {
-                i32::from(step != 0 && v < 100.0)
-            }),
-            [0, 0],
-        ),
+        // `formatEnergy`: Wh, or kWh from 1000 Wh, two decimals below 10,
+        // one below 100.
+        Unit::Joule => {
+            let wh = value / 3600.0;
+            let kilo = wh.abs() >= 1000.0;
+            let shown = if kilo { wh / 1000.0 } else { wh };
+            let digits = match shown.abs() {
+                a if a < 10.0 => 2,
+                a if a < 100.0 => 1,
+                _ => 0,
+            };
+            [
+                i64::from(kilo),
+                digits,
+                round(shown * 10f64.powi(digits as i32)),
+                0,
+            ]
+        }
+        // `formatDuration`: whole minutes, rounded down.
+        Unit::Seconds => [(value / 60.0).floor().max(0.0) as i64, 0, 0, 0],
         Unit::Boolean => [i64::from(value >= 0.5), 0, 0, 0],
         // `Math.round`: half up.
         Unit::PcieGeneration | Unit::Lanes => [(value + 0.5).floor() as i64, 0, 0, 0],
@@ -135,15 +148,19 @@ mod tests {
 
     #[test]
     fn display_key_steps_joules() {
-        // `formatEnergy` in format.ts: decimal steps (J, kJ, MJ, GJ), zero
-        // decimals at J or from 100 up, else one. The key is
-        // `[step * 4 + digits, round(scaled * 10^digits), 0, 0]`.
-        // 999 J: below 1000, stays in J, 0 digits -> "999 J" -> [0, 999].
-        assert_eq!(display_key(999.0, Unit::Joule), [0, 999, 0, 0]);
-        // 1500 J: 1.5 kJ, one digit -> "1.5 kJ" -> [4 + 1, 15].
-        assert_eq!(display_key(1500.0, Unit::Joule), [5, 15, 0, 0]);
-        // 2 500 000 J: 2500 kJ, then 2.5 MJ, one digit -> "2.5 MJ"
-        // -> [2 * 4 + 1, 25].
-        assert_eq!(display_key(2_500_000.0, Unit::Joule), [9, 25, 0, 0]);
+        // `formatEnergy` in format.ts: Wh, or kWh from 1000 Wh. The key is
+        // `[kilo, digits, round(shown * 10^digits), 0]`.
+        // 3600 J: 1 Wh, two digits -> "1.00 Wh".
+        assert_eq!(display_key(3600.0, Unit::Joule), [0, 2, 100, 0]);
+        // 180 000 J: 50 Wh, one digit -> "50.0 Wh".
+        assert_eq!(display_key(180_000.0, Unit::Joule), [0, 1, 500, 0]);
+        // 3 600 000 J: 1000 Wh = 1 kWh -> "1.00 kWh".
+        assert_eq!(display_key(3_600_000.0, Unit::Joule), [1, 2, 100, 0]);
+    }
+
+    #[test]
+    fn display_key_floors_seconds_to_minutes() {
+        assert_eq!(display_key(119.0, Unit::Seconds)[0], 1);
+        assert_eq!(display_key(120.0, Unit::Seconds)[0], 2);
     }
 }

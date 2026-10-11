@@ -46,6 +46,14 @@ facts first documented by LibreHardwareMonitor
 with thanks. No LibreHardwareMonitor code is included. Readings from these calls are marked
 "experimental" in the app.
 
+## ZenStates-Core (credit)
+
+The in-use RAM timings of AMD Zen CPUs are decoded from the memory controller (UMC)
+registers read through LibreHardwareMonitor's PawnIO module. Only the register offsets and
+bit fields of the UMC were taken as a reference from ZenStates-Core
+(https://github.com/irusanov/ZenStates-Core, GPL-3.0), credited here with thanks. No file
+or code of ZenStates-Core is copied into this repository.
+
 ## NVIDIA NVML, AMD ADL, Intel IGCL
 
 `crates/oma-win/src/gpu/nvml.rs`, `adl.rs` and `igcl.rs` contain hand-written

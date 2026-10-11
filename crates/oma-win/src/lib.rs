@@ -2,6 +2,7 @@
 #![cfg(windows)]
 
 pub mod autostart;
+pub mod battery;
 pub mod cpu;
 pub mod crash;
 pub(crate) mod dynlib;
@@ -76,6 +77,7 @@ pub fn default_providers(
             service.feed.clone(),
         )),
         Box::new(network::NetworkProvider::default()),
+        Box::new(battery::BatteryProvider::default()),
         Box::new(svc::SvcProvider::new(service.feed, service.drives)),
     ]
 }

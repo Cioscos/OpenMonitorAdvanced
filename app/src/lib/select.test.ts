@@ -1,5 +1,6 @@
-import { MOCK_SCHEMA, mockValues } from './backend/mock';
+import { MOCK_BATTERY_SCHEMA, MOCK_SCHEMA, mockBatteryValues, mockValues } from './backend/mock';
 import {
+  batterySummary,
   cpuSummary,
   gpuSummaries,
   memorySummary,
@@ -208,4 +209,30 @@ test('network_summary_has_adapter_and_link', () => {
   const net = networkSummary(MOCK_SCHEMA, valueOf)!;
   expect(net.adapterName).toBe('Ethernet');
   expect(net.linkBps).toBe(valueOf('network/mock-eth/throughput/link-speed'));
+});
+
+const BAT = 'battery/0';
+const batteryOf = (overrides: Record<string, number | null> = {}) => {
+  const base = mockBatteryValues(1);
+  return (id: string) => {
+    if (id in overrides) return overrides[id];
+    const i = MOCK_BATTERY_SCHEMA.sensors.findIndex((s) => s.id === id);
+    return i < 0 ? null : base[i];
+  };
+};
+
+test('battery_summary_states', () => {
+  const summary = (o: Record<string, number | null>) => batterySummary(MOCK_BATTERY_SCHEMA, batteryOf(o))!;
+  expect(summary({})).toEqual({ deviceId: BAT, chargePct: 64, chargeId: `${BAT}/percent/charge`, state: 'discharging', secondsLeft: 5400, rateW: -12.5 });
+  expect(summary({ [`${BAT}/flag/charging`]: 1, [`${BAT}/flag/ac-online`]: 1 }).state).toBe('charging');
+  // Plugged in and full: not charging, but not discharging either.
+  const full = summary({ [`${BAT}/flag/charging`]: 0, [`${BAT}/flag/ac-online`]: 1, [`${BAT}/duration/remaining`]: null });
+  expect(full.state).toBe('plugged');
+  expect(full.secondsLeft).toBeNull();
+  // Without the AC flag nothing says the battery is discharging.
+  expect(summary({ [`${BAT}/flag/ac-online`]: null, [`${BAT}/flag/charging`]: 0 }).state).toBe('plugged');
+});
+
+test('no_battery_no_summary', () => {
+  expect(batterySummary(MOCK_SCHEMA, valueOf)).toBeNull();
 });

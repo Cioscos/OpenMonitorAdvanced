@@ -42,7 +42,9 @@ public sealed record SensorNode(
 /// <paramref name="IsNvme"/> is DiskInfoToolkit's <c>Storage.IsNVMe</c>; <paramref name="HasCriticalWarning"/>
 /// says its SMART attribute list holds the NVMe Critical Warning attribute (true only after an
 /// <c>Update()</c> read the SMART/Health log), so the schema publishes the
-/// <c>flag/critical-warning</c> sensor only for a disk that can answer it.
+/// <c>flag/critical-warning</c> sensor only for a disk that can answer it. <paramref name="HasAtaHealth"/>
+/// is the same for a non-NVMe disk whose SMART pass left ATA attributes (the SATA health sensors);
+/// <paramref name="AtaSectorAttributes"/> says which sector counters it has (bit 1 = 05h, 2 = C5h, 4 = C6h).
 /// </summary>
 public sealed record StorageInfo(
     int DriveNumber,
@@ -51,7 +53,9 @@ public sealed record StorageInfo(
     string? DriveSerial,
     bool Rotational,
     bool IsNvme = false,
-    bool HasCriticalWarning = false);
+    bool HasCriticalWarning = false,
+    bool HasAtaHealth = false,
+    byte AtaSectorAttributes = 0);
 
 /// <summary>Where the value behind a <see cref="SensorBinding"/> comes from.</summary>
 public enum BindingSource
@@ -64,6 +68,22 @@ public enum BindingSource
     /// attributes by <see cref="IHardwareTree.ReadNvmeCriticalWarning"/> and published as 0/1.
     /// </summary>
     NvmeCriticalWarning,
+
+    /// <summary>
+    /// One SATA health value of a storage hardware, cached by the storage worker under
+    /// <c>&lt;storageId&gt;#ata-critical</c>, <c>#ata-sectors</c>, <c>#ata-reallocated</c>,
+    /// <c>#ata-pending</c> or <c>#ata-uncorrectable</c> (<see cref="SensorBinding.LhmIdentifier"/>).
+    /// </summary>
+    AtaHealth,
+
+    /// <summary>
+    /// Bit 0 (thermal status) of IA32_PACKAGE_THERM_STATUS (MSR 0x1B1), read once per CPU per tick by
+    /// <see cref="IHardwareTree.ReadIntelPackageThermStatus"/>; <see cref="SensorBinding.LhmIdentifier"/> is the CPU's.
+    /// </summary>
+    IntelThermal,
+
+    /// <summary>Bit 10 (power limitation status) of the same MSR.</summary>
+    IntelPowerLimit,
 }
 
 /// <summary>

@@ -33,10 +33,10 @@ Updated at the end of every milestone (last update: M8d1).
 | Pipe listener: after a failed connect, the replacement instance is created after the old one is disposed and without `FILE_FLAG_FIRST_PIPE_INSTANCE`, a brief zero-instance gap (the client-side PID check protects the app). Cheap hardening: create it with `first: Volatile.Read(ref _busy) == 0`, so a squatter makes it fail loudly (R20) instead of being joined. | `service/OpenMonitorAdvanced.Service/Pipe/PipeListener.cs` | when touched |
 | The service's logs live in `$INSTDIR\service\logs` (ruling R30). Any future service-owned path (settings, rules) must stay under a folder no user can create first, with the same service-side check (`LogDirectoryGuard`), never under `%ProgramData%`. | `service/OpenMonitorAdvanced.Service/Logging/LogDirectoryGuard.cs`, `app/src-tauri/nsis/oma.nsh` | M5 (settings) |
 | Update check: WinHTTP does not check certificate revocation (M6c ruling). Revisit if the check ever downloads anything. | `crates/oma-win/src/http.rs` | accepted |
-| CPU thermal throttling has no sensor in LibreHardwareMonitor 0.9.6 (S1 §1), so `cpu-throttle` has no instances. On Intel the service could read bit 0 of `IA32_PACKAGE_THERM_STATUS` itself through the public `LibreHardwareMonitor.PawnIo.IntelMsr`: new code, Intel only, not testable on this PC. | `service/OpenMonitorAdvanced.Service/Sensors/` | when Intel hardware is available |
+| CPU throttling (Intel, `IA32_PACKAGE_THERM_STATUS` through PawnIO) was implemented in M9b; AMD has no sensor, so `cpu-throttle` has no instances there. Only the live test on an Intel PC is owed: see "Open: new sensors (M9b)". | `service/OpenMonitorAdvanced.Service/Sensors/` | Intel hardware (M9b live test) |
 | TjMax: the AMD table (`AmdTjMaxTable.cs`, 164 entries) covers desktop Ryzen only. Mobile and Ryzen AI (in the same AMD table, e.g. 7840HS at 100 °C), Threadripper, Zen/Zen+ with the offset Tctl, engineering samples and the Ryzen 3 3100/3300X (no published value) use the 85/95 °C fallback. The entries were checked against AMD's specifications table only (31 also against the product page). | `service/OpenMonitorAdvanced.Service/Sensors/AmdTjMaxTable.cs` | M6 (hardware matrix) |
 | Intel `tjMaxC` is the TCC activation target without the TCC offset (bits 29:24 of the same MSR, not read by LHM), so on machines with an offset (typical on laptops) throttling starts below `tjMaxC`. | `service/OpenMonitorAdvanced.Service/Sensors/CpuIdentity.cs` | M6 (hardware matrix) |
-| The disk critical warning exists only for NVMe (the DIT `CriticalWarning` attribute and the core's NVMe health log). A SATA rule from `SmartInfo.DiskStatus == Bad` (a CrystalDiskInfo-style heuristic, S1 §2) would be a separate rule, to be discussed. | `service/OpenMonitorAdvanced.Service/Sensors/` | to discuss |
+| The SATA critical warning was added in M9b (`SataHealth`: an attribute value at or below its threshold); the `SmartInfo.DiskStatus == Bad` heuristic stays out. Closed, live test on a real SATA disk owed: see "Open: new sensors (M9b)". | `service/OpenMonitorAdvanced.Service/Sensors/SataHealth.cs` | closed |
 | The machine schema fixture `crates/oma-core/tests/fixtures/this-machine-schema.json` holds this PC's Windows volume GUIDs and network adapter GUID (no serials or MACs). Regenerate it with hashed ids before the repository is pushed. | `crates/oma-core/tests/fixtures/` | before any push |
 
 ## Open: stress test (M8a1)
@@ -195,6 +195,29 @@ Grafico a strisce, cassetto «Serie», Semplice e Avanzata a tutta finestra, fas
   - Semplice: il sollevamento di tutto `.threads` blocca i clic negli spazi tra le barre (basterebbe sollevare `.threads i`); `.disks [title]` prende anche `.act` con il titolo vuoto; le barre dei thread non hanno `aria-valuetext`; il testo del `Term` «/ 320 W» è solo il valore del limite; `linkBps` porta bit/s e si divide per 8 in `SimpleView`;
   - stress test: `chosen` resta in `$state` con `fixedSeries` anche se non serve; i sensori di clock e RAM si cercano per `label.key` in tutto lo schema;
   - test: asserzioni con regex sul sorgente in `SimpleView.test.ts` e nel `Tile`; i test di `select.ts` scritti dopo il codice; il filtro `/fan/i` di un test è largo.
+
+## Open: new sensors (M9b)
+
+Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Implementata sul branch `feat/m9b`; verifiche automatiche verdi, prove dal vivo e misure superate il 2026-10-11.
+
+- **Prove dal vivo su questo PC (spec §9.2): superate il 2026-10-11** con la build release di `ad25e22`. I timing in uso coincidono con ZenTimings 1.39 campo per campo (tRFCsb 416 compreso); l'SPD mostra i due moduli; energia e PCIe RX/TX nella pagina della GPU durante il benchmark, grafico a 60 FPS senza scatti; l'HDD SATA D: resta in standby con l'app aperta; nessuna voce «Batteria». Consumi in `docs/perf-budget.md` (sezione M9b), nel budget anche in tray.
+- **Correzioni dalle prove dal vivo (2026-10-11):** l'«Avviso settori» si accende solo sui dischi che possono essere rotativi (su un SSD SATA, il Corsair Force LS di E:, il contatore 05h valeva 1 blocco ritirato e CrystalDiskInfo lo giudica «Buono»; decisione dell'utente); la tabella dei sensori non mostra minimo, massimo e media per i totali che crescono soltanto (energia dall'avvio, dati letti e scritti, ore e cicli di accensione, settori riallocati).
+- **Da collaudare altrove (spec §9.3):**
+  - batteria su un portatile: carica, potenza con il segno, tempo stimato, usura, regola `battery-low` solo in scarica;
+  - throttling Intel su un PC Intel: termico sotto carico con dissipatore limitato, potenza con PL1 basso;
+  - timing in uso su Zen 2, Zen 3 e Zen 5;
+  - un disco SATA con settori riallocati o un attributo sotto soglia.
+- **Altre prove dal vivo dovute (revisione finale):**
+  - etichetta `slot` dell'SPD: su questo PC dice «DIMM #1» e «DIMM #3» (come i sensori di temperatura di LibreHardwareMonitor), mentre ZenTimings dice A2 e B2; lasciata così, da rivedere solo se si trova una corrispondenza affidabile con gli slot della scheda;
+  - su un disco SATA vero, DiskInfoToolkit riempie `Threshold` (senza soglie l'avviso critico non scatta mai).
+- **Minori rinviati dalle revisioni (M9b):**
+  - formattazione: unità e cifre della batteria si scelgono prima dell'arrotondamento (9,995 Wh dà «10,00 Wh», 999,6 Wh dà «1.000 Wh»), in Rust, TS e overlay; durata con «min»/«h» scritti nel codice di Rust e dell'overlay; mancano i casi joule e secondi in `overlayFormat.test.ts`; `scalesFor` di `rules.ts` non ha il caso dei secondi; i watt della batteria sono interi nei KPI della Avanzata e con un decimale nella Semplice;
+  - SPD e timing: il nome del sensore di LHM «Thermal Sensor High Limit» è provato solo con i nomi del dump; il mutex si prende per registro e non per gruppo (nel caso peggiore 12 × 100 ms); mancano i test dei limiti CL > 80 e MCLK > 5000; le lettere dei canali vengono dall'indice UMC (A, C possibili); dopo una lettura incompleta il nuovo tentativo arriva solo al prossimo evento di ricostruzione dello schema e `memoryTimings` può restare assente (mai sbagliato); un modulo con un campo sbagliato è scartato intero; mancano i test DDR4 e senza `trfcSb`; `MEMORY_TERMS` non è in `TERMS`; «39-–-–-–» con SPD parziale;
+  - throttling Intel: `X86Base.CpuId(6,0)` senza `IsSupported`; un primo sondaggio dell'MSR fallito tiene i flag fuori fino alla ricostruzione successiva; manca il test con la CPU in `_failedRoots`; la fixture `/amdcpu/0` porta una `CpuInfo` Intel;
+  - salute SATA: manca il test di un disco con `ReadAtaAttributes` nullo o vuoto;
+  - batteria: il nome di ripiego «Battery {n}» non è tradotto; `acOnline` si usa senza controllare `Quality::Fresh`; con il cavo inserito e la carica assente resta una voce di bersaglio mancante; la pausa è legata al solo id `battery-low` (regole duplicate o proprie non si fermano) e mancano i test dell'inserimento del cavo a livello critico e dell'aggiornamento di `ac_index`; il commento SAFETY di `ioctl_partial` non cita la garanzia di `Pod`; `static_changed` e gli IOCTL sono provati solo con zero dispositivi;
+  - GPU NVIDIA: `SlowReader` e `NvmlLayer::sample` sono coperti solo dal test hardware ignorato; il commento SAFETY di `Send` di `NvmlLayer` è vecchio; il sondaggio gira anche per GPU senza campi lenti; una lettura in volo può impostare `stale` dopo `set_targets`, con un `rediscover` in più;
+  - UI: una stringa `wearPct` vuota dà 0 %; ordine degli import in `SensorTable` e `KpiRow`; la larghezza `nowrap` della colonna slot; l'angolo vuoto della tabella dei canali.
 
 ## Open: leaderboard app (M8d2)
 
@@ -511,7 +534,7 @@ The hand-written part of the 0.5.0 draft release (above the block that `render-r
 - Per-disk SMART switch and per-module switches are done (M5a); the SAT fallback for USB disks is done (M6b), with the SMART of USB disks off by default.
 - **Not covered yet, despite LibreHardwareMonitor exposing related sensors — do not assume the mapping surfaces them without re-checking `SchemaBuilder.cs`:**
   - **RAM SPD timings:** `SchemaBuilder.cs` (around the DIMM temperature match, see the comment there) explicitly discards the SPD timing and capacity sensors RAMSPDToolkit exposes on each DIMM. To check availability, enable PawnIO and dump a DIMM's `SensorNode`s: the timing values are present but currently thrown away, not absent from LHM.
-- CPU throttling and the disk critical warning were settled in M5b: see the limits in "Open: code" (throttling has no LHM sensor; the critical warning is NVMe only).
+- CPU throttling (Intel only) and the SATA critical warning were implemented in M9b: see "Open: new sensors (M9b)".
 
 ## Manual checks owed by a human
 

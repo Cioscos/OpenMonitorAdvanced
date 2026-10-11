@@ -1,9 +1,16 @@
-//! Every label key the providers emit (crates/oma-win/src/{cpu,memory,storage,network}.rs
+//! Every label key the providers emit (crates/oma-win/src/{cpu,memory,storage,network,battery}.rs
 //! and `GpuField::label_key` in crates/oma-win/src/gpu/field.rs)
 //! must exist as `sensor.<key>` in both i18n catalogs, so a provider cannot
 //! ship a key with no translation. Runs on any platform, no hardware needed.
 
 const KEYS: &[&str] = &[
+    "battery.charge",
+    "battery.rate",
+    "battery.voltage",
+    "battery.remaining",
+    "battery.timeRemaining",
+    "battery.charging",
+    "battery.acOnline",
     "cpu.load.total",
     "cpu.load.thread",
     "cpu.clock.effective",
@@ -49,6 +56,9 @@ const KEYS: &[&str] = &[
     "gpu.throttle.thermal",
     "gpu.pcie.gen",
     "gpu.pcie.width",
+    "gpu.energy.total",
+    "gpu.pcie.rx",
+    "gpu.pcie.tx",
 ];
 
 #[test]

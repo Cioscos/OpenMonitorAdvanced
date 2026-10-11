@@ -281,6 +281,32 @@
     "warn": null
   },
   {
+    "condition": "flagActive",
+    "crit": null,
+    "enabled": true,
+    "hysteresis": {
+      "amount": 3.0,
+      "durationS": 10
+    },
+    "id": "disk-sectors",
+    "notify": {
+      "crit": true,
+      "warn": false
+    },
+    "target": {
+      "deviceKind": "storage",
+      "names": [
+        "sector-warning"
+      ],
+      "sensorKind": "flag"
+    },
+    "unit": "boolean",
+    "warn": {
+      "durationS": 0,
+      "threshold": null
+    }
+  },
+  {
     "condition": "above",
     "crit": {
       "durationS": 0,

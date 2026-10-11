@@ -130,6 +130,7 @@ pub fn parse_unit(s: &str) -> Option<Unit> {
         "pcie_generation" => Unit::PcieGeneration,
         "lanes" => Unit::Lanes,
         "hours" => Unit::Hours,
+        "seconds" => Unit::Seconds,
         "count" => Unit::Count,
         _ => return None,
     })
@@ -1040,6 +1041,7 @@ mod tests {
             Unit::PcieGeneration,
             Unit::Lanes,
             Unit::Hours,
+            Unit::Seconds,
             Unit::Count,
         ] {
             let name = serde_json::to_value(u).unwrap();

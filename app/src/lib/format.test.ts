@@ -79,11 +79,12 @@ const EXAMPLES: Record<Unit, [number, string]> = {
   bytes: [17.9 * 1024 ** 3, '17.9 GB'],
   bytes_per_second: [120 * 1024 ** 2, '120 MB/s'],
   bits_per_second: [1e9, '1.0 Gbit/s'],
-  joule: [12_345, '12.3 kJ'],
+  joule: [180_000, '50.0 Wh'],
   boolean: [1, 'Active'],
   pcie_generation: [4, 'Gen 4'],
   lanes: [16, 'x16'],
   hours: [1234, '1,234 h'],
+  seconds: [5400, '1 h 30 min'],
   count: [56, '56'],
 };
 
@@ -111,8 +112,15 @@ test('formatValue follows the locale', () => {
 test('formatValue rounds link values and scales energy', () => {
   expect(formatValue(3.9999, 'pcie_generation', 'en', tEn)).toBe('Gen 4');
   expect(formatValue(8, 'lanes', 'en', tEn)).toBe('x8');
-  expect(formatValue(950, 'joule', 'en', tEn)).toBe('950 J');
-  expect(formatValue(2.5e6, 'joule', 'en', tEn)).toBe('2.5 MJ');
+  expect(formatValue(3600, 'joule', 'en', tEn)).toBe('1.00 Wh');
+  expect(formatValue(3600, 'joule', 'it', tIt)).toBe('1,00 Wh');
+  expect(formatValue(1_800_000, 'joule', 'en', tEn)).toBe('500 Wh');
+  expect(formatValue(3.6e6, 'joule', 'en', tEn)).toBe('1.00 kWh');
+});
+
+test('formatValue shows seconds as hours and minutes', () => {
+  expect(formatValue(5400, 'seconds', 'it', tIt)).toBe('1 h 30 min');
+  expect(formatValue(600, 'seconds', 'en', tEn)).toBe('10 min');
 });
 
 test('formats hours and counts', () => {

@@ -205,6 +205,8 @@ public sealed partial class SensorHub
         _watch.Rearm();
     }
 
+    private static readonly string[] AtaKeys = ["critical", "sectors", "reallocated", "pending", "uncorrectable"];
+
     /// <summary>
     /// A resting disk's values of the round before, carried into this one as held (the caller
     /// has checked that round is still current, <see cref="IsCurrent"/>). Only those
@@ -230,6 +232,11 @@ public sealed partial class SensorHub
         }
 
         Keep(root.Identifier); // the critical warning flag is keyed by the disk itself
+        foreach (string ataKey in AtaKeys)
+        {
+            Keep(root.Identifier + SchemaBuilder.AtaKeyPrefix + ataKey);
+        }
+
         KeepSensors(root);
 
         void KeepSensors(HardwareNode node)
@@ -593,10 +600,51 @@ public sealed partial class SensorHub
             cache[fresh.Identifier] = raw is byte b ? ((b & CriticalWarningMask) != 0 ? 1.0 : 0.0) : null;
         }
 
+        if (current is { IsNvme: false, HasAtaHealth: true })
+        {
+            CollectAtaHealth(fresh.Identifier, resolution.Info.Rotational, cache);
+        }
+
         StorageInfo info = resolution.Info;
-        return info.IsNvme == current.IsNvme && info.HasCriticalWarning == current.HasCriticalWarning
+        return info.IsNvme == current.IsNvme
+            && info.HasCriticalWarning == current.HasCriticalWarning
+            && info.HasAtaHealth == current.HasAtaHealth
+            && info.AtaSectorAttributes == current.AtaSectorAttributes
             ? resolution
-            : resolution with { Info = info with { IsNvme = current.IsNvme, HasCriticalWarning = current.HasCriticalWarning } };
+            : resolution with
+            {
+                Info = info with
+                {
+                    IsNvme = current.IsNvme,
+                    HasCriticalWarning = current.HasCriticalWarning,
+                    HasAtaHealth = current.HasAtaHealth,
+                    AtaSectorAttributes = current.AtaSectorAttributes,
+                },
+            };
+    }
+
+    /// <summary>The SATA flags and sector counters of a just-updated disk, from the attributes that update left (no extra command).</summary>
+    private void CollectAtaHealth(string root, bool rotational, Dictionary<string, double?> cache)
+    {
+        SataHealthResult? health = null;
+        try
+        {
+            if (_tree.ReadAtaAttributes(root) is { } attributes)
+            {
+                health = SataHealth.Evaluate(rotational, attributes);
+            }
+        }
+        catch (Exception e)
+        {
+            LogRateLimited("ata-health:" + root, e, "Reading the SMART attributes of {Root} failed", root);
+        }
+
+        string key = root + SchemaBuilder.AtaKeyPrefix;
+        cache[key + "critical"] = health is null ? null : health.Critical ? 1.0 : 0.0;
+        cache[key + "sectors"] = health is null ? null : health.SectorWarning ? 1.0 : 0.0;
+        cache[key + "reallocated"] = health?.Reallocated;
+        cache[key + "pending"] = health?.Pending;
+        cache[key + "uncorrectable"] = health?.Uncorrectable;
     }
 
     private void CollectValues(HardwareNode node, Dictionary<string, double?> cache)

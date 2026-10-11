@@ -18,6 +18,7 @@ public sealed partial class SensorHub
         _applier.Open(groups);
         ApplyDesired();
         _pawnIo = _pawnIoAvailable();
+        _memoryTimingsRead = false;
         _log.LogInformation("PawnIO available: {PawnIo}", _pawnIo);
 
         // Changes raised during Open() are covered by the Roots read right after.
@@ -136,7 +137,7 @@ public sealed partial class SensorHub
             }
         }
 
-        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins, _serviceState);
+        BuiltSchema built = SchemaBuilder.Build(schemaRoots, _pawnIo, pins, _serviceState, ReadMemoryTimings(schemaRoots));
         foreach (string skipped in built.SkippedRoots)
         {
             LogNotUnique(skipped);
@@ -168,8 +169,27 @@ public sealed partial class SensorHub
             : new Plan(planRoots, built, current.Revision + 1, filter, resolved);
     }
 
+    /// <summary>
+    /// The in-use DRAM timings (spec M9b §2.3): read once per opened tree, as soon as PawnIO, the
+    /// memory device and a supported AMD CPU are all there, never in the tick. Timings do not change
+    /// without a reboot. Runs on the sampler.
+    /// </summary>
+    private string? ReadMemoryTimings(IReadOnlyList<HardwareNode> schemaRoots)
+    {
+        if (!_memoryTimingsRead && _pawnIo
+            && schemaRoots.Any(r => r.Type == HardwareType.Memory && r.Identifier == "/ram")
+            && schemaRoots.FirstOrDefault(r => r.Type == HardwareType.Cpu && r.Cpu is not null)?.Cpu is { } cpu)
+        {
+            // An incomplete read (mutex contention, module failure) stays retryable: the next schema build asks again.
+            _memoryTimingsRead = UmcTimings.TryRead(_tree.ReadSmn, cpu, out string? timings, message => _log.LogInformation("{Message}", message));
+            _memoryTimings = timings;
+        }
+
+        return _memoryTimings;
+    }
+
     /// <summary>The disk identity a pinned id depends on: the NVMe health flags come and go with updates and never change an id.</summary>
-    private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false };
+    private static StorageInfo Identity(StorageInfo info) => info with { IsNvme = false, HasCriticalWarning = false, HasAtaHealth = false, AtaSectorAttributes = 0 };
 
     /// <summary>
     /// The disk's identity with the descriptor model/serial and the rotational flag, from
@@ -268,6 +288,16 @@ public sealed partial class SensorHub
                     // Keyed by the storage hardware identifier, and only ever cached by the storage worker.
                     FromStorage[i] = true;
                     Owner[i] = binding.LhmIdentifier;
+                }
+                else if (binding.Source == BindingSource.AtaHealth)
+                {
+                    // "<storageId>#ata-...": cached by the storage worker, owned by the storage root.
+                    FromStorage[i] = true;
+                    Owner[i] = binding.LhmIdentifier[..binding.LhmIdentifier.LastIndexOf(SchemaBuilder.AtaKeyPrefix, StringComparison.Ordinal)];
+                }
+                else if (binding.Source is BindingSource.IntelThermal or BindingSource.IntelPowerLimit)
+                {
+                    Owner[i] = binding.LhmIdentifier; // the CPU root itself, so a failed update of it makes the flags absent
                 }
                 else if (owners.TryGetValue(binding.LhmIdentifier, out (string Root, bool Storage) owner))
                 {

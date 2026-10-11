@@ -19,6 +19,8 @@ internal sealed class FakeTree : IHardwareTree
     private readonly ConcurrentDictionary<string, int> _reads = new();
     private readonly ConcurrentDictionary<string, int> _criticalWarningReads = new();
     private List<HardwareNode> _roots = [];
+    private int _smnReads;
+    private int _thermStatusReads;
     private int _openCount;
     private int _closeCount;
     private int _enableStorageCount;
@@ -40,6 +42,26 @@ internal sealed class FakeTree : IHardwareTree
 
     /// <summary>The critical warning byte <see cref="ReadNvmeCriticalWarning"/> answers per storage identifier; absent = the attribute is not there.</summary>
     public ConcurrentDictionary<string, byte?> NvmeCriticalWarnings { get; } = new();
+
+    /// <summary>The ATA attributes <see cref="ReadAtaAttributes"/> answers per storage identifier; absent = none.</summary>
+    public ConcurrentDictionary<string, IReadOnlyList<AtaAttribute>> AtaAttributes { get; } = new();
+
+    /// <summary>How many times <see cref="ReadAtaAttributes"/> was called for that storage identifier.</summary>
+    public int AtaAttributeReads(string storageIdentifier) => _ataReads.GetValueOrDefault(storageIdentifier);
+
+    private readonly ConcurrentDictionary<string, int> _ataReads = new();
+
+    public IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier)
+    {
+        _ataReads.AddOrUpdate(storageIdentifier, 1, (_, n) => n + 1);
+        return AtaAttributes.TryGetValue(storageIdentifier, out IReadOnlyList<AtaAttribute>? v) ? v : null;
+    }
+
+    /// <summary>The SMN registers <see cref="ReadSmn"/> answers by full address (channel offset included); absent = not readable.</summary>
+    public ConcurrentDictionary<uint, uint> Smn { get; } = new();
+
+    /// <summary>How many times <see cref="ReadSmn"/> was called.</summary>
+    public int SmnReads => Volatile.Read(ref _smnReads);
 
     /// <summary>Runs at the start of <see cref="Update"/>, on the calling thread.</summary>
     public Action<HardwareNode>? BeforeUpdate { get; set; }
@@ -154,6 +176,24 @@ internal sealed class FakeTree : IHardwareTree
     {
         _criticalWarningReads.AddOrUpdate(storageIdentifier, 1, (_, n) => n + 1);
         return NvmeCriticalWarnings.TryGetValue(storageIdentifier, out byte? v) ? v : null;
+    }
+
+    /// <summary>The MSR 0x1B1 value <see cref="ReadIntelPackageThermStatus"/> answers per CPU identifier; absent = not readable.</summary>
+    public ConcurrentDictionary<string, ulong> ThermStatus { get; } = new();
+
+    /// <summary>How many times <see cref="ReadIntelPackageThermStatus"/> was called.</summary>
+    public int ThermStatusReads => Volatile.Read(ref _thermStatusReads);
+
+    public ulong? ReadIntelPackageThermStatus(string cpuIdentifier)
+    {
+        Interlocked.Increment(ref _thermStatusReads);
+        return ThermStatus.TryGetValue(cpuIdentifier, out ulong v) ? v : null;
+    }
+
+    public uint? ReadSmn(uint address)
+    {
+        Interlocked.Increment(ref _smnReads);
+        return Smn.TryGetValue(address, out uint v) ? v : null;
     }
 
     public void EnableStorage()

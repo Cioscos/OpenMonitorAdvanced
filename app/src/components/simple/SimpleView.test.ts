@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { MOCK_SCHEMA, mockValues } from '../../lib/backend/mock';
+import { MOCK_BATTERY_SCHEMA, MOCK_SCHEMA, mockBatteryValues, mockValues } from '../../lib/backend/mock';
 import { formatRate, formatTemperature } from '../../lib/format';
 import { i18n, t } from '../../lib/i18n/index.svelte';
 import { LiveStore } from '../../lib/live.svelte';
@@ -215,4 +215,38 @@ test('fan_rpm_uses_the_locale_separators', () => {
   store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: [...mockValues(1), 1500] });
   render(SimpleView, { store, onOpenAdvanced: () => {} });
   expect(chipTexts().some((chip) => chip.includes('1.500 RPM'))).toBe(true);
+});
+
+function setupBattery(plugged: boolean, onOpenAdvanced: (section: string | null) => void = () => {}) {
+  const store = new LiveStore();
+  store.applySchema(MOCK_BATTERY_SCHEMA);
+  store.applySnapshot({ revision: 1, seq: 1, timestampMs: 2000, values: mockBatteryValues(1, plugged) });
+  render(SimpleView, { store, onOpenAdvanced });
+}
+
+test('battery_tile_only_on_laptops', async () => {
+  setup();
+  expect(text()).not.toContain(t('tile.battery'));
+  cleanup();
+
+  const opened = vi.fn();
+  setupBattery(false, opened);
+  expect(text()).toContain(t('tile.battery'));
+  expect(text()).toContain('64');
+  expect(text()).toContain(t('tile.battery.discharging'));
+  expect(text()).toContain('-12.5 W');
+  expect(text()).toContain(t('duration.hoursMinutes', { h: 1, m: 30 }));
+  await fireEvent.click(screen.getByRole('button', { name: new RegExp(t('tile.battery')) }));
+  expect(opened).toHaveBeenCalledWith(sectionForTile('battery', 'battery/0'));
+  cleanup();
+
+  setupBattery(true);
+  expect(text()).toContain(t('tile.battery.charging'));
+});
+
+test('battery_bar_uses_transform', () => {
+  setupBattery(false);
+  const bar = document.querySelector('[role="meter"][aria-label="' + t('tile.battery') + '"] i') as HTMLElement;
+  expect(bar.style.transform).toBe('scaleX(0.64)');
+  expect(bar.style.width).toBe('');
 });

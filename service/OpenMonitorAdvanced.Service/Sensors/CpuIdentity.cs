@@ -10,7 +10,14 @@ namespace OpenMonitorAdvanced.Service.Sensors;
 /// name); <paramref name="IntelTjMaxC"/> is the value of the "TjMax [°C]" parameter of the
 /// "CPU Package" sensor, when there is one.
 /// </summary>
-public sealed record CpuInfo(string Vendor, string BrandString, int Family, int Model, double? IntelTjMaxC);
+public sealed record CpuInfo(
+    string Vendor,
+    string BrandString,
+    int Family,
+    int Model,
+    double? IntelTjMaxC,
+    bool ThermStatusReadable = false,
+    bool PowerLimitNotification = false);
 
 /// <summary>
 /// Turns a <see cref="CpuInfo"/> into a TjMax for the <c>tjMaxC</c> device property. Rules of

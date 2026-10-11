@@ -2,6 +2,7 @@ using DiskInfoToolkit.Interop.Enums;
 using LibreHardwareMonitor.Hardware;
 using LibreHardwareMonitor.Hardware.Cpu;
 using LibreHardwareMonitor.Hardware.Storage;
+using LibreHardwareMonitor.PawnIo;
 using Microsoft.Extensions.Logging;
 using SmartAttribute = DiskInfoToolkit.SmartAttribute;
 
@@ -58,6 +59,13 @@ public sealed class LhmTree : IHardwareTree
     private int _membershipDirty;
     private int _storageEnabled;
     private int _disposed;
+    private readonly object _smnLock = new();
+    private AmdFamily17? _smn; // guarded by _smnLock
+    private Mutex? _pciMutex; // guarded by _smnLock; one instance for the tree's lifetime
+    private bool _smnFailed; // guarded by _smnLock
+    private readonly object _msrLock = new();
+    private IntelMsr? _intelMsr; // guarded by _msrLock; opened on the first Intel read, closed with the tree
+    private bool _msrFailed; // guarded by _msrLock
 
     public LhmTree(ILogger<LhmTree> log)
         : this(log, CreateComputer)
@@ -174,8 +182,109 @@ public sealed class LhmTree : IHardwareTree
         _composition.Sensors.TryGetValue(sensorIdentifier, out ISensor? sensor) && sensor.Value is float value ? value : null;
 
     /// <inheritdoc />
+    public uint? ReadSmn(uint address)
+    {
+        lock (_smnLock)
+        {
+            if (_smnFailed || Volatile.Read(ref _disposed) == 1)
+            {
+                return null;
+            }
+
+            bool held = false;
+            try
+            {
+                // The PawnIO module asks for the machine-wide PCI mutex that LHM and HWiNFO also use.
+                _pciMutex ??= new Mutex(false, @"Global\Access_PCI");
+                try
+                {
+                    held = _pciMutex.WaitOne(100);
+                }
+                catch (AbandonedMutexException)
+                {
+                    held = true; // the previous owner died; we own it now
+                }
+
+                if (!held)
+                {
+                    return null;
+                }
+
+                _smn ??= new AmdFamily17();
+                return _smn.ReadSmn(address);
+            }
+            catch (Exception e)
+            {
+                _smnFailed = true;
+                _log.LogWarning(e, "SMN reads are not available");
+                return null;
+            }
+            finally
+            {
+                if (held)
+                {
+                    _pciMutex!.ReleaseMutex();
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public ulong? ReadIntelPackageThermStatus(string cpuIdentifier) =>
+        _composition.Entries.TryGetValue(cpuIdentifier, out Entry? entry) && entry.Hardware is GenericCpu { CpuId: { Length: > 0 } ids } cpu
+            && cpu.CpuId[0].Length > 0 && ids[0][0].Vendor == Vendor.Intel
+            ? ReadIntelThermStatus(ids[0][0].Affinity)
+            : null;
+
+    // MSR 0x1B1 on the thread of the package; the PawnIO IntelMSR module allows it (0x64F it does not).
+    private ulong? ReadIntelThermStatus(GroupAffinity affinity)
+    {
+        lock (_msrLock)
+        {
+            if (_msrFailed || Volatile.Read(ref _disposed) == 1)
+            {
+                return null;
+            }
+
+            try
+            {
+                _intelMsr ??= new IntelMsr();
+                return _intelMsr.ReadMsr(0x1B1, out uint eax, out uint edx, affinity) ? ((ulong)edx << 32) | eax : null;
+            }
+            catch (Exception e)
+            {
+                _msrFailed = true;
+                _log.LogWarning(e, "MSR reads are not available");
+                return null;
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public byte? ReadNvmeCriticalWarning(string storageIdentifier) =>
         _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? CriticalWarningOf(entry.Hardware) : null;
+
+    /// <inheritdoc />
+    public IReadOnlyList<AtaAttribute>? ReadAtaAttributes(string storageIdentifier) =>
+        _composition.Entries.TryGetValue(storageIdentifier, out Entry? entry) ? AtaAttributesOf(entry.Hardware) : null;
+
+    /// <summary>The attributes the last SMART pass fetched, copied; members read directly (no reflection).</summary>
+    private static List<AtaAttribute>? AtaAttributesOf(IHardware hardware)
+    {
+        if (hardware is not StorageDevice { Storage: { IsNVMe: false, Smart: { } smart } })
+        {
+            return null;
+        }
+
+        var list = new List<AtaAttribute>();
+        foreach (SmartAttribute attribute in smart.SmartAttributes)
+        {
+            var data = attribute.Attribute;
+            list.Add(new AtaAttribute(data.ID, data.CurrentValue, data.Threshold, data.RawValueULong));
+        }
+
+        return list.Count > 0 ? list : null;
+    }
 
     /// <summary>
     /// The Critical Warning attribute of an NVMe disk (<c>SmartAttributeType.CriticalWarning</c>,
@@ -312,6 +421,36 @@ public sealed class LhmTree : IHardwareTree
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
         {
             return;
+        }
+
+        lock (_smnLock)
+        {
+            try
+            {
+                _smn?.Close();
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning(e, "Closing the SMN module failed");
+            }
+
+            _smn = null;
+            _pciMutex?.Dispose();
+            _pciMutex = null;
+        }
+
+        lock (_msrLock)
+        {
+            try
+            {
+                _intelMsr?.Close();
+            }
+            catch (Exception e)
+            {
+                _log.LogWarning(e, "Closing the MSR module failed");
+            }
+
+            _intelMsr = null;
         }
 
         Computer? computer = _computer;
@@ -455,7 +594,7 @@ public sealed class LhmTree : IHardwareTree
         }
     }
 
-    private static HardwareNode BuildNode(IHardware hardware, StorageInfo? storage, Dictionary<string, ISensor> sensors)
+    private HardwareNode BuildNode(IHardware hardware, StorageInfo? storage, Dictionary<string, ISensor> sensors)
     {
         // Sorted, so the schema order does not depend on LHM's HashSet order.
         ISensor[] active = [.. hardware.Sensors.OrderBy(s => s.SensorType).ThenBy(s => s.Index)];
@@ -472,6 +611,17 @@ public sealed class LhmTree : IHardwareTree
         HardwareNode[] children = [.. hardware.SubHardware.Select(sub => BuildNode(sub, null, sensors))];
         // The attribute list is filled by an Update(): a node rebuilt after one reports it.
         StorageInfo? withHealth = storage is null ? null : storage with { HasCriticalWarning = storage.IsNvme && CriticalWarningOf(hardware) is not null };
+        if (withHealth is { IsNvme: false } && AtaAttributesOf(hardware) is { } ata)
+        {
+            // Only which counters exist matters here, not the warning: the rotational flag is still unknown.
+            SataHealthResult health = SataHealth.Evaluate(rotational: true, ata);
+            withHealth = withHealth with
+            {
+                HasAtaHealth = true,
+                AtaSectorAttributes = (byte)((health.Reallocated is null ? 0 : 1) | (health.Pending is null ? 0 : 2) | (health.Uncorrectable is null ? 0 : 4)),
+            };
+        }
+
         return new HardwareNode(hardware.Identifier.ToString(), hardware.HardwareType, hardware.Name, nodes, children, withHealth, ReadCpuInfo(hardware, active));
     }
 
@@ -480,7 +630,7 @@ public sealed class LhmTree : IHardwareTree
     /// "TjMax [°C]" parameter of its "CPU Package" sensor. Members are read directly (no
     /// reflection), so the trimmer keeps them.
     /// </summary>
-    private static CpuInfo? ReadCpuInfo(IHardware hardware, ISensor[] sensors)
+    private CpuInfo? ReadCpuInfo(IHardware hardware, ISensor[] sensors)
     {
         if (hardware is not GenericCpu cpu || cpu.CpuId.Length == 0 || cpu.CpuId[0].Length == 0)
         {
@@ -496,7 +646,10 @@ public sealed class LhmTree : IHardwareTree
             intelTjMaxC = tjMax?.Value;
         }
 
-        return new CpuInfo(id.Vendor.ToString(), id.BrandString ?? string.Empty, (int)id.Family, (int)id.Model, intelTjMaxC);
+        // One successful read decides, once per node build, whether the throttling flags exist at all.
+        bool thermReadable = id.Vendor == Vendor.Intel && ReadIntelThermStatus(id.Affinity) is not null;
+        bool powerLimit = thermReadable && (System.Runtime.Intrinsics.X86.X86Base.CpuId(6, 0).Eax & (1 << 4)) != 0;
+        return new CpuInfo(id.Vendor.ToString(), id.BrandString ?? string.Empty, (int)id.Family, (int)id.Model, intelTjMaxC, thermReadable, powerLimit);
     }
 
     private sealed record Composition(HardwareNode[] Roots, Dictionary<string, Entry> Entries, Dictionary<string, ISensor> Sensors)

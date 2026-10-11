@@ -13,6 +13,7 @@ pub(crate) mod igcl;
 pub(crate) mod layer;
 pub(crate) mod nvapi;
 pub(crate) mod nvml;
+pub(crate) mod nvml_slow;
 pub(crate) mod pdh;
 pub(crate) mod pnp;
 pub(crate) mod processes;

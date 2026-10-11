@@ -76,10 +76,25 @@ public sealed partial class SensorHub
         // A new seq is not a new measurement: once a round's values went out, they are repeated.
         bool republished = _view.Generation == _publishedGeneration;
         bool anyFailed = _failedRoots.Count > 0;
+        Dictionary<string, ulong?>? thermStatus = null; // MSR 0x1B1, read at most once per CPU per tick
         for (int i = 0; i < values.Length; i++)
         {
             double? raw;
-            if (plan.FromStorage[i])
+            if (plan.Built.Bindings[i].Source is BindingSource.IntelThermal or BindingSource.IntelPowerLimit)
+            {
+                BindingSource source = plan.Built.Bindings[i].Source;
+                string cpuId = plan.LhmIds[i];
+                thermStatus ??= new Dictionary<string, ulong?>(StringComparer.Ordinal);
+                if (!thermStatus.TryGetValue(cpuId, out ulong? status))
+                {
+                    status = anyFailed && _failedRoots.Contains(cpuId) ? null : _tree.ReadIntelPackageThermStatus(cpuId);
+                    thermStatus[cpuId] = status;
+                }
+
+                int bit = source == BindingSource.IntelThermal ? 0 : 10;
+                raw = status is ulong s ? (s >> bit) & 1 : null;
+            }
+            else if (plan.FromStorage[i])
             {
                 raw = storage.TryGetValue(plan.LhmIds[i], out double? cached) ? cached : null;
             }

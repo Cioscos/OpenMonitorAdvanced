@@ -129,6 +129,35 @@ export function memorySummary(schema: Schema, valueOf: ValueOf): MemorySummary |
   };
 }
 
+export interface BatterySummary {
+  deviceId: string;
+  chargePct: number | null;
+  chargeId: string;
+  state: 'charging' | 'discharging' | 'plugged';
+  /** Estimate while discharging; absent otherwise. */
+  secondsLeft: number | null;
+  /** Watts, positive while charging and negative while discharging. */
+  rateW: number | null;
+}
+
+/** The first battery, or null on a desktop (no battery device). */
+export function batterySummary(schema: Schema, valueOf: ValueOf): BatterySummary | null {
+  const battery = devicesOf(schema, 'battery')[0];
+  const charge = battery && sensorsWith(schema, [battery.id], 'battery.charge')[0];
+  if (!battery || !charge) return null;
+  const flag = (key: string) => read(valueOf, sensorsWith(schema, [battery.id], key)[0]);
+  // Only an explicit "not on AC" says the battery is discharging.
+  const state = flag('battery.charging') === 1 ? 'charging' : flag('battery.acOnline') === 0 ? 'discharging' : 'plugged';
+  return {
+    deviceId: battery.id,
+    chargePct: valueOf(charge.id),
+    chargeId: charge.id,
+    state,
+    secondsLeft: flag('battery.timeRemaining'),
+    rateW: flag('battery.rate'),
+  };
+}
+
 export interface StorageSummary {
   readBps: number | null;
   writeBps: number | null;

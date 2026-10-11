@@ -3,6 +3,7 @@
   import { formatValue } from '../../lib/format';
   import { i18n, t } from '../../lib/i18n/index.svelte';
   import type { ValueOf } from '../../lib/select';
+  import Term from '../common/Term.svelte';
   import AnimatedNumber from '../common/AnimatedNumber.svelte';
 
   let {
@@ -29,7 +30,7 @@
     {@const value = kpi.value(valueOf, statsOf)}
     {@const stale = value !== null && kpi.sensorId !== undefined && qualityOf(kpi.sensorId) === 2}
     <div class="kpi">
-      <div class="label">{t(kpi.labelKey)}</div>
+      <div class="label">{#if kpi.term}<Term term={kpi.term}>{t(kpi.labelKey)}</Term>{:else}{t(kpi.labelKey)}{/if}</div>
       <div class="value" class:stale>
         <AnimatedNumber {value} format={(v) => formatValue(v, kpi.unit, locale, t, { rate })} />
       </div>

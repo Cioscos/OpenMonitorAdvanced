@@ -172,6 +172,7 @@ const SYMBOLS: Partial<Record<Unit, string>> = {
   rpm: 'RPM',
   joule: 'J',
   hours: 'h',
+  seconds: 's',
 };
 
 const scale = (symbol: string, per: number): DisplayScale => ({ id: symbol, symbol, per });

@@ -73,11 +73,11 @@ public static partial class SchemaBuilder
     /// The schema of <paramref name="roots"/>, with <paramref name="service"/> as its service block
     /// (every module active when omitted).
     /// </summary>
-    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null, ServiceStateBlock? service = null)
+    public static BuiltSchema Build(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, IReadOnlyDictionary<string, string>? storageDeviceIds = null, ServiceStateBlock? service = null, string? memoryTimings = null)
     {
         var output = new Output();
 
-        BuildMemoryDevice(roots, pawnIoAvailable, output);
+        BuildMemoryDevice(roots, pawnIoAvailable, memoryTimings, output);
         var storageIds = new Dictionary<string, string>(StringComparer.Ordinal);
         BuildStorageDevices(roots, storageDeviceIds, storageIds, output);
 
@@ -136,7 +136,19 @@ public static partial class SchemaBuilder
             properties = new Dictionary<string, string> { ["tjMaxC"] = tjMaxC.ToString(CultureInfo.InvariantCulture) };
         }
 
-        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", DisplayName.Clean(cpu.Name), new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties);
+        // Not LHM sensors: bits of MSR 0x1B1, bound to the CPU hardware itself (see BindingSource).
+        var extras = new List<(WireSensor, SensorBinding)>();
+        if (cpu.Cpu is { ThermStatusReadable: true } info)
+        {
+            string deviceId = DeviceId(cpu.Identifier);
+            extras.Add((new WireSensor(deviceId, "flag", "throttle-thermal", "boolean", "cpu.throttle.thermal", LabelArg: null, "flag"), new SensorBinding(cpu.Identifier, 1.0, BindingSource.IntelThermal)));
+            if (info.PowerLimitNotification)
+            {
+                extras.Add((new WireSensor(deviceId, "flag", "throttle-power", "boolean", "cpu.throttle.power", LabelArg: null, "flag"), new SensorBinding(cpu.Identifier, 1.0, BindingSource.IntelPowerLimit)));
+            }
+        }
+
+        ProcessDevice(cpu, DeviceId(cpu.Identifier), "cpu", DisplayName.Clean(cpu.Name), new CpuHint(index), s => Resolve(MatchCpuSensor, s), output, properties, extras);
     }
 
     /// <summary>Kind prefix and label key of an Intel core sensor, by the LHM name prefix of its core type.</summary>
@@ -299,7 +311,7 @@ public static partial class SchemaBuilder
         }
     }
 
-    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, Output output)
+    private static void BuildMemoryDevice(IReadOnlyList<HardwareNode> roots, bool pawnIoAvailable, string? memoryTimings, Output output)
     {
         HardwareNode? ram = roots.FirstOrDefault(r => r.Type == HardwareType.Memory && r.Identifier == "/ram");
         if (ram is null)
@@ -328,9 +340,20 @@ public static partial class SchemaBuilder
             }
         }
 
+        var properties = new Dictionary<string, string>();
         if (pawnIoAvailable)
         {
             IEnumerable<HardwareNode> dimms = roots.Where(r => r.Type == HardwareType.Memory && r.Identifier.StartsWith("/memory/dimm/", StringComparison.Ordinal));
+            if (SpdModulesJson(dimms) is { } modules)
+            {
+                properties["memoryModules"] = modules;
+            }
+
+            if (memoryTimings is not null)
+            {
+                properties["memoryTimings"] = memoryTimings;
+            }
+
             foreach (HardwareNode dimm in dimms)
             {
                 uint i = ParseTrailingIndex(dimm.Identifier);
@@ -355,7 +378,77 @@ public static partial class SchemaBuilder
             return;
         }
 
-        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", DisplayName.Clean(ram.Name), Vendor: null, EmptyProperties, new MemoryHint()), localSensors, localBindings);
+        output.TryAdd(ram.Identifier, new WireDevice(deviceId, "memory", DisplayName.Clean(ram.Name), Vendor: null, properties, new MemoryHint()), localSensors, localBindings);
+    }
+
+    /// <summary>
+    /// The DIMM SPD data (capacity, thermal limits, JEDEC timings) as a JSON array, one object per
+    /// module; zero or absent values are left out. Sensors are matched by LHM name (DimmMemory.cs,
+    /// v0.9.6), never by index. Written with Utf8JsonWriter: the service is trimmed, no reflection.
+    /// </summary>
+    private static string? SpdModulesJson(IEnumerable<HardwareNode> dimms)
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        int count = 0;
+        using (var w = new System.Text.Json.Utf8JsonWriter(buffer))
+        {
+            w.WriteStartArray();
+            foreach (HardwareNode dimm in dimms)
+            {
+                var fields = new List<(string Key, double Value)>();
+                foreach (SensorNode s in dimm.Sensors)
+                {
+                    if (s.Value is not { } v || !float.IsFinite(v) || v <= 0)
+                    {
+                        continue;
+                    }
+
+                    string? key = s.Type switch
+                    {
+                        SensorType.Data when s.Name == "Capacity" => "capacityBytes",
+                        SensorType.Temperature when s.Name.Contains("Critical", StringComparison.Ordinal) && !s.Name.Contains("Low", StringComparison.Ordinal) => "tempCritC",
+                        SensorType.Temperature when s.Name.Contains("High", StringComparison.Ordinal) => "tempHighC",
+                        SensorType.Timing => s.Name.Split(' ')[0] switch
+                        {
+                            "tCKAVGmin" => "tckMinNs",
+                            "tAA" => "taaNs",
+                            "tRCD" => "trcdNs",
+                            "tRP" => "trpNs",
+                            "tRAS" => "trasNs",
+                            "tRC" => "trcNs",
+                            "tRFC1" => "trfc1Ns",
+                            "tRFC2" => "trfc2Ns",
+                            "tRFCsb" => "trfcSbNs",
+                            _ => null,
+                        },
+                        _ => null,
+                    };
+                    if (key is not null)
+                    {
+                        fields.Add((key, key == "capacityBytes" ? Math.Round(v * TwoPow30) : Math.Round(v, 3)));
+                    }
+                }
+
+                if (fields.Count == 0)
+                {
+                    continue; // no SPD readings: nothing worth listing
+                }
+
+                w.WriteStartObject();
+                w.WriteString("slot", $"DIMM #{ParseTrailingIndex(dimm.Identifier).ToString(CultureInfo.InvariantCulture)}");
+                foreach ((string key, double value) in fields)
+                {
+                    w.WriteNumber(key, value);
+                }
+
+                w.WriteEndObject();
+                count++;
+            }
+
+            w.WriteEndArray();
+        }
+
+        return count == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
     private static SensorMatch MatchMemorySensor(SensorNode s) => s.Type switch
@@ -481,6 +574,9 @@ public static partial class SchemaBuilder
 
     private static string StorageIdentityKey(HardwareNode node) => StorageModel(node) + "\0" + node.Storage?.DriveSerial?.Trim();
 
+    /// <summary>Joins a storage identifier to the name of one SATA health value in the hub's cache and in <see cref="BindingSource.AtaHealth"/> bindings.</summary>
+    internal const string AtaKeyPrefix = "#ata-";
+
     private static void BuildStorageDevice(HardwareNode node, string deviceId, StorageHint? hint, Output output)
     {
         var used = new HashSet<string>();
@@ -517,6 +613,33 @@ public static partial class SchemaBuilder
         {
             local.Add(new WireSensor(deviceId, "flag", "critical-warning", "boolean", "storage.criticalWarning", LabelArg: null, "flag"));
             localBindings.Add(new SensorBinding(node.Identifier, 1.0, BindingSource.NvmeCriticalWarning));
+        }
+
+        // SATA health from the ATA attributes of the same SMART pass; a counter only for an attribute the disk has.
+        if (node.Storage is { IsNvme: false, HasAtaHealth: true } sata)
+        {
+            AddAtaSensor("flag", "critical-warning", "boolean", "storage.criticalWarning", "critical");
+            AddAtaSensor("flag", "sector-warning", "boolean", "storage.sectorWarning", "sectors");
+            if ((sata.AtaSectorAttributes & 1) != 0)
+            {
+                AddAtaSensor("counter", "reallocated-sectors", "count", "storage.reallocatedSectors", "reallocated");
+            }
+
+            if ((sata.AtaSectorAttributes & 2) != 0)
+            {
+                AddAtaSensor("counter", "pending-sectors", "count", "storage.pendingSectors", "pending");
+            }
+
+            if ((sata.AtaSectorAttributes & 4) != 0)
+            {
+                AddAtaSensor("counter", "uncorrectable-sectors", "count", "storage.uncorrectableSectors", "uncorrectable");
+            }
+        }
+
+        void AddAtaSensor(string kind, string name, string unit, string label, string cacheKey)
+        {
+            local.Add(new WireSensor(deviceId, kind, name, unit, label, LabelArg: null, kind));
+            localBindings.Add(new SensorBinding(node.Identifier + AtaKeyPrefix + cacheKey, 1.0, BindingSource.AtaHealth));
         }
 
         if (local.Count == 0 && properties.Count == 0)
@@ -663,7 +786,8 @@ public static partial class SchemaBuilder
         IdentityHint? hint,
         Func<SensorNode, SensorMatch> resolve,
         Output output,
-        IReadOnlyDictionary<string, string>? properties = null)
+        IReadOnlyDictionary<string, string>? properties = null,
+        IReadOnlyList<(WireSensor Sensor, SensorBinding Binding)>? extras = null)
     {
         var used = new HashSet<string>();
         var local = new List<WireSensor>();
@@ -680,6 +804,12 @@ public static partial class SchemaBuilder
             string wireName = DisambiguateName(used, m.Kind!, m.Name!, s.Identifier);
             local.Add(new WireSensor(deviceId, m.Kind!, wireName, m.Unit!, m.LabelKey!, m.LabelArg, m.Kind!));
             localBindings.Add(new SensorBinding(s.Identifier, m.Scale));
+        }
+
+        foreach ((WireSensor sensor, SensorBinding binding) in extras ?? [])
+        {
+            local.Add(sensor);
+            localBindings.Add(binding);
         }
 
         if (local.Count == 0)

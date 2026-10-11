@@ -21,7 +21,6 @@ export interface OverlayFormat {
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 const BIT_UNITS = ['bit/s', 'kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s'];
-const JOULE_UNITS = ['J', 'kJ', 'MJ', 'GJ'];
 const FIXED_BYTES: Partial<Record<UnitChoice, number>> = { B: 0, KB: 1, MB: 2, GB: 3, TB: 4 };
 const FIXED_BITS: Partial<Record<UnitChoice, number>> = { 'bit/s': 0, 'kbit/s': 1, 'Mbit/s': 2, 'Gbit/s': 3 };
 
@@ -84,6 +83,13 @@ export function formatParts(value: number | null, of: { unit: Unit } | { frames:
     const [s, unit] = scaled(x, step, units);
     return [n(s, unit !== 0 && s < 100 ? 1 : 0), `${units[unit]}${suffix}`];
   };
+  const energy = (joule: number): [string, string] => {
+    const wh = joule / 3600;
+    const kilo = Math.abs(wh) >= 1000;
+    const s = kilo ? wh / 1000 : wh;
+    const abs = Math.abs(s);
+    return [n(s, abs < 10 ? 2 : abs < 100 ? 1 : 0), kilo ? 'kWh' : 'Wh'];
+  };
   const bytesFixed = (x: number, index: number, suffix: string): [string, string] => {
     const s = x / 1024 ** index;
     return [n(s, index !== 0 && Math.abs(s) < 100 ? 1 : 0), `${BYTE_UNITS[index]}${suffix}`];
@@ -122,7 +128,11 @@ export function formatParts(value: number | null, of: { unit: Unit } | { frames:
     case 'bits_per_second':
       return throughput(v / 8, 'bits');
     case 'joule':
-      return stepped(v, 1000, JOULE_UNITS, '');
+      return energy(v);
+    case 'seconds': {
+      const minutes = Math.max(0, Math.floor(v / 60));
+      return [minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`, ''];
+    }
     case 'boolean':
       return [v >= 0.5 ? o.flagOn : o.flagOff, ''];
     case 'pcie_generation':

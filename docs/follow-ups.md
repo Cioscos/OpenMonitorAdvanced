@@ -198,7 +198,7 @@ Grafico a strisce, cassetto «Serie», Semplice e Avanzata a tutta finestra, fas
 
 ## Open: new sensors (M9b)
 
-Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Implementata sul branch `feat/m9b`; verifiche automatiche verdi, prove dal vivo e misure superate il 2026-10-11.
+Timing della RAM (SPD e controller UMC AMD), throttling Intel, salute SATA, batteria, energia e traffico PCIe della GPU NVIDIA (spec `docs/superpowers/specs/2026-10-09-m9b-sensori-design.md`). Unita in `main` e pubblicata come release 0.7.0 il 2026-10-11 (non firmata); verifiche automatiche verdi, prove dal vivo e misure superate.
 
 - **Prove dal vivo su questo PC (spec §9.2): superate il 2026-10-11** con la build release di `ad25e22`. I timing in uso coincidono con ZenTimings 1.39 campo per campo (tRFCsb 416 compreso); l'SPD mostra i due moduli; energia e PCIe RX/TX nella pagina della GPU durante il benchmark, grafico a 60 FPS senza scatti; l'HDD SATA D: resta in standby con l'app aperta; nessuna voce «Batteria». Consumi in `docs/perf-budget.md` (sezione M9b), nel budget anche in tray.
 - **Correzioni dalle prove dal vivo (2026-10-11):** l'«Avviso settori» si accende solo sui dischi che possono essere rotativi (su un SSD SATA, il Corsair Force LS di E:, il contatore 05h valeva 1 blocco ritirato e CrystalDiskInfo lo giudica «Buono»; decisione dell'utente); la tabella dei sensori non mostra minimo, massimo e media per i totali che crescono soltanto (energia dall'avvio, dati letti e scritti, ore e cicli di accensione, settori riallocati).

@@ -149,7 +149,7 @@ Nel servizio, nello stesso passaggio SMART dei dischi ATA (`_tree.Update`), quin
 Una funzione pura, `SataHealth.Evaluate(IReadOnlyList<SmartAttribute>)`, testata con fixture:
 
 - **critico:** un attributo con `Threshold` > 0 e `CurrentValue` ≤ `Threshold`;
-- **attenzione:** i 32 bit bassi del valore grezzo di 05h, C5h o C6h > 0 (E3).
+- **attenzione:** i 32 bit bassi del valore grezzo di 05h, C5h o C6h > 0 (E3), solo sui dischi che possono essere rotativi (seek penalty vera o sconosciuta). Su un SSD SATA 05h conta i blocchi di NAND ritirati, usura normale che anche CrystalDiskInfo giudica «Buono»: i contatori restano visibili, l'avviso no (decisione dell'utente dopo la prova dal vivo, 2026-10-11).
 
 | Sensore | Kind / nome | Unità | Regola |
 |---|---|---|---|

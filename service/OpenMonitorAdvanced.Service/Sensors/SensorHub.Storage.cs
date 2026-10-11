@@ -602,7 +602,7 @@ public sealed partial class SensorHub
 
         if (current is { IsNvme: false, HasAtaHealth: true })
         {
-            CollectAtaHealth(fresh.Identifier, cache);
+            CollectAtaHealth(fresh.Identifier, resolution.Info.Rotational, cache);
         }
 
         StorageInfo info = resolution.Info;
@@ -624,14 +624,14 @@ public sealed partial class SensorHub
     }
 
     /// <summary>The SATA flags and sector counters of a just-updated disk, from the attributes that update left (no extra command).</summary>
-    private void CollectAtaHealth(string root, Dictionary<string, double?> cache)
+    private void CollectAtaHealth(string root, bool rotational, Dictionary<string, double?> cache)
     {
         SataHealthResult? health = null;
         try
         {
             if (_tree.ReadAtaAttributes(root) is { } attributes)
             {
-                health = SataHealth.Evaluate(attributes);
+                health = SataHealth.Evaluate(rotational, attributes);
             }
         }
         catch (Exception e)

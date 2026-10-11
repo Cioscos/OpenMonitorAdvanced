@@ -5,8 +5,8 @@ public readonly record struct AtaAttribute(byte Id, byte Current, byte Threshold
 
 /// <summary>
 /// The CrystalDiskInfo-style verdict of a SATA disk: <see cref="Critical"/> when an attribute fell to
-/// its threshold, <see cref="SectorWarning"/> when reallocated, pending or uncorrectable sectors exist.
-/// A counter is <see langword="null"/> when the disk has no such attribute.
+/// its threshold, <see cref="SectorWarning"/> when a rotational disk has reallocated, pending or
+/// uncorrectable sectors. A counter is <see langword="null"/> when the disk has no such attribute.
 /// </summary>
 public sealed record SataHealthResult(bool Critical, bool SectorWarning, uint? Reallocated, uint? Pending, uint? Uncorrectable);
 
@@ -17,7 +17,12 @@ public static class SataHealth
     public const byte PendingId = 0xC5;
     public const byte UncorrectableId = 0xC6;
 
-    public static SataHealthResult Evaluate(IReadOnlyList<AtaAttribute> attributes)
+    /// <param name="rotational">
+    /// Whether the disk may have a platter (seek penalty true or unknown). Only then do the sector
+    /// counters warn: on a SATA SSD 05h counts retired NAND blocks, normal wear that
+    /// CrystalDiskInfo also rates "Good" (user ruling, 2026-10-11). The counters are reported either way.
+    /// </param>
+    public static SataHealthResult Evaluate(bool rotational, IReadOnlyList<AtaAttribute> attributes)
     {
         bool critical = false;
         uint? reallocated = null, pending = null, uncorrectable = null;
@@ -34,7 +39,7 @@ public static class SataHealth
             }
         }
 
-        bool warn = reallocated > 0 || pending > 0 || uncorrectable > 0;
+        bool warn = rotational && (reallocated > 0 || pending > 0 || uncorrectable > 0);
         return new SataHealthResult(critical, warn, reallocated, pending, uncorrectable);
     }
 }

@@ -1720,7 +1720,7 @@
   "glossary.trfcSb.name": "tRFCsb",
   "glossary.trfcSb": "Same-bank refresh cycle time (DDR5): how long a refresh of one bank takes, while the other banks keep working.",
   "glossary.sectorWarning.name": "Sector warning",
-  "glossary.sectorWarning": "The disk reports reallocated, pending or uncorrectable sectors: damaged areas were found. Back up your data.",
+  "glossary.sectorWarning": "The hard disk (HDD) reports reallocated, pending or uncorrectable sectors: damaged areas were found. Back up your data. It stays off on SSDs, where the counter tracks retired memory blocks, which is normal wear.",
   "glossary.diskCriticalWarning.name": "Critical warning",
   "glossary.diskCriticalWarning": "The disk says it is failing: an NVMe drive raised its critical warning, or a SATA health value fell to its failure threshold.",
   "glossary.batteryRemaining.name": "Remaining energy",

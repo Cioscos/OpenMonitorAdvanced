@@ -613,7 +613,8 @@ public sealed class LhmTree : IHardwareTree
         StorageInfo? withHealth = storage is null ? null : storage with { HasCriticalWarning = storage.IsNvme && CriticalWarningOf(hardware) is not null };
         if (withHealth is { IsNvme: false } && AtaAttributesOf(hardware) is { } ata)
         {
-            SataHealthResult health = SataHealth.Evaluate(ata);
+            // Only which counters exist matters here, not the warning: the rotational flag is still unknown.
+            SataHealthResult health = SataHealth.Evaluate(rotational: true, ata);
             withHealth = withHealth with
             {
                 HasAtaHealth = true,

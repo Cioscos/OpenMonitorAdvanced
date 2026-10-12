@@ -8,6 +8,7 @@ import type { HistorySeed, Sensor } from '../../lib/types';
 import { FakeBackend } from '../../test/fake-backend';
 import { spyChartFrames } from '../../test/chart-frames';
 import { connectSettings, disconnectSettings } from '../../test/settings';
+import { setTheme } from '../../test/theme';
 import { FakeUplot } from '../../test/uplot-stub';
 import { canvasFixture, RecordingPath } from '../../test/uplot-canvas';
 import { drawChartCanvas, type ChartHeldSegment } from '../../lib/advanced/chartCanvas';
@@ -689,7 +690,7 @@ test('locale and theme rebuild cached geometry without refetching or moving the 
   flushSync();
   expect(plots).toHaveLength(2);
   expect(plots[1].scales.at(-1)?.range.max).toBe(7);
-  document.documentElement.style.setProperty('--accent', '#123456');
+  await setTheme({ '--accent': '#123456' });
   await vi.waitFor(() => expect(plots).toHaveLength(3));
   expect(plots[2].opts.series[1].stroke).toBe('#123456');
   expect(plots[2].scales.at(-1)?.range.max).toBe(7);
@@ -852,7 +853,7 @@ test('series hidden in the legend stay hidden through density, locale, theme and
     expect(plots).toHaveLength(3);
     expectHidden(plots[2]);
     // A value no earlier test left on the root, so the style attribute really changes.
-    document.documentElement.style.setProperty('--accent', '#654321');
+    await setTheme({ '--accent': '#654321' });
     await vi.waitFor(() => expect(plots).toHaveLength(4));
     expectHidden(plots[3]);
     await fireEvent.click(screen.getByRole('button', { name: t('advanced.chart.window.60') }));
@@ -1487,7 +1488,7 @@ test.each(['density', 'locale', 'theme'] as const)('a %s rebuild during a transi
   try {
     if (kind === 'density') for (const listener of [...density]) listener();
     else if (kind === 'locale') { i18n.locale = 'it'; flushSync(); }
-    else document.documentElement.style.setProperty('--accent', '#123456');
+    else await setTheme({ '--accent': '#123456' });
     await vi.waitFor(() => expect(plots).toHaveLength(2));
     const rebuilt = plots[1];
     expect(rebuilt.yRanges.get('celsius')).toEqual(celsiusRange(11, 90));

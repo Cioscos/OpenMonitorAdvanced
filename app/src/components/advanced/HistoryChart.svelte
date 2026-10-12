@@ -33,6 +33,7 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import type { HistorySeed, Schema, Sensor, ThroughputUnit } from '../../lib/types';
   import { display } from '../../lib/units.svelte';
+  import { theme as appTheme } from '../../lib/theme/theme.svelte';
   import { subscribeChartFrame } from '../../lib/chartFrameClock';
 
   let {
@@ -583,10 +584,11 @@
     untrack(() => tail(timestampMs));
   });
 
-  // Locale affects both the cached time labels and uPlot's legend/Y labels; the units change the
+  // Locale affects both the cached time labels and uPlot's legend/Y labels; the theme the colours; the units change the
   // plotted data, axes and legend. All rebuild the plot from the buffer, without new history.
   $effect(() => {
     void i18n.locale;
+    void appTheme.version;
     void display.temperature;
     void rate;
     untrack(() => { if (!paused && buffer) build(buffer.ids); });
@@ -639,8 +641,6 @@
           });
     observer?.observe(container);
     const refresh = () => { if (!paused && buffer) build(buffer.ids); };
-    const themeObserver = new MutationObserver(refresh);
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
     let densityQuery: MediaQueryList;
     const onDensity = () => {
       densityQuery?.removeEventListener('change', onDensity);
@@ -655,7 +655,6 @@
       generation++;
       document.removeEventListener('visibilitychange', onVisibility);
       observer?.disconnect();
-      themeObserver.disconnect();
       densityQuery.removeEventListener('change', onDensity);
       motionQuery.removeEventListener('change', onMotionChange);
       yMoves.clear();

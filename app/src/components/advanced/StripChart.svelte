@@ -31,6 +31,7 @@
   import type { LiveStore } from '../../lib/live.svelte';
   import type { HistorySeed, Schema, Sensor, ThroughputUnit, Unit } from '../../lib/types';
   import { display } from '../../lib/units.svelte';
+  import { theme } from '../../lib/theme/theme.svelte';
   import ChartStrip from './ChartStrip.svelte';
   import SeriesDrawer from './SeriesDrawer.svelte';
   import StripLegend, { type StripLegendRow } from './StripLegend.svelte';
@@ -375,10 +376,11 @@
     untrack(() => tail(timestampMs));
   });
 
-  // Locale affects the cached time labels, the Y labels and the legends; the units change the
+  // Locale affects the cached time labels, the Y labels and the legends; the theme the colours; the units change the
   // plotted data, axes and legends. All rebuild the strips from the buffer, without new history.
   $effect(() => {
     void i18n.locale;
+    void theme.version;
     void display.temperature;
     void rate;
     untrack(() => { if (!paused && buffer) build(); });
@@ -418,8 +420,6 @@
     };
     document.addEventListener('visibilitychange', onVisibility);
     const refresh = () => { if (!paused && buffer) build(); };
-    const themeObserver = new MutationObserver(refresh);
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
     let densityQuery: MediaQueryList;
     const onDensity = () => {
       densityQuery?.removeEventListener('change', onDensity);
@@ -433,7 +433,6 @@
       destroyed = true;
       generation++;
       document.removeEventListener('visibilitychange', onVisibility);
-      themeObserver.disconnect();
       densityQuery.removeEventListener('change', onDensity);
       motionQuery.removeEventListener('change', onMotionChange);
       endFrames();

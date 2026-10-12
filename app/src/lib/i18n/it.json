@@ -1730,6 +1730,7 @@
   "themes.builtin.builtin-midnight": "Mezzanotte",
   "themes.builtin.builtin-daylight": "Giorno",
   "themes.builtin.builtin-contrast": "Alto contrasto",
+  "themes.notice.fallback": "Non è stato possibile caricare il tema salvato: è in uso Synthwave.",
   "themes.error.tooLarge": "Il file del tema supera i 64 KiB.",
   "themes.error.notUtf8": "Il file del tema non è testo UTF-8.",
   "themes.error.empty": "Il file del tema non ha nessuna variabile valida.",

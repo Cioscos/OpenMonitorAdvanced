@@ -1730,6 +1730,7 @@
   "themes.builtin.builtin-midnight": "Midnight",
   "themes.builtin.builtin-daylight": "Daylight",
   "themes.builtin.builtin-contrast": "High contrast",
+  "themes.notice.fallback": "The saved theme could not be loaded; Synthwave is in use.",
   "themes.error.tooLarge": "The theme file is larger than 64 KiB.",
   "themes.error.notUtf8": "The theme file is not UTF-8 text.",
   "themes.error.empty": "The theme file has no valid variable.",

@@ -24,6 +24,7 @@
   import { t } from '../lib/i18n/index.svelte';
   import { LiveStore, connect } from '../lib/live.svelte';
   import { settings } from '../lib/settings.svelte';
+  import { theme } from '../lib/theme/theme.svelte';
   import type { OverlayProfileEntry, OverlayStatus } from '../lib/types';
   import ErrorBanner from '../components/ErrorBanner.svelte';
   import Canvas from './Canvas.svelte';
@@ -60,6 +61,7 @@
 
   onMount(() => {
     let off: (() => void) | undefined;
+    const offTheme = theme.follow(backend, settings);
     let cancelled = false;
     const stops: (() => void)[] = [];
     const subscriptions: (() => Promise<() => void>)[] = [
@@ -117,6 +119,7 @@
     return () => {
       cancelled = true;
       off?.();
+      offTheme();
       stops.forEach((stop) => stop());
     };
   });

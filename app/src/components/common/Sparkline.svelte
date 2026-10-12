@@ -173,7 +173,7 @@
   {#if geometry.endpoint}
     <span bind:this={endpoint}
       class="endpoint"
-      style="position: absolute; width: 5px; height: 5px; border-radius: 50%; background: white; transform: translate(-50%, -50%); pointer-events: none;"
+      style="position: absolute; width: 5px; height: 5px; border-radius: 50%; background: var(--text); transform: translate(-50%, -50%); pointer-events: none;"
       style:left="100%"
       style:top="{(geometry.endpoint.y / HEIGHT) * 100}%"
     ></span>

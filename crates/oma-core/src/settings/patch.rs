@@ -306,7 +306,8 @@ fn corrected_key(merged: &Value, path: &str) -> &'static str {
                 "settings.error.hotkey"
             }
         }
-        "overlay.defaultProfile" | "appearance.theme" => "settings.error.profileId",
+        "overlay.defaultProfile" => "settings.error.profileId",
+        "appearance.theme" => "settings.error.themeId",
         _ => match path.strip_prefix("overlay.gameProfiles.") {
             // A name that is not an executable, otherwise its profile id.
             Some(name) if normalize_exe(name).is_none() => "settings.error.exe",
@@ -429,11 +430,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next.appearance.theme, "builtin-midnight");
-        assert!(apply_patch(
-            &Settings::default(),
-            &json!({"appearance": {"theme": "../x"}})
-        )
-        .is_err());
+        assert_eq!(
+            apply_patch(
+                &Settings::default(),
+                &json!({"appearance": {"theme": "../x"}})
+            ),
+            Err(PatchError::new(
+                "appearance.theme",
+                "settings.error.themeId"
+            ))
+        );
     }
 
     #[test]

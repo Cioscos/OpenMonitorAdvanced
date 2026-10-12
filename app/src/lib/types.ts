@@ -1248,3 +1248,41 @@ export interface BoardTable {
   enabled: boolean;
   versions: { cpu: string; gpu: string; disk: string };
 }
+
+/** `--color-scheme` of a theme (`oma_core::theme::Scheme`). */
+export type ThemeScheme = 'dark' | 'light';
+
+/** A line of a theme file the parser discarded, or a contrast warning (`oma_core::theme::ThemeWarning`); `detail` is plain text. */
+export interface ThemeWarning {
+  line: number;
+  code: 'unknownVariable' | 'invalidValue' | 'duplicate' | 'important' | 'notAVariable' | 'selector' | 'atRule' | 'futureVersion' | 'lowContrast';
+  detail: string;
+}
+
+/** A tile of the theme gallery (`themes_list`); `name` is null for a built-in (shown as `themes.builtin.<id>`), `vars` are merged with the base theme. */
+export interface ThemeSummary {
+  id: string;
+  name: string | null;
+  author: string | null;
+  scheme: ThemeScheme;
+  builtin: boolean;
+  vars: Record<string, string>;
+}
+
+/** A theme file read before «Add» (`theme_import_preview`); `applied` counts the variables the file sets. */
+export interface ImportPreview {
+  token: number;
+  name: string;
+  author: string | null;
+  scheme: ThemeScheme;
+  vars: Record<string, string>;
+  applied: number;
+  warnings: ThemeWarning[];
+}
+
+/** The active theme's variables (`theme_resolved`); `fallback` when the saved user theme was missing or corrupt and Synthwave took its place. */
+export interface ResolvedTheme {
+  id: string;
+  vars: Record<string, string>;
+  fallback: boolean;
+}

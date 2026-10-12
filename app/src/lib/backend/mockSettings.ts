@@ -153,7 +153,7 @@ function checkTypes(merged: Record<string, unknown>): void {
   if (typeof (merged.updates as Record<string, unknown>).checkAutomatically !== 'boolean') fail('updates.checkAutomatically', 'settings.error.type');
   const theme = (merged.appearance as Record<string, unknown>).theme;
   if (typeof theme !== 'string') fail('appearance.theme', 'settings.error.type');
-  if (!isThemeId(theme as string)) fail('appearance.theme', 'settings.error.profileId');
+  if (!isThemeId(theme as string)) fail('appearance.theme', 'settings.error.themeId');
   if (typeof sources.antiCheat !== 'boolean') fail('sources.antiCheat', 'settings.error.type');
   if (advanced.section != null && typeof advanced.section !== 'string') fail('advanced.section', 'settings.error.type');
   const series = advanced.series;

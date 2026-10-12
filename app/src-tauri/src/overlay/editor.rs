@@ -39,7 +39,7 @@ impl From<StoreError> for CommandError {
     }
 }
 
-type Answer<T> = Result<T, CommandError>;
+pub(crate) type Answer<T> = Result<T, CommandError>;
 
 fn store() -> Result<ProfileStore, StoreError> {
     app_profiles_dir()
@@ -56,7 +56,7 @@ fn schema(app: &AppHandle) -> Schema {
         .clone()
 }
 
-fn lang(app: &AppHandle) -> Lang {
+pub(crate) fn lang(app: &AppHandle) -> Lang {
     language_for(
         app.state::<Arc<SettingsStore>>()
             .snapshot()
@@ -76,7 +76,7 @@ fn reload(app: &AppHandle) {
 }
 
 /// Runs `call` on the blocking pool.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     call: impl FnOnce() -> Answer<T> + Send + 'static,
 ) -> Answer<T> {
     tauri::async_runtime::spawn_blocking(call)
@@ -188,6 +188,12 @@ fn into_path(path: tauri_plugin_dialog::FilePath) -> Result<PathBuf, StoreError>
 /// `<name>.omaoverlay.json`, with the characters Windows forbids in a file
 /// name replaced by `_`.
 fn export_file_name(name: &str) -> String {
+    file_name(name, EXPORT_EXTENSION)
+}
+
+/// `<name>.<extension>`, with the characters Windows forbids in a file name
+/// replaced by `_`.
+pub(crate) fn file_name(name: &str, extension: &str) -> String {
     let safe: String = name
         .chars()
         .map(|c| match c {
@@ -196,7 +202,7 @@ fn export_file_name(name: &str) -> String {
             c => c,
         })
         .collect();
-    format!("{}.{EXPORT_EXTENSION}", safe.trim())
+    format!("{}.{extension}", safe.trim())
 }
 
 /// The installed font families, read once per session on the blocking pool;

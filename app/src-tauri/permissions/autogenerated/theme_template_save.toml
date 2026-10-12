@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-theme-template-save"
+description = "Enables the theme_template_save command without any pre-configured scope."
+commands.allow = ["theme_template_save"]
+
+[[permission]]
+identifier = "deny-theme-template-save"
+description = "Denies the theme_template_save command without any pre-configured scope."
+commands.deny = ["theme_template_save"]

@@ -31,6 +31,7 @@ import defaultRulesFixture from '../../test/fixtures/default-rules.json';
 import { decimateWindow } from './decimate';
 import { MockSettings, parsePersistence } from './mockSettings';
 import { StatsAccumulator } from './mockStats';
+import { mockThemes } from './mockThemes';
 import { MOCK_BENCHMARKS, mockEditorData, mockProfileStore } from './mockEditor';
 import { MOCK_VOLUMES, mockBench, mockBoardTable, mockPerformance, parseBenchScenario, parseDiskScenario, parsePerfScenario } from './mockPerformance';
 
@@ -556,6 +557,7 @@ export function createMockBackend(intervalMs = 1000): Backend {
     schema === SERVICE_MOCK_SCHEMA ? [{ deviceId: MOCK_HDD, power: 'standby' }] : [];
   const stats = new StatsAccumulator();
   const settings = new MockSettings(parsePersistence(typeof location === 'undefined' ? '' : location.search));
+  const themes = mockThemes(settings);
   const listeners = new Set<(s: Snapshot) => void>();
   const serviceListeners = new Set<(s: ServiceStatus) => void>();
   const recorder = mockLogRecorder(parseLogState(typeof location === 'undefined' ? '' : location.search));
@@ -765,5 +767,16 @@ export function createMockBackend(intervalMs = 1000): Backend {
     // No native dialog or file system in the browser: pretend the user saved the report.
     exportSensorReport: async () => ({ fileName: 'oma-report-20261004-090507.json' }),
     revealSensorReport: async () => console.info('mock: open report folder'),
+    themesList: async () => themes.list(),
+    // No file dialogs in the browser: import always reads the same sample, export and the template always succeed.
+    themeImportPreview: async () => themes.preview(),
+    themeImportConfirm: async (token) => themes.confirm(token),
+    themeExport: async (id) => {
+      if (!themes.has(id)) throw { key: 'themes.error.notFound', detail: null };
+      return true;
+    },
+    themeDelete: async (id) => themes.remove(id),
+    themeResolved: async () => themes.resolved(),
+    themeTemplateSave: async () => true,
   };
 }

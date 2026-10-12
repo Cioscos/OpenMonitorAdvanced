@@ -14,6 +14,7 @@ mod report;
 mod rules;
 mod service;
 mod settings;
+mod theme;
 mod tray;
 mod tray_icon;
 mod updates;
@@ -408,6 +409,13 @@ fn main() {
             performance::commands::performance_share_preview,
             performance::commands::performance_share_send,
             performance::commands::performance_score_export,
+            theme::commands::themes_list,
+            theme::commands::theme_import_preview,
+            theme::commands::theme_import_confirm,
+            theme::commands::theme_export,
+            theme::commands::theme_delete,
+            theme::commands::theme_resolved,
+            theme::commands::theme_template_save,
         ])
         .setup(move |app| {
             // Only the surviving instance gets here: a second launch has

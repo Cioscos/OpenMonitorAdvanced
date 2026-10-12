@@ -1,4 +1,7 @@
 import type {
+  ImportPreview,
+  ResolvedTheme,
+  ThemeSummary,
   BenchStatus,
   DiskBenchRequest,
   VolumeChoice,
@@ -249,4 +252,18 @@ export interface Backend {
   exportSensorReport(): Promise<ExportedReport | null>;
   /** Opens the folder of the last exported report; rejects when there is none or with the system's text. */
   revealSensorReport(): Promise<void>;
+  /** The built-in themes, then the user's by name. Theme commands reject with a `CommandError` (`themes.error.*`). */
+  themesList(): Promise<ThemeSummary[]>;
+  /** File dialog and parse; null when cancelled; rejects for a file that cannot be imported. */
+  themeImportPreview(): Promise<ImportPreview | null>;
+  /** Adds the previewed theme (name made unique); rejects with `themes.error.notFound` for a stale token. */
+  themeImportConfirm(token: number): Promise<ThemeSummary>;
+  /** Save dialog and export of a user theme; false when cancelled. */
+  themeExport(id: string): Promise<boolean>;
+  /** Deletes a user theme; if it was active, `appearance.theme` goes back to Synthwave (settings event). */
+  themeDelete(id: string): Promise<void>;
+  /** The variables of the active theme, to apply before mounting. */
+  themeResolved(): Promise<ResolvedTheme>;
+  /** Save dialog for the commented template; false when cancelled. */
+  themeTemplateSave(): Promise<boolean>;
 }

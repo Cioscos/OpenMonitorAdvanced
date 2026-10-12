@@ -49,5 +49,7 @@ export default defineConfig({
     globals: true,
     include: ['src/**/*.test.ts'],
     setupFiles: ['src/test-setup.ts'],
+    // Vitest empties CSS imports, `?raw` included; the built-in themes are data the mock backend reads.
+    css: { include: [/src\/themes\/builtin\//] },
   },
 });

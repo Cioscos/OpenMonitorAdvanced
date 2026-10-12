@@ -117,4 +117,9 @@ export const TERMS: string[] = [
   'scoreVersion',
   'overclock',
   'anonymousShare',
+  // M10: the import summary of a theme.
+  'contrast',
+  'cssVariable',
+  'wcag',
+  'alpha',
 ];

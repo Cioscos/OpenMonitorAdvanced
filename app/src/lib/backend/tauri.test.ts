@@ -122,7 +122,7 @@ test('overlay commands and event match the Rust shell', async () => {
 const REQUEST: StartRequest = { component: 'cpu', objective: 'normal', preset: 'quick', custom: null, retryCore: null };
 const DISK_REQUEST = { folder: 'D:/Tests', profile: 'b1' as const, compressible: false, wake: false };
 
-// Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs, performance/commands.rs and window.rs.
+// Names must match app/src-tauri/src/overlay/{editor,runner,benchmark}.rs, performance/commands.rs, theme/commands.rs and window.rs.
 test('editor and benchmark commands match the Rust shell', async () => {
   const { listen } = await import('@tauri-apps/api/event');
   const backend = createTauriBackend();
@@ -170,6 +170,13 @@ test('editor and benchmark commands match the Rust shell', async () => {
     [() => backend.benchmarkOpenCsv('x'), 'benchmark_open_csv', { id: 'x' }],
     [() => backend.benchmarkOpenFolder(), 'benchmark_open_folder'],
     [() => backend.benchmarkDelete('x'), 'benchmark_delete', { id: 'x' }],
+    [() => backend.themesList(), 'themes_list'],
+    [() => backend.themeImportPreview(), 'theme_import_preview'],
+    [() => backend.themeImportConfirm(7), 'theme_import_confirm', { token: 7 }],
+    [() => backend.themeExport('x'), 'theme_export', { id: 'x' }],
+    [() => backend.themeDelete('x'), 'theme_delete', { id: 'x' }],
+    [() => backend.themeResolved(), 'theme_resolved'],
+    [() => backend.themeTemplateSave(), 'theme_template_save'],
   ];
   for (const [call, name, args] of calls) {
     await call();

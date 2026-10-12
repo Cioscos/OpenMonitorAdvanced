@@ -147,7 +147,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
-    box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 70%, transparent);
+    box-shadow: 0 12px 32px var(--shadow);
     cursor: default;
   }
   .deck:focus {

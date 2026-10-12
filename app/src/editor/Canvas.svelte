@@ -8,6 +8,7 @@
   import { sensorLabel } from '../lib/advanced/labels';
   import type { LiveStore } from '../lib/live.svelte';
   import { display } from '../lib/units.svelte';
+  import { theme } from '../lib/theme/theme.svelte';
   import { blockRect, byZ, drawProfile, sourceName, type Readout, type View } from './draw';
   import { makeReadout, type FrameFeed } from './feed.svelte';
 
@@ -83,7 +84,7 @@
 
   $effect(() => {
     // Everything the picture depends on; no continuous loop (§11).
-    void [editor.profile, editor.selection, feed.version, live.timestampMs, live.schema, size.w, size.h, screenArea, format];
+    void [editor.profile, editor.selection, feed.version, theme.version, live.timestampMs, live.schema, size.w, size.h, screenArea, format];
     schedule();
   });
 
@@ -112,12 +113,17 @@
     ctx.clearRect(0, 0, size.w, size.h);
     const L = layout(editor.profile);
     const s = L.screen;
+    const css = getComputedStyle(document.documentElement);
+    const accent = css.getPropertyValue('--accent').trim();
+    const accent2 = css.getPropertyValue('--accent-2').trim();
+    // The simulated game screen stays dark whatever the theme: the overlay is drawn over games.
     ctx.fillStyle = '#140F1E';
     ctx.fillRect(s.x, s.y, s.w, s.h);
     // The cell grid, when cells are big enough to tell apart.
     const { cell, origin } = L.view;
     if (cell >= 4) {
-      ctx.strokeStyle = 'rgba(255, 79, 216, 0.07)';
+      ctx.strokeStyle = accent;
+      ctx.globalAlpha = 0.07;
       ctx.lineWidth = 1;
       ctx.beginPath();
       for (let x = origin[0] - Math.floor((origin[0] - s.x) / cell) * cell; x <= s.x + s.w; x += cell) {
@@ -129,6 +135,7 @@
         ctx.lineTo(s.x + s.w, Math.round(y) + 0.5);
       }
       ctx.stroke();
+      ctx.globalAlpha = 1;
     }
     ctx.save();
     ctx.beginPath();
@@ -139,13 +146,15 @@
     if (L.panel !== null) {
       // The profile's footprint as the overlay places it.
       ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = 'rgba(76, 201, 240, 0.6)';
+      ctx.strokeStyle = accent2;
+      ctx.globalAlpha = 0.6;
       ctx.lineWidth = 1;
       ctx.strokeRect(Math.round(L.panel.x) + 0.5, Math.round(L.panel.y) + 0.5, Math.round(L.panel.w) - 1, Math.round(L.panel.h) - 1);
       ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
     }
-    ctx.strokeStyle = '#FF4FD8';
-    ctx.fillStyle = '#FF4FD8';
+    ctx.strokeStyle = accent;
+    ctx.fillStyle = accent;
     ctx.lineWidth = 1.5;
     for (const b of editor.selected) {
       const r = blockRect(b, L.view);

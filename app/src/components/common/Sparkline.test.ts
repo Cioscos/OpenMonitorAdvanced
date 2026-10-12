@@ -247,7 +247,7 @@ test('renders one white endpoint over a colored line and translucent glow', () =
   expect(paths[1].getAttribute('stroke')).toBe('#2ab0ff');
   const points = container.querySelectorAll('.endpoint');
   expect(points).toHaveLength(1);
-  expect(getComputedStyle(points[0]).backgroundColor).toBe('rgb(255, 255, 255)');
+  expect((points[0] as HTMLElement).getAttribute('style')).toContain('background: var(--text)');
 });
 
 test('endpoint stays circular and five pixels wide as the tile width changes', () => {

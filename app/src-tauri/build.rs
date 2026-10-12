@@ -86,6 +86,13 @@ fn main() {
             "performance_share_preview",
             "performance_share_send",
             "performance_score_export",
+            "themes_list",
+            "theme_import_preview",
+            "theme_import_confirm",
+            "theme_export",
+            "theme_delete",
+            "theme_resolved",
+            "theme_template_save",
         ]),
     ))
     .expect("Tauri build")

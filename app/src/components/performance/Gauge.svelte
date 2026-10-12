@@ -94,23 +94,23 @@
   <svg viewBox="0 0 300 300" aria-hidden="true">
     <defs>
       <linearGradient id="{uid}-bezel" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="#6d6386" />
-        <stop offset="0.45" stop-color="#231b33" />
-        <stop offset="1" stop-color="#4d4463" />
+        <stop offset="0" class="bz1" />
+        <stop offset="0.45" class="bz2" />
+        <stop offset="1" class="bz3" />
       </linearGradient>
       <radialGradient id="{uid}-vignette" cx="0.5" cy="0.5" r="0.5">
-        <stop offset="0.55" stop-color="#000" stop-opacity="0" />
-        <stop offset="1" stop-color="#000" stop-opacity="0.7" />
+        <stop offset="0.55" class="vig" stop-opacity="0" />
+        <stop offset="1" class="vig" stop-opacity="0.7" />
       </radialGradient>
       <pattern id="{uid}-carbon" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <rect width="6" height="6" fill="#150f22" />
-        <rect width="3" height="3" fill="#1e1630" />
-        <rect x="3" y="3" width="3" height="3" fill="#1e1630" />
+        <rect width="6" height="6" class="cb1" />
+        <rect width="3" height="3" class="cb2" />
+        <rect x="3" y="3" width="3" height="3" class="cb2" />
       </pattern>
       <pattern id="{uid}-dots" width="2.6" height="2.6" patternUnits="userSpaceOnUse">
-        <circle cx="1.3" cy="1.3" r="1" fill="#fff" />
+        <circle cx="1.3" cy="1.3" r="1" class="dot" />
       </pattern>
-      <mask id="{uid}-matrix">
+      <mask id="{uid}-matrix" style="mask-type: alpha">
         <rect width="300" height="300" fill="url(#{uid}-dots)" />
       </mask>
       <linearGradient id="{uid}-arc" gradientUnits="userSpaceOnUse" x1="30" y1="250" x2="270" y2="250">
@@ -118,16 +118,16 @@
         <stop offset="1" class="to" />
       </linearGradient>
       <radialGradient id="{uid}-hub" cx="0.35" cy="0.35" r="0.7">
-        <stop offset="0" stop-color="#8a80a3" />
-        <stop offset="1" stop-color="#1c1628" />
+        <stop offset="0" class="hub1" />
+        <stop offset="1" class="hub2" />
       </radialGradient>
     </defs>
 
     <circle cx={C} cy={C} r="147" fill="url(#{uid}-bezel)" />
-    <circle cx={C} cy={C} r="137" fill="#08060d" />
+    <circle cx={C} cy={C} r="137" class="well" />
     <circle cx={C} cy={C} r="133" fill="url(#{uid}-carbon)" />
     <circle cx={C} cy={C} r="133" fill="url(#{uid}-vignette)" />
-    <path d="M40 120 A112 112 0 0 1 260 120 Q150 70 40 120 Z" fill="#fff" opacity="0.045" />
+    <path d="M40 120 A112 112 0 0 1 260 120 Q150 70 40 120 Z" class="gloss" />
 
     <path class="track" d={arc(ARC_R, START_ANGLE, START_ANGLE + SWEEP)} />
     <path class="lit" d={arc(ARC_R, START_ANGLE, angle)} stroke="url(#{uid}-arc)" />
@@ -157,8 +157,8 @@
     <g class="needle" transform="rotate({angle} {C} {C})">
       <polygon points="{C - 22},{C - 3.2} {C + 112},{C - 1} {C + 112},{C + 1} {C - 22},{C + 3.2}" />
     </g>
-    <circle cx={C} cy={C} r="15" fill="url(#{uid}-hub)" stroke="#0b0812" stroke-width="2" />
-    <circle cx={C} cy={C} r="6" fill="#08060d" />
+    <circle cx={C} cy={C} r="15" fill="url(#{uid}-hub)" class="hubring" stroke-width="2" />
+    <circle cx={C} cy={C} r="6" class="well" />
   </svg>
 </div>
 
@@ -173,6 +173,56 @@
     display: block;
     width: 100%;
     height: 100%;
+  }
+
+  /* The dial face is built from the theme so its marks keep the theme's own contrast. */
+  .bz1 {
+    stop-color: color-mix(in srgb, var(--text) 35%, var(--surface-2));
+  }
+
+  .bz2 {
+    stop-color: var(--surface-2);
+  }
+
+  .bz3 {
+    stop-color: color-mix(in srgb, var(--text) 22%, var(--surface-2));
+  }
+
+  .vig {
+    stop-color: var(--bg);
+  }
+
+  .cb1 {
+    fill: var(--surface);
+  }
+
+  .cb2 {
+    fill: var(--surface-2);
+  }
+
+  .dot {
+    fill: var(--text);
+  }
+
+  .hub1 {
+    stop-color: color-mix(in srgb, var(--text) 45%, var(--surface-2));
+  }
+
+  .hub2 {
+    stop-color: var(--surface);
+  }
+
+  .well {
+    fill: var(--bg);
+  }
+
+  .gloss {
+    fill: var(--text);
+    opacity: 0.045;
+  }
+
+  .hubring {
+    stroke: var(--bg);
   }
 
   .from {
@@ -195,7 +245,7 @@
   }
 
   .tick {
-    stroke: #cfc6e0;
+    stroke: var(--text);
     stroke-linecap: round;
     opacity: 0.75;
     stroke-width: 1.4;
@@ -212,7 +262,7 @@
   .tick-label {
     font-family: 'Orbitron', var(--font);
     font-size: 15px;
-    fill: #b9aecf;
+    fill: var(--text-muted);
     text-anchor: middle;
   }
 
@@ -227,7 +277,7 @@
   .title {
     font-family: 'Orbitron', var(--font);
     font-size: 23px;
-    fill: #cfc6e0;
+    fill: var(--text);
     opacity: 0.85;
     text-anchor: middle;
   }
@@ -240,7 +290,7 @@
   }
 
   .lcd {
-    fill: #07050c;
+    fill: var(--bg);
     stroke: var(--border);
   }
 

@@ -1,6 +1,9 @@
 import type { Backend, Unsubscribe } from '../lib/backend/backend';
 import { MockSettings } from '../lib/backend/mockSettings';
 import type {
+  ImportPreview,
+  ResolvedTheme,
+  ThemeSummary,
   BenchKernel,
   BenchStatus,
   BenchStep,
@@ -1152,6 +1155,30 @@ export class FakeBackend implements Backend {
 
   async revealSensorReport(): Promise<void> {
     this.revealSensorReportCalls++;
+  }
+
+  /** The theme gallery; the theme commands are stubs until a test needs more. */
+  themes: ThemeSummary[] = [];
+  async themesList(): Promise<ThemeSummary[]> {
+    return this.themes;
+  }
+  async themeImportPreview(): Promise<ImportPreview | null> {
+    return null;
+  }
+  async themeImportConfirm(_token: number): Promise<ThemeSummary> {
+    throw { key: 'themes.error.notFound', detail: null };
+  }
+  async themeExport(_id: string): Promise<boolean> {
+    return false;
+  }
+  async themeDelete(id: string): Promise<void> {
+    this.themes = this.themes.filter((t) => t.id !== id);
+  }
+  async themeResolved(): Promise<ResolvedTheme> {
+    return { id: 'builtin-synthwave', vars: {}, fallback: false };
+  }
+  async themeTemplateSave(): Promise<boolean> {
+    return false;
   }
 
   async onUpdateStatus(cb: (s: UpdateStatus) => void): Promise<Unsubscribe> {

@@ -22,5 +22,6 @@ pub mod sanitize;
 pub mod scores;
 pub mod settings;
 pub mod stats;
+pub mod theme;
 pub mod updates;
 mod worker;

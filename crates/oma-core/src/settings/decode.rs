@@ -17,6 +17,7 @@ use crate::rules::{
     is_builtin, nested, validate_override, validate_rules, CustomRules, Rule, RuleOverride,
     RulesSettings,
 };
+use crate::theme::is_valid_theme_id;
 
 /// Serialized as `{"path": …, "kind": "invalidRule", "key": …}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -145,6 +146,20 @@ pub fn decode_lenient(value: &Value) -> Decoded {
         "checkAutomatically",
         u.check_automatically,
     );
+
+    let appearance = reader.section(root, "", "appearance");
+    match lookup(&appearance, "theme", false) {
+        None => {}
+        Some(Value::String(id)) if is_valid_theme_id(id) => settings.appearance.theme = id.clone(),
+        Some(Value::String(id)) => reader.push(
+            "appearance.theme".into(),
+            DiagnosticKind::Corrected {
+                from: id.clone(),
+                to: settings.appearance.theme.clone(),
+            },
+        ),
+        Some(_) => reader.push("appearance.theme".into(), DiagnosticKind::WrongType),
+    }
 
     let sources = reader.section(root, "", "sources");
     let vendors = reader.section(&sources, "sources", "vendorLibraries");
@@ -1089,6 +1104,43 @@ mod tests {
             d.diagnostics,
             vec![Diagnostic {
                 path: "updates.checkAutomatically".into(),
+                kind: DiagnosticKind::WrongType
+            }]
+        );
+    }
+
+    #[test]
+    fn appearance_defaults_to_synthwave() {
+        let d = decode(json!({"version": 1}));
+        assert_eq!(d.settings.appearance.theme, "builtin-synthwave");
+        assert!(d.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn appearance_keeps_builtin_and_uuid_ids() {
+        for id in ["builtin-daylight", "3f2a9c1e-5b7d-4e8f-a1b2-0c3d4e5f6a7b"] {
+            let d = decode(json!({"version": 1, "appearance": {"theme": id}}));
+            assert_eq!(d.settings.appearance.theme, id);
+            assert!(d.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn appearance_corrects_malformed_ids() {
+        for bad in ["../x", "BUILTIN-SYNTHWAVE"] {
+            let d = decode(json!({"version": 1, "appearance": {"theme": bad}}));
+            assert_eq!(d.settings.appearance.theme, "builtin-synthwave");
+            assert_eq!(
+                d.diagnostics,
+                vec![corrected("appearance.theme", bad, "builtin-synthwave")]
+            );
+        }
+        let d = decode(json!({"version": 1, "appearance": {"theme": 42}}));
+        assert_eq!(d.settings.appearance.theme, "builtin-synthwave");
+        assert_eq!(
+            d.diagnostics,
+            vec![Diagnostic {
+                path: "appearance.theme".into(),
                 kind: DiagnosticKind::WrongType
             }]
         );

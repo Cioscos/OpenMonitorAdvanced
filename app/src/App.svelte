@@ -16,6 +16,9 @@
   import { overlay } from './lib/overlay.svelte';
   import { updates } from './lib/updates.svelte';
   import { initialView, migrateLegacyState, settings } from './lib/settings.svelte';
+  import { theme } from './lib/theme/theme.svelte';
+  import { t } from './lib/i18n/index.svelte';
+  import ErrorBanner from './components/ErrorBanner.svelte';
   import { isStale } from './lib/stale';
   import type { NavigationTarget, ServiceStatus, Session, StartupStatus } from './lib/types';
   import { openSettings, performancePageOf, setSettingsOpener, type PerformancePage, type SettingsTarget, type View } from './lib/view';
@@ -36,6 +39,8 @@
 
   /** The view the settings screen goes back to. */
   let previous = $state<Exclude<View, 'settings'>>('simple');
+  /** The theme fallback notice is shown once, until dismissed. */
+  let fallbackDismissed = $state(false);
   /** The page of the Performance view, kept while another view is shown. */
   let performancePage = $state<PerformancePage>('new');
   let gear = $state<HTMLButtonElement | undefined>();
@@ -81,6 +86,7 @@
     const clock = setInterval(() => { nowMs = Date.now(); }, 1000);
     let off: (() => void) | undefined;
     let offSettings: (() => void) | undefined;
+    const offTheme = theme.follow(backend, settings);
     let offNavigate: (() => void) | undefined;
     let offService: (() => void) | undefined;
     let offHealth: (() => void) | undefined;
@@ -210,6 +216,7 @@
       offUpdates?.();
       offService?.();
       offSettings?.();
+      offTheme();
       offNavigate?.();
       offQuit?.();
     };
@@ -266,6 +273,9 @@
 />
 {#if visible && ready && (view === 'simple' || view === 'advanced')}<HealthStrip {store} />{/if}
 <main class:simple={view === 'simple'} class:wide={view === 'advanced'}>
+  {#if theme.fallback && !fallbackDismissed}
+    <ErrorBanner message={t('themes.notice.fallback')} onDismiss={() => (fallbackDismissed = true)} />
+  {/if}
   {#if startup?.safeMode}
     <SafeModeNotice status={startup} onEnable={enableVendorLibraries} />
   {/if}

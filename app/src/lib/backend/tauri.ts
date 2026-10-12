@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
+  ImportPreview,
+  ResolvedTheme,
+  ThemeSummary,
   BenchStatus,
   DiskBenchRequest,
   VolumeChoice,
@@ -149,5 +152,12 @@ export function createTauriBackend(): Backend {
     onUpdateStatus: (cb) => listen<UpdateStatus>('oma:update-status', (e) => cb(e.payload)),
     exportSensorReport: () => invoke<ExportedReport | null>('export_sensor_report'),
     revealSensorReport: () => invoke<void>('reveal_sensor_report'),
+    themesList: () => invoke<ThemeSummary[]>('themes_list'),
+    themeImportPreview: () => invoke<ImportPreview | null>('theme_import_preview'),
+    themeImportConfirm: (token) => invoke<ThemeSummary>('theme_import_confirm', { token }),
+    themeExport: (id) => invoke<boolean>('theme_export', { id }),
+    themeDelete: (id) => invoke<void>('theme_delete', { id }),
+    themeResolved: () => invoke<ResolvedTheme>('theme_resolved'),
+    themeTemplateSave: () => invoke<boolean>('theme_template_save'),
   };
 }

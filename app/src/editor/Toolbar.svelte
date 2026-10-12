@@ -360,7 +360,7 @@
     display: grid;
     place-items: center;
     padding: 16px;
-    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    background: var(--backdrop);
   }
   .dialog {
     display: flex;

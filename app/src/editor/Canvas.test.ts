@@ -6,6 +6,7 @@ import { i18n } from '../lib/i18n/index.svelte';
 import { LiveStore } from '../lib/live.svelte';
 import { settings } from '../lib/settings.svelte';
 import { FakeBackend } from '../test/fake-backend';
+import { setTheme } from '../test/theme';
 import Canvas from './Canvas.svelte';
 import EditorApp from './EditorApp.svelte';
 import { FrameFeed } from './feed.svelte';
@@ -181,4 +182,27 @@ test('dropping outside the canvas adds nothing', async () => {
   await fireEvent.pointerDown(item, { clientX: 1200, clientY: 300, pointerId: 1, button: 0 });
   await fireEvent.pointerUp(item, { clientX: 1200, clientY: 600, pointerId: 1 });
   await waitFor(() => expect(blocks().queryAllByRole('option')).toHaveLength(0));
+});
+
+test('the selection is drawn in the theme accent and redrawn on a theme change', async () => {
+  const strokes: string[] = [];
+  const ctx = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (target, key) => (key in target ? target[key] : () => ({ width: 0 })),
+    set: (target, key, value) => {
+      if (key === 'strokeStyle') strokes.push(String(value));
+      target[key] = value;
+      return true;
+    },
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+  const { editor, a } = setup();
+  editor.selection = new Set([a]);
+  await setTheme({ '--accent': '#123456' });
+  try {
+    await waitFor(() => expect(strokes).toContain('#123456'));
+    await setTheme({ '--accent': '#654321' });
+    await waitFor(() => expect(strokes).toContain('#654321'));
+  } finally {
+    document.documentElement.removeAttribute('style');
+  }
 });

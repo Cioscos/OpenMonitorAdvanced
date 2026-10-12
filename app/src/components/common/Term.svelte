@@ -154,7 +154,7 @@
     border-left: 2px solid var(--accent-2);
     border-radius: 8px;
     box-shadow:
-      0 8px 24px color-mix(in srgb, var(--bg) 70%, transparent),
+      0 8px 24px var(--shadow),
       0 0 12px color-mix(in srgb, var(--accent-2) 12%, transparent);
     user-select: text;
   }

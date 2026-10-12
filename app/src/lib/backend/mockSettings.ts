@@ -60,6 +60,7 @@ const SHAPE: { [key: string]: Node } = {
   general: { language: 'leaf', temperatureUnit: 'leaf', throughputUnit: 'leaf', intervalMs: 'leaf', chartFps: 'leaf', defaultView: 'leaf' },
   tray: { closeToTray: 'leaf', autostart: 'leaf', iconSensor: 'nullable' },
   updates: { checkAutomatically: 'leaf' },
+  appearance: { theme: 'leaf' },
   sources: {
     vendorLibraries: { nvml: 'leaf', nvapi: 'leaf', adl: 'leaf', igcl: 'leaf' },
     antiCheat: 'leaf',
@@ -150,6 +151,9 @@ function checkTypes(merged: Record<string, unknown>): void {
   for (const key of ['closeToTray', 'autostart']) if (typeof tray[key] !== 'boolean') fail(`tray.${key}`, 'settings.error.type');
   if (tray.iconSensor !== null && typeof tray.iconSensor !== 'string') fail('tray.iconSensor', 'settings.error.type');
   if (typeof (merged.updates as Record<string, unknown>).checkAutomatically !== 'boolean') fail('updates.checkAutomatically', 'settings.error.type');
+  const theme = (merged.appearance as Record<string, unknown>).theme;
+  if (typeof theme !== 'string') fail('appearance.theme', 'settings.error.type');
+  if (!isThemeId(theme as string)) fail('appearance.theme', 'settings.error.themeId');
   if (typeof sources.antiCheat !== 'boolean') fail('sources.antiCheat', 'settings.error.type');
   if (advanced.section != null && typeof advanced.section !== 'string') fail('advanced.section', 'settings.error.type');
   const series = advanced.series;
@@ -234,6 +238,11 @@ const normalizeExe = (name: string): string | null => {
 
 /** `is_profile_id`: a built-in id or a lowercase `8-4-4-4-12` UUID. */
 const isProfileId = (id: string) => BUILTIN_PROFILES.includes(id) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);
+
+/** `is_valid_theme_id`: a built-in theme id or a lowercase uuid v4. */
+const isThemeId = (id: string) =>
+  ['builtin-synthwave', 'builtin-midnight', 'builtin-daylight', 'builtin-contrast'].includes(id) ||
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
 
 /** The overlay checks of the strict decoder; names and hotkeys are stored normalised. */
 function checkOverlay(overlay: Record<string, unknown>, log: Record<string, unknown>): void {
@@ -370,6 +379,7 @@ export function defaultSettings(): Settings {
     general: { language: 'system', temperatureUnit: 'c', throughputUnit: 'bits', intervalMs: 1000, chartFps: 60, defaultView: 'last' },
     tray: { closeToTray: true, autostart: false, iconSensor: null },
     updates: { checkAutomatically: false },
+    appearance: { theme: 'builtin-synthwave' },
     sources: {
       vendorLibraries: { nvml: true, nvapi: true, adl: true, igcl: true },
       antiCheat: false,

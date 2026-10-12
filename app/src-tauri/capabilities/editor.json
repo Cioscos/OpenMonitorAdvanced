@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "editor",
-  "description": "Overlay editor window: event subscriptions, closing itself after a save or discard, the sensor reads and the settings it reads, the overlay status, the editor's profile commands and font list, the preview, «Use now», the unsaved-changes flag and confirming a quit.",
+  "description": "Overlay editor window: event subscriptions, closing itself after a save or discard, the sensor reads and the settings it reads, the overlay status, the editor's profile commands and font list, the preview, «Use now», the unsaved-changes flag, confirming a quit and the active theme.",
   "windows": ["overlay-editor"],
   "permissions": [
     "core:event:allow-listen",
@@ -24,6 +24,7 @@
     "allow-overlay-use-now",
     "allow-overlay-editor-dirty",
     "allow-overlay-editor-profile",
-    "allow-app-quit-confirmed"
+    "allow-app-quit-confirmed",
+    "allow-theme-resolved"
   ]
 }

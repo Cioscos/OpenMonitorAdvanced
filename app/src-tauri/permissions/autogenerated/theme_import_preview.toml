@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-theme-import-preview"
+description = "Enables the theme_import_preview command without any pre-configured scope."
+commands.allow = ["theme_import_preview"]
+
+[[permission]]
+identifier = "deny-theme-import-preview"
+description = "Denies the theme_import_preview command without any pre-configured scope."
+commands.deny = ["theme_import_preview"]

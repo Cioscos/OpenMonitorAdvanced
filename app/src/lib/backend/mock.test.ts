@@ -235,6 +235,47 @@ test('mock backend rejects an off-step interval', async () => {
   expect((await backend.getSettings()).settings.general.intervalMs).toBe(1000);
 });
 
+test('mock backend defaults the theme and accepts a valid id only', async () => {
+  const backend = createMockBackend();
+  expect((await backend.getSettings()).settings.appearance).toEqual({ theme: 'builtin-synthwave' });
+  const state = await backend.updateSettings({ appearance: { theme: 'builtin-midnight' } });
+  expect(state.settings.appearance.theme).toBe('builtin-midnight');
+  await expect(backend.updateSettings({ appearance: { theme: '../x' } })).rejects.toEqual({
+    field: 'appearance.theme',
+    key: 'settings.error.themeId',
+  });
+});
+
+test('mock backend lists the four built-in themes first, then imports and deletes', async () => {
+  const backend = createMockBackend();
+  const list = await backend.themesList();
+  expect(list.map((t) => t.id)).toEqual(['builtin-synthwave', 'builtin-midnight', 'builtin-daylight', 'builtin-contrast']);
+  expect(list.every((t) => t.builtin && t.name === null)).toBe(true);
+  expect(list[2].scheme).toBe('light');
+  expect(list[0].vars['--bg']).toMatch(/^#/);
+  expect(Object.keys(list[0].vars)).toHaveLength(22);
+
+  const preview = (await backend.themeImportPreview())!;
+  expect(preview.applied).toBeGreaterThan(0);
+  await expect(backend.themeImportConfirm(preview.token + 1)).rejects.toEqual({ key: 'themes.error.notFound', detail: null });
+  const added = await backend.themeImportConfirm(preview.token);
+  expect(added).toMatchObject({ name: preview.name, builtin: false });
+  expect((await backend.themesList()).at(-1)!.id).toBe(added.id);
+  expect(await backend.themeExport(added.id)).toBe(true);
+
+  // A second import of the same name is renamed; deleting the active theme resets it.
+  const again = await backend.themeImportConfirm((await backend.themeImportPreview())!.token);
+  expect(again.name).toBe(`${preview.name} (2)`);
+  await backend.updateSettings({ appearance: { theme: added.id } });
+  expect((await backend.themeResolved()).id).toBe(added.id);
+  await backend.themeDelete(added.id);
+  expect((await backend.getSettings()).settings.appearance.theme).toBe('builtin-synthwave');
+  expect((await backend.themesList()).map((t) => t.id)).not.toContain(added.id);
+  await expect(backend.themeDelete(added.id)).rejects.toEqual({ key: 'themes.error.notFound', detail: null });
+  expect(await backend.themeResolved()).toMatchObject({ id: 'builtin-synthwave', fallback: false });
+  expect(await backend.themeTemplateSave()).toBe(true);
+});
+
 test('mock backend keeps update checks off by default and accepts a patch', async () => {
   const backend = createMockBackend();
   expect((await backend.getSettings()).settings.updates).toEqual({ checkAutomatically: false });

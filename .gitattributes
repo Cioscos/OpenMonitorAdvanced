@@ -9,3 +9,4 @@
 *.icns binary
 *.msgpack binary
 *.ttf binary
+testdata/themes/crlf-bom.css -text

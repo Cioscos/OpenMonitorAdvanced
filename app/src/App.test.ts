@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { i18n } from './lib/i18n/index.svelte';
 beforeEach(() => { localStorage.clear(); i18n.locale = 'en'; });
 afterEach(() => { cleanup(); settings.state = null; settings.errors = {}; });
@@ -8,6 +8,7 @@ import App from './App.svelte';
 import { MOCK_SCHEMA, mockValues } from './lib/backend/mock';
 import { LiveStore } from './lib/live.svelte';
 import { settings } from './lib/settings.svelte';
+import { theme } from './lib/theme/theme.svelte';
 import type { Schema } from './lib/types';
 import { FakeBackend, makeLogStatus, makeRunStatus } from './test/fake-backend';
 
@@ -589,4 +590,19 @@ test('the health strip sits under the top bar in Simple and Advanced only', asyn
   await fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
   expect(strip()).toBeNull();
   expect(document.documentElement.style.getPropertyValue('--chrome-height')).toBe('');
+});
+
+test('a theme fallback shows the notice once, until dismissed', async () => {
+  const backend = new FakeBackend(MOCK_SCHEMA);
+  backend.themeResolved = async () => ({ id: 'builtin-synthwave', vars: {}, fallback: true });
+  await theme.load(backend);
+  try {
+    render(App, { backend, store: new LiveStore() });
+    const notice = await screen.findByText('The saved theme could not be loaded; Synthwave is in use.');
+    await fireEvent.click(within(notice.closest('[role="alert"]') as HTMLElement).getByRole('button'));
+    expect(screen.queryByText('The saved theme could not be loaded; Synthwave is in use.')).toBeNull();
+  } finally {
+    backend.themeResolved = async () => ({ id: 'builtin-synthwave', vars: {}, fallback: false });
+    await theme.load(backend);
+  }
 });

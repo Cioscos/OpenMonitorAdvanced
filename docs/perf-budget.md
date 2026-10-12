@@ -291,6 +291,17 @@ Budget: app CPU < 1 % at idle; tray < 30 MB; window open < 200 MB in total.
 
 Budget: service CPU < 1 % of the machine; service private bytes < 80 MB — both met.
 
+## M10 — themes
+
+Budget unchanged from M9a. Measured 2026-10-12 on the development machine (Ryzen 7 7800X3D, RTX 4080, 2560×1440 at 165 Hz, Windows 11 Pro 10.0.26300), release build of `feat/m10` at `994b605` (`pnpm tauri build --no-bundle`), `scripts/measure-footprint.ps1`, three launches per case.
+
+| Case | Core CPU | App + WebView2 CPU | Memory | Within budget |
+|---|---|---|---|---|
+| Tray (`-Minimized -WarmupSeconds 60`) | 0.10 / 0.05 / 0.09 % | same (one process) | 20.7 / 19.9 / 19.4 MB | yes (< 1 %, < 30 MB) |
+| Window maximized, Advanced NVIDIA GPU page, Daylight theme (`-WarmupSeconds 15`) | 0.08 / 0.09 / 0.10 % | 1.10 / 1.17 / 1.04 % | 194.1 / 194.8 / 195.2 MB | yes (< 2.5 %, < 260 MB) |
+
+A/B against the `main` release, alternated, five launches each, same window case with Synthwave: `main` 192.4 / 193.0 / 189.5 / 192.5 / 183.7 MB, `feat/m10` 208.7 / 203.4 / 189.5 / 192.8 / 192.9 MB. The earlier spikes (218–256 MB) were noise, not the themes. The theme adds no thread, watcher or timer: the active theme travels with the settings patch and the canvas charts rebuild only when `theme.version` changes.
+
 ## M9b — new sensors
 
 Budget unchanged from M9a. Measured 2026-10-11 on the development machine (Ryzen 7 7800X3D, RTX 4080, 2560×1440 at 165 Hz, Windows 11 Pro 10.0.26300), release build of `feat/m9b` at `ad25e22` (`pnpm tauri build --bundles nsis`, installed with its service), `scripts/measure-footprint.ps1`, three launches per case.

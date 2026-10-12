@@ -1,0 +1,10 @@
+/* @oma-theme 1
+   @name Light */
+:root {
+  --color-scheme: light;
+  --bg: #f7f7fa;
+  --surface: #ffffff;
+  --text: #1b1b24;
+  --text-muted: #5a5a6e;
+  --accent: #b0127f;
+}

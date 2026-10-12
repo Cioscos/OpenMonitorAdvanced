@@ -385,7 +385,7 @@
     const css = getComputedStyle(document.documentElement);
     const read = (token: string) => css.getPropertyValue(token).trim();
     const muted = read('--text-muted');
-    const border = read('--border');
+    const grid = read('--chart-grid');
     const paths: ChartCanvasPath[] = colors.map(({ color, dash }) => ({ stroke: null, gapsClip: null, color, dash: dashOf(dash) }));
     plotCssWidth = Math.max(320, container.clientWidth || 800);
     const opts: uPlot.Options = {
@@ -435,7 +435,7 @@
         }),
       ],
       hooks: {
-        draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })],
+        draw: [(u) => paint(u, paths, { gridColor: grid, textColor: muted })],
         // Values follow dataIdx, but uPlot publishes its uncorrected index here.
         setCursor: [(u) => {
           u.cursor.idx = u.legend.idx = u.cursor.idxs![0];
@@ -463,8 +463,8 @@
           side: 3,
           size: Y_AXIS_PX,
           stroke: muted,
-          grid: { show: true, stroke: border, width: 1 },
-          ticks: { show: true, stroke: border, width: 1 },
+          grid: { show: true, stroke: grid, width: 1 },
+          ticks: { show: true, stroke: grid, width: 1 },
           // Increments coarse enough that the labels never repeat.
           incrs: labelSafeIncrs(unit, i18n.locale, t, format),
           values: (_u, splits) => splits.map((v) => format(v, i18n.locale, t)),
@@ -583,7 +583,7 @@
     right: 3px;
     width: 6px;
     height: 6px;
-    background: white;
+    background: var(--text);
     border-radius: 50%;
     transform: translate(50%, -50%);
   }

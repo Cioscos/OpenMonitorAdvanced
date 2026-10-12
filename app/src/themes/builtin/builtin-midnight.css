@@ -1,0 +1,27 @@
+/* @oma-theme 1
+   @name builtin-midnight
+   @author OpenMonitor Advanced */
+:root {
+  --color-scheme: dark;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #1f2630;
+  --border: #30363d;
+  --shadow: #00000080;
+  --backdrop: #0d1117cc;
+  --text: #e6edf3;
+  --text-muted: #8b98a8;
+  --on-accent: #0d1117;
+  --accent: #6ea8fe;
+  --accent-2: #7ee0d6;
+  --ok: #56d364;
+  --warn: #e3b341;
+  --crit: #ff7b72;
+  --series-5: #a5a5f5;
+  --series-6: #f0883e;
+  --series-7: #d2e66b;
+  --series-8: #79c0ff;
+  --chart-grid: #30363d80;
+  --radius: 10px;
+  --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+}

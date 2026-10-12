@@ -5,6 +5,7 @@
   import { t } from '../../lib/i18n/index.svelte';
   import { settings } from '../../lib/settings.svelte';
   import type { ImportPreview, ThemeSummary } from '../../lib/types';
+  import ThemeGuide from './ThemeGuide.svelte';
   import ThemeCard from './ThemeCard.svelte';
   import ThemeImportDialog from './ThemeImportDialog.svelte';
 
@@ -59,6 +60,8 @@
       }
     });
 
+  const saveTemplate = () => attempt(() => backend.themeTemplateSave());
+
   const startImport = () =>
     attempt(async () => {
       pendingError = null;
@@ -85,6 +88,7 @@
 <div class="themes">
   <div class="toolbar">
     <button type="button" class="import" bind:this={importButton} onclick={startImport}>{t('themes.import')}</button>
+    <button type="button" class="import" onclick={saveTemplate}>{t('themes.templateSave')}</button>
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <ul class="gallery" aria-label={t('settings.section.themes')}>
@@ -98,6 +102,7 @@
       />
     {/each}
   </ul>
+  <ThemeGuide />
 </div>
 
 {#if pending}

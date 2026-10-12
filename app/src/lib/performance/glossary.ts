@@ -119,4 +119,7 @@ export const TERMS: string[] = [
   'anonymousShare',
   // M10: the import summary of a theme.
   'contrast',
+  'cssVariable',
+  'wcag',
+  'alpha',
 ];

@@ -186,3 +186,14 @@ test('delete_confirmation_moves_focus', async () => {
   await fireEvent.click(screen.getByRole('button', { name: t('themes.deleteYes') }));
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: t('themes.import') })));
 });
+
+test('template_button_calls_backend', async () => {
+  const { backend } = await setup(BUILTINS);
+  let calls = 0;
+  backend.themeTemplateSave = async () => {
+    calls++;
+    return true;
+  };
+  await fireEvent.click(screen.getByRole('button', { name: t('themes.templateSave') }));
+  await waitFor(() => expect(calls).toBe(1));
+});

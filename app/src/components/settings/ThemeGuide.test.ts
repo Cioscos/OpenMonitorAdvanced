@@ -39,3 +39,15 @@ test('example_parses_as_three_variables', () => {
   expect(decls).toHaveLength(3);
   for (const d of decls) expect(known.has(d)).toBe(true);
 });
+
+test('header_example_has_each_directive_on_its_own_line', () => {
+  for (const locale of ['en', 'it'] as const) {
+    i18n.locale = locale;
+    const lines = t('themes.guide.headerExample').split('\n').map((l) => l.replace(/^\/\*|\*\/$/g, '').trim());
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/^@oma-theme \d+$/);
+    expect(lines[1]).toMatch(/^@name \S/);
+    expect(lines[2]).toMatch(/^@author \S/);
+    expect(lines.join('')).not.toContain(',');
+  }
+});

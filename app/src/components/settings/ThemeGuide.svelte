@@ -15,7 +15,10 @@
     <pre class="example"><code>{t('themes.guide.example')}</code></pre>
     <h4>{t('themes.guide.rulesTitle')}</h4>
     <ul>
-      <li>{t('themes.guide.ruleHeader')}</li>
+      <li>
+        {t('themes.guide.ruleHeader')}
+        <pre class="example"><code>{t('themes.guide.headerExample')}</code></pre>
+      </li>
       <li>{t('themes.guide.ruleSize')}</li>
       <li>{t('themes.guide.ruleColors')}<Term term="alpha">{t('glossary.alpha.name')}</Term>{t('themes.guide.ruleColorsAlpha')}</li>
       <li>{t('themes.guide.ruleRadius')}</li>

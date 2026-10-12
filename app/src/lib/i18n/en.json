@@ -1808,7 +1808,7 @@
   "themes.guide.exampleTitle": "Smallest useful file",
   "themes.guide.example": ":root {\n  --accent: #ff4fd8;\n  --radius: 8px;\n  --font: \"Segoe UI\", sans-serif;\n}",
   "themes.guide.rulesTitle": "Rules",
-  "themes.guide.ruleHeader": "Optional header: a comment at the very top of the file, with one directive per line and no quotes: /* @oma-theme 1, @name My theme, @author Me */ (written on separate lines). @name and @author take up to 64 characters. Outside a leading comment these lines are dropped.",
+  "themes.guide.ruleHeader": "Optional header: a comment at the very top of the file, with one directive per line and no quotes. @name and @author take up to 64 characters. Outside a leading comment these lines are dropped.",
   "themes.guide.ruleSize": "The file can be up to 64 KiB, UTF-8 text, with the variables inside :root { … }.",
   "themes.guide.ruleColors": "Colours: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla() or transparent. Colour names, var(), calc() and color-mix() are not accepted. The forms with an ",
   "themes.guide.ruleColorsAlpha": " channel (the last two digits or the fourth value) set the transparency.",
@@ -1839,5 +1839,6 @@
   "glossary.wcag.name": "WCAG",
   "glossary.wcag": "The Web Content Accessibility Guidelines: the common rules for readable colours. They ask for a contrast ratio of at least 4.5:1 for normal text and 3:1 for large or secondary text.",
   "glossary.alpha.name": "Alpha",
-  "glossary.alpha": "The transparency of a colour: 0 is invisible, the maximum is fully solid. It is the optional fourth part of a colour, like the last two digits of #rrggbbaa."
+  "glossary.alpha": "The transparency of a colour: 0 is invisible, the maximum is fully solid. It is the optional fourth part of a colour, like the last two digits of #rrggbbaa.",
+  "themes.guide.headerExample": "/* @oma-theme 1\n   @name My theme\n   @author Me */"
 }

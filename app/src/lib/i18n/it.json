@@ -1808,7 +1808,7 @@
   "themes.guide.exampleTitle": "Il file più piccolo che serve",
   "themes.guide.example": ":root {\n  --accent: #ff4fd8;\n  --radius: 8px;\n  --font: \"Segoe UI\", sans-serif;\n}",
   "themes.guide.rulesTitle": "Regole",
-  "themes.guide.ruleHeader": "Intestazione facoltativa: un commento in cima al file, con una direttiva per riga e senza virgolette: /* @oma-theme 1, @name Il mio tema, @author Io */ (scritte su righe separate). @name e @author arrivano a 64 caratteri. Fuori da un commento iniziale queste righe vengono scartate.",
+  "themes.guide.ruleHeader": "Intestazione facoltativa: un commento in cima al file, con una direttiva per riga e senza virgolette. @name e @author arrivano a 64 caratteri. Fuori da un commento iniziale queste righe vengono scartate.",
   "themes.guide.ruleSize": "Il file può pesare fino a 64 KiB, in testo UTF-8, con le variabili dentro :root { … }.",
   "themes.guide.ruleColors": "Colori: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla() o transparent. I nomi dei colori, var(), calc() e color-mix() non sono accettati. Le forme con il canale ",
   "themes.guide.ruleColorsAlpha": " (le ultime due cifre o il quarto valore) fissano la trasparenza.",
@@ -1839,5 +1839,6 @@
   "glossary.wcag.name": "WCAG",
   "glossary.wcag": "Le Web Content Accessibility Guidelines: le regole comuni per i colori leggibili. Chiedono un rapporto di contrasto di almeno 4,5:1 per il testo normale e 3:1 per il testo grande o secondario.",
   "glossary.alpha.name": "Alfa",
-  "glossary.alpha": "La trasparenza di un colore: 0 è invisibile, il massimo è pieno. È la quarta parte facoltativa di un colore, come le ultime due cifre di #rrggbbaa."
+  "glossary.alpha": "La trasparenza di un colore: 0 è invisibile, il massimo è pieno. È la quarta parte facoltativa di un colore, come le ultime due cifre di #rrggbbaa.",
+  "themes.guide.headerExample": "/* @oma-theme 1\n   @name Il mio tema\n   @author Io */"
 }

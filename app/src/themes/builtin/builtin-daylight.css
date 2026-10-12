@@ -1,0 +1,27 @@
+/* @oma-theme 1
+   @name builtin-daylight
+   @author OpenMonitor Advanced */
+:root {
+  --color-scheme: light;
+  --bg: #f6f4fa;
+  --surface: #ffffff;
+  --surface-2: #eeeaf5;
+  --border: #d6cfe3;
+  --shadow: #1d152926;
+  --backdrop: #1d152966;
+  --text: #1d1529;
+  --text-muted: #5d5370;
+  --on-accent: #ffffff;
+  --accent: #7a1fa2;
+  --accent-2: #0b6e99;
+  --ok: #0f7b5a;
+  --warn: #9a6400;
+  --crit: #c62828;
+  --series-5: #5e35b1;
+  --series-6: #c2570c;
+  --series-7: #4d7c0f;
+  --series-8: #3949ab;
+  --chart-grid: #1d152926;
+  --radius: 12px;
+  --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+}

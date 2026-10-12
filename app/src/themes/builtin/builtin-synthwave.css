@@ -1,0 +1,27 @@
+/* @oma-theme 1
+   @name builtin-synthwave
+   @author OpenMonitor Advanced */
+:root {
+  --color-scheme: dark;
+  --bg: #0f0a1a;
+  --surface: #181126;
+  --surface-2: #211733;
+  --border: #2d2042;
+  --shadow: #00000080;
+  --backdrop: #0f0a1acc;
+  --text: #f5eefe;
+  --text-muted: #9585b0;
+  --on-accent: #1a0616;
+  --accent: #ff4fd8;
+  --accent-2: #4cc9f0;
+  --ok: #3ee8b5;
+  --warn: #ffc53d;
+  --crit: #ff4d4d;
+  --series-5: #b388ff;
+  --series-6: #ff8c42;
+  --series-7: #c6ff4a;
+  --series-8: #6c8cff;
+  --chart-grid: #2d204280;
+  --radius: 12px;
+  --font: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+}

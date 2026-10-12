@@ -11,6 +11,9 @@
   --warn: #ffc53d;
   --crit: #ff4d4d;
   --on-accent: #1a0616; /* text colour on --accent */
+  --shadow: #00000080;
+  --backdrop: #0f0a1acc;
+  --chart-grid: #2d204280;
   /* Chart series 5-8; series 1-4 use --accent, --accent-2, --ok, --warn. */
   --series-5: #b388ff;
   --series-6: #ff8c42;

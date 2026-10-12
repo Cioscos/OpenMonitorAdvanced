@@ -1165,10 +1165,10 @@ export class FakeBackend implements Backend {
   async themeImportPreview(): Promise<ImportPreview | null> {
     return null;
   }
-  async themeImportConfirm(): Promise<ThemeSummary> {
+  async themeImportConfirm(_token: number): Promise<ThemeSummary> {
     throw { key: 'themes.error.notFound', detail: null };
   }
-  async themeExport(): Promise<boolean> {
+  async themeExport(_id: string): Promise<boolean> {
     return false;
   }
   async themeDelete(id: string): Promise<void> {

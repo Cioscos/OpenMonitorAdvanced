@@ -15,6 +15,7 @@
   import PersistenceNotice from './PersistenceNotice.svelte';
   import RulesSection from './RulesSection.svelte';
   import SourcesSection from './SourcesSection.svelte';
+  import ThemesSection from './ThemesSection.svelte';
 
   // The settings screen (spec M5 §2.7): sections on the left, the chosen one on the right. Every
   // control sends its change at once; there is no Save button. The CSV log has its own section.
@@ -26,8 +27,8 @@
     onBack,
   }: { store: LiveStore; backend: Backend; service: ServiceStatus | null; target?: SettingsTarget | null; onBack: () => void } = $props();
 
-  type Section = 'general' | 'rules' | 'log' | 'overlay' | 'benchmark' | 'performance' | 'sources' | 'about';
-  const SECTIONS: Section[] = ['general', 'rules', 'log', 'overlay', 'benchmark', 'performance', 'sources', 'about'];
+  type Section = 'general' | 'themes' | 'rules' | 'log' | 'overlay' | 'benchmark' | 'performance' | 'sources' | 'about';
+  const SECTIONS: Section[] = ['general', 'themes', 'rules', 'log', 'overlay', 'benchmark', 'performance', 'sources', 'about'];
   // Opened on a target (a sensor row's "Create rule…"), the screen starts on that section.
   // svelte-ignore state_referenced_locally
   let section = $state<Section>(target?.section ?? 'general');
@@ -75,6 +76,8 @@
     {/if}
     {#if section === 'general'}
       <GeneralSection {store} {backend} />
+    {:else if section === 'themes'}
+      <ThemesSection {backend} />
     {:else if section === 'rules'}
       <RulesSection {store} {backend} {newRuleSensor} />
     {:else if section === 'log'}

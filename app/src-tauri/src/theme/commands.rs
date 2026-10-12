@@ -113,17 +113,38 @@ fn summary(id: &str, theme: &ParsedTheme, is_builtin: bool) -> ThemeSummary {
     }
 }
 
-fn user_summary(s: &StoredTheme) -> ThemeSummary {
-    summary(&s.id, &s.theme, false)
+/// A user theme's tile; a hand-written file without `@name` shows
+/// `themes.unnamed` in `lang`.
+fn user_summary(s: &StoredTheme, lang: Lang) -> ThemeSummary {
+    let mut out = summary(&s.id, &s.theme, false);
+    out.name
+        .get_or_insert_with(|| t(lang, "themes.unnamed", &[]));
+    out
 }
 
 /// The built-ins, then the user themes by name.
-pub fn list_summaries(store: &ThemeStore) -> Vec<ThemeSummary> {
+pub fn list_summaries(store: &ThemeStore, lang: Lang) -> Vec<ThemeSummary> {
     builtins()
         .iter()
         .map(|b| summary(b.id, &b.theme, true))
-        .chain(store.list().iter().map(user_summary))
+        .chain(store.list().iter().map(|s| user_summary(s, lang)))
         .collect()
+}
+
+/// Deletes the user theme `id`. When it is the `active` one, `reset` runs
+/// (back to Synthwave) even if its file was already gone.
+pub fn delete_theme(
+    store: &ThemeStore,
+    id: &str,
+    active: &str,
+    reset: impl FnOnce(),
+) -> Result<(), ThemeStoreError> {
+    let result = store.delete(id);
+    let gone = matches!(result, Ok(()) | Err(ThemeStoreError::NotFound));
+    if gone && active == id && builtin(id).is_none() {
+        reset();
+    }
+    result
 }
 
 /// The theme `id` resolves to; Synthwave when it is unknown (with
@@ -194,14 +215,18 @@ pub fn preview(bytes: &[u8], stem: &str) -> Result<ImportPreview, ThemeError> {
 }
 
 /// Adds the pending import if `token` is the one held.
-pub fn confirm(token: u64, store: &ThemeStore) -> Result<ThemeSummary, ThemeStoreError> {
+pub fn confirm(
+    token: u64,
+    store: &ThemeStore,
+    lang: Lang,
+) -> Result<ThemeSummary, ThemeStoreError> {
     let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
     let Some((_, parsed, stem)) = pending.as_ref().filter(|(held, ..)| *held == token) else {
         return Err(ThemeStoreError::NotFound);
     };
     let added = store.add(parsed, stem)?;
     *pending = None;
-    Ok(user_summary(&added))
+    Ok(user_summary(&added, lang))
 }
 
 fn into_path(path: tauri_plugin_dialog::FilePath) -> Result<PathBuf, ThemeStoreError> {
@@ -227,8 +252,8 @@ fn save_dialog(
 }
 
 #[tauri::command]
-pub async fn themes_list() -> Answer<Vec<ThemeSummary>> {
-    blocking(|| Ok(list_summaries(&store()?))).await
+pub async fn themes_list(app: AppHandle) -> Answer<Vec<ThemeSummary>> {
+    blocking(move || Ok(list_summaries(&store()?, lang(&app)))).await
 }
 
 #[tauri::command]
@@ -257,15 +282,15 @@ pub async fn theme_import_preview(
 }
 
 #[tauri::command]
-pub async fn theme_import_confirm(token: u64) -> Answer<ThemeSummary> {
-    blocking(move || Ok(confirm(token, &store()?)?)).await
+pub async fn theme_import_confirm(app: AppHandle, token: u64) -> Answer<ThemeSummary> {
+    blocking(move || Ok(confirm(token, &store()?, lang(&app))?)).await
 }
 
 #[tauri::command]
 pub async fn theme_export(app: AppHandle, window: WebviewWindow, id: String) -> Answer<bool> {
     blocking(move || {
         let stored = store()?.get(&id)?;
-        let name = stored.theme.meta.name.clone().unwrap_or_default();
+        let name = user_summary(&stored, lang(&app)).name.unwrap_or_default();
         let Some(path) = save_dialog(&app, &window, file_name(&name, "css"))? else {
             return Ok(false);
         };
@@ -278,13 +303,12 @@ pub async fn theme_export(app: AppHandle, window: WebviewWindow, id: String) -> 
 #[tauri::command]
 pub async fn theme_delete(app: AppHandle, id: String) -> Answer<()> {
     blocking(move || {
-        store()?.delete(&id)?;
-        if active_theme(&app) == id {
+        delete_theme(&store()?, &id, &active_theme(&app), || {
             let patch = serde_json::json!({ "appearance": { "theme": DEFAULT_THEME } });
             if let Err(e) = app.state::<Arc<SettingsStore>>().update(&patch) {
                 tracing::warn!(?e, "cannot reset the theme after deleting it");
             }
-        }
+        })?;
         Ok(())
     })
     .await
@@ -391,7 +415,7 @@ mod tests {
         let dir = temp_dir("summaries");
         let store = ThemeStore::new(dir.clone());
         store.add(&theme(Some("Mine")), "f").unwrap();
-        let list = list_summaries(&store);
+        let list = list_summaries(&store, Lang::En);
         let ids: Vec<&str> = list.iter().take(4).map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -411,6 +435,52 @@ mod tests {
     }
 
     #[test]
+    fn user_theme_without_name_is_untitled() {
+        let dir = temp_dir("unnamed");
+        let store = ThemeStore::new(dir.clone());
+        fs::write(
+            dir.join(format!("{UUID_A}.css")),
+            ":root { --bg: #102030; }",
+        )
+        .unwrap();
+        for lang in [Lang::En, Lang::It] {
+            let list = list_summaries(&store, lang);
+            assert!(list[..4].iter().all(|s| s.name.is_none()));
+            assert_eq!(list[4].name, Some(t(lang, "themes.unnamed", &[])));
+            assert_ne!(list[4].name.as_deref(), Some("themes.unnamed"));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_resets_the_active_theme_even_when_the_file_is_gone() {
+        let dir = temp_dir("delete-gone");
+        let store = ThemeStore::new(dir.clone());
+        let mut resets = 0;
+        // Active, file already gone: NotFound, and the theme still goes back to Synthwave.
+        assert_eq!(
+            delete_theme(&store, UUID_A, UUID_A, || resets += 1),
+            Err(ThemeStoreError::NotFound)
+        );
+        assert_eq!(resets, 1);
+        // Active and present: deleted and reset.
+        let a = store.add(&theme(Some("A")), "f").unwrap();
+        assert_eq!(delete_theme(&store, &a.id, &a.id, || resets += 1), Ok(()));
+        assert_eq!(resets, 2);
+        // Not active: no reset.
+        let b = store.add(&theme(Some("B")), "f").unwrap();
+        assert_eq!(delete_theme(&store, &b.id, UUID_A, || resets += 1), Ok(()));
+        // A built-in is never deleted nor reset.
+        assert_eq!(
+            delete_theme(&store, "builtin-midnight", "builtin-midnight", || resets +=
+                1),
+            Err(ThemeStoreError::NotFound)
+        );
+        assert_eq!(resets, 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn preview_then_confirm_adds_once() {
         let dir = temp_dir("import");
         let store = ThemeStore::new(dir.clone());
@@ -419,10 +489,16 @@ mod tests {
         let p = preview(css, "dark file").unwrap();
         assert_eq!((p.name.as_str(), p.applied), ("dark file", 1));
         assert!(p.warnings.len() >= 2, "{:?}", p.warnings);
-        assert_eq!(confirm(p.token + 1, &store), Err(ThemeStoreError::NotFound));
-        let added = confirm(p.token, &store).unwrap();
+        assert_eq!(
+            confirm(p.token + 1, &store, Lang::En),
+            Err(ThemeStoreError::NotFound)
+        );
+        let added = confirm(p.token, &store, Lang::En).unwrap();
         assert_eq!(added.name.as_deref(), Some("dark file"));
-        assert_eq!(confirm(p.token, &store), Err(ThemeStoreError::NotFound));
+        assert_eq!(
+            confirm(p.token, &store, Lang::En),
+            Err(ThemeStoreError::NotFound)
+        );
         assert_eq!(store.list().len(), 1);
         assert_eq!(
             CommandError::from(preview(b"", "x").unwrap_err()).key,

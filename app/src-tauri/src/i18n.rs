@@ -82,6 +82,7 @@ pub const RUST_KEYS: &[&str] = &[
     "themes.error.tooMany",
     "themes.error.io",
     "themes.error.notFound",
+    "themes.unnamed",
     "rule.cpu-temp.name",
     "rule.cpu-temp.message",
     "rule.cpu-throttle.name",

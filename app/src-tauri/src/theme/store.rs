@@ -51,11 +51,17 @@ impl ThemeStoreError {
 
 impl From<io::Error> for ThemeStoreError {
     fn from(e: io::Error) -> Self {
-        if e.kind() == io::ErrorKind::NotFound {
-            Self::NotFound
-        } else {
-            Self::Io(e.to_string())
-        }
+        Self::Io(e.to_string())
+    }
+}
+
+/// Reading or deleting a theme file: a missing file is `NotFound`. Writes,
+/// exports and template saves keep a vanished folder as `Io`.
+fn missing_as_not_found(e: io::Error) -> ThemeStoreError {
+    if e.kind() == io::ErrorKind::NotFound {
+        ThemeStoreError::NotFound
+    } else {
+        e.into()
     }
 }
 
@@ -112,7 +118,8 @@ impl ThemeStore {
     /// or an invalid file.
     pub fn get(&self, id: &str) -> Result<StoredTheme, ThemeStoreError> {
         let path = self.path(id)?;
-        let theme = parse_theme(&read_bounded(&path)?).map_err(|_| ThemeStoreError::NotFound)?;
+        let theme = parse_theme(&read_bounded(&path).map_err(missing_as_not_found)?)
+            .map_err(|_| ThemeStoreError::NotFound)?;
         Ok(StoredTheme {
             id: id.to_owned(),
             theme,
@@ -159,7 +166,7 @@ impl ThemeStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), ThemeStoreError> {
-        Ok(fs::remove_file(self.path(id)?)?)
+        fs::remove_file(self.path(id)?).map_err(missing_as_not_found)
     }
 
     /// `<dir>\<id>.css` for a user theme id.
@@ -289,6 +296,13 @@ pub(crate) mod tests {
             Err(ThemeStoreError::TooMany)
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_is_not_found_only_for_read_and_delete() {
+        let e = || io::Error::from(io::ErrorKind::NotFound);
+        assert!(matches!(ThemeStoreError::from(e()), ThemeStoreError::Io(_)));
+        assert_eq!(missing_as_not_found(e()), ThemeStoreError::NotFound);
     }
 
     #[test]

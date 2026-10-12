@@ -197,3 +197,14 @@ test('template_button_calls_backend', async () => {
   await fireEvent.click(screen.getByRole('button', { name: t('themes.templateSave') }));
   await waitFor(() => expect(calls).toBe(1));
 });
+
+test('settings_error_key_is_translated_directly', async () => {
+  const { backend } = await setup(BUILTINS);
+  backend.themeTemplateSave = async () => {
+    throw { field: 'appearance.theme', key: 'settings.error.themeId' };
+  };
+  await fireEvent.click(screen.getByRole('button', { name: t('themes.templateSave') }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(t('settings.error.themeId'));
+  expect(alert.textContent).not.toContain('settings.error.');
+});

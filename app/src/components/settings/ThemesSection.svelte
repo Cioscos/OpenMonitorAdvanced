@@ -23,6 +23,7 @@
 
   const errorText = (e: unknown) => {
     const { key, detail } = asCommandError(e);
+    if (key.startsWith('settings.error.')) return t(key);
     return key.startsWith('themes.error.') ? t(key, { detail: detail ?? '' }) : t('themes.error.io', { detail: detail ?? key });
   };
 

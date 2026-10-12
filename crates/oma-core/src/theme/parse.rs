@@ -492,10 +492,11 @@ fn normalize(spec: &VarSpec, value: &str) -> Option<String> {
 
 /// `12`, `.5`, `0.25`: no sign, no exponent.
 fn is_number(s: &str) -> bool {
-    let (int, frac) = s.split_once('.').unwrap_or((s, "0"));
-    !frac.is_empty()
-        && int.bytes().all(|c| c.is_ascii_digit())
-        && frac.bytes().all(|c| c.is_ascii_digit())
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit());
+    match s.split_once('.') {
+        Some((int, frac)) => (int.is_empty() || digits(int)) && digits(frac),
+        None => digits(s),
+    }
 }
 
 /// A number with the optional `suffix` (any case), lowercased.
@@ -836,6 +837,11 @@ mod tests {
             "rgb(1, 2, 3 / 4)",
             "rgb(-1 2 3)",
             "rgb(1. 2 3)",
+            "rgb(% % %)",
+            "hsl(deg 1% 1%)",
+            "rgb(1 2 3 / )",
+            "rgb(1,2,3,)",
+            "rgb(1,,3)",
             "rgb(1deg 2 3)",
             "hsl(300% 1% 1%)",
             "rgb((1 2 3))",

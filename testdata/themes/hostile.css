@@ -1,0 +1,16 @@
+/* @oma-theme 1
+   @name Hostile */
+body { background: url(http://evil.example/x.png) }
+@import url(x);
+@font-face { font-family: x; src: url(x.woff); }
+:root {
+  --bg: url(http://x);
+  --accent: var(--bg);
+  --text: red;
+  --radius: 99px;
+  --ok: #fff !important;
+  --unknown: #000;
+  color: red;
+  --bg: #111;
+  --bg: #222;
+}

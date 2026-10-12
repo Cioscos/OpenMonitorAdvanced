@@ -1,0 +1,9 @@
+/* @oma-theme 1
+   @name Comments } ; */
+/* a stray comment with } and ; before the block */
+:root /* } */ {
+  --font: "Fira;}Sans", serif;
+  /* }; a comment with braces and semicolons */
+  --font: "Fira Sans" /* }; */ , sans-serif;
+  --accent: #abcdef;
+}

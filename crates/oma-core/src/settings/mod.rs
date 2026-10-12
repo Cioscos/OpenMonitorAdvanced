@@ -178,6 +178,20 @@ pub struct Updates {
     pub check_automatically: bool,
 }
 
+/// Look of the app: the id of the active theme (built-in or a user theme's uuid).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Appearance {
+    pub theme: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: crate::theme::DEFAULT_THEME.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VendorLibraries {
     pub nvml: bool,
@@ -276,6 +290,7 @@ pub struct Settings {
     pub general: General,
     pub tray: Tray,
     pub updates: Updates,
+    pub appearance: Appearance,
     pub sources: Sources,
     pub advanced: AdvancedState,
     pub view: ViewState,
@@ -295,6 +310,7 @@ impl Default for Settings {
             general: General::default(),
             tray: Tray::default(),
             updates: Updates::default(),
+            appearance: Appearance::default(),
             sources: Sources::default(),
             advanced: AdvancedState::default(),
             view: ViewState::default(),
@@ -343,6 +359,9 @@ pub fn encode(settings: &Settings) -> Value {
         },
         "updates": {
             "checkAutomatically": settings.updates.check_automatically,
+        },
+        "appearance": {
+            "theme": settings.appearance.theme,
         },
         "sources": {
             "vendorLibraries": {
@@ -399,6 +418,9 @@ pub(crate) mod test_support {
             },
             updates: Updates {
                 check_automatically: true,
+            },
+            appearance: Appearance {
+                theme: "builtin-contrast".into(),
             },
             sources: Sources {
                 vendor_libraries: VendorLibraries {
@@ -522,6 +544,7 @@ mod tests {
                         "intervalMs": 1000, "chartFps": 60, "defaultView": "last"},
             "tray": {"closeToTray": true, "autostart": false, "iconSensor": null},
             "updates": {"checkAutomatically": false},
+            "appearance": {"theme": "builtin-synthwave"},
             "sources": {
                 "vendorLibraries": {"nvml": true, "nvapi": true, "adl": true, "igcl": true},
                 "antiCheat": false,

@@ -70,6 +70,7 @@ const SCHEMA: &[(&str, Node)] = &[
         ]),
     ),
     ("updates", Node::Object(&[("checkAutomatically", leaf())])),
+    ("appearance", Node::Object(&[("theme", leaf())])),
     (
         "sources",
         Node::Object(&[
@@ -305,7 +306,7 @@ fn corrected_key(merged: &Value, path: &str) -> &'static str {
                 "settings.error.hotkey"
             }
         }
-        "overlay.defaultProfile" => "settings.error.profileId",
+        "overlay.defaultProfile" | "appearance.theme" => "settings.error.profileId",
         _ => match path.strip_prefix("overlay.gameProfiles.") {
             // A name that is not an executable, otherwise its profile id.
             Some(name) if normalize_exe(name).is_none() => "settings.error.exe",
@@ -418,6 +419,21 @@ mod tests {
         )
         .unwrap();
         assert!(next.updates.check_automatically);
+    }
+
+    #[test]
+    fn patch_sets_the_theme() {
+        let next = apply_patch(
+            &Settings::default(),
+            &json!({"appearance": {"theme": "builtin-midnight"}}),
+        )
+        .unwrap();
+        assert_eq!(next.appearance.theme, "builtin-midnight");
+        assert!(apply_patch(
+            &Settings::default(),
+            &json!({"appearance": {"theme": "../x"}})
+        )
+        .is_err());
     }
 
     #[test]

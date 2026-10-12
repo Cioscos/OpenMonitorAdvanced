@@ -325,6 +325,10 @@ export interface Settings {
   updates: {
     checkAutomatically: boolean;
   };
+  appearance: {
+    /** Id of the active theme: a `builtin-*` id or a user theme's uuid. */
+    theme: string;
+  };
   sources: {
     vendorLibraries: { nvml: boolean; nvapi: boolean; adl: boolean; igcl: boolean };
     antiCheat: boolean;

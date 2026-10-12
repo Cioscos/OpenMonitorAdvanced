@@ -235,6 +235,17 @@ test('mock backend rejects an off-step interval', async () => {
   expect((await backend.getSettings()).settings.general.intervalMs).toBe(1000);
 });
 
+test('mock backend defaults the theme and accepts a valid id only', async () => {
+  const backend = createMockBackend();
+  expect((await backend.getSettings()).settings.appearance).toEqual({ theme: 'builtin-synthwave' });
+  const state = await backend.updateSettings({ appearance: { theme: 'builtin-midnight' } });
+  expect(state.settings.appearance.theme).toBe('builtin-midnight');
+  await expect(backend.updateSettings({ appearance: { theme: '../x' } })).rejects.toEqual({
+    field: 'appearance.theme',
+    key: 'settings.error.profileId',
+  });
+});
+
 test('mock backend keeps update checks off by default and accepts a patch', async () => {
   const backend = createMockBackend();
   expect((await backend.getSettings()).settings.updates).toEqual({ checkAutomatically: false });

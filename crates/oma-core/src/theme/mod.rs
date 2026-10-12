@@ -7,7 +7,7 @@ mod parse;
 mod resolve;
 mod variables;
 
-pub use builtin::{builtin, builtins, Builtin, DEFAULT_THEME};
+pub use builtin::{builtin, builtins, is_valid_theme_id, Builtin, DEFAULT_THEME};
 pub use contrast::{contrast_ratio, contrast_warnings, parse_color};
 pub use resolve::{resolve, scheme_of, to_css, Scheme};
 

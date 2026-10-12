@@ -529,12 +529,18 @@ The hand-written part of the 0.5.0 draft release (above the block that `render-r
 
 ## Open: deferred features (spec §5.2 point 5, §7.3; M3 decision D10)
 
-- NVML `TotalEnergyConsumption` (p95 about 9 ms) and `PcieThroughput` (blocks 31 ms): only with sampling outside the tick. The M5c CSV log does not need them (it logs what the tick already has), so they wait for a request.
-- Battery page: appears when a battery provider exists.
-- Per-disk SMART switch and per-module switches are done (M5a); the SAT fallback for USB disks is done (M6b), with the SMART of USB disks off by default.
-- **Not covered yet, despite LibreHardwareMonitor exposing related sensors — do not assume the mapping surfaces them without re-checking `SchemaBuilder.cs`:**
-  - **RAM SPD timings:** `SchemaBuilder.cs` (around the DIMM temperature match, see the comment there) explicitly discards the SPD timing and capacity sensors RAMSPDToolkit exposes on each DIMM. To check availability, enable PawnIO and dump a DIMM's `SensorNode`s: the timing values are present but currently thrown away, not absent from LHM.
-- CPU throttling (Intel only) and the SATA critical warning were implemented in M9b: see "Open: new sensors (M9b)".
+Still excluded, by decision D10 of the M3 plan:
+
+- the NVML process lists: `usedGpuMemory` is not available under WDDM;
+- ADL sensors 40 and 41 (constant values, undocumented unit).
+
+Done since (kept here so the old deferrals are not reopened by mistake):
+
+- NVML `TotalEnergyConsumption` and `PcieThroughput`: M9b, read outside the tick by the `oma-gpu-slow` thread (energy since start in Wh, PCIe RX/TX).
+- Battery page and tile: M9b (`crates/oma-win/src/battery.rs`).
+- RAM SPD data: M9b, as the `memoryModules` property of `memory/0` (capacity, JEDEC speed and timings, thermal limits), plus the AMD timings in use as `memoryTimings`. The SPD readings stay out of the sensor list on purpose: `SchemaBuilder.cs` keeps only the "DIMM #<n>" temperature as a sensor and reads the rest into the property.
+- CPU throttling (Intel only) and SATA health: M9b, see "Open: new sensors (M9b)".
+- Per-disk SMART switch and per-module switches (M5a); SAT fallback for USB disks, with their SMART off by default (M6b).
 
 ## Manual checks owed by a human
 

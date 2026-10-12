@@ -130,7 +130,7 @@
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border: 1px solid var(--accent);
     border-radius: 8px;
-    box-shadow: 0 10px 30px rgb(0 0 0 / 0.6);
+    box-shadow: 0 10px 30px var(--shadow);
     font-size: 12px;
     animation: drawer-in 150ms ease-out;
   }

@@ -455,7 +455,7 @@
     const read = (token: string) => css.getPropertyValue(token).trim();
     const palette = seriesPalette(read);
     const muted = read('--text-muted');
-    const border = read('--border');
+    const grid = read('--chart-grid');
     const { scales, seriesScale } = scaleLayout(ids, schema);
     const byId = new Map(sensors.map((s) => [s.id, s]));
     // Units apply at draw time: the buffer keeps °C and byte/s, and the data handed to uPlot,
@@ -472,8 +472,8 @@
       side,
       size: 72,
       stroke: muted,
-      grid: { show: side === 3, stroke: border, width: 1 },
-      ticks: { show: side === 3, stroke: border, width: 1 },
+      grid: { show: side === 3, stroke: grid, width: 1 },
+      ticks: { show: side === 3, stroke: grid, width: 1 },
       incrs: labelSafeIncrs(unit, i18n.locale, t, shown.get(unit)!.format),
       values: (_u, splits) => splits.map((v) => shown.get(unit)!.format(v, i18n.locale, t)),
     });
@@ -518,7 +518,7 @@
         }),
       ],
       hooks: {
-        draw: [(u) => paint(u, paths, { gridColor: border, textColor: muted })],
+        draw: [(u) => paint(u, paths, { gridColor: grid, textColor: muted })],
         // The legend toggles series on this plot; remember them for the next rebuild.
         setSeries: [(u) => {
           hiddenIds = new Set(ids.filter((_, i) => u.series[i + 1]?.show === false));
@@ -806,7 +806,7 @@
     right: 3px;
     width: 6px;
     height: 6px;
-    background: white;
+    background: var(--text);
     border-radius: 50%;
     transform: translate(50%, -50%);
   }

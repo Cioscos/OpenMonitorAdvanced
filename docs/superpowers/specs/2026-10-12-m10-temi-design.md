@@ -44,7 +44,7 @@ Un file UTF-8 (BOM ammesso), al massimo 64 KiB, con un commento d'intestazione f
 
 ### 2.2 Variabili
 
-L'elenco sta in un solo file, `crates/oma-core/src/theme/variables.json` (nome, gruppo, tipo, limiti), letto da Rust con `include_str!` e importato dalla UI per la guida e le anteprime.
+L'elenco sta in un solo file, `app/src/themes/variables.json` (nome, gruppo, tipo, limiti), letto da Rust con `include_str!` e importato dalla UI per la guida e le anteprime.
 
 | Gruppo | Variabili | Tipo |
 |---|---|---|
@@ -137,7 +137,7 @@ I termini tecnici (variabile CSS, contrasto, WCAG, alfa) hanno il tooltip `Term`
 
 ### 5.1 Rust puro: `crates/oma-core/src/theme/`
 
-- `variables.json` e `variables.rs` (deserializzazione e ricerca).
+- `variables.rs` (deserializzazione e ricerca di `app/src/themes/variables.json`).
 - `parse.rs`: `parse_theme(bytes: &[u8]) -> Result<ParsedTheme, ThemeError>`; `ParsedTheme { meta: ThemeMeta { name, author, version }, vars: BTreeMap<String, String>, warnings: Vec<ThemeWarning { line, code, detail }> }`.
 - `contrast.rs`: luminanza relativa, composizione dell'alfa, `contrast_warnings(&resolved) -> Vec<ThemeWarning>`.
 - `resolve.rs`: `resolve(&ParsedTheme, base) -> BTreeMap` (unione con il tema base) e `to_css(&ParsedTheme) -> String` (forma normalizzata con l'intestazione).

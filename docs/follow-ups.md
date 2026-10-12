@@ -185,7 +185,7 @@ Voci aperte dopo la M8d1 (piano `docs/superpowers/plans/2026-10-08-m8d1-server-c
 
 ## Open: themes (M10)
 
-Temi dell'app: parser e validatore, quattro temi integrati, importazione, anteprima e guida (spec `docs/superpowers/specs/2026-10-12-m10-temi-design.md`, piano `docs/superpowers/plans/2026-10-12-m10-temi.md`). Prove dal vivo M1–M7 superate con l'utente il 2026-10-12; non ancora unita in `main` né pubblicata. Misure in `docs/perf-budget.md`, sezione M10.
+Temi dell'app: parser e validatore, quattro temi integrati, importazione, anteprima e guida (spec `docs/superpowers/specs/2026-10-12-m10-temi-design.md`, piano `docs/superpowers/plans/2026-10-12-m10-temi.md`). Prove dal vivo M1–M7 superate con l'utente il 2026-10-12; unita in `main` e pubblicata come release 0.8.0 il 2026-10-12, non firmata. Misure in `docs/perf-budget.md`, sezione M10.
 
 - **Minori rinviati dalle revisioni (M10):**
   - parser (`parse.rs`): la sintassi con virgole accetta `hsl(300,100,50)` e `rgb(1%,2,3)` misti; identificatori come `-1a` passano come nomi di font; manca il commento sul tetto di 8 font;
@@ -196,6 +196,7 @@ Temi dell'app: parser e validatore, quattro temi integrati, importazione, antepr
   - impostazioni dei temi: se `settings.update` fallisce dopo un'aggiunta riuscita, `confirmImport` lascia il dialogo rotto (ricaricare l'elenco in `finally`); `ThemeImportDialog` ha `aria-modal` senza trappola del fuoco (confrontare con `ShareDialog`); i nomi e gli autori troncati non hanno `title`; un'eliminazione fallita lascia la scheda in conferma (innocuo); manca un test Vitest per «tema attivo eliminato» (lo copre Rust); l'inglese degli avvisi di contrasto è goffo per alcune coppie (accento su accento);
   - guida: dire che un nono font scarta tutto `--font` e descrivere i nomi senza virgolette; il test dell'esempio usa una regex e non il parser vero; la guida non è stata guardata in un browser; la chiave `themes.guide.headerExample` sta dopo quelle del glossario.
 - **Test instabili preesistenti:** `updates::tests` (`auto_check_toasts_once`, `state_file_missing_or_garbage_is_empty`) è fallito una volta durante la M10, senza relazione con i temi; non si è più ripresentato.
+- **Test che misura i tempi reali:** `oma-load` `engine::tests::the_rate_window_starts_at_the_gate` è fallito una volta sul runner di GitHub nella CI della 0.8.0 (prima velocità 109 contro 193, soglia del 75 %) ed è passato al nuovo tentativo; dipende dal carico della macchina. Da rendere indipendente dai tempi o da allargare la soglia.
 
 ## Open: charts and layout (M9a)
 

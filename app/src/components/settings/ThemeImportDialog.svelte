@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { t } from '../../lib/i18n/index.svelte';
+  import { i18n, t } from '../../lib/i18n/index.svelte';
+  import { warningText } from '../../lib/theme/warnings';
   import type { ImportPreview } from '../../lib/types';
   import Term from '../common/Term.svelte';
   import ThemePreview from './ThemePreview.svelte';
@@ -46,8 +47,9 @@
       <h3>{t('themes.import.warnings')}</h3>
       <ul>
         {#each preview.warnings as w, i (i)}
-          {@const text = t(`themes.warn.${w.code}`, { line: w.line, detail: w.detail })}
-          <li class:contrast={w.code === 'lowContrast'}>
+          {@const text = warningText(w, t, i18n.locale)}
+          <!-- A low contrast keeps the CSS names in the title, for theme authors. -->
+          <li class:contrast={w.code === 'lowContrast'} title={w.code === 'lowContrast' ? w.detail : undefined}>
             {#if w.code === 'lowContrast'}<Term term="contrast">{text}</Term>{:else}{text}{/if}
           </li>
         {/each}

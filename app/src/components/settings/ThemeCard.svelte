@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { t } from '../../lib/i18n/index.svelte';
   import type { ThemeSummary } from '../../lib/types';
   import ThemePreview from './ThemePreview.svelte';
@@ -14,6 +15,20 @@
   }: { theme: ThemeSummary; active: boolean; onPick: () => void; onExport: () => void; onDelete: () => void } = $props();
 
   let confirming = $state(false);
+  let deleteButton = $state<HTMLButtonElement>();
+  let keepButton = $state<HTMLButtonElement>();
+
+  // The question takes the focus on its safe answer; «Keep» gives it back to «Delete».
+  async function ask() {
+    confirming = true;
+    await tick();
+    keepButton?.focus();
+  }
+  async function keep() {
+    confirming = false;
+    await tick();
+    deleteButton?.focus();
+  }
   const name = $derived(theme.builtin ? t(`themes.builtin.${theme.id}`) : (theme.name ?? t('themes.unnamed')));
 </script>
 
@@ -32,12 +47,12 @@
   {#if !theme.builtin}
     <div class="actions">
       {#if confirming}
-        <p>{t('themes.deleteConfirm')}</p>
-        <button type="button" class="danger" onclick={() => ((confirming = false), onDelete())}>{t('themes.deleteYes')}</button>
-        <button type="button" onclick={() => (confirming = false)}>{t('themes.deleteCancel')}</button>
+        <p role="alert">{t('themes.deleteConfirm')}</p>
+        <button type="button" class="danger" onclick={onDelete}>{t('themes.deleteYes')}</button>
+        <button type="button" bind:this={keepButton} onclick={keep}>{t('themes.deleteCancel')}</button>
       {:else}
         <button type="button" onclick={onExport}>{t('themes.export')}</button>
-        <button type="button" onclick={() => (confirming = true)}>{t('themes.delete')}</button>
+        <button type="button" bind:this={deleteButton} onclick={ask}>{t('themes.delete')}</button>
       {/if}
     </div>
   {/if}

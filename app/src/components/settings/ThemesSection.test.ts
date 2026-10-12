@@ -108,7 +108,7 @@ test('import_shows_summary_with_warnings_then_adds', async () => {
   expect(within(dialog).getByText('Nord Night')).toBeTruthy();
   expect(within(dialog).getByText(t('themes.import.summary', { applied: 3 }))).toBeTruthy();
   expect(within(dialog).getByText(t('themes.warn.unknownVariable', { line: 4, detail: '--nope' }))).toBeTruthy();
-  expect(within(dialog).getByText(t('themes.warn.lowContrast', { line: 0, detail: '--text/--bg 2.1' }))).toBeTruthy();
+  expect(within(dialog).getByText('The text on background has low contrast: 2.1:1')).toBeTruthy();
   await fireEvent.click(within(dialog).getByRole('button', { name: t('themes.import.add') }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(confirmed).toEqual([7]);
@@ -170,4 +170,19 @@ test('user_name_is_text_not_html', async () => {
   await setup([...BUILTINS, user(UUID_A, '<img src=x>')]);
   expect(cardNames()).toContain('<img src=x>');
   expect(gallery().querySelector('img')).toBeNull();
+});
+
+test('delete_confirmation_moves_focus', async () => {
+  await setup([...BUILTINS, user(UUID_A, 'Nord')]);
+  const del = screen.getByRole('button', { name: t('themes.delete') });
+  del.focus();
+  await fireEvent.click(del);
+  // The safe choice gets the focus, and the question is announced.
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: t('themes.deleteCancel') })));
+  expect(screen.getByRole('alert').textContent).toContain(t('themes.deleteConfirm'));
+  await fireEvent.click(screen.getByRole('button', { name: t('themes.deleteCancel') }));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: t('themes.delete') })));
+  await fireEvent.click(screen.getByRole('button', { name: t('themes.delete') }));
+  await fireEvent.click(screen.getByRole('button', { name: t('themes.deleteYes') }));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: t('themes.import') })));
 });

@@ -17,6 +17,7 @@
   let pending = $state<ImportPreview | null>(null);
   let pendingError = $state<string | null>(null);
   let busy = $state(false);
+  let importButton = $state<HTMLButtonElement>();
   const active = $derived(settings.state?.settings.appearance.theme ?? null);
 
   const errorText = (e: unknown) => {
@@ -47,12 +48,14 @@
 
   const pick = (id: string) => attempt(() => settings.update({ appearance: { theme: id } }));
   const exportTheme = (id: string) => attempt(() => backend.themeExport(id));
+  // The deleted card takes its buttons away: the focus goes to «Import theme…».
   const remove = (id: string) =>
     attempt(async () => {
       try {
         await backend.themeDelete(id);
       } finally {
         await load();
+        importButton?.focus();
       }
     });
 
@@ -81,7 +84,7 @@
 
 <div class="themes">
   <div class="toolbar">
-    <button type="button" class="import" onclick={startImport}>{t('themes.import')}</button>
+    <button type="button" class="import" bind:this={importButton} onclick={startImport}>{t('themes.import')}</button>
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <ul class="gallery" aria-label={t('settings.section.themes')}>
